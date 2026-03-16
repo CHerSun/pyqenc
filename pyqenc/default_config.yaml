@@ -1,0 +1,167 @@
+# pyqenc Default Configuration
+# ===========================
+#
+# This file defines the default codecs, encoding profiles, and strategies
+# for the quality-based encoding pipeline.
+#
+# Configuration Sections:
+# -----------------------
+# 1. default_strategies: Strategy patterns used when --strategies is not specified
+# 2. codecs: Video codec definitions with encoder settings
+# 3. profiles: Named encoding profiles with custom FFmpeg arguments
+#
+# Strategy Specification Syntax:
+# ------------------------------
+# Strategies combine presets and profiles using flexible patterns:
+#
+#   Format: "preset+profile" or variations with wildcards
+#
+#   Examples:
+#     "slow+h265-aq"     - Specific preset+profile combination
+#     "slow+h265*"       - Preset with profile wildcard (all h265 profiles)
+#     "slow"             - All profiles with slow preset (validated per codec)
+#     "+h265*"           - All presets with h265 profiles (from h265-10bit codec)
+#     "+h265-aq"         - All presets with specific profile
+#     ""                 - All preset+profile combinations (all codecs)
+#
+#   Multiple strategies can be comma-separated:
+#     "slow+h265*,medium+h264"
+#
+# Wildcard Matching:
+#   - "*" matches any characters in profile names
+#   - "h265*" matches: h265, h265-aq, h265-anime
+#   - "h264*" matches: h264
+#
+# Customization:
+# --------------
+# To customize this configuration:
+#
+# 1. Copy this file to one of these locations:
+#    - ./pyqenc.yaml (current directory)
+#    - ~/.config/pyqenc/config.yaml (user config)
+#
+# 2. Modify the copied file with your custom settings
+#
+# 3. The pipeline will automatically use your custom config
+#
+# Adding Custom Profiles:
+# -----------------------
+# To add a new encoding profile:
+#
+# 1. Choose which codec it uses (h264-8bit or h265-10bit)
+# 2. Add a new entry under 'profiles' section
+# 3. Specify the codec, description, and extra FFmpeg arguments
+#
+# Example:
+#   profiles:
+#     h265-custom:
+#       codec: h265-10bit
+#       description: "Custom h.265 profile with specific tuning"
+#       extra_args:
+#         - "-x265-params"
+#         - "aq-mode=3:aq-strength=1.0:psy-rd=2.0"
+#
+# FFmpeg Encoder Arguments:
+# -------------------------
+# The extra_args list contains FFmpeg arguments passed to the encoder.
+# Common x265 parameters:
+#   - aq-mode: Adaptive quantization mode (0-4)
+#   - aq-strength: AQ strength (0.0-3.0)
+#   - psy-rd: Psychovisual rate-distortion optimization
+#   - deblock: Deblocking filter strength
+#
+# Refer to FFmpeg documentation for complete parameter lists:
+#   - x264: https://trac.ffmpeg.org/wiki/Encode/H.264
+#   - x265: https://trac.ffmpeg.org/wiki/Encode/H.265
+
+# Default Strategies
+# ------------------
+# These strategies are used when --strategies is not specified on the command line.
+# The pipeline will test these strategies and select the optimal one (smallest file size
+# while meeting quality targets), unless --all-strategies flag is used.
+default_strategies:
+  - "veryslow+h264*"  # All h264 profiles with veryslow preset
+  - "slow+h265*"      # All h265 profiles with slow preset
+
+# Codec Definitions
+# -----------------
+# Defines available video codecs with their FFmpeg encoder settings.
+# Each codec specifies:
+#   - encoder: FFmpeg encoder name (e.g., libx264, libx265)
+#   - pixel_format: Pixel format for encoding
+#   - default_crf: Starting CRF value for quality-based encoding
+#   - crf_range: Valid CRF range [min, max] for this codec
+#   - presets: List of encoding presets supported by this encoder
+codecs:
+  h264-8bit:
+    encoder: libx264
+    pixel_format: yuv420p
+    default_crf: 23
+    crf_range: [0, 51]
+    presets:
+      - ultrafast
+      - superfast
+      - veryfast
+      - faster
+      - fast
+      - medium
+      - slow
+      - slower
+      - veryslow
+      - placebo
+
+  h265-10bit:
+    encoder: libx265
+    pixel_format: yuv420p10le
+    default_crf: 20
+    crf_range: [0, 51]
+    presets:
+      - ultrafast
+      - superfast
+      - veryfast
+      - faster
+      - fast
+      - medium
+      - slow
+      - slower
+      - veryslow
+      - placebo
+
+# Encoding Profiles
+# -----------------
+# Named profiles that define specific encoder configurations.
+# Each profile specifies:
+#   - codec: Which codec this profile uses (references codec name above)
+#   - description: Human-readable description of the profile
+#   - extra_args: Additional FFmpeg arguments for this profile
+#
+# Profiles can be referenced in strategy specifications and combined
+# with any preset supported by their codec.
+profiles:
+  # H.264 8-bit Profiles
+  # --------------------
+  h264:
+    codec: h264-8bit
+    description: "Default h.264 8-bit encoding with no extra arguments"
+    extra_args: []
+
+  # H.265 10-bit Profiles
+  # ---------------------
+  h265:
+    codec: h265-10bit
+    description: "Default h.265 10-bit encoding with no extra arguments"
+    extra_args: []
+
+  h265-aq:
+    codec: h265-10bit
+    description: "h.265 10-bit with adaptive quantization tuning for better quality distribution"
+    extra_args:
+      - "-x265-params"
+      - "aq-mode=3:aq-strength=0.8"
+
+  h265-anime:
+    codec: h265-10bit
+    description: "h.265 10-bit optimized for anime content with reduced blocking and enhanced detail"
+    extra_args:
+      - "-x265-params"
+      - "aq-mode=2:psy-rd=1.0:deblock=-1,-1"

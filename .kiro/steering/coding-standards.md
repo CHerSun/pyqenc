@@ -1,0 +1,21 @@
+# Project Coding Standards
+
+- Targeting Python>=3.13 syntax.
+- For volatile things - try (not check).
+- All functions, classes and class members MUST BE type-hinted.
+- Type-hinting using newer rules: `int|None` instead of `Optional[int]`, newer generic classes without imports from `typing` where possible.
+- `alive-progress` or `tqdm` for lively progress display. `alive-progress` is preferable, unless it lacks features.
+- progress and current status display must be detailed and self-explanatory, lively, with end-user in mind.
+- Path from pathlib is mandatory for cross-platform paths handling. NO str for paths (only during Path modification).
+- If we need to directly open file for reading or writing - also use Path. This point is NOT applicable to formatted files, like JSON, PNG, etc.
+- NO MAGIC NUMBERS allowed. If you need to use a constant - name it. An str `psnr` is NOT ALLOWED, an MetricType.PSNR.value - is allowed.
+- CLI is mandatory starting point, but final target is a client-server solution - API MUST NOT be tailored only towards CLI.
+- CLI script must be defined for building, so that end-user can call our program directly without `python ...`.
+- async where required, so that UI stays responsive and we don't waste time waiting for IO. But there's NO target to be 100% async.
+- Clean, self-explanatory code is preferable over "classic patterns for patterns".
+- Public API and functions must have explanatory docstrings with required details. Only truly required functions must be kept public - clean, intent-driven API.
+- Non-public functions must be marked so with `_` prefix or even `__` if they are internal details.
+- If seems sane - use vertical alignment between arguments / parameters.
+- Detailed logging is a MUST, separated by levels. Starting with debug (hidden by default), info (end-user notifying), warning (non-critical errors, which allow continuation), critical (problems, which prevent actual work).
+- Follow DRY. If code is repeated at least 2-3 times - make it reusable.
+- Follow rule of three - if we have at least 3 similar entities - make a common interface for them (Protocol or class to unify API).

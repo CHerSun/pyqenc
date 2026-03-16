@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyqenc"
+dynamic = ["version"]
+description = "PYthon Quality-based video ENCoding pipeline with scene-based chunking and iterative CRF optimization."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "alive-progress>=3.3.0",
+    "ffmpeg-normalize>=1.37.3",
+    "matplotlib>=3.10.0",
+    "pandas>=3.0.0",
+    "psutil>=7.2.2",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "scenedetect[opencv]>=0.6.0",
+]
+
+[project.scripts]
+pyqenc = "pyqenc.cli:main"
+
+[tool.uv]
+package = true
+
+[tool.setuptools]
+packages = ["pyqenc"]
+
+[tool.setuptools.dynamic]
+version = {attr = "pyqenc.__version__"}
+
+[dependency-groups]
+dev = [
+    "types-psutil>=7.2.2.20260130",
+]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]

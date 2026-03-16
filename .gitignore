@@ -1,0 +1,32 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# caches
+.*_cache
+
+# vscode
+.vscode
+
+# uv freeze lock
+uv.lock
+
+# sample videos
+*.mkv
+*.mp4
+*.avi
+*.mov
+*.flv
+*.webm
+
+# Local environment Kiro steering doc
+.kiro/steering/environment.md
+
+
