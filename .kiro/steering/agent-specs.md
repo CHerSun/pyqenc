@@ -1,2 +1,2 @@
 - Add HTML comment to specs to disable MD024 markdownlint rule `<!-- markdownlint-disable MD024 -->` after the first header to prevent excessive warnings about duplicate headers.
-- Add dates in ISO format to specs to have a clear indication of specs order: "Created" - when we started working on the spec, "Completed" date - update once all tasks were done (add as a last task).
+- Add dates in ISO format to specs to have a clear indication of specs order: "- Created: " - when we started working on the spec, "- Completed: " date - update once all tasks were done (add as a last task). In form of a list under the top header, after MD024 comment.

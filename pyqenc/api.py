@@ -96,8 +96,8 @@ def run_pipeline(
 def extract_streams(
     source_video: Path,
     output_dir: Path,
-    video_filter: str | None = None,
-    audio_filter: str | None = None,
+    include: str | None = None,
+    exclude: str | None = None,
     detect_crop: bool = True,
     manual_crop: str | None = None,
     force: bool = False,
@@ -106,47 +106,28 @@ def extract_streams(
     """Extract video and audio streams from source MKV.
 
     Extracts all video and audio streams from the source MKV file, optionally
-    filtering by regex patterns. Automatically detects black borders for cropping
-    unless disabled or manual crop is specified.
+    filtering by regex patterns applied uniformly to all stream types.
+    Automatically detects black borders for cropping unless disabled or manual
+    crop is specified.
 
     Args:
         source_video: Path to source MKV file
         output_dir: Directory for extracted streams
-        video_filter: Regex pattern to include video streams (e.g., ".*eng.*")
-        audio_filter: Regex pattern to include audio streams (e.g., ".*eng.*")
+        include: Regex pattern applied to ALL stream types; only matching streams
+                 are extracted (e.g. ``".*eng.*"``). ``None`` means include all.
+        exclude: Regex pattern applied to ALL stream types; matching streams are
+                 skipped (e.g. ``"attachment"``). ``None`` means exclude none.
         detect_crop: If True, automatically detect black borders (default: True)
         manual_crop: Manual crop parameters (format: "top bottom" or "top bottom left right")
         force: If True, re-extract even if files exist (default: False)
         dry_run: If True, only report status without extracting (default: False)
 
     Returns:
-        ExtractionResult with:
-        - video_files: List of extracted video file paths
-        - audio_files: List of extracted audio file paths
-        - crop_params: Detected or manual crop parameters (None if no cropping)
-        - reused: True if existing files were reused
-        - needs_work: True if extraction would be performed (dry-run)
-        - success: Whether extraction succeeded
-        - error: Error message if extraction failed
+        ExtractionResult with video/audio metadata and phase outcome.
 
     Raises:
         FileNotFoundError: If source video doesn't exist
         ValueError: If crop parameters are invalid
-
-    Example:
-        >>> from pathlib import Path
-        >>> from pyqenc.api import extract_streams
-        >>>
-        >>> result = extract_streams(
-        ...     source_video=Path("movie.mkv"),
-        ...     output_dir=Path("./work/extracted"),
-        ...     video_filter=".*eng.*",
-        ...     audio_filter=".*eng.*",
-        ... )
-        >>> if result.success:
-        ...     print(f"Extracted {len(result.video_files)} video streams")
-        ...     if result.crop_params:
-        ...         print(f"Detected crop: {result.crop_params}")
     """
     from pyqenc.phases.extraction import extract_streams as _extract_streams
 
@@ -158,8 +139,8 @@ def extract_streams(
     return _extract_streams(
         source_video=source_video,
         output_dir=output_dir,
-        video_filter=video_filter,
-        audio_filter=audio_filter,
+        include=include,
+        exclude=exclude,
         detect_crop=detect_crop,
         manual_crop=manual_crop,
         force=force,
@@ -380,6 +361,9 @@ def encode_chunks(
 def process_audio(
     audio_dir: Path,
     output_dir: Path,
+    audio_convert: str | None = None,
+    audio_codec: str | None = None,
+    audio_base_bitrate: str | None = None,
     dry_run: bool = False
 ) -> "AudioResult":
     """Process audio streams with normalization strategies.
@@ -391,6 +375,12 @@ def process_audio(
     Args:
         audio_dir: Directory containing audio files to process
         output_dir: Directory for processed audio output
+        audio_convert: Regex pattern selecting processed audio files to convert to the
+                       final delivery format. Overrides ``audio_output.convert_filter``
+                       from config when provided.
+        audio_codec: Override audio codec for all conversion profiles (e.g. ``'aac'``).
+        audio_base_bitrate: Base bitrate for 2.0 stereo conversion (e.g. ``'192k'``).
+                            Bitrates for other channel layouts are scaled proportionally.
         dry_run: If True, only report status without processing (default: False)
 
     Returns:
@@ -442,6 +432,9 @@ def process_audio(
     return process_audio_streams(
         audio_files=audio_files,
         output_dir=output_dir,
+        audio_convert=audio_convert,
+        audio_codec=audio_codec,
+        audio_base_bitrate=audio_base_bitrate,
         dry_run=dry_run,
     )
 
@@ -562,8 +555,8 @@ def merge_final(
                 encoded_chunks[chunk_id] = {}
             encoded_chunks[chunk_id][strategy_name] = chunk_path
 
-    # Collect audio files
-    audio_files = sorted(audio_dir.glob("audio_*_day.aac")) + sorted(audio_dir.glob("audio_*_night.aac"))
+    # Collect audio files — all AAC delivery files produced by the audio phase
+    audio_files = sorted(audio_dir.glob("*.aac"))
 
     return merge_final_video(
         encoded_chunks=encoded_chunks,

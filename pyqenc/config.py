@@ -15,6 +15,51 @@ from pyqenc.models import CodecConfig, StrategyConfig
 
 
 @dataclass
+class AudioConversionProfile:
+    """Codec/bitrate/extension profile for the final audio delivery conversion step.
+
+    Attributes:
+        codec:     ffmpeg audio codec name (e.g. ``"aac"``).
+        bitrate:   Target bitrate string (e.g. ``"192k"``).
+        extension: Output file extension including the leading dot (e.g. ``".aac"``).
+    """
+
+    codec:     str
+    bitrate:   str
+    extension: str
+
+
+@dataclass
+class AudioOutputConfig:
+    """Configuration for the audio output / conversion phase.
+
+    Attributes:
+        convert_filter: Regex string; processed audio files whose name matches
+                        are passed to the ``ConversionStrategy`` finalizer.
+        profiles:       Map of channel-layout key (e.g. ``"2.0"``) to
+                        :class:`AudioConversionProfile`.
+    """
+
+    convert_filter: str
+    profiles:       dict[str, AudioConversionProfile]
+
+
+@dataclass
+class StreamFilterConfig:
+    """Include/exclude regex filters applied to all stream types during extraction.
+
+    Attributes:
+        include: Regex string selecting streams by would-be output filename.
+                 ``None`` means include all streams.
+        exclude: Regex string rejecting streams by would-be output filename.
+                 ``None`` means exclude no streams.  Exclusion takes precedence.
+    """
+
+    include: str | None
+    exclude: str | None
+
+
+@dataclass
 class EncodingProfile:
     """Encoding profile definition.
 
@@ -413,3 +458,40 @@ class ConfigManager:
                 unique_configs.append(config)
 
         return unique_configs
+
+    def get_audio_output_config(self) -> AudioOutputConfig:
+        """Parse and return the ``audio_output`` configuration section.
+
+        Returns:
+            :class:`AudioOutputConfig` populated from the loaded config.
+
+        Raises:
+            KeyError: If the ``audio_output`` section or required keys are missing.
+        """
+        section: dict[str, Any] = self._config["audio_output"]
+        raw_profiles: dict[str, Any] = section["profiles"]
+        profiles = {
+            layout: AudioConversionProfile(
+                codec     = p["codec"],
+                bitrate   = p["bitrate"],
+                extension = p["extension"],
+            )
+            for layout, p in raw_profiles.items()
+        }
+        return AudioOutputConfig(
+            convert_filter = section["convert_filter"],
+            profiles       = profiles,
+        )
+
+    def get_stream_filter(self) -> StreamFilterConfig:
+        """Parse and return the ``streams`` filtering configuration section.
+
+        Returns:
+            :class:`StreamFilterConfig` populated from the loaded config.
+            Both ``include`` and ``exclude`` default to ``None`` when absent.
+        """
+        section: dict[str, Any] = self._config.get("streams", {})
+        return StreamFilterConfig(
+            include = section.get("include"),
+            exclude = section.get("exclude"),
+        )

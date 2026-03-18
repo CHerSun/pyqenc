@@ -95,6 +95,30 @@ ENCODED_ATTEMPT_NAME_PATTERN = re.compile(
 scheme.  Named groups: ``chunk_id``, ``resolution`` (e.g. ``1920x800``),
 ``crf`` (e.g. ``18.0``)."""
 
+# Audio processing — filename conventions
+AUDIO_STEM_SEPARATOR = "←"
+"""Separator used between strategy_short and source stem in audio output filenames.
+Example: ``norm ← #02 ID=2 (audio-ac3) lang=eng ch=5.1(side) start=0.028.flac``"""
+
+AUDIO_CH_71     = "ch=7.1"
+"""Channel layout tag embedded in filenames by the extraction phase for 7.1 surround."""
+AUDIO_CH_51     = "ch=5.1"
+"""Channel layout tag embedded in filenames by the extraction phase for 5.1 surround."""
+AUDIO_CH_20     = "ch=2.0"
+"""Channel layout tag embedded in filenames by the extraction phase for 2.0 stereo."""
+AUDIO_CH_STEREO = "ch=stereo"
+"""Channel layout tag embedded in filenames by the extraction phase for stereo (non-numeric)."""
+
+_NORMALISED_PREFIXES: tuple[str, ...] = (
+    f"norm {AUDIO_STEM_SEPARATOR}",
+    f"2.0 std {AUDIO_STEM_SEPARATOR}",
+    f"2.0 night {AUDIO_STEM_SEPARATOR}",
+    f"2.0 nboost {AUDIO_STEM_SEPARATOR}",
+)
+"""Filename prefixes that indicate a file has already been statically normalised.
+Used by ``NormStrategy.check()`` (to skip already-normalised files) and
+``DynaudnormStrategy.check()`` (to select only normalised files)."""
+
 # Progress display
 STDERR_TAIL_LINES = 20
 """Number of recent stderr lines to retain in the rolling buffer used by

@@ -1,0 +1,155 @@
+flowchart TD
+    SRC71["#02 ch=7.1 .mka"]
+    SRC51["#02 ch=5.1 .mka"]
+    SRC20["#02 ch=2.0 .mka"]
+
+    %% ── 7.1 source  (21 tasks, 10 AAC) ──────────────────────────────
+    subgraph G71["7.1 source  (21 tasks)"]
+        subgraph CH71_71["ch=7.1 outputs"]
+            N71["norm ← #02 ch=7.1 .flac"]
+            DYN_N71["dynaudnorm ← norm ← ch=7.1 … .flac"]
+        end
+
+        subgraph CH51_71["ch=5.1 outputs"]
+            D51["5.1 ← #02 ch=7.1 .flac"]
+            N51_71["norm ← 5.1 ← ch=7.1 … .flac"]
+            DYN_N51_71["dynaudnorm ← norm ← 5.1 ← ch=7.1 … .flac"]
+        end
+
+        subgraph CH20_71["ch=2.0 outputs"]
+            STD71["2.0 std ← 5.1 ← … .flac"]
+            NGT71["2.0 night ← 5.1 ← … .flac"]
+            NBS71["2.0 nboost ← 5.1 ← … .flac"]
+            DYN_STD71["dynaudnorm ← 2.0 std ← 5.1 ← … .flac"]
+            DYN_NGT71["dynaudnorm ← 2.0 night ← 5.1 ← … .flac"]
+            DYN_NBS71["dynaudnorm ← 2.0 nboost ← 5.1 ← … .flac"]
+        end
+
+        subgraph AAC71["AAC delivery"]
+            AAC_N71(["aac ← norm ← ch=7.1 … .aac"])
+            AAC_DYN_N71(["aac ← dynaudnorm ← norm ← ch=7.1 … .aac"])
+            AAC_N51_71(["aac ← norm ← 5.1 ← ch=7.1 … .aac"])
+            AAC_DYN_N51_71(["aac ← dynaudnorm ← norm ← 5.1 ← … .aac"])
+            AAC_STD71(["aac ← 2.0 std ← … .aac"])
+            AAC_NGT71(["aac ← 2.0 night ← … .aac"])
+            AAC_NBS71(["aac ← 2.0 nboost ← … .aac"])
+            AAC_DYN_STD71(["aac ← dynaudnorm ← 2.0 std ← … .aac"])
+            AAC_DYN_NGT71(["aac ← dynaudnorm ← 2.0 night ← … .aac"])
+            AAC_DYN_NBS71(["aac ← dynaudnorm ← 2.0 nboost ← … .aac"])
+        end
+
+        SRC71 -->|"norm"| N71
+        SRC71 -->|"5.1 downmix"| D51
+
+        N71 -->|"dynaudnorm"| DYN_N71
+        N71 -->|"aac"| AAC_N71
+        DYN_N71 -->|"aac"| AAC_DYN_N71
+
+        D51 -->|"norm"| N51_71
+        D51 -->|"2.0 std"| STD71
+        D51 -->|"2.0 night"| NGT71
+        D51 -->|"2.0 nboost"| NBS71
+
+        N51_71 -->|"dynaudnorm"| DYN_N51_71
+        N51_71 -->|"aac"| AAC_N51_71
+        DYN_N51_71 -->|"aac"| AAC_DYN_N51_71
+
+        STD71 -->|"dynaudnorm"| DYN_STD71
+        NGT71 -->|"dynaudnorm"| DYN_NGT71
+        NBS71 -->|"dynaudnorm"| DYN_NBS71
+
+        STD71 -->|"aac"| AAC_STD71
+        NGT71 -->|"aac"| AAC_NGT71
+        NBS71 -->|"aac"| AAC_NBS71
+        DYN_STD71 -->|"aac"| AAC_DYN_STD71
+        DYN_NGT71 -->|"aac"| AAC_DYN_NGT71
+        DYN_NBS71 -->|"aac"| AAC_DYN_NBS71
+    end
+
+    %% ── 5.1 source  (16 tasks, 8 AAC) ───────────────────────────────
+    subgraph G51["5.1 source  (16 tasks)"]
+        subgraph CH51_51["ch=5.1 outputs"]
+            N51["norm ← #02 ch=5.1 .flac"]
+            DYN_N51["dynaudnorm ← norm ← ch=5.1 … .flac"]
+        end
+
+        subgraph CH20_51["ch=2.0 outputs"]
+            STD51["2.0 std ← #02 ch=5.1 .flac"]
+            NGT51["2.0 night ← #02 ch=5.1 .flac"]
+            NBS51["2.0 nboost ← #02 ch=5.1 .flac"]
+            DYN_STD51["dynaudnorm ← 2.0 std ← … .flac"]
+            DYN_NGT51["dynaudnorm ← 2.0 night ← … .flac"]
+            DYN_NBS51["dynaudnorm ← 2.0 nboost ← … .flac"]
+        end
+
+        subgraph AAC51["AAC delivery"]
+            AAC_N51(["aac ← norm ← ch=5.1 … .aac"])
+            AAC_DYN_N51(["aac ← dynaudnorm ← norm ← ch=5.1 … .aac"])
+            AAC_STD51(["aac ← 2.0 std ← … .aac"])
+            AAC_NGT51(["aac ← 2.0 night ← … .aac"])
+            AAC_NBS51(["aac ← 2.0 nboost ← … .aac"])
+            AAC_DYN_STD51(["aac ← dynaudnorm ← 2.0 std ← … .aac"])
+            AAC_DYN_NGT51(["aac ← dynaudnorm ← 2.0 night ← … .aac"])
+            AAC_DYN_NBS51(["aac ← dynaudnorm ← 2.0 nboost ← … .aac"])
+        end
+
+        SRC51 -->|"norm"| N51
+        SRC51 -->|"2.0 std"| STD51
+        SRC51 -->|"2.0 night"| NGT51
+        SRC51 -->|"2.0 nboost"| NBS51
+
+        N51 -->|"dynaudnorm"| DYN_N51
+        N51 -->|"aac"| AAC_N51
+        DYN_N51 -->|"aac"| AAC_DYN_N51
+
+        STD51 -->|"dynaudnorm"| DYN_STD51
+        NGT51 -->|"dynaudnorm"| DYN_NGT51
+        NBS51 -->|"dynaudnorm"| DYN_NBS51
+
+        STD51 -->|"aac"| AAC_STD51
+        NGT51 -->|"aac"| AAC_NGT51
+        NBS51 -->|"aac"| AAC_NBS51
+        DYN_STD51 -->|"aac"| AAC_DYN_STD51
+        DYN_NGT51 -->|"aac"| AAC_DYN_NGT51
+        DYN_NBS51 -->|"aac"| AAC_DYN_NBS51
+    end
+
+    %% ── 2.0 source  (4 tasks, 2 AAC) ────────────────────────────────
+    subgraph G20["2.0 source  (4 tasks)"]
+        subgraph CH20_20["ch=2.0 outputs"]
+            N20["norm ← #02 ch=2.0 .flac"]
+            DYN_N20["dynaudnorm ← norm ← … .flac"]
+        end
+
+        subgraph AAC20["AAC delivery"]
+            AAC_N20(["aac ← norm ← … .aac"])
+            AAC_DYN_N20(["aac ← dynaudnorm ← norm ← … .aac"])
+        end
+
+        SRC20   -->|"norm"| N20
+        N20     -->|"dynaudnorm"| DYN_N20
+        N20     -->|"aac"| AAC_N20
+        DYN_N20 -->|"aac"| AAC_DYN_N20
+    end
+
+    %% ── Styles ───────────────────────────────────────────────────────
+    style AAC_N71        fill:#2d6a4f,color:#fff
+    style AAC_DYN_N71    fill:#1b4332,color:#fff
+    style AAC_N51_71     fill:#2d6a4f,color:#fff
+    style AAC_DYN_N51_71 fill:#1b4332,color:#fff
+    style AAC_STD71      fill:#2d6a4f,color:#fff
+    style AAC_NGT71      fill:#2d6a4f,color:#fff
+    style AAC_NBS71      fill:#2d6a4f,color:#fff
+    style AAC_DYN_STD71  fill:#1b4332,color:#fff
+    style AAC_DYN_NGT71  fill:#1b4332,color:#fff
+    style AAC_DYN_NBS71  fill:#1b4332,color:#fff
+    style AAC_N51        fill:#2d6a4f,color:#fff
+    style AAC_DYN_N51    fill:#1b4332,color:#fff
+    style AAC_STD51      fill:#2d6a4f,color:#fff
+    style AAC_NGT51      fill:#2d6a4f,color:#fff
+    style AAC_NBS51      fill:#2d6a4f,color:#fff
+    style AAC_DYN_STD51  fill:#1b4332,color:#fff
+    style AAC_DYN_NGT51  fill:#1b4332,color:#fff
+    style AAC_DYN_NBS51  fill:#1b4332,color:#fff
+    style AAC_N20        fill:#2d6a4f,color:#fff
+    style AAC_DYN_N20    fill:#1b4332,color:#fff

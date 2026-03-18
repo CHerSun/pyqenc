@@ -747,38 +747,46 @@ class PipelineConfig(BaseModel):
     """Configuration for complete pipeline execution.
 
     Attributes:
-        source_video:     Path to source video file.
-        work_dir:         Working directory for intermediate files.
-        quality_targets:  List of quality targets to meet.
-        strategies:       List of encoding strategies to use.
-        optimize:         Whether to search for optimal strategy.
-        all_strategies:   Whether to produce output for all strategies.
-        max_parallel:     Maximum concurrent encoding processes.
-        subsample_factor: Frame subsampling for metric calculation.
-        log_level:        Logging level (debug, info, warning, critical).
-        crop_params:      Manual crop parameters (``None`` for auto-detect).
-        video_filter:     Regex pattern to filter video streams.
-        audio_filter:     Regex pattern to filter audio streams.
-        keep_all:         Whether to keep all intermediate files.
-        chunking_mode:    Chunking strategy — lossless FFV1 (default) or stream-copy remux.
-        force:            When True alongside execute mode, delete all artifacts and reset state
-                          when a source-file mismatch is detected, then continue with the new source.
+        source_video:       Path to source video file.
+        work_dir:           Working directory for intermediate files.
+        quality_targets:    List of quality targets to meet.
+        strategies:         List of encoding strategies to use.
+        optimize:           Whether to search for optimal strategy.
+        all_strategies:     Whether to produce output for all strategies.
+        max_parallel:       Maximum concurrent encoding processes.
+        subsample_factor:   Frame subsampling for metric calculation.
+        log_level:          Logging level (debug, info, warning, critical).
+        crop_params:        Manual crop parameters (``None`` for auto-detect).
+        include:            Regex pattern to include streams (applied to all stream types).
+        exclude:            Regex pattern to exclude streams (applied to all stream types).
+        keep_all:           Whether to keep all intermediate files.
+        chunking_mode:      Chunking strategy — lossless FFV1 (default) or stream-copy remux.
+        force:              When True alongside execute mode, delete all artifacts and reset state
+                            when a source-file mismatch is detected, then continue with the new source.
+        audio_convert:      Regex pattern selecting processed audio files to convert to the final
+                            delivery format. Overrides ``audio_output.convert_filter`` from config.
+        audio_codec:        Override audio codec for all conversion profiles (e.g. ``'aac'``).
+        audio_base_bitrate: Base bitrate for 2.0 stereo conversion (e.g. ``'192k'``). Bitrates for
+                            other channel layouts are scaled proportionally by channel count.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    source_video:     Path
-    work_dir:         Path
-    quality_targets:  list[QualityTarget]
-    strategies:       list[str]
-    optimize:         bool         = False
-    all_strategies:   bool         = False
-    max_parallel:     int          = 2
-    subsample_factor: int          = 10
-    log_level:        str          = "info"
-    crop_params:      CropParams | None  = None
-    video_filter:     str | None        = None
-    audio_filter:     str | None        = None
-    keep_all:         bool              = False
-    chunking_mode:    ChunkingMode      = ChunkingMode.LOSSLESS
-    force:            bool              = False
+    source_video:       Path
+    work_dir:           Path
+    quality_targets:    list[QualityTarget]
+    strategies:         list[str]
+    optimize:           bool              = False
+    all_strategies:     bool              = False
+    max_parallel:       int               = 2
+    subsample_factor:   int               = 10
+    log_level:          str               = "info"
+    crop_params:        CropParams | None = None
+    include:            str | None        = None
+    exclude:            str | None        = None
+    keep_all:           bool              = False
+    chunking_mode:      ChunkingMode      = ChunkingMode.LOSSLESS
+    force:              bool              = False
+    audio_convert:      str | None        = None
+    audio_codec:        str | None        = None
+    audio_base_bitrate: str | None        = None

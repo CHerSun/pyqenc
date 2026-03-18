@@ -165,3 +165,46 @@ profiles:
     extra_args:
       - "-x265-params"
       - "aq-mode=2:psy-rd=1.0:deblock=-1,-1"
+
+# Audio Output Configuration
+# --------------------------
+# Controls which processed audio files are converted to the final delivery
+# format (AAC) and what codec/bitrate profile is used per channel layout.
+#
+# convert_filter: Regex matched against the output filename.  Any file whose
+#   name matches is passed to the ConversionStrategy finalizer.  The default
+#   matches all statically-normalised outputs (norm, 2.0 std/night/nboost,
+#   dynaudnorm).
+#
+# profiles: Map of channel-layout key to codec/bitrate/extension settings.
+#   Keys must match the channel layout tags embedded in filenames by the
+#   extraction phase (e.g. "2.0", "5.1", "7.1").
+audio_output:
+  convert_filter: "^(norm|dynaudnorm|2\\.0 (std|night|nboost)) ←"
+  profiles:
+    "2.0":
+      codec: aac
+      bitrate: 192k
+      extension: .aac
+    "5.1":
+      codec: aac
+      bitrate: 512k
+      extension: .aac
+    "7.1":
+      codec: aac
+      bitrate: 768k
+      extension: .aac
+
+# Stream Filter Configuration
+# ---------------------------
+# Unified include/exclude regex patterns applied to ALL stream types
+# (video, audio, subtitles, chapters) during the extraction phase.
+#
+# include: Regex matched against the would-be output filename of each stream.
+#   Only matching streams are extracted.  null = include all streams.
+# exclude: Regex matched against the would-be output filename of each stream.
+#   Matching streams are skipped even if they also match include.
+#   null = exclude no streams.  Exclusion takes precedence over inclusion.
+streams:
+  include: null
+  exclude: null

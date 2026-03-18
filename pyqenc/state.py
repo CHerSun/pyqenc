@@ -88,6 +88,33 @@ class JobState(BaseModel):
         return cls(source=source)
 
 
+class ExtractionParams(BaseModel):
+    """Phase parameter file model for extraction (``extraction.yaml``).
+
+    Stores the include/exclude stream filter patterns that were active when
+    extraction last ran.  Used to detect filter changes on subsequent runs
+    and trigger re-extraction when they differ.
+    """
+
+    include: str | None = None
+    exclude: str | None = None
+
+    def to_yaml_dict(self) -> dict:
+        """Serialise to a YAML-friendly dict."""
+        return {
+            "include": self.include,
+            "exclude": self.exclude,
+        }
+
+    @classmethod
+    def from_yaml_dict(cls, data: dict) -> "ExtractionParams":
+        """Restore from a dict loaded from ``extraction.yaml``."""
+        return cls(
+            include=data.get("include"),
+            exclude=data.get("exclude"),
+        )
+
+
 class ChunkingParams(BaseModel):
     """Phase parameter file model for chunking (``chunking.yaml``).
 
@@ -276,12 +303,14 @@ class ChunkSidecar(BaseModel):
 # ---------------------------------------------------------------------------
 
 _JOB_YAML_FILENAME          = "job.yaml"
+_EXTRACTION_YAML_FILENAME   = "extraction.yaml"
 _CHUNKING_YAML_FILENAME     = "chunking.yaml"
 _OPTIMIZATION_YAML_FILENAME = "optimization.yaml"
 _ENCODING_YAML_FILENAME     = "encoding.yaml"
 
 # Phase parameter files that should be deleted on --force wipe
 _PHASE_PARAM_FILENAMES: list[str] = [
+    _EXTRACTION_YAML_FILENAME,
     _CHUNKING_YAML_FILENAME,
     _OPTIMIZATION_YAML_FILENAME,
     _ENCODING_YAML_FILENAME,
@@ -409,6 +438,30 @@ class JobStateManager:
             mismatch_desc,
         )
         return False
+
+    # ------------------------------------------------------------------
+    # extraction.yaml
+    # ------------------------------------------------------------------
+
+    def load_extraction(self) -> "ExtractionParams | None":
+        """Load ``extraction.yaml`` from the work directory.
+
+        Returns:
+            ``ExtractionParams`` if the file exists and is valid, ``None`` otherwise.
+        """
+        return self._load_phase_params(
+            _EXTRACTION_YAML_FILENAME,
+            ExtractionParams.from_yaml_dict,
+        )
+
+    def save_extraction(self, params: "ExtractionParams") -> None:
+        """Write ``extraction.yaml`` atomically.
+
+        Args:
+            params: Extraction parameters to persist.
+        """
+        write_yaml_atomic(self._work_dir / _EXTRACTION_YAML_FILENAME, params.to_yaml_dict())
+        _logger.debug("Saved extraction.yaml")
 
     # ------------------------------------------------------------------
     # chunking.yaml

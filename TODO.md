@@ -35,3 +35,11 @@
 
 - [ ] Check for stale code
 - [ ] Make all tests pass
+- [ ] optimization phase tasks selection rework. Split into bins - either by duration or by mid-timestamp. Number of bins == number of chunks to select. From each bin select 1 task randomly. Limit max duration and prefilter chunks that do not match immediately. If picked still too large chunks - remove largest and re-random.
+- [ ] review specs to mark what was outdated already (for future human reference) (task for agent).
+
+- [ ] Reused artifact not reflected as success on the encoding progress bar — reused chunks don't advance the bar, making it look stalled/incomplete (e.g. bar stops at 76% despite all chunks being done). Also duplicate logging: both "Encoding complete: X newly encoded, Y reused" and "✔ encoding: Encoded X chunks, reused Y" are emitted.
+-
+ [ ] Apply the `✔ {success}  ✘ {failed}  ⏭ {skipped}` summary text pattern to the duration-based progress bars used in other phases (encoding, chunking), replacing per-task text updates with a running counter for consistency.
+
+- [ ] flag `  --keep-all            Keep all intermediate files (skip cleanup prompt after completion)` looks wrong. Replace with --clean for auto only? making the pipeline to purge all intermediate results (source is untouched + keeping the final results; everything else in workdir is purged; care, source could be there too).

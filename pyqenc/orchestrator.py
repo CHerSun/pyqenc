@@ -418,8 +418,8 @@ class PipelineOrchestrator:
             result = extract_streams(
                 source_video=self.config.source_video,
                 output_dir=output_dir,
-                video_filter=self.config.video_filter,
-                audio_filter=self.config.audio_filter,
+                include=self.config.include,
+                exclude=self.config.exclude,
                 detect_crop=self.config.crop_params is None,
                 manual_crop=str(self.config.crop_params) if self.config.crop_params else None,
                 force=False,
@@ -824,6 +824,9 @@ class PipelineOrchestrator:
             result = process_audio_streams(
                 audio_files=audio_files,
                 output_dir=output_dir,
+                audio_convert=self.config.audio_convert,
+                audio_codec=self.config.audio_codec,
+                audio_base_bitrate=self.config.audio_base_bitrate,
                 dry_run=dry_run,
             )
 
@@ -839,10 +842,9 @@ class PipelineOrchestrator:
                 return PhaseResult(
                     phase=Phase.AUDIO,
                     outcome=PhaseOutcome.REUSED if result.reused else PhaseOutcome.COMPLETED,
-                    message=f"Processed {len(result.day_mode_files)} day, {len(result.night_mode_files)} night audio streams",
+                    message=f"Processed {len(result.output_files)} audio delivery file(s)",
                     metadata={
-                        "day_mode_files": result.day_mode_files,
-                        "night_mode_files": result.night_mode_files,
+                        "output_files": result.output_files,
                     }
                 )
             else:
@@ -897,8 +899,8 @@ class PipelineOrchestrator:
                 error="Audio phase must complete first"
             )
 
-        # Collect audio files (both day and night modes)
-        audio_files = sorted(audio_dir.glob("audio_*_day.aac")) + sorted(audio_dir.glob("audio_*_night.aac"))
+        # Collect audio files — all AAC delivery files produced by the audio phase
+        audio_files = sorted(audio_dir.glob("*.aac"))
 
         if not audio_files:
             logger.warning("No processed audio files found, merging video only")

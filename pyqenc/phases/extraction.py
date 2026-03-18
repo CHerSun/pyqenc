@@ -18,6 +18,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Any, cast
 
+from pyqenc.constants import FAILURE_SYMBOL_MINOR, SUCCESS_SYMBOL_MINOR
 from pyqenc.models import AudioMetadata, CropParams, PhaseOutcome, VideoMetadata
 from pyqenc.phases.recovery import ExtractionRecovery, recover_extraction
 from pyqenc.state import ArtifactState, JobState
@@ -365,6 +366,38 @@ class StreamFactory:
         return StreamBase(stream, index)
 
 
+def _print_stream_table(
+    all_tracks:      list[StreamBase],
+    selected_tracks: list[StreamBase],
+) -> None:
+    """Print a compact aligned table of all streams with include/exclude symbols.
+
+    Each row shows ``✔`` for included streams and ``✗`` for excluded streams,
+    followed by the would-be output filename.  Columns are vertically aligned.
+
+    Args:
+        all_tracks:      All streams discovered in the source file.
+        selected_tracks: Streams that passed the include/exclude filters.
+    """
+    if not all_tracks:
+        return
+
+    selected_set = set(id(t) for t in selected_tracks)
+
+    max_track_num = len(all_tracks)
+    max_track_id  = max((t.track_id for t in all_tracks), default=0)
+    track_num_width = len(str(max_track_num))
+    track_id_width  = len(str(max(max_track_id, 0)))
+
+    lines: list[str] = []
+    for track in all_tracks:
+        symbol   = SUCCESS_SYMBOL_MINOR if id(track) in selected_set else FAILURE_SYMBOL_MINOR
+        filename = track.display_name(track_num_width, track_id_width)
+        lines.append(f"  {symbol}  {filename}")
+
+    logger.info("Streams:\n%s", "\n".join(lines))
+
+
 def streams_filter_plain_regex(
     tracks: list[StreamBase],
     include_pattern: str | None = None,
@@ -647,8 +680,8 @@ def _audio_metadata_from_stream(path: Path, track: "AudioStream") -> AudioMetada
 def extract_streams(
     source_video: Path,
     output_dir:   Path,
-    video_filter: str | None = None,
-    audio_filter: str | None = None,
+    include:      str | None = None,
+    exclude:      str | None = None,
     detect_crop:  bool = True,
     manual_crop:  str | None = None,
     force:        bool = False,
@@ -667,11 +700,19 @@ def extract_streams(
     artifacts are present (``ArtifactState.COMPLETE``), extraction is skipped
     and existing files are reused.
 
+    On subsequent runs the persisted ``include``/``exclude`` values from
+    ``extraction.yaml`` are compared against the current values.  If they
+    differ, a warning is logged and the phase is marked as needing re-execution.
+
     Args:
         source_video: Path to source MKV file.
         output_dir:   Directory for extracted streams.
-        video_filter: Regex pattern to include video streams (e.g. ``".*eng.*"``).
-        audio_filter: Regex pattern to include audio streams (e.g. ``".*eng.*"``).
+        include:      Regex pattern applied to ALL stream types; only streams
+                      whose would-be output filename matches are extracted.
+                      ``None`` means include all.
+        exclude:      Regex pattern applied to ALL stream types; streams whose
+                      would-be output filename matches are skipped even if they
+                      also match ``include``.  ``None`` means exclude none.
         detect_crop:  If ``True``, automatically detect black borders.
         manual_crop:  Manual crop parameters (format: ``"top bottom [left right]"``).
         force:        If ``False``, reuse existing extracted files.
@@ -702,20 +743,19 @@ def extract_streams(
             video=None, audio=[], outcome=PhaseOutcome.FAILED, error=error_msg,
         )
 
-    selected_tracks = extractor.tracks
+    # Apply unified include/exclude filter to ALL stream types in one call (Req 10.1–10.4)
+    selected_tracks = streams_filter_plain_regex(
+        extractor.tracks,
+        include_pattern=include,
+        exclude_pattern=exclude,
+    )
 
-    if video_filter:
-        video_tracks_all = [t for t in selected_tracks if t.codec_type == "video"]
-        filtered_video   = streams_filter_plain_regex(video_tracks_all, include_pattern=video_filter)
-        selected_tracks  = [t for t in selected_tracks if t.codec_type != "video"] + filtered_video
-
-    if audio_filter:
-        audio_tracks_all = [t for t in selected_tracks if t.codec_type == "audio"]
-        filtered_audio   = streams_filter_plain_regex(audio_tracks_all, include_pattern=audio_filter)
-        selected_tracks  = [t for t in selected_tracks if t.codec_type != "audio"] + filtered_audio
+    # Compact stream display — shown in both dry-run and execute modes (Req 10.5, 10.6)
+    _print_stream_table(extractor.tracks, selected_tracks)
 
     video_tracks: list[VideoStream] = [t for t in selected_tracks if t.codec_type == "video"]  # type: ignore[assignment]
     audio_tracks: list[AudioStream] = [t for t in selected_tracks if t.codec_type == "audio"]  # type: ignore[assignment]
+    other_tracks: list[StreamBase]  = [t for t in selected_tracks if t.codec_type not in ("video", "audio")]
 
     if not video_tracks:
         error_msg = "No video streams found matching filters"
@@ -724,13 +764,10 @@ def extract_streams(
             video=None, audio=[], outcome=PhaseOutcome.FAILED, error=error_msg,
         )
 
-    logger.info(
-        "Selected %d video stream(s) and %d audio stream(s)",
-        len(video_tracks), len(audio_tracks),
-    )
-
     expected_video_files = [output_dir / t.display_name() for t in video_tracks]
     expected_audio_files = [output_dir / t.display_name() for t in audio_tracks]
+    expected_other_files = [output_dir / t.display_name() for t in other_tracks
+                            if t.extract_type]  # skip HeadersStream (extract_type="")
     video_metas = [
         VideoMetadata.from_stream(path=f, stream=t)
         for f, t in zip(expected_video_files, video_tracks)
@@ -759,15 +796,32 @@ def extract_streams(
     recovery = recover_extraction(work_dir=output_dir.parent, job=_job)
 
     # ------------------------------------------------------------------
+    # Filter change detection via extraction.yaml sidecar (Req 10.11, 10.12)
+    # ------------------------------------------------------------------
+    from pyqenc.state import ExtractionParams, JobStateManager
+    _state_manager = JobStateManager(work_dir=output_dir.parent, source_video=source_video)
+    persisted_params = _state_manager.load_extraction()
+    if persisted_params is not None:
+        if persisted_params.include != include or persisted_params.exclude != exclude:
+            logger.warning(
+                "Stream filter change detected — extraction needs re-execution. "
+                "Persisted: include=%r, exclude=%r. Current: include=%r, exclude=%r. "
+                "Re-run with --force to re-extract with the new filters.",
+                persisted_params.include, persisted_params.exclude,
+                include, exclude,
+            )
+            # Mark phase as needing re-execution by treating artifacts as absent
+            recovery = type(recovery)(video_files=recovery.video_files, state=ArtifactState.ABSENT)
+
+    # ------------------------------------------------------------------
     # Reuse path — all artifacts present (COMPLETE via .tmp protocol)
     # ------------------------------------------------------------------
     all_exist = (
         not force
         and recovery.state == ArtifactState.COMPLETE
-        and all(f.exists() for f in expected_video_files + expected_audio_files)
+        and all(f.exists() for f in expected_video_files + expected_audio_files + expected_other_files)
     )
     if all_exist:
-        logger.info("Extracted files already exist, reusing")
         primary_video = video_metas[0]
         if manual_crop:
             primary_video.crop_params = _resolve_crop(primary_video)
@@ -788,11 +842,6 @@ def extract_streams(
     # Dry-run path
     # ------------------------------------------------------------------
     if dry_run:
-        logger.info("[DRY-RUN] Would extract:")
-        for track in video_tracks:
-            logger.info("[DRY-RUN]   Video: %s", track.display_name())
-        for track in audio_tracks:
-            logger.info("[DRY-RUN]   Audio: %s", track.display_name())
         if manual_crop:
             logger.info("[DRY-RUN] Would use manual crop: %s", manual_crop)
         elif detect_crop:
@@ -850,7 +899,15 @@ def extract_streams(
                     f"ffmpeg failed (exit {audio_result.returncode}) extracting audio track {track.track_id}"
                 )
 
-        logger.info("Stream extraction completed")
+        if other_tracks:
+            logger.debug("Extracting %d other track(s) via mkvextract", len(other_tracks))
+            extractor.extract_tracks(other_tracks, output_dir)
+
+        # Persist include/exclude filters in extraction.yaml sidecar (Req 10.11)
+        try:
+            _state_manager.save_extraction(ExtractionParams(include=include, exclude=exclude))
+        except Exception as e:
+            logger.warning("Could not persist extraction.yaml: %s", e)
 
     except RuntimeError as e:
         error_msg = str(e)
