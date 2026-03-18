@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pyqenc.constants import FAILURE_SYMBOL_MINOR, SUCCESS_SYMBOL_MINOR
-from pyqenc.models import PhaseOutcome, QualityTarget, VideoMetadata
+from pyqenc.models import CropParams, PhaseOutcome, QualityTarget, VideoMetadata
 from pyqenc.utils.ffmpeg_runner import get_frame_count, run_ffmpeg
 from pyqenc.utils.visualization import QualityEvaluator
 
@@ -47,6 +47,7 @@ def merge_final_video(
     audio_files:        list[Path],
     output_dir:         Path,
     source_video:       VideoMetadata | None = None,
+    ref_crop:           CropParams | None = None,
     quality_targets:    list[QualityTarget] | None = None,
     source_frame_count: int | None = None,
     optimal_strategy:   str | None = None,
@@ -71,6 +72,8 @@ def merge_final_video(
         audio_files:        List of processed audio files to include.
         output_dir:         Directory for final output files.
         source_video:       Original source ``VideoMetadata`` for quality measurement (optional).
+        ref_crop:           Crop parameters applied during encoding; used to align the reference
+                            for quality measurement (optional).
         quality_targets:    Quality targets to verify against (optional).
         source_frame_count: Expected frame count for verification (optional).
         optimal_strategy:   When set, merge only this strategy; otherwise merge all.
@@ -171,7 +174,7 @@ def merge_final_video(
                             evaluation = evaluator.evaluate_chunk(
                                 encoded=output_file,
                                 reference=source_video.path,
-                                ref_crop=source_video.crop_params,
+                                ref_crop=ref_crop,
                                 targets=quality_targets,
                                 output_dir=metrics_dir,
                                 subsample_factor=subsample_factor,
@@ -367,7 +370,7 @@ def merge_final_video(
                         evaluation = evaluator.evaluate_chunk(
                             encoded=output_file,
                             reference=source_video.path,
-                            ref_crop=source_video.crop_params,
+                            ref_crop=ref_crop,
                             targets=quality_targets,
                             output_dir=metrics_dir,
                             subsample_factor=subsample_factor,

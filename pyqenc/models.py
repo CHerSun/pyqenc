@@ -274,17 +274,12 @@ class VideoMetadata(BaseModel):
     values.
 
     Attributes:
-        path:        Path to the video file.
-        crop_params: Crop parameters detected during extraction.
-                     ``None`` means detection has not yet run.
-                     After extraction this is always a ``CropParams`` instance
-                     (all-zero if no borders were found).
+        path: Path to the video file.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    path:        Path
-    crop_params: "CropParams | None" = None
+    path: Path
 
     # Backing fields — populated lazily or via populate_from_* helpers.
     _duration_seconds: float | None = PrivateAttr(default=None)
@@ -539,11 +534,6 @@ class VideoMetadata(BaseModel):
         """Serialize including cached private fields for round-trip persistence."""
         base = self.model_dump()
 
-        # crop_params is ordinary field, automatically serialized.
-        # We don't want to serialize None crop_params - so pop it if None.
-        if self.crop_params is None:
-            base.pop("crop_params", None)
-
         # We do not serialize properties, we serialize backing private fields. This:
         #  - allows not to trigger lazy-loading properties
         #  - allows to omit None fields.
@@ -563,11 +553,6 @@ class VideoMetadata(BaseModel):
     def model_validate_full(cls, data: dict) -> "VideoMetadata":
         """Restore a ``VideoMetadata`` from a ``model_dump_full()`` dict."""
         instance = cls.model_validate(data)
-        # Restore crop_params from nested dict if present.
-        raw_crop = data.get("crop_params")
-        if isinstance(raw_crop, dict):
-            instance.crop_params = CropParams.model_validate(raw_crop)
-
         # Manual private fields deserialization override:
         #  - allows not to trigger lazy-loading properties, while properly restoring the state.
         instance._duration_seconds = data.get("duration_seconds")
@@ -599,9 +584,6 @@ class ChunkMetadata(VideoMetadata):
     def model_validate_full(cls, data: dict) -> "ChunkMetadata":  # type: ignore[override]
         """Restore a ``ChunkMetadata`` from a ``model_dump_full()`` dict."""
         instance = cls.model_validate(data)
-        raw_crop = data.get("crop_params")
-        if isinstance(raw_crop, dict):
-            instance.crop_params = CropParams.model_validate(raw_crop)
         instance._duration_seconds = data.get("duration_seconds")
         instance._frame_count      = data.get("frame_count")
         instance._fps              = data.get("fps")

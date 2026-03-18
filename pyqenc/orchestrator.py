@@ -397,7 +397,7 @@ class PipelineOrchestrator:
         job = self.state_manager.load_job()
         if job is None:
             return None
-        return job.source.crop_params
+        return job.crop
 
     def _execute_extraction(self, dry_run: bool) -> PhaseResult:
         """Execute extraction phase."""
@@ -476,8 +476,8 @@ class PipelineOrchestrator:
 
         # 2. Cached in job.yaml
         job = self.state_manager.load_job()
-        if job is not None and job.source.crop_params is not None:
-            c = job.source.crop_params
+        if job is not None and job.crop is not None:
+            c = job.crop
             logger.info(
                 "Detected cropping: %d top, %d bottom, %d left, %d right (cached)",
                 c.top, c.bottom, c.left, c.right,
@@ -489,7 +489,7 @@ class PipelineOrchestrator:
         logger.info("Cropping: detecting black borders...")
         crop = detect_crop_parameters(source)
         if job is not None:
-            job.source.crop_params = crop
+            job.crop = crop
             self.state_manager.save_job(job)
         return crop
 
@@ -987,6 +987,7 @@ class PipelineOrchestrator:
                 audio_files=audio_files,
                 output_dir=output_dir,
                 source_video=job.source if job else None,
+                ref_crop=job.crop if job else None,
                 quality_targets=self.config.quality_targets or None,
                 source_frame_count=source_frame_count,
                 optimal_strategy=self._optimal_strategy,

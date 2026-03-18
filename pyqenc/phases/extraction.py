@@ -468,8 +468,7 @@ class ExtractionResult:
     """Result of stream extraction phase.
 
     Attributes:
-        video:   Extracted video metadata (single stream); ``crop_params`` is
-                 always populated after extraction (all-zero if no borders found).
+        video:   Extracted video metadata (single stream).
         audio:   List of extracted audio track metadata.
         outcome: Phase outcome (COMPLETED, REUSED, DRY_RUN, or FAILED).
         error:   Error message if extraction failed.
@@ -551,8 +550,7 @@ def extract_streams(
         dry_run:      If ``True``, only report status without performing extraction.
 
     Returns:
-        ``ExtractionResult`` with the first video stream (``crop_params`` is
-        always ``None`` — set by the orchestrator after crop detection),
+        ``ExtractionResult`` with the first video stream,
         a list of ``AudioMetadata`` objects, and a ``PhaseOutcome``.
     """
     logger.info("Extraction phase: %s", source_video.name)

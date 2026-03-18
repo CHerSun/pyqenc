@@ -67,17 +67,26 @@ class JobState(BaseModel):
     """Stable source video parameters stored in ``job.yaml``.
 
     Contains only run-invariant metadata — no phase status, no chunk tracking.
-    ``source.crop_params`` is ``None`` when crop detection has not yet run.
+    ``crop_params`` is ``None`` when crop detection has not yet run.
     """
 
     source: VideoMetadata
+    crop:   CropParams | None = None
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict using ``model_dump_full``."""
         data = self.source.model_dump_full()
         # Convert Path to str for YAML serialisation
         data["path"] = str(data["path"])
-        return {"source": data}
+        result: dict = {"source": data}
+        if self.crop is not None:
+            result["crop"] = {
+                "top":    self.crop.top,
+                "bottom": self.crop.bottom,
+                "left":   self.crop.left,
+                "right":  self.crop.right,
+            }
+        return result
 
     @classmethod
     def from_yaml_dict(cls, data: dict) -> "JobState":
@@ -85,7 +94,9 @@ class JobState(BaseModel):
         source_data = data["source"]
         source_data = {**source_data, "path": Path(source_data["path"])}
         source = VideoMetadata.model_validate_full(source_data)
-        return cls(source=source)
+        raw_crop = data.get("crop")
+        crop_params = CropParams(**raw_crop) if isinstance(raw_crop, dict) else None
+        return cls(source=source, crop_params=crop_params)
 
 
 class ExtractionParams(BaseModel):

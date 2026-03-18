@@ -1,7 +1,7 @@
 """Unit tests for core refactored pipeline logic.
 
 Covers:
-- ChunkMetadata serialisation round-trip (including timestamps and crop_params)
+- ChunkMetadata serialisation round-trip (including timestamps)
 - ENCODED_ATTEMPT_NAME_PATTERN parsing of CRF-only filenames
 - Merge strategy selection (optimal-only vs all-strategies)
 """
@@ -23,7 +23,7 @@ from pyqenc.models import (
     VideoMetadata,
 )
 from pyqenc.phases.merge import merge_final_video
-
+from pyqenc.state import JobState
 
 # ---------------------------------------------------------------------------
 # ChunkMetadata serialisation round-trip
@@ -49,51 +49,36 @@ class TestChunkMetadataRoundTrip:
         assert restored.path            == chunk.path
 
     def test_crop_params_round_trip(self) -> None:
-        """crop_params (non-empty) survives serialisation."""
-        chunk = ChunkMetadata(
-            path=Path("chunks/chunk.mkv"),
-            chunk_id="00꞉00꞉00․000-00꞉00꞉10․000",
-            start_timestamp=0.0,
-            end_timestamp=10.0,
-            crop_params=CropParams(top=140, bottom=140, left=0, right=0),
-        )
-        data = chunk.model_dump_full()
-        restored = ChunkMetadata.model_validate_full(data)
+        """crop_params on JobState survives serialisation."""
+        source = VideoMetadata(path=Path("source.mkv"))
+        job = JobState(source=source, crop_params=CropParams(top=140, bottom=140, left=0, right=0))
+        data = job.to_yaml_dict()
+        restored = JobState.from_yaml_dict(data)
 
-        assert restored.crop_params is not None
-        assert restored.crop_params.top    == 140
-        assert restored.crop_params.bottom == 140
-        assert restored.crop_params.left   == 0
-        assert restored.crop_params.right  == 0
+        assert restored.crop is not None
+        assert restored.crop.top    == 140
+        assert restored.crop.bottom == 140
+        assert restored.crop.left   == 0
+        assert restored.crop.right  == 0
 
     def test_empty_crop_params_round_trip(self) -> None:
-        """All-zero CropParams (no-op crop) survives serialisation."""
-        chunk = ChunkMetadata(
-            path=Path("chunks/chunk.mkv"),
-            chunk_id="00꞉00꞉00․000-00꞉00꞉10․000",
-            start_timestamp=0.0,
-            end_timestamp=10.0,
-            crop_params=CropParams(),
-        )
-        data = chunk.model_dump_full()
-        restored = ChunkMetadata.model_validate_full(data)
+        """All-zero CropParams on JobState survives serialisation."""
+        source = VideoMetadata(path=Path("source.mkv"))
+        job = JobState(source=source, crop_params=CropParams())
+        data = job.to_yaml_dict()
+        restored = JobState.from_yaml_dict(data)
 
-        assert restored.crop_params is not None
-        assert restored.crop_params.is_empty()
+        assert restored.crop is not None
+        assert restored.crop.is_empty()
 
     def test_none_crop_params_round_trip(self) -> None:
-        """None crop_params (detection not yet run) survives serialisation."""
-        chunk = ChunkMetadata(
-            path=Path("chunks/chunk.mkv"),
-            chunk_id="00꞉00꞉00․000-00꞉00꞉10․000",
-            start_timestamp=0.0,
-            end_timestamp=10.0,
-            crop_params=None,
-        )
-        data = chunk.model_dump_full()
-        restored = ChunkMetadata.model_validate_full(data)
+        """None crop_params on JobState (detection not yet run) survives serialisation."""
+        source = VideoMetadata(path=Path("source.mkv"))
+        job = JobState(source=source, crop_params=None)
+        data = job.to_yaml_dict()
+        restored = JobState.from_yaml_dict(data)
 
-        assert restored.crop_params is None
+        assert restored.crop is None
 
     def test_private_fields_round_trip(self) -> None:
         """Cached probe fields survive serialisation."""
@@ -123,7 +108,6 @@ class TestChunkMetadataRoundTrip:
             chunk_id="00꞉00꞉00․000-00꞉00꞉10․000",
             start_timestamp=0.0,
             end_timestamp=10.0,
-            crop_params=CropParams(top=10, bottom=10, left=0, right=0),
         )
         data = chunk.model_dump_full()
         # Should not raise

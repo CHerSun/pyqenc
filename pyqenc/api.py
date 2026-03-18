@@ -120,7 +120,6 @@ def extract_streams(
 
     Returns:
         ExtractionResult with video/audio metadata and phase outcome.
-        ``video.crop_params`` is always ``None`` — set by the caller after detection.
 
     Raises:
         FileNotFoundError: If source video doesn't exist
