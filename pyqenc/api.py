@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from pyqenc.constants import TEMP_SUFFIX
 from pyqenc.models import PipelineConfig
 from pyqenc.orchestrator import PipelineOrchestrator, PipelineResult
-from pyqenc.progress import ProgressTracker
+from pyqenc.state import JobStateManager
 
 logger = logging.getLogger(__name__)
 
@@ -77,16 +77,19 @@ def run_pipeline(
     if not config.work_dir.is_dir():
         raise ValueError(f"Work directory is not a directory: {config.work_dir}")
 
-    # Initialize progress tracker
-    tracker = ProgressTracker(config.work_dir)
+    # Initialize state manager
+    state_manager = JobStateManager(
+        work_dir=config.work_dir,
+        source_video=config.source_video,
+        force=getattr(config, "force", False),
+    )
 
-    # Create orchestrator and run pipeline; flush state on any exit path
-    orchestrator = PipelineOrchestrator(config, tracker)
+    # Create orchestrator and run pipeline
+    orchestrator = PipelineOrchestrator(config, state_manager)
     try:
         return orchestrator.run(dry_run=dry_run, max_phases=max_phases)
     except BaseException:
-        logger.warning("Unhandled exception — flushing ProgressTracker state before re-raise.")
-        tracker.flush()
+        logger.warning("Unhandled exception — re-raising.")
         raise
 
 
@@ -181,6 +184,9 @@ def chunk_video(
     ``chunking_mode=ChunkingMode.REMUX`` to fall back to stream-copy (faster,
     smaller chunks, but boundaries may snap to the nearest I-frame).
 
+    Runs inputs discovery to verify that the extraction phase has produced its
+    outputs before proceeding (Req 11.1).
+
     Args:
         video_file: Path to video file to chunk
         output_dir: Directory for chunk output
@@ -219,6 +225,8 @@ def chunk_video(
     """
     from pyqenc.models import ChunkingMode, CropParams
     from pyqenc.phases.chunking import chunk_video as _chunk_video
+    from pyqenc.state import JobState, JobStateManager
+    from pyqenc.models import VideoMetadata
 
     if not video_file.exists():
         raise FileNotFoundError(f"Video file not found: {video_file}")
@@ -239,15 +247,20 @@ def chunk_video(
         except ValueError as e:
             raise ValueError(f"Invalid crop parameters: {e}") from e
 
+    # Derive work_dir from output_dir (output_dir is work_dir/chunks)
+    work_dir = output_dir.parent
+    state_manager = JobStateManager(work_dir=work_dir, source_video=video_file)
+    existing_job = state_manager.load_job()
+    job = existing_job if existing_job is not None else JobState(source=VideoMetadata(path=video_file))
+
     return _chunk_video(
         video_file=video_file,
         output_dir=output_dir,
-        crop_params=parsed_crop_params,
-        scene_threshold=scene_threshold,
-        min_scene_length=min_scene_length,
+        state_manager=state_manager,
+        job=job,
         chunking_mode=chunking_mode if chunking_mode is not None else ChunkingMode.LOSSLESS,
-        force=force,
         dry_run=dry_run,
+        standalone=True,
     )
 
 
@@ -306,7 +319,6 @@ def encode_chunks(
     from pyqenc.config import ConfigManager
     from pyqenc.models import QualityTarget
     from pyqenc.phases.encoding import ChunkInfo, encode_all_chunks
-    from pyqenc.progress import ProgressTracker
 
     if not chunks_dir.exists():
         raise FileNotFoundError(f"Chunks directory not found: {chunks_dir}")
@@ -346,10 +358,9 @@ def encode_chunks(
         except ValueError as e:
             raise ValueError(f"Invalid quality target '{target_str}': {e}") from e
 
-    # Initialize config manager and progress tracker
+    # Initialize config manager and state manager
     config_manager = ConfigManager()
-    progress_tracker = ProgressTracker(work_dir)
-    progress_tracker.load_state()
+    state_manager = JobStateManager(work_dir=work_dir, source_video=chunks_dir)
 
     return encode_all_chunks(
         chunks=chunks,
@@ -358,10 +369,11 @@ def encode_chunks(
         quality_targets=parsed_targets,
         work_dir=work_dir,
         config_manager=config_manager,
-        progress_tracker=progress_tracker,
         max_parallel=max_parallel,
         force=force,
         dry_run=dry_run,
+        state_manager=state_manager,
+        standalone=True,
     )
 
 
@@ -405,11 +417,23 @@ def process_audio(
         ...     print(f"Processed {len(result.day_mode_files)} audio streams")
     """
     from pyqenc.phases.audio import process_audio_streams
+    from pyqenc.phases.recovery import discover_inputs
 
     if not audio_dir.exists():
         raise FileNotFoundError(f"Audio directory not found: {audio_dir}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Inputs discovery: verify extraction phase produced audio outputs (Req 11.1)
+    work_dir = audio_dir.parent
+    discovery = discover_inputs("audio", work_dir)
+    if not discovery.ok:
+        from pyqenc.phases.audio import AudioResult
+        return AudioResult(
+            day_mode_files=[], night_mode_files=[],
+            reused=False, needs_work=False, success=False,
+            error=discovery.error,
+        )
 
     audio_files = list(audio_dir.glob("audio_*.mka"))
     if not audio_files:
@@ -471,12 +495,28 @@ def merge_final(
         ...         print(f"  Frame count: {result.frame_counts[strategy]}")
     """
     from pyqenc.phases.merge import merge_final_video
+    from pyqenc.phases.recovery import discover_inputs
 
     if not encoded_dir.exists():
         raise FileNotFoundError(f"Encoded directory not found: {encoded_dir}")
 
     if not audio_dir.exists():
         raise FileNotFoundError(f"Audio directory not found: {audio_dir}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Inputs discovery: verify encoding phase produced outputs (Req 11.1)
+    work_dir = encoded_dir.parent
+    discovery = discover_inputs("merge", work_dir)
+    if not discovery.ok:
+        from pyqenc.phases.merge import MergeResult
+        from pyqenc.models import PhaseOutcome
+        return MergeResult(
+            output_files={}, frame_counts={},
+            final_metrics={}, targets_met={}, metrics_plots={},
+            outcome=PhaseOutcome.FAILED,
+            error=discovery.error,
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
 

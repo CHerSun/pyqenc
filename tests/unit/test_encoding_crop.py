@@ -1,11 +1,12 @@
 """Unit tests for crop parameter injection in ChunkEncoder._encode_with_ffmpeg."""
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pyqenc.models import CodecConfig, CropParams, StrategyConfig
-from pyqenc.phases.encoding import ChunkEncoder, ChunkInfo
+from pyqenc.models import ChunkMetadata, CodecConfig, CropParams, StrategyConfig
+from pyqenc.phases.encoding import ChunkEncoder
+from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -16,7 +17,6 @@ def _make_encoder(crop_params: CropParams | None = None) -> ChunkEncoder:
     return ChunkEncoder(
         config_manager=MagicMock(),
         quality_evaluator=MagicMock(),
-        progress_tracker=MagicMock(),
         work_dir=Path("/tmp/work"),
         crop_params=crop_params,
     )
@@ -33,14 +33,12 @@ def _make_strategy_config() -> StrategyConfig:
     return StrategyConfig(preset="fast", profile="h265", codec=codec, profile_args=[])
 
 
-def _make_chunk() -> ChunkInfo:
-    return ChunkInfo(
-        chunk_id="chunk.000000-000319",
-        file_path=Path("/tmp/chunk.mkv"),
-        start_frame=0,
-        end_frame=319,
-        frame_count=320,
-        duration=10.0,
+def _make_chunk() -> ChunkMetadata:
+    return ChunkMetadata(
+        path=Path("/tmp/chunk.mkv"),
+        chunk_id="00꞉00꞉00․000-00꞉00꞉10․000",
+        start_timestamp=0.0,
+        end_timestamp=10.0,
     )
 
 
@@ -49,25 +47,23 @@ def _make_chunk() -> ChunkInfo:
 # ---------------------------------------------------------------------------
 
 def _captured_cmd(encoder: ChunkEncoder, crop: CropParams | None) -> list[str]:
-    """Run _encode_with_ffmpeg with a mocked subprocess and return the captured cmd."""
+    """Run _encode_with_ffmpeg with a mocked runner and return the captured cmd."""
     encoder._crop_params = crop
     chunk = _make_chunk()
     strategy = _make_strategy_config()
     output = Path("/tmp/out.mkv")
 
-    captured: list[list[str]] = []
+    captured: list[list] = []
 
-    def fake_run(cmd, **_kwargs):
-        captured.append(cmd)
-        # Simulate successful encode: create the output file
-        output.touch()
-        result = MagicMock()
+    def fake_run_ffmpeg(cmd, output_file=None, **_kwargs):
+        captured.append(list(cmd))
+        result = MagicMock(spec=FFmpegRunResult)
+        result.success = True
         result.returncode = 0
         return result
 
-    with patch("subprocess.run", side_effect=fake_run):
-        with patch.object(Path, "exists", return_value=True):
-            encoder._encode_with_ffmpeg(chunk, strategy, 28.0, output)
+    with patch("pyqenc.phases.encoding.run_ffmpeg", side_effect=fake_run_ffmpeg):
+        encoder._encode_with_ffmpeg(chunk, strategy, 28.0, output)
 
     return captured[0] if captured else []
 

@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
-import subprocess
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Callable
 
 from alive_progress import alive_bar, config_handler
+
+from pyqenc.utils.ffmpeg_runner import run_ffmpeg, run_ffmpeg_async
 
 config_handler.set_global(enrich_print=False) # type: ignore
 logger = logging.getLogger(__name__)
@@ -95,31 +97,28 @@ class ConversionStrategy(BaseStrategy):
     def execute(self, source: Path, output: Path, dry_run: bool) -> None:
         if dry_run:
             return
-        cmd = [
+        cmd: list[str | os.PathLike] = [
             "ffmpeg", "-hide_banner",
-            "-i", str(source),
+            "-i", source,
             "-c:a", self.codec, "-b:a", self.bitrate,
-            "-y", str(output),
+            "-y", output,
         ]
-        subprocess.run(cmd, capture_output=True, check=True)
+        result = run_ffmpeg(cmd)
+        if not result.success:
+            raise RuntimeError(f"ffmpeg conversion failed for {source.name}")
 
     async def execute_async(self, source: Path, output: Path, dry_run: bool) -> None:
         if dry_run:
             return
-        cmd = [
+        cmd: list[str | os.PathLike] = [
             "ffmpeg", "-hide_banner",
-            "-i", str(source),
+            "-i", source,
             "-c:a", self.codec, "-b:a", self.bitrate,
-            "-y", str(output),
+            "-y", output,
         ]
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await process.communicate()
-        if process.returncode != 0:
-            raise RuntimeError(stderr.decode() if stderr else f"ffmpeg exit {process.returncode}")
+        result = await run_ffmpeg_async(cmd)
+        if not result.success:
+            raise RuntimeError(f"ffmpeg conversion failed for {source.name}")
 
 
 # ---------------------------------------------------------------------------
@@ -168,29 +167,26 @@ class DownmixStrategy(BaseStrategy):
     def execute(self, source: Path, output: Path, dry_run: bool) -> None:
         if dry_run:
             return
-        cmd = (
-            ["ffmpeg", "-hide_banner", "-i", str(source)]
+        cmd: list[str | os.PathLike] = (
+            ["ffmpeg", "-hide_banner", "-i", source]
             + self.args
-            + ["-c:a", _INTERMEDIATE_CODEC, "-y", str(output)]
+            + ["-c:a", _INTERMEDIATE_CODEC, "-y", output]
         )
-        subprocess.run(cmd, capture_output=True, check=True)
+        result = run_ffmpeg(cmd)
+        if not result.success:
+            raise RuntimeError(f"ffmpeg downmix failed for {source.name}")
 
     async def execute_async(self, source: Path, output: Path, dry_run: bool) -> None:
         if dry_run:
             return
-        cmd = (
-            ["ffmpeg", "-hide_banner", "-i", str(source)]
+        cmd: list[str | os.PathLike] = (
+            ["ffmpeg", "-hide_banner", "-i", source]
             + self.args
-            + ["-c:a", _INTERMEDIATE_CODEC, "-y", str(output)]
+            + ["-c:a", _INTERMEDIATE_CODEC, "-y", output]
         )
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await process.communicate()
-        if process.returncode != 0:
-            raise RuntimeError(stderr.decode() if stderr else f"ffmpeg exit {process.returncode}")
+        result = await run_ffmpeg_async(cmd)
+        if not result.success:
+            raise RuntimeError(f"ffmpeg downmix failed for {source.name}")
 
 
 # ---------------------------------------------------------------------------
@@ -610,17 +606,21 @@ def process_audio_streams(
         for audio_file in audio_files:
             target = output_dir / (audio_file.stem + ".flac")
             if not target.exists():
-                cmd = [
+                cmd: list[str | os.PathLike] = [
                     "ffmpeg", "-hide_banner", "-loglevel", "error",
-                    "-i", str(audio_file),
+                    "-i", audio_file,
                     "-c:a", "flac",
-                    "-y", str(target),
+                    "-y", target,
                 ]
                 try:
-                    subprocess.run(cmd, check=True, capture_output=True)
-                    logger.debug("Converted %s -> %s", audio_file.name, target.name)
-                except subprocess.CalledProcessError as exc:
-                    logger.error("Failed to convert %s: %s", audio_file.name, exc.stderr.decode())
+                    result = run_ffmpeg(cmd)
+                    if result.success:
+                        logger.debug("Converted %s -> %s", audio_file.name, target.name)
+                    else:
+                        logger.error("Failed to convert %s", audio_file.name)
+                        continue
+                except Exception as exc:
+                    logger.error("Failed to convert %s: %s", audio_file.name, exc)
                     continue
             flac_files.append(target)
 

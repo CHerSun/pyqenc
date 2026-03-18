@@ -2,6 +2,9 @@
 
 <!-- markdownlint-disable MD024 -->
 
+- Created: 2026-03-15
+- Completed: 2026-03-15
+
 ## Introduction
 
 This feature extends the existing video metrics analysis capability to support unified visualization of PSNR, SSIM, and VMAF metrics. Currently, only PSNR has a dedicated parsing and plotting module. This enhancement will create a reusable framework for parsing all three metric types, computing statistics, and generating comparative visualizations with dual Y-axes to accommodate different metric scales.

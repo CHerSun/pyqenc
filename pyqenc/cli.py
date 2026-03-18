@@ -113,6 +113,15 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Keep all intermediate files (skip cleanup prompt after completion)"
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "When a source-file mismatch is detected in execute mode (-y), "
+            "delete all intermediate artifacts and reset state, then continue "
+            "with the new source file. Has no effect without -y."
+        ),
+    )
 
 
 def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
@@ -428,6 +437,7 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         crop_params=crop_params,
         keep_all=args.keep_all if hasattr(args, "keep_all") else False,
         chunking_mode=ChunkingMode.REMUX if args.remux_chunking else ChunkingMode.LOSSLESS,
+        force=args.force if hasattr(args, "force") else False,
     )
 
     # Execute pipeline

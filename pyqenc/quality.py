@@ -5,18 +5,17 @@ This module provides quality evaluation against targets and CRF adjustment
 algorithms for iterative encoding optimization.
 """
 
-import asyncio
 import logging
-from asyncio.subprocess import Process
 from dataclasses import dataclass, field
 from enum import Enum
 from os import PathLike
 from pathlib import Path
-from typing import Any, Coroutine, TypedDict, assert_never
+from typing import TypedDict, assert_never
 
 import pandas as pd
 
 from pyqenc.constants import CRF_GRANULARITY, PADDING_CRF
+from pyqenc.utils.ffmpeg_runner import FFmpegRunResult, ProgressCallback, run_ffmpeg_async
 
 from .models import CropParams, QualityTarget
 
@@ -69,43 +68,45 @@ class MetricData:
     column: str
 
 
-def run_metric(
-    metric:          MetricType,
-    distorted:       Path,
-    reference:       Path,
-    crop_distorted:  CropParams,
-    crop_reference:  CropParams,
-    duration:        int,
-    width:           int,
-    use_gpu:         bool,
-    subsample:       int,
-    output_prefix:   str,
-    cwd:             Path | None = None,
-) -> Coroutine[Any, Any, Process]:
-    """Build and launch a single metric calculation subprocess.
+async def run_metric(
+    metric:            MetricType,
+    distorted:         Path,
+    reference:         Path,
+    crop_distorted:    CropParams,
+    crop_reference:    CropParams,
+    duration:          int,
+    width:             int,
+    use_gpu:           bool,
+    subsample:         int,
+    output_prefix:     str,
+    cwd:               Path | None             = None,
+    progress_callback: ProgressCallback | None = None,
+) -> FFmpegRunResult:
+    """Build and run a single metric calculation subprocess via FFmpegRunner.
 
     ffmpeg is run with ``cwd`` set to the distorted file's directory (or an
     explicit override) so that ``output_prefix`` can be a plain UUID-based
-    filename with no path separators or special characters.  The caller is
-    responsible for moving the resulting files to their final location.
+    filename with no path separators or special characters.
 
     Args:
-        metric:         Metric to compute.
-        distorted:      Path to the distorted (encoded) video.
-        reference:      Path to the reference video.
-        crop_distorted: Crop parameters for the distorted input.
-        crop_reference: Crop parameters for the reference input.
-        duration:       Limit comparison to this many seconds (0 = full video).
-        width:          Scale both inputs to this width (0 = no scaling).
-        use_gpu:        Use GPU-accelerated VMAF (``libvmaf_cuda``).
-        subsample:      Frame subsampling factor (1 = every frame).
-        output_prefix:  Simple filename prefix (no path separators) for metric
-                        output files written relative to ``cwd``.
-        cwd:            Working directory for the ffmpeg process.  Defaults to
-                        the parent directory of ``distorted``.
+        metric:            Metric to compute.
+        distorted:         Path to the distorted (encoded) video.
+        reference:         Path to the reference video.
+        crop_distorted:    Crop parameters for the distorted input.
+        crop_reference:    Crop parameters for the reference input.
+        duration:          Limit comparison to this many seconds (0 = full video).
+        width:             Scale both inputs to this width (0 = no scaling).
+        use_gpu:           Use GPU-accelerated VMAF (``libvmaf_cuda``).
+        subsample:         Frame subsampling factor (1 = every frame).
+        output_prefix:     Simple filename prefix (no path separators) for metric
+                           output files written relative to ``cwd``.
+        cwd:               Working directory for the ffmpeg process.  Defaults to
+                           the parent directory of ``distorted``.
+        progress_callback: Optional ``(frame, out_time_seconds)`` callable
+                           invoked once per completed progress block.
 
     Returns:
-        Coroutine that resolves to the launched ``asyncio.subprocess.Process``.
+        ``FFmpegRunResult`` with returncode, success, stderr_lines, and frame_count.
     """
     if cwd is None:
         cwd = distorted.parent
@@ -163,12 +164,7 @@ def run_metric(
     cmd.extend(["-filter_complex", filter_start + filter_metric])
     cmd.extend(["-f", "null", "-"])
 
-    return asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=str(cwd),
-    )
+    return await run_ffmpeg_async(cmd, output_file=None, progress_callback=progress_callback, video_meta=None, cwd=cwd)
 
 
 @dataclass

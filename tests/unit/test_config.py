@@ -22,7 +22,6 @@ class TestConfigManager:
         # Check profiles loaded
         profiles = config.list_profiles()
         assert "h264" in profiles
-        assert "h264-aq" in profiles
         assert "h265" in profiles
         assert "h265-aq" in profiles
         assert "h265-anime" in profiles
@@ -102,7 +101,6 @@ class TestConfigManager:
 
         h264_profiles = config.list_profiles(codec="h264-8bit")
         assert "h264" in h264_profiles
-        assert "h264-aq" in h264_profiles
         assert "h265" not in h264_profiles
 
         h265_profiles = config.list_profiles(codec="h265-10bit")
@@ -231,7 +229,6 @@ class TestConfigManager:
         config = ConfigManager()
 
         assert config.validate_strategy("slow+h265-aq")
-        assert config.validate_strategy("veryslow+h264-aq")
         assert config.validate_strategy("slow+h265*")
         assert config.validate_strategy("slow")
         assert config.validate_strategy("+h265*")

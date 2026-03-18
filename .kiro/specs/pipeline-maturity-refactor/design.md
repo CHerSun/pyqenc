@@ -1,5 +1,8 @@
 # Design Document — Pipeline Maturity Refactor
 
+- Created: 2026-03-15
+- Completed: 2026-03-15
+
 ## Overview
 
 This refactor matures five interconnected areas of the pyqenc codebase without changing external behavior:

@@ -1,5 +1,8 @@
 # Design Document
 
+- Created: 2026-03-15
+- Completed: 2026-03-15
+
 ## Overview
 
 The quality-based encoding pipeline is a comprehensive video processing system that orchestrates extraction, scene-based chunking, quality-targeted encoding, audio processing, and final merging of video files. The system supports multiple codecs (h.264 8-bit, h.265 10-bit) and is designed to achieve user-specified quality targets while optimizing file size through iterative CRF adjustment.

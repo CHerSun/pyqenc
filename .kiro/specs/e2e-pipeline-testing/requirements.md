@@ -2,6 +2,9 @@
 
 <!-- markdownlint-disable MD024 -->
 
+- Created: 2026-03-15
+
+
 ## Introduction
 
 This document specifies requirements for end-to-end testing of the pyqenc quality-based encoding pipeline on a real video file. The goal is to validate that the full automatic pipeline runs correctly from extraction through merge, that each phase completes successfully, and that the pipeline correctly detects and resumes from partial work across all phases — including the two-sub-phase chunking split (scene detection done but splitting not yet done), and partial encoding (some chunks encoded, others not).
@@ -16,7 +19,7 @@ The spec has been updated to reflect the `ffv1-lossless-chunking` implementation
 - **Scene Detection Sub-phase**: The first half of chunking — running PySceneDetect and persisting scene boundaries to state.
 - **Chunk Splitting Sub-phase**: The second half of chunking — splitting the video at persisted boundaries.
 - **Partial Encoding**: A state where some chunks have been encoded to the target quality but others have not.
-- **Work Directory**: The directory `D:\_current\pyqenc` used for all intermediate files.
+- **Work Directory**: The directory `D:\_current\pyqenc1` used for all intermediate files.
 - **Source Video**: The file `D:\_current\О чём говорят мужчины Blu-Ray (1080p) (1).mkv`.
 - **Automatic Cropping**: Black border detection during extraction; crop filter applied during encoding and metrics calculation (not during chunking).
 - **progress.json**: The state file written by ProgressTracker to the work directory.
@@ -33,8 +36,8 @@ The spec has been updated to reflect the `ffv1-lossless-chunking` implementation
 
 #### Acceptance Criteria
 
-1. WHEN the pipeline is invoked with `pyqenc auto` on the source video with `--work-dir D:\_current\pyqenc` and `-y`, THE Pipeline SHALL complete all five phases (extraction, chunking, encoding, audio, merge) without a fatal error.
-2. WHEN the pipeline completes, THE Pipeline SHALL produce at least one output MKV file in `D:\_current\pyqenc\final\`.
+1. WHEN the pipeline is invoked with `pyqenc auto` on the source video with `--work-dir D:\_current\pyqenc1` and `-y`, THE Pipeline SHALL complete all five phases (extraction, chunking, encoding, audio, merge) without a fatal error.
+2. WHEN the pipeline completes, THE Pipeline SHALL produce at least one output MKV file in `D:\_current\pyqenc1\final\`.
 3. WHEN automatic cropping is enabled (default), THE Pipeline SHALL detect black borders during extraction and log the detected crop parameters at info level; THE Pipeline SHALL apply the crop filter during encoding and metrics calculation, not during chunking.
 4. WHEN each phase completes, THE Pipeline SHALL log a success message at info level indicating the phase name and a summary of work done (e.g. number of chunks, streams, files).
 5. WHEN the pipeline finishes, THE Pipeline SHALL log the path(s) of the final output file(s).

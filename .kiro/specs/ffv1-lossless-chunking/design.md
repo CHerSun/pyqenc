@@ -1,5 +1,8 @@
 # Design Document
 
+- Created: 2026-03-15
+- Completed: 2026-03-15
+
 ## Overview
 
 Chunk splitting currently uses `ffmpeg -c copy` with input-side `-ss`, which snaps each chunk's start to the nearest I-frame before the requested timestamp. With FFV1 `-g 1` every output frame is an I-frame, so the split is frame-perfect. The re-encode happens per-chunk during splitting — no intermediate whole-file FFV1 copy is created, so there is no double storage overhead.

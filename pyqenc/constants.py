@@ -1,5 +1,7 @@
 """Module-level constants for pyqenc."""
 
+import re
+
 TIMEOUT_SECONDS_SHORT = 10
 """Short timeout for quick operations"""
 TIMEOUT_SECONDS_LONG = 300
@@ -11,6 +13,8 @@ THRESHOLD_ATTEMPTS_WARNING = 10
 """Threshold for warning about excessive encoding attempts."""
 PROGRESS_CHUNK_UNIT = " chunks"
 """Unit for progress bar when tracking chunk processing."""
+PROGRESS_DURATION_UNIT = " s"
+"""Unit for duration-based progress bars (seconds of video content)."""
 
 TEMP_SUFFIX = ".tmp"
 """A suffix to append to temporary files during processing. This helps avoid confusion with final output files and allows for easy cleanup of incomplete files."""
@@ -68,3 +72,31 @@ BRACKET_LEFT = "｟"
 """Left bracket symbol for visually distinct log formatting."""
 BRACKET_RIGHT = " ｠"
 """Right bracket symbol for visually distinct log formatting."""
+
+# Artifact discovery patterns
+CHUNK_GLOB_PATTERN = "*.mkv"
+"""Glob mask used to discover chunk files in a chunk output directory."""
+
+CHUNK_NAME_PATTERN = re.compile(
+    r"^(?:\d{2,}꞉\d{2}꞉\d{2}․\d{3})-(?:\d{2,}꞉\d{2}꞉\d{2}․\d{3})$"
+)
+"""Regex that validates and matches timestamp-based chunk file stems produced by
+``_chunk_name_duration``.  A stem has the form
+``HH꞉MM꞉SS․mmm-HH꞉MM꞉SS․mmm`` where ``꞉`` is ``TIME_SEPARATOR_SAFE`` and
+``․`` is ``TIME_SEPARATOR_MS``."""
+
+ENCODED_ATTEMPT_GLOB_PATTERN = "*.crf*.mkv"
+"""Glob mask used to discover encoded attempt files in a strategy output directory."""
+
+ENCODED_ATTEMPT_NAME_PATTERN = re.compile(
+    r"^(?P<chunk_id>.+)\.(?P<resolution>\d+x\d+)\.crf(?P<crf>[\d.]+)\.mkv$"
+)
+"""Regex that parses encoded attempt filenames produced by the CRF-only naming
+scheme.  Named groups: ``chunk_id``, ``resolution`` (e.g. ``1920x800``),
+``crf`` (e.g. ``18.0``)."""
+
+# Progress display
+STDERR_TAIL_LINES = 20
+"""Number of recent stderr lines to retain in the rolling buffer used by
+``_drain_stderr``.  These lines are available for error logging after the
+subprocess exits."""

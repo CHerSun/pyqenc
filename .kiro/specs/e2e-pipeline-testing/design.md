@@ -1,5 +1,7 @@
 # Design Document: End-to-End Pipeline Testing
 
+- Created: 2026-03-15
+
 ## Overview
 
 This document describes the design for fixing all failing tests and validating the pyqenc pipeline end-to-end after the `ffv1-lossless-chunking` implementation. There are four distinct categories of failures to address, plus a manual CLI test plan.
@@ -44,13 +46,11 @@ The default config no longer has an `h264-aq` profile (only `h264`, `h265`, `h26
 
 **Fix**: Update these tests to use `"h264"` (the actual h264 profile name) instead of `"h264-aq"`.
 
-### Failure Category 3 — `test_extraction_chunking.py`: Stateless chunking produces no chunks
+### Failure Category 3 — `test_extraction_chunking.py`: `chunk_video` called without required `tracker`
 
-The integration tests call `chunk_video` without a `tracker`. In the stateless path (`_chunk_video_stateless`), PySceneDetect detects scenes but the sample video likely has no scene changes detected above the threshold, so `scene_list` is empty and no chunks are created.
+The `pipeline-correctness-refactor` spec removed the stateless path (`_chunk_video_stateless`) and made `tracker: ProgressTracker` a required parameter in `chunk_video`. The integration tests in `test_extraction_chunking.py` still call `chunk_video` without a `tracker`, which will fail at runtime.
 
-The root cause: the stateless path uses `detect()` from PySceneDetect which returns an empty list for the sample video at the default threshold. The tracked path (`_chunk_video_tracked`) handles the zero-scenes case by creating a single boundary at frame 0 (via `detect_scenes_to_state`), but the stateless path does not.
-
-**Fix**: The stateless path in `_chunk_video_stateless` must handle the zero-scenes case the same way `detect_scenes_to_state` does — treat the entire video as one chunk when no scenes are detected.
+**Fix**: Update all `chunk_video` calls in `test_extraction_chunking.py` to create a `ProgressTracker` (using `tmp_path`) and initialize pipeline state before calling `chunk_video`.
 
 ### Failure Category 4 — `test_resumption.py`: `SourceVideoMetadata` import error
 
@@ -70,7 +70,7 @@ No new data models. Changes are confined to test files and one production module
 
 ## Error Handling
 
-- `_chunk_video_stateless` with zero detected scenes logs a warning and treats the whole video as one chunk, consistent with the tracked path.
+- No new error handling required. The zero-scenes case is already handled in `detect_scenes_to_state` (tracked path only).
 
 ## Testing Strategy
 
@@ -78,10 +78,9 @@ No new data models. Changes are confined to test files and one production module
 
 | File                                   | Change                                                                                                                                                                  |
 | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pyqenc/phases/chunking.py`            | Handle zero-scenes in `_chunk_video_stateless` (same as tracked path)                                                                                                   |
-| `tests/unit/test_quality.py`           | Use `MetricType` enum instead of plain strings; update `test_adjust_crf_*` to assert invariants not exact values; update unknown-metric test to expect `AssertionError` |
+| `tests/unit/test_quality.py`           | Update `test_normalize_unknown_metric` to expect `AssertionError`; update `test_adjust_crf_*` to assert invariants not exact values                                     |
 | `tests/unit/test_config.py`            | Replace `h264-aq` references with `h264`                                                                                                                                |
-| `tests/integration/test_resumption.py` | Replace `SourceVideoMetadata` with `VideoMetadata`                                                                                                                      |
+| `tests/integration/test_extraction_chunking.py` | Add `ProgressTracker` + initialized state to all `chunk_video` calls (tracker is now required)                                                               |
 | `tests/e2e/test_complete_pipeline.py`  | Remove `config_manager` from `PipelineOrchestrator(...)` calls; add `chunking_mode=ChunkingMode.REMUX` to all `PipelineConfig` constructions                            |
 
 ### Manual CLI test plan
@@ -91,7 +90,7 @@ All manual scenarios use the real source video and work directory. The `--remux-
 #### Scenario 1 — Full run, lossless mode (default)
 
 ```sh
-.venv\Scripts\python.exe -m pyqenc auto "D:\_current\О чём говорят мужчины Blu-Ray (1080p) (1).mkv" --work-dir "D:\_current\pyqenc" -y --keep-all --log-level info
+uv run pyqenc auto "D:\_current\О чём говорят мужчины Blu-Ray (1080p) (1).mkv" --work-dir "D:\_current\pyqenc1" -y --keep-all --log-level info
 ```
 
 Verify: exit 0, log contains "Chunking mode: lossless FFV1", chunks exist, final output exists.
@@ -99,7 +98,7 @@ Verify: exit 0, log contains "Chunking mode: lossless FFV1", chunks exist, final
 #### Scenario 2 — Full run, remux mode
 
 ```sh
-.venv\Scripts\python.exe -m pyqenc auto "D:\_current\О чём говорят мужчины Blu-Ray (1080p) (1).mkv" --work-dir "D:\_current\pyqenc" -y --keep-all --log-level info --remux-chunking
+uv run pyqenc auto "D:\_current\О чём говорят мужчины Blu-Ray (1080p) (1).mkv" --work-dir "D:\_current\pyqenc1" -y --keep-all --log-level info --remux-chunking
 ```
 
 Verify: exit 0, log contains "Chunking mode: remux", chunks exist, final output exists.
@@ -111,12 +110,12 @@ Verify: each phase logs reuse message, no new ffmpeg invocations, exit 0.
 
 #### Scenario 4 — Chunking partial restart (scenes in state, no chunk files)
 
-Delete `D:\_current\pyqenc\chunks\`, `encoded\`, `final\`. Keep `progress.json`.
+Delete `D:\_current\pyqenc1\chunks\`, `encoded\`, `final\`. Keep `progress.json`.
 Re-run scenario 2 command.
 Verify: log contains "Scene boundaries already in state (N) -- skipping detection.", chunks re-split, encoding and merge complete, exit 0.
 
 #### Scenario 5 — Encoding partial restart (half chunks encoded)
 
-From completed scenario 2 state, delete ~half the files in `D:\_current\pyqenc\encoded\<strategy>\` and delete `final\`.
+From completed scenario 2 state, delete ~half the files in `D:\_current\pyqenc1\encoded\<strategy>\` and delete `final\`.
 Re-run scenario 2 command.
 Verify: log reports reused chunk count and encoding count, only deleted chunks re-encoded, merge completes, exit 0.

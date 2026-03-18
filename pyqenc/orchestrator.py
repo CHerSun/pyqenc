@@ -8,26 +8,54 @@ from typing import Any
 
 from pyqenc.constants import SUCCESS_SYMBOL_MINOR, TEMP_SUFFIX, THICK_LINE, THIN_LINE
 from pyqenc.models import (
+    ChunkingMode,
     CropParams,
-    PhaseMetadata,
-    PhaseStatus,
-    PhaseUpdate,
+    PhaseOutcome,
     PipelineConfig,
-    PipelineState,
 )
-from pyqenc.progress import ProgressTracker
+from pyqenc.state import JobState, JobStateManager
 
 logger = logging.getLogger(__name__)
 
 
-def _get_persisted_test_chunk_ids(state: "PipelineState | None") -> list[str]:
-    """Return test chunk IDs persisted from a previous optimization run, or empty list."""
-    if state is None:
-        return []
-    opt_phase = state.phases.get("optimization")
-    if opt_phase is not None and opt_phase.metadata is not None:
-        return opt_phase.metadata.test_chunk_ids
-    return []
+def _load_chunks_from_sidecars(
+    chunks_dir: Path,
+    chunk_files: list[Path],
+) -> list["ChunkMetadata"]:
+    """Load ChunkMetadata from chunk sidecar YAMLs; fall back to stub if sidecar absent.
+
+    Args:
+        chunks_dir:  Directory containing chunk ``.mkv`` and ``.yaml`` sidecar files.
+        chunk_files: Sorted list of chunk ``.mkv`` paths.
+
+    Returns:
+        List of ``ChunkMetadata`` instances, sorted by filename.
+    """
+    from pyqenc.models import ChunkMetadata
+    from pyqenc.state import ChunkSidecar
+
+    chunks: list[ChunkMetadata] = []
+    for chunk_file in chunk_files:
+        sidecar_path = chunk_file.with_suffix(".yaml")
+        if sidecar_path.exists():
+            try:
+                import yaml as _yaml
+                with sidecar_path.open("r", encoding="utf-8") as fh:
+                    data = _yaml.safe_load(fh)
+                sidecar = ChunkSidecar.from_yaml_dict(data, chunk_id=chunk_file.stem, path=chunk_file)
+                chunks.append(sidecar.chunk)
+                continue
+            except Exception:
+                pass
+        # Fallback: stub with zero timestamps
+        chunks.append(ChunkMetadata(
+            path=chunk_file,
+            chunk_id=chunk_file.stem,
+            start_timestamp=0.0,
+            end_timestamp=0.0,
+        ))
+    return chunks
+
 
 
 class Phase(Enum):
@@ -43,13 +71,30 @@ class Phase(Enum):
 @dataclass
 class PhaseResult:
     """Result of executing a single phase."""
-    phase: Phase
-    success: bool
-    reused: bool  # True if existing artifacts were reused
-    needs_work: bool  # True if phase needs work (dry-run mode)
-    message: str
-    error: str | None = None
+    phase:    Phase
+    outcome:  PhaseOutcome
+    message:  str
+    error:    str | None          = None
     metadata: dict[str, Any] | None = None
+
+    # ------------------------------------------------------------------
+    # Backward-compatible derived properties
+    # ------------------------------------------------------------------
+
+    @property
+    def success(self) -> bool:
+        """True when the phase completed or reused existing artifacts."""
+        return self.outcome in (PhaseOutcome.COMPLETED, PhaseOutcome.REUSED)
+
+    @property
+    def reused(self) -> bool:
+        """True when existing artifacts were reused without new work."""
+        return self.outcome == PhaseOutcome.REUSED
+
+    @property
+    def needs_work(self) -> bool:
+        """True when the phase is in dry-run mode and work would be required."""
+        return self.outcome == PhaseOutcome.DRY_RUN
 
 
 @dataclass
@@ -66,15 +111,15 @@ class PipelineResult:
 class PipelineOrchestrator:
     """Orchestrates pipeline phase execution with artifact-based resumption."""
 
-    def __init__(self, config: PipelineConfig, tracker: ProgressTracker):
-        """Initialize orchestrator with configuration and progress tracker.
+    def __init__(self, config: PipelineConfig, state_manager: JobStateManager):
+        """Initialize orchestrator with configuration and job state manager.
 
         Args:
-            config: Pipeline configuration
-            tracker: Progress tracker for state management
+            config:        Pipeline configuration
+            state_manager: Job state manager for YAML-based state persistence
         """
-        self.config = config
-        self.tracker = tracker
+        self.config        = config
+        self.state_manager = state_manager
         self._optimal_strategy: str | None = None
         self._phase_order = [
             Phase.EXTRACTION,
@@ -135,42 +180,37 @@ class PipelineOrchestrator:
 
         logger.info("")
 
-        # Load existing state or initialize new one
-        state = self.tracker.load_state()
-        if state:
-            logger.info(f"Loaded existing state from: {self.tracker.state_file}")
-            # Restore optimal strategy from persisted optimization result
-            opt_phase = state.phases.get(Phase.OPTIMIZATION.value)
-            if (
-                opt_phase is not None
-                and opt_phase.metadata is not None
-                and opt_phase.metadata.optimal_strategy
-            ):
-                self._optimal_strategy = opt_phase.metadata.optimal_strategy
-                logger.info("Restored optimal strategy from state: %s", self._optimal_strategy)
-        else:
-            logger.info("Starting fresh pipeline execution")
-            # Initialize new state
-            from pyqenc.models import PipelineState, VideoMetadata
-            state = PipelineState(
-                version="1.0",
-                source_video=VideoMetadata(path=self.config.source_video),
-                current_phase="",
-                phases={},
-                chunks_metadata={},
-                chunks={}
+        # Source-file binding check via JobStateManager (Req 1.2)
+        if not self.state_manager.validate(dry_run=dry_run):
+            return PipelineResult(
+                success=False,
+                phases_executed=[],
+                phases_reused=[],
+                phases_needing_work=[],
+                output_files=[],
+                error="Source file mismatch — aborting. Use --force to override.",
             )
-            # Eagerly populate all source video metadata so it's persisted
-            # and available for change-detection on subsequent restarts.
-            sv = state.source_video
-            _ = sv.file_size_bytes   # filesystem stat — instant
-            _ = sv.duration_seconds  # ffprobe — fast
-            _ = sv.fps
-            _ = sv.resolution
-            _ = sv.frame_count       # ffmpeg null-encode — slower but done once
-            # Save initial state
-            if not dry_run:
-                self.tracker.save_state(state, force=True)
+
+        # Restore optimal strategy from persisted optimization.yaml
+        opt_params = self.state_manager.load_optimization()
+        if opt_params is not None and opt_params.optimal_strategy:
+            self._optimal_strategy = opt_params.optimal_strategy
+            logger.info("Restored optimal strategy from optimization.yaml: %s", self._optimal_strategy)
+
+        # Ensure job.yaml is written with current source metadata (first run)
+        if not dry_run:
+            existing_job = self.state_manager.load_job()
+            if existing_job is None:
+                from pyqenc.models import VideoMetadata
+                job = JobState(source=VideoMetadata(path=self.config.source_video))
+                sv = job.source
+                _ = sv.file_size_bytes
+                _ = sv.duration_seconds
+                _ = sv.fps
+                _ = sv.resolution
+                _ = sv.frame_count
+                self.state_manager.save_job(job)
+                logger.info("Initialized job.yaml for new pipeline run")
 
         # Determine which phases to execute
         phases_to_run = self._phase_order[:max_phases] if max_phases else self._phase_order
@@ -200,15 +240,6 @@ class PipelineOrchestrator:
                     # Track output files
                     if result.metadata and "output_files" in result.metadata:
                         output_files.extend(result.metadata["output_files"])
-
-                    # Update progress tracker — preserve existing phase metadata
-                    if not dry_run:
-                        existing_phase = self.tracker._state.phases.get(phase.value) if self.tracker._state else None
-                        self.tracker.update_phase(PhaseUpdate(
-                            phase=phase.value,
-                            status=PhaseStatus.COMPLETED,
-                            metadata=existing_phase.metadata if existing_phase else None,
-                        ))
 
                 elif result.needs_work:
                     phases_needing_work.append(phase)
@@ -350,32 +381,25 @@ class PipelineOrchestrator:
         else:
             return PhaseResult(
                 phase=phase,
-                success=False,
-                reused=False,
-                needs_work=False,
+                outcome=PhaseOutcome.FAILED,
                 message=f"Unknown phase: {phase}",
                 error="Phase not implemented"
             )
 
-    def _resolve_crop_params(self) -> CropParams | None:
-        """Read crop parameters from persisted extraction phase metadata.
+    def _get_crop_params(self) -> CropParams | None:
+        """Read crop parameters from ``job.yaml``.
+
+        Returns ``None`` only when detection has not yet run (crop_params is None).
+        Returns the ``CropParams`` instance (possibly all-zero) once extraction
+        has completed.
 
         Returns:
-            CropParams if extraction phase stored valid crop data, None otherwise.
+            CropParams if source video has crop data, None if not yet detected.
         """
-        state = self.tracker._state
-        if state is None:
+        job = self.state_manager.load_job()
+        if job is None:
             return None
-        ext_phase = state.phases.get(Phase.EXTRACTION.value)
-        if ext_phase and ext_phase.metadata and ext_phase.metadata.crop_params:
-            try:
-                return CropParams.parse(ext_phase.metadata.crop_params)
-            except ValueError:
-                logger.warning(
-                    "Could not parse persisted crop_params '%s'; proceeding without crop",
-                    ext_phase.metadata.crop_params,
-                )
-        return None
+        return job.source.crop_params
 
     def _execute_extraction(self, dry_run: bool) -> PhaseResult:
         """Execute extraction phase.
@@ -386,7 +410,6 @@ class PipelineOrchestrator:
         Returns:
             PhaseResult with execution details
         """
-        # Import here to avoid circular dependencies
         from pyqenc.phases.extraction import extract_streams
 
         output_dir = self.config.work_dir / "extracted"
@@ -397,49 +420,42 @@ class PipelineOrchestrator:
                 output_dir=output_dir,
                 video_filter=self.config.video_filter,
                 audio_filter=self.config.audio_filter,
-                detect_crop=self.config.crop_params is None,  # Auto-detect if not manually specified
+                detect_crop=self.config.crop_params is None,
                 manual_crop=str(self.config.crop_params) if self.config.crop_params else None,
                 force=False,
                 dry_run=dry_run,
             )
 
-            if dry_run and result.needs_work:
+            if result.outcome == PhaseOutcome.DRY_RUN:
                 return PhaseResult(
                     phase=Phase.EXTRACTION,
-                    success=True,
-                    reused=False,
-                    needs_work=True,
+                    outcome=PhaseOutcome.DRY_RUN,
                     message="Needs work: streams not extracted",
                     metadata={"result": result}
                 )
 
-            if result.success:
-                # Store crop parameters if detected
-                if result.crop_params and not dry_run:
-                    self.tracker.update_phase(PhaseUpdate(
-                        phase=Phase.EXTRACTION.value,
-                        status=PhaseStatus.COMPLETED,
-                        metadata=PhaseMetadata(crop_params=str(result.crop_params)),
-                    ))
+            if result.outcome in (PhaseOutcome.COMPLETED, PhaseOutcome.REUSED):
+                # Persist crop_params into job.yaml so downstream phases can read them
+                if result.video and not dry_run:
+                    job = self.state_manager.load_job()
+                    if job is not None:
+                        job.source.crop_params = result.video.crop_params
+                        self.state_manager.save_job(job)
 
+                video_count = 1 if result.video else 0
                 return PhaseResult(
                     phase=Phase.EXTRACTION,
-                    success=True,
-                    reused=result.reused,
-                    needs_work=False,
-                    message=f"Extracted {len(result.video_files)} video, {len(result.audio_files)} audio streams",
+                    outcome=result.outcome,
+                    message=f"Extracted {video_count} video, {len(result.audio)} audio streams",
                     metadata={
-                        "video_files": result.video_files,
-                        "audio_files": result.audio_files,
-                        "crop_params": result.crop_params,
+                        "video": result.video,
+                        "audio": result.audio,
                     }
                 )
             else:
                 return PhaseResult(
                     phase=Phase.EXTRACTION,
-                    success=False,
-                    reused=False,
-                    needs_work=False,
+                    outcome=PhaseOutcome.FAILED,
                     message="Extraction failed",
                     error=result.error
                 )
@@ -448,9 +464,7 @@ class PipelineOrchestrator:
             logger.error(f"Extraction phase error: {e}", exc_info=True)
             return PhaseResult(
                 phase=Phase.EXTRACTION,
-                success=False,
-                reused=False,
-                needs_work=False,
+                outcome=PhaseOutcome.FAILED,
                 message="Extraction failed with exception",
                 error=str(e)
             )
@@ -471,37 +485,45 @@ class PipelineOrchestrator:
         video_file = self.config.source_video
         output_dir = self.config.work_dir / "chunks"
 
+        existing_job = self.state_manager.load_job()
+        if existing_job is not None:
+            job = existing_job
+        else:
+            from pyqenc.models import VideoMetadata
+            job = JobState(source=VideoMetadata(path=video_file))
+
         try:
             result = chunk_video(
                 video_file=video_file,
                 output_dir=output_dir,
+                state_manager=self.state_manager,
+                job=job,
                 chunking_mode=self.config.chunking_mode,
-                force=False,
                 dry_run=dry_run,
-                tracker=self.tracker
             )
 
             if dry_run and result.needs_work:
                 return PhaseResult(
                     phase=Phase.CHUNKING,
-                    success=True,
-                    reused=False,
-                    needs_work=True,
+                    outcome=PhaseOutcome.DRY_RUN,
                     message="Needs work: video not chunked",
                     metadata={"result": result}
                 )
 
             if result.success:
                 # Verify chunk frame total matches source
-                state = self.tracker._state
-                source_frame_count = state.source_video._frame_count if state else None
+                job = self.state_manager.load_job()
+                source_frame_count = job.source._frame_count if job else None
                 if source_frame_count and result.total_frames != source_frame_count:
                     diff = result.total_frames - source_frame_count
                     sign = "+" if diff > 0 else ""
+                    if self.config.chunking_mode == ChunkingMode.REMUX:
+                        note = "This is expected with stream-copy I-frame snapping."
+                    else:
+                        note = "Frame count mismatch — check chunking output."
                     logger.warning(
-                        "Chunk frame total (%d) differs from source (%d) by %s%d frames. "
-                        "This is expected with stream-copy I-frame snapping — see chunking TODO.",
-                        result.total_frames, source_frame_count, sign, diff,
+                        "Chunk frame total (%d) differs from source (%d) by %s%d frames. %s",
+                        result.total_frames, source_frame_count, sign, diff, note,
                     )
                 elif source_frame_count:
                     logger.info(
@@ -511,18 +533,14 @@ class PipelineOrchestrator:
 
                 return PhaseResult(
                     phase=Phase.CHUNKING,
-                    success=True,
-                    reused=result.reused,
-                    needs_work=False,
+                    outcome=PhaseOutcome.REUSED if result.reused else PhaseOutcome.COMPLETED,
                     message=f"Created {len(result.chunks)} chunks ({result.total_frames} frames)",
                     metadata={"chunks": result.chunks}
                 )
             else:
                 return PhaseResult(
                     phase=Phase.CHUNKING,
-                    success=False,
-                    reused=False,
-                    needs_work=False,
+                    outcome=PhaseOutcome.FAILED,
                     message="Chunking failed",
                     error=result.error
                 )
@@ -531,9 +549,7 @@ class PipelineOrchestrator:
             logger.error(f"Chunking phase error: {e}", exc_info=True)
             return PhaseResult(
                 phase=Phase.CHUNKING,
-                success=False,
-                reused=False,
-                needs_work=False,
+                outcome=PhaseOutcome.FAILED,
                 message="Chunking failed with exception",
                 error=str(e)
             )
@@ -541,7 +557,7 @@ class PipelineOrchestrator:
     def _execute_optimization(self, dry_run: bool) -> PhaseResult:
         """Execute optimization phase."""
         from pyqenc.config import ConfigManager
-        from pyqenc.phases.encoding import ChunkInfo
+        from pyqenc.models import ChunkMetadata
         from pyqenc.phases.optimization import find_optimal_strategy
 
         chunks_dir = self.config.work_dir / "chunks"
@@ -549,9 +565,7 @@ class PipelineOrchestrator:
         if not chunks_dir.exists():
             return PhaseResult(
                 phase=Phase.OPTIMIZATION,
-                success=False,
-                reused=False,
-                needs_work=True,
+                outcome=PhaseOutcome.FAILED,
                 message="Chunks directory not found",
                 error="Chunking phase must complete first",
             )
@@ -560,38 +574,26 @@ class PipelineOrchestrator:
         if not chunk_files:
             return PhaseResult(
                 phase=Phase.OPTIMIZATION,
-                success=False,
-                reused=False,
-                needs_work=True,
+                outcome=PhaseOutcome.FAILED,
                 message="No chunks found in chunks directory",
                 error="Chunking phase must complete first",
             )
 
-        # Fast-path: reuse cached result from a previous run
-        state = self.tracker._state
-        if state and not dry_run:
-            opt_phase = state.phases.get(Phase.OPTIMIZATION.value)
-            if (
-                opt_phase is not None
-                and opt_phase.status.value == "completed"
-                and opt_phase.metadata is not None
-                and opt_phase.metadata.optimal_strategy
-            ):
-                optimal = opt_phase.metadata.optimal_strategy
-                logger.info("Optimization already completed — reusing result: %s", optimal)
-                self._optimal_strategy = optimal
-                return PhaseResult(
-                    phase=Phase.OPTIMIZATION,
-                    success=True,
-                    reused=True,
-                    needs_work=False,
-                    message=f"Optimal strategy (cached): {optimal}",
-                    metadata={"optimal_strategy": optimal},
-                )
+        # Fast-path: reuse cached result from optimization.yaml
+        opt_params = self.state_manager.load_optimization()
+        if opt_params is not None and opt_params.optimal_strategy and not dry_run:
+            optimal = opt_params.optimal_strategy
+            logger.info("Optimization already completed — reusing result: %s", optimal)
+            self._optimal_strategy = optimal
+            return PhaseResult(
+                phase=Phase.OPTIMIZATION,
+                outcome=PhaseOutcome.REUSED,
+                message=f"Optimal strategy (cached): {optimal}",
+                metadata={"optimal_strategy": optimal},
+            )
 
         config_manager = ConfigManager()
 
-        # Resolve strategies the same way encoding does
         strategies_input = self.config.strategies if self.config.strategies else None
         resolved = config_manager.expand_strategies(strategies_input)
         seen: set[str] = set()
@@ -604,20 +606,14 @@ class PipelineOrchestrator:
 
         logger.info("Found %d chunks for optimization testing", len(chunk_files))
 
-        chunks = [
-            ChunkInfo(
-                chunk_id=f.stem,
-                file_path=f,
-                start_frame=0,
-                end_frame=0,
-                frame_count=0,
-                duration=0.0,
-            )
-            for f in chunk_files
-        ]
+        # Load chunks from chunk sidecars; fall back to filesystem glob
+        chunks = _load_chunks_from_sidecars(chunks_dir, chunk_files)
+
+        # Persisted test chunk IDs from optimization.yaml
+        persisted_chunk_ids = opt_params.test_chunks if opt_params is not None else []
 
         try:
-            crop_params = self._resolve_crop_params()
+            crop_params = self._get_crop_params()
             if crop_params:
                 logger.info("Crop params loaded: %s", crop_params)
             else:
@@ -630,19 +626,18 @@ class PipelineOrchestrator:
                 quality_targets=self.config.quality_targets,
                 work_dir=self.config.work_dir,
                 config_manager=config_manager,
-                progress_tracker=self.tracker,
                 dry_run=dry_run,
                 crop_params=crop_params,
                 max_parallel=self.config.max_parallel,
-                persisted_chunk_ids=_get_persisted_test_chunk_ids(state),
+                persisted_chunk_ids=persisted_chunk_ids,
+                state_manager=self.state_manager,
+                force=self.config.force,
             )
 
             if dry_run:
                 return PhaseResult(
                     phase=Phase.OPTIMIZATION,
-                    success=True,
-                    reused=False,
-                    needs_work=True,
+                    outcome=PhaseOutcome.DRY_RUN,
                     message="Would test strategies on representative chunks",
                 )
 
@@ -659,39 +654,18 @@ class PipelineOrchestrator:
                     else:
                         logger.warning("  %s: failed to encode all test chunks", strategy)
 
-                # Store optimal strategy for encoding phase and persist to state
                 self._optimal_strategy = result.optimal_strategy
-                if result.optimal_strategy:
-                    from pyqenc.models import PhaseMetadata, PhaseStatus, PhaseUpdate
-
-                    # Preserve test_chunk_ids that were persisted during selection
-                    existing_chunk_ids = _get_persisted_test_chunk_ids(state)
-                    self.tracker.update_phase(
-                        PhaseUpdate(
-                            phase=Phase.OPTIMIZATION.value,
-                            status=PhaseStatus.COMPLETED,
-                            metadata=PhaseMetadata(
-                                optimal_strategy=result.optimal_strategy,
-                                test_chunk_ids=existing_chunk_ids,
-                            ),
-                        )
-                    )
-
                 logger.info("Optimal strategy: %s", result.optimal_strategy)
                 return PhaseResult(
                     phase=Phase.OPTIMIZATION,
-                    success=True,
-                    reused=False,
-                    needs_work=False,
+                    outcome=PhaseOutcome.COMPLETED,
                     message=f"Optimal strategy: {result.optimal_strategy}",
                     metadata={"optimal_strategy": result.optimal_strategy},
                 )
             else:
                 return PhaseResult(
                     phase=Phase.OPTIMIZATION,
-                    success=False,
-                    reused=False,
-                    needs_work=False,
+                    outcome=PhaseOutcome.FAILED,
                     message="Optimization failed",
                     error=result.error,
                 )
@@ -700,9 +674,7 @@ class PipelineOrchestrator:
             logger.error("Optimization phase error: %s", e, exc_info=True)
             return PhaseResult(
                 phase=Phase.OPTIMIZATION,
-                success=False,
-                reused=False,
-                needs_work=False,
+                outcome=PhaseOutcome.FAILED,
                 message="Optimization failed with exception",
                 error=str(e),
             )
@@ -718,54 +690,33 @@ class PipelineOrchestrator:
         """
         # Import here to avoid circular dependencies
         from pyqenc.config import ConfigManager
-        from pyqenc.phases.encoding import ChunkInfo, encode_all_chunks
+        from pyqenc.models import ChunkMetadata
+        from pyqenc.phases.encoding import encode_all_chunks
 
         chunks_dir = self.config.work_dir / "chunks"
 
         if not chunks_dir.exists():
             return PhaseResult(
                 phase=Phase.ENCODING,
-                success=False,
-                reused=False,
-                needs_work=True,
+                outcome=PhaseOutcome.FAILED,
                 message="Chunks directory not found",
                 error="Chunking phase must complete first"
             )
 
-        # Load chunk information from chunking phase
-        # Get chunks from directory
+        # Load chunks from chunk sidecars; fall back to filesystem glob
         chunk_files = sorted(chunks_dir.glob("*.mkv"))
         if not chunk_files:
             return PhaseResult(
                 phase=Phase.ENCODING,
-                success=False,
-                reused=False,
-                needs_work=True,
+                outcome=PhaseOutcome.FAILED,
                 message="No chunks found in chunks directory",
                 error="Chunking phase must complete first"
             )
+        chunks = _load_chunks_from_sidecars(chunks_dir, chunk_files)
+        logger.info("Found %d chunks to encode", len(chunks))
 
-        # Create ChunkInfo objects
-        # Note: We don't have frame counts readily available, but they're not critical for encoding
-        chunks = []
-        for chunk_file in chunk_files:
-            chunk_id = chunk_file.stem  # e.g., "chunk.000000-000319"
-            chunks.append(ChunkInfo(
-                chunk_id=chunk_id,
-                file_path=chunk_file,
-                start_frame=0,  # Not critical for encoding
-                end_frame=0,    # Not critical for encoding
-                frame_count=0,  # Not critical for encoding
-                duration=0.0    # Not critical for encoding
-            ))
-
-        logger.info(f"Found {len(chunks)} chunks to encode")
-
-        # Initialize config manager
         config_manager = ConfigManager()
 
-        # Resolve strategies: if optimization ran and picked one, use it;
-        # otherwise use config strategies (or defaults from config file)
         if self._optimal_strategy:
             strategy_names = [self._optimal_strategy]
             logger.info("Using optimal strategy from optimization phase: %s", self._optimal_strategy)
@@ -780,10 +731,10 @@ class PipelineOrchestrator:
                     seen_strategies.add(key)
                     strategy_names.append(key)
 
-        logger.info(f"Resolved {len(strategy_names)} strategies: {strategy_names}")
+        logger.info("Resolved %d strategies: %s", len(strategy_names), strategy_names)
 
         try:
-            crop_params = self._resolve_crop_params()
+            crop_params = self._get_crop_params()
             if crop_params:
                 logger.info("Crop params loaded: %s", crop_params)
             else:
@@ -791,16 +742,16 @@ class PipelineOrchestrator:
 
             result = encode_all_chunks(
                 chunks=chunks,
-                reference_dir=chunks_dir,  # Reference chunks are the original chunks
+                reference_dir=chunks_dir,
                 strategies=strategy_names,
                 quality_targets=self.config.quality_targets,
                 work_dir=self.config.work_dir,
                 config_manager=config_manager,
-                progress_tracker=self.tracker,
                 max_parallel=self.config.max_parallel,
-                force=False,
+                force=self.config.force,
                 crop_params=crop_params,
                 dry_run=dry_run,
+                state_manager=self.state_manager,
             )
 
             # Calculate needs_work for dry-run
@@ -814,28 +765,22 @@ class PipelineOrchestrator:
                 chunks_needing_work = (len(chunks) * len(strategy_names)) - result.reused_count
                 return PhaseResult(
                     phase=Phase.ENCODING,
-                    success=True,
-                    reused=False,
-                    needs_work=True,
+                    outcome=PhaseOutcome.DRY_RUN,
                     message=f"Needs work: {chunks_needing_work} chunk+strategy combinations need encoding",
                     metadata={"result": result}
                 )
 
-            if result.success:
+            if result.outcome in (PhaseOutcome.COMPLETED, PhaseOutcome.REUSED):
                 return PhaseResult(
                     phase=Phase.ENCODING,
-                    success=True,
-                    reused=result.reused_count > 0,
-                    needs_work=False,
+                    outcome=PhaseOutcome.REUSED if result.reused_count > 0 and result.encoded_count == 0 else PhaseOutcome.COMPLETED,
                     message=f"Encoded {result.encoded_count} chunks, reused {result.reused_count}",
                     metadata={"encoded_chunks": result.encoded_chunks}
                 )
             else:
                 return PhaseResult(
                     phase=Phase.ENCODING,
-                    success=False,
-                    reused=False,
-                    needs_work=False,
+                    outcome=PhaseOutcome.FAILED,
                     message=f"Encoding failed: {len(result.failed_chunks)} chunks failed",
                     error=result.error
                 )
@@ -844,9 +789,7 @@ class PipelineOrchestrator:
             logger.error(f"Encoding phase error: {e}", exc_info=True)
             return PhaseResult(
                 phase=Phase.ENCODING,
-                success=False,
-                reused=False,
-                needs_work=False,
+                outcome=PhaseOutcome.FAILED,
                 message="Encoding failed with exception",
                 error=str(e)
             )
@@ -870,9 +813,7 @@ class PipelineOrchestrator:
         if not audio_files:
             return PhaseResult(
                 phase=Phase.AUDIO,
-                success=False,
-                reused=False,
-                needs_work=True,
+                outcome=PhaseOutcome.FAILED,
                 message="No extracted audio files found",
                 error="Extraction phase must complete first"
             )
@@ -889,9 +830,7 @@ class PipelineOrchestrator:
             if dry_run and result.needs_work:
                 return PhaseResult(
                     phase=Phase.AUDIO,
-                    success=True,
-                    reused=False,
-                    needs_work=True,
+                    outcome=PhaseOutcome.DRY_RUN,
                     message="Needs work: audio not processed",
                     metadata={"result": result}
                 )
@@ -899,9 +838,7 @@ class PipelineOrchestrator:
             if result.success:
                 return PhaseResult(
                     phase=Phase.AUDIO,
-                    success=True,
-                    reused=result.reused,
-                    needs_work=False,
+                    outcome=PhaseOutcome.REUSED if result.reused else PhaseOutcome.COMPLETED,
                     message=f"Processed {len(result.day_mode_files)} day, {len(result.night_mode_files)} night audio streams",
                     metadata={
                         "day_mode_files": result.day_mode_files,
@@ -911,9 +848,7 @@ class PipelineOrchestrator:
             else:
                 return PhaseResult(
                     phase=Phase.AUDIO,
-                    success=False,
-                    reused=False,
-                    needs_work=False,
+                    outcome=PhaseOutcome.FAILED,
                     message="Audio processing failed",
                     error=result.error
                 )
@@ -922,9 +857,7 @@ class PipelineOrchestrator:
             logger.error(f"Audio phase error: {e}", exc_info=True)
             return PhaseResult(
                 phase=Phase.AUDIO,
-                success=False,
-                reused=False,
-                needs_work=False,
+                outcome=PhaseOutcome.FAILED,
                 message="Audio processing failed with exception",
                 error=str(e)
             )
@@ -939,20 +872,19 @@ class PipelineOrchestrator:
             PhaseResult with execution details
         """
         # Import here to avoid circular dependencies
+        from pyqenc.constants import ENCODED_ATTEMPT_NAME_PATTERN
         from pyqenc.phases.merge import merge_final_video
-        from pyqenc.utils.ffmpeg import get_frame_count
+        from pyqenc.utils.ffmpeg_runner import get_frame_count
 
         encoded_dir = self.config.work_dir / "encoded"
-        audio_dir = self.config.work_dir / "audio"
-        output_dir = self.config.work_dir / "final"
-        chunks_dir = self.config.work_dir / "chunks"
+        audio_dir   = self.config.work_dir / "audio"
+        output_dir  = self.config.work_dir / "final"
+        chunks_dir  = self.config.work_dir / "chunks"
 
         if not encoded_dir.exists():
             return PhaseResult(
                 phase=Phase.MERGE,
-                success=False,
-                reused=False,
-                needs_work=True,
+                outcome=PhaseOutcome.FAILED,
                 message="Encoded directory not found",
                 error="Encoding phase must complete first"
             )
@@ -960,9 +892,7 @@ class PipelineOrchestrator:
         if not audio_dir.exists():
             return PhaseResult(
                 phase=Phase.MERGE,
-                success=False,
-                reused=False,
-                needs_work=True,
+                outcome=PhaseOutcome.FAILED,
                 message="Audio directory not found",
                 error="Audio phase must complete first"
             )
@@ -973,82 +903,68 @@ class PipelineOrchestrator:
         if not audio_files:
             logger.warning("No processed audio files found, merging video only")
 
-        # Get source frame count for verification
-        source_frame_count = None
-        try:
-            # Try to get from first chunk's parent (original video)
-            # Or sum up all chunks
-            chunk_files = sorted(chunks_dir.glob("chunk.*.mkv"))
-            if chunk_files:
-                source_frame_count = sum(get_frame_count(cf) for cf in chunk_files)
-                logger.debug(f"Source frame count from chunks: {source_frame_count}")
-        except Exception as e:
-            logger.warning(f"Could not determine source frame count: {e}")
+        # Get source frame count for verification from job.yaml
+        source_frame_count: int | None = None
+        job = self.state_manager.load_job()
+        if job and job.source._frame_count is not None:
+            source_frame_count = job.source._frame_count
+            logger.debug("Source frame count from job.yaml: %d", source_frame_count)
+        else:
+            try:
+                chunk_files = sorted(chunks_dir.glob("*.mkv"))
+                if chunk_files:
+                    source_frame_count = sum(get_frame_count(cf) for cf in chunk_files)
+                    logger.debug("Source frame count from chunks: %d", source_frame_count)
+            except Exception as e:
+                logger.warning("Could not determine source frame count: %s", e)
 
-        # Collect encoded chunks organized by chunk_id and strategy
-        # Structure: {chunk_id: {strategy: path}}
-        encoded_chunks = {}
+        # Collect encoded chunks organised by chunk_id → strategy → path.
+        # Use ENCODED_ATTEMPT_NAME_PATTERN to parse CRF-only filenames;
+        # one file per (chunk_id, strategy) — presence on disk is proof of completion.
+        encoded_chunks: dict[str, dict[str, Path]] = {}
 
-        # Scan encoded directory for all strategies
         for strategy_dir in encoded_dir.iterdir():
             if not strategy_dir.is_dir():
                 continue
-
             strategy_name = strategy_dir.name
 
-            # Find all successful encodings for this strategy
-            chunk_files = {}
+            for encoded_file in sorted(strategy_dir.glob("*.mkv")):
+                if TEMP_SUFFIX in encoded_file.name:
+                    continue  # skip in-progress temp files
+                m = ENCODED_ATTEMPT_NAME_PATTERN.match(encoded_file.name)
+                if not m:
+                    # Fallback: treat everything before the first '.' as chunk_id
+                    chunk_id = encoded_file.stem.split(".")[0]
+                else:
+                    chunk_id = m.group("chunk_id")
 
-            for encoded_file in strategy_dir.glob("*.mkv"):
-                if TEMP_SUFFIX in encoded_file.stem:
-                    continue  # Skip temp files
-                # Extract chunk_id from filename. Expected format: <start>-<end>.<resolution>.crf<CRF>.mkv
-                # chunk_id is the first part: "<start>-<end>"
-                parts = encoded_file.stem.split(".")
-                if len(parts) >= 2:
-                    chunk_id = parts[0]
-
-                    # TODO: Check what the hell is happening here. We shouldn't count attempts, rather check presence of artifacts.
-                    # Keep track of highest attempt number for each chunk
-                    if chunk_id not in chunk_files:
-                        chunk_files[chunk_id] = encoded_file
-                    else:
-                        # Compare attempt numbers — extract from "attempt_N" segment
-                        def _attempt_num(p: Path) -> int:
-                            for seg in p.stem.split("."):
-                                if seg.startswith("attempt_"):
-                                    try:
-                                        return int(seg.split("_")[1])
-                                    except (IndexError, ValueError):
-                                        pass
-                            return 0
-                        if _attempt_num(encoded_file) > _attempt_num(chunk_files[chunk_id]):
-                            chunk_files[chunk_id] = encoded_file
-
-            # Add to encoded_chunks structure
-            for chunk_id, chunk_path in chunk_files.items():
-                if chunk_id not in encoded_chunks:
-                    encoded_chunks[chunk_id] = {}
-                encoded_chunks[chunk_id][strategy_name] = chunk_path
+                # One file per (chunk_id, strategy) — last one wins on duplicates
+                encoded_chunks.setdefault(chunk_id, {})[strategy_name] = encoded_file
 
         if not encoded_chunks:
             return PhaseResult(
                 phase=Phase.MERGE,
-                success=False,
-                reused=False,
-                needs_work=True,
+                outcome=PhaseOutcome.FAILED,
                 message="No encoded chunks found",
                 error="Encoding phase must complete first"
             )
 
-        logger.info(f"Found {len(encoded_chunks)} chunks across {len(set(s for cs in encoded_chunks.values() for s in cs.keys()))} strategies")
+        strategy_count = len({s for cs in encoded_chunks.values() for s in cs})
+        logger.info(
+            "Found %d chunks across %d strategies",
+            len(encoded_chunks), strategy_count,
+        )
 
         try:
             result = merge_final_video(
                 encoded_chunks=encoded_chunks,
                 audio_files=audio_files,
                 output_dir=output_dir,
+                source_video=job.source if job else None,
+                quality_targets=self.config.quality_targets or None,
                 source_frame_count=source_frame_count,
+                optimal_strategy=self._optimal_strategy,
+                subsample_factor=self.config.subsample_factor,
                 verify_frames=True,
                 force=False,
                 dry_run=dry_run,
@@ -1057,33 +973,27 @@ class PipelineOrchestrator:
             if dry_run and result.needs_work:
                 return PhaseResult(
                     phase=Phase.MERGE,
-                    success=True,
-                    reused=False,
-                    needs_work=True,
+                    outcome=PhaseOutcome.DRY_RUN,
                     message="Needs work: final videos not merged",
                     metadata={"result": result}
                 )
 
-            if result.success:
+            if result.outcome in (PhaseOutcome.COMPLETED, PhaseOutcome.REUSED):
                 # Log frame counts if available
                 if result.frame_counts:
                     for strategy, frame_count in result.frame_counts.items():
-                        logger.info(f"  {strategy}: {frame_count} frames")
+                        logger.info("  %s: %d frames", strategy, frame_count)
 
                 return PhaseResult(
                     phase=Phase.MERGE,
-                    success=True,
-                    reused=result.reused,
-                    needs_work=False,
+                    outcome=result.outcome,
                     message=f"Merged {len(result.output_files)} final video(s)",
                     metadata={"output_files": list(result.output_files.values())}
                 )
             else:
                 return PhaseResult(
                     phase=Phase.MERGE,
-                    success=False,
-                    reused=False,
-                    needs_work=False,
+                    outcome=PhaseOutcome.FAILED,
                     message="Merge failed",
                     error=result.error
                 )
@@ -1092,9 +1002,7 @@ class PipelineOrchestrator:
             logger.error(f"Merge phase error: {e}", exc_info=True)
             return PhaseResult(
                 phase=Phase.MERGE,
-                success=False,
-                reused=False,
-                needs_work=False,
+                outcome=PhaseOutcome.FAILED,
                 message="Merge failed with exception",
                 error=str(e)
             )

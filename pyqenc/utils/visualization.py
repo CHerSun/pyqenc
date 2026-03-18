@@ -11,15 +11,14 @@ import logging
 import os
 import uuid
 import warnings
-from asyncio.subprocess import Process
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Coroutine, Literal, TypedDict
+from typing import Callable, Literal, TypedDict
 
 import matplotlib
-
 from pyqenc.constants import TIME_SEPARATOR_MS, TIME_SEPARATOR_SAFE
+from pyqenc.utils.alive import duration_bar
 from pyqenc.models import CropParams, QualityTarget
 from pyqenc.quality import (
     ChunkQualityStats,
@@ -843,7 +842,9 @@ class QualityEvaluator:
         reference: Path,
         ref_crop: CropParams,
         output_prefix: str,
-        subsample_factor: int = 10
+        subsample_factor: int = 10,
+        bar_advance: Callable[[float], None] | None = None,
+        duration_seconds: float = 0.0,
     ) -> tuple[Path, Path, Path]:
         """Generate metric log files for quality comparison.
 
@@ -853,12 +854,20 @@ class QualityEvaluator:
         moved to ``output_dir`` (derived from ``output_prefix``) with their
         canonical names.
 
+        When ``bar_advance`` is provided, each ffmpeg process reports progress
+        via ``ProgressCallback`` which advances the bar based on ``out_time_seconds``.
+
         Args:
-            encoded: Path to encoded video file
-            reference: Path to reference video file
-            output_prefix: Full path prefix for the final metric files
-                           (e.g. ``/work/encoded/slow_h265/chunk.000000-000195.``)
+            encoded:          Path to encoded video file
+            reference:        Path to reference video file
+            ref_crop:         Crop parameters for the reference input
+            output_prefix:    Full path prefix for the final metric files
+                              (e.g. ``/work/encoded/slow_h265/chunk.000000-000195.``)
             subsample_factor: Frame subsampling factor
+            bar_advance:      Optional callable that advances the progress bar
+                              by the given number of seconds.
+            duration_seconds: Duration of the encoded clip in seconds; used to
+                              cap per-process bar advances.
 
         Returns:
             Tuple of (psnr_log, ssim_log, vmaf_json) final paths
@@ -867,36 +876,47 @@ class QualityEvaluator:
         tmp_prefix = uuid.uuid4().hex + "_"
         cwd = encoded.parent
 
-        _logger.debug("Generating metrics for %s vs %s (tmp prefix: %s)", encoded.name, reference.name, tmp_prefix)
+        _logger.debug(
+            "Generating metrics for %s vs %s (tmp prefix: %s)",
+            encoded.name, reference.name, tmp_prefix,
+        )
 
-        # Launch all three metrics concurrently
-        tasks: list[Coroutine[Any, Any, Process]] = []
-        for metric in MetricType:
-            coroutine = run_metric(
+        def _make_progress_callback(last_time: list[float]) -> Callable[[int, float], None] | None:
+            """Build a ProgressCallback that converts absolute out_time_s to bar deltas."""
+            if bar_advance is None or duration_seconds <= 0:
+                return None
+
+            def _callback(frame: int, out_time_s: float) -> None:
+                delta = max(0.0, out_time_s - last_time[0])
+                delta = min(delta, duration_seconds - last_time[0])
+                if delta > 0:
+                    bar_advance(delta)
+                    last_time[0] = out_time_s
+
+            return _callback
+
+        async def _run_one(metric: MetricType) -> None:
+            result = await run_metric(
                 metric=metric,
                 distorted=encoded,
                 reference=reference,
-                crop_distorted=CropParams(),  # taking distorted as is
-                crop_reference=ref_crop, # reference is expected
+                crop_distorted=CropParams(),
+                crop_reference=ref_crop,
                 duration=0,
                 width=0,
                 use_gpu=False,
                 subsample=subsample_factor,
                 output_prefix=tmp_prefix,
                 cwd=cwd,
+                progress_callback=_make_progress_callback([0.0]),
             )
-            tasks.append(coroutine)
-
-        processes = await asyncio.gather(*tasks)
-        for process in processes:
-            await process.wait()
-            if process.returncode != 0:
-                stderr = await process.stderr.read()
+            if not result.success:
                 _logger.warning(
-                    "Metric calculation had non-zero exit code: %d. Error: %s",
-                    process.returncode,
-                    stderr.decode()[:200],
+                    "Metric %s calculation had non-zero exit code: %d",
+                    metric.value, result.returncode,
                 )
+
+        await asyncio.gather(*[_run_one(metric) for metric in MetricType])
 
         # Move temp files to their final locations
         final_psnr = Path(f"{output_prefix}{MetricType.PSNR.value}.log")
@@ -924,23 +944,28 @@ class QualityEvaluator:
         ref_crop: CropParams,
         targets: list[QualityTarget],
         output_dir: Path,
-        subsample_factor: int = 10
+        subsample_factor: int = 10,
+        show_progress: bool = False,
+        plot_path: Path | None = None,
     ) -> QualityEvaluation:
         """Evaluate encoded chunk against reference and quality targets.
 
         Args:
-            encoded: Path to encoded video file
-            reference: Path to reference video file
-            targets: List of quality targets to evaluate against
-            output_dir: Directory for metric artifacts
+            encoded:          Path to encoded video file
+            reference:        Path to reference video file
+            ref_crop:         Crop parameters for the reference input
+            targets:          List of quality targets to evaluate against
+            output_dir:       Directory for raw metric log files and stats
             subsample_factor: Frame subsampling factor for metrics
+            show_progress:    If True, display a live progress bar (use only
+                              when not nested inside another alive_bar context,
+                              e.g. for the final full-video metrics run after merge).
+            plot_path:        Explicit path for the PNG plot.  When ``None``,
+                              the plot is written as ``<encoded.stem>.png``
+                              inside ``output_dir``.
 
         Returns:
             QualityEvaluation with metrics and target evaluation results
-
-        Note:
-            Both encoded and reference are already cropped to same dimensions.
-            No additional cropping needed during comparison.
         """
         # Ensure output directory exists
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -948,19 +973,53 @@ class QualityEvaluator:
         # Generate output prefix for metric files
         output_prefix = str(output_dir / f"{encoded.stem}.")
 
-        # Generate metrics
-        psnr_log, ssim_log, vmaf_json = asyncio.run(
-            self._generate_metrics(encoded, reference, ref_crop, output_prefix, subsample_factor)
-        )
+        # Probe duration for progress bar total (3 metric passes)
+        _NUM_METRIC_PASSES = 3
+        duration_seconds: float | None = None
+        try:
+            from pyqenc.models import VideoMetadata
+            vm = VideoMetadata(path=encoded)
+            duration_seconds = vm.duration_seconds
+        except Exception:
+            pass
+
+        bar_title = encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
+
+        if show_progress:
+            with duration_bar(_NUM_METRIC_PASSES * (duration_seconds or 0.0), title=f"Metrics: {bar_title}") as advance:
+                psnr_log, ssim_log, vmaf_json = asyncio.run(
+                    self._generate_metrics(
+                        encoded,
+                        reference,
+                        ref_crop,
+                        output_prefix,
+                        subsample_factor,
+                        bar_advance=advance,
+                        duration_seconds=duration_seconds or 0.0,
+                    )
+                )
+        else:
+            psnr_log, ssim_log, vmaf_json = asyncio.run(
+                self._generate_metrics(
+                    encoded,
+                    reference,
+                    ref_crop,
+                    output_prefix,
+                    subsample_factor,
+                    bar_advance=None,
+                    duration_seconds=duration_seconds or 0.0,
+                )
+            )
 
         # Parse metrics and generate plots using metrics_visualization
         _logger.debug("Parsing metrics and generating plots")
+        resolved_plot_path = plot_path if plot_path is not None else output_dir / f"{encoded.stem}.png"
         metrics = analyze_chunk_quality(
             psnr_log=psnr_log if psnr_log.exists() else None,
             ssim_log=ssim_log if ssim_log.exists() else None,
             vmaf_json=vmaf_json if vmaf_json.exists() else None,
             factor=subsample_factor,
-            output_path=output_dir / f"{encoded.stem}.png",
+            output_path=resolved_plot_path,
             title=f"Quality metrics for {encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")}",
             generate_plot=True
         )
@@ -970,7 +1029,7 @@ class QualityEvaluator:
             psnr_log=psnr_log if psnr_log.exists() else None,
             ssim_log=ssim_log if ssim_log.exists() else None,
             vmaf_json=vmaf_json if vmaf_json.exists() else None,
-            plot=output_dir / f"{encoded.stem}.png",
+            plot=resolved_plot_path,
             stats_files=[]
         )
 
