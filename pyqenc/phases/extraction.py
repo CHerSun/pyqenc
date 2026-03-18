@@ -1,10 +1,9 @@
 """
 Extraction phase for the quality-based encoding pipeline.
 
-This module handles extraction of video and audio streams from source MKV files,
-including automatic black border detection and cropping. It also provides the
-MKVTrackExtractor and stream model classes (migrated from the legacy pymkvextract
-module) for parsing and extracting MKV tracks via ffprobe / mkvextract.
+This module handles extraction of streams from the source MKV file.
+It also provides the MKVTrackExtractor and stream model classes for
+parsing and extracting MKV tracks via ffprobe / mkvextract.
 """
 
 import json
@@ -19,9 +18,9 @@ from pathlib import Path
 from typing import Any, cast
 
 from pyqenc.constants import FAILURE_SYMBOL_MINOR, SUCCESS_SYMBOL_MINOR
-from pyqenc.models import AudioMetadata, CropParams, PhaseOutcome, VideoMetadata
-from pyqenc.phases.recovery import ExtractionRecovery, recover_extraction
-from pyqenc.state import ArtifactState, JobState
+from pyqenc.models import AudioMetadata, PhaseOutcome, VideoMetadata
+from pyqenc.phases.recovery import recover_extraction
+from pyqenc.state import ArtifactState
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 
 logger = logging.getLogger(__name__)
@@ -273,61 +272,6 @@ class ChaptersStream(StreamBase):
         return [str(output_path / self.display_name())]
 
 
-class TagsStream(StreamBase):
-    """Represents the global tags entity as a stream for uniform filtering."""
-
-    extract_type = 'tags'
-
-    def __init__(self, stream: dict, index: int) -> None:  # type: ignore[override]
-        self.index = index
-        self.raw = stream
-        self.tags: dict = {}
-        self.disposition: dict = {}
-
-    @property
-    def codec_type(self) -> str:
-        return 'tags'
-
-    @property
-    def file_extension(self) -> str:
-        return 'xml'
-
-    def display_name(self, track_num_width: int = 2, track_id_width: int = 2) -> str:
-        return f"tags.{self.file_extension}"
-
-    def mkvextract_parts(self, output_path: Path, attachment_index: int | None = None) -> list[str]:
-        return [str(output_path / self.display_name())]
-
-
-class HeadersStream(StreamBase):
-    """Represents file-level header information as a stream."""
-
-    extract_type = ''  # no mkvextract command part; written directly to JSON
-
-    def __init__(self, stream: dict, index: int) -> None:  # type: ignore[override]
-        self.index = index
-        self.raw = stream
-        self.tags: dict = {}
-        self.disposition: dict = {}
-
-    @property
-    def codec_type(self) -> str:
-        return 'headers'
-
-    @property
-    def file_extension(self) -> str:
-        return 'json'
-
-    def display_name(self, track_num_width: int = 2, track_id_width: int = 2) -> str:
-        return f"headers.{self.file_extension}"
-
-    def mkvextract_parts(self, output_path: Path, attachment_index: int | None = None) -> list[str]:
-        """Dump file info from ffprobe to a JSON file; returns no mkvextract fragments."""
-        with (output_path / self.display_name()).open('wt') as f:
-            json.dump(self.raw, f, indent=4)
-        return []
-
-
 class StreamFactory:
     """Factory that creates the appropriate *Stream* subclass from an ffprobe stream dict."""
 
@@ -395,7 +339,9 @@ def _print_stream_table(
         filename = track.display_name(track_num_width, track_id_width)
         lines.append(f"  {symbol}  {filename}")
 
-    logger.info("Streams:\n%s", "\n".join(lines))
+    logger.info("Streams:")
+    for line in lines:
+        logger.info(line)
 
 
 def streams_filter_plain_regex(
@@ -438,8 +384,6 @@ class MKVTrackExtractor:
 
     MISSING_STREAM_ID: int = -1
     CHAPTERS_INDEX:    int = -2
-    TAGS_INDEX:        int = -3
-    FILE_INFO_INDEX:   int = -4
 
     def __init__(self, input_file: str) -> None:
         self.input_file = Path(input_file)
@@ -461,7 +405,6 @@ class MKVTrackExtractor:
                 '-print_format', 'json',
                 '-show_streams',
                 '-show_chapters',
-                '-show_format',
                 str(self.input_file),
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -473,13 +416,6 @@ class MKVTrackExtractor:
             if chapters_data := data.get('chapters'):
                 self.has_chapters = True
                 self.tracks.append(ChaptersStream(chapters_data, self.CHAPTERS_INDEX))
-
-            if file_info_data := data.get('format', {}).get('tags'):
-                self.has_file_info = True
-                self.tracks.append(HeadersStream(file_info_data, self.FILE_INFO_INDEX))
-
-            # Tags stream is always appended; no reliable way to detect absence via ffprobe.
-            self.tracks.append(TagsStream({}, self.TAGS_INDEX))
 
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"FFprobe error: {e}") from e
@@ -545,100 +481,6 @@ class ExtractionResult:
     error:   str | None = None
 
 
-def _detect_crop_parameters(
-    video_file: VideoMetadata,
-    sample_count: int = 50,
-) -> CropParams:
-    """Detect black borders using ffmpeg cropdetect filter.
-
-    Samples multiple frames across the video to find conservative crop parameters
-    that remove all black borders while preserving maximum content area.
-
-    Always returns a ``CropParams`` instance — all-zero if no borders are found
-    or if detection fails for any reason.
-
-    Args:
-        video_file:   Video metadata for the file to analyse.
-        sample_count: Number of frames to sample across the video.
-
-    Returns:
-        CropParams with detected border offsets; all-zero if no cropping needed.
-    """
-    logger.debug("Detecting black borders in %s...", video_file.path)
-
-    try:
-        duration = video_file.duration_seconds
-
-        if not duration:
-            logger.warning("Duration is not available, skipping crop detection")
-            return CropParams()
-
-        # Distribute samples across the middle 80 % of the video
-        start_time  = duration * 0.1
-        step        = duration * 0.8 / (sample_count - 1) if sample_count > 1 else 0
-        step_frames = (
-            int(video_file.frame_count * 0.8 / sample_count) if video_file.frame_count
-            else int(step * video_file.fps)                   if video_file.fps
-            else 0
-        )
-        step_frames = max(min(step_frames, 500), 30)
-
-        cmd: list[str | PathLike] = [
-            "ffmpeg",
-            "-ss", str(start_time),
-            "-i", video_file.path,
-            "-vf", f"select='not(mod(n\\,{step_frames}))',cropdetect=24:16:0",
-            "-vframes", str(sample_count),
-            "-f", "null",
-            "-",
-        ]
-
-        result = run_ffmpeg(cmd, output_file=None)
-
-        # Parse lines like: [Parsed_cropdetect_0 @ ...] w:1920 h:800 x:0 y:140
-        crop_detections: list[tuple[int, int, int, int]] = []
-        for line in result.stderr_lines:
-            if "cropdetect" in line and "x1:" in line:
-                match = re.search(r"w:(\d+)\s+h:(\d+)\s+x:(\d+)\s+y:(\d+)", line)
-                if match:
-                    w, h, x, y = map(int, match.groups())
-                    crop_detections.append((w, h, x, y))
-
-        logger.debug("Got %d crop samples.", len(crop_detections))
-
-        if not crop_detections:
-            logger.debug("No black borders detected")
-            return CropParams()
-
-        # Most conservative crop: smallest detected content area
-        max_w = max(d[0] for d in crop_detections)
-        max_h = max(d[1] for d in crop_detections)
-        min_x = min(d[2] for d in crop_detections)
-        min_y = min(d[3] for d in crop_detections)
-
-        left = min_x
-        top  = min_y
-
-        width, height = video_file.resolution.split("x", 1) if video_file.resolution else ("0", "0")
-        right  = int(width)  - max_w - left
-        bottom = int(height) - max_h - top
-
-        if max(left, right, top, bottom) < 2:
-            logger.debug("Detected borders too small, no cropping needed")
-            return CropParams()
-
-        crop = CropParams(top=top, bottom=bottom, left=left, right=right)
-        logger.info(
-            "Detected black borders: %d top, %d bottom, %d left, %d right (content %dx%d)",
-            top, bottom, left, right, max_w, max_h,
-        )
-        return crop
-
-    except Exception as e:
-        logger.warning("Failed to detect crop parameters: %s", e)
-        return CropParams()
-
-
 def _audio_metadata_from_stream(path: Path, track: "AudioStream") -> AudioMetadata:
     """Build an ``AudioMetadata`` instance from an extracted audio file and its stream info.
 
@@ -682,18 +524,10 @@ def extract_streams(
     output_dir:   Path,
     include:      str | None = None,
     exclude:      str | None = None,
-    detect_crop:  bool = True,
-    manual_crop:  str | None = None,
     force:        bool = False,
     dry_run:      bool = False,
-    job:          JobState | None = None,
 ) -> ExtractionResult:
     """Extract video and audio streams from source MKV file.
-
-    Integrates with pymkvextract for stream extraction and implements
-    automatic black border detection for cropping.  The returned
-    ``ExtractionResult.video.crop_params`` is always a ``CropParams``
-    instance after this call — all-zero if no borders were found.
 
     Performs extraction phase recovery first: cleans up leftover ``.tmp``
     files and checks whether extracted artifacts already exist.  If all
@@ -713,14 +547,12 @@ def extract_streams(
         exclude:      Regex pattern applied to ALL stream types; streams whose
                       would-be output filename matches are skipped even if they
                       also match ``include``.  ``None`` means exclude none.
-        detect_crop:  If ``True``, automatically detect black borders.
-        manual_crop:  Manual crop parameters (format: ``"top bottom [left right]"``).
         force:        If ``False``, reuse existing extracted files.
         dry_run:      If ``True``, only report status without performing extraction.
-        job:          Current job state for recovery context (optional).
 
     Returns:
-        ``ExtractionResult`` with the first video stream (``crop_params`` populated),
+        ``ExtractionResult`` with the first video stream (``crop_params`` is
+        always ``None`` — set by the orchestrator after crop detection),
         a list of ``AudioMetadata`` objects, and a ``PhaseOutcome``.
     """
     logger.info("Extraction phase: %s", source_video.name)
@@ -766,40 +598,19 @@ def extract_streams(
 
     expected_video_files = [output_dir / t.display_name() for t in video_tracks]
     expected_audio_files = [output_dir / t.display_name() for t in audio_tracks]
-    expected_other_files = [output_dir / t.display_name() for t in other_tracks
-                            if t.extract_type]  # skip HeadersStream (extract_type="")
+    expected_other_files = [output_dir / t.display_name() for t in other_tracks]
     video_metas = [
         VideoMetadata.from_stream(path=f, stream=t)
         for f, t in zip(expected_video_files, video_tracks)
     ]
 
     # ------------------------------------------------------------------
-    # Helper: resolve crop params (manual takes priority over detection)
-    # ------------------------------------------------------------------
-    def _resolve_crop(video_meta: VideoMetadata) -> CropParams:
-        if manual_crop:
-            try:
-                crop = CropParams.parse(manual_crop)
-                logger.info("Using manual crop: %s", crop)
-                return crop
-            except ValueError as e:
-                logger.warning("Invalid manual crop format: %s — skipping crop", e)
-                return CropParams()
-        if detect_crop:
-            return _detect_crop_parameters(video_meta)
-        return CropParams()
-
-    # ------------------------------------------------------------------
-    # Recovery: clean up .tmp files and check existing artifacts (Req 3.2, 4.1, 7.7)
-    # ------------------------------------------------------------------
-    _job = job or JobState(source=VideoMetadata(path=source_video))
-    recovery = recover_extraction(work_dir=output_dir.parent, job=_job)
-
-    # ------------------------------------------------------------------
-    # Filter change detection via extraction.yaml sidecar (Req 10.11, 10.12)
+    # Recovery: clean up .tmp files and check existing artifacts
     # ------------------------------------------------------------------
     from pyqenc.state import ExtractionParams, JobStateManager
     _state_manager = JobStateManager(work_dir=output_dir.parent, source_video=source_video)
+    from pyqenc.state import JobState
+    recovery = recover_extraction(work_dir=output_dir.parent, job=JobState(source=VideoMetadata(path=source_video)))
     persisted_params = _state_manager.load_extraction()
     if persisted_params is not None:
         if persisted_params.include != include or persisted_params.exclude != exclude:
@@ -823,17 +634,6 @@ def extract_streams(
     )
     if all_exist:
         primary_video = video_metas[0]
-        if manual_crop:
-            primary_video.crop_params = _resolve_crop(primary_video)
-        elif job is not None and job.source.crop_params is not None:
-            # Crop was already detected and persisted in job.yaml — reuse it
-            primary_video.crop_params = job.source.crop_params
-            logger.info("Reusing previously detected crop from job.yaml: %s", primary_video.crop_params)
-        elif detect_crop:
-            # No cached crop — run detection now
-            primary_video.crop_params = _detect_crop_parameters(primary_video)
-        else:
-            primary_video.crop_params = CropParams()
         audio_meta = [_audio_metadata_from_stream(path, track)
                       for path, track in zip(expected_audio_files, audio_tracks)]
         return ExtractionResult(video=primary_video, audio=audio_meta, outcome=PhaseOutcome.REUSED)
@@ -842,11 +642,6 @@ def extract_streams(
     # Dry-run path
     # ------------------------------------------------------------------
     if dry_run:
-        if manual_crop:
-            logger.info("[DRY-RUN] Would use manual crop: %s", manual_crop)
-        elif detect_crop:
-            logger.info("[DRY-RUN] Would detect black borders automatically")
-
         primary_video = video_metas[0] if video_metas else None
         audio_meta = [
             _audio_metadata_from_stream(path, track)
@@ -923,9 +718,6 @@ def extract_streams(
         )
 
     primary_video = video_metas[0]
-    if detect_crop and not manual_crop:
-        logger.info("Detecting black borders...")
-    primary_video.crop_params = _resolve_crop(primary_video)
     audio_meta = [
         _audio_metadata_from_stream(path, track)
         for path, track in zip(expected_audio_files, audio_tracks)

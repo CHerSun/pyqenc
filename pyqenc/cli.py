@@ -499,8 +499,6 @@ def _cmd_extract(args: argparse.Namespace) -> int:
             output_dir=args.work_dir / "extracted",
             include=args.include if hasattr(args, "include") else None,
             exclude=args.exclude if hasattr(args, "exclude") else None,
-            detect_crop=not args.no_crop if hasattr(args, "no_crop") else True,
-            manual_crop=args.crop if hasattr(args, "crop") else None,
             dry_run=not execute,
         )
 

@@ -28,10 +28,10 @@ from typing import Callable
 from alive_progress import alive_bar, config_handler
 
 from pyqenc.constants import (
+    _NORMALISED_PREFIXES,
     AUDIO_CH_51,
     AUDIO_CH_71,
     AUDIO_STEM_SEPARATOR,
-    _NORMALISED_PREFIXES,
 )
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg, run_ffmpeg_async
 
@@ -968,7 +968,6 @@ def process_audio_streams(
         7.1, 7.2, 9.2, 9.3
     """
     try:
-        logger.info("Audio processing phase starting")
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # --- Load config profiles and apply CLI overrides ---

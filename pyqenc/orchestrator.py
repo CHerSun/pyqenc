@@ -191,17 +191,12 @@ class PipelineOrchestrator:
                 error="Source file mismatch — aborting. Use --force to override.",
             )
 
-        # Restore optimal strategy from persisted optimization.yaml
-        opt_params = self.state_manager.load_optimization()
-        if opt_params is not None and opt_params.optimal_strategy:
-            self._optimal_strategy = opt_params.optimal_strategy
-            logger.info("Restored optimal strategy from optimization.yaml: %s", self._optimal_strategy)
-
         # Ensure job.yaml is written with current source metadata (first run)
+        # Also resolve crop parameters here at job level — before any phases.
         if not dry_run:
+            from pyqenc.models import VideoMetadata
             existing_job = self.state_manager.load_job()
             if existing_job is None:
-                from pyqenc.models import VideoMetadata
                 job = JobState(source=VideoMetadata(path=self.config.source_video))
                 sv = job.source
                 _ = sv.file_size_bytes
@@ -211,6 +206,9 @@ class PipelineOrchestrator:
                 _ = sv.frame_count
                 self.state_manager.save_job(job)
                 logger.info("Initialized job.yaml for new pipeline run")
+
+            # Crop: manual → cached → detect (runs on source video, once per job)
+            self._resolve_crop_params(VideoMetadata(path=self.config.source_video))
 
         # Determine which phases to execute
         phases_to_run = self._phase_order[:max_phases] if max_phases else self._phase_order
@@ -402,14 +400,7 @@ class PipelineOrchestrator:
         return job.source.crop_params
 
     def _execute_extraction(self, dry_run: bool) -> PhaseResult:
-        """Execute extraction phase.
-
-        Args:
-            dry_run: If True, only report status
-
-        Returns:
-            PhaseResult with execution details
-        """
+        """Execute extraction phase."""
         from pyqenc.phases.extraction import extract_streams
 
         output_dir = self.config.work_dir / "extracted"
@@ -420,8 +411,6 @@ class PipelineOrchestrator:
                 output_dir=output_dir,
                 include=self.config.include,
                 exclude=self.config.exclude,
-                detect_crop=self.config.crop_params is None,
-                manual_crop=str(self.config.crop_params) if self.config.crop_params else None,
                 force=False,
                 dry_run=dry_run,
             )
@@ -435,39 +424,74 @@ class PipelineOrchestrator:
                 )
 
             if result.outcome in (PhaseOutcome.COMPLETED, PhaseOutcome.REUSED):
-                # Persist crop_params into job.yaml so downstream phases can read them
-                if result.video and not dry_run:
-                    job = self.state_manager.load_job()
-                    if job is not None:
-                        job.source.crop_params = result.video.crop_params
-                        self.state_manager.save_job(job)
-
                 video_count = 1 if result.video else 0
                 return PhaseResult(
                     phase=Phase.EXTRACTION,
                     outcome=result.outcome,
                     message=f"Extracted {video_count} video, {len(result.audio)} audio streams",
-                    metadata={
-                        "video": result.video,
-                        "audio": result.audio,
-                    }
+                    metadata={"video": result.video, "audio": result.audio},
                 )
             else:
                 return PhaseResult(
                     phase=Phase.EXTRACTION,
                     outcome=PhaseOutcome.FAILED,
                     message="Extraction failed",
-                    error=result.error
+                    error=result.error,
                 )
 
         except Exception as e:
-            logger.error(f"Extraction phase error: {e}", exc_info=True)
+            logger.error("Extraction phase error: %s", e, exc_info=True)
             return PhaseResult(
                 phase=Phase.EXTRACTION,
                 outcome=PhaseOutcome.FAILED,
                 message="Extraction failed with exception",
-                error=str(e)
+                error=str(e),
             )
+
+    def _resolve_crop_params(self, video: "VideoMetadata | None" = None) -> "CropParams":
+        """Resolve crop parameters at job level: manual → cached → detect → save.
+
+        Runs on the source video directly, before any phases.  Called once
+        during job initialisation in ``run()``.
+
+        Priority:
+        1. Manual crop from ``config.crop_params`` — always used as-is.
+        2. Cached value in ``job.yaml`` — reused if present (detection already ran).
+        3. Auto-detection via ffmpeg cropdetect on the source video.
+
+        Returns:
+            Resolved ``CropParams`` (all-zero if no borders found).
+        """
+        from pyqenc.models import CropParams, VideoMetadata
+        from pyqenc.utils.crop import detect_crop_parameters
+
+        # 1. Manual override
+        if self.config.crop_params is not None:
+            c = self.config.crop_params
+            logger.info(
+                "User-provided cropping: %d top, %d bottom, %d left, %d right",
+                c.top, c.bottom, c.left, c.right,
+            )
+            return c
+
+        # 2. Cached in job.yaml
+        job = self.state_manager.load_job()
+        if job is not None and job.source.crop_params is not None:
+            c = job.source.crop_params
+            logger.info(
+                "Detected cropping: %d top, %d bottom, %d left, %d right (cached)",
+                c.top, c.bottom, c.left, c.right,
+            )
+            return c
+
+        # 3. Detect on source video and persist
+        source = video or VideoMetadata(path=self.config.source_video)
+        logger.info("Cropping: detecting black borders...")
+        crop = detect_crop_parameters(source)
+        if job is not None:
+            job.source.crop_params = crop
+            self.state_manager.save_job(job)
+        return crop
 
     def _execute_chunking(self, dry_run: bool) -> PhaseResult:
         """Execute chunking phase.

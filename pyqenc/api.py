@@ -98,17 +98,15 @@ def extract_streams(
     output_dir: Path,
     include: str | None = None,
     exclude: str | None = None,
-    detect_crop: bool = True,
-    manual_crop: str | None = None,
     force: bool = False,
-    dry_run: bool = False
+    dry_run: bool = False,
 ) -> "ExtractionResult":
     """Extract video and audio streams from source MKV.
 
     Extracts all video and audio streams from the source MKV file, optionally
     filtering by regex patterns applied uniformly to all stream types.
-    Automatically detects black borders for cropping unless disabled or manual
-    crop is specified.
+    Crop detection is NOT performed here — use the orchestrator or call
+    ``detect_crop_parameters`` separately after extraction.
 
     Args:
         source_video: Path to source MKV file
@@ -117,17 +115,15 @@ def extract_streams(
                  are extracted (e.g. ``".*eng.*"``). ``None`` means include all.
         exclude: Regex pattern applied to ALL stream types; matching streams are
                  skipped (e.g. ``"attachment"``). ``None`` means exclude none.
-        detect_crop: If True, automatically detect black borders (default: True)
-        manual_crop: Manual crop parameters (format: "top bottom" or "top bottom left right")
         force: If True, re-extract even if files exist (default: False)
         dry_run: If True, only report status without extracting (default: False)
 
     Returns:
         ExtractionResult with video/audio metadata and phase outcome.
+        ``video.crop_params`` is always ``None`` — set by the caller after detection.
 
     Raises:
         FileNotFoundError: If source video doesn't exist
-        ValueError: If crop parameters are invalid
     """
     from pyqenc.phases.extraction import extract_streams as _extract_streams
 
@@ -141,8 +137,6 @@ def extract_streams(
         output_dir=output_dir,
         include=include,
         exclude=exclude,
-        detect_crop=detect_crop,
-        manual_crop=manual_crop,
         force=force,
         dry_run=dry_run,
     )
