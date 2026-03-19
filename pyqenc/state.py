@@ -95,8 +95,8 @@ class JobState(BaseModel):
         source_data = {**source_data, "path": Path(source_data["path"])}
         source = VideoMetadata.model_validate_full(source_data)
         raw_crop = data.get("crop")
-        crop_params = CropParams(**raw_crop) if isinstance(raw_crop, dict) else None
-        return cls(source=source, crop_params=crop_params)
+        crop = CropParams(**raw_crop) if isinstance(raw_crop, dict) else None
+        return cls(source=source, crop=crop)
 
 
 class ExtractionParams(BaseModel):
@@ -107,6 +107,7 @@ class ExtractionParams(BaseModel):
     and trigger re-extraction when they differ.
     """
 
+    stream_filter: StreamFilterConfig
     include: str | None = None
     exclude: str | None = None
 

@@ -903,7 +903,6 @@ class PipelineOrchestrator:
         from pyqenc.utils.ffmpeg_runner import get_frame_count
 
         encoded_dir = self.config.work_dir / "encoded"
-        audio_dir   = self.config.work_dir / "audio"
         output_dir  = self.config.work_dir / "final"
         chunks_dir  = self.config.work_dir / "chunks"
 
@@ -914,20 +913,6 @@ class PipelineOrchestrator:
                 message="Encoded directory not found",
                 error="Encoding phase must complete first"
             )
-
-        if not audio_dir.exists():
-            return PhaseResult(
-                phase=Phase.MERGE,
-                outcome=PhaseOutcome.FAILED,
-                message="Audio directory not found",
-                error="Audio phase must complete first"
-            )
-
-        # Collect audio files — all AAC delivery files produced by the audio phase
-        audio_files = sorted(audio_dir.glob("*.aac"))
-
-        if not audio_files:
-            logger.warning("No processed audio files found, merging video only")
 
         # Get source frame count for verification from job.yaml
         source_frame_count: int | None = None
@@ -984,7 +969,6 @@ class PipelineOrchestrator:
         try:
             result = merge_final_video(
                 encoded_chunks=encoded_chunks,
-                audio_files=audio_files,
                 output_dir=output_dir,
                 source_video=job.source if job else None,
                 ref_crop=job.crop if job else None,

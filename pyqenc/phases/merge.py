@@ -1,23 +1,85 @@
 """
 Merging phase for the quality-based encoding pipeline.
 
-This module handles concatenation of encoded video chunks and muxing with
-processed audio streams to produce final MKV output files. It also measures
-final quality metrics and generates visual plots for verification.
+This module handles concatenation of encoded video chunks to produce final
+MKV output files.  It also measures final quality metrics and generates
+visual plots for verification.
+
+Audio muxing is intentionally omitted — the final output is video-only.
+Audio delivery files are kept alongside the output for the user to mux
+manually or in a downstream step.
 """
 
 import logging
-import subprocess
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from pyqenc.constants import FAILURE_SYMBOL_MINOR, SUCCESS_SYMBOL_MINOR
+import yaml
+
+from pyqenc.constants import (
+    FAILURE_SYMBOL_MINOR,
+    SUCCESS_SYMBOL_MINOR,
+    TEMP_SUFFIX,
+)
 from pyqenc.models import CropParams, PhaseOutcome, QualityTarget, VideoMetadata
 from pyqenc.utils.ffmpeg_runner import get_frame_count, run_ffmpeg
 from pyqenc.utils.visualization import QualityEvaluator
+from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Sidecar model
+# ---------------------------------------------------------------------------
+
+_MERGE_SIDECAR_VERSION = 1
+
+
+def _sidecar_path(output_file: Path) -> Path:
+    """Return the sidecar YAML path for a merged output file."""
+    return output_file.with_suffix(".yaml")
+
+
+def _load_merge_sidecar(output_file: Path) -> dict | None:
+    """Load the merge sidecar for *output_file*, or ``None`` if absent/invalid."""
+    path = _sidecar_path(output_file)
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            return yaml.safe_load(fh)
+    except Exception as exc:
+        logger.debug("Could not load merge sidecar %s: %s", path.name, exc)
+        return None
+
+
+def _write_merge_sidecar(
+    output_file:     Path,
+    frame_count:     int | None,
+    final_metrics:   dict[str, float],
+    targets_met:     bool,
+    plot_path:       Path | None,
+) -> None:
+    """Atomically write a merge sidecar alongside *output_file*."""
+    data: dict = {
+        "version":     _MERGE_SIDECAR_VERSION,
+        "frame_count": frame_count,
+        "targets_met": targets_met,
+        "metrics":     final_metrics,
+    }
+    if plot_path is not None:
+        data["plot"] = str(plot_path)
+    try:
+        write_yaml_atomic(_sidecar_path(output_file), data)
+    except Exception as exc:
+        logger.warning("Could not write merge sidecar for %s: %s", output_file.name, exc)
+
+
+# ---------------------------------------------------------------------------
+# Result dataclass
+# ---------------------------------------------------------------------------
 
 @dataclass
 class MergeResult:
@@ -41,10 +103,101 @@ class MergeResult:
     outcome:       PhaseOutcome
     error:         str | None = None
 
+    @property
+    def needs_work(self) -> bool:
+        """True when the phase is in dry-run mode and work would be required."""
+        return self.outcome == PhaseOutcome.DRY_RUN
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _strategy_display_name(strategy: str) -> str:
+    """Return a human-readable strategy name (preserves ``+`` and ``:`` separators)."""
+    return strategy.replace("_", "+", 1)  # only first underscore — profile may contain underscores
+
+
+def _strategy_safe_name(strategy: str) -> str:
+    """Return a filesystem-safe strategy name."""
+    return strategy.replace("+", "_").replace(":", "_")
+
+
+def _cleanup_tmp_files(directory: Path) -> None:
+    """Remove leftover ``.tmp`` files from a previous interrupted run."""
+    if not directory.exists():
+        return
+    for tmp_file in directory.glob(f"*{TEMP_SUFFIX}"):
+        try:
+            tmp_file.unlink()
+            logger.warning("Removed leftover temp file: %s", tmp_file.name)
+        except OSError as exc:
+            logger.warning("Could not remove temp file %s: %s", tmp_file.name, exc)
+
+
+def _measure_quality(
+    output_file:     Path,
+    source_video:    VideoMetadata,
+    ref_crop:        CropParams | None,
+    quality_targets: list[QualityTarget],
+    output_dir:      Path,
+    safe_strategy:   str,
+    subsample_factor: int,
+) -> tuple[dict[str, float], bool, Path | None]:
+    """Measure final quality metrics for *output_file* against *source_video*.
+
+    Returns:
+        Tuple of ``(metrics_dict, targets_met, plot_path)``.
+    """
+    evaluator   = QualityEvaluator(output_dir)
+    metrics_dir = output_dir / f"metrics_{safe_strategy}"
+
+    evaluation = evaluator.evaluate_chunk(
+        encoded=output_file,
+        reference=source_video.path,
+        ref_crop=ref_crop,
+        targets=quality_targets,
+        output_dir=metrics_dir,
+        subsample_factor=subsample_factor,
+        show_progress=True,
+    )
+
+    metrics_dict: dict[str, float] = {}
+    for metric_name, metric_stats in evaluation.metrics.items():
+        for stat_name, stat_value in metric_stats.items():
+            metrics_dict[f"{metric_name}_{stat_name}"] = stat_value
+
+    plot_path = evaluation.artifacts.plot if evaluation.artifacts.plot else None
+    return metrics_dict, evaluation.targets_met, plot_path
+
+
+def _log_metrics_summary(
+    strategy:        str,
+    metrics_dict:    dict[str, float],
+    quality_targets: list[QualityTarget],
+    targets_met:     bool,
+) -> None:
+    """Log a compact quality metrics summary for *strategy*."""
+    for target in quality_targets:
+        key    = f"{target.metric}_{target.statistic}"
+        value  = metrics_dict.get(key)
+        if value is None:
+            continue
+        symbol = SUCCESS_SYMBOL_MINOR if value >= target.value else FAILURE_SYMBOL_MINOR
+        logger.info(
+            "  %s %s-%s: %.2f (target: %.2f)",
+            symbol, target.metric, target.statistic, value, target.value,
+        )
+    overall = SUCCESS_SYMBOL_MINOR if targets_met else FAILURE_SYMBOL_MINOR
+    logger.info("  %s %s: quality targets %s", overall, strategy, "met" if targets_met else "NOT met")
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def merge_final_video(
     encoded_chunks:     dict[str, dict[str, Path]],
-    audio_files:        list[Path],
     output_dir:         Path,
     source_video:       VideoMetadata | None = None,
     ref_crop:           CropParams | None = None,
@@ -57,19 +210,19 @@ def merge_final_video(
     force:              bool = False,
     dry_run:            bool = False,
 ) -> MergeResult:
-    """Merge encoded chunks and audio into final MKV files.
+    """Merge encoded chunks into final MKV files (video-only concatenation).
 
-    Produces separate output files for each encoding strategy.
-    Uses ffmpeg concat demuxer for frame-perfect video concatenation,
-    then mkvmerge to combine video and audio streams.
+    Produces one output file per encoding strategy.  Uses the ffmpeg concat
+    demuxer for frame-perfect video concatenation.  Audio muxing is omitted —
+    audio delivery files are kept alongside the output for downstream use.
 
     After merging, measures final quality metrics by comparing the complete
     merged video against the original source, and generates visual quality
-    plots for verification.
+    plots for verification.  Results are persisted in a per-output sidecar
+    YAML so metrics are not re-measured on subsequent runs.
 
     Args:
         encoded_chunks:     Nested dict ``{chunk_id: {strategy: path}}`` with encoded chunks.
-        audio_files:        List of processed audio files to include.
         output_dir:         Directory for final output files.
         source_video:       Original source ``VideoMetadata`` for quality measurement (optional).
         ref_crop:           Crop parameters applied during encoding; used to align the reference
@@ -85,17 +238,11 @@ def merge_final_video(
 
     Returns:
         MergeResult with paths to final output files, metrics, and plots.
-
-    Requirements:
-        5.1, 5.2, 5.3, 5.4, 5.5, 6.1, 6.2, 6.3, 6.4, 6.5
     """
     try:
-        logger.info("Merging phase starting")
-
-        # Ensure output directory exists
-        output_dir.mkdir(parents=True, exist_ok=True)
-
+        # ------------------------------------------------------------------
         # Determine which strategies we have
+        # ------------------------------------------------------------------
         all_strategies: set[str] = set()
         for chunk_strategies in encoded_chunks.values():
             all_strategies.update(chunk_strategies.keys())
@@ -103,377 +250,318 @@ def merge_final_video(
         if not all_strategies:
             logger.error("No encoded chunks found for merging")
             return MergeResult(
-                output_files={},
-                frame_counts={},
-                final_metrics={},
-                targets_met={},
-                metrics_plots={},
-                outcome=PhaseOutcome.FAILED,
-                error="No encoded chunks found"
+                output_files={}, frame_counts={}, final_metrics={},
+                targets_met={}, metrics_plots={},
+                outcome=PhaseOutcome.FAILED, error="No encoded chunks found",
             )
 
-        # Respect optimal_strategy: when set, merge only that strategy
+        total_chunks = len(encoded_chunks)
+
+        # Strategies that have ALL chunks encoded
+        complete_strategies: set[str] = {
+            s for s in all_strategies
+            if sum(1 for cs in encoded_chunks.values() if s in cs) == total_chunks
+        }
+
+        # ------------------------------------------------------------------
+        # Optimal-strategy mode: resolve and restrict to one strategy
+        # ------------------------------------------------------------------
         if optimal_strategy:
-            if optimal_strategy in all_strategies:
-                strategies = {optimal_strategy}
-                logger.info("Merging optimal strategy only: %s", optimal_strategy)
-            else:
-                logger.warning(
-                    "Optimal strategy '%s' not found in encoded chunks; "
-                    "available: %s — merging all strategies instead.",
-                    optimal_strategy, sorted(all_strategies),
+            # Normalise both sides for comparison (stored name may use '+' or '_')
+            normalised_optimal = optimal_strategy.replace("+", "_").replace(":", "_")
+            normalised_map: dict[str, str] = {
+                s.replace("+", "_").replace(":", "_"): s for s in complete_strategies
+            }
+
+            if normalised_optimal not in normalised_map:
+                # Also check all_strategies in case it's incomplete
+                normalised_all: dict[str, str] = {
+                    s.replace("+", "_").replace(":", "_"): s for s in all_strategies
+                }
+                if normalised_optimal in normalised_all:
+                    logger.error(
+                        "Optimal strategy '%s' is incomplete — not all %d chunks encoded",
+                        optimal_strategy, total_chunks,
+                    )
+                else:
+                    logger.error(
+                        "Optimal strategy '%s' not found in encoded artifacts",
+                        optimal_strategy,
+                    )
+                return MergeResult(
+                    output_files={}, frame_counts={}, final_metrics={},
+                    targets_met={}, metrics_plots={},
+                    outcome=PhaseOutcome.FAILED,
+                    error=f"Optimal strategy '{optimal_strategy}' not found or incomplete",
                 )
-                strategies = all_strategies
+
+            resolved = normalised_map[normalised_optimal]
+            strategies: set[str] = {resolved}
+            # Log the human-readable name as the very first message
+            logger.info("Merging optimal strategy: %s", _strategy_display_name(resolved))
+
         else:
-            strategies = all_strategies
+            # All-strategies mode: warn about incomplete ones
+            incomplete_strategies = all_strategies - complete_strategies
+            if incomplete_strategies:
+                logger.warning(
+                    "Skipping %d incomplete strategies (not all %d chunks encoded): %s",
+                    len(incomplete_strategies), total_chunks, sorted(incomplete_strategies),
+                )
 
-        logger.info("Found %d strategies to merge: %s", len(strategies), ", ".join(sorted(strategies)))
+            if not complete_strategies:
+                logger.error("No strategy has all %d chunks encoded — cannot merge", total_chunks)
+                return MergeResult(
+                    output_files={}, frame_counts={}, final_metrics={},
+                    targets_met={}, metrics_plots={},
+                    outcome=PhaseOutcome.FAILED,
+                    error=f"No strategy has all {total_chunks} chunks encoded",
+                )
 
-        # Check for existing output files
+            strategies = complete_strategies
+            logger.info(
+                "Merging %d strategy(ies): %s",
+                len(strategies), ", ".join(sorted(strategies)),
+            )
+
+        # ------------------------------------------------------------------
+        # Ensure output directory exists and clean up leftover .tmp files
+        # ------------------------------------------------------------------
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _cleanup_tmp_files(output_dir)
+
+        # ------------------------------------------------------------------
+        # Dry-run mode
+        # ------------------------------------------------------------------
+        if dry_run:
+            for strategy in sorted(strategies):
+                safe = _strategy_safe_name(strategy)
+                output_file = output_dir / f"output_{safe}.mkv"
+                if not output_file.exists():
+                    logger.info("[DRY-RUN] Would merge: %s", _strategy_display_name(strategy))
+            return MergeResult(
+                output_files={}, frame_counts={}, final_metrics={},
+                targets_met={}, metrics_plots={},
+                outcome=PhaseOutcome.DRY_RUN,
+            )
+
+        # ------------------------------------------------------------------
+        # Check for fully complete existing outputs (file + sidecar)
+        # ------------------------------------------------------------------
         if not force:
-            existing_outputs = {}
-            all_exist = True
+            existing_outputs: dict[str, Path] = {}
+            all_complete = True
 
             for strategy in strategies:
-                # Make strategy name filesystem-safe
-                safe_strategy = strategy.replace("+", "_").replace(":", "_")
-                output_file = output_dir / f"output_{safe_strategy}.mkv"
-
-                if output_file.exists():
+                safe        = _strategy_safe_name(strategy)
+                output_file = output_dir / f"output_{safe}.mkv"
+                sidecar     = _load_merge_sidecar(output_file)
+                if output_file.exists() and sidecar is not None:
                     existing_outputs[strategy] = output_file
-                    logger.debug(f"Found existing output for {strategy}: {output_file.name}")
                 else:
-                    all_exist = False
+                    all_complete = False
                     break
 
-            if all_exist:
-                logger.info(f"Reusing existing output files: {len(existing_outputs)} files")
+            if all_complete and existing_outputs:
+                frame_counts:    dict[str, int]              = {}
+                final_metrics:   dict[str, dict[str, float]] = {}
+                targets_met_map: dict[str, bool]             = {}
+                metrics_plots:   dict[str, Path]             = {}
 
-                # Get frame counts if verification requested
-                frame_counts = {}
-                if verify_frames:
-                    for strategy, output_file in existing_outputs.items():
-                        try:
-                            frame_counts[strategy] = get_frame_count(output_file)
-                        except Exception as e:
-                            logger.warning(f"Could not verify frame count for {strategy}: {e}")
+                for strategy, output_file in existing_outputs.items():
+                    sidecar = _load_merge_sidecar(output_file)
+                    if sidecar:
+                        if sidecar.get("frame_count") is not None:
+                            frame_counts[strategy] = int(sidecar["frame_count"])
+                        if sidecar.get("metrics"):
+                            final_metrics[strategy] = {
+                                k: float(v) for k, v in sidecar["metrics"].items()
+                            }
+                        targets_met_map[strategy] = bool(sidecar.get("targets_met", False))
+                        if sidecar.get("plot"):
+                            plot = Path(sidecar["plot"])
+                            if plot.exists():
+                                metrics_plots[strategy] = plot
 
-                # Measure quality if requested and source provided
-                final_metrics = {}
-                targets_met_dict = {}
-                metrics_plots = {}
-
-                if measure_quality and source_video and quality_targets:
-                    logger.info("Measuring final quality metrics for existing outputs...")
-                    evaluator = QualityEvaluator(output_dir)
-
-                    for strategy, output_file in existing_outputs.items():
-                        try:
-                            safe_strategy = strategy.replace("+", "_").replace(":", "_")
-                            metrics_dir = output_dir / f"final_metrics_{safe_strategy}"
-                            evaluation = evaluator.evaluate_chunk(
-                                encoded=output_file,
-                                reference=source_video.path,
-                                ref_crop=ref_crop,
-                                targets=quality_targets,
-                                output_dir=metrics_dir,
-                                subsample_factor=subsample_factor,
-                                show_progress=True,
-                            )
-
-                            # Extract metrics as flat dict
-                            metrics_dict = {}
-                            for metric_name, metric_stats in evaluation.metrics.items():
-                                for stat_name, stat_value in metric_stats.items():
-                                    metrics_dict[f"{metric_name}_{stat_name}"] = stat_value
-
-                            final_metrics[strategy] = metrics_dict
-                            targets_met_dict[strategy] = evaluation.targets_met
-
-                            if evaluation.artifacts.plot:
-                                metrics_plots[strategy] = evaluation.artifacts.plot
-                                logger.info(f"  {strategy}: Quality plot saved to {evaluation.artifacts.plot.name}")
-
-                            # Log metrics summary
-                            logger.info(f"  {strategy}: Final quality metrics:")
-                            for target in quality_targets:
-                                key = f"{target.metric}_{target.statistic}"
-                                if key in metrics_dict:
-                                    status: str = SUCCESS_SYMBOL_MINOR if metrics_dict[key] >= target.value \
-                                                    else FAILURE_SYMBOL_MINOR
-                                    logger.info(
-                                        f"    {status} {target.metric}-{target.statistic}: "
-                                        f"{metrics_dict[key]:.2f} (target: {target.value})"
-                                    )
-
-                        except Exception as e:
-                            logger.warning(f"Could not measure quality for {strategy}: {e}")
-
-                if dry_run:
-                    logger.info("[DRY-RUN] Merging: Complete (reusing existing files)")
-                    return MergeResult(
-                        output_files=existing_outputs,
-                        frame_counts=frame_counts,
-                        final_metrics=final_metrics,
-                        targets_met=targets_met_dict,
-                        metrics_plots=metrics_plots,
-                        outcome=PhaseOutcome.REUSED,
-                    )
-
+                logger.info(
+                    "Reusing %d existing output(s) — all complete",
+                    len(existing_outputs),
+                )
                 return MergeResult(
                     output_files=existing_outputs,
                     frame_counts=frame_counts,
                     final_metrics=final_metrics,
-                    targets_met=targets_met_dict,
+                    targets_met=targets_met_map,
                     metrics_plots=metrics_plots,
                     outcome=PhaseOutcome.REUSED,
                 )
 
-        # Dry-run mode: report what would be done
-        if dry_run:
-            logger.info(f"[DRY-RUN] Would merge {len(strategies)} strategies")
-            for strategy in sorted(strategies):
-                chunk_count = sum(1 for cs in encoded_chunks.values() if strategy in cs)
-                logger.info(f"[DRY-RUN]   {strategy}: {chunk_count} chunks")
-            logger.info(f"[DRY-RUN]   Audio files: {len(audio_files)}")
-            if measure_quality and source_video:
-                logger.info(f"[DRY-RUN]   Would measure final quality against source")
-            logger.info("[DRY-RUN] Merging: Needs work")
-            return MergeResult(
-                output_files={},
-                frame_counts={},
-                final_metrics={},
-                targets_met={},
-                metrics_plots={},
-                outcome=PhaseOutcome.DRY_RUN,
-            )
-
+        # ------------------------------------------------------------------
         # Process each strategy
-        output_files = {}
-        frame_counts = {}
-        final_metrics = {}
-        targets_met_dict = {}
-        metrics_plots = {}
+        # ------------------------------------------------------------------
+        output_files:    dict[str, Path]              = {}
+        frame_counts     = {}
+        final_metrics    = {}
+        targets_met_map  = {}
+        metrics_plots    = {}
 
         for strategy in sorted(strategies):
-            logger.info(f"Merging strategy: {strategy}")
+            safe = _strategy_safe_name(strategy)
+            logger.info("Merging: %s", _strategy_display_name(strategy))
 
             try:
-                # Collect chunks for this strategy sorted by filename (encodes start timestamp)
-                strategy_chunks: list[Path] = []
-                for chunk_id in sorted(encoded_chunks.keys()):
-                    if strategy in encoded_chunks[chunk_id]:
-                        strategy_chunks.append(encoded_chunks[chunk_id][strategy])
-
-                # Sort by filename for correct temporal order (Req 5.3)
-                strategy_chunks.sort(key=lambda p: p.name)
-
-                if not strategy_chunks:
-                    logger.warning(f"No chunks found for strategy {strategy}, skipping")
-                    continue
-
-                # Log chunk count and total frame count before merge (Req 5.5)
-                total_chunk_frames: int | None = None
-                if verify_frames:
-                    try:
-                        total_chunk_frames = sum(get_frame_count(c) for c in strategy_chunks)
-                    except Exception as e:
-                        logger.warning("Could not count frames for strategy %s: %s", strategy, e)
-
-                if total_chunk_frames is not None:
-                    logger.info(
-                        "  Merging %d chunks, %d total frames",
-                        len(strategy_chunks), total_chunk_frames,
-                    )
-                else:
-                    logger.info("  Merging %d chunks", len(strategy_chunks))
-
-                # Create concat file for ffmpeg
-                concat_file = output_dir / f"concat_{strategy.replace('+', '_')}.txt"
-                with open(concat_file, 'w') as f:
-                    for chunk_path in strategy_chunks:
-                        # Use absolute paths and escape single quotes
-                        abs_path = chunk_path.resolve()
-                        f.write(f"file '{abs_path}'\n")
-
-                # Concatenate video chunks using ffmpeg concat demuxer
-                safe_strategy = strategy.replace("+", "_").replace(":", "_")
-                concatenated_video = output_dir / f"concatenated_{safe_strategy}.mkv"
-
-                concat_cmd = [
-                    "ffmpeg",
-                    "-f", "concat",
-                    "-safe", "0",
-                    "-i", str(concat_file),
-                    "-c", "copy",  # Stream copy for lossless concatenation
-                    "-y",
-                    concatenated_video,
-                ]
-
-                logger.debug("Running: %s", " ".join(str(a) for a in concat_cmd))
-                concat_result = run_ffmpeg(concat_cmd, output_file=concatenated_video)
-                if not concat_result.success:
-                    logger.error("Video concatenation failed for strategy %s", strategy)
-                    continue
-
-                logger.info(f"  Video concatenation complete: {concatenated_video.name}")
-
-                # Verify frame count if requested (Req 5.4 — warn and continue, do not abort)
-                if verify_frames:
-                    video_frames = get_frame_count(concatenated_video)
-                    logger.info(f"  Concatenated video frame count: {video_frames}")
-
-                    if source_frame_count is not None:
-                        if video_frames != source_frame_count:
-                            logger.warning(
-                                "  Frame count mismatch: expected %d, got %d (difference: %d)",
-                                source_frame_count, video_frames,
-                                abs(video_frames - source_frame_count),
-                            )
-                        else:
-                            logger.info("  Frame count verification passed: %d frames", video_frames)
-
-                    frame_counts[strategy] = video_frames
-
-                # Mux video and audio using mkvmerge
-                output_file = output_dir / f"output_{safe_strategy}.mkv"
-
-                mkvmerge_cmd = [
-                    "mkvmerge",
-                    "-o", str(output_file),
-                    str(concatenated_video),  # Video track
-                ]
-
-                # Add all audio tracks
-                for audio_file in audio_files:
-                    mkvmerge_cmd.append(str(audio_file))
-
-                logger.debug(f"Running: {' '.join(mkvmerge_cmd)}")
-                result = subprocess.run(
-                    mkvmerge_cmd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    timeout=300  # 5 minute timeout
+                # Collect and sort chunks for this strategy
+                strategy_chunks: list[Path] = sorted(
+                    (
+                        encoded_chunks[chunk_id][strategy]
+                        for chunk_id in sorted(encoded_chunks.keys())
+                        if strategy in encoded_chunks[chunk_id]
+                    ),
+                    key=lambda p: p.name,
                 )
 
-                logger.info(f"  Muxing complete: {output_file.name}")
+                if not strategy_chunks:
+                    logger.warning("No chunks found for strategy %s — skipping", strategy)
+                    continue
 
-                # Measure final quality if requested (Req 6.1–6.5)
-                if measure_quality and source_video and quality_targets:
-                    logger.info(f"  Measuring final quality metrics...")
+                logger.info("  %d chunks to concatenate", len(strategy_chunks))
 
-                    try:
-                        evaluator = QualityEvaluator(output_dir)
-                        metrics_dir = output_dir / f"final_metrics_{safe_strategy}"
+                # Write concat list to a temp file in the output dir
+                concat_file = output_dir / f"concat_{safe}{TEMP_SUFFIX}.txt"
+                with concat_file.open("w", encoding="utf-8") as fh:
+                    for chunk_path in strategy_chunks:
+                        abs_path = chunk_path.resolve()
+                        escaped  = str(abs_path).replace("'", "'\\''")
+                        fh.write(f"file '{escaped}'\n")
 
-                        evaluation = evaluator.evaluate_chunk(
-                            encoded=output_file,
-                            reference=source_video.path,
-                            ref_crop=ref_crop,
-                            targets=quality_targets,
-                            output_dir=metrics_dir,
-                            subsample_factor=subsample_factor,
-                            show_progress=True,
-                        )
+                output_file = output_dir / f"output_{safe}.mkv"
 
-                        # Extract metrics as flat dict
-                        metrics_dict = {}
-                        for metric_name, metric_stats in evaluation.metrics.items():
-                            for stat_name, stat_value in metric_stats.items():
-                                metrics_dict[f"{metric_name}_{stat_name}"] = stat_value
+                concat_cmd: list[str | os.PathLike] = [
+                    "ffmpeg",
+                    "-f",    "concat",
+                    "-safe", "0",
+                    "-i",    concat_file,
+                    "-c",    "copy",
+                    "-y",
+                    output_file,
+                ]
 
-                        final_metrics[strategy] = metrics_dict
-                        targets_met_dict[strategy] = evaluation.targets_met
+                logger.debug("Concat command: %s", " ".join(str(a) for a in concat_cmd))
+                concat_result = run_ffmpeg(concat_cmd, output_file=output_file)
 
-                        if evaluation.artifacts.plot:
-                            metrics_plots[strategy] = evaluation.artifacts.plot
-                            logger.info(f"  Quality plot saved to {evaluation.artifacts.plot.name}")
-
-                        # Log metrics summary
-                        logger.info("  Final quality metrics:")
-                        for target in quality_targets:
-                            key = f"{target.metric}_{target.statistic}"
-                            if key in metrics_dict:
-                                status: str = SUCCESS_SYMBOL_MINOR if metrics_dict[key] >= target.value else FAILURE_SYMBOL_MINOR
-                                logger.info(
-                                    f"    {status} {target.metric}-{target.statistic}: "
-                                    f"{metrics_dict[key]:.2f} (target: {target.value})"
-                                )
-
-                        if evaluation.targets_met:
-                            logger.info(f"  {SUCCESS_SYMBOL_MINOR} All quality targets met for {strategy}")
-                        else:
-                            logger.warning(f"  {FAILURE_SYMBOL_MINOR} Some quality targets not met for {strategy}")
-
-                    except Exception as e:
-                        logger.warning(f"  Could not measure final quality: {e}")
-
-                # Clean up intermediate files
+                # Clean up concat list regardless of outcome
                 concat_file.unlink(missing_ok=True)
-                concatenated_video.unlink(missing_ok=True)
+
+                if not concat_result.success:
+                    logger.error("Concatenation failed for strategy %s", strategy)
+                    continue
+
+                logger.info("  Concatenation complete: %s", output_file.name)
+
+                # Verify frame count
+                frame_count: int | None = None
+                if verify_frames:
+                    try:
+                        frame_count = get_frame_count(output_file)
+                        if source_frame_count is not None:
+                            if frame_count != source_frame_count:
+                                diff = frame_count - source_frame_count
+                                logger.warning(
+                                    "  Frame count mismatch: expected %d, got %d (%+d)",
+                                    source_frame_count, frame_count, diff,
+                                )
+                            else:
+                                logger.info(
+                                    "  Frame count verified: %d %s",
+                                    frame_count, SUCCESS_SYMBOL_MINOR,
+                                )
+                        frame_counts[strategy] = frame_count
+                    except Exception as exc:
+                        logger.warning("  Could not verify frame count: %s", exc)
+
+                # Measure quality (skip if sidecar already present and not forced)
+                metrics_dict: dict[str, float] = {}
+                targets_met:  bool             = False
+                plot_path:    Path | None       = None
+
+                if measure_quality and source_video and quality_targets:
+                    existing_sidecar = _load_merge_sidecar(output_file)
+                    if not force and existing_sidecar and existing_sidecar.get("metrics"):
+                        logger.info("  Quality metrics: reusing from sidecar")
+                        metrics_dict = {
+                            k: float(v) for k, v in existing_sidecar["metrics"].items()
+                        }
+                        targets_met = bool(existing_sidecar.get("targets_met", False))
+                        if existing_sidecar.get("plot"):
+                            p = Path(existing_sidecar["plot"])
+                            if p.exists():
+                                plot_path = p
+                    else:
+                        logger.info("  Measuring final quality metrics...")
+                        try:
+                            metrics_dict, targets_met, plot_path = _measure_quality(
+                                output_file=output_file,
+                                source_video=source_video,
+                                ref_crop=ref_crop,
+                                quality_targets=quality_targets,
+                                output_dir=output_dir,
+                                safe_strategy=safe,
+                                subsample_factor=subsample_factor,
+                            )
+                        except Exception as exc:
+                            logger.warning("  Could not measure quality: %s", exc)
+
+                    if metrics_dict:
+                        _log_metrics_summary(
+                            _strategy_display_name(strategy),
+                            metrics_dict, quality_targets, targets_met,
+                        )
+                        final_metrics[strategy]   = metrics_dict
+                        targets_met_map[strategy] = targets_met
+                        if plot_path:
+                            metrics_plots[strategy] = plot_path
+
+                # Write sidecar (marks this output as COMPLETE)
+                _write_merge_sidecar(
+                    output_file=output_file,
+                    frame_count=frame_count,
+                    final_metrics=metrics_dict,
+                    targets_met=targets_met,
+                    plot_path=plot_path,
+                )
 
                 output_files[strategy] = output_file
 
-            except subprocess.TimeoutExpired as e:
-                logger.error(f"Merging strategy {strategy} timed out: {e}")
-                continue
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Merging strategy {strategy} failed: {e.stderr}")
-                continue
-            except Exception as e:
-                logger.error(f"Merging strategy {strategy} error: {e}", exc_info=True)
+            except Exception as exc:
+                logger.error("Merging strategy %s error: %s", strategy, exc, exc_info=True)
                 continue
 
         if not output_files:
             logger.error("No strategies were successfully merged")
             return MergeResult(
-                output_files={},
-                frame_counts={},
-                final_metrics={},
-                targets_met={},
-                metrics_plots={},
-                outcome=PhaseOutcome.FAILED,
-                error="All strategy merges failed"
+                output_files={}, frame_counts={}, final_metrics={},
+                targets_met={}, metrics_plots={},
+                outcome=PhaseOutcome.FAILED, error="All strategy merges failed",
             )
 
-        logger.info(f"Merging complete: {len(output_files)} output files created")
-
-        # Report final metrics summary
-        if final_metrics:
-            logger.info("Final quality metrics summary:")
-            for strategy in sorted(output_files.keys()):
-                if strategy in final_metrics:
-                    status: str = SUCCESS_SYMBOL_MINOR if targets_met_dict.get(strategy, False) else FAILURE_SYMBOL_MINOR
-                    logger.info(f"  {status} {strategy}:")
-                    if quality_targets:
-                        for target in quality_targets:
-                            key = f"{target.metric}_{target.statistic}"
-                            if key in final_metrics[strategy]:
-                                logger.info(
-                                    f"      {target.metric}-{target.statistic}: "
-                                    f"{final_metrics[strategy][key]:.2f}"
-                                )
-                    if strategy in metrics_plots:
-                        logger.info(f"      Plot: {metrics_plots[strategy]}")
+        logger.info(
+            "Merge complete: %d output file(s)",
+            len(output_files),
+        )
 
         return MergeResult(
             output_files=output_files,
             frame_counts=frame_counts,
             final_metrics=final_metrics,
-            targets_met=targets_met_dict,
+            targets_met=targets_met_map,
             metrics_plots=metrics_plots,
             outcome=PhaseOutcome.COMPLETED,
         )
 
-    except Exception as e:
-        logger.critical(f"Merging phase failed: {e}", exc_info=True)
+    except Exception as exc:
+        logger.critical("Merging phase failed: %s", exc, exc_info=True)
         return MergeResult(
-            output_files={},
-            frame_counts={},
-            final_metrics={},
-            targets_met={},
-            metrics_plots={},
-            outcome=PhaseOutcome.FAILED,
-            error=str(e),
+            output_files={}, frame_counts={}, final_metrics={},
+            targets_met={}, metrics_plots={},
+            outcome=PhaseOutcome.FAILED, error=str(exc),
         )
