@@ -670,10 +670,10 @@ class PipelineOrchestrator:
                 for strategy, test_result in result.test_results.items():
                     if test_result.all_passed:
                         logger.info(
-                            "  %s: avg CRF %.2f, avg size %.2f MB",
+                            "  %s: avg CRF %.2f, total size %.2f MB",
                             strategy,
                             test_result.avg_crf,
-                            test_result.avg_file_size / 1024 / 1024,
+                            test_result.total_file_size / 1024 / 1024,
                         )
                     else:
                         logger.warning("  %s: failed to encode all test chunks", strategy)
@@ -888,6 +888,101 @@ class PipelineOrchestrator:
                 error=str(e)
             )
 
+    def _get_reference_size(self, job: "JobState") -> int | None:
+        """Return the reference video size in bytes for merge summary savings calculation.
+
+        Looks for the extracted video stream in ``work_dir/extracted/``.
+        Falls back to the source file size if no extracted video is found.
+
+        Args:
+            job: Current job state (used for source size fallback).
+
+        Returns:
+            Size in bytes, or ``None`` if unavailable.
+        """
+        extracted_dir = self.config.work_dir / "extracted"
+        if extracted_dir.exists():
+            # The extracted video stream is a .mkv file that does NOT contain "(audio-"
+            video_files = [
+                f for f in extracted_dir.glob("*.mkv")
+                if "(audio-" not in f.name
+            ]
+            if video_files:
+                try:
+                    return video_files[0].stat().st_size
+                except OSError as exc:
+                    logger.warning("Could not stat extracted video file: %s", exc)
+
+        # Fallback: source file size
+        try:
+            return job.source.file_size_bytes
+        except Exception as exc:
+            logger.warning("Could not determine reference size: %s", exc)
+            return None
+
+    def _emit_merge_summary(
+        self,
+        result:  "MergeResult",
+        job:     "JobState",
+    ) -> None:
+        """Emit a human-readable post-merge summary at ``info`` level.
+
+        Determines the operating mode from ``self._optimal_strategy``, resolves
+        the reference size, and delegates formatting to the appropriate
+        ``fmt_merge_summary_*`` function.
+
+        Args:
+            result: Completed merge result.
+            job:    Current job state (for reference size fallback).
+        """
+        from pyqenc.phases.merge import MergeResult
+        from pyqenc.utils.log_format import fmt_merge_summary_all, fmt_merge_summary_optimal
+
+        if not result.output_files:
+            return
+
+        reference_size_bytes = self._get_reference_size(job)
+        quality_targets      = self.config.quality_targets or []
+
+        # Collect output file sizes
+        sizes_bytes: dict[str, int] = {}
+        for strategy, output_file in result.output_files.items():
+            try:
+                sizes_bytes[strategy] = output_file.stat().st_size
+            except OSError as exc:
+                logger.warning("Could not stat output file %s: %s", output_file.name, exc)
+                sizes_bytes[strategy] = 0
+
+        if self._optimal_strategy and len(result.output_files) == 1:
+            # Optimal-strategy mode: single-strategy key-value block
+            strategy    = next(iter(result.output_files))
+            output_file = result.output_files[strategy]
+            size_bytes  = sizes_bytes.get(strategy, 0)
+            metrics     = result.final_metrics.get(strategy, {})
+            targets_met = result.targets_met.get(strategy, False)
+
+            lines = fmt_merge_summary_optimal(
+                output_file=output_file,
+                size_bytes=size_bytes,
+                reference_size_bytes=reference_size_bytes,
+                quality_targets=quality_targets,
+                metrics=metrics,
+                targets_met=targets_met,
+            )
+        else:
+            # All-strategies mode: table format
+            lines = fmt_merge_summary_all(
+                output_files=result.output_files,
+                sizes_bytes=sizes_bytes,
+                reference_size_bytes=reference_size_bytes,
+                quality_targets=quality_targets,
+                final_metrics=result.final_metrics,
+                targets_met=result.targets_met,
+            )
+
+        for line in lines:
+            logger.info(line)
+
     def _execute_merge(self, dry_run: bool) -> PhaseResult:
         """Execute merge phase.
 
@@ -961,21 +1056,31 @@ class PipelineOrchestrator:
             )
 
         strategy_count = len({s for cs in encoded_chunks.values() for s in cs})
-        logger.info(
+        logger.debug(
             "Found %d chunks across %d strategies",
             len(encoded_chunks), strategy_count,
         )
+
+        if job is None:
+            logger.critical("Job state is None — cannot determine source stem for merge")
+            return PhaseResult(
+                phase=Phase.MERGE,
+                outcome=PhaseOutcome.FAILED,
+                message="Merge failed: job state unavailable",
+                error="job is None",
+            )
 
         try:
             result = merge_final_video(
                 encoded_chunks=encoded_chunks,
                 output_dir=output_dir,
+                source_stem=job.source.path.stem,
                 source_video=job.source if job else None,
                 ref_crop=job.crop if job else None,
                 quality_targets=self.config.quality_targets or None,
                 source_frame_count=source_frame_count,
                 optimal_strategy=self._optimal_strategy,
-                subsample_factor=self.config.subsample_factor,
+                metrics_sampling=self.config.metrics_sampling,
                 verify_frames=True,
                 force=False,
                 dry_run=dry_run,
@@ -994,6 +1099,9 @@ class PipelineOrchestrator:
                 if result.frame_counts:
                     for strategy, frame_count in result.frame_counts.items():
                         logger.info("  %s: %d frames", strategy, frame_count)
+
+                # Emit post-merge summary
+                self._emit_merge_summary(result, job)
 
                 return PhaseResult(
                     phase=Phase.MERGE,

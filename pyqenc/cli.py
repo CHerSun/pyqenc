@@ -155,6 +155,17 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         default=2,
         help="Maximum concurrent encoding processes (default: 2). Don't set this high, ffmpeg knows how to scale too."
     )
+    parser.add_argument(
+        "--metrics-sampling",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Metrics sampling factor: measure every N-th frame. "
+            "Min: 1 (every frame measured). Default: 10 (recommended balance of speed and precision). "
+            "Values above 30 are not recommended due to measurement volatility."
+        ),
+    )
 
 
 def _add_filter_arguments(parser: argparse.ArgumentParser) -> None:
@@ -405,6 +416,7 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         Exit code (0 for success, non-zero for failure)
     """
     from pyqenc.api import run_pipeline
+    from pyqenc.config import ConfigManager
 
     logger.info("Starting automatic pipeline execution")
 
@@ -426,6 +438,11 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         except ValueError as e:
             logger.critical(f"Invalid crop parameters: {e}")
             return 1
+
+    # Resolve metrics sampling: CLI arg takes precedence over config file
+    config_manager = ConfigManager()
+    metrics_sampling = args.metrics_sampling if args.metrics_sampling is not None \
+                       else config_manager.get_metrics_sampling()
 
     # Aggregate into a key/value table and print it
     kv_to_show = {
@@ -462,6 +479,7 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         audio_convert=args.audio_convert,
         audio_codec=args.audio_codec,
         audio_base_bitrate=args.audio_bitrate,
+        metrics_sampling=metrics_sampling,
     )
 
     # Execute pipeline

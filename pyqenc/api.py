@@ -436,6 +436,7 @@ def merge_final(
     encoded_dir: Path,
     audio_dir: Path,
     output_dir: Path,
+    source_stem: str,
     source_frame_count: int | None = None,
     verify_frames: bool = True,
     dry_run: bool = False
@@ -450,6 +451,7 @@ def merge_final(
         encoded_dir: Directory containing encoded chunks organized by strategy
         audio_dir: Directory containing processed audio files
         output_dir: Directory for final output MKV files
+        source_stem: Stem of the source video filename (used in output filename)
         source_frame_count: Expected frame count for verification (optional)
         verify_frames: If True, verify frame count matches source (default: True)
         dry_run: If True, only report status without merging (default: False)
@@ -553,8 +555,8 @@ def merge_final(
 
     return merge_final_video(
         encoded_chunks=encoded_chunks,
-        audio_files=audio_files,
         output_dir=output_dir,
+        source_stem=source_stem,
         source_frame_count=source_frame_count,
         verify_frames=verify_frames,
         force=False,

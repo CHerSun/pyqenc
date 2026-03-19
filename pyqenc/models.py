@@ -736,7 +736,7 @@ class PipelineConfig(BaseModel):
         optimize:           Whether to search for optimal strategy.
         all_strategies:     Whether to produce output for all strategies.
         max_parallel:       Maximum concurrent encoding processes.
-        subsample_factor:   Frame subsampling for metric calculation.
+        metrics_sampling:   Frame subsampling for metric calculation.
         log_level:          Logging level (debug, info, warning, critical).
         crop_params:        Manual crop parameters (``None`` for auto-detect).
         include:            Regex pattern to include streams (applied to all stream types).
@@ -761,7 +761,7 @@ class PipelineConfig(BaseModel):
     optimize:           bool              = False
     all_strategies:     bool              = False
     max_parallel:       int               = 2
-    subsample_factor:   int               = 10
+    metrics_sampling:   int               = 10
     log_level:          str               = "info"
     crop_params:        CropParams | None = None
     include:            str | None        = None

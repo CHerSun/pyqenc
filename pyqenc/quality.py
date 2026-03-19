@@ -81,6 +81,7 @@ async def run_metric(
     output_prefix:     str,
     cwd:               Path | None             = None,
     progress_callback: ProgressCallback | None = None,
+    output_extension:  str | None              = None,
 ) -> FFmpegRunResult:
     """Build and run a single metric calculation subprocess via FFmpegRunner.
 
@@ -104,6 +105,10 @@ async def run_metric(
                            the parent directory of ``distorted``.
         progress_callback: Optional ``(frame, out_time_seconds)`` callable
                            invoked once per completed progress block.
+        output_extension:  Override the default file extension for the metric
+                           output file (e.g. ``".tmp"``).  When ``None``, the
+                           default extension for each metric is used (``.log``
+                           for PSNR/SSIM, ``.json`` for VMAF).
 
     Returns:
         ``FFmpegRunResult`` with returncode, success, stderr_lines, and frame_count.
@@ -139,13 +144,16 @@ async def run_metric(
         options: str = "" if use_gpu else "n_threads=4:"
         if subsample > 1:
             options += f"n_subsample={subsample}:"
+        vmaf_ext = output_extension if output_extension is not None else ".json"
         filter_metric = (
-            f"{lib}={options}log_path={output_prefix}{metric.value}.json:log_fmt=json"
+            f"{lib}={options}log_path={output_prefix}{metric.value}{vmaf_ext}:log_fmt=json"
         )
     elif metric == MetricType.SSIM:
-        filter_metric = f"ssim=stats_file={output_prefix}{metric.value}.log"
+        ssim_ext = output_extension if output_extension is not None else ".log"
+        filter_metric = f"ssim=stats_file={output_prefix}{metric.value}{ssim_ext}"
     elif metric == MetricType.PSNR:
-        filter_metric = f"psnr=stats_file={output_prefix}{metric.value}.log"
+        psnr_ext = output_extension if output_extension is not None else ".log"
+        filter_metric = f"psnr=stats_file={output_prefix}{metric.value}{psnr_ext}"
     else:
         assert_never(metric)
 
@@ -276,17 +284,23 @@ class CRFHistory:
         return (too_low_crf, too_high_crf)
 
 def normalize_metric(metric_type: MetricType, value: float) -> float:
-    """Normalize measured metric values to a consistent scale for CRF adjustment.
+    """Normalize a raw metric value to the 0–100 scale.
 
-    This allows the CRF adjustment algorithm to treat all metrics on a similar
-    scale when calculating proportional adjustments.
+    Applies the canonical normalization for each metric type:
+    - SSIM: multiply by 100 (raw 0–1 → 0–100)
+    - PSNR: cap at 100.0 (unbounded dB → 0–100)
+    - VMAF: unchanged (already 0–100)
+
+    After normalization is applied at the parsing boundary (in
+    ``analyze_chunk_quality``), all downstream code works with values already
+    on the 0–100 scale and should NOT call this function again.
 
     Args:
         metric_type: Type of the metric (VMAF, SSIM, PSNR).
         value: The raw metric value to normalize.
 
     Returns:
-        The normalized metric value.
+        The normalized metric value on the 0–100 scale.
     """
     if metric_type == MetricType.SSIM:
         return value * 100
@@ -302,18 +316,20 @@ def normalize_metric_deficit(
     actual:      float,
     target:      float,
 ) -> float:
-    """Normalize quality deficit to 0-100 scale for consistent CRF adjustment.
+    """Compute quality deficit on the 0–100 scale for consistent CRF adjustment.
+
+    Both ``actual`` and ``target`` must already be on the 0–100 scale
+    (i.e. values returned by ``analyze_chunk_quality`` or ``normalize_metric``).
 
     Args:
-        metric_type: Metric type enum value.
-        actual:      Actual measured value.
-        target:      Target value.
+        metric_type: Metric type enum value (unused; kept for API compatibility).
+        actual:      Actual measured value, already normalized to 0–100.
+        target:      Target value on the 0–100 scale.
 
     Returns:
-        Normalized deficit — positive when quality exceeds target, negative
-        when below.  Magnitude indicates distance from target on a 0-100 scale.
+        Deficit — positive when quality exceeds target, negative when below.
     """
-    return normalize_metric(metric_type, actual) - target
+    return actual - target
 
 def adjust_crf(
     current_crf:     float,
@@ -409,18 +425,9 @@ def adjust_crf(
             return None
 
         metric_type = MetricType(worst_target.metric)
-        if metric_type == MetricType.SSIM:
-            actual_pct = worst_actual * 100
-            target_pct = worst_target.value * 100
-            max_metric = 100.0
-        elif metric_type == MetricType.PSNR:
-            actual_pct = worst_actual if not (worst_actual == float("inf")) else 60.0
-            target_pct = worst_target.value
-            max_metric = 60.0
-        else:
-            actual_pct = worst_actual
-            target_pct = worst_target.value
-            max_metric = 100.0
+        actual_pct = worst_actual if not (metric_type == MetricType.PSNR and worst_actual == float("inf")) else 60.0
+        target_pct = worst_target.value
+        max_metric = 100.0
 
         headroom = max_metric - actual_pct
         if headroom > 0:

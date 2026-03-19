@@ -195,6 +195,17 @@ audio_output:
       bitrate: 768k
       extension: .aac
 
+# Metrics Configuration
+# ---------------------
+# Controls quality metrics measurement behavior.
+#
+# sampling: Metrics sampling factor — measure every N-th frame.
+#   Min: 1 (every frame measured, slowest but most precise).
+#   Default: 10 (recommended balance of speed and precision).
+#   Values above 30 are not recommended due to measurement volatility.
+metrics:
+  sampling: 10
+
 # Stream Filter Configuration
 # ---------------------------
 # Unified include/exclude regex patterns applied to ALL stream types

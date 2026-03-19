@@ -136,30 +136,35 @@ def _cleanup_tmp_files(directory: Path) -> None:
 
 
 def _measure_quality(
-    output_file:     Path,
-    source_video:    VideoMetadata,
-    ref_crop:        CropParams | None,
-    quality_targets: list[QualityTarget],
-    output_dir:      Path,
-    safe_strategy:   str,
-    subsample_factor: int,
+    final_result:     Path,
+    source_video:     VideoMetadata,
+    ref_crop:         CropParams | None,
+    quality_targets:  list[QualityTarget],
+    output_dir:       Path,
+    metrics_sampling: int,
 ) -> tuple[dict[str, float], bool, Path | None]:
-    """Measure final quality metrics for *output_file* against *source_video*.
+    """Measure final quality metrics for *final_result* against *source_video*.
+
+    Intermediate metric artifacts (raw logs, ``.stats`` files) are placed in
+    ``output_dir / final_result.stem``.  The quality plot PNG is written to
+    ``output_dir / f"{final_result.stem}.png"``.
 
     Returns:
         Tuple of ``(metrics_dict, targets_met, plot_path)``.
     """
     evaluator   = QualityEvaluator(output_dir)
-    metrics_dir = output_dir / f"metrics_{safe_strategy}"
+    metrics_dir = output_dir / final_result.stem
+    plot_path   = output_dir / f"{final_result.stem}.png"
 
     evaluation = evaluator.evaluate_chunk(
-        encoded=output_file,
+        encoded=final_result,
         reference=source_video.path,
         ref_crop=ref_crop,
         targets=quality_targets,
         output_dir=metrics_dir,
-        subsample_factor=subsample_factor,
+        subsample_factor=metrics_sampling,
         show_progress=True,
+        plot_path=plot_path,
     )
 
     metrics_dict: dict[str, float] = {}
@@ -199,12 +204,13 @@ def _log_metrics_summary(
 def merge_final_video(
     encoded_chunks:     dict[str, dict[str, Path]],
     output_dir:         Path,
+    source_stem:        str,
     source_video:       VideoMetadata | None = None,
     ref_crop:           CropParams | None = None,
     quality_targets:    list[QualityTarget] | None = None,
     source_frame_count: int | None = None,
     optimal_strategy:   str | None = None,
-    subsample_factor:   int = 10,
+    metrics_sampling:   int = 10,
     verify_frames:      bool = True,
     measure_quality:    bool = True,
     force:              bool = False,
@@ -224,13 +230,14 @@ def merge_final_video(
     Args:
         encoded_chunks:     Nested dict ``{chunk_id: {strategy: path}}`` with encoded chunks.
         output_dir:         Directory for final output files.
+        source_stem:        Stem of the source video filename (used in output filename).
         source_video:       Original source ``VideoMetadata`` for quality measurement (optional).
         ref_crop:           Crop parameters applied during encoding; used to align the reference
                             for quality measurement (optional).
         quality_targets:    Quality targets to verify against (optional).
         source_frame_count: Expected frame count for verification (optional).
         optimal_strategy:   When set, merge only this strategy; otherwise merge all.
-        subsample_factor:   Frame subsampling factor for final quality metrics.
+        metrics_sampling:   Frame subsampling factor for final quality metrics.
         verify_frames:      Whether to verify frame count matches source.
         measure_quality:    Whether to measure final video quality metrics.
         force:              If False, reuse existing output files.
@@ -297,8 +304,13 @@ def merge_final_video(
 
             resolved = normalised_map[normalised_optimal]
             strategies: set[str] = {resolved}
-            # Log the human-readable name as the very first message
-            logger.info("Merging optimal strategy: %s", _strategy_display_name(resolved))
+            display_name = _strategy_display_name(resolved)
+            logger.info("Mode: optimal strategy — %s", display_name)
+            # Chunk count scoped to the resolved strategy only
+            strategy_chunk_count = sum(
+                1 for cs in encoded_chunks.values() if resolved in cs
+            )
+            logger.info("  %d chunk(s) to merge", strategy_chunk_count)
 
         else:
             # All-strategies mode: warn about incomplete ones
@@ -319,10 +331,17 @@ def merge_final_video(
                 )
 
             strategies = complete_strategies
+            strategy_list = ", ".join(sorted(strategies))
             logger.info(
-                "Merging %d strategy(ies): %s",
-                len(strategies), ", ".join(sorted(strategies)),
+                "Mode: all strategies — %d strategy(ies): %s",
+                len(strategies), strategy_list,
             )
+            # Chunk count across all complete strategies
+            all_strategy_chunk_count = sum(
+                sum(1 for s in cs if s in strategies)
+                for cs in encoded_chunks.values()
+            )
+            logger.info("  %d total chunk(s) to merge", all_strategy_chunk_count)
 
         # ------------------------------------------------------------------
         # Ensure output directory exists and clean up leftover .tmp files
@@ -336,7 +355,7 @@ def merge_final_video(
         if dry_run:
             for strategy in sorted(strategies):
                 safe = _strategy_safe_name(strategy)
-                output_file = output_dir / f"output_{safe}.mkv"
+                output_file = output_dir / f"{source_stem} {safe}.mkv"
                 if not output_file.exists():
                     logger.info("[DRY-RUN] Would merge: %s", _strategy_display_name(strategy))
             return MergeResult(
@@ -354,7 +373,7 @@ def merge_final_video(
 
             for strategy in strategies:
                 safe        = _strategy_safe_name(strategy)
-                output_file = output_dir / f"output_{safe}.mkv"
+                output_file = output_dir / f"{source_stem} {safe}.mkv"
                 sidecar     = _load_merge_sidecar(output_file)
                 if output_file.exists() and sidecar is not None:
                     existing_outputs[strategy] = output_file
@@ -434,7 +453,7 @@ def merge_final_video(
                         escaped  = str(abs_path).replace("'", "'\\''")
                         fh.write(f"file '{escaped}'\n")
 
-                output_file = output_dir / f"output_{safe}.mkv"
+                output_file = output_dir / f"{source_stem} {safe}.mkv"
 
                 concat_cmd: list[str | os.PathLike] = [
                     "ffmpeg",
@@ -500,13 +519,12 @@ def merge_final_video(
                         logger.info("  Measuring final quality metrics...")
                         try:
                             metrics_dict, targets_met, plot_path = _measure_quality(
-                                output_file=output_file,
+                                final_result=output_file,
                                 source_video=source_video,
                                 ref_crop=ref_crop,
                                 quality_targets=quality_targets,
                                 output_dir=output_dir,
-                                safe_strategy=safe,
-                                subsample_factor=subsample_factor,
+                                metrics_sampling=metrics_sampling,
                             )
                         except Exception as exc:
                             logger.warning("  Could not measure quality: %s", exc)

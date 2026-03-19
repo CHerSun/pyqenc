@@ -483,6 +483,17 @@ class ConfigManager:
             profiles       = profiles,
         )
 
+    def get_metrics_sampling(self) -> int:
+        """Return the metrics sampling factor from config.
+
+        Reads ``config["metrics"]["sampling"]`` with a fallback of ``10``
+        for backward compatibility with user configs that predate this setting.
+
+        Returns:
+            Metrics sampling factor (minimum 1, default 10).
+        """
+        return int(self._config.get("metrics", {}).get("sampling", 10))
+
     def get_stream_filter(self) -> StreamFilterConfig:
         """Parse and return the ``streams`` filtering configuration section.
 

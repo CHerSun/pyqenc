@@ -28,6 +28,7 @@ from pyqenc.quality import (
     QualityArtifacts,
     QualityEvaluation,
     _MetricStatistics,
+    normalize_metric,
     run_metric,
 )
 
@@ -332,8 +333,8 @@ DEFAULT_METRIC_STYLES: dict[MetricType, MetricVisualStyle] = {
         y_axis="right",
         linestyle="-",
         linewidth=_LINE_WIDTH_DEFAULT,
-        lossless_threshold=1.0,
-        lossless_label="1.0",
+        lossless_threshold=100.0,
+        lossless_label="100.0",
     ),
     MetricType.VMAF: MetricVisualStyle(
         label="VMAF",
@@ -356,8 +357,9 @@ def create_unified_plot(
     metrics:     dict[MetricType, MetricData],
     factor:      int,
     output_path: Path,
-    title:       str = "Video Quality Metrics Analysis",
+    title:       str                                  = "Video Quality Metrics Analysis",
     styles:      dict[MetricType, MetricVisualStyle] | None = None,
+    fps:         float | None                         = None,
 ) -> dict[MetricType, _MetricStatistics]:
     """Create a unified quality-metrics plot and save it to disk.
 
@@ -373,6 +375,10 @@ def create_unified_plot(
         title:       Plot title.
         styles:      Optional custom visual styles; falls back to
                      ``DEFAULT_METRIC_STYLES`` for any missing key.
+        fps:         Frames per second of the encoded video.  When provided,
+                     x-axis tick labels show ``HH:MM:SS`` on the top line and
+                     the adjusted frame number on the bottom line.  When
+                     ``None``, raw frame numbers are shown as before.
 
     Returns:
         Mapping of ``MetricType`` to full ``_MetricStatistics``.
@@ -448,7 +454,6 @@ def create_unified_plot(
         ax_right.grid(True, which="major", alpha=_GRID_ALPHA_MAJOR)
         ax_right.grid(True, which="minor", alpha=_GRID_ALPHA_MINOR)
 
-    ax_main.set_xlabel("Frame Number", fontsize=_FONT_AXIS_LABEL, fontweight="bold")
     ax_main.set_title(title, fontsize=_FONT_TITLE, fontweight="bold", pad=20)
     ax_main.tick_params(axis="x", labelsize=_FONT_AXIS_TICKS)
 
@@ -457,6 +462,24 @@ def create_unified_plot(
     ax_main.set_xlim(-x_pad, max_frame + x_pad)
     ax_main.xaxis.set_major_locator(ticker.MaxNLocator(nbins=_X_MAJOR_TICKS, integer=True))
     ax_main.xaxis.set_minor_locator(ticker.MaxNLocator(nbins=_X_MINOR_TICKS, integer=True))
+
+    if fps is not None and fps > 0:
+        ax_main.set_xlabel("Timestamp / Frame Number", fontsize=_FONT_AXIS_LABEL, fontweight="bold")
+
+        def _dual_label_formatter(frame_num: float, _pos: int | None = None) -> str:
+            """Format x-axis tick as 'HH:MM:SS\nframe N'."""
+            total_seconds = int(frame_num / fps)
+            hours         = total_seconds // 3600
+            minutes       = (total_seconds % 3600) // 60
+            seconds       = total_seconds % 60
+            timestamp     = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            return f"{timestamp}\n{int(frame_num)}"
+
+        ax_main.xaxis.set_major_formatter(ticker.FuncFormatter(_dual_label_formatter))
+        # Increase bottom margin so two-line labels don't get clipped
+        ax_main.tick_params(axis="x", labelsize=_FONT_AXIS_TICKS, pad=4)
+    else:
+        ax_main.set_xlabel("Frame Number", fontsize=_FONT_AXIS_LABEL, fontweight="bold")
 
     lines:  list[plt.Line2D] = []
     labels: list[str]        = []
@@ -474,8 +497,6 @@ def create_unified_plot(
             ax = ax_main
 
         plot_values = df[column].copy()
-        if metric_type == MetricType.SSIM:
-            plot_values = plot_values * 100
         plot_values = plot_values.clip(upper=100.0)
 
         n_points = len(plot_values)
@@ -542,9 +563,6 @@ def create_unified_plot(
             lossless_count = 0
 
         display_stats: dict[str, float] = dict(metric_stats)
-        if metric_type == MetricType.SSIM:
-            for key in ("min", "p50", "max", "std"):
-                display_stats[key] = display_stats[key] * 100
 
         max_label: str   = "Max"
         max_value: float = display_stats["max"]
@@ -588,11 +606,6 @@ def create_unified_plot(
         subplot_idx += 1
 
         stat_values = [metric_stats[k] for k in stat_keys]
-        if metric_type == MetricType.SSIM:
-            stat_values = [
-                v * 100 if not (np.isnan(v) or np.isinf(v)) else v
-                for v in stat_values
-            ]
 
         y_positions: np.ndarray                  = np.arange(len(bar_labels))
         base_rgb:    tuple[float, float, float]  = mcolors.to_rgb(style.color)
@@ -690,8 +703,6 @@ def _save_stats_file(
     """
     stats_path:    Path                  = metric_file.with_suffix(".stats")
     display_stats: dict[str, float]      = dict(stats)
-    if metric_type == MetricType.SSIM:
-        display_stats = {k: v * 100 for k, v in display_stats.items()}
 
     lines = [
         f"{metric_type.value.upper()} statistics",
@@ -710,6 +721,7 @@ def analyze_chunk_quality(
     output_path:   Path | None = None,
     title:         str | None  = None,
     generate_plot: bool        = True,
+    fps:           float | None = None,
 ) -> ChunkQualityStats:
     """Analyze video chunk quality from metric log files.
 
@@ -724,6 +736,9 @@ def analyze_chunk_quality(
         output_path:   Destination for the plot PNG.  Auto-derived when ``None``.
         title:         Plot title.  Auto-generated when ``None``.
         generate_plot: Whether to create and save the visualization.
+        fps:           Frames per second of the encoded video.  When provided,
+                       x-axis tick labels show ``HH:MM:SS`` on the top line and
+                       the adjusted frame number on the bottom line.
 
     Returns:
         ``ChunkQualityStats`` with ``min``, ``median``, ``max``, and ``std``
@@ -790,14 +805,22 @@ def analyze_chunk_quality(
             "At least one valid metric file (PSNR, SSIM, or VMAF) is required."
         )
 
+    # Normalize all stat values to 0–100 scale immediately after extraction (Req 5.1)
+    for metric_type, stats in result.items():
+        if stats is not None:
+            for stat_key in ("min", "median", "max", "std"):
+                raw = stats.get(stat_key)
+                if raw is not None:
+                    stats[stat_key] = normalize_metric(metric_type, raw)  # type: ignore[literal-required]
+
     # Single concise info summary
     parts = []
     for mt in [MetricType.VMAF, MetricType.PSNR, MetricType.SSIM]:
-        if mt in full_stats:
-            fs = full_stats[mt]
-            parts.append(f"{mt.value.upper()} min={fs['min']:.1f} med={fs['p50']:.1f}")
+        if mt in result and result[mt] is not None:
+            s = result[mt]
+            parts.append(f"{mt.value.upper()} min={s['min']:.1f} med={s['median']:.1f}")
     if parts:
-        _logger.debug("Metrics: %s", " | ".join(parts))
+        _logger.debug("Metrics (normalized): %s", " | ".join(parts))
 
     if generate_plot:
         if output_path is None:
@@ -811,6 +834,7 @@ def analyze_chunk_quality(
             factor=factor,
             output_path=output_path,
             title=title,
+            fps=fps,
         )
         _logger.debug("Plot saved to %s", output_path)
 
@@ -842,7 +866,7 @@ class QualityEvaluator:
         reference: Path,
         ref_crop: CropParams,
         output_prefix: str,
-        subsample_factor: int = 10,
+        metrics_sampling: int = 10,
         bar_advance: Callable[[float], None] | None = None,
         duration_seconds: float = 0.0,
     ) -> tuple[Path, Path, Path]:
@@ -850,9 +874,12 @@ class QualityEvaluator:
 
         ffmpeg is run in the encoded file's parent directory using a UUID-based
         temporary filename prefix so that no special characters appear in the
-        filter-graph string.  After all processes finish the temporary files are
-        moved to ``output_dir`` (derived from ``output_prefix``) with their
-        canonical names.
+        filter-graph string.  Each metric is written to a ``.tmp``-suffixed file
+        while ffmpeg is running; on success the file is atomically renamed to its
+        final canonical path derived from ``output_prefix``.
+
+        This ensures the standard ``.tmp`` cleanup routine removes any leftover
+        files from interrupted runs.
 
         When ``bar_advance`` is provided, each ffmpeg process reports progress
         via ``ProgressCallback`` which advances the bar based on ``out_time_seconds``.
@@ -863,7 +890,7 @@ class QualityEvaluator:
             ref_crop:         Crop parameters for the reference input
             output_prefix:    Full path prefix for the final metric files
                               (e.g. ``/work/encoded/slow_h265/chunk.000000-000195.``)
-            subsample_factor: Frame subsampling factor
+            metrics_sampling: Frame subsampling factor
             bar_advance:      Optional callable that advances the progress bar
                               by the given number of seconds.
             duration_seconds: Duration of the encoded clip in seconds; used to
@@ -872,13 +899,14 @@ class QualityEvaluator:
         Returns:
             Tuple of (psnr_log, ssim_log, vmaf_json) final paths
         """
-        # Use a UUID prefix so ffmpeg never sees special characters
-        tmp_prefix = uuid.uuid4().hex + "_"
+        # UUID prefix keeps special characters out of the ffmpeg filter graph;
+        # the .tmp extension ensures cleanup on interrupted runs.
+        uuid_hex = uuid.uuid4().hex
         cwd = encoded.parent
 
         _logger.debug(
             "Generating metrics for %s vs %s (tmp prefix: %s)",
-            encoded.name, reference.name, tmp_prefix,
+            encoded.name, reference.name, uuid_hex,
         )
 
         def _make_progress_callback(last_time: list[float]) -> Callable[[int, float], None] | None:
@@ -895,6 +923,10 @@ class QualityEvaluator:
 
             return _callback
 
+        # tmp_prefix used as output_prefix in run_metric; extension overridden to .tmp
+        # so ffmpeg writes e.g. <uuid>.psnr.tmp, <uuid>.ssim.tmp, <uuid>.vmaf.tmp
+        tmp_prefix = f"{uuid_hex}."
+
         async def _run_one(metric: MetricType) -> None:
             result = await run_metric(
                 metric=metric,
@@ -905,10 +937,11 @@ class QualityEvaluator:
                 duration=0,
                 width=0,
                 use_gpu=False,
-                subsample=subsample_factor,
+                subsample=metrics_sampling,
                 output_prefix=tmp_prefix,
                 cwd=cwd,
                 progress_callback=_make_progress_callback([0.0]),
+                output_extension=".tmp",
             )
             if not result.success:
                 _logger.warning(
@@ -918,22 +951,28 @@ class QualityEvaluator:
 
         await asyncio.gather(*[_run_one(metric) for metric in MetricType])
 
-        # Move temp files to their final locations
+        # Rename <uuid>.<metric>.tmp → final canonical path (single atomic rename per file)
         final_psnr = Path(f"{output_prefix}{MetricType.PSNR.value}.log")
         final_ssim = Path(f"{output_prefix}{MetricType.SSIM.value}.log")
         final_vmaf = Path(f"{output_prefix}{MetricType.VMAF.value}.json")
 
-        for tmp_name, final_path in [
-            (f"{tmp_prefix}{MetricType.PSNR.value}.log", final_psnr),
-            (f"{tmp_prefix}{MetricType.SSIM.value}.log", final_ssim),
-            (f"{tmp_prefix}{MetricType.VMAF.value}.json", final_vmaf),
+        for metric, final_path in [
+            (MetricType.PSNR, final_psnr),
+            (MetricType.SSIM, final_ssim),
+            (MetricType.VMAF, final_vmaf),
         ]:
-            tmp_path = cwd / tmp_name
+            tmp_path = cwd / f"{tmp_prefix}{metric.value}.tmp"
             if tmp_path.exists():
                 final_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp_path.replace(final_path)
+                try:
+                    tmp_path.replace(final_path)
+                except OSError as exc:
+                    _logger.warning(
+                        "Failed to rename metric tmp file %s → %s: %s",
+                        tmp_path, final_path, exc,
+                    )
             else:
-                _logger.warning("Expected metric file not found: %s", tmp_path)
+                _logger.warning("Expected metric tmp file not found: %s", tmp_path)
 
         return final_psnr, final_ssim, final_vmaf
 
@@ -976,10 +1015,12 @@ class QualityEvaluator:
         # Probe duration for progress bar total (3 metric passes)
         _NUM_METRIC_PASSES = 3
         duration_seconds: float | None = None
+        fps_value:        float | None = None
         try:
             from pyqenc.models import VideoMetadata
             vm = VideoMetadata(path=encoded)
             duration_seconds = vm.duration_seconds
+            fps_value        = vm.fps
         except Exception:
             pass
 
@@ -1021,7 +1062,8 @@ class QualityEvaluator:
             factor=subsample_factor,
             output_path=resolved_plot_path,
             title=f"Quality metrics for {encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")}",
-            generate_plot=True
+            generate_plot=True,
+            fps=fps_value,
         )
 
         # Collect artifacts

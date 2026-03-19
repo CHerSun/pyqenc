@@ -38,16 +38,16 @@ class StrategyTestResult:
     """Result of testing a strategy on test chunks.
 
     Attributes:
-        strategy: Strategy name
-        avg_file_size: Average file size across test chunks (bytes)
-        avg_crf: Average CRF value used
-        test_chunks: List of chunk IDs used for testing
-        all_passed: Whether all test chunks met quality targets
-        error: Error message if testing failed
+        strategy:        Strategy name
+        total_file_size: Total file size across all successful test chunks (bytes)
+        avg_crf:         Average CRF value used
+        test_chunks:     List of chunk IDs used for testing
+        all_passed:      Whether all test chunks met quality targets
+        error:           Error message if testing failed
     """
 
     strategy: str
-    avg_file_size: float = 0.0
+    total_file_size: float = 0.0
     avg_crf: float = 0.0
     test_chunks: list[str] = field(default_factory=list)
     all_passed: bool = False
@@ -257,8 +257,8 @@ async def _encode_strategy_chunks_parallel(
             _logger.error("  Chunk %s failed: %s", cr.chunk_id, err)
 
     if file_sizes and crfs:
-        result.avg_file_size = sum(file_sizes) / len(file_sizes)
-        result.avg_crf       = sum(crfs) / len(crfs)
+        result.total_file_size = sum(file_sizes)
+        result.avg_crf         = sum(crfs) / len(crfs)
 
     result.all_passed = all_passed and not errors
     if errors:
@@ -438,7 +438,7 @@ def find_optimal_strategy(
                 )
             )
 
-            total_size_mb = strategy_result.avg_file_size * len(test_chunks) / (1024 * 1024)
+            total_size_mb = strategy_result.total_file_size / (1024 * 1024)
             for line in fmt_strategy_result_block(
                 strategy=strategy,
                 avg_crf=strategy_result.avg_crf,
@@ -454,7 +454,7 @@ def find_optimal_strategy(
     # Select optimal strategy (smallest average file size among successful strategies)
     successful_strategies = {
         name: res for name, res in result.test_results.items()
-        if res.all_passed and res.avg_file_size > 0
+        if res.all_passed and res.total_file_size > 0
     }
 
     if not successful_strategies:
@@ -464,10 +464,10 @@ def find_optimal_strategy(
         result.error = error_msg
         return result
 
-    # Find strategy with smallest average file size
+    # Find strategy with smallest total file size
     optimal_strategy = min(
         successful_strategies.items(),
-        key=lambda item: item[1].avg_file_size
+        key=lambda item: item[1].total_file_size
     )
 
     result.optimal_strategy = optimal_strategy[0]

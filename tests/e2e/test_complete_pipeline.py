@@ -42,7 +42,7 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
 
@@ -63,7 +63,7 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
             crop_params=CropParams(top=100, bottom=100, left=0, right=0),
         )
@@ -85,7 +85,7 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
 
@@ -106,7 +106,7 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
 
@@ -131,7 +131,7 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
         orchestrator1 = PipelineOrchestrator(config1, _make_state_manager(config1))
@@ -146,7 +146,7 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=True,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
         orchestrator2 = PipelineOrchestrator(config2, _make_state_manager(config2))
@@ -166,7 +166,7 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
         orchestrator1 = PipelineOrchestrator(config1, _make_state_manager(config1))
@@ -181,7 +181,7 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
         orchestrator2 = PipelineOrchestrator(config2, _make_state_manager(config2))
@@ -201,7 +201,7 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
             crop_params=None,
         )
@@ -223,7 +223,7 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
             crop_params=CropParams(),
         )
@@ -250,7 +250,7 @@ class TestPipelineValidation:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
 
@@ -270,7 +270,7 @@ class TestPipelineValidation:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
 
