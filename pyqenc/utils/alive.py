@@ -1,75 +1,93 @@
 """Utility helpers for alive_progress bars."""
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from math import floor
+from enum import Enum
 
 from alive_progress import alive_bar
 
-from pyqenc.constants import PROGRESS_DURATION_UNIT, WARNING_SYMBOL
+from pyqenc.constants import FAILURE_SYMBOL_MINOR, SKIPPED_SYMBOL, SUCCESS_SYMBOL_MINOR
 
 
-def update_bar(bar: Callable[[float], None] | None, increment: float = 1.0, failed: int = 0) -> None:
-    """Advance a progress bar handle, optionally showing a failed-chunk warning.
+class AdvanceState(Enum):
+    """Outcome of a completed pipeline item reported to :func:`ProgressBar`."""
 
-    Args:
-        bar:       The advance callable yielded by ``duration_bar``, or ``None`` to no-op.
-        increment: Seconds (or fraction) to advance.  Pass ``0.0`` to update text only.
-        failed:    Number of failed chunks to display in the bar text.
-    """
-    if bar is not None:
-        bar.text = "" if failed <= 0 else f"{WARNING_SYMBOL} {failed} failed"  # type: ignore[attr-defined]
-        if increment != 0.0:
-            bar(increment)
+    SUCCESS = "success"
+    """The item was processed successfully."""
+    SKIPPED = "skipped"
+    """The item was skipped because its output already exists (reused artifact)."""
+    FAILED  = "failed"
+    """The item failed to process."""
 
 
 @contextmanager
-def duration_bar(
-    total_seconds: float,
+def ProgressBar(
+    total: int | float,
     title: str,
-    unit: str = PROGRESS_DURATION_UNIT,
-) -> Generator[Callable[[float], None], None, None]:
-    """Context manager that opens a duration-based ``alive_bar`` in manual mode.
+    show_counters: bool = True,
+) -> Generator[Callable[[int | float, AdvanceState], None], None, None]:
+    """Context manager that opens an ``alive_bar`` progress bar.
 
-    Yields an ``advance(seconds: float) -> None`` callable.  The bar fraction is
-    updated as ``min(1.0, cumulative_seconds / total_seconds)``.  On normal exit
-    the bar is set to ``1.0`` (complete).
+    Always uses manual mode (0.0–1.0 fraction, renders as %) when *total* > 0.
+    When *total* <= 0 opens an indeterminate spinner instead.
 
-    When ``total_seconds <= 0`` the bar opens as an indeterminate spinner and
-    ``advance`` becomes a no-op.
+    Yields an ``advance(increment, state)`` callable that callers invoke once
+    per completed item.  The bar fraction is computed from the caller's domain
+    units — seconds for duration-based phases, item count for count-based phases.
 
     Args:
-        total_seconds: Total video duration this bar represents (seconds).
+        total:         Total weight (seconds or item count).  ``0`` → indeterminate.
         title:         Bar title shown to the user.
-        unit:          Unit label appended to the throughput readout.
+        show_counters: When ``True`` (default) bar text shows
+                       ``✔ {success}  ⏭ {skipped}`` (plus ``✘ {failed}`` when
+                       failures exist).  When ``False`` bar text shows
+                       ``{cumulative:.1f} / {total:.1f}`` — useful for streaming
+                       sub-second progress feeds where item counters are noise.
     """
-    if total_seconds <= 0:
+    _remaining:  list[float] = [float(total)]
+    _cumulative: list[float] = [0.0]
+    _success:    list[int]   = [0]
+    _skipped:    list[int]   = [0]
+    _failed:     list[int]   = [0]
+    _original_total: float   = float(total)
+
+    def _text() -> str:
+        if show_counters:
+            base = f"{SUCCESS_SYMBOL_MINOR} {_success[0]}  {SKIPPED_SYMBOL} {_skipped[0]}"
+            return base if _failed[0] == 0 else f"{base}  {FAILURE_SYMBOL_MINOR} {_failed[0]}"
+        return f"{_cumulative[0]:.1f} / {_original_total:.1f}"
+
+    if total <= 0:
         # Indeterminate spinner — no fraction arithmetic possible.
-        with alive_bar(title=title, unit=unit) as _bar:
-            def _noop(_seconds: float) -> None:  # noqa: ANN001
-                pass
-            yield _noop
+        with alive_bar(title=title) as bar:
+            def advance(increment: int | float = 1, state: AdvanceState = AdvanceState.SUCCESS) -> None:  # noqa: E501
+                if state == AdvanceState.SUCCESS:
+                    _success[0] += 1
+                elif state == AdvanceState.SKIPPED:
+                    _skipped[0] += 1
+                else:
+                    _failed[0] += 1
+                bar.text = _text()  # type: ignore[attr-defined]
+
+            yield advance
         return
 
-    cumulative: list[float] = [0.0]
-    failed: list[int] = [0]
-
-    ## manual mode with 0.0-1.0 percentage. Looks bad - always shows % instead of numbers with units.
-    # with alive_bar(manual=True, title=title, unit=unit) as bar:
-    #     def advance(seconds: float) -> None:
-    #         cumulative[0] += seconds
-    #         bar(min(1.0, cumulative[0] / total_seconds))  # type: ignore[operator]
-    #
-    #     yield advance
-    #     bar(1.0)  # ensure bar reaches 100 % on normal exit
-    total_int = floor(total_seconds)
-    with alive_bar(total_int, title=title, unit=unit) as bar:
-        def advance(seconds: float, _failed: int = 0) -> None:
-            failed[0] += _failed
-            prev: int = floor(cumulative[0])
-            cumulative[0] += seconds
-            if failed[0]:
-                bar.text = f"{WARNING_SYMBOL} {failed[0]} failed"
-            bar(floor(cumulative[0]) - prev)
+    with alive_bar(manual=True, title=title) as bar:
+        def advance(increment: int | float = 1, state: AdvanceState = AdvanceState.SUCCESS) -> None:  # noqa: E501
+            if state == AdvanceState.SKIPPED:
+                _skipped[0] += 1
+                _remaining[0] -= increment
+                if _remaining[0] <= 0:
+                    bar(1.0)  # type: ignore[operator]
+                else:
+                    bar(min(1.0, _cumulative[0] / _remaining[0]))  # type: ignore[operator]
+            elif state == AdvanceState.FAILED:
+                _failed[0] += 1
+                # no fraction change, no total change
+            else:  # SUCCESS
+                _success[0] += 1
+                _cumulative[0] += increment
+                if _remaining[0] > 0:
+                    bar(min(1.0, _cumulative[0] / _remaining[0]))  # type: ignore[operator]
+            bar.text = _text()  # type: ignore[attr-defined]
 
         yield advance
-

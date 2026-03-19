@@ -11,10 +11,6 @@ TIMEOUT_SECONDS_MAX = 3600
 
 THRESHOLD_ATTEMPTS_WARNING = 10
 """Threshold for warning about excessive encoding attempts."""
-PROGRESS_CHUNK_UNIT = " chunks"
-"""Unit for progress bar when tracking chunk processing."""
-PROGRESS_DURATION_UNIT = " s"
-"""Unit for duration-based progress bars (seconds of video content)."""
 
 TEMP_SUFFIX = ".tmp"
 """A suffix to append to temporary files during processing. This helps avoid confusion with final output files and allows for easy cleanup of incomplete files."""
@@ -60,6 +56,8 @@ FAILURE_SYMBOL_MINOR = "✘"
 """Symbol to indicate failure of a minor step, such as an individual chunk attempt."""
 FAILURE_SYMBOL_MAJOR = "❌"
 """Symbol to indicate failure of a major step, such as an entire strategy or optimization phase."""
+SKIPPED_SYMBOL = "⏭"
+"""Symbol to indicate a skipped item (reused artifact) in progress bar text."""
 WARNING_SYMBOL = "⚠"
 """Symbol to indicate a warning condition, such as excessive encoding attempts or potential issues with disk space."""
 RANGE_SEPARATOR = "-"

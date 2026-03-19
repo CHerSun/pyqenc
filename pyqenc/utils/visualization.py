@@ -18,7 +18,7 @@ from typing import Callable, Literal, TypedDict
 
 import matplotlib
 from pyqenc.constants import TIME_SEPARATOR_MS, TIME_SEPARATOR_SAFE
-from pyqenc.utils.alive import duration_bar
+from pyqenc.utils.alive import ProgressBar
 from pyqenc.models import CropParams, QualityTarget
 from pyqenc.quality import (
     ChunkQualityStats,
@@ -1027,7 +1027,7 @@ class QualityEvaluator:
         bar_title = encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
 
         if show_progress:
-            with duration_bar(_NUM_METRIC_PASSES * (duration_seconds or 0.0), title=f"Metrics: {bar_title}") as advance:
+            with ProgressBar(_NUM_METRIC_PASSES * (duration_seconds or 0.0), title=f"Metrics: {bar_title}", show_counters=False) as advance:
                 psnr_log, ssim_log, vmaf_json = asyncio.run(
                     self._generate_metrics(
                         encoded,

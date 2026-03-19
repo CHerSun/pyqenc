@@ -36,7 +36,7 @@ from pyqenc.models import (
 )
 from pyqenc.quality import CRFHistory, adjust_crf
 from pyqenc.state import EncodingResultSidecar, MetricsSidecar
-from pyqenc.utils.alive import duration_bar, update_bar
+from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 from pyqenc.utils.log_format import (
     fmt_chunk,
@@ -985,7 +985,7 @@ async def _encode_chunks_parallel(
     force:          bool,
     initial_crf:    float = 20.0,
     phase_recovery: "PhaseRecovery | None" = None,
-    bar:            Callable[[float], None] | None = None,
+    bar:            Callable[[int | float, AdvanceState], None] | None = None,
 ) -> EncodingResult:
     """Encode chunks in parallel with semaphore control.
 
@@ -1000,8 +1000,9 @@ async def _encode_chunks_parallel(
         phase_recovery: Optional recovery state from ``recover_attempts``; when
                         provided, ``COMPLETE`` pairs are skipped and ``ARTIFACT_ONLY``
                         pairs resume from their recovered ``CRFHistory``.
-        bar:            Optional advance callable from ``duration_bar``; called with
-                        chunk duration in seconds on each chunk completion.
+        bar:            Optional advance callable from ``ProgressBar``; called with
+                        chunk duration in seconds and an ``AdvanceState`` on each
+                        chunk completion.
 
     Returns:
         EncodingResult with all encoding outcomes
@@ -1060,7 +1061,8 @@ async def _encode_chunks_parallel(
                     _logger.error("Reference chunk not found: %s", reference)
                     queue.mark_failed(chunk.chunk_id, strategy)
                     result.failed_chunks.append(chunk.chunk_id)
-                    update_bar(bar, increment=0.0)
+                    if bar is not None:
+                        bar(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.FAILED)
                     continue
 
                 # Inject recovered CRFHistory for ARTIFACT_ONLY pairs (Req 6.3)
@@ -1095,16 +1097,20 @@ async def _encode_chunks_parallel(
 
                     if chunk_result.reused:
                         result.reused_count += 1
+                        if bar is not None:
+                            bar(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.SKIPPED)
                     else:
                         result.encoded_count += 1
+                        if bar is not None:
+                            bar(chunk.end_timestamp - chunk.start_timestamp)
 
                     queue.mark_complete(chunk.chunk_id, strategy)
                 else:
                     queue.mark_failed(chunk.chunk_id, strategy)
                     result.failed_chunks.append(chunk.chunk_id)
                     counter_failed += 1
-
-                update_bar(bar, increment=chunk.end_timestamp - chunk.start_timestamp)
+                    if bar is not None:
+                        bar(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.FAILED)
 
 
     # Start worker tasks
@@ -1247,7 +1253,7 @@ def encode_all_chunks(
     # Run parallel encoding — COMPLETE pairs are skipped inside _encode_chunks_parallel
     _logger.info("Starting parallel encoding with %d workers", max_parallel)
     total_seconds = sum(c.end_timestamp - c.start_timestamp for c in chunks) * len(strategies)
-    with duration_bar(total_seconds, title="Encoding") as advance:
+    with ProgressBar(total_seconds, title="Encoding") as advance:
         result = asyncio.run(
             _encode_chunks_parallel(
                 encoder=encoder,

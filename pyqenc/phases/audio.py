@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from alive_progress import alive_bar, config_handler
+from alive_progress import config_handler
 
 from pyqenc.constants import (
     _NORMALISED_PREFIXES,
@@ -33,6 +33,7 @@ from pyqenc.constants import (
     AUDIO_CH_71,
     AUDIO_STEM_SEPARATOR,
 )
+from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg, run_ffmpeg_async
 
 config_handler.set_global(enrich_print=False) # type: ignore
@@ -811,31 +812,32 @@ class SynchronousRunner:
                 print(f"    [{task.strategy.strategy_short}]  {task.output.name}")
             return PlanExecutionResult(count_success, count_failed, count_skipped)
 
-        def _summary() -> str:
-            return f"✔ {count_success}  ✘ {count_failed}  ⏭ {count_skipped}"
-
         try:
-            with alive_bar(len(self.tasks), title="Audio Pipeline") as progress:
+            with ProgressBar(len(self.tasks), title="Audio Pipeline") as advance:
                 for task in self.tasks:
+                    if task.output.exists():
+                        count_skipped += 1
+                        logger.info("Reused (output exists): %s", task.output.name)
+                        advance(state=AdvanceState.SKIPPED)
+                        continue
+
                     if task.parent and task.parent.failed:
                         task.failed = True
-                        count_skipped += 1
+                        count_failed += 1
                         logger.warning("Skipped (parent failure): %s", task.source.name)
-                        progress.text = _summary()  # type: ignore[attr-defined]
-                        progress()                  # type: ignore[operator]
+                        advance(state=AdvanceState.FAILED)
                         continue
 
                     try:
                         task.strategy.execute(task.source, task.output, dry_run=False)
                         count_success += 1
                         logger.info("SUCCESS [%s] %s", task.strategy.name, task.output.name)
+                        advance()
                     except Exception as exc:
                         task.failed = True
                         count_failed += 1
                         logger.error("FAILURE [%s]: %s", task.strategy.name, str(exc)[:70])
-
-                    progress.text = _summary()  # type: ignore[attr-defined]
-                    progress()                  # type: ignore[operator]
+                        advance(state=AdvanceState.FAILED)
         finally:
             return PlanExecutionResult(count_success, count_failed, count_skipped)
 
@@ -857,7 +859,7 @@ class AsyncRunner:
         self._semaphore:  asyncio.Semaphore              = asyncio.Semaphore(max_parallel)
         self.tasks:       list[Task]                     = plan.tasks
         self.registry:    dict[Path, asyncio.Task[bool]] = {}
-        self._progress:   Callable[..., None] | None     = None
+        self._advance:    Callable[..., None] | None     = None
         self._started:    bool                           = False
 
     async def process(self, dry_run: bool = False) -> PlanExecutionResult:
@@ -865,15 +867,15 @@ class AsyncRunner:
         assert not self._started, "process() must be called only once"
         self._started = True
 
-        parent_tasks  = {t.parent for t in self.tasks if t.parent}
+        parent_tasks   = {t.parent for t in self.tasks if t.parent}
         terminal_tasks = set(self.tasks) - parent_tasks
         if not terminal_tasks:
             raise RuntimeError("Cyclic dependencies detected in plan.")
 
-        with alive_bar(len(self.tasks), title="Audio Pipeline") as progress:
-            self._progress = progress
+        with ProgressBar(len(self.tasks), title="Audio Pipeline") as advance:
+            self._advance = advance
             await asyncio.gather(*(self._get_or_execute(t, dry_run) for t in terminal_tasks))
-            self._progress = None
+            self._advance = None
 
         succeeded = sum(1 for t in self.tasks if not t.failed)
         failed    = sum(1 for t in self.tasks if t.failed)
@@ -883,28 +885,37 @@ class AsyncRunner:
         key = task.output
         if key not in self.registry:
             coro = self._run_task(task, dry_run)
-            t    = asyncio.create_task(coro)
-            if self._progress:
-                t.add_done_callback(lambda _fut, p=self._progress: p())
-            self.registry[key] = t
+            self.registry[key] = asyncio.create_task(coro)
         return await self.registry[key]
 
     async def _run_task(self, task: Task, dry_run: bool) -> bool:
+        if task.output.exists():
+            logger.info("Reused (output exists): %s", task.output.name)
+            if self._advance:
+                self._advance(state=AdvanceState.SKIPPED)
+            return True
+
         if task.parent:
             parent_ok = await self._get_or_execute(task.parent, dry_run)
             if not parent_ok:
                 task.failed = True
                 logger.warning("Skipped (parent failure): %s", task.source.name)
+                if self._advance:
+                    self._advance(state=AdvanceState.FAILED)
                 return False
 
         async with self._semaphore:
             try:
                 await task.strategy.execute_async(task.source, task.output, dry_run)
                 logger.info("SUCCESS [%s] %s", task.strategy.name, task.output.name)
+                if self._advance:
+                    self._advance()
                 return True
             except Exception as exc:
                 task.failed = True
                 logger.error("FAILURE [%s]: %s", task.strategy.name, str(exc)[:70])
+                if self._advance:
+                    self._advance(state=AdvanceState.FAILED)
                 return False
 
 

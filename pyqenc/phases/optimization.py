@@ -22,7 +22,7 @@ from pyqenc.phases.encoding import (
     ChunkEncodingResult,
     _encode_chunk_async,
 )
-from pyqenc.utils.alive import duration_bar, update_bar
+from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.log_format import fmt_optimization_summary, fmt_strategy_result_block
 from pyqenc.utils.visualization import QualityEvaluator
 
@@ -132,7 +132,7 @@ async def _encode_strategy_chunks_parallel(
     quality_targets: list[QualityTarget],
     max_parallel:    int,
     phase_recovery:  "PhaseRecovery | None" = None,
-    bar:             Callable[[float], None] | None = None,
+    bar:             Callable[[int | float, AdvanceState], None] | None = None,
 ) -> StrategyTestResult:
     """Encode all test chunks for a single strategy in parallel.
 
@@ -149,7 +149,7 @@ async def _encode_strategy_chunks_parallel(
         max_parallel:    Maximum concurrent encoding workers.
         phase_recovery:  Optional recovery state; ``COMPLETE`` pairs are skipped
                          and ``ARTIFACT_ONLY`` pairs resume from recovered history.
-        bar:             Optional advance callable yielded by ``duration_bar``;
+        bar:             Optional advance callable yielded by ``ProgressBar``;
                          advanced by chunk duration on each completion.
 
     Returns:
@@ -182,7 +182,8 @@ async def _encode_strategy_chunks_parallel(
                         file_sizes.append(ar.path.stat().st_size)
                         crfs.append(ar.crf)
                         break
-                update_bar(bar, increment=chunk.end_timestamp - chunk.start_timestamp)
+                if bar is not None:
+                    bar(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.SKIPPED)
                 return ChunkEncodingResult(
                     chunk_id=chunk.chunk_id,
                     strategy=strategy,
@@ -195,7 +196,8 @@ async def _encode_strategy_chunks_parallel(
             msg = f"Reference chunk not found: {reference_path}"
             _logger.error(msg)
             errors.append(msg)
-            update_bar(bar, increment=chunk.end_timestamp - chunk.start_timestamp, failed=len(errors))
+            if bar is not None:
+                bar(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.FAILED)
             return ChunkEncodingResult(
                 chunk_id=chunk.chunk_id,
                 strategy=strategy,
@@ -228,9 +230,11 @@ async def _encode_strategy_chunks_parallel(
                 initial_history=recovered_history,
             )
             if bar is not None:
-                if not chunk_result.success:
+                if chunk_result.success:
+                    bar(chunk.end_timestamp - chunk.start_timestamp)
+                else:
                     errors.append(chunk_result.error or f"Unknown failure for chunk {chunk_result.chunk_id}")
-            update_bar(bar, increment=chunk.end_timestamp - chunk.start_timestamp, failed=len(errors))
+                    bar(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.FAILED)
             return chunk_result
 
     chunk_results = await asyncio.gather(*(_encode_one(c) for c in test_chunks))
@@ -421,7 +425,7 @@ def find_optimal_strategy(
     result = OptimizationResult()
 
     total_seconds = sum(c.end_timestamp - c.start_timestamp for c in test_chunks) * len(strategies)
-    with duration_bar(total_seconds, title="Optimization") as advance:
+    with ProgressBar(total_seconds, title="Optimization") as advance:
         for strategy in strategies:
             _logger.info("Testing strategy: %s", strategy)
 

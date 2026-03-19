@@ -35,7 +35,7 @@ from pyqenc.constants import (
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
-from pyqenc.utils.alive import duration_bar
+from pyqenc.utils.alive import ProgressBar
 from pyqenc.models import (
     ChunkMetadata,
     ChunkingMode,
@@ -233,7 +233,7 @@ def split_chunks(
     }
 
     total_seconds = video_meta.duration_seconds or 0.0
-    with duration_bar(total_seconds, title="Chunking") as advance:
+    with ProgressBar(total_seconds, title="Chunking") as advance:
         for idx, start_boundary in enumerate(boundaries):
             end_ts = (
                 boundaries[idx + 1].timestamp_seconds
