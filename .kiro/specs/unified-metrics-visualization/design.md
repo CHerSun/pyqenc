@@ -2,6 +2,9 @@
 
 <!-- markdownlint-disable MD024 -->
 
+- Created: 2026-03-15
+- Completed: 2026-03-15
+
 ## Overview
 
 This design refactors the existing `psnr.py` module into a unified metrics visualization system that supports PSNR, SSIM, and VMAF. The architecture emphasizes code reuse through abstraction of parsing, statistics computation, and visualization logic. The system provides both a command-line interface and a programmatic API for integration into the encoding pipeline.

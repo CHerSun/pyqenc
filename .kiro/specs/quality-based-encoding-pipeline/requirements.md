@@ -2,6 +2,9 @@
 
 <!-- markdownlint-disable MD024 -->
 
+- Created: 2026-03-15
+- Completed: 2026-03-15
+
 ## Introduction
 
 This document specifies requirements for a quality-based video encoding pipeline that orchestrates extraction, chunking, encoding, quality measurement, audio processing, and merging of h.265 video files. The pipeline aims to achieve user-specified quality targets while optimizing file size, with support for both automated end-to-end processing and manual phase-by-phase execution.

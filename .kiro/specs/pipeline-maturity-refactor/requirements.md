@@ -2,6 +2,9 @@
 
 <!-- markdownlint-disable MD024 -->
 
+- Created: 2026-03-15
+- Completed: 2026-03-15
+
 ## Introduction
 
 This document specifies requirements for maturing the pyqenc pipeline codebase. The work covers four interconnected areas: (1) consolidating all video metadata into proper typed classes and eliminating bare `Path` usage for intermediate data; (2) making `ProgressTracker` accept typed status updates and ensuring it is flushed on crash or external kill; (3) splitting scene detection into two independently resumable sub-phases; (4) fixing scene detection correctness issues; and (5) removing the legacy module tree entirely, integrating any still-needed logic into the main codebase.

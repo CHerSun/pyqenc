@@ -5,18 +5,17 @@ This module provides quality evaluation against targets and CRF adjustment
 algorithms for iterative encoding optimization.
 """
 
-import asyncio
 import logging
-from asyncio.subprocess import Process
 from dataclasses import dataclass, field
 from enum import Enum
 from os import PathLike
 from pathlib import Path
-from typing import Any, Coroutine, TypedDict, assert_never
+from typing import TypedDict, assert_never
 
 import pandas as pd
 
 from pyqenc.constants import CRF_GRANULARITY, PADDING_CRF
+from pyqenc.utils.ffmpeg_runner import FFmpegRunResult, ProgressCallback, run_ffmpeg_async
 
 from .models import CropParams, QualityTarget
 
@@ -69,43 +68,50 @@ class MetricData:
     column: str
 
 
-def run_metric(
-    metric:          MetricType,
-    distorted:       Path,
-    reference:       Path,
-    crop_distorted:  CropParams,
-    crop_reference:  CropParams,
-    duration:        int,
-    width:           int,
-    use_gpu:         bool,
-    subsample:       int,
-    output_prefix:   str,
-    cwd:             Path | None = None,
-) -> Coroutine[Any, Any, Process]:
-    """Build and launch a single metric calculation subprocess.
+async def run_metric(
+    metric:            MetricType,
+    distorted:         Path,
+    reference:         Path,
+    crop_distorted:    CropParams,
+    crop_reference:    CropParams,
+    duration:          int,
+    width:             int,
+    use_gpu:           bool,
+    subsample:         int,
+    output_prefix:     str,
+    cwd:               Path | None             = None,
+    progress_callback: ProgressCallback | None = None,
+    output_extension:  str | None              = None,
+) -> FFmpegRunResult:
+    """Build and run a single metric calculation subprocess via FFmpegRunner.
 
     ffmpeg is run with ``cwd`` set to the distorted file's directory (or an
     explicit override) so that ``output_prefix`` can be a plain UUID-based
-    filename with no path separators or special characters.  The caller is
-    responsible for moving the resulting files to their final location.
+    filename with no path separators or special characters.
 
     Args:
-        metric:         Metric to compute.
-        distorted:      Path to the distorted (encoded) video.
-        reference:      Path to the reference video.
-        crop_distorted: Crop parameters for the distorted input.
-        crop_reference: Crop parameters for the reference input.
-        duration:       Limit comparison to this many seconds (0 = full video).
-        width:          Scale both inputs to this width (0 = no scaling).
-        use_gpu:        Use GPU-accelerated VMAF (``libvmaf_cuda``).
-        subsample:      Frame subsampling factor (1 = every frame).
-        output_prefix:  Simple filename prefix (no path separators) for metric
-                        output files written relative to ``cwd``.
-        cwd:            Working directory for the ffmpeg process.  Defaults to
-                        the parent directory of ``distorted``.
+        metric:            Metric to compute.
+        distorted:         Path to the distorted (encoded) video.
+        reference:         Path to the reference video.
+        crop_distorted:    Crop parameters for the distorted input.
+        crop_reference:    Crop parameters for the reference input.
+        duration:          Limit comparison to this many seconds (0 = full video).
+        width:             Scale both inputs to this width (0 = no scaling).
+        use_gpu:           Use GPU-accelerated VMAF (``libvmaf_cuda``).
+        subsample:         Frame subsampling factor (1 = every frame).
+        output_prefix:     Simple filename prefix (no path separators) for metric
+                           output files written relative to ``cwd``.
+        cwd:               Working directory for the ffmpeg process.  Defaults to
+                           the parent directory of ``distorted``.
+        progress_callback: Optional ``(frame, out_time_seconds)`` callable
+                           invoked once per completed progress block.
+        output_extension:  Override the default file extension for the metric
+                           output file (e.g. ``".tmp"``).  When ``None``, the
+                           default extension for each metric is used (``.log``
+                           for PSNR/SSIM, ``.json`` for VMAF).
 
     Returns:
-        Coroutine that resolves to the launched ``asyncio.subprocess.Process``.
+        ``FFmpegRunResult`` with returncode, success, stderr_lines, and frame_count.
     """
     if cwd is None:
         cwd = distorted.parent
@@ -138,13 +144,16 @@ def run_metric(
         options: str = "" if use_gpu else "n_threads=4:"
         if subsample > 1:
             options += f"n_subsample={subsample}:"
+        vmaf_ext = output_extension if output_extension is not None else ".json"
         filter_metric = (
-            f"{lib}={options}log_path={output_prefix}{metric.value}.json:log_fmt=json"
+            f"{lib}={options}log_path={output_prefix}{metric.value}{vmaf_ext}:log_fmt=json"
         )
     elif metric == MetricType.SSIM:
-        filter_metric = f"ssim=stats_file={output_prefix}{metric.value}.log"
+        ssim_ext = output_extension if output_extension is not None else ".log"
+        filter_metric = f"ssim=stats_file={output_prefix}{metric.value}{ssim_ext}"
     elif metric == MetricType.PSNR:
-        filter_metric = f"psnr=stats_file={output_prefix}{metric.value}.log"
+        psnr_ext = output_extension if output_extension is not None else ".log"
+        filter_metric = f"psnr=stats_file={output_prefix}{metric.value}{psnr_ext}"
     else:
         assert_never(metric)
 
@@ -163,12 +172,7 @@ def run_metric(
     cmd.extend(["-filter_complex", filter_start + filter_metric])
     cmd.extend(["-f", "null", "-"])
 
-    return asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=str(cwd),
-    )
+    return await run_ffmpeg_async(cmd, output_file=None, progress_callback=progress_callback, video_meta=None, cwd=cwd)
 
 
 @dataclass
@@ -280,17 +284,23 @@ class CRFHistory:
         return (too_low_crf, too_high_crf)
 
 def normalize_metric(metric_type: MetricType, value: float) -> float:
-    """Normalize measured metric values to a consistent scale for CRF adjustment.
+    """Normalize a raw metric value to the 0–100 scale.
 
-    This allows the CRF adjustment algorithm to treat all metrics on a similar
-    scale when calculating proportional adjustments.
+    Applies the canonical normalization for each metric type:
+    - SSIM: multiply by 100 (raw 0–1 → 0–100)
+    - PSNR: cap at 100.0 (unbounded dB → 0–100)
+    - VMAF: unchanged (already 0–100)
+
+    After normalization is applied at the parsing boundary (in
+    ``analyze_chunk_quality``), all downstream code works with values already
+    on the 0–100 scale and should NOT call this function again.
 
     Args:
         metric_type: Type of the metric (VMAF, SSIM, PSNR).
         value: The raw metric value to normalize.
 
     Returns:
-        The normalized metric value.
+        The normalized metric value on the 0–100 scale.
     """
     if metric_type == MetricType.SSIM:
         return value * 100
@@ -306,18 +316,20 @@ def normalize_metric_deficit(
     actual:      float,
     target:      float,
 ) -> float:
-    """Normalize quality deficit to 0-100 scale for consistent CRF adjustment.
+    """Compute quality deficit on the 0–100 scale for consistent CRF adjustment.
+
+    Both ``actual`` and ``target`` must already be on the 0–100 scale
+    (i.e. values returned by ``analyze_chunk_quality`` or ``normalize_metric``).
 
     Args:
-        metric_type: Metric type enum value.
-        actual:      Actual measured value.
-        target:      Target value.
+        metric_type: Metric type enum value (unused; kept for API compatibility).
+        actual:      Actual measured value, already normalized to 0–100.
+        target:      Target value on the 0–100 scale.
 
     Returns:
-        Normalized deficit — positive when quality exceeds target, negative
-        when below.  Magnitude indicates distance from target on a 0-100 scale.
+        Deficit — positive when quality exceeds target, negative when below.
     """
-    return normalize_metric(metric_type, actual) - target
+    return actual - target
 
 def adjust_crf(
     current_crf:     float,
@@ -413,18 +425,9 @@ def adjust_crf(
             return None
 
         metric_type = MetricType(worst_target.metric)
-        if metric_type == MetricType.SSIM:
-            actual_pct = worst_actual * 100
-            target_pct = worst_target.value * 100
-            max_metric = 100.0
-        elif metric_type == MetricType.PSNR:
-            actual_pct = worst_actual if not (worst_actual == float("inf")) else 60.0
-            target_pct = worst_target.value
-            max_metric = 60.0
-        else:
-            actual_pct = worst_actual
-            target_pct = worst_target.value
-            max_metric = 100.0
+        actual_pct = worst_actual if not (metric_type == MetricType.PSNR and worst_actual == float("inf")) else 60.0
+        target_pct = worst_target.value
+        max_metric = 100.0
 
         headroom = max_metric - actual_pct
         if headroom > 0:

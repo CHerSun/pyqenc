@@ -8,6 +8,7 @@ All models use Pydantic BaseModel for validation and serialisation.
 
 import json
 import logging
+import os
 import re
 import subprocess
 from enum import Enum
@@ -64,33 +65,21 @@ def _run_ffmpeg_null(path: Path) -> tuple[int | None, list[str]]:
 
     Returns ``(None, stderr_lines)`` on failure.
     """
-    cmd = [
+    from pyqenc.utils.ffmpeg_runner import (
+        run_ffmpeg,  # deferred to avoid circular import
+    )
+
+    cmd: list[str | os.PathLike] = [
         "ffmpeg",
-        "-hide_banner",
-        "-nostats",
-        "-i", str(path),
+        "-i",   path,
         "-map", "0:v:0",
-        "-c", "copy",
-        "-f", "null",
+        "-c",   "copy",
+        "-f",   "null",
         "-",
     ]
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=600,
-        )
-        stderr_lines = result.stderr.splitlines()
-        # Parse frame count from last "frame=N" in stderr
-        frame_count: int | None = None
-        for line in reversed(stderr_lines):
-            m = re.search(r"frame=\s*(\d+)", line)
-            if m:
-                frame_count = int(m.group(1))
-                break
-        return frame_count, stderr_lines
+        result = run_ffmpeg(cmd, output_file=None)
+        return result.frame_count, result.stderr_lines
     except Exception:
         return None, []
 
@@ -112,17 +101,24 @@ class ChunkingMode(Enum):
     REMUX    = "remux"
 
 
-class PhaseStatus(Enum):
-    """Status of a pipeline phase."""
+class PhaseOutcome(Enum):
+    """Outcome of a completed pipeline phase execution.
 
-    NOT_STARTED = "not_started"
-    IN_PROGRESS  = "in_progress"
-    COMPLETED    = "completed"
-    FAILED       = "failed"
+    Attributes:
+        COMPLETED: Phase did real work and succeeded.
+        REUSED:    All artifacts existed; no work performed (valid in both modes).
+        DRY_RUN:   Dry-run mode; work would be needed; pipeline stops here.
+        FAILED:    Phase failed (``error`` field populated).
+    """
+
+    COMPLETED = "completed"
+    REUSED    = "reused"
+    DRY_RUN   = "dry_run"
+    FAILED    = "failed"
 
 
 # ---------------------------------------------------------------------------
-# Scene / phase metadata helpers
+# Scene boundary
 # ---------------------------------------------------------------------------
 
 class SceneBoundary(BaseModel):
@@ -135,23 +131,6 @@ class SceneBoundary(BaseModel):
 
     frame:             int
     timestamp_seconds: float
-
-
-class PhaseMetadata(BaseModel):
-    """Typed metadata carried by a PhaseState or PhaseUpdate.
-
-    Attributes:
-        crop_params:       Serialised crop string for the extraction phase.
-        scene_boundaries:  List of detected scene boundaries for the chunking phase.
-        optimal_strategy:  Optimal encoding strategy selected during optimization phase.
-        test_chunk_ids:    Chunk IDs selected for optimization testing; persisted so
-                           the same representative sample is reused across restarts.
-    """
-
-    crop_params:      str | None              = None
-    scene_boundaries: list[SceneBoundary]     = Field(default_factory=list)
-    optimal_strategy: str | None              = None
-    test_chunk_ids:   list[str]               = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -267,101 +246,6 @@ class StrategyConfig(BaseModel):
         ]
 
 
-# ---------------------------------------------------------------------------
-# Attempt / strategy / chunk state
-# ---------------------------------------------------------------------------
-
-class AttemptInfo(BaseModel):
-    """Information about a single encoding attempt.
-
-    Attributes:
-        attempt_number: Sequential attempt number.
-        crf:            CRF value used for this attempt.
-        metrics:        Measured quality metrics (e.g., ``{'vmaf_min': 95.3}``).
-        success:        Whether this attempt met quality targets.
-        file_path:      Path to encoded file (if successful).
-        file_size:      Size of encoded file in bytes (if successful).
-    """
-
-    attempt_number: int
-    crf:            float
-    metrics:        dict[str, float]
-    success:        bool
-    file_path:      Path | None = None
-    file_size:      int  | None = None
-
-
-class StrategyState(BaseModel):
-    """State of chunk encoding with a specific strategy.
-
-    Attributes:
-        status:    Current status of this strategy.
-        attempts:  List of encoding attempts.
-        final_crf: Final successful CRF value (if completed).
-    """
-
-    status:    PhaseStatus
-    attempts:  list[AttemptInfo] = Field(default_factory=list)
-    final_crf: float | None      = None
-
-
-class ChunkState(BaseModel):
-    """State of a single chunk across strategies.
-
-    Attributes:
-        chunk_id:   Unique chunk identifier.
-        strategies: State for each strategy applied to this chunk.
-    """
-
-    chunk_id:   str
-    strategies: dict[str, StrategyState] = Field(default_factory=dict)
-
-
-class PhaseState(BaseModel):
-    """State of a single pipeline phase.
-
-    Attributes:
-        status:    Current phase status.
-        timestamp: ISO timestamp of last update.
-        metadata:  Typed phase-specific metadata.
-    """
-
-    status:    PhaseStatus
-    timestamp: str | None         = None
-    metadata:  PhaseMetadata | None = None
-
-
-# ---------------------------------------------------------------------------
-# Typed update objects
-# ---------------------------------------------------------------------------
-
-class PhaseUpdate(BaseModel):
-    """Self-describing update for a pipeline phase.
-
-    Attributes:
-        phase:    Phase name.
-        status:   New phase status.
-        metadata: Optional typed phase metadata.
-    """
-
-    phase:    str
-    status:   PhaseStatus
-    metadata: PhaseMetadata | None = None
-
-
-class ChunkUpdate(BaseModel):
-    """Self-describing update for a chunk encoding attempt.
-
-    Attributes:
-        chunk_id: Chunk identifier.
-        strategy: Strategy name.
-        attempt:  Attempt information.
-    """
-
-    chunk_id: str
-    strategy: str
-    attempt:  AttemptInfo
-
 
 # ---------------------------------------------------------------------------
 # Video metadata — lazy-loading Pydantic model
@@ -390,15 +274,12 @@ class VideoMetadata(BaseModel):
     values.
 
     Attributes:
-        path:        Path to the video file.
-        start_frame: Starting frame offset within the source video (0 for
-                     source files; chunk offset for chunks).
+        path: Path to the video file.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    path:        Path
-    start_frame: int = 0
+    path: Path
 
     # Backing fields — populated lazily or via populate_from_* helpers.
     _duration_seconds: float | None = PrivateAttr(default=None)
@@ -593,12 +474,24 @@ class VideoMetadata(BaseModel):
 
             Duration: 01:30:00.04, start: 0.000000, bitrate: ...
             Stream #0:0: Video: ..., 1920x1080, 24 fps, ...
+            frame=  196 fps= 66 q=-0.0 Lsize= ...
 
         Only fills fields that are currently ``None``.
 
         Args:
             stderr_lines: Lines from ffmpeg stderr.
         """
+        # Parse frame count from the last "frame=N" progress line (reverse scan).
+        if self._frame_count is None:
+            for line in reversed(stderr_lines):
+                m = re.search(r"frame=\s*(\d+)", line)
+                if m:
+                    try:
+                        self._frame_count = int(m.group(1))
+                    except (ValueError, TypeError):
+                        pass
+                    break
+
         for line in stderr_lines:
             # Duration line: "  Duration: HH:MM:SS.ss, ..."
             if self._duration_seconds is None:
@@ -638,76 +531,115 @@ class VideoMetadata(BaseModel):
     # ------------------------------------------------------------------
 
     def model_dump_full(self) -> dict:
-        """Serialise including cached private fields for round-trip persistence."""
+        """Serialize including cached private fields for round-trip persistence."""
         base = self.model_dump()
-        base["_duration_seconds"] = self._duration_seconds
-        base["_frame_count"]      = self._frame_count
-        base["_fps"]              = self._fps
-        base["_resolution"]       = self._resolution
-        base["_pix_fmt"]          = self._pix_fmt
-        base["_file_size_bytes"]  = self._file_size_bytes
+
+        # We do not serialize properties, we serialize backing private fields. This:
+        #  - allows not to trigger lazy-loading properties
+        #  - allows to omit None fields.
+        for key, value in [
+            ("duration_seconds", self._duration_seconds),
+            ("frame_count",      self._frame_count),
+            ("fps",              self._fps),
+            ("resolution",       self._resolution),
+            ("pix_fmt",          self._pix_fmt),
+            ("file_size_bytes",  self._file_size_bytes),
+        ]:
+            if value is not None:
+                base[key] = value
         return base
 
     @classmethod
     def model_validate_full(cls, data: dict) -> "VideoMetadata":
         """Restore a ``VideoMetadata`` from a ``model_dump_full()`` dict."""
         instance = cls.model_validate(data)
-        instance._duration_seconds = data.get("_duration_seconds")
-        instance._frame_count      = data.get("_frame_count")
-        instance._fps              = data.get("_fps")
-        instance._resolution       = data.get("_resolution")
-        instance._pix_fmt          = data.get("_pix_fmt")
-        instance._file_size_bytes  = data.get("_file_size_bytes")
+        # Manual private fields deserialization override:
+        #  - allows not to trigger lazy-loading properties, while properly restoring the state.
+        instance._duration_seconds = data.get("duration_seconds")
+        instance._frame_count      = data.get("frame_count")
+        instance._fps              = data.get("fps")
+        instance._resolution       = data.get("resolution")
+        instance._pix_fmt          = data.get("pix_fmt")
+        instance._file_size_bytes  = data.get("file_size_bytes")
         return instance
 
 
-class ChunkVideoMetadata(VideoMetadata):
-    """VideoMetadata for a video chunk, adding a stable frame-range identifier.
+class ChunkMetadata(VideoMetadata):
+    """VideoMetadata for a video chunk, adding timestamp-based identification.
 
-    The ``chunk_id`` is derived from the chunk file stem using the
-    frame-range naming convention (e.g. ``'chunk.000000-000319'``).
+    The ``chunk_id`` is derived from the timestamp range using
+    ``_chunk_name_duration(start_timestamp, end_timestamp)``.
 
     Attributes:
-        chunk_id: Stable identifier derived from the frame-range file name.
+        chunk_id:        Stable identifier derived from the timestamp range.
+        start_timestamp: Start timestamp of the chunk in seconds.
+        end_timestamp:   End timestamp of the chunk in seconds.
     """
 
-    chunk_id: str
+    chunk_id:        str
+    start_timestamp: float
+    end_timestamp:   float
 
     @classmethod
-    def model_validate_full(cls, data: dict) -> "ChunkVideoMetadata":  # type: ignore[override]
-        """Restore a ``ChunkVideoMetadata`` from a ``model_dump_full()`` dict."""
+    def model_validate_full(cls, data: dict) -> "ChunkMetadata":  # type: ignore[override]
+        """Restore a ``ChunkMetadata`` from a ``model_dump_full()`` dict."""
         instance = cls.model_validate(data)
-        instance._duration_seconds = data.get("_duration_seconds")
-        instance._frame_count      = data.get("_frame_count")
-        instance._fps              = data.get("_fps")
-        instance._resolution       = data.get("_resolution")
-        instance._pix_fmt          = data.get("_pix_fmt")
-        instance._file_size_bytes  = data.get("_file_size_bytes")
+        instance._duration_seconds = data.get("duration_seconds")
+        instance._frame_count      = data.get("frame_count")
+        instance._fps              = data.get("fps")
+        instance._resolution       = data.get("resolution")
+        instance._pix_fmt          = data.get("pix_fmt")
+        instance._file_size_bytes  = data.get("file_size_bytes")
         return instance
 
 
 # ---------------------------------------------------------------------------
-# Pipeline state
+# Audio / attempt metadata
 # ---------------------------------------------------------------------------
 
-class PipelineState(BaseModel):
-    """Complete state of pipeline execution.
+class AudioMetadata(BaseModel):
+    """Metadata about an extracted audio track.
 
     Attributes:
-        version:         State format version.
-        source_video:    Metadata about the source video.
-        current_phase:   Name of the currently active phase.
-        phases:          State of each named phase.
-        chunks_metadata: Metadata for each chunk keyed by chunk_id.
-        chunks:          Encoding state of each chunk.
+        path:             Path to the extracted audio file.
+        codec:            Audio codec name (e.g. ``'aac'``, ``'ac3'``).
+        channels:         Number of audio channels.
+        language:         Language tag (e.g. ``'eng'``, ``'rus'``).
+        title:            Descriptive title from track metadata (e.g. ``'Surround 5.1'``).
+        duration_seconds: Duration of the audio track in seconds.
+        start_timestamp:  Delay relative to video in seconds (e.g. ``0.007`` for 7 ms).
     """
 
-    version:         str
-    source_video:    VideoMetadata
-    current_phase:   str
-    phases:          dict[str, PhaseState]              = Field(default_factory=dict)
-    chunks_metadata: dict[str, ChunkVideoMetadata]      = Field(default_factory=dict)
-    chunks:          dict[str, ChunkState]              = Field(default_factory=dict)
+    path:             Path
+    codec:            str   | None = None
+    channels:         int   | None = None
+    language:         str   | None = None
+    title:            str   | None = None
+    duration_seconds: float | None = None
+    start_timestamp:  float | None = None
+
+
+class AttemptMetadata(BaseModel):
+    """Metadata about a completed encoded chunk attempt artifact on disk.
+
+    All fields are recoverable from the filename and filesystem alone —
+    no progress tracker lookup is required.
+
+    Attributes:
+        path:            Path to the encoded attempt file.
+        chunk_id:        Chunk identifier (parsed from filename stem).
+        strategy:        Encoding strategy name (inferred from parent directory).
+        crf:             CRF value used for this attempt.
+        resolution:      Resolution string (e.g. ``'1920x800'``).
+        file_size_bytes: File size in bytes.
+    """
+
+    path:            Path
+    chunk_id:        str
+    strategy:        str
+    crf:             float
+    resolution:      str
+    file_size_bytes: int
 
 
 # ---------------------------------------------------------------------------
@@ -797,35 +729,46 @@ class PipelineConfig(BaseModel):
     """Configuration for complete pipeline execution.
 
     Attributes:
-        source_video:     Path to source video file.
-        work_dir:         Working directory for intermediate files.
-        quality_targets:  List of quality targets to meet.
-        strategies:       List of encoding strategies to use.
-        optimize:         Whether to search for optimal strategy.
-        all_strategies:   Whether to produce output for all strategies.
-        max_parallel:     Maximum concurrent encoding processes.
-        subsample_factor: Frame subsampling for metric calculation.
-        log_level:        Logging level (debug, info, warning, critical).
-        crop_params:      Manual crop parameters (``None`` for auto-detect).
-        video_filter:     Regex pattern to filter video streams.
-        audio_filter:     Regex pattern to filter audio streams.
-        keep_all:         Whether to keep all intermediate files.
-        chunking_mode:    Chunking strategy — lossless FFV1 (default) or stream-copy remux.
+        source_video:       Path to source video file.
+        work_dir:           Working directory for intermediate files.
+        quality_targets:    List of quality targets to meet.
+        strategies:         List of encoding strategies to use.
+        optimize:           Whether to search for optimal strategy.
+        all_strategies:     Whether to produce output for all strategies.
+        max_parallel:       Maximum concurrent encoding processes.
+        metrics_sampling:   Frame subsampling for metric calculation.
+        log_level:          Logging level (debug, info, warning, critical).
+        crop_params:        Manual crop parameters (``None`` for auto-detect).
+        include:            Regex pattern to include streams (applied to all stream types).
+        exclude:            Regex pattern to exclude streams (applied to all stream types).
+        keep_all:           Whether to keep all intermediate files.
+        chunking_mode:      Chunking strategy — lossless FFV1 (default) or stream-copy remux.
+        force:              When True alongside execute mode, delete all artifacts and reset state
+                            when a source-file mismatch is detected, then continue with the new source.
+        audio_convert:      Regex pattern selecting processed audio files to convert to the final
+                            delivery format. Overrides ``audio_output.convert_filter`` from config.
+        audio_codec:        Override audio codec for all conversion profiles (e.g. ``'aac'``).
+        audio_base_bitrate: Base bitrate for 2.0 stereo conversion (e.g. ``'192k'``). Bitrates for
+                            other channel layouts are scaled proportionally by channel count.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    source_video:     Path
-    work_dir:         Path
-    quality_targets:  list[QualityTarget]
-    strategies:       list[str]
-    optimize:         bool         = False
-    all_strategies:   bool         = False
-    max_parallel:     int          = 2
-    subsample_factor: int          = 10
-    log_level:        str          = "info"
-    crop_params:      CropParams | None  = None
-    video_filter:     str | None        = None
-    audio_filter:     str | None        = None
-    keep_all:         bool              = False
-    chunking_mode:    ChunkingMode      = ChunkingMode.LOSSLESS
+    source_video:       Path
+    work_dir:           Path
+    quality_targets:    list[QualityTarget]
+    strategies:         list[str]
+    optimize:           bool              = False
+    all_strategies:     bool              = False
+    max_parallel:       int               = 2
+    metrics_sampling:   int               = 10
+    log_level:          str               = "info"
+    crop_params:        CropParams | None = None
+    include:            str | None        = None
+    exclude:            str | None        = None
+    keep_all:           bool              = False
+    chunking_mode:      ChunkingMode      = ChunkingMode.LOSSLESS
+    force:              bool              = False
+    audio_convert:      str | None        = None
+    audio_codec:        str | None        = None
+    audio_base_bitrate: str | None        = None

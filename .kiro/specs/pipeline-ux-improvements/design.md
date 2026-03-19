@@ -1,5 +1,8 @@
 # Design Document — Pipeline UX Improvements
 
+- Created: 2026-03-15
+- Completed: 2026-03-15
+
 ## Overview
 
 Four targeted improvements to the pyqenc encoding pipeline:

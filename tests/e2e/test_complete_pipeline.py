@@ -7,12 +7,21 @@ import pytest
 from pyqenc.config import ConfigManager
 from pyqenc.models import CropParams, PipelineConfig, QualityTarget
 from pyqenc.orchestrator import PipelineOrchestrator
-from pyqenc.progress import ProgressTracker
+from pyqenc.state import JobStateManager
 from tests.fixtures.video_fixtures import get_sample_video_path, sample_video_exists
 
 
 def _qt(metric: str, statistic: str, value: float) -> QualityTarget:
     return QualityTarget(metric=metric, statistic=statistic, value=value)
+
+
+def _make_state_manager(config: PipelineConfig) -> JobStateManager:
+    """Create a JobStateManager for the given config."""
+    return JobStateManager(
+        work_dir=config.work_dir,
+        source_video=config.source_video,
+        force=getattr(config, "force", False),
+    )
 
 
 @pytest.mark.skipif(not sample_video_exists(), reason="Sample video not available")
@@ -33,14 +42,11 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
 
-        tracker = ProgressTracker(work_dir)
-        config_manager = ConfigManager()
-        orchestrator = PipelineOrchestrator(config, tracker, config_manager)
-
+        orchestrator = PipelineOrchestrator(config, _make_state_manager(config))
         result = orchestrator.run(dry_run=True, max_phases=None)
         assert result is not None
 
@@ -57,15 +63,12 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
             crop_params=CropParams(top=100, bottom=100, left=0, right=0),
         )
 
-        tracker = ProgressTracker(work_dir)
-        config_manager = ConfigManager()
-        orchestrator = PipelineOrchestrator(config, tracker, config_manager)
-
+        orchestrator = PipelineOrchestrator(config, _make_state_manager(config))
         result = orchestrator.run(dry_run=True, max_phases=1)
         assert result is not None
 
@@ -82,14 +85,11 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
 
-        tracker = ProgressTracker(work_dir)
-        config_manager = ConfigManager()
-        orchestrator = PipelineOrchestrator(config, tracker, config_manager)
-
+        orchestrator = PipelineOrchestrator(config, _make_state_manager(config))
         result = orchestrator.run(dry_run=True, max_phases=2)
         assert result is not None
 
@@ -106,22 +106,15 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
 
-        tracker1 = ProgressTracker(work_dir)
-        orchestrator1 = PipelineOrchestrator(config, tracker1, ConfigManager())
+        orchestrator1 = PipelineOrchestrator(config, _make_state_manager(config))
         result1 = orchestrator1.run(dry_run=True, max_phases=1)
         assert result1 is not None
 
-        tracker2 = ProgressTracker(work_dir)
-        orchestrator2 = PipelineOrchestrator(config, tracker2, ConfigManager())
-
-        existing_state = tracker2.load_state()
-        if existing_state:
-            assert existing_state.source_video.path == str(source_video)
-
+        orchestrator2 = PipelineOrchestrator(config, _make_state_manager(config))
         result2 = orchestrator2.run(dry_run=True, max_phases=None)
         assert result2 is not None
 
@@ -138,10 +131,10 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
-        orchestrator1 = PipelineOrchestrator(config1, ProgressTracker(work_dir))
+        orchestrator1 = PipelineOrchestrator(config1, _make_state_manager(config1))
         result1 = orchestrator1.run(dry_run=True, max_phases=1)
         assert result1 is not None
 
@@ -153,10 +146,10 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=True,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
-        orchestrator2 = PipelineOrchestrator(config2, ProgressTracker(work_dir), ConfigManager())
+        orchestrator2 = PipelineOrchestrator(config2, _make_state_manager(config2))
         result2 = orchestrator2.run(dry_run=True, max_phases=None)
         assert result2 is not None
 
@@ -173,10 +166,10 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
-        orchestrator1 = PipelineOrchestrator(config1, ProgressTracker(work_dir), ConfigManager())
+        orchestrator1 = PipelineOrchestrator(config1, _make_state_manager(config1))
         result1 = orchestrator1.run(dry_run=True, max_phases=1)
         assert result1 is not None
 
@@ -188,10 +181,10 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
-        orchestrator2 = PipelineOrchestrator(config2, ProgressTracker(work_dir), ConfigManager())
+        orchestrator2 = PipelineOrchestrator(config2, _make_state_manager(config2))
         result2 = orchestrator2.run(dry_run=True, max_phases=None)
         assert result2 is not None
 
@@ -208,12 +201,12 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
             crop_params=None,
         )
 
-        orchestrator = PipelineOrchestrator(config, ProgressTracker(work_dir), ConfigManager())
+        orchestrator = PipelineOrchestrator(config, _make_state_manager(config))
         result = orchestrator.run(dry_run=True, max_phases=1)
         assert result is not None
 
@@ -230,12 +223,12 @@ class TestCompletePipeline:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
             crop_params=CropParams(),
         )
 
-        orchestrator = PipelineOrchestrator(config, ProgressTracker(work_dir), ConfigManager())
+        orchestrator = PipelineOrchestrator(config, _make_state_manager(config))
         result = orchestrator.run(dry_run=True, max_phases=1)
         assert result is not None
 
@@ -257,11 +250,11 @@ class TestPipelineValidation:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
 
-        orchestrator = PipelineOrchestrator(config, ProgressTracker(work_dir), ConfigManager())
+        orchestrator = PipelineOrchestrator(config, _make_state_manager(config))
         assert orchestrator is not None
 
     def test_invalid_strategy(self, tmp_path):
@@ -277,7 +270,7 @@ class TestPipelineValidation:
             optimize=False,
             all_strategies=False,
             max_parallel=1,
-            subsample_factor=10,
+            metrics_sampling=10,
             log_level="info",
         )
 

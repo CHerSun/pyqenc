@@ -465,8 +465,8 @@ def validate_all(
     strategies_str: str,
     config_manager: Any | None = None,
     crop_str: str | None = None,
-    video_filter: str | None = None,
-    audio_filter: str | None = None,
+    include: str | None = None,
+    exclude: str | None = None,
     max_parallel: int = 2,
     log_level: str = "info"
 ) -> tuple[list[QualityTarget], list[tuple[str, str]], CropParams | None]:
@@ -479,8 +479,8 @@ def validate_all(
         strategies_str: Strategies string
         config_manager: Optional ConfigManager for profile validation
         crop_str: Optional crop parameters string
-        video_filter: Optional video filter regex
-        audio_filter: Optional audio filter regex
+        include: Optional include filter regex (applied to all stream types)
+        exclude: Optional exclude filter regex (applied to all stream types)
         max_parallel: Maximum parallel processes
         log_level: Log level
 
@@ -508,11 +508,11 @@ def validate_all(
     if crop_str:
         crop_params = validator.validate_crop_params(crop_str)
 
-    if video_filter:
-        validator.validate_regex_pattern(video_filter, "video filter")
+    if include:
+        validator.validate_regex_pattern(include, "include filter")
 
-    if audio_filter:
-        validator.validate_regex_pattern(audio_filter, "audio filter")
+    if exclude:
+        validator.validate_regex_pattern(exclude, "exclude filter")
 
     validator.validate_max_parallel(max_parallel)
     validator.validate_log_level(log_level)

@@ -113,6 +113,15 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Keep all intermediate files (skip cleanup prompt after completion)"
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "When a source-file mismatch is detected in execute mode (-y), "
+            "delete all intermediate artifacts and reset state, then continue "
+            "with the new source file. Has no effect without -y."
+        ),
+    )
 
 
 def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
@@ -146,6 +155,17 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         default=2,
         help="Maximum concurrent encoding processes (default: 2). Don't set this high, ffmpeg knows how to scale too."
     )
+    parser.add_argument(
+        "--metrics-sampling",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Metrics sampling factor: measure every N-th frame. "
+            "Min: 1 (every frame measured). Default: 10 (recommended balance of speed and precision). "
+            "Values above 30 are not recommended due to measurement volatility."
+        ),
+    )
 
 
 def _add_filter_arguments(parser: argparse.ArgumentParser) -> None:
@@ -155,27 +175,48 @@ def _add_filter_arguments(parser: argparse.ArgumentParser) -> None:
         parser: Argument parser to add arguments to
     """
     parser.add_argument(
-        "--video-filter",
+        "--include",
         type=str,
-        help="Regex pattern to filter video streams (e.g., '.*eng.*')"
+        help="Regex pattern to include streams across all types (e.g. '.*eng.*')"
     )
     parser.add_argument(
-        "--audio-filter",
+        "--exclude",
         type=str,
-        help="Regex pattern to filter audio streams (e.g., '.*eng.*')"
+        help="Regex pattern to exclude streams across all types (e.g. 'attachment')"
     )
 
-def _add_audio_keep_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add audio keep arguments.
+def _add_audio_convert_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add audio conversion arguments for the audio output phase.
 
     Args:
         parser: Argument parser to add arguments to
     """
     parser.add_argument(
-        "--audio-keep",
+        "--audio-convert",
         type=str,
-        default="^2.0 (norm|dyna)",
-        help="Regex pattern to pick terminal audio results to be converted into AAC. Defaults to keeping statically and dynamically normalized stereo streams."
+        default=None,
+        metavar="REGEX",
+        help=(
+            "Regex pattern selecting processed audio files to convert to the final delivery format. "
+            "Overrides the config-derived audio_output.convert_filter for this run."
+        ),
+    )
+    parser.add_argument(
+        "--audio-codec",
+        type=str,
+        default=None,
+        metavar="CODEC",
+        help="Override the audio codec for all conversion profiles in this run (e.g. 'aac').",
+    )
+    parser.add_argument(
+        "--audio-bitrate",
+        type=str,
+        default=None,
+        metavar="BITRATE",
+        help=(
+            "Base bitrate for 2.0 stereo conversion (e.g. '192k'). "
+            "Bitrates for other channel layouts are scaled proportionally by channel count."
+        ),
     )
 
 
@@ -218,7 +259,7 @@ def _create_auto_subcommand(subparsers) -> None:
     _add_quality_arguments(auto_parser)
     _add_filter_arguments(auto_parser)
     _add_crop_arguments(auto_parser)
-    _add_audio_keep_arguments(auto_parser)
+    _add_audio_convert_arguments(auto_parser)
     auto_parser.add_argument(
         "--remux-chunking",
         action="store_true",
@@ -326,7 +367,7 @@ def _create_audio_subcommand(subparsers) -> None:
         help="Directory containing audio files to process"
     )
     _add_common_arguments(audio_parser)
-    _add_audio_keep_arguments(audio_parser)
+    _add_audio_convert_arguments(audio_parser)
     audio_parser.set_defaults(func=_cmd_audio)
 
 
@@ -375,6 +416,7 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         Exit code (0 for success, non-zero for failure)
     """
     from pyqenc.api import run_pipeline
+    from pyqenc.config import ConfigManager
 
     logger.info("Starting automatic pipeline execution")
 
@@ -396,6 +438,11 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         except ValueError as e:
             logger.critical(f"Invalid crop parameters: {e}")
             return 1
+
+    # Resolve metrics sampling: CLI arg takes precedence over config file
+    config_manager = ConfigManager()
+    metrics_sampling = args.metrics_sampling if args.metrics_sampling is not None \
+                       else config_manager.get_metrics_sampling()
 
     # Aggregate into a key/value table and print it
     kv_to_show = {
@@ -423,11 +470,16 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         all_strategies=args.all_strategies,
         max_parallel=args.max_parallel,
         log_level=args.log_level,
-        video_filter=args.video_filter,
-        audio_filter=args.audio_filter,
+        include=args.include,
+        exclude=args.exclude,
         crop_params=crop_params,
         keep_all=args.keep_all if hasattr(args, "keep_all") else False,
         chunking_mode=ChunkingMode.REMUX if args.remux_chunking else ChunkingMode.LOSSLESS,
+        force=args.force if hasattr(args, "force") else False,
+        audio_convert=args.audio_convert,
+        audio_codec=args.audio_codec,
+        audio_base_bitrate=args.audio_bitrate,
+        metrics_sampling=metrics_sampling,
     )
 
     # Execute pipeline
@@ -463,10 +515,8 @@ def _cmd_extract(args: argparse.Namespace) -> int:
         result = extract_streams(
             source_video=args.source,
             output_dir=args.work_dir / "extracted",
-            video_filter=args.video_filter,
-            audio_filter=args.audio_filter,
-            detect_crop=not args.no_crop if hasattr(args, "no_crop") else True,
-            manual_crop=args.crop if hasattr(args, "crop") else None,
+            include=args.include if hasattr(args, "include") else None,
+            exclude=args.exclude if hasattr(args, "exclude") else None,
             dry_run=not execute,
         )
 
@@ -590,6 +640,9 @@ def _cmd_audio(args: argparse.Namespace) -> int:
         result = process_audio(
             audio_dir=args.audio_dir,
             output_dir=args.work_dir / "audio",
+            audio_convert=args.audio_convert,
+            audio_codec=args.audio_codec,
+            audio_base_bitrate=args.audio_bitrate,
             dry_run=not execute,
         )
 

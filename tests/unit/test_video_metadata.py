@@ -1,10 +1,10 @@
-"""Unit tests for VideoMetadata lazy-loading and ChunkVideoMetadata."""
+"""Unit tests for VideoMetadata lazy-loading and ChunkMetadata."""
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pyqenc.models import ChunkVideoMetadata, VideoMetadata
+from pyqenc.models import ChunkMetadata, VideoMetadata
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -215,18 +215,19 @@ class TestRoundTrip:
             assert mock_fc.call_count == 0
 
     def test_chunk_video_metadata_round_trip(self):
-        """ChunkVideoMetadata round-trip preserves chunk_id and cached fields."""
-        chunk = ChunkVideoMetadata(
+        """ChunkMetadata round-trip preserves chunk_id and cached fields."""
+        chunk = ChunkMetadata(
             path=Path("/fake/chunk.000000-000319.mkv"),
             chunk_id="chunk.000000-000319",
-            start_frame=0,
+            start_timestamp=0.0,
+            end_timestamp=13.33,
         )
         chunk._frame_count = 320
         chunk._fps         = 24.0
         chunk._resolution  = "1920x800"
 
         dumped   = chunk.model_dump_full()
-        restored = ChunkVideoMetadata.model_validate_full(dumped)
+        restored = ChunkMetadata.model_validate_full(dumped)
 
         assert restored.chunk_id    == "chunk.000000-000319"
         assert restored._frame_count == 320

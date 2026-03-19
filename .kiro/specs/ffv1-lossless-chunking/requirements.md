@@ -2,6 +2,9 @@
 
 <!-- markdownlint-disable MD024 -->
 
+- Created: 2026-03-15
+- Completed: 2026-03-15
+
 ## Introduction
 
 The chunking phase currently splits the source video using `ffmpeg -c copy` with input-side `-ss`. Because stream-copy can only cut at existing I-frames, each chunk boundary snaps to the nearest I-frame *before* the requested scene timestamp. This means chunk boundaries are not frame-perfect.

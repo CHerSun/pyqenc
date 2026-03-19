@@ -4,11 +4,11 @@ Chunking phase for the quality-based encoding pipeline.
 This module handles splitting video into scene-based chunks using PySceneDetect.
 The phase is split into two independently resumable sub-phases:
 
-1. ``detect_scenes_to_state`` -- runs scene detection and persists boundaries.
-2. ``split_chunks_from_state`` -- splits the video at persisted boundaries.
+1. ``detect_scenes`` -- runs scene detection and persists boundaries to ``chunking.yaml``.
+2. ``split_chunks`` -- splits the video at persisted boundaries, writing chunk sidecars.
 
-The ``chunk_video`` entry point orchestrates both sub-phases and skips any
-work that has already been persisted in ``PipelineState``.
+The ``chunk_video`` entry point orchestrates both sub-phases, calling
+``recover_chunking`` first to skip any work already on disk.
 
 Two chunking modes are supported (see ``ChunkingMode``):
 
@@ -21,10 +21,7 @@ Two chunking modes are supported (see ``ChunkingMode``):
 from __future__ import annotations
 
 import logging
-import re
-import subprocess
 from dataclasses import dataclass
-from math import floor
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,32 +30,33 @@ from scenedetect import ContentDetector, detect
 from scenedetect.video_splitter import is_ffmpeg_available
 
 from pyqenc.constants import (
-    PADDING_FRAME_NUMBER,
-    PROGRESS_CHUNK_UNIT,
+    CHUNK_NAME_PATTERN,
     RANGE_SEPARATOR,
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
+from pyqenc.utils.alive import ProgressBar
 from pyqenc.models import (
+    ChunkMetadata,
     ChunkingMode,
-    ChunkVideoMetadata,
-    PhaseMetadata,
-    PhaseStatus,
-    PhaseUpdate,
+    PhaseOutcome,
     SceneBoundary,
     VideoMetadata,
 )
-from pyqenc.utils.ffmpeg import FrameCountError, get_frame_count
+from pyqenc.state import (
+    ArtifactState,
+    ChunkSidecar,
+    ChunkingParams,
+    JobState,
+    JobStateManager,
+)
+from pyqenc.utils.ffmpeg_runner import run_ffmpeg
+from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.phases.recovery import ChunkingRecovery, discover_inputs, recover_chunking
 
-if TYPE_CHECKING:
-    from pyqenc.progress import ProgressTracker
-
-config_handler.set_global(enrich_print=False) # type: ignore
+config_handler.set_global(enrich_print=False)  # type: ignore
 logger = logging.getLogger(__name__)
 
-
-
-_CHUNK_NAME_PATTERN = re.compile(r"^chunk\.(\d+)-(\d+)$")
 
 # FFV1 all-intra flags used in lossless chunking mode.
 # -g 1 makes every frame an I-frame for frame-perfect splits.
@@ -72,12 +70,8 @@ FFV1_VIDEO_ARGS: list[str] = [
 ]
 
 
-def _chunk_name(start_frame: int, end_frame: int) -> str:
-    """Return the canonical chunk file stem for a frame range."""
-    return f"{start_frame:0{PADDING_FRAME_NUMBER}d}{RANGE_SEPARATOR}{end_frame:0{PADDING_FRAME_NUMBER}d}"
-
 def _chunk_name_duration(start_ts: float, end_ts: float) -> str:
-    """Return the canonical chunk file stem for timestamps range. Use either this or _chunk_name everywhere for consistency, but not both."""
+    """Return the canonical chunk file stem for a timestamp range."""
     start_str = TIME_SEPARATOR_SAFE.join([
         f"{int(start_ts // 3600):02d}",
         f"{int((start_ts % 3600) // 60):02d}",
@@ -92,55 +86,68 @@ def _chunk_name_duration(start_ts: float, end_ts: float) -> str:
 
 
 @dataclass
-class ChunkInfo:
-    chunk_id:    str
-    file_path:   Path
-    start_frame: int
-    end_frame:   int
-    frame_count: int
-    duration:    float
-
-
-@dataclass
 class ChunkingResult:
-    chunks:       list[ChunkInfo]
+    chunks:       list[ChunkMetadata]
     total_frames: int
-    reused:       bool
-    needs_work:   bool
-    success:      bool
+    outcome:      PhaseOutcome
     error:        str | None = None
 
+    @property
+    def success(self) -> bool:
+        """True when chunking completed or reused existing chunks."""
+        return self.outcome in (PhaseOutcome.COMPLETED, PhaseOutcome.REUSED)
 
-def detect_scenes_to_state(
+    @property
+    def reused(self) -> bool:
+        """True when existing chunks were reused without new work."""
+        return self.outcome == PhaseOutcome.REUSED
+
+    @property
+    def needs_work(self) -> bool:
+        """True when in dry-run mode and work would be required."""
+        return self.outcome == PhaseOutcome.DRY_RUN
+
+
+def detect_scenes(
     video_meta:       VideoMetadata,
-    tracker:          "ProgressTracker",
+    state_manager:    JobStateManager,
     scene_threshold:  float = 27.0,
     min_scene_length: int   = 15,
 ) -> list[SceneBoundary]:
-    """Detect scene boundaries and persist them into pipeline state.
+    """Detect scene boundaries and persist them to ``chunking.yaml``.
 
-    Runs PySceneDetect ContentDetector on video_meta.path and stores
-    the resulting boundary list in
-    PipelineState.phases["chunking"].metadata.scene_boundaries via tracker.
+    Runs PySceneDetect ContentDetector on ``video_meta.path`` and stores
+    the resulting boundary list via ``state_manager.save_chunking``.
     If zero scenes are detected the entire video is treated as a single scene
     (one boundary at frame 0 / t=0.0) and a warning is logged.
 
     Args:
         video_meta:       Metadata for the source video file.
-        tracker:          Progress tracker used to persist boundaries.
+        state_manager:    State manager used to persist scene boundaries.
         scene_threshold:  PySceneDetect content-change threshold (default 27.0).
         min_scene_length: Minimum frames per scene (default 15).
 
     Returns:
-        List of SceneBoundary objects.
+        List of ``SceneBoundary`` objects.
     """
     logger.info("Scene detection: analyzing %s", video_meta.path.name)
 
     with alive_bar(title="Scene detection", monitor=False, stats=False) as bar:
-        scene_list = detect(
-            str(video_meta.path),
-            ContentDetector(threshold=scene_threshold, min_scene_len=min_scene_length),
-        )
+        import os
+        # PySceneDetect invokes ffmpeg internally; redirect its stderr to suppress
+        # noise like "[matroska,webm @ ...] Unsupported encoding type".
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        old_stderr_fd = os.dup(2)
+        os.dup2(devnull_fd, 2)
+        os.close(devnull_fd)
+        try:
+            scene_list = detect(
+                str(video_meta.path),
+                ContentDetector(threshold=scene_threshold, min_scene_len=min_scene_length),
+            )
+        finally:
+            os.dup2(old_stderr_fd, 2)
+            os.close(old_stderr_fd)
         bar()
 
     if not scene_list:
@@ -159,59 +166,42 @@ def detect_scenes_to_state(
         ]
         logger.info("Scene detection complete: %d scene(s) detected.", len(boundaries))
 
-    tracker.update_phase(PhaseUpdate(
-        phase="chunking",
-        status=PhaseStatus.IN_PROGRESS,
-        metadata=PhaseMetadata(scene_boundaries=boundaries),
-    ))
+    # Persist scene boundaries to chunking.yaml (Req 2.2)
+    state_manager.save_chunking(ChunkingParams(scenes=boundaries))
+    logger.debug("Saved %d scene boundary(ies) to chunking.yaml", len(boundaries))
 
     return boundaries
 
 
-def split_chunks_from_state(
+def split_chunks(
     video_meta:    VideoMetadata,
     output_dir:    Path,
-    tracker:       "ProgressTracker",
+    boundaries:    list[SceneBoundary],
+    state_manager: JobStateManager,
+    recovery:      ChunkingRecovery,
     chunking_mode: ChunkingMode = ChunkingMode.LOSSLESS,
-) -> list[ChunkVideoMetadata]:
-    """Split the source video into chunks using persisted scene boundaries.
+) -> list[ChunkMetadata]:
+    """Split the source video into chunks using scene boundaries.
 
-    Reads scene_boundaries from PipelineState.phases["chunking"].metadata,
-    derives frame-range chunk names, skips chunks already recorded in
-    PipelineState.chunks_metadata, and calls ffmpeg to split each segment.
-
-    In LOSSLESS mode each chunk is re-encoded to FFV1 all-intra (``-g 1``)
-    for frame-perfect boundaries.  In REMUX mode stream-copy is used.
-
-    Each successfully split chunk is immediately recorded via
-    tracker.update_chunk_metadata. If a chunk file is missing or empty
-    after splitting, a critical error is logged and the chunk is skipped.
+    Skips chunks already present on disk (as determined by *recovery*).
+    Writes a ``<chunk_stem>.yaml`` sidecar after each successful split (Req 5.5).
 
     Args:
         video_meta:    Metadata for the source video file.
         output_dir:    Directory where chunk files will be written.
-        tracker:       Progress tracker that holds scene boundaries and receives
-                       chunk metadata updates.
+        boundaries:    Scene boundaries to split at.
+        state_manager: State manager (used for context; sidecars written directly).
+        recovery:      Recovery result from ``recover_chunking``; chunks already
+                       ``COMPLETE`` are skipped.
         chunking_mode: LOSSLESS (FFV1 all-intra, default) or REMUX (stream-copy).
 
     Returns:
-        List of ChunkVideoMetadata for every chunk that was successfully split.
+        List of ``ChunkMetadata`` for every chunk that was successfully split or reused.
     """
-    state = tracker._state
-    if state is None:
-        raise RuntimeError(
-            "ProgressTracker state not initialized before split_chunks_from_state."
-        )
-
-    chunking_phase = state.phases.get("chunking")
-    boundaries: list[SceneBoundary] = []
-    if chunking_phase and chunking_phase.metadata:
-        boundaries = chunking_phase.metadata.scene_boundaries
-
     if not boundaries:
         raise RuntimeError(
-            "No scene boundaries found in pipeline state. "
-            "Run detect_scenes_to_state first."
+            "No scene boundaries provided to split_chunks. "
+            "Run detect_scenes first."
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -233,188 +223,188 @@ def split_chunks_from_state(
         video_args = ["-c", "copy"]
         logger.info("Chunking mode: remux (stream-copy) — I-frame-snapped splits.")
 
-    total_frames = video_meta.frame_count
+    result_chunks: list[ChunkMetadata] = []
 
-    result_chunks: list[ChunkVideoMetadata] = []
-    already_done = set(state.chunks_metadata.keys())
+    # Collect already-complete chunks from recovery first
+    complete_from_recovery: dict[str, ChunkMetadata] = {
+        chunk_id: rec.metadata
+        for chunk_id, rec in recovery.chunks.items()
+        if rec.state == ArtifactState.COMPLETE and rec.metadata is not None
+    }
 
-    with alive_bar(len(boundaries), title="Chunking", unit=PROGRESS_CHUNK_UNIT) as bar:
+    total_seconds = video_meta.duration_seconds or 0.0
+    with ProgressBar(total_seconds, title="Chunking") as advance:
         for idx, start_boundary in enumerate(boundaries):
-            if idx + 1 < len(boundaries):
-                end_frame  = boundaries[idx + 1].frame - 1
-                end_ts     = boundaries[idx + 1].timestamp_seconds  # exclusive end = next scene start
-            else:
-                end_frame  = (total_frames - 1) if total_frames else start_boundary.frame
-                end_ts     = video_meta.duration_seconds or 0.0
-
-            start_ts    = start_boundary.timestamp_seconds
-            start_frame = start_boundary.frame
-
-            stem       = _chunk_name(start_frame, end_frame)
-            stem       = _chunk_name_duration(start_ts, end_ts) # Use timestamp-based naming for more consistency on variable framerate
+            end_ts = (
+                boundaries[idx + 1].timestamp_seconds
+                if idx + 1 < len(boundaries)
+                else video_meta.duration_seconds or 0.0
+            )
+            start_ts = start_boundary.timestamp_seconds
+            stem     = _chunk_name_duration(start_ts, end_ts)
             chunk_file = output_dir / f"{stem}.mkv"
 
-            if stem in already_done:
-                existing = state.chunks_metadata[stem]
-                result_chunks.append(existing)
-                logger.debug("Skipping already-split chunk: %s", stem)
-                bar.text = stem
-                bar()
+            # Skip chunks already COMPLETE from recovery (Req 5.2)
+            if stem in complete_from_recovery:
+                result_chunks.append(complete_from_recovery[stem])
+                logger.debug("Skipping already-complete chunk: %s", stem)
+                advance(end_ts - start_ts)
                 continue
 
-            if not chunk_file.exists():
-                duration = end_ts - start_ts
-                cmd: list[str] = [
-                    "ffmpeg", "-y",
-                    "-ss", str(start_ts),
-                    "-i", str(video_meta.path),
-                    "-t", str(duration),
-                    *video_args,
-                    "-an", str(chunk_file),
-                ]
-                logger.debug("Splitting chunk %s (%.3fs): %s", stem, duration, " ".join(cmd))
-                proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                if proc.returncode != 0:
-                    logger.critical(
-                        "ffmpeg split failed for chunk %s (exit %d): %s",
-                        stem, proc.returncode, proc.stderr[-400:],
-                    )
-                    bar.text = f"✗ {stem}"
-                    bar()
-                    continue
+            duration = end_ts - start_ts
+            cmd: list[str | Path] = [
+                "ffmpeg", "-y",
+                "-ss", str(start_ts),
+                "-i", video_meta.path,
+                "-t", str(duration),
+                *video_args,
+                "-an", chunk_file,
+            ]
+            logger.debug("Splitting chunk %s (%.3fs)", stem, duration)
+
+            chunk_meta = ChunkMetadata(
+                path=chunk_file,
+                chunk_id=stem,
+                start_timestamp=start_ts,
+                end_timestamp=end_ts,
+            )
+            split_result = run_ffmpeg(cmd, output_file=chunk_file, video_meta=chunk_meta)
+
+            if not split_result.success:
+                logger.critical(
+                    "ffmpeg split failed for chunk %s (exit %d)",
+                    stem, split_result.returncode,
+                )
+                advance(end_ts - start_ts)
+                continue
 
             if not chunk_file.exists() or chunk_file.stat().st_size == 0:
                 logger.critical("Chunk file missing or empty after split: %s", chunk_file.name)
-                bar.text = f"✗ {stem}"
-                bar()
+                advance(end_ts - start_ts)
                 continue
 
-            try:
-                chunk_frames = get_frame_count(chunk_file, tracker, is_source=False)
-            except FrameCountError as exc:
-                logger.warning(
-                    "Failed to get frame count for %s: %s -- using estimate.", stem, exc
-                )
-                chunk_frames = end_frame - start_frame + 1
+            # Set duration from the known timestamp range
+            chunk_meta._duration_seconds = end_ts - start_ts
 
-            chunk_meta = ChunkVideoMetadata(
-                path=chunk_file,
-                chunk_id=stem,
-                start_frame=start_frame,
-            )
-            chunk_meta._frame_count = chunk_frames
+            if chunk_meta._frame_count is None:
+                logger.warning("Frame count not found in ffmpeg output for chunk %s", stem)
 
-            tracker.update_chunk_metadata(chunk_meta)
+            # Write chunk sidecar (Req 5.5)
+            _write_chunk_sidecar(chunk_file, chunk_meta)
+
             result_chunks.append(chunk_meta)
-            logger.debug("Chunk %s: %d frames", stem, chunk_frames)
-            bar.text = stem
-            bar()
+            logger.debug("Chunk %s split successfully", stem)
+            advance(end_ts - start_ts)
 
-    logger.info("Chunk splitting complete: %d chunk(s) ready.", len(result_chunks))
     return result_chunks
+
+
+def _write_chunk_sidecar(chunk_file: Path, chunk_meta: ChunkMetadata) -> None:
+    """Write a ``<chunk_stem>.yaml`` sidecar alongside *chunk_file*.
+
+    Args:
+        chunk_file:  Path to the chunk ``.mkv`` file.
+        chunk_meta:  Metadata to persist in the sidecar.
+    """
+    sidecar_path = chunk_file.with_suffix(".yaml")
+    sidecar = ChunkSidecar(chunk=chunk_meta)
+    try:
+        write_yaml_atomic(sidecar_path, sidecar.to_yaml_dict())
+        logger.debug("Wrote chunk sidecar: %s", sidecar_path.name)
+    except Exception as exc:
+        logger.warning("Could not write chunk sidecar for %s: %s", chunk_file.name, exc)
+
 
 def chunk_video(
     video_file:       Path,
     output_dir:       Path,
+    state_manager:    JobStateManager,
+    job:              JobState,
     chunking_mode:    ChunkingMode = ChunkingMode.LOSSLESS,
     scene_threshold:  float = 27.0,
     min_scene_length: int   = 15,
-    force:            bool  = False,
     dry_run:          bool  = False,
-    tracker:          "ProgressTracker | None" = None,
+    standalone:       bool  = False,
 ) -> ChunkingResult:
     """Split video into scene-based chunks using PySceneDetect.
 
-    Orchestrates detect_scenes_to_state and split_chunks_from_state as two
-    independently resumable sub-phases. Scene boundaries are persisted after
-    detection so a restart skips re-detection. Already-split chunks are
-    skipped during splitting.
+    Calls ``recover_chunking`` first to determine what work remains.
+    Scene boundaries are loaded from ``chunking.yaml`` when present, skipping
+    re-detection.  Already-split chunks (``COMPLETE`` in recovery) are skipped.
 
-    When tracker is None the function falls back to a stateless path.
+    When *standalone* is ``True`` (direct CLI invocation, not via the
+    auto-pipeline), ``discover_inputs`` is called first to verify that the
+    extraction phase has produced its outputs.  The auto-pipeline orchestrator
+    passes outputs directly and sets *standalone* to ``False`` to bypass this
+    check (Req 11.2).
 
     Args:
         video_file:       Path to source video file.
         output_dir:       Directory for chunk output.
+        state_manager:    State manager for persisting scene boundaries.
+        job:              Current job state.
         chunking_mode:    LOSSLESS (FFV1 all-intra, default) or REMUX (stream-copy).
         scene_threshold:  Scene detection threshold (default 27.0).
         min_scene_length: Minimum frames per scene (default 15).
-        force:            If True, ignore existing chunks and re-chunk.
         dry_run:          If True, only report status without performing work.
-        tracker:          Optional progress tracker for state persistence.
+        standalone:       If True, run inputs discovery before proceeding (Req 11.1).
 
     Returns:
-        ChunkingResult with chunk information.
+        ``ChunkingResult`` with chunk information.
     """
     logger.info("Chunking phase: %s", video_file.name)
 
+    # Inputs discovery — only when invoked standalone (not via auto-pipeline)
+    if standalone:
+        discovery = discover_inputs("chunking", state_manager.work_dir, job)
+        if not discovery.ok:
+            return ChunkingResult(
+                outcome=PhaseOutcome.FAILED,
+                chunks=[], total_frames=0,
+                error=discovery.error,
+            )
+
     if not video_file.exists():
         return ChunkingResult(
-            success=False, reused=False, needs_work=False,
+            outcome=PhaseOutcome.FAILED,
             chunks=[], total_frames=0,
             error=f"Video file not found: {video_file}",
         )
 
     if not is_ffmpeg_available():
         return ChunkingResult(
-            success=False, reused=False, needs_work=False,
+            outcome=PhaseOutcome.FAILED,
             chunks=[], total_frames=0,
             error="ffmpeg not found in PATH",
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not force and tracker is None:
-        existing_chunks = sorted(output_dir.glob("chunk.*.mkv"))
-        if existing_chunks:
-            chunks, valid = _load_existing_chunks(existing_chunks, tracker)
-            if valid:
-                total_frames = sum(c.frame_count for c in chunks)
-                logger.info("Reusing %d existing chunks (%d frames)", len(chunks), total_frames)
-                return ChunkingResult(
-                    success=True, reused=True, needs_work=False,
-                    chunks=chunks, total_frames=total_frames,
-                )
+    # Recovery: scan filesystem, classify chunks, load scene boundaries (Req 3.3, 5.1–5.7)
+    recovery = recover_chunking(
+        work_dir=state_manager.work_dir,
+        job=job,
+        state_manager=state_manager,
+    )
 
-    # Fast-path: tracker has persisted boundaries AND all chunk files exist on disk.
-    # Skip both scene detection and frame-counting — just load from state.
-    if not force and tracker is not None:
-        state = tracker._state
-        if state is not None:
-            chunking_phase = state.phases.get("chunking")
-            has_boundaries = (
-                chunking_phase is not None
-                and chunking_phase.metadata is not None
-                and bool(chunking_phase.metadata.scene_boundaries)
-            )
-            if has_boundaries and state.chunks_metadata:
-                existing_chunk_files = sorted(output_dir.glob("chunk.*.mkv"))
-                existing_stems = {f.stem for f in existing_chunk_files}
-                persisted_stems = set(state.chunks_metadata.keys())
-                if persisted_stems and persisted_stems == existing_stems:
-                    chunks: list[ChunkInfo] = []
-                    total_frames = 0
-                    for meta in state.chunks_metadata.values():
-                        m = _CHUNK_NAME_PATTERN.match(meta.chunk_id)
-                        end_frame = int(m.group(2)) if m else 0
-                        fc = meta._frame_count or 0
-                        chunks.append(ChunkInfo(
-                            chunk_id=meta.chunk_id,
-                            file_path=meta.path,
-                            start_frame=meta.start_frame,
-                            end_frame=end_frame,
-                            frame_count=fc,
-                            duration=meta._duration_seconds or 0.0,
-                        ))
-                        total_frames += fc
-                    chunks.sort(key=lambda c: c.start_frame)
-                    logger.info(
-                        "Reusing %d chunks from state (%d frames) — skipping scene detection",
-                        len(chunks), total_frames,
-                    )
-                    return ChunkingResult(
-                        success=True, reused=True, needs_work=False,
-                        chunks=chunks, total_frames=total_frames,
-                    )
+    # Fast-path: all chunks COMPLETE and scenes loaded — nothing to do
+    if recovery.scenes and not recovery.pending and recovery.chunks:
+        chunks = [
+            rec.metadata
+            for rec in recovery.chunks.values()
+            if rec.metadata is not None
+        ]
+        chunks.sort(key=lambda c: c.chunk_id)
+        total_frames = sum(c._frame_count or 0 for c in chunks)
+        logger.info(
+            "Reusing %d chunk(s) from recovery (%d frames) — skipping scene detection",
+            len(chunks), total_frames,
+        )
+        return ChunkingResult(
+            outcome=PhaseOutcome.REUSED,
+            chunks=chunks,
+            total_frames=total_frames,
+        )
 
     if dry_run:
         logger.info("[DRY-RUN] Would perform scene detection and chunking")
@@ -422,251 +412,80 @@ def chunk_video(
         logger.info("[DRY-RUN]   Min scene length: %d frames", min_scene_length)
         logger.info("[DRY-RUN]   Chunking mode: %s", chunking_mode.value)
         return ChunkingResult(
-            success=True, reused=False, needs_work=True,
+            outcome=PhaseOutcome.DRY_RUN,
             chunks=[], total_frames=0,
         )
 
-    if tracker is not None:
-        return _chunk_video_tracked(
-            video_file, output_dir, chunking_mode,
-            scene_threshold, min_scene_length, tracker,
-        )
-
-    return _chunk_video_stateless(
+    return _chunk_video_impl(
         video_file, output_dir, chunking_mode,
-        scene_threshold, min_scene_length,
+        scene_threshold, min_scene_length, state_manager, job, recovery,
     )
 
 
-def _load_existing_chunks(
-    existing_chunks: list[Path],
-    tracker:         "ProgressTracker | None",
-) -> tuple[list[ChunkInfo], bool]:
-    """Try to load ChunkInfo from existing chunk files on disk."""
-    chunks: list[ChunkInfo] = []
-    for chunk_file in existing_chunks:
-        m = _CHUNK_NAME_PATTERN.match(chunk_file.stem)
-        if m is None:
-            logger.warning("Skipping unrecognized chunk file: %s", chunk_file.name)
-            continue
-        start_frame = int(m.group(1))
-        end_frame   = int(m.group(2))
-        try:
-            frame_count = get_frame_count(chunk_file, tracker, is_source=False)
-            chunks.append(ChunkInfo(
-                chunk_id=chunk_file.stem,
-                file_path=chunk_file,
-                start_frame=start_frame,
-                end_frame=end_frame,
-                frame_count=frame_count,
-                duration=0.0,
-            ))
-        except FrameCountError as exc:
-            logger.warning("Failed to validate chunk %s: %s", chunk_file.name, exc)
-            return chunks, False
-
-    return chunks, len(chunks) == len(existing_chunks)
-
-
-def _chunk_video_tracked(
+def _chunk_video_impl(
     video_file:       Path,
     output_dir:       Path,
     chunking_mode:    ChunkingMode,
     scene_threshold:  float,
     min_scene_length: int,
-    tracker:          "ProgressTracker",
+    state_manager:    JobStateManager,
+    job:              JobState,
+    recovery:         ChunkingRecovery,
 ) -> ChunkingResult:
-    """Two-phase chunking with full state persistence via tracker."""
-    state = tracker._state
-    if state is None:
-        return ChunkingResult(
-            success=False, reused=False, needs_work=False,
-            chunks=[], total_frames=0,
-            error="ProgressTracker state not initialized.",
-        )
-
+    """Two-phase chunking with recovery-aware state persistence."""
     video_meta = VideoMetadata(path=video_file)
 
-    chunking_phase = state.phases.get("chunking")
-
-    if (chunking_phase is not None # Check if there are boundaries in the Progress tracker
-        and chunking_phase.metadata is not None
-        and bool(chunking_phase.metadata.scene_boundaries)):
-            boundary_count = len(chunking_phase.metadata.scene_boundaries)
-            logger.info(
-                "Scene boundaries already in state (%d) -- skipping detection.",
-                boundary_count,
-            )
+    # Use recovered scene boundaries or run detection (Req 5.3, 5.4)
+    if recovery.scenes:
+        boundaries = recovery.scenes
+        logger.info(
+            "Scene boundaries already in chunking.yaml (%d) -- skipping detection.",
+            len(boundaries),
+        )
     else:
         try:
-            detect_scenes_to_state(
+            boundaries = detect_scenes(
                 video_meta=video_meta,
-                tracker=tracker,
+                state_manager=state_manager,
                 scene_threshold=scene_threshold,
                 min_scene_length=min_scene_length,
             )
         except Exception as exc:
             logger.error("Scene detection failed: %s", exc, exc_info=True)
             return ChunkingResult(
-                success=False, reused=False, needs_work=False,
+                outcome=PhaseOutcome.FAILED,
                 chunks=[], total_frames=0,
                 error=str(exc),
             )
 
     try:
-        chunk_metas = split_chunks_from_state(
+        chunk_metas = split_chunks(
             video_meta=video_meta,
             output_dir=output_dir,
-            tracker=tracker,
+            boundaries=boundaries,
+            state_manager=state_manager,
+            recovery=recovery,
             chunking_mode=chunking_mode,
         )
     except Exception as exc:
         logger.error("Chunk splitting failed: %s", exc, exc_info=True)
         return ChunkingResult(
-            success=False, reused=False, needs_work=False,
+            outcome=PhaseOutcome.FAILED,
             chunks=[], total_frames=0,
             error=str(exc),
         )
 
     if not chunk_metas:
         return ChunkingResult(
-            success=False, reused=False, needs_work=False,
+            outcome=PhaseOutcome.FAILED,
             chunks=[], total_frames=0,
             error="No valid chunks created.",
         )
 
-    chunks: list[ChunkInfo] = []
-    total_frames = 0
-    for meta in chunk_metas:
-        m = _CHUNK_NAME_PATTERN.match(meta.chunk_id)
-        end_frame = int(m.group(2)) if m else 0
-        fc = meta._frame_count or 0
-        chunks.append(ChunkInfo(
-            chunk_id=meta.chunk_id,
-            file_path=meta.path,
-            start_frame=meta.start_frame,
-            end_frame=end_frame,
-            frame_count=fc,
-            duration=meta._duration_seconds or 0.0,
-        ))
-        total_frames += fc
-
-    reused = len(state.chunks_metadata) > 0
-
-    logger.info("Chunking complete: %d chunk(s), %d total frames.", len(chunks), total_frames)
+    total_frames = sum(c._frame_count or 0 for c in chunk_metas)
+    logger.info("Chunking complete: %d chunk(s), %d total frames.", len(chunk_metas), total_frames)
     return ChunkingResult(
-        success=True, reused=reused, needs_work=False,
-        chunks=chunks, total_frames=total_frames,
+        outcome=PhaseOutcome.COMPLETED,
+        chunks=chunk_metas,
+        total_frames=total_frames,
     )
-
-
-def _chunk_video_stateless(
-    video_file:       Path,
-    output_dir:       Path,
-    chunking_mode:    ChunkingMode,
-    scene_threshold:  float,
-    min_scene_length: int,
-) -> ChunkingResult:
-    """Stateless chunking path used when no tracker is provided."""
-    try:
-        logger.info("Detecting scene changes (stateless)...")
-        with alive_bar(title="Scene detection", monitor=False, stats=False) as bar:
-            scene_list = detect(
-                str(video_file),
-                ContentDetector(threshold=scene_threshold, min_scene_len=min_scene_length),
-            )
-            bar()
-        logger.info("Detected %d scene change(s).", len(scene_list))
-
-        # Resolve video args once before the loop.
-        if chunking_mode == ChunkingMode.LOSSLESS:
-            video_meta_probe = VideoMetadata(path=video_file)
-            pix_fmt = video_meta_probe.pix_fmt
-            if pix_fmt is None:
-                logger.warning(
-                    "Could not determine pixel format for %s; falling back to yuv420p.",
-                    video_file.name,
-                )
-                pix_fmt = "yuv420p"
-            video_args: list[str] = [*FFV1_VIDEO_ARGS, "-pix_fmt", pix_fmt]
-            logger.info(
-                "Chunking mode: lossless FFV1 (pix_fmt=%s) — frame-perfect splits.", pix_fmt
-            )
-        else:
-            video_args = ["-c", "copy"]
-            logger.info("Chunking mode: remux (stream-copy) — I-frame-snapped splits.")
-
-        chunks: list[ChunkInfo] = []
-        total_frames = 0
-
-        with alive_bar(len(scene_list), title="Chunking", unit=PROGRESS_CHUNK_UNIT) as bar:
-            for scene_start, scene_end in scene_list:
-                start_ts    = scene_start.get_seconds()
-                end_ts      = scene_end.get_seconds()   # exclusive end = next scene start
-                start_frm   = scene_start.get_frames()
-                end_frm     = scene_end.get_frames() - 1
-
-                stem       = _chunk_name(start_frm, end_frm)
-                stem       = _chunk_name_duration(start_ts, end_ts) # Use timestamp-based naming for more consistency on variable framerate
-                chunk_file = output_dir / f"{stem}.mkv"
-
-                if not chunk_file.exists():
-                    duration = end_ts - start_ts
-                    cmd: list[str] = [
-                        "ffmpeg", "-y",
-                        "-ss", str(start_ts),
-                        "-i", str(video_file),
-                        "-t", str(duration),
-                        *video_args,
-                        "-an", str(chunk_file),
-                    ]
-                    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-                    if proc.returncode != 0:
-                        logger.error("ffmpeg split failed for %s: %s", stem, proc.stderr[-300:])
-                        bar.text = f"✗ {stem}"
-                        bar()
-                        continue
-
-                if not chunk_file.exists() or chunk_file.stat().st_size == 0:
-                    logger.critical("Chunk file missing or empty: %s", chunk_file.name)
-                    bar.text = f"✗ {stem}"
-                    bar()
-                    continue
-
-                try:
-                    chunk_frames = get_frame_count(chunk_file, None, is_source=False)
-                except FrameCountError:
-                    chunk_frames = end_frm - start_frm + 1
-
-                chunks.append(ChunkInfo(
-                    chunk_id=stem,
-                    file_path=chunk_file,
-                    start_frame=start_frm,
-                    end_frame=end_frm,
-                    frame_count=chunk_frames,
-                    duration=end_ts - start_ts,
-                ))
-                total_frames += chunk_frames
-                bar.text = stem  # type: ignore[union-attr]
-                bar()  # type: ignore[operator]
-
-        if not chunks:
-            return ChunkingResult(
-                success=False, reused=False, needs_work=False,
-                chunks=[], total_frames=0,
-                error="No valid chunks created.",
-            )
-
-        logger.info("Created %d chunk(s) with %d total frames.", len(chunks), total_frames)
-        return ChunkingResult(
-            success=True, reused=False, needs_work=False,
-            chunks=chunks, total_frames=total_frames,
-        )
-
-    except Exception as exc:
-        logger.error("Chunking failed: %s", exc, exc_info=True)
-        return ChunkingResult(
-            success=False, reused=False, needs_work=False,
-            chunks=[], total_frames=0,
-            error=str(exc),
-        )
