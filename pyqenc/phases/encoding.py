@@ -1057,18 +1057,10 @@ class ChunkEncoder:
                         continue
                     else:
                         # File exists but sidecar is missing or incomplete — re-evaluate metrics only
-                        if sidecar is not None:
-                            missing = required_keys - set(sidecar.get("metrics", {}).keys())
-                            logger.info(
-                                "Found existing attempt %s (crf=%.2f) with incomplete sidecar "
-                                "(missing keys: %s) — re-evaluating metrics",
-                                existing.path.name, existing.crf, missing,
-                            )
-                        else:
-                            logger.info(
-                                "Found existing attempt %s (crf=%.2f) without sidecar — re-evaluating metrics",
-                                existing.path.name, existing.crf,
-                            )
+                        logger.info(
+                            fmt_chunk(strategy, chunk.chunk_id,
+                            f"existing attempt (crf={existing.crf:.2f}) — re-evaluating metrics"),
+                        )
                         output_file = existing.path
                         # Skip encoding, jump straight to quality evaluation below
                         encode_success = True
