@@ -1,4 +1,5 @@
 """CLI interface for the quality-based encoding pipeline."""
+# CHerSun 2026
 
 import argparse
 import logging

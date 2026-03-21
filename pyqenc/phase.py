@@ -12,6 +12,7 @@ This module defines the structural backbone of the phase object model:
 - ``_build_registry`` — factory that constructs all phase objects in execution
                         order, wires their dependencies, and returns the registry.
 """
+# CHerSun 2026
 
 from __future__ import annotations
 

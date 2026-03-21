@@ -5,6 +5,7 @@ This module defines all data structures used throughout the pipeline,
 including configuration, state tracking, and result objects.
 All models use Pydantic BaseModel for validation and serialisation.
 """
+# CHerSun 2026
 
 import json
 import logging
@@ -23,7 +24,13 @@ from pydantic import (  # noqa: F401 (ConfigDict used in PipelineConfig)
     PrivateAttr,
 )
 
-from pyqenc.constants import TIMEOUT_SECONDS_SHORT
+from pyqenc.constants import (
+    DOWN_ARROW,
+    LEFT_ARROW,
+    RIGHT_ARROW,
+    TIMEOUT_SECONDS_SHORT,
+    UP_ARROW,
+)
 
 if TYPE_CHECKING:
     from pyqenc.phases.extraction import VideoStream
@@ -733,6 +740,10 @@ class CropParams(BaseModel):
     def __str__(self) -> str:
         """String representation for storage and display."""
         return f"{self.top} {self.bottom} {self.left} {self.right}"
+
+    def display(self) -> str:
+        """String representation for display."""
+        return f"{UP_ARROW}{self.top} {DOWN_ARROW}{self.bottom} {LEFT_ARROW}{self.left} {RIGHT_ARROW}{self.right}"
 
     @staticmethod
     def parse(crop_str: str) -> "CropParams":

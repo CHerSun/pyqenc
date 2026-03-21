@@ -5,6 +5,7 @@ that a crash during writing never leaves a partial file on disk.  The caller
 passes the final target path and a data dict; temp-file management is handled
 internally using the ``.tmp``-then-rename protocol.
 """
+# CHerSun 2026
 
 from __future__ import annotations
 

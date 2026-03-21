@@ -4,6 +4,7 @@ Quality evaluation and CRF adjustment for encoding pipeline.
 This module provides quality evaluation against targets and CRF adjustment
 algorithms for iterative encoding optimization.
 """
+# CHerSun 2026
 
 import logging
 from dataclasses import dataclass, field
@@ -15,7 +16,11 @@ from typing import TypedDict, assert_never
 import pandas as pd
 
 from pyqenc.constants import CRF_GRANULARITY, PADDING_CRF
-from pyqenc.utils.ffmpeg_runner import FFmpegRunResult, ProgressCallback, run_ffmpeg_async
+from pyqenc.utils.ffmpeg_runner import (
+    FFmpegRunResult,
+    ProgressCallback,
+    run_ffmpeg_async,
+)
 
 from .models import CropParams, QualityTarget
 

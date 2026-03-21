@@ -1,4 +1,5 @@
 """Black border crop detection utility."""
+# CHerSun 2026
 
 from __future__ import annotations
 
@@ -76,7 +77,7 @@ def detect_crop_parameters(
         logger.debug("Got %d crop samples.", len(crop_detections))
 
         if not crop_detections:
-            logger.debug("No black borders detected")
+            logger.warning("No black borders detected")
             return CropParams()
 
         # Most conservative crop: smallest detected content area
@@ -92,17 +93,10 @@ def detect_crop_parameters(
         right  = int(width)  - max_w - left
         bottom = int(height) - max_h - top
 
-        if max(left, right, top, bottom) < 2:
-            logger.debug("Detected borders too small, no cropping needed")
-            return CropParams()
-
         crop = CropParams(top=top, bottom=bottom, left=left, right=right)
-        logger.info(
-            "Detected cropping: %d top, %d bottom, %d left, %d right (content %dx%d)",
-            top, bottom, left, right, max_w, max_h,
-        )
+        logger.info(f"Cropping: {crop.display()} (detected)")
         return crop
 
     except Exception as e:
-        logger.warning("Failed to detect crop parameters: %s", e)
+        logger.error("Failed to detect crop parameters: %s", e)
         return CropParams()

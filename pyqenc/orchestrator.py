@@ -10,6 +10,7 @@ The orchestrator's only responsibilities are:
 All phase-specific logic (artifact paths, sidecar formats, crop handling, strategy
 resolution, cleanup) lives inside the individual phase objects.
 """
+# CHerSun 2026
 
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ from pyqenc.constants import (
 )
 from pyqenc.models import CleanupLevel, PhaseOutcome, PipelineConfig
 from pyqenc.phase import Phase, PhaseResult, _build_registry
+
 logger = logging.getLogger(__name__)
 
 

@@ -4,6 +4,7 @@ Configuration management for the encoding pipeline.
 This module handles loading, validating, and providing access to encoding
 profiles and codec configurations.
 """
+# CHerSun 2026
 
 import fnmatch
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
 from pyqenc.models import CodecConfig, Strategy, StrategyConfig
 
 

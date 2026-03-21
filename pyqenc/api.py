@@ -3,6 +3,7 @@
 This module provides the main entry points for programmatic access to the pipeline.
 All functions are designed to be used both from CLI and from external code.
 """
+# CHerSun 2026
 
 import logging
 from pathlib import Path

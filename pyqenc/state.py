@@ -11,6 +11,7 @@ This module provides:
 Each model is self-sufficient: call ``Model.load(path)`` to load from a YAML
 file and ``instance.save(path)`` to persist atomically.
 """
+# CHerSun 2026
 
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ import logging
 from enum import Enum
 from pathlib import Path
 from typing import Self
+
 import yaml
 from pydantic import BaseModel, Field
 

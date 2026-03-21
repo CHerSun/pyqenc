@@ -5,6 +5,7 @@ This module handles extraction of streams from the source MKV file.
 It also provides the MKVTrackExtractor and stream model classes for
 parsing and extracting MKV tracks via ffprobe / mkvextract.
 """
+# CHerSun 2026
 
 import json
 import logging
@@ -350,12 +351,16 @@ def _log_stream_table(
     track_id_width  = len(str(max(max_track_id, 0)))
 
     logger.info("Streams:")
-    for track in all_tracks:
-        wanted  = id(track) in selected_set
-        name    = track.display_name(track_num_width, track_id_width)
-        w_sym   = SUCCESS_SYMBOL_MINOR if wanted else FAILURE_SYMBOL_MINOR
-        p_sym   = (SUCCESS_SYMBOL_MINOR if name in on_disk_names else FAILURE_SYMBOL_MINOR) if wanted else "-"
-        logger.info("  %s  %s  %s", w_sym, p_sym, name)
+    if all_tracks:
+        logger.info("Want  Present      Name")
+        for track in all_tracks:
+            wanted  = id(track) in selected_set
+            name    = track.display_name(track_num_width, track_id_width)
+            w_sym   = SUCCESS_SYMBOL_MINOR if wanted else FAILURE_SYMBOL_MINOR
+            p_sym   = (SUCCESS_SYMBOL_MINOR if name in on_disk_names else FAILURE_SYMBOL_MINOR) if wanted else "-"
+            logger.info("   %s  %s  \"%s\"", w_sym, p_sym, name)
+    else:
+        logger.error("No streams found")
 
 
 def streams_filter_plain_regex(
@@ -908,10 +913,12 @@ class ExtractionPhase:
 
         # Key parameters
         logger.info("Source:   %s", self._config.source_video.name)
-        if self._config.include:
-            logger.info("Include:  %s", self._config.include)
-        if self._config.exclude:
-            logger.info("Exclude:  %s", self._config.exclude)
+        if self._config.include or self._config.exclude:
+            logger.info("Filter:")
+            if self._config.include:
+                logger.info("  Include:  %s", self._config.include)
+            if self._config.exclude:
+                logger.info("  Exclude:  %s", self._config.exclude)
 
         artifacts, video_meta, audio_meta = self._recover(
             force_wipe=force_wipe, execute=True

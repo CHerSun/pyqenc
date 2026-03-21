@@ -4,6 +4,7 @@ Unified visualization and quality metrics analysis for video encoding pipeline.
 Consolidates metric parsing, statistics computation, and plot generation
 from the legacy metrics_visualization module.
 """
+# CHerSun 2026
 
 import asyncio
 import json
@@ -12,13 +13,12 @@ import os
 import uuid
 import warnings
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
-from typing import Callable, Literal, TypedDict
+from typing import Callable, Literal
 
 import matplotlib
+
 from pyqenc.constants import TIME_SEPARATOR_MS, TIME_SEPARATOR_SAFE
-from pyqenc.utils.alive import ProgressBar
 from pyqenc.models import CropParams, QualityTarget
 from pyqenc.quality import (
     ChunkQualityStats,
@@ -31,6 +31,7 @@ from pyqenc.quality import (
     normalize_metric,
     run_metric,
 )
+from pyqenc.utils.alive import ProgressBar
 
 matplotlib.use("Agg")  # non-interactive backend — safe to call from any thread
 import matplotlib.colors as mcolors

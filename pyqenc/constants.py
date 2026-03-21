@@ -1,4 +1,5 @@
 """Module-level constants for pyqenc."""
+# CHerSun 2026
 
 import re
 
@@ -70,6 +71,10 @@ BRACKET_LEFT = "｟"
 """Left bracket symbol for visually distinct log formatting."""
 BRACKET_RIGHT = " ｠"
 """Right bracket symbol for visually distinct log formatting."""
+UP_ARROW="↑"
+DOWN_ARROW="↓"
+LEFT_ARROW="←"
+RIGHT_ARROW="→"
 
 # Directory names for phase output
 EXTRACTED_DIR          = "extracted"

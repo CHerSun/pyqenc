@@ -9,6 +9,7 @@ Audio muxing is intentionally omitted — the final output is video-only.
 Audio delivery files are kept alongside the output for the user to mux
 manually or in a downstream step.
 """
+# CHerSun 2026
 
 from __future__ import annotations
 

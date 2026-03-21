@@ -13,12 +13,12 @@ Responsibilities:
   provided and a source mismatch is detected.
 - Check available disk space before starting work.
 """
+# CHerSun 2026
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from pyqenc.models import (
     CropParams,
@@ -152,9 +152,6 @@ class JobPhase:
         Returns:
             ``JobPhaseResult`` with ``job``, ``crop``, and ``force_wipe`` set.
         """
-        logger.info("Source:          %s", self._config.source_video)
-        logger.info("Work directory:  %s", self._config.work_dir)
-
         # Disk space check (execute mode only)
         if not dry_run:
             log_disk_space_info(
@@ -387,19 +384,13 @@ class JobPhase:
         # 1. Manual override from config
         if self._config.crop_params is not None:
             c = self._config.crop_params
-            logger.info(
-                "Cropping: manual — %d top, %d bottom, %d left, %d right",
-                c.top, c.bottom, c.left, c.right,
-            )
+            logger.info(f"Cropping: {c.display()} (manual)")
             return c
 
         # 2. Cached in job.yaml
         if job.crop is not None:
             c = job.crop
-            logger.info(
-                "Cropping: reusing previously detected — %d top, %d bottom, %d left, %d right",
-                c.top, c.bottom, c.left, c.right,
-            )
+            logger.info(f"Cropping: {c.display()} (cached)")
             return c
 
         # 3. Auto-detect

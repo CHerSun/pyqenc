@@ -4,6 +4,7 @@ Input validation for pipeline configuration and parameters.
 This module provides validation functions for all user inputs including
 file paths, quality targets, strategies, and external tool availability.
 """
+# CHerSun 2026
 
 import logging
 import re

@@ -11,6 +11,7 @@ Per-phase recovery logic has been moved into the respective phase objects:
 - ``EncodingPhase._recover()``    in ``pyqenc/phases/encoding.py``
   (via ``_recover_encoding_attempts``)
 """
+# CHerSun 2026
 
 from __future__ import annotations
 

@@ -1,4 +1,6 @@
 """Disk space checking utilities."""
+# CHerSun 2026
+
 import logging
 import shutil
 from dataclasses import dataclass
@@ -208,11 +210,9 @@ def log_disk_space_info(
     # Log warnings or success message for disk space
     logger.info("")
     if estimate.sufficient == AvailableSpaceLevel.INSUFFICIENT:
-        logger.critical("Insufficient disk space! Most likely you won't be able to finish processing. Consider freeing up more space" +
-        (" or using `--cleanup` flag." if not include_optimization else "."))
+        logger.error("Insufficient disk space! Most likely you won't be able to finish processing. Consider freeing up more space or using `--cleanup` flag.")
     elif estimate.sufficient == AvailableSpaceLevel.TIGHT:
-        logger.warning("Disk space is limited. Consider freeing up more space" +
-        (" or using `--cleanup` flag." if not include_optimization else "."))
+        logger.warning("Disk space is limited. Consider freeing up more space or using `--cleanup` flag.")
     elif estimate.sufficient == AvailableSpaceLevel.SUFFICIENT:
         logger.info(f"{SUCCESS_SYMBOL_MINOR} Sufficient disk space available.")
     logger.info("")

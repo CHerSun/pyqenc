@@ -13,6 +13,7 @@ Two modes are supported:
   representative chunks, persists per-strategy results to ``optimization.yaml``,
   and selects strategies within the configured tolerance of the best result.
 """
+# CHerSun 2026
 
 from __future__ import annotations
 

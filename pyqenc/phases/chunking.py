@@ -17,6 +17,7 @@ Two chunking modes are supported (see ``ChunkingMode``):
 * **REMUX**: stream-copy (``-c copy``); faster and smaller chunks but boundaries
   snap to the nearest I-frame before the scene timestamp.
 """
+# CHerSun 2026
 
 from __future__ import annotations
 

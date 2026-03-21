@@ -8,6 +8,7 @@ Exception: ``emit_phase_banner`` and ``log_recovery_line`` are side-effecting
 helpers that accept a logger and emit directly, since they are always called
 at ``info`` level and the pattern is too mechanical to benefit from separation.
 """
+# CHerSun 2026
 
 from __future__ import annotations
 

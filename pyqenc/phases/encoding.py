@@ -4,6 +4,7 @@ Encoding phase for the quality-based encoding pipeline.
 This module handles chunk encoding with iterative CRF adjustment to meet
 quality targets, including parallel execution and artifact-based resumption.
 """
+# CHerSun 2026
 
 import asyncio
 import logging
@@ -1004,13 +1005,17 @@ class ChunkEncoder:
                     )
                     if sidecar_valid and sidecar is not None:
                         # Re-evaluate pass/fail from metrics against current targets (Req 6a.2)
-                        metrics_dict: dict[str, float] = {
+                        all_sidecar_metrics: dict[str, float] = {
                             k: float(v) for k, v in sidecar.get("metrics", {}).items()
                         }
                         targets_met: bool = all(
-                            metrics_dict.get(f"{t.metric}_{t.statistic}", 0.0) >= t.value
+                            all_sidecar_metrics.get(f"{t.metric}_{t.statistic}", 0.0) >= t.value
                             for t in quality_targets
                         )
+                        targets_set_reused = {f"{t.metric}_{t.statistic}" for t in quality_targets}
+                        metrics_dict: dict[str, float] = {
+                            k: v for k, v in all_sidecar_metrics.items() if k in targets_set_reused
+                        }
                         metric_summary = ", ".join(f"{k}={v:.1f}" for k, v in metrics_dict.items())
                         pass_fail = (
                             f"{SUCCESS_SYMBOL_MINOR} pass"
@@ -1615,6 +1620,13 @@ def encode_all_chunks(
     logger.debug("Starting parallel encoding with %d workers", max_parallel)
     total_seconds = sum(c.end_timestamp - c.start_timestamp for c in chunks) * len(strategies)
     with ProgressBar(total_seconds, title="Encoding") as advance:
+        # Update the bar for completed chunks
+        chunks_by_id = {c.chunk_id: c for c in chunks}
+        for r in phase_recovery.pairs.values():
+            if r.state == ArtifactState.COMPLETE:
+                advance((chunks_by_id[r.chunk_id].end_timestamp - chunks_by_id[r.chunk_id].start_timestamp), AdvanceState.SKIPPED)
+
+        # Run parallel encoding
         result = asyncio.run(
             _encode_chunks_parallel(
                 encoder=encoder,

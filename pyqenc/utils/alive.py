@@ -1,4 +1,6 @@
 """Utility helpers for alive_progress bars."""
+# CHerSun 2026
+
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass

@@ -11,6 +11,7 @@ Strategy classes:
   NormStrategy, DynaudnormStrategy,
   Task, AudioEngine, SynchronousRunner, AsyncRunner
 """
+# CHerSun 2026
 
 from __future__ import annotations
 

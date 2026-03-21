@@ -13,6 +13,7 @@ The mandatory ``output_file`` parameter enforces the ``.tmp``-then-rename
 protocol for all file-producing calls.  Pass ``None`` explicitly for
 null-encode / metadata-probe commands that produce no file output.
 """
+# CHerSun 2026
 
 from __future__ import annotations
 
