@@ -43,7 +43,7 @@ import pandas as pd
 logging.getLogger("matplotlib").setLevel(logging.WARNING)
 logging.getLogger("PIL").setLevel(logging.WARNING)
 
-_logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +56,7 @@ _KEY_FRAME_NUM: str = "frameNum"
 _FONT_TITLE:         int = 14
 _FONT_AXIS_LABEL:    int = 12
 _FONT_AXIS_TICKS:    int = 10
+_FONT_AXIS_TICKS_X:  int = 8
 _FONT_LEGEND:        int = 10
 _FONT_SUMMARY_BOX:   int = 9
 _FONT_BAR_LABEL:     int = 8
@@ -355,12 +356,13 @@ DEFAULT_METRIC_STYLES: dict[MetricType, MetricVisualStyle] = {
 # ---------------------------------------------------------------------------
 
 def create_unified_plot(
-    metrics:     dict[MetricType, MetricData],
-    factor:      int,
-    output_path: Path,
-    title:       str                                  = "Video Quality Metrics Analysis",
-    styles:      dict[MetricType, MetricVisualStyle] | None = None,
-    fps:         float | None                         = None,
+    metrics:             dict[MetricType, MetricData],
+    factor:              int,
+    output_path:         Path,
+    title:               str                                  = "Video Quality Metrics Analysis",
+    styles:              dict[MetricType, MetricVisualStyle] | None = None,
+    fps:                 float | None                         = None,
+    chunk_start_seconds: float                               = 0.0,
 ) -> dict[MetricType, _MetricStatistics]:
     """Create a unified quality-metrics plot and save it to disk.
 
@@ -370,16 +372,20 @@ def create_unified_plot(
     - Per-metric statistics bar subplots below the main plot.
 
     Args:
-        metrics:     Mapping of ``MetricType`` to ``MetricData``.
-        factor:      Frame sampling factor used during metric generation.
-        output_path: Destination path for the saved PNG.
-        title:       Plot title.
-        styles:      Optional custom visual styles; falls back to
-                     ``DEFAULT_METRIC_STYLES`` for any missing key.
-        fps:         Frames per second of the encoded video.  When provided,
-                     x-axis tick labels show ``HH:MM:SS`` on the top line and
-                     the adjusted frame number on the bottom line.  When
-                     ``None``, raw frame numbers are shown as before.
+        metrics:             Mapping of ``MetricType`` to ``MetricData``.
+        factor:              Frame sampling factor used during metric generation.
+        output_path:         Destination path for the saved PNG.
+        title:               Plot title.
+        styles:              Optional custom visual styles; falls back to
+                             ``DEFAULT_METRIC_STYLES`` for any missing key.
+        fps:                 Frames per second of the encoded video.  When provided,
+                             x-axis tick labels show ``HH:MM:SS`` on the top line and
+                             the adjusted frame number on the bottom line.  When
+                             ``None``, raw frame numbers are shown as before.
+        chunk_start_seconds: Start timestamp of the chunk in seconds.  When non-zero,
+                             the x-axis frame numbers are offset so they reflect the
+                             actual position in the source video rather than starting
+                             from 0.
 
     Returns:
         Mapping of ``MetricType`` to full ``_MetricStatistics``.
@@ -395,7 +401,7 @@ def create_unified_plot(
     if styles:
         effective_styles.update(styles)
 
-    plt.style.use("seaborn-v0_8-darkgrid")
+    plt.style.use("seaborn-v0_8")
     plt.rcParams["axes.grid"] = False
 
     n_metrics = len(metrics)
@@ -426,8 +432,8 @@ def create_unified_plot(
         ax.yaxis.set_major_locator(plt.MultipleLocator(_PSNR_Y_MAJOR_TICK))
         ax.yaxis.set_minor_locator(plt.MultipleLocator(_PSNR_Y_MINOR_TICK))
         ax.set_axisbelow(True)
-        ax.grid(True, which="major", alpha=_GRID_ALPHA_MAJOR)
-        ax.grid(True, which="minor", alpha=_GRID_ALPHA_MINOR)
+        ax.grid(True, which="major", alpha=_GRID_ALPHA_MAJOR, zorder=0)
+        ax.grid(True, which="minor", alpha=_GRID_ALPHA_MINOR, zorder=0)
 
     def _configure_pct_axis(ax: plt.Axes, color: str) -> None:
         ax.set_ylabel("SSIM / VMAF (%)", color=color, fontsize=_FONT_AXIS_LABEL, fontweight="bold")
@@ -443,8 +449,9 @@ def create_unified_plot(
         _configure_psnr_axis(ax_left)
         pct_color: str = effective_styles[MetricType.SSIM if has_ssim else MetricType.VMAF].color
         _configure_pct_axis(ax_right, pct_color)
-        ax_right.grid(True, which="major", alpha=_GRID_ALPHA_MAJOR)
-        ax_right.grid(True, which="minor", alpha=_GRID_ALPHA_MINOR)
+        ax_right.set_axisbelow(True)
+        ax_right.grid(True, which="major", alpha=_GRID_ALPHA_MAJOR, zorder=0)
+        ax_right.grid(True, which="minor", alpha=_GRID_ALPHA_MINOR, zorder=0)
     elif has_psnr:
         ax_left = ax_main
         _configure_psnr_axis(ax_left)
@@ -452,15 +459,36 @@ def create_unified_plot(
         ax_right = ax_main
         pct_color = effective_styles[MetricType.SSIM if has_ssim else MetricType.VMAF].color
         _configure_pct_axis(ax_right, pct_color)
-        ax_right.grid(True, which="major", alpha=_GRID_ALPHA_MAJOR)
-        ax_right.grid(True, which="minor", alpha=_GRID_ALPHA_MINOR)
+        ax_right.set_axisbelow(True)
+        ax_right.grid(True, which="major", alpha=_GRID_ALPHA_MAJOR, zorder=0)
+        ax_right.grid(True, which="minor", alpha=_GRID_ALPHA_MINOR, zorder=0)
 
     ax_main.set_title(title, fontsize=_FONT_TITLE, fontweight="bold", pad=20)
-    ax_main.tick_params(axis="x", labelsize=_FONT_AXIS_TICKS)
+    ax_main.tick_params(axis="x", labelsize=_FONT_AXIS_TICKS_X)
 
-    max_frame = max(m.df.index.max() for m in metrics.values())
-    x_pad     = max_frame * _X_PADDING_RATIO
-    ax_main.set_xlim(-x_pad, max_frame + x_pad)
+    # Compute frame offset from chunk start so x-axis reflects source timestamps
+    frame_offset: float = chunk_start_seconds * fps if (fps is not None and fps > 0) else 0.0
+
+    # Scale metrics to display range once:
+    #   SSIM: raw 0–1 → multiply by 100
+    #   PSNR: clip inf → 100.0
+    #   VMAF: unchanged (already 0–100)
+    # All subsequent code uses scaled_values exclusively — no raw metrics access after this point.
+    scaled_values: dict[MetricType, pd.Series] = {}
+    frame_index:   dict[MetricType, pd.Index]  = {}
+    for metric_type, metric_data in metrics.items():
+        vals = metric_data.df[metric_data.column].copy()
+        if metric_type == MetricType.SSIM:
+            vals = vals * 100.0
+        elif metric_type == MetricType.PSNR:
+            vals = vals.clip(upper=100.0)
+        scaled_values[metric_type] = vals
+        frame_index[metric_type]   = metric_data.df.index
+
+    max_frame = max(idx.max() for idx in frame_index.values()) + frame_offset
+    min_frame = min(idx.min() for idx in frame_index.values()) + frame_offset
+    x_pad     = (max_frame - min_frame) * _X_PADDING_RATIO
+    ax_main.set_xlim(min_frame - x_pad, max_frame + x_pad)
     ax_main.xaxis.set_major_locator(ticker.MaxNLocator(nbins=_X_MAJOR_TICKS, integer=True))
     ax_main.xaxis.set_minor_locator(ticker.MaxNLocator(nbins=_X_MINOR_TICKS, integer=True))
 
@@ -478,16 +506,14 @@ def create_unified_plot(
 
         ax_main.xaxis.set_major_formatter(ticker.FuncFormatter(_dual_label_formatter))
         # Increase bottom margin so two-line labels don't get clipped
-        ax_main.tick_params(axis="x", labelsize=_FONT_AXIS_TICKS, pad=4)
+        ax_main.tick_params(axis="x", labelsize=_FONT_AXIS_TICKS_X, pad=4)
     else:
         ax_main.set_xlabel("Frame Number", fontsize=_FONT_AXIS_LABEL, fontweight="bold")
 
     lines:  list[plt.Line2D] = []
     labels: list[str]        = []
 
-    for metric_type, metric_data in metrics.items():
-        df     = metric_data.df
-        column = metric_data.column
+    for metric_type in scaled_values:
         style  = effective_styles[metric_type]
 
         if style.y_axis == "left" and ax_left is not None:
@@ -497,29 +523,25 @@ def create_unified_plot(
         else:
             ax = ax_main
 
-        plot_values = df[column].copy()
-        plot_values = plot_values.clip(upper=100.0)
+        plot_values = scaled_values[metric_type]
+        plot_index  = frame_index[metric_type] + frame_offset
 
         n_points = len(plot_values)
-        # Dynamic aggregation: target _TARGET_PLOT_POINTS display points,
-        # but only if we have at least _MIN_POINTS_PER_BIN raw points per bin.
-        # Otherwise plot raw values with no range band.
         min_raw_for_agg = _TARGET_PLOT_POINTS * _MIN_POINTS_PER_BIN
         if n_points >= min_raw_for_agg:
             window = max(1, n_points // _TARGET_PLOT_POINTS)
             smoothed    = plot_values.rolling(window=window, center=True, min_periods=1).mean()
             rolling_min = plot_values.rolling(window=window * 2, center=True, min_periods=1).min()
             rolling_max = plot_values.rolling(window=window * 2, center=True, min_periods=1).max()
-            ax.fill_between(df.index, rolling_min, rolling_max,
+            ax.fill_between(plot_index, rolling_min, rolling_max,
                             color=style.color, alpha=_RANGE_ALPHA, zorder=2,
                             label=f"{style.label} range")
-            line, = ax.plot(df.index, smoothed,
+            line, = ax.plot(plot_index, smoothed,
                             color=style.color, linestyle=style.linestyle,
                             linewidth=style.linewidth, label=style.label,
                             alpha=_LINE_ALPHA, zorder=3)
         else:
-            # Too few points — plot raw, no range band
-            line, = ax.plot(df.index, plot_values,
+            line, = ax.plot(plot_index, plot_values,
                             color=style.color, linestyle=style.linestyle,
                             linewidth=style.linewidth, label=style.label,
                             alpha=_LINE_ALPHA, zorder=3)
@@ -527,41 +549,34 @@ def create_unified_plot(
         lines.append(line)
         labels.append(style.label)
 
-    # Compute full statistics for all metrics
-    stats: dict[MetricType, _MetricStatistics] = {}
-    for metric_type, metric_data in metrics.items():
-        stats[metric_type] = compute_statistics(metric_data.df[metric_data.column])
+    # Compute full statistics from scaled values
+    stats: dict[MetricType, _MetricStatistics] = {
+        mt: compute_statistics(scaled_values[mt])
+        for mt in scaled_values
+    }
 
-    # Summary boxes
-    total_frames   = max(m.df.index.max() for m in metrics.values()) + 1
-    frames_checked = max(len(m.df) for m in metrics.values())
+    # Collect summary box data — rendered after tight_layout so axes position is final
+    _summary_boxes: list[tuple[float, float, str, dict]] = []
+
+    total_frames   = max(idx.max() for idx in frame_index.values()) + 1
+    frames_checked = max(len(v) for v in scaled_values.values())
     current_x      = _SUMMARY_BOX_START_X
 
-    ax_main.text(
+    _summary_boxes.append((
         current_x, _SUMMARY_BOX_Y_POS,
         f"Frames:\n  Total: {total_frames}\n  Checked: {frames_checked}\n  Factor: 1:{factor}",
-        transform=ax_main.transAxes, fontsize=_FONT_SUMMARY_BOX,
-        verticalalignment="bottom",
-        bbox=dict(boxstyle="round", facecolor="wheat", alpha=_SUMMARY_BOX_ALPHA),
-        family="monospace", zorder=_SUMMARY_BOX_ZORDER,
-    )
+        dict(facecolor="wheat", alpha=_SUMMARY_BOX_ALPHA),
+    ))
     current_x += _SUMMARY_BOX_WIDTH + _SUMMARY_BOX_SPACING
 
     for metric_type in [MetricType.PSNR, MetricType.SSIM, MetricType.VMAF]:
-        if metric_type not in metrics:
+        if metric_type not in scaled_values:
             continue
-        metric_data  = metrics[metric_type]
         metric_stats = stats[metric_type]
         style        = effective_styles[metric_type]
-        df           = metric_data.df
-        column       = metric_data.column
+        vals         = scaled_values[metric_type]
 
-        if metric_type == MetricType.PSNR:
-            lossless_count = int(np.isinf(df[column]).sum())
-        elif style.lossless_threshold is not None:
-            lossless_count = int((df[column] >= style.lossless_threshold).sum())
-        else:
-            lossless_count = 0
+        lossless_count = int((vals >= 100.0).sum())
 
         display_stats: dict[str, float] = dict(metric_stats)
 
@@ -582,13 +597,10 @@ def create_unified_plot(
             f"  Std: {display_stats['std']:>5.1f}{style.unit}\n"
             f"  Lossless: {lossless_count} ({style.lossless_label})"
         )
-        ax_main.text(
+        _summary_boxes.append((
             current_x, _SUMMARY_BOX_Y_POS, summary_text,
-            transform=ax_main.transAxes, fontsize=_FONT_SUMMARY_BOX,
-            verticalalignment="bottom",
-            bbox=dict(boxstyle="round", facecolor=style.color, alpha=_SUMMARY_BOX_METRIC_ALPHA),
-            family="monospace", zorder=_SUMMARY_BOX_ZORDER,
-        )
+            dict(facecolor=style.color, alpha=_SUMMARY_BOX_METRIC_ALPHA),
+        ))
         current_x += _SUMMARY_BOX_WIDTH + _SUMMARY_BOX_SPACING
 
     ax_main.legend(lines, labels, loc="lower right", fontsize=_FONT_LEGEND, framealpha=_LEGEND_ALPHA)
@@ -599,7 +611,7 @@ def create_unified_plot(
     subplot_idx = 0
 
     for metric_type in [MetricType.PSNR, MetricType.SSIM, MetricType.VMAF]:
-        if metric_type not in metrics:
+        if metric_type not in scaled_values:
             continue
         metric_stats = stats[metric_type]
         style        = effective_styles[metric_type]
@@ -627,17 +639,55 @@ def create_unified_plot(
                             fontsize=_FONT_SUBPLOT_XLABEL, fontweight="bold", color=style.color)
         ax_stats.set_title(f"{metric_type.value.upper()} Distribution",
                            fontsize=_FONT_SUBPLOT_TITLE, fontweight="bold", color=style.color)
-        ax_stats.tick_params(axis="x", labelcolor=style.color, labelsize=_FONT_AXIS_TICKS)
+        ax_stats.tick_params(axis="x", labelcolor=style.color, labelsize=_FONT_AXIS_TICKS_X)
         ax_stats.tick_params(axis="y", labelsize=_FONT_AXIS_TICKS)
         ax_stats.set_xlim(_PSNR_Y_MIN, _PSNR_Y_MAX) if metric_type == MetricType.PSNR \
             else ax_stats.set_xlim(_PCT_Y_MIN, _PCT_Y_MAX)
-        ax_stats.grid(True, axis="x", alpha=_GRID_ALPHA_MAJOR)
+        ax_stats.grid(True, axis="x", alpha=_GRID_ALPHA_MAJOR, zorder=0)
         ax_stats.set_axisbelow(True)
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore",
                                 message="This figure includes Axes that are not compatible with tight_layout")
         plt.tight_layout()
+
+    # -----------------------------------------------------------------------
+    # Summary boxes — why fig.text() and NOT ax.text()
+    # -----------------------------------------------------------------------
+    # When a twinx() axes is present it sits in a separate axes layer that is
+    # rendered on top of ax_main in the figure's stacking order.  Any text
+    # added via ax_main.text(..., transform=ax_main.transAxes) lives in
+    # ax_main's layer and is therefore drawn *under* the twinx axes — meaning
+    # the twinx grid lines and background patch overdraw it regardless of the
+    # zorder value set on the Text artist (zorder only sorts within one axes).
+    #
+    # The fix: use fig.text() with figure-level coordinates so the text is
+    # composited in the figure layer, which is always above all axes layers.
+    #
+    # The coordinate conversion (axes → figure) must happen AFTER tight_layout()
+    # because tight_layout repositions the axes; computing the transform before
+    # that call would produce stale coordinates and misplace the boxes.
+    #
+    # What NOT to do:
+    #   - ax.text(..., zorder=<large number>) — zorder is intra-axes only.
+    #   - iterating gridlines and setting their zorder — seaborn styles render
+    #     the grid as part of the axes background, not as Line2D artists, so
+    #     get_xgridlines() / get_ygridlines() may return nothing useful.
+    #   - switching to a "darkgrid" or "whitegrid" seaborn style and hoping
+    #     rcParams["axes.grid"] = False suppresses it — it does not fully
+    #     suppress the background patch that carries the grid texture.
+    # -----------------------------------------------------------------------
+    axes_to_fig = ax_main.transAxes + fig.transFigure.inverted()
+    for ax_x, ax_y, text, bbox_kw in _summary_boxes:
+        fx, fy = axes_to_fig.transform((ax_x, ax_y))
+        fig.text(
+            fx, fy, text,
+            transform=fig.transFigure, fontsize=_FONT_SUMMARY_BOX,
+            verticalalignment="bottom",
+            bbox=dict(boxstyle="round", **bbox_kw),
+            family="monospace",
+        )
+
     fig.savefig(output_path, dpi=_PLOT_DPI, bbox_inches="tight")
     plt.close(fig)
 
@@ -711,18 +761,19 @@ def _save_stats_file(
         *[f"{key:<3}:{display_stats[key]:>8.2f}" for key in display_stats],
     ]
     stats_path.write_text(os.linesep.join(lines), encoding="utf-8")
-    _logger.debug("Saved %s statistics to %s", metric_type.value.upper(), stats_path)
+    logger.debug("Saved %s statistics to %s", metric_type.value.upper(), stats_path)
 
 
 def analyze_chunk_quality(
-    psnr_log:      Path | None = None,
-    ssim_log:      Path | None = None,
-    vmaf_json:     Path | None = None,
-    factor:        int         = 1,
-    output_path:   Path | None = None,
-    title:         str | None  = None,
-    generate_plot: bool        = True,
-    fps:           float | None = None,
+    psnr_log:            Path | None = None,
+    ssim_log:            Path | None = None,
+    vmaf_json:           Path | None = None,
+    factor:              int         = 1,
+    output_path:         Path | None = None,
+    title:               str | None  = None,
+    generate_plot:       bool        = True,
+    fps:                 float | None = None,
+    chunk_start_seconds: float       = 0.0,
 ) -> ChunkQualityStats:
     """Analyze video chunk quality from metric log files.
 
@@ -730,16 +781,19 @@ def analyze_chunk_quality(
     a unified visualization plot, and saves per-metric ``.stats`` text files.
 
     Args:
-        psnr_log:      Path to PSNR log file (optional).
-        ssim_log:      Path to SSIM log file (optional).
-        vmaf_json:     Path to VMAF JSON file (optional).
-        factor:        Frame sampling factor used during metric generation.
-        output_path:   Destination for the plot PNG.  Auto-derived when ``None``.
-        title:         Plot title.  Auto-generated when ``None``.
-        generate_plot: Whether to create and save the visualization.
-        fps:           Frames per second of the encoded video.  When provided,
-                       x-axis tick labels show ``HH:MM:SS`` on the top line and
-                       the adjusted frame number on the bottom line.
+        psnr_log:            Path to PSNR log file (optional).
+        ssim_log:            Path to SSIM log file (optional).
+        vmaf_json:           Path to VMAF JSON file (optional).
+        factor:              Frame sampling factor used during metric generation.
+        output_path:         Destination for the plot PNG.  Auto-derived when ``None``.
+        title:               Plot title.  Auto-generated when ``None``.
+        generate_plot:       Whether to create and save the visualization.
+        fps:                 Frames per second of the encoded video.  When provided,
+                             x-axis tick labels show ``HH:MM:SS`` on the top line and
+                             the adjusted frame number on the bottom line.
+        chunk_start_seconds: Start timestamp of the chunk in seconds.  When non-zero,
+                             the x-axis is offset so frame numbers reflect the actual
+                             position in the source video.
 
     Returns:
         ``ChunkQualityStats`` with ``min``, ``median``, ``max``, and ``std``
@@ -761,44 +815,44 @@ def analyze_chunk_quality(
     # --- PSNR ---
     if psnr_log is not None:
         try:
-            _logger.debug("Parsing PSNR log: %s", psnr_log)
+            logger.debug("Parsing PSNR log: %s", psnr_log)
             df = parse_psnr_file(psnr_log, factor)
             parsed_metrics[MetricType.PSNR] = MetricData(df=df, column=MetricType.PSNR.value)
             metric_files[MetricType.PSNR]   = psnr_log
             fs = compute_statistics(df[MetricType.PSNR.value], std_cutoff_max=100.0)
             full_stats[MetricType.PSNR]     = fs
             result[MetricType.PSNR]         = _extract_key_stats(fs, MetricType.PSNR)
-            _logger.debug("Parsed PSNR: %d frames", len(df))
+            logger.debug("Parsed PSNR: %d frames", len(df))
         except Exception as exc:
-            _logger.warning("Failed to parse PSNR from %s: %s", psnr_log, exc)
+            logger.warning("Failed to parse PSNR from %s: %s", psnr_log, exc)
 
     # --- SSIM ---
     if ssim_log is not None:
         try:
-            _logger.debug("Parsing SSIM log: %s", ssim_log)
+            logger.debug("Parsing SSIM log: %s", ssim_log)
             df = parse_ssim_file(ssim_log, factor)
             parsed_metrics[MetricType.SSIM] = MetricData(df=df, column=MetricType.SSIM.value)
             metric_files[MetricType.SSIM]   = ssim_log
             fs = compute_statistics(df[MetricType.SSIM.value])
             full_stats[MetricType.SSIM]     = fs
             result[MetricType.SSIM]         = _extract_key_stats(fs, MetricType.SSIM)
-            _logger.debug("Parsed SSIM: %d frames", len(df))
+            logger.debug("Parsed SSIM: %d frames", len(df))
         except Exception as exc:
-            _logger.warning("Failed to parse SSIM from %s: %s", ssim_log, exc)
+            logger.warning("Failed to parse SSIM from %s: %s", ssim_log, exc)
 
     # --- VMAF ---
     if vmaf_json is not None:
         try:
-            _logger.debug("Parsing VMAF JSON: %s", vmaf_json)
+            logger.debug("Parsing VMAF JSON: %s", vmaf_json)
             df = parse_vmaf_file(vmaf_json, factor)
             parsed_metrics[MetricType.VMAF] = MetricData(df=df, column=MetricType.VMAF.value)
             metric_files[MetricType.VMAF]   = vmaf_json
             fs = compute_statistics(df[MetricType.VMAF.value])
             full_stats[MetricType.VMAF]     = fs
             result[MetricType.VMAF]         = _extract_key_stats(fs, MetricType.VMAF)
-            _logger.debug("Parsed VMAF: %d frames", len(df))
+            logger.debug("Parsed VMAF: %d frames", len(df))
         except Exception as exc:
-            _logger.warning("Failed to parse VMAF from %s: %s", vmaf_json, exc)
+            logger.warning("Failed to parse VMAF from %s: %s", vmaf_json, exc)
 
     if not parsed_metrics:
         raise ValueError(
@@ -821,7 +875,7 @@ def analyze_chunk_quality(
             s = result[mt]
             parts.append(f"{mt.value.upper()} min={s['min']:.1f} med={s['median']:.1f}")
     if parts:
-        _logger.debug("Metrics (normalized): %s", " | ".join(parts))
+        logger.debug("Metrics (normalized): %s", " | ".join(parts))
 
     if generate_plot:
         if output_path is None:
@@ -829,15 +883,16 @@ def analyze_chunk_quality(
         if title is None:
             names = [mt.value.upper() for mt in parsed_metrics]
             title = f"Video Quality Metrics Analysis ({', '.join(names)})"
-        _logger.debug("Generating unified plot: %s", output_path)
+        logger.debug("Generating unified plot: %s", output_path)
         create_unified_plot(
             metrics=parsed_metrics,
             factor=factor,
             output_path=output_path,
             title=title,
             fps=fps,
+            chunk_start_seconds=chunk_start_seconds,
         )
-        _logger.debug("Plot saved to %s", output_path)
+        logger.debug("Plot saved to %s", output_path)
 
     for metric_type, metric_file in metric_files.items():
         if metric_type in full_stats:
@@ -905,7 +960,7 @@ class QualityEvaluator:
         uuid_hex = uuid.uuid4().hex
         cwd = encoded.parent
 
-        _logger.debug(
+        logger.debug(
             "Generating metrics for %s vs %s (tmp prefix: %s)",
             encoded.name, reference.name, uuid_hex,
         )
@@ -945,7 +1000,7 @@ class QualityEvaluator:
                 output_extension=".tmp",
             )
             if not result.success:
-                _logger.warning(
+                logger.warning(
                     "Metric %s calculation had non-zero exit code: %d",
                     metric.value, result.returncode,
                 )
@@ -968,12 +1023,12 @@ class QualityEvaluator:
                 try:
                     tmp_path.replace(final_path)
                 except OSError as exc:
-                    _logger.warning(
+                    logger.warning(
                         "Failed to rename metric tmp file %s → %s: %s",
                         tmp_path, final_path, exc,
                     )
             else:
-                _logger.warning("Expected metric tmp file not found: %s", tmp_path)
+                logger.warning("Expected metric tmp file not found: %s", tmp_path)
 
         return final_psnr, final_ssim, final_vmaf
 
@@ -987,22 +1042,26 @@ class QualityEvaluator:
         subsample_factor: int = 10,
         show_progress: bool = False,
         plot_path: Path | None = None,
+        chunk_start_seconds: float = 0.0,
     ) -> QualityEvaluation:
         """Evaluate encoded chunk against reference and quality targets.
 
         Args:
-            encoded:          Path to encoded video file
-            reference:        Path to reference video file
-            ref_crop:         Crop parameters for the reference input
-            targets:          List of quality targets to evaluate against
-            output_dir:       Directory for raw metric log files and stats
-            subsample_factor: Frame subsampling factor for metrics
-            show_progress:    If True, display a live progress bar (use only
-                              when not nested inside another alive_bar context,
-                              e.g. for the final full-video metrics run after merge).
-            plot_path:        Explicit path for the PNG plot.  When ``None``,
-                              the plot is written as ``<encoded.stem>.png``
-                              inside ``output_dir``.
+            encoded:             Path to encoded video file
+            reference:           Path to reference video file
+            ref_crop:            Crop parameters for the reference input
+            targets:             List of quality targets to evaluate against
+            output_dir:          Directory for raw metric log files and stats
+            subsample_factor:    Frame subsampling factor for metrics
+            show_progress:       If True, display a live progress bar (use only
+                                 when not nested inside another alive_bar context,
+                                 e.g. for the final full-video metrics run after merge).
+            plot_path:           Explicit path for the PNG plot.  When ``None``,
+                                 the plot is written as ``<encoded.stem>.png``
+                                 inside ``output_dir``.
+            chunk_start_seconds: Start timestamp of the chunk in seconds.  Used to
+                                 offset the x-axis so the graph reflects the actual
+                                 position in the source video.
 
         Returns:
             QualityEvaluation with metrics and target evaluation results
@@ -1054,7 +1113,7 @@ class QualityEvaluator:
             )
 
         # Parse metrics and generate plots using metrics_visualization
-        _logger.debug("Parsing metrics and generating plots")
+        logger.debug("Parsing metrics and generating plots")
         resolved_plot_path = plot_path if plot_path is not None else output_dir / f"{encoded.stem}.png"
         metrics = analyze_chunk_quality(
             psnr_log=psnr_log if psnr_log.exists() else None,
@@ -1065,6 +1124,7 @@ class QualityEvaluator:
             title=f"Quality metrics for {encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")}",
             generate_plot=True,
             fps=fps_value,
+            chunk_start_seconds=chunk_start_seconds,
         )
 
         # Collect artifacts
@@ -1089,14 +1149,14 @@ class QualityEvaluator:
 
             metric_stats = metrics.get(MetricType(target.metric))
             if metric_stats is None:
-                _logger.warning("Target metric '%s' not available in results", target.metric)
+                logger.warning("Target metric '%s' not available in results", target.metric)
                 failed_targets.append(target)
                 continue
 
             # Get the statistic value
             actual_value = metric_stats.get(target.statistic)
             if actual_value is None:
-                _logger.warning(
+                logger.warning(
                     "Target statistic '%s' not available for metric '%s'",
                     target.statistic,
                     target.metric,
@@ -1106,13 +1166,13 @@ class QualityEvaluator:
 
             # Compare against target
             if actual_value < target.value:
-                _logger.debug(
+                logger.debug(
                     "Target not met: %s-%s:%s (actual: %.2f)",
                     target.metric, target.statistic, target.value, actual_value,
                 )
                 failed_targets.append(target)
             else:
-                _logger.debug(
+                logger.debug(
                     "Target met: %s-%s:%s (actual: %.2f)",
                     target.metric, target.statistic, target.value, actual_value,
                 )

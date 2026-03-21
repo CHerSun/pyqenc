@@ -1,8 +1,8 @@
 """Disk space checking utilities."""
-
 import logging
 import shutil
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 from pyqenc.constants import (
@@ -28,15 +28,19 @@ class DiskSpaceInfo:
     free_gb: float
     percent_used: float
 
+class AvailableSpaceLevel(StrEnum):
+    SUFFICIENT = "Sufficient"
+    INSUFFICIENT = "Tight"
+    TIGHT = "Warning"
 
 @dataclass
 class SpaceEstimate:
     """Estimated space requirements for pipeline."""
     source_size_gb: float
-    estimated_required_gb: float
+    min_estimated_required_gb: float
+    max_estimated_required_gb: float
     available_gb: float
-    sufficient: bool
-    warning_message: str | None = None
+    sufficient: AvailableSpaceLevel
 
 
 def get_disk_space(path: Path) -> DiskSpaceInfo:
@@ -110,11 +114,12 @@ def estimate_required_space(
 def check_disk_space(
     source_video:         Path,
     work_dir:             Path,
-    num_strategies:       int          = 1,
+    min_strategies:       int          = 1,
+    max_strategies:       int          = 1,
     include_optimization: bool         = False,
     chunking_mode:        ChunkingMode = ChunkingMode.LOSSLESS,
 ) -> SpaceEstimate:
-    """Check if sufficient disk space is available for pipeline execution.
+    """Check if sufficient disk space is available for pipeline execution. Accounts for multiple strategies possibilities.
 
     Args:
         source_video:         Path to source video file.
@@ -124,24 +129,25 @@ def check_disk_space(
         chunking_mode:        Chunking strategy — affects chunk size estimate.
 
     Returns:
-        SpaceEstimate with availability details.
+        tuple[SpaceEstimate, SpaceEstimate] with availability details min and max.
     """
     # Get source size
     if not source_video.exists():
-        return SpaceEstimate(
-            source_size_gb=0.0,
-            estimated_required_gb=0.0,
-            available_gb=0.0,
-            sufficient=False,
-            warning_message=f"Source video not found: {source_video}"
-        )
+        return SpaceEstimate(0.0, 0.0, 0.0, 0.0, AvailableSpaceLevel.INSUFFICIENT)
 
     source_size_gb = source_video.stat().st_size / (1024 ** 3)
 
-    # Estimate required space
-    estimated_required_gb = estimate_required_space(
+    # Estimate minimal required space (min num strategies)
+    estimated_required_gb_min = estimate_required_space(
         source_video,
-        num_strategies,
+        min_strategies,
+        include_optimization,
+        chunking_mode,
+    )
+    # Estimate maximal required space (max num strategies)
+    estimated_required_gb_max = estimate_required_space(
+        source_video,
+        max_strategies,
         include_optimization,
         chunking_mode,
     )
@@ -152,43 +158,24 @@ def check_disk_space(
     disk_info = get_disk_space(work_dir)
 
     # Check if sufficient space available
-    # Add 10% safety margin
-    required_with_margin = estimated_required_gb * 1.1
-    sufficient = disk_info.free_gb >= required_with_margin
+    min_required = estimated_required_gb_min
+    recommended_required = estimated_required_gb_max * 1.2
+    sufficient: bool = disk_info.free_gb >= min_required
+    recommended: bool = disk_info.free_gb >= recommended_required
+    level: AvailableSpaceLevel = AvailableSpaceLevel.INSUFFICIENT if not sufficient else AvailableSpaceLevel.TIGHT if not recommended else AvailableSpaceLevel.SUFFICIENT
 
-    # Generate warning message if insufficient
-    warning_message = None
-    if not sufficient:                                                          # Warn if space is insufficient
-        warning_message = (
-            f"Insufficient disk space! "
-            f"Required: {required_with_margin:.2f} GB, "
-            f"Available: {disk_info.free_gb:.2f} GB, "
-            f"Shortfall: {required_with_margin - disk_info.free_gb:.2f} GB"
-        )
-    elif disk_info.free_gb < required_with_margin * OVERHEAD_TIGHT_MARGIN:      # Warn if space is tight
-        warning_message = (
-            f"Disk space is limited. "
-            f"Required: {required_with_margin:.2f} GB, "
-            f"Available: {disk_info.free_gb:.2f} GB. "
-            f"Consider freeing up space or using a different work directory."
-        )
+    return SpaceEstimate(source_size_gb, min_required, recommended_required, disk_info.free_gb, level)
 
-    return SpaceEstimate(
-        source_size_gb=source_size_gb,
-        estimated_required_gb=estimated_required_gb,
-        available_gb=disk_info.free_gb,
-        sufficient=sufficient,
-        warning_message=warning_message
-    )
 
 
 def log_disk_space_info(
     source_video:         Path,
     work_dir:             Path,
-    num_strategies:       int          = 1,
+    min_num_strategies:   int          = 1,
+    max_num_strategies:   int          = 1,
     include_optimization: bool         = False,
     chunking_mode:        ChunkingMode = ChunkingMode.LOSSLESS,
-) -> bool:
+) -> AvailableSpaceLevel:
     """Check and log disk space information.
 
     Args:
@@ -204,7 +191,7 @@ def log_disk_space_info(
     estimate = check_disk_space(
         source_video,
         work_dir,
-        num_strategies,
+        min_num_strategies, max_num_strategies,
         include_optimization,
         chunking_mode,
     )
@@ -212,19 +199,22 @@ def log_disk_space_info(
     # Log the results in a clear format
     kv_table = {
         "Source video size": f"{estimate.source_size_gb:.2f} GB",
-        "Estimated required space": f"{estimate.estimated_required_gb:.2f} GB",
+        "Estimated required space": f"{estimate.min_estimated_required_gb:.2f} GB",
+        "Estimated recommended space": f"{estimate.max_estimated_required_gb:.2f} GB",
         "Available space": f"{estimate.available_gb:.2f} GB",
     }
     fmt_key_value_table(kv_table)
-    logger.info("")
 
     # Log warnings or success message for disk space
-    if estimate.warning_message:
-        if not estimate.sufficient:
-            logger.critical(estimate.warning_message)
-        else:
-            logger.warning(estimate.warning_message)
-    else:
-        logger.info("%s Sufficient disk space available", SUCCESS_SYMBOL_MINOR)
+    logger.info("")
+    if estimate.sufficient == AvailableSpaceLevel.INSUFFICIENT:
+        logger.critical("Insufficient disk space! Most likely you won't be able to finish processing. Consider freeing up more space" +
+        (" or using `--cleanup` flag." if not include_optimization else "."))
+    elif estimate.sufficient == AvailableSpaceLevel.TIGHT:
+        logger.warning("Disk space is limited. Consider freeing up more space" +
+        (" or using `--cleanup` flag." if not include_optimization else "."))
+    elif estimate.sufficient == AvailableSpaceLevel.SUFFICIENT:
+        logger.info(f"{SUCCESS_SYMBOL_MINOR} Sufficient disk space available.")
+    logger.info("")
 
     return estimate.sufficient

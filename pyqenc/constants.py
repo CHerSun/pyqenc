@@ -71,6 +71,20 @@ BRACKET_LEFT = "｟"
 BRACKET_RIGHT = " ｠"
 """Right bracket symbol for visually distinct log formatting."""
 
+# Directory names for phase output
+EXTRACTED_DIR          = "extracted"
+"""Output directory for extracted streams (ExtractionPhase)."""
+CHUNKS_DIR             = "chunks"
+"""Output directory for video chunks (ChunkingPhase)."""
+ENCODING_WORKSPACE_DIR = "encoding"
+"""Working directory for CRF search attempt files (intermediate, per-strategy)."""
+ENCODED_OUTPUT_DIR     = "encoded"
+"""Output directory for finalized encoded artifacts (hard-linked winning attempts)."""
+AUDIO_OUTPUT_DIR       = "audio"
+"""Output directory for processed audio files (AudioPhase)."""
+FINAL_OUTPUT_DIR       = "final"
+"""Output directory for merged final outputs (MergePhase)."""
+
 # Artifact discovery patterns
 CHUNK_GLOB_PATTERN = "*.mkv"
 """Glob mask used to discover chunk files in a chunk output directory."""

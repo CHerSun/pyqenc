@@ -30,7 +30,7 @@ from pyqenc.constants import STDERR_TAIL_LINES, TEMP_SUFFIX
 if TYPE_CHECKING:
     from pyqenc.models import VideoMetadata
 
-_logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -161,7 +161,7 @@ async def _read_stdout(
                 try:
                     callback(frame, out_time_s)
                 except Exception as exc:  # noqa: BLE001
-                    _logger.debug("progress_callback raised (ignored): %s", exc)
+                    logger.debug("progress_callback raised (ignored): %s", exc)
 
             block = {}
 
@@ -249,10 +249,10 @@ def _finalize_outputs(tmp_to_final: dict[Path, Path], success: bool) -> None:
         for tmp_path, final_path in tmp_to_final.items():
             try:
                 tmp_path.replace(final_path)
-                _logger.debug("Renamed %s → %s", tmp_path.name, final_path.name)
+                logger.debug("Renamed %s → %s", tmp_path.name, final_path.name)
             except OSError:
                 # Cross-device move — fall back to copy-then-delete
-                _logger.warning(
+                logger.warning(
                     "Cross-device rename for %s → %s; falling back to copy+delete",
                     tmp_path.name, final_path.name,
                 )
@@ -263,7 +263,7 @@ def _finalize_outputs(tmp_to_final: dict[Path, Path], success: bool) -> None:
             try:
                 tmp_path.unlink(missing_ok=True)
             except OSError as exc:
-                _logger.debug("Could not delete temp file %s: %s", tmp_path, exc)
+                logger.debug("Could not delete temp file %s: %s", tmp_path, exc)
 
 
 async def run_ffmpeg_async(
@@ -307,7 +307,7 @@ async def run_ffmpeg_async(
         cmd, tmp_to_final = _resolve_tmp_paths(list(cmd), output_file)
 
     modified_cmd = _inject_flags(list(cmd))
-    _logger.debug("run_ffmpeg_async: %s", " ".join(str(a) for a in modified_cmd))
+    logger.debug("run_ffmpeg_async: %s", " ".join(str(a) for a in modified_cmd))
 
     proc = await asyncio.create_subprocess_exec(
         *modified_cmd,
@@ -337,9 +337,9 @@ async def run_ffmpeg_async(
     )
 
     if not result.success:
-        _logger.error("ffmpeg exited with code %d", result.returncode)
+        logger.error("ffmpeg exited with code %d", result.returncode)
         for line in result.stderr_lines[-STDERR_TAIL_LINES:]:
-            _logger.error("ffmpeg stderr: %s", line)
+            logger.error("ffmpeg stderr: %s", line)
 
     _finalize_outputs(tmp_to_final, result.success)
 

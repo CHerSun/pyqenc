@@ -2,22 +2,22 @@
 
 This module provides:
 
-- ``ArtifactState`` — three-value enum classifying each artifact's recovery
-  state (``ABSENT`` / ``ARTIFACT_ONLY`` / ``COMPLETE``).
-- Data models: ``JobState``, ``ChunkingParams``, ``OptimizationParams``,
-  ``EncodingParams``, ``MetricsSidecar``, ``EncodingResultSidecar``,
-  ``ChunkSidecar``.
-- ``JobStateManager`` — replaces ``ProgressTracker``; typed load/save methods
-  for ``job.yaml`` and all phase parameter YAML files.
+- ``ArtifactState`` — four-value enum classifying each artifact's recovery
+  state (``ABSENT`` / ``ARTIFACT_ONLY`` / ``STALE`` / ``COMPLETE``).
+- Data models: ``JobState``, ``ExtractionParams``, ``ChunkingParams``,
+  ``OptimizationParams``, ``EncodingParams``, ``MetricsSidecar``,
+  ``EncodingResultSidecar``, ``ChunkSidecar``.
+
+Each model is self-sufficient: call ``Model.load(path)`` to load from a YAML
+file and ``instance.save(path)`` to persist atomically.
 """
 
 from __future__ import annotations
 
 import logging
-import shutil
 from enum import Enum
 from pathlib import Path
-
+from typing import Self
 import yaml
 from pydantic import BaseModel, Field
 
@@ -25,11 +25,12 @@ from pyqenc.models import (
     ChunkMetadata,
     CropParams,
     SceneBoundary,
+    Strategy,
     VideoMetadata,
 )
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
-_logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +50,11 @@ class ArtifactState(Enum):
         ARTIFACT_ONLY: The artifact file is present and consistent (written via
                        the ``.tmp`` protocol), but its sidecar is missing or
                        incomplete.  Recovery action: produce the sidecar only.
+        STALE:         The artifact file and sidecar are present and internally
+                       consistent, but the parameters under which they were
+                       produced no longer match the current run parameters.
+                       Recovery action: re-produce if still needed, or leave on
+                       disk if cleanup level does not permit deletion.
         COMPLETE:      The artifact file is present and its sidecar is present
                        and contains all required data.  Recovery action: skip —
                        no work needed.
@@ -56,6 +62,7 @@ class ArtifactState(Enum):
 
     ABSENT        = "absent"
     ARTIFACT_ONLY = "artifact_only"
+    STALE         = "stale"
     COMPLETE      = "complete"
 
 
@@ -98,6 +105,35 @@ class JobState(BaseModel):
         crop = CropParams(**raw_crop) if isinstance(raw_crop, dict) else None
         return cls(source=source, crop=crop)
 
+    @classmethod
+    def load(cls, path: Path) -> Self | None:
+        """Load ``JobState`` from *path*.
+
+        Returns:
+            ``JobState`` if the file exists and is valid, ``None`` otherwise.
+        """
+        if not path.exists():
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh)
+            return cls.from_yaml_dict(data)
+        except Exception as exc:
+            logger.warning("Could not load %s: %s", path, exc)
+            return None
+
+    def save(self, path: Path) -> None:
+        """Write this ``JobState`` to *path* atomically.
+
+        Creates parent directories as needed.
+
+        Args:
+            path: Destination YAML file path.
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_yaml_atomic(path, self.to_yaml_dict())
+        logger.debug("Saved %s", path.name)
+
 
 class ExtractionParams(BaseModel):
     """Phase parameter file model for extraction (``extraction.yaml``).
@@ -107,7 +143,6 @@ class ExtractionParams(BaseModel):
     and trigger re-extraction when they differ.
     """
 
-    stream_filter: StreamFilterConfig
     include: str | None = None
     exclude: str | None = None
 
@@ -125,6 +160,32 @@ class ExtractionParams(BaseModel):
             include=data.get("include"),
             exclude=data.get("exclude"),
         )
+
+    @classmethod
+    def load(cls, path: Path) -> Self | None:
+        """Load ``ExtractionParams`` from *path*.
+
+        Returns:
+            ``ExtractionParams`` if the file exists and is valid, ``None`` otherwise.
+        """
+        if not path.exists():
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh)
+            return cls.from_yaml_dict(data or {})
+        except Exception as exc:
+            logger.warning("Could not load %s: %s", path, exc)
+            return None
+
+    def save(self, path: Path) -> None:
+        """Write this ``ExtractionParams`` to *path* atomically.
+
+        Args:
+            path: Destination YAML file path.
+        """
+        write_yaml_atomic(path, self.to_yaml_dict())
+        logger.debug("Saved %s", path.name)
 
 
 class ChunkingParams(BaseModel):
@@ -151,37 +212,159 @@ class ChunkingParams(BaseModel):
         scenes = [SceneBoundary(**s) for s in data.get("scenes", [])]
         return cls(scenes=scenes)
 
+    @classmethod
+    def load(cls, path: Path) -> Self | None:
+        """Load ``ChunkingParams`` from *path*.
+
+        Returns:
+            ``ChunkingParams`` if the file exists and is valid, ``None`` otherwise.
+        """
+        if not path.exists():
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh)
+            return cls.from_yaml_dict(data or {})
+        except Exception as exc:
+            logger.warning("Could not load %s: %s", path, exc)
+            return None
+
+    def save(self, path: Path) -> None:
+        """Write this ``ChunkingParams`` to *path* atomically.
+
+        Args:
+            path: Destination YAML file path.
+        """
+        write_yaml_atomic(path, self.to_yaml_dict())
+        logger.debug("Saved %s", path.name)
+
+
+class StrategyTestResult(BaseModel):
+    """Per-strategy test result stored in ``optimization.yaml``.
+
+    Attributes:
+        strategy:    The encoding strategy that was tested.
+        total_size:  Total encoded size across all test chunks in bytes.
+        avg_crf:     Average CRF value used across test chunks.
+    """
+
+    strategy:   Strategy
+    total_size: int
+    avg_crf:    float
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    def to_yaml_dict(self) -> dict:
+        """Serialise to a YAML-friendly dict."""
+        return {
+            "strategy":   self.strategy.name,
+            "total_size": self.total_size,
+            "avg_crf":    self.avg_crf,
+        }
+
+    @classmethod
+    def from_yaml_dict(cls, data: dict) -> "StrategyTestResult":
+        """Restore from a dict loaded from ``optimization.yaml``."""
+        return cls(
+            strategy   = Strategy.from_name(data["strategy"]),
+            total_size = int(data["total_size"]),
+            avg_crf    = float(data["avg_crf"]),
+        )
+
 
 class OptimizationParams(BaseModel):
     """Phase parameter file model for optimization (``optimization.yaml``).
 
     Stores crop params active when optimization ran, selected test chunk IDs,
-    and (once determined) the optimal strategy name.
+    per-strategy test results, the tolerance used, the selected strategies, and
+    the quality targets active when the last run wrote this file.
+
+    Attributes:
+        crop:             Crop params active when optimization ran.
+        test_chunks:      Chunk IDs used for test encodes.
+        strategy_results: Per-strategy test results ordered by increasing total size.
+        tolerance_pct:    Tolerance percentage used when ``selected`` was computed.
+        selected:         Strategies selected as optimal at time of last run.
+        quality_targets:  Quality targets active when test encodes ran, serialised as
+                          ``"metric-statistic:value"`` strings (e.g. ``"vmaf-min:93.0"``).
+                          Written in both optimization mode and all-strategies mode so
+                          ``OptimizationPhase`` can detect target changes on the next run
+                          regardless of mode.
     """
 
-    crop:             CropParams | None = None
-    test_chunks:      list[str]         = Field(default_factory=list)
-    optimal_strategy: str | None        = None
+    model_config = {"arbitrary_types_allowed": True}
+
+    crop:             CropParams | None        = None
+    test_chunks:      list[str]                = Field(default_factory=list)
+    strategy_results: list[StrategyTestResult] = Field(default_factory=list)
+    tolerance_pct:    float                    = 0.0
+    selected:         list[Strategy]           = Field(default_factory=list)
+    quality_targets:  list[str]                = Field(default_factory=list)
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
-        d: dict = {"test_chunks": self.test_chunks}
+        d: dict = {
+            "test_chunks":      self.test_chunks,
+            "tolerance_pct":    self.tolerance_pct,
+            "strategy_results": [r.to_yaml_dict() for r in self.strategy_results],
+            "selected":         [s.name for s in self.selected],
+            "quality_targets":  self.quality_targets,
+        }
         if self.crop is not None:
-            d["crop"] = {"top": self.crop.top, "bottom": self.crop.bottom,
-                         "left": self.crop.left, "right": self.crop.right}
-        if self.optimal_strategy is not None:
-            d["optimal_strategy"] = self.optimal_strategy
+            d["crop"] = {
+                "top":    self.crop.top,
+                "bottom": self.crop.bottom,
+                "left":   self.crop.left,
+                "right":  self.crop.right,
+            }
         return d
 
     @classmethod
     def from_yaml_dict(cls, data: dict) -> "OptimizationParams":
         """Restore from a dict loaded from ``optimization.yaml``."""
         crop = CropParams(**data["crop"]) if data.get("crop") else None
+        strategy_results = [
+            StrategyTestResult.from_yaml_dict(r)
+            for r in data.get("strategy_results", [])
+        ]
+        selected = [
+            Strategy.from_name(name)
+            for name in data.get("selected", [])
+        ]
         return cls(
-            crop=crop,
-            test_chunks=data.get("test_chunks", []),
-            optimal_strategy=data.get("optimal_strategy"),
+            crop             = crop,
+            test_chunks      = data.get("test_chunks", []),
+            strategy_results = strategy_results,
+            tolerance_pct    = float(data.get("tolerance_pct", 0.0)),
+            selected         = selected,
+            quality_targets  = data.get("quality_targets", []),
         )
+
+    @classmethod
+    def load(cls, path: Path) -> Self | None:
+        """Load ``OptimizationParams`` from *path*.
+
+        Returns:
+            ``OptimizationParams`` if the file exists and is valid, ``None`` otherwise.
+        """
+        if not path.exists():
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh)
+            return cls.from_yaml_dict(data or {})
+        except Exception as exc:
+            logger.warning("Could not load %s: %s", path, exc)
+            return None
+
+    def save(self, path: Path) -> None:
+        """Write this ``OptimizationParams`` to *path* atomically.
+
+        Args:
+            path: Destination YAML file path.
+        """
+        write_yaml_atomic(path, self.to_yaml_dict())
+        logger.debug("Saved %s", path.name)
 
 
 class EncodingParams(BaseModel):
@@ -205,6 +388,32 @@ class EncodingParams(BaseModel):
         """Restore from a dict loaded from ``encoding.yaml``."""
         crop = CropParams(**data["crop"]) if data.get("crop") else None
         return cls(crop=crop)
+
+    @classmethod
+    def load(cls, path: Path) -> Self | None:
+        """Load ``EncodingParams`` from *path*.
+
+        Returns:
+            ``EncodingParams`` if the file exists and is valid, ``None`` otherwise.
+        """
+        if not path.exists():
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh)
+            return cls.from_yaml_dict(data or {})
+        except Exception as exc:
+            logger.warning("Could not load %s: %s", path, exc)
+            return None
+
+    def save(self, path: Path) -> None:
+        """Write this ``EncodingParams`` to *path* atomically.
+
+        Args:
+            path: Destination YAML file path.
+        """
+        write_yaml_atomic(path, self.to_yaml_dict())
+        logger.debug("Saved %s", path.name)
 
 
 class MetricsSidecar(BaseModel):
@@ -243,11 +452,15 @@ class EncodingResultSidecar(BaseModel):
     Written when the CRF search for a ``(chunk_id, strategy)`` pair concludes.
     Its presence means the pair is ``COMPLETE``.  ``chunk_id`` and ``strategy``
     are derived from the filename and directory — not stored here.
+
+    Quality-target tracking is owned exclusively by ``OptimizationPhase`` via
+    ``optimization.yaml``.  ``OptimizationPhase`` deletes stale result sidecars
+    before ``EncodingPhase`` runs, so ``EncodingPhase._recover()`` simply sees
+    ``ARTIFACT_ONLY`` pairs naturally when targets change.
     """
 
     winning_attempt: str              # filename of the winning attempt .mkv
     crf:             float
-    quality_targets: list[str]        # targets active when this result was written
     metrics:         dict[str, float] # only the targeted metric values
 
     def to_yaml_dict(self) -> dict:
@@ -255,7 +468,6 @@ class EncodingResultSidecar(BaseModel):
         return {
             "winning_attempt": self.winning_attempt,
             "crf":             self.crf,
-            "quality_targets": self.quality_targets,
             "metrics":         self.metrics,
         }
 
@@ -265,9 +477,66 @@ class EncodingResultSidecar(BaseModel):
         return cls(
             winning_attempt=data["winning_attempt"],
             crf=float(data["crf"]),
-            quality_targets=data.get("quality_targets", []),
             metrics={k: float(v) for k, v in data.get("metrics", {}).items()},
         )
+
+
+class AudioParams(BaseModel):
+    """Phase parameter file model for audio processing (``audio.yaml``).
+
+    Stores the codec and base bitrate that were active when audio processing
+    last ran.  These are Type B config values — they affect the *content* of
+    produced AAC files and must be tracked across runs so that a codec or
+    bitrate change triggers re-processing.
+
+    ``audio_convert`` (the convert filter) is intentionally excluded: it is a
+    Type A input — ``AudioEngine.build_plan()`` with the current filter already
+    defines the expected terminal outputs, so no cross-run tracking is needed.
+    """
+
+    audio_codec:        str | None = None
+    audio_base_bitrate: str | None = None
+
+    def to_yaml_dict(self) -> dict:
+        """Serialise to a YAML-friendly dict."""
+        return {
+            "audio_codec":        self.audio_codec,
+            "audio_base_bitrate": self.audio_base_bitrate,
+        }
+
+    @classmethod
+    def from_yaml_dict(cls, data: dict) -> "AudioParams":
+        """Restore from a dict loaded from ``audio.yaml``."""
+        return cls(
+            audio_codec        = data.get("audio_codec"),
+            audio_base_bitrate = data.get("audio_base_bitrate"),
+        )
+
+    @classmethod
+    def load(cls, path: Path) -> Self | None:
+        """Load ``AudioParams`` from *path*.
+
+        Returns:
+            ``AudioParams`` if the file exists and is valid, ``None`` otherwise.
+        """
+        if not path.exists():
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh)
+            return cls.from_yaml_dict(data or {})
+        except Exception as exc:
+            logger.warning("Could not load %s: %s", path, exc)
+            return None
+
+    def save(self, path: Path) -> None:
+        """Write this ``AudioParams`` to *path* atomically.
+
+        Args:
+            path: Destination YAML file path.
+        """
+        write_yaml_atomic(path, self.to_yaml_dict())
+        logger.debug("Saved %s", path.name)
 
 
 class ChunkSidecar(BaseModel):
@@ -310,338 +579,3 @@ class ChunkSidecar(BaseModel):
         return cls(chunk=chunk)
 
 
-# ---------------------------------------------------------------------------
-# JobStateManager
-# ---------------------------------------------------------------------------
-
-_JOB_YAML_FILENAME          = "job.yaml"
-_EXTRACTION_YAML_FILENAME   = "extraction.yaml"
-_CHUNKING_YAML_FILENAME     = "chunking.yaml"
-_OPTIMIZATION_YAML_FILENAME = "optimization.yaml"
-_ENCODING_YAML_FILENAME     = "encoding.yaml"
-
-# Phase parameter files that should be deleted on --force wipe
-_PHASE_PARAM_FILENAMES: list[str] = [
-    _EXTRACTION_YAML_FILENAME,
-    _CHUNKING_YAML_FILENAME,
-    _OPTIMIZATION_YAML_FILENAME,
-    _ENCODING_YAML_FILENAME,
-]
-
-
-class JobStateManager:
-    """Manages ``job.yaml`` and all phase parameter YAML files.
-
-    Replaces ``ProgressTracker`` as the single source of truth for job and
-    phase state.  Provides typed load/save methods for each YAML file; no
-    generic string-keyed accessor is exposed.
-
-    Args:
-        work_dir:      Working directory where all YAML files are stored.
-        source_video:  Path to the source video file for this job.
-        force:         When ``True``, a source-file mismatch in execute mode
-                       triggers a wipe-and-continue rather than a hard stop.
-    """
-
-    def __init__(
-        self,
-        work_dir:     Path,
-        source_video: Path,
-        force:        bool = False,
-    ) -> None:
-        self._work_dir     = work_dir
-        self._source_video = source_video
-        self._force        = force
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
-
-    @property
-    def work_dir(self) -> Path:
-        """Working directory managed by this instance."""
-        return self._work_dir
-
-    # ------------------------------------------------------------------
-    # job.yaml
-    # ------------------------------------------------------------------
-
-    def load_job(self) -> JobState | None:
-        """Load ``job.yaml`` from the work directory.
-
-        Returns:
-            ``JobState`` if the file exists and is valid, ``None`` otherwise.
-        """
-        path = self._work_dir / _JOB_YAML_FILENAME
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return JobState.from_yaml_dict(data)
-        except Exception as exc:
-            _logger.warning("Could not load %s: %s", path, exc)
-            return None
-
-    def save_job(self, state: JobState) -> None:
-        """Write ``job.yaml`` atomically.
-
-        Creates the work directory if it does not yet exist.
-
-        Args:
-            state: Job state to persist.
-        """
-        self._work_dir.mkdir(parents=True, exist_ok=True)
-        write_yaml_atomic(self._work_dir / _JOB_YAML_FILENAME, state.to_yaml_dict())
-        _logger.debug("Saved job.yaml")
-
-    def validate(self, dry_run: bool) -> bool:
-        """Validate the source video against the persisted ``job.yaml``.
-
-        Implements the dry-run / execute / ``--force`` source-binding logic
-        (Requirement 1.2):
-
-        - If ``job.yaml`` does not exist: nothing to validate; returns ``True``.
-        - If all checked fields match: returns ``True``.
-        - If any field differs:
-          - **dry-run**: logs a warning, returns ``True`` (no action taken).
-          - **execute without --force**: logs a critical message, returns ``False``.
-          - **execute with --force**: logs a warning, wipes all intermediate
-            artifacts and phase parameter files, returns ``True``.
-
-        Args:
-            dry_run: ``True`` when running in dry-run mode.
-
-        Returns:
-            ``True`` if the pipeline may proceed, ``False`` if it must stop.
-        """
-        existing = self.load_job()
-        if existing is None:
-            return True
-
-        mismatches = self._find_source_mismatches(existing)
-        if not mismatches:
-            return True
-
-        mismatch_desc = "; ".join(
-            f"{field}: persisted={old!r}, current={new!r}"
-            for field, old, new in mismatches
-        )
-
-        if dry_run:
-            _logger.warning(
-                "Source file mismatch detected (dry-run — no action taken): %s",
-                mismatch_desc,
-            )
-            return True
-
-        if self._force:
-            _logger.warning(
-                "Source file mismatch detected (--force — wiping artifacts and continuing): %s",
-                mismatch_desc,
-            )
-            self._wipe_artifacts()
-            return True
-
-        _logger.critical(
-            "Source file mismatch detected — stopping execution.  "
-            "Re-run with --force to wipe existing artifacts and continue with the new source.  "
-            "Mismatch: %s",
-            mismatch_desc,
-        )
-        return False
-
-    # ------------------------------------------------------------------
-    # extraction.yaml
-    # ------------------------------------------------------------------
-
-    def load_extraction(self) -> "ExtractionParams | None":
-        """Load ``extraction.yaml`` from the work directory.
-
-        Returns:
-            ``ExtractionParams`` if the file exists and is valid, ``None`` otherwise.
-        """
-        return self._load_phase_params(
-            _EXTRACTION_YAML_FILENAME,
-            ExtractionParams.from_yaml_dict,
-        )
-
-    def save_extraction(self, params: "ExtractionParams") -> None:
-        """Write ``extraction.yaml`` atomically.
-
-        Args:
-            params: Extraction parameters to persist.
-        """
-        write_yaml_atomic(self._work_dir / _EXTRACTION_YAML_FILENAME, params.to_yaml_dict())
-        _logger.debug("Saved extraction.yaml")
-
-    # ------------------------------------------------------------------
-    # chunking.yaml
-    # ------------------------------------------------------------------
-
-    def load_chunking(self) -> ChunkingParams | None:
-        """Load ``chunking.yaml`` from the work directory.
-
-        Returns:
-            ``ChunkingParams`` if the file exists and is valid, ``None`` otherwise.
-        """
-        return self._load_phase_params(
-            _CHUNKING_YAML_FILENAME,
-            ChunkingParams.from_yaml_dict,
-        )
-
-    def save_chunking(self, params: ChunkingParams) -> None:
-        """Write ``chunking.yaml`` atomically.
-
-        Args:
-            params: Chunking parameters to persist.
-        """
-        write_yaml_atomic(self._work_dir / _CHUNKING_YAML_FILENAME, params.to_yaml_dict())
-        _logger.debug("Saved chunking.yaml")
-
-    # ------------------------------------------------------------------
-    # optimization.yaml
-    # ------------------------------------------------------------------
-
-    def load_optimization(self) -> OptimizationParams | None:
-        """Load ``optimization.yaml`` from the work directory.
-
-        Returns:
-            ``OptimizationParams`` if the file exists and is valid, ``None`` otherwise.
-        """
-        return self._load_phase_params(
-            _OPTIMIZATION_YAML_FILENAME,
-            OptimizationParams.from_yaml_dict,
-        )
-
-    def save_optimization(self, params: OptimizationParams) -> None:
-        """Write ``optimization.yaml`` atomically.
-
-        Args:
-            params: Optimization parameters to persist.
-        """
-        write_yaml_atomic(self._work_dir / _OPTIMIZATION_YAML_FILENAME, params.to_yaml_dict())
-        _logger.debug("Saved optimization.yaml")
-
-    # ------------------------------------------------------------------
-    # encoding.yaml
-    # ------------------------------------------------------------------
-
-    def load_encoding(self) -> EncodingParams | None:
-        """Load ``encoding.yaml`` from the work directory.
-
-        Returns:
-            ``EncodingParams`` if the file exists and is valid, ``None`` otherwise.
-        """
-        return self._load_phase_params(
-            _ENCODING_YAML_FILENAME,
-            EncodingParams.from_yaml_dict,
-        )
-
-    def save_encoding(self, params: EncodingParams) -> None:
-        """Write ``encoding.yaml`` atomically.
-
-        Args:
-            params: Encoding parameters to persist.
-        """
-        write_yaml_atomic(self._work_dir / _ENCODING_YAML_FILENAME, params.to_yaml_dict())
-        _logger.debug("Saved encoding.yaml")
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _load_phase_params[T](
-        self,
-        filename: str,
-        factory:  "type[T] | callable[[dict], T]",
-    ) -> "T | None":
-        """Generic helper to load a phase parameter YAML file.
-
-        Args:
-            filename: Filename within the work directory.
-            factory:  Callable that accepts a dict and returns the typed model.
-
-        Returns:
-            Typed model instance, or ``None`` if the file is absent or invalid.
-        """
-        path = self._work_dir / filename
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return factory(data or {})
-        except Exception as exc:
-            _logger.warning("Could not load %s: %s", path, exc)
-            return None
-
-    def _find_source_mismatches(
-        self,
-        existing: JobState,
-    ) -> list[tuple[str, object, object]]:
-        """Compare persisted source metadata against the current source file.
-
-        Checks path, file size, and resolution.  Duration and fps are not
-        checked here because they require a probe call and are less reliable
-        as identity signals.
-
-        Args:
-            existing: Previously persisted ``JobState``.
-
-        Returns:
-            List of ``(field_name, persisted_value, current_value)`` tuples
-            for each field that differs.  Empty list means no mismatch.
-        """
-        mismatches: list[tuple[str, object, object]] = []
-        persisted = existing.source
-
-        # Path check
-        if persisted.path.resolve() != self._source_video.resolve():
-            mismatches.append(("path", str(persisted.path), str(self._source_video)))
-            # If path changed, skip size/resolution checks — they're meaningless
-            return mismatches
-
-        # File size check (fast, no probe needed)
-        try:
-            current_size = self._source_video.stat().st_size
-        except OSError:
-            current_size = None
-
-        if persisted._file_size_bytes is not None and current_size is not None:
-            if persisted._file_size_bytes != current_size:
-                mismatches.append(("file_size_bytes", persisted._file_size_bytes, current_size))
-
-        # Resolution check (requires probe — only run if size matched)
-        if not mismatches and persisted._resolution is not None:
-            live_meta = VideoMetadata(path=self._source_video)
-            current_res = live_meta.resolution
-            if current_res is not None and current_res != persisted._resolution:
-                mismatches.append(("resolution", persisted._resolution, current_res))
-
-        return mismatches
-
-    def _wipe_artifacts(self) -> None:
-        """Delete all intermediate artifacts and phase parameter files.
-
-        Called when ``--force`` is provided and a source mismatch is detected.
-        Removes all subdirectories (extracted, chunks, encoded, audio, final)
-        and all phase parameter YAML files.  ``job.yaml`` itself is NOT deleted
-        here — it will be overwritten by the caller after validation.
-        """
-        # Delete phase parameter files
-        for filename in _PHASE_PARAM_FILENAMES:
-            path = self._work_dir / filename
-            if path.exists():
-                path.unlink()
-                _logger.debug("Deleted phase parameter file: %s", path)
-
-        # Delete intermediate artifact subdirectories
-        artifact_dirs = ["extracted", "chunks", "encoded", "audio", "final"]
-        for dirname in artifact_dirs:
-            dir_path = self._work_dir / dirname
-            if dir_path.exists():
-                shutil.rmtree(dir_path)
-                _logger.debug("Deleted artifact directory: %s", dir_path)
-
-        _logger.info("Wiped all intermediate artifacts from %s", self._work_dir)

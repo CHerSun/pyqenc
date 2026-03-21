@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pyqenc.models import CodecConfig, StrategyConfig
+from pyqenc.models import CodecConfig, Strategy, StrategyConfig
 
 
 @dataclass
@@ -458,6 +458,24 @@ class ConfigManager:
                 unique_configs.append(config)
 
         return unique_configs
+
+    def resolve_strategies(self, strategies: list[str] | None) -> list[Strategy]:
+        """Resolve strategy patterns into typed ``Strategy`` objects.
+
+        Expands each pattern via :meth:`expand_strategies`, then converts each
+        resolved ``StrategyConfig`` into a ``Strategy`` using the canonical
+        ``preset+profile`` display name.
+
+        Args:
+            strategies: List of strategy pattern strings, or ``None`` to use
+                        the defaults from the loaded config file.
+
+        Returns:
+            Deduplicated list of :class:`~pyqenc.models.Strategy` objects in
+            the same order as the expanded configurations.
+        """
+        configs = self.expand_strategies(strategies)
+        return [Strategy.from_name(f"{sc.preset}+{sc.profile}") for sc in configs]
 
     def get_audio_output_config(self) -> AudioOutputConfig:
         """Parse and return the ``audio_output`` configuration section.

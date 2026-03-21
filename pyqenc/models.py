@@ -11,7 +11,8 @@ import logging
 import os
 import re
 import subprocess
-from enum import Enum
+from dataclasses import dataclass
+from enum import Enum, IntEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -101,6 +102,23 @@ class ChunkingMode(Enum):
     REMUX    = "remux"
 
 
+class CleanupLevel(IntEnum):
+    """Controls how aggressively intermediate files are removed.
+
+    Attributes:
+        NONE:         Keep all intermediate files (default — no ``--cleanup`` flag).
+        INTERMEDIATE: Delete workspace files per artifact immediately after it is
+                      marked ``COMPLETE`` (``--cleanup`` with no argument).
+        ALL:          Superset of ``INTERMEDIATE``; also deletes remaining
+                      intermediate directories after full pipeline success
+                      (``--cleanup all``).
+    """
+
+    NONE         = 0
+    INTERMEDIATE = 1
+    ALL          = 2
+
+
 class PhaseOutcome(Enum):
     """Outcome of a completed pipeline phase execution.
 
@@ -115,6 +133,42 @@ class PhaseOutcome(Enum):
     REUSED    = "reused"
     DRY_RUN   = "dry_run"
     FAILED    = "failed"
+
+
+# ---------------------------------------------------------------------------
+# Strategy
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Strategy:
+    """Typed representation of an encoding strategy.
+
+    Replaces bare string strategy names throughout the codebase.
+
+    Attributes:
+        name:      Display form used in logs and YAML (e.g. ``slow+h265-aq``).
+        safe_name: Filesystem-safe form used for directory names
+                   (e.g. ``slow_h265-aq``).
+    """
+
+    name:      str
+    safe_name: str
+
+    @staticmethod
+    def from_name(name: str) -> "Strategy":
+        """Construct a ``Strategy`` from a display name.
+
+        Replaces ``+`` and ``:`` with ``_`` to produce the filesystem-safe form.
+
+        Args:
+            name: Display strategy name (e.g. ``slow+h265-aq``).
+
+        Returns:
+            ``Strategy`` instance with ``safe_name`` derived from ``name``.
+        """
+        safe = name.replace("+", "_").replace(":", "_")
+        return Strategy(name=name, safe_name=safe)
 
 
 # ---------------------------------------------------------------------------
@@ -741,7 +795,7 @@ class PipelineConfig(BaseModel):
         crop_params:        Manual crop parameters (``None`` for auto-detect).
         include:            Regex pattern to include streams (applied to all stream types).
         exclude:            Regex pattern to exclude streams (applied to all stream types).
-        keep_all:           Whether to keep all intermediate files.
+        cleanup:            Cleanup level controlling intermediate file retention.
         chunking_mode:      Chunking strategy — lossless FFV1 (default) or stream-copy remux.
         force:              When True alongside execute mode, delete all artifacts and reset state
                             when a source-file mismatch is detected, then continue with the new source.
@@ -757,7 +811,7 @@ class PipelineConfig(BaseModel):
     source_video:       Path
     work_dir:           Path
     quality_targets:    list[QualityTarget]
-    strategies:         list[str]
+    strategies:         list[Strategy]
     optimize:           bool              = False
     all_strategies:     bool              = False
     max_parallel:       int               = 2
@@ -766,9 +820,16 @@ class PipelineConfig(BaseModel):
     crop_params:        CropParams | None = None
     include:            str | None        = None
     exclude:            str | None        = None
-    keep_all:           bool              = False
+    cleanup:            CleanupLevel      = CleanupLevel.NONE
     chunking_mode:      ChunkingMode      = ChunkingMode.LOSSLESS
-    force:              bool              = False
-    audio_convert:      str | None        = None
-    audio_codec:        str | None        = None
-    audio_base_bitrate: str | None        = None
+    force:                       bool              = False
+    audio_convert:               str | None        = None
+    audio_codec:                 str | None        = None
+    audio_base_bitrate:          str | None        = None
+    strategy_selection_tolerance: float            = 5.0
+    """Tolerance percentage for strategy selection (default 5%).
+
+    Strategies whose total encoded size is within this percentage of the best
+    strategy's size are also selected as optimal.  ``0.0`` means exactly one
+    strategy is selected.
+    """

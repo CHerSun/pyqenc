@@ -3,6 +3,10 @@ Log formatting helpers for uniform chunk attempt and optimization output.
 
 All public functions return plain strings or lists of strings — no logging
 side-effects — so callers decide the log level.
+
+Exception: ``emit_phase_banner`` and ``log_recovery_line`` are side-effecting
+helpers that accept a logger and emit directly, since they are always called
+at ``info`` level and the pattern is too mechanical to benefit from separation.
 """
 
 from __future__ import annotations
@@ -28,6 +32,51 @@ if TYPE_CHECKING:
     from pyqenc.phases.optimization import StrategyTestResult
 
 logger = logging.getLogger(__name__)
+
+
+def emit_phase_banner(name: str, log: logging.Logger) -> None:
+    """Emit the standard thick-line banner for a phase.
+
+    Args:
+        name: Phase name in UPPER CASE (e.g. ``"EXTRACTION"``).
+        log:  Logger instance belonging to the calling phase module.
+    """
+    log.info(THICK_LINE)
+    log.info(name)
+    log.info(THICK_LINE)
+
+
+def log_recovery_line(
+    log:      logging.Logger,
+    complete: int,
+    pending:  int,
+    stale:    int = 0,
+    unit:     str = "artifact",
+) -> None:
+    """Emit the standard single-line recovery summary.
+
+    Args:
+        log:      Logger instance belonging to the calling phase module.
+        complete: Number of artifacts already complete.
+        pending:  Number of artifacts needing work (ABSENT or ARTIFACT_ONLY).
+        stale:    Number of stale artifacts (present but parameters changed).
+        unit:     Singular noun for the artifact type (e.g. ``"chunk"``,
+                  ``"pair"``, ``"strategy result"``).  Pluralised by appending
+                  ``"s"`` when count ≠ 1.
+    """
+    def _plural(n: int) -> str:
+        return f"{n} {unit}{'s' if n != 1 else ''}"
+
+    if pending == 0 and stale == 0:
+        log.info("Recovery: %s complete, 0 pending — reusing", _plural(complete))
+    elif complete == 0 and stale == 0:
+        log.info("Recovery: 0 complete, %s pending — full run needed", _plural(pending))
+    else:
+        parts = [f"{_plural(complete)} complete", f"{_plural(pending)} pending"]
+        if stale:
+            parts.append(f"{stale} stale")
+        suffix = "resuming" if complete > 0 else "full run needed"
+        log.info("Recovery: %s — %s", ", ".join(parts), suffix)
 
 
 def _fmt_chunk_prefix(strategy: str, chunk_id: str) -> str:
