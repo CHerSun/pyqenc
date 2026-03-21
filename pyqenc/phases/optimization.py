@@ -645,15 +645,6 @@ class OptimizationPhase:
         """
         selected_names = {s.name for s in selected}
 
-        logger.info(THICK_LINE)
-        logger.info("OPTIMIZATION SUMMARY")
-        logger.info(THICK_LINE)
-
-        if selected:
-            logger.info("  Selected strategies: %s", ", ".join(s.name for s in selected))
-        else:
-            logger.info("  No strategies selected (all failed)")
-
         logger.info("")
         logger.info(
             "  %-30s  %8s  %12s  %8s",
@@ -671,11 +662,16 @@ class OptimizationPhase:
             status   = "passed" if res.total_size > 0 else "failed"
             logger.info(
                 "  %-30s  %8.2f  %12s  %8s%s",
-                res.strategy.name, res.avg_crf, size_str, status, marker,
+                res.strategy.name[:30], res.avg_crf, size_str, status, marker,
             )
 
-        logger.info(THICK_LINE)
+        logger.info("")
+        if selected:
+            logger.info("Selected strategies: %s", ", ".join(s.name for s in selected))
+        else:
+            logger.critical("NO strategies selected (all failed).")
 
+        logger.info("")
 
 # ---------------------------------------------------------------------------
 # Module-level helpers

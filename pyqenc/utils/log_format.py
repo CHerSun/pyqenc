@@ -133,50 +133,6 @@ def fmt_strategy_result_block(
     lines.append(THIN_LINE)
     return lines
 
-def fmt_optimization_summary(
-    optimal:  str,
-    results:  dict[str, StrategyTestResult],
-) -> list[str]:
-    """Return a visually distinct final optimization summary block.
-
-    Includes the winning strategy and a comparison table of all strategies
-    sorted by total file size ascending.  Bordered by ``═`` delimiter lines.
-
-    Args:
-        optimal:  Name of the selected optimal strategy.
-        results:  Mapping of strategy name → :class:`StrategyTestResult`.
-
-    Returns:
-        List of log lines.
-    """
-    lines: list[str] = [
-        THICK_LINE,
-        "OPTIMIZATION SUMMARY",
-        THICK_LINE,
-        f"  Optimal strategy : {optimal}",
-        "",
-        "  Comparison (all strategies, sorted by size):",
-        f"  {'Strategy':<30}  {'Avg CRF':>8}  {'Size (MB)':>12}  {'Status':>8}",
-        f"  {'-'*30}  {'-'*8}  {'-'*12}  {'-'*8}",
-    ]
-
-    sorted_results = sorted(
-        results.values(),
-        key=lambda r: r.total_file_size if r.total_file_size > 0 else float("inf"),
-    )
-
-    for res in sorted_results:
-        marker   = " ◀ optimal" if res.strategy == optimal else ""
-        status   = "passed" if res.all_passed else "failed"
-        size_mb  = res.total_file_size / (1024 * 1024) if res.total_file_size > 0 else 0.0
-        size_str = f"{size_mb:,.1f}".replace(",", "\u202f")  # space-thousands separator
-        lines.append(
-            f"  {res.strategy:<30}  {res.avg_crf:>8.2f}  {size_str:>12}  {status:>8}{marker}"
-        )
-
-    lines.append(THICK_LINE)
-    return lines
-
 def fmt_key_value_table(kv_to_show):
     """Format a dictionary of key-value pairs into aligned log lines for display as a table."""
     max_key_len = max(len(k) for k in kv_to_show.keys())+1
