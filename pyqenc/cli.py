@@ -427,7 +427,8 @@ def _cmd_auto(args: argparse.Namespace) -> int:
     from pyqenc.api import run_pipeline
     from pyqenc.config import ConfigManager
 
-    logger.info("Starting automatic pipeline execution")
+    logger.info("Starting automatic pipeline execution...")
+    logger.info("")
 
     # Parse execution-related flags
     execute = args.execute
@@ -793,6 +794,7 @@ Examples:
 
     # Setup logging
     setup_logging(args.log_level)
+    logger.info("Welcome to pyqenc v%s", pyqenc.__version__)
 
     # Set process priority
     _set_process_priority()
