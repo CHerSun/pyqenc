@@ -1350,33 +1350,36 @@ async def _encode_chunk_async(
 
 
 async def _encode_chunks_parallel(
-    encoder:        ChunkEncoder,
-    chunks:         list[ChunkMetadata],
-    reference_dir:  Path,
-    strategies:     list[str],
+    encoder:         ChunkEncoder,
+    chunks:          list[ChunkMetadata],
+    reference_dir:   Path,
+    strategies:      list[str],
     quality_targets: list[QualityTarget],
-    max_parallel:   int,
-    force:          bool,
-    initial_crf:    float = 20.0,
-    phase_recovery: "_PhaseRecovery | None" = None,
-    bar:            Callable[[int | float, AdvanceState], None] | None = None,
+    max_parallel:    int,
+    force:           bool,
+    default_crfs:    dict[str, float],
+    phase_recovery:  "_PhaseRecovery | None" = None,
+    bar:             Callable[[int | float, AdvanceState|None], None] | None = None,
 ) -> EncodingResult:
     """Encode chunks in parallel with semaphore control.
 
     Args:
-        encoder:        ChunkEncoder instance
-        chunks:         List of chunks to encode
-        reference_dir:  Directory containing reference chunks
-        strategies:     List of strategies to use
+        encoder:         ChunkEncoder instance
+        chunks:          List of chunks to encode
+        reference_dir:   Directory containing reference chunks
+        strategies:      List of strategies to use
         quality_targets: Quality targets to meet
-        max_parallel:   Maximum concurrent encodings
-        force:          Whether to force re-encoding
-        phase_recovery: Optional recovery state from ``recover_attempts``; when
-                        provided, ``COMPLETE`` pairs are skipped and ``ARTIFACT_ONLY``
-                        pairs resume from their recovered ``CRFHistory``.
-        bar:            Optional advance callable from ``ProgressBar``; called with
-                        chunk duration in seconds and an ``AdvanceState`` on each
-                        chunk completion.
+        max_parallel:    Maximum concurrent encodings
+        force:           Whether to force re-encoding
+        default_crfs:    Per-strategy fallback CRF (codec ``default_crf``); used as
+                         the seed for the first chunk of each strategy, then replaced
+                         by the running average of winning CRFs from completed chunks.
+        phase_recovery:  Optional recovery state from ``recover_attempts``; when
+                         provided, ``COMPLETE`` pairs are skipped and ``ARTIFACT_ONLY``
+                         pairs resume from their recovered ``CRFHistory``.
+        bar:             Optional advance callable from ``ProgressBar``; called with
+                         chunk duration in seconds and an ``AdvanceState`` on each
+                         chunk completion.
 
     Returns:
         EncodingResult with all encoding outcomes
@@ -1384,6 +1387,11 @@ async def _encode_chunks_parallel(
     result    = EncodingResult()
     semaphore = asyncio.Semaphore(max_parallel)
     counter_failed = 0
+
+    # Per-strategy running average of winning CRFs — seeded from codec default_crf,
+    # updated after each chunk completes so subsequent chunks start closer to the
+    # expected optimum rather than always starting from the codec default.
+    winning_crfs: dict[str, list[float]] = {s: [] for s in strategies}
 
     # Pre-populate result with COMPLETE pairs from recovery (skip them in the queue)
     complete_pairs: set[tuple[str, str]] = set()
@@ -1407,6 +1415,8 @@ async def _encode_chunks_parallel(
                             if m and m.group("chunk_id") == chunk.chunk_id and candidate.exists():
                                 winning_file = candidate
                                 break
+                    if not winning_file:
+                        raise ValueError(f"Winning file not found for {chunk.chunk_id}/{strategy}")
                     result.encoded_chunks[chunk.chunk_id][strategy] = winning_file
                     result.reused_count += 1
                     complete_pairs.add((chunk.chunk_id, strategy))
@@ -1451,6 +1461,15 @@ async def _encode_chunks_parallel(
                             chunk.chunk_id, strategy, len(pair_rec.history.attempts),
                         )
 
+                # Use running average of winning CRFs for this strategy as the seed,
+                # falling back to the codec default_crf when no winners yet.
+                strategy_winners = winning_crfs[strategy]
+                chunk_initial_crf = (
+                    sum(strategy_winners) / len(strategy_winners)
+                    if strategy_winners
+                    else default_crfs[strategy]
+                )
+
                 # Encode chunk
                 chunk_result = await _encode_chunk_async(
                     encoder,
@@ -1458,7 +1477,7 @@ async def _encode_chunks_parallel(
                     VideoMetadata(path=reference),
                     strategy,
                     quality_targets,
-                    initial_crf,
+                    chunk_initial_crf,
                     force,
                     initial_history=recovered_history,
                 )
@@ -1469,6 +1488,10 @@ async def _encode_chunks_parallel(
                         result.encoded_chunks[chunk.chunk_id] = {}
                     encoded_path = chunk_result.encoded_file.path if chunk_result.encoded_file else None
                     result.encoded_chunks[chunk.chunk_id][strategy] = encoded_path
+
+                    # Record winning CRF to improve seed for subsequent chunks
+                    if chunk_result.final_crf is not None and not chunk_result.reused:
+                        winning_crfs[strategy].append(chunk_result.final_crf)
 
                     if chunk_result.reused:
                         result.reused_count += 1
@@ -1616,6 +1639,15 @@ def encode_all_chunks(
         cleanup_level=cleanup_level,
     )
 
+    # Build per-strategy default CRF seeds from codec config
+    default_crfs: dict[str, float] = {}
+    for strategy in strategies:
+        try:
+            strategy_configs = config_manager.parse_strategy(strategy)
+            default_crfs[strategy] = strategy_configs[0].codec.default_crf if strategy_configs else 20.0
+        except (ValueError, IndexError):
+            default_crfs[strategy] = 20.0
+
     # Run parallel encoding — COMPLETE pairs are skipped inside _encode_chunks_parallel
     logger.debug("Starting parallel encoding with %d workers", max_parallel)
     total_seconds = sum(c.end_timestamp - c.start_timestamp for c in chunks) * len(strategies)
@@ -1636,7 +1668,7 @@ def encode_all_chunks(
                 quality_targets=quality_targets,
                 max_parallel=max_parallel,
                 force=force,
-                initial_crf=20.0,
+                default_crfs=default_crfs,
                 phase_recovery=phase_recovery,
                 bar=advance,
             )
