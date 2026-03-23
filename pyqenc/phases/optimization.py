@@ -31,6 +31,7 @@ from alive_progress import config_handler
 from pyqenc.config import ConfigManager
 from pyqenc.constants import (
     CHUNKS_DIR,
+    CRF_INITIAL_DEFAULT,
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
     TEMP_SUFFIX,
@@ -420,6 +421,18 @@ class OptimizationPhase:
         for strategy in strategies_to_test:
             logger.info("Testing strategy: %s", strategy.name)
 
+            # Seed initial CRF from the last persisted result for this strategy (moving average),
+            # falling back to the codec default_crf when no prior result exists.
+            persisted_for_strategy = cached_results.get(strategy.name)
+            if persisted_for_strategy is not None and persisted_for_strategy.avg_crf > 0.0:
+                strategy_initial_crf = persisted_for_strategy.avg_crf
+            else:
+                try:
+                    strategy_configs     = config_manager.parse_strategy(strategy.name)
+                    strategy_initial_crf = strategy_configs[0].codec.default_crf if strategy_configs else CRF_INITIAL_DEFAULT
+                except (ValueError, IndexError):
+                    strategy_initial_crf = CRF_INITIAL_DEFAULT
+
             strategy_result = asyncio.run(
                 _encode_strategy_test_chunks(
                     encoder        = encoder,
@@ -429,6 +442,7 @@ class OptimizationPhase:
                     quality_targets= self._config.quality_targets,
                     max_parallel   = self._config.max_parallel,
                     work_dir       = work_dir,
+                    initial_crf    = strategy_initial_crf,
                 )
             )
 
@@ -805,6 +819,7 @@ async def _encode_strategy_test_chunks(
     quality_targets: list[QualityTarget],
     max_parallel:    int,
     work_dir:        Path,
+    initial_crf:     float = CRF_INITIAL_DEFAULT,
 ) -> StrategyTestResult:
     """Encode all test chunks for a single strategy in parallel.
 
@@ -816,6 +831,8 @@ async def _encode_strategy_test_chunks(
         quality_targets: Quality targets to meet.
         max_parallel:    Maximum concurrent encoding workers.
         work_dir:        Pipeline working directory (for recovery).
+        initial_crf:     Starting CRF for the first test chunk (moving average
+                         from the last persisted result for this strategy).
 
     Returns:
         ``StrategyTestResult`` populated with totals and averages.
@@ -835,9 +852,13 @@ async def _encode_strategy_test_chunks(
     file_sizes: list[float] = []
     crfs:       list[float] = []
 
+    # Moving-average CRF seed: start from the provided initial_crf (rounded to granularity),
+    # then update after each winning test chunk so later chunks start closer to the optimum.
+    moving_crf: float = round(initial_crf / CRF_GRANULARITY) * CRF_GRANULARITY
     total_seconds = sum(c.end_timestamp - c.start_timestamp for c in test_chunks)
     with ProgressBar(total_seconds, title=f"Optimization [{strategy.name}]") as advance:
         async def _encode_one(chunk: ChunkMetadata) -> None:
+            nonlocal moving_crf
             pair_rec = phase_recovery.pairs.get((chunk.chunk_id, strategy.name))
 
             # Skip COMPLETE pairs
@@ -870,7 +891,7 @@ async def _encode_strategy_test_chunks(
                     reference,
                     strategy.name,
                     quality_targets,
-                    20.0,
+                    moving_crf,
                     force=False,
                     initial_history=recovered_history,
                 )
@@ -879,6 +900,8 @@ async def _encode_strategy_test_chunks(
                 file_sizes.append(chunk_result.encoded_file.path.stat().st_size)
                 if chunk_result.final_crf is not None:
                     crfs.append(chunk_result.final_crf)
+                    # Update moving average: blend last stored seed with this winning CRF
+                    moving_crf = (moving_crf + chunk_result.final_crf) / 2.0
                 advance(chunk.end_timestamp - chunk.start_timestamp)
             else:
                 logger.error("Test encode failed for chunk %s / %s", chunk.chunk_id, strategy.name)

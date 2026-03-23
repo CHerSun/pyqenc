@@ -45,8 +45,10 @@ PADDING_CRF = "4.1f"
 """Padding for CRF values in log messages for consistent formatting."""
 
 # CRF optimization controls
-CRF_GRANULARITY = 0.5 # 0.5 might be too coarse; consider 0.2 or even 0.1 for finer search. Modifying this could require PADDING_CRF adjustment for log formatting.
+CRF_GRANULARITY   = 0.5  # 0.5 might be too coarse; consider 0.2 or even 0.1 for finer search. Modifying this could require PADDING_CRF adjustment for log formatting.
 """Granularity for CRF adjustments during optimization. This determines the step size when adjusting CRF values to find the optimal quality/size balance."""
+CRF_INITIAL_DEFAULT = 20.0
+"""Default starting CRF when no prior history or optimization result is available."""
 
 # Symbols for log messages
 SUCCESS_SYMBOL_MINOR = "✔"
