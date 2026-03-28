@@ -1,4 +1,5 @@
 """CLI interface for the quality-based encoding pipeline."""
+# CHerSun 2026
 
 import argparse
 import logging
@@ -9,7 +10,13 @@ import psutil
 
 import pyqenc
 from pyqenc.constants import CRF_GRANULARITY, FAILURE_SYMBOL_MAJOR, SUCCESS_SYMBOL_MAJOR
-from pyqenc.models import ChunkingMode, CropParams, PipelineConfig, QualityTarget
+from pyqenc.models import (
+    ChunkingMode,
+    CleanupLevel,
+    CropParams,
+    PipelineConfig,
+    QualityTarget,
+)
 from pyqenc.utils.log_format import fmt_key_value_table
 from pyqenc.utils.logging import setup_logging
 
@@ -56,31 +63,28 @@ def _parse_strategies(strategies_str: str | None) -> list[str] | None:
     return [s.strip() for s in strategies_str.split(",") if s.strip()]
 
 
-def _parse_execute_flag(execute_value: str | None) -> tuple[bool, int | None]:
-    """Parse the -y/--execute flag value.
+def _parse_cleanup_level(cleanup_value: str | None) -> CleanupLevel:
+    """Parse the --cleanup flag value into a ``CleanupLevel``.
 
     Args:
-        execute_value: None (not provided), "all", or a number string
+        cleanup_value: ``None`` (flag absent), ``""`` / ``"intermediate"``
+                       (flag present, no argument), or ``"all"``.
 
     Returns:
-        Tuple of (execute_enabled, max_phases)
-        - (False, None) for dry-run mode
-        - (True, None) for execute all phases
-        - (True, N) for execute N phases
+        Corresponding ``CleanupLevel`` enum value.
+
+    Raises:
+        argparse.ArgumentTypeError: If the value is not recognised.
     """
-    if execute_value is None:
-        return False, None
-
-    if execute_value.lower() == "all":
-        return True, None
-
-    try:
-        max_phases = int(execute_value)
-        if max_phases < 1:
-            raise ValueError("Phase count must be positive")
-        return True, max_phases
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(f"Invalid execute value '{execute_value}': {e}")
+    if cleanup_value is None:
+        return CleanupLevel.NONE
+    if cleanup_value.lower() in ("", "intermediate"):
+        return CleanupLevel.INTERMEDIATE
+    if cleanup_value.lower() == "all":
+        return CleanupLevel.ALL
+    raise argparse.ArgumentTypeError(
+        f"Invalid --cleanup value '{cleanup_value}'. Expected no argument or 'all'."
+    )
 
 
 def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
@@ -103,15 +107,20 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "-y", "--execute",
-        nargs="?",
-        const="all",
-        metavar="N",
-        help="Execute phases (default: dry-run). Use -y or -y all for all phases, -y N for N phases"
+        action="store_true",
+        default=False,
+        help="Execute phases (default: dry-run). Without this flag only a dry-run is performed."
     )
     parser.add_argument(
-        "--keep-all",
-        action="store_true",
-        help="Keep all intermediate files (skip cleanup prompt after completion)"
+        "--cleanup",
+        nargs="?",
+        const="intermediate",
+        metavar="all",
+        help=(
+            "Cleanup level for intermediate files. "
+            "--cleanup (no argument): delete workspace files per artifact after completion. "
+            "--cleanup all: also delete remaining intermediate directories after full pipeline success."
+        ),
     )
     parser.add_argument(
         "--force",
@@ -418,10 +427,12 @@ def _cmd_auto(args: argparse.Namespace) -> int:
     from pyqenc.api import run_pipeline
     from pyqenc.config import ConfigManager
 
-    logger.info("Starting automatic pipeline execution")
+    logger.info("Starting automatic pipeline execution...")
+    logger.info("")
 
     # Parse execution-related flags
-    execute, max_phases = _parse_execute_flag(args.execute)
+    execute = args.execute
+    cleanup = _parse_cleanup_level(args.cleanup)
     # Parse strategies
     strategies = _parse_strategies(args.strategies)
     # Parse quality targets and strategies
@@ -444,6 +455,9 @@ def _cmd_auto(args: argparse.Namespace) -> int:
     metrics_sampling = args.metrics_sampling if args.metrics_sampling is not None \
                        else config_manager.get_metrics_sampling()
 
+    # Resolve strategy patterns → typed Strategy objects
+    resolved_strategies = config_manager.resolve_strategies(strategies)
+
     # Aggregate into a key/value table and print it
     kv_to_show = {
         "Source:": args.source,
@@ -451,21 +465,20 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         "CRF granularity:": CRF_GRANULARITY,
         "Cropping:": "disabled" if args.no_crop else f"manual ({crop_params})" if crop_params else "automatic",
         "Strategies:": "using defaults from config file" if strategies is None \
-                      else "all combinations" if strategies == "" \
-                      else strategies,
+                      else "all combinations" if strategies == [""] \
+                      else ", ".join(s.name for s in resolved_strategies),
         "Targets:": ", ".join(str(t) for t in quality_targets),
-        "Work mode:": "DRY-RUN (no changes will be made)" if not execute \
-                      else f"EXECUTE {max_phases} phase(s)" if max_phases \
-                      else "EXECUTE ALL PHASES",
+        "Work mode:": "DRY-RUN (no changes will be made)" if not execute else "EXECUTE",
     }
     fmt_key_value_table(kv_to_show)
+    logger.info("")
 
     # Create pipeline configuration
     config = PipelineConfig(
         source_video=args.source,
         work_dir=args.work_dir,
         quality_targets=quality_targets,
-        strategies=strategies if strategies is not None else [],
+        strategies=resolved_strategies,
         optimize=not args.all_strategies,  # optimize unless --all-strategies requested
         all_strategies=args.all_strategies,
         max_parallel=args.max_parallel,
@@ -473,7 +486,7 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         include=args.include,
         exclude=args.exclude,
         crop_params=crop_params,
-        keep_all=args.keep_all if hasattr(args, "keep_all") else False,
+        cleanup=cleanup,
         chunking_mode=ChunkingMode.REMUX if args.remux_chunking else ChunkingMode.LOSSLESS,
         force=args.force if hasattr(args, "force") else False,
         audio_convert=args.audio_convert,
@@ -484,7 +497,7 @@ def _cmd_auto(args: argparse.Namespace) -> int:
 
     # Execute pipeline
     try:
-        result = run_pipeline(config, dry_run=not execute, max_phases=max_phases)
+        result = run_pipeline(config, dry_run=not execute)
         if result.success:
             logger.info(f"{SUCCESS_SYMBOL_MAJOR} Pipeline completed successfully")
             return 0
@@ -509,7 +522,7 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     logger.info(f"Source: {args.source}")
 
     # Parse execute flag
-    execute, _ = _parse_execute_flag(args.execute)
+    execute = args.execute
 
     try:
         result = extract_streams(
@@ -547,7 +560,7 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
     logger.info(f"Video: {args.video}")
 
     # Parse execute flag
-    execute, _ = _parse_execute_flag(args.execute)
+    execute = args.execute
 
     chunking_mode = ChunkingMode.REMUX if args.remux_chunking else ChunkingMode.LOSSLESS
 
@@ -587,7 +600,7 @@ def _cmd_encode(args: argparse.Namespace) -> int:
     logger.info(f"Chunks directory: {args.chunks_dir}")
 
     # Parse execute flag
-    execute, _ = _parse_execute_flag(args.execute)
+    execute = args.execute
 
     # Parse quality targets and strategies
     _quality_target_strs = _parse_quality_targets(args.quality_target)
@@ -634,7 +647,7 @@ def _cmd_audio(args: argparse.Namespace) -> int:
     logger.info(f"Audio directory: {args.audio_dir}")
 
     # Parse execute flag
-    execute, _ = _parse_execute_flag(args.execute)
+    execute = args.execute
 
     try:
         result = process_audio(
@@ -673,7 +686,7 @@ def _cmd_merge(args: argparse.Namespace) -> int:
     logger.info(f"Audio directory: {args.audio_dir}")
 
     # Parse execute flag
-    execute, _ = _parse_execute_flag(args.execute)
+    execute = args.execute
 
     # Determine output directory
     output_dir = args.output_dir if hasattr(args, "output_dir") and args.output_dir else args.work_dir / "final"
@@ -724,9 +737,6 @@ Examples:
   # Execute all phases with default settings
   pyqenc auto source.mkv -y
 
-  # Execute up to 3 phases
-  pyqenc auto source.mkv -y 3
-
   # Custom quality target and strategies
   pyqenc auto source.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq -y
 
@@ -744,6 +754,15 @@ Examples:
 
   # Multiple strategies
   pyqenc auto source.mkv --strategies slow+h265-aq,veryslow+h264 -y
+
+  # Keep intermediate files after completion (default)
+  pyqenc auto source.mkv -y
+
+  # Delete CRF attempt files as each chunk completes
+  pyqenc auto source.mkv -y --cleanup
+
+  # Delete all intermediate directories after full pipeline success
+  pyqenc auto source.mkv -y --cleanup all
         """
     )
 
@@ -775,6 +794,7 @@ Examples:
 
     # Setup logging
     setup_logging(args.log_level)
+    logger.info("Welcome to pyqenc v%s", pyqenc.__version__)
 
     # Set process priority
     _set_process_priority()

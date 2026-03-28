@@ -4,6 +4,7 @@ Quality evaluation and CRF adjustment for encoding pipeline.
 This module provides quality evaluation against targets and CRF adjustment
 algorithms for iterative encoding optimization.
 """
+# CHerSun 2026
 
 import logging
 from dataclasses import dataclass, field
@@ -15,11 +16,15 @@ from typing import TypedDict, assert_never
 import pandas as pd
 
 from pyqenc.constants import CRF_GRANULARITY, PADDING_CRF
-from pyqenc.utils.ffmpeg_runner import FFmpegRunResult, ProgressCallback, run_ffmpeg_async
+from pyqenc.utils.ffmpeg_runner import (
+    FFmpegRunResult,
+    ProgressCallback,
+    run_ffmpeg_async,
+)
 
 from .models import CropParams, QualityTarget
 
-_logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Metric types
@@ -421,7 +426,7 @@ def adjust_crf(
                 worst_actual  = actual
 
         if worst_target is None:
-            _logger.warning("No valid deficits calculated, cannot adjust CRF")
+            logger.warning("No valid deficits calculated, cannot adjust CRF")
             return None
 
         metric_type = MetricType(worst_target.metric)
@@ -459,7 +464,7 @@ def adjust_crf(
 
     # Deduplication
     if history.has_attempted(next_crf):
-        _logger.debug(f"CRF {next_crf:{PADDING_CRF}} already attempted, falling back to binary search")
+        logger.debug(f"CRF {next_crf:{PADDING_CRF}} already attempted, falling back to binary search")
         if too_low_crf is not None and too_high_crf is not None:
             gap = too_low_crf - too_high_crf
             if gap <= CRF_GRANULARITY:
@@ -467,7 +472,7 @@ def adjust_crf(
             candidate = round((too_high_crf + gap / 2) * (1 / CRF_GRANULARITY)) / (1 / CRF_GRANULARITY)
             if not history.has_attempted(candidate):
                 return candidate
-        _logger.warning("CRF search space exhausted — no untried CRF available")
+        logger.warning("CRF search space exhausted — no untried CRF available")
         return None
 
     return next_crf

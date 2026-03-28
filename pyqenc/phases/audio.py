@@ -11,6 +11,7 @@ Strategy classes:
   NormStrategy, DynaudnormStrategy,
   Task, AudioEngine, SynchronousRunner, AsyncRunner
 """
+# CHerSun 2026
 
 from __future__ import annotations
 
@@ -1045,7 +1046,7 @@ def process_audio_streams(
             )
 
         # --- Convert source files to FLAC intermediates ---
-        logger.info("Converting %d audio files to FLAC for processing", len(audio_files))
+        logger.debug("Converting %d audio files to FLAC for processing", len(audio_files))
         flac_files: list[Path] = []
         for audio_file in audio_files:
             target = output_dir / (audio_file.stem + ".flac")
@@ -1100,7 +1101,7 @@ def process_audio_streams(
             directory      = output_dir,
             convert_filter = effective_convert_filter,
         )
-        logger.info("Audio pipeline plan: %d tasks", len(plan.tasks))
+        logger.debug("Audio pipeline plan: %d tasks", len(plan.tasks))
 
         exec_result = SynchronousRunner(engine, plan).process(dry_run=False)
         logger.info(
@@ -1177,3 +1178,545 @@ def _build_and_display_dry_run_plan(
     else:
         logger.info("[DRY-RUN] Audio pipeline: no tasks planned (output_dir may be empty)")
         logger.info("[DRY-RUN] Source files that would be processed: %d", len(audio_files))
+
+
+# ---------------------------------------------------------------------------
+# AudioPhase — Phase object (task 10)
+# ---------------------------------------------------------------------------
+
+import shutil
+from dataclasses import dataclass as _dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pyqenc.models import PipelineConfig
+    from pyqenc.phase import Phase, PhaseResult
+    from pyqenc.phases.extraction import ExtractionPhase
+    from pyqenc.phases.job import JobPhase
+
+from pyqenc.constants import (
+    AUDIO_OUTPUT_DIR,
+    SUCCESS_SYMBOL_MINOR,
+    TEMP_SUFFIX,
+    THICK_LINE,
+)
+from pyqenc.models import AudioMetadata, PhaseOutcome
+from pyqenc.phase import Artifact, Phase, PhaseResult
+from pyqenc.state import ArtifactState, AudioParams
+from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
+
+_AUDIO_YAML = "audio.yaml"
+
+
+@_dataclass
+class AudioArtifact(Artifact):
+    """Audio phase artifact for a single processed audio file.
+
+    Attributes:
+        source_path: Path to the source extracted audio file this was produced from.
+    """
+
+    source_path: Path | None = None
+
+
+@_dataclass
+class AudioPhaseResult(PhaseResult):
+    """``PhaseResult`` subclass carrying audio-specific payload.
+
+    Attributes:
+        audio_files: Paths to all produced AAC delivery files.
+    """
+
+    audio_files: list[Path] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.audio_files is None:
+            self.audio_files = []
+
+
+def _build_audio_engine(
+    audio_codec:        str | None,
+    audio_base_bitrate: str | None,
+) -> AudioEngine:
+    """Build an ``AudioEngine`` with the standard strategy set and AAC finalizer.
+
+    Uses the config-derived profiles with optional codec/bitrate overrides.
+    This is the same engine used by ``process_audio_streams`` and
+    ``AudioPhase._recover()`` so that plan evaluation is consistent.
+
+    Args:
+        audio_codec:        Override codec for all conversion profiles.
+        audio_base_bitrate: Override base bitrate for 2.0 stereo (scaled for other layouts).
+
+    Returns:
+        Configured :class:`AudioEngine` instance.
+    """
+    from pyqenc.config import ConfigManager
+    audio_output_config = ConfigManager().get_audio_output_config()
+
+    effective_profiles: dict[str, AudioConversionProfile] = {}
+    for layout, profile in audio_output_config.profiles.items():
+        effective_codec   = audio_codec or profile.codec
+        effective_bitrate = profile.bitrate
+        if audio_base_bitrate:
+            base_str = audio_base_bitrate.lower().rstrip("k")
+            try:
+                base_kbps = int(base_str)
+                ch_count  = _CHANNEL_COUNTS.get(f"ch={layout}", 2)
+                effective_bitrate = f"{int(base_kbps * ch_count / 2)}k"
+            except ValueError:
+                pass
+        effective_profiles[layout] = AudioConversionProfile(
+            codec     = effective_codec,
+            bitrate   = effective_bitrate,
+            extension = profile.extension,
+        )
+
+    return AudioEngine(
+        strategies=[
+            DownmixStrategy71to51(),
+            DownmixStrategy51to20Std(),
+            DownmixStrategy51to20Night(),
+            DownmixStrategy51to20NBoost(),
+            NormStrategy(),
+            DynaudnormStrategy(),
+        ],
+        finalizer=ConversionStrategy(
+            profiles              = effective_profiles,
+            base_bitrate_override = audio_base_bitrate,
+        ),
+    )
+
+
+class AudioPhase:
+    """Phase object for audio stream processing.
+
+    Owns artifact enumeration, recovery, invalidation, execution, and logging
+    for the audio phase.  Wraps the existing ``process_audio_streams`` helper.
+
+    Args:
+        config: Full pipeline configuration.
+        phases: Phase registry; used to resolve typed dependency references.
+    """
+
+    name: str = "audio"
+
+    def __init__(
+        self,
+        config: "PipelineConfig",
+        phases: "dict[type[Phase], Phase] | None" = None,
+    ) -> None:
+        from typing import cast
+
+        from pyqenc.phases.extraction import ExtractionPhase as _ExtractionPhase
+        from pyqenc.phases.job import JobPhase as _JobPhase
+
+        self._config:     "PipelineConfig"           = config
+        self._job:        "_JobPhase | None"          = cast(_JobPhase,        phases[_JobPhase])        if phases else None
+        self._extraction: "_ExtractionPhase | None"  = cast(_ExtractionPhase, phases[_ExtractionPhase]) if phases else None
+        self.result:      "AudioPhaseResult | None"  = None
+        self.dependencies: "list[Phase]"             = [d for d in [self._job, self._extraction] if d is not None]
+
+    # ------------------------------------------------------------------
+    # Public Phase interface
+    # ------------------------------------------------------------------
+
+    def scan(self) -> "AudioPhaseResult":
+        """Classify existing audio artifacts without executing any work.
+
+        Returns:
+            ``AudioPhaseResult`` with all artifacts classified.
+        """
+        if self.result is not None:
+            return self.result
+
+        dep_result = self._ensure_dependencies(execute=False)
+        if dep_result is not None:
+            self.result = dep_result
+            return self.result
+
+        job_result = self._job.result  # type: ignore[union-attr]
+        force_wipe = getattr(job_result, "force_wipe", False)
+
+        artifacts = self._recover(force_wipe=force_wipe, execute=False)
+        audio_files = [a.path for a in artifacts if a.state == ArtifactState.COMPLETE]
+        outcome = _outcome_from_artifacts(artifacts, did_work=False)
+
+        self.result = AudioPhaseResult(
+            outcome     = outcome,
+            artifacts   = artifacts,
+            message     = _recovery_message(artifacts),
+            audio_files = audio_files,
+        )
+        return self.result
+
+    def run(self, dry_run: bool = False) -> "AudioPhaseResult":
+        """Recover, process pending audio files, cache result.
+
+        Sequence:
+        1. Emit phase banner.
+        2. Ensure dependencies have results (scan if needed).
+        3. Run ``_recover()`` — handles ``force_wipe``.
+        4. Log recovery result line.
+        5. In dry-run mode: return ``DRY_RUN`` if any artifacts are pending.
+        6. Process pending audio files.
+        7. Log completion summary.
+
+        Args:
+            dry_run: When ``True``, report what would be done without writing files.
+
+        Returns:
+            ``AudioPhaseResult`` with all artifacts ``COMPLETE`` on success.
+        """
+        emit_phase_banner("AUDIO", logger)
+
+        dep_result = self._ensure_dependencies(execute=True)
+        if dep_result is not None:
+            self.result = dep_result
+            return self.result
+
+        job_result = self._job.result  # type: ignore[union-attr]
+        force_wipe = getattr(job_result, "force_wipe", False)
+
+        # Key parameters
+        if self._config.audio_convert:
+            logger.info("Convert filter:  %s", self._config.audio_convert)
+        if self._config.audio_codec:
+            logger.info("Codec:           %s", self._config.audio_codec)
+        if self._config.audio_base_bitrate:
+            logger.info("Base bitrate:    %s", self._config.audio_base_bitrate)
+
+        artifacts = self._recover(force_wipe=force_wipe, execute=True)
+
+        complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
+        pending_count  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
+        log_recovery_line(logger, complete_count, pending_count)
+
+        # Action plan — log source file count before starting work
+        if pending_count > 0:
+            extraction_result = self._extraction.result if self._extraction else None  # type: ignore[union-attr]
+            audio_meta = getattr(extraction_result, "audio", []) or []
+            if audio_meta:
+                logger.info("Sources: %d audio track(s) to process", len(audio_meta))
+
+        # Dry-run path
+        if dry_run:
+            outcome     = PhaseOutcome.REUSED if pending_count == 0 else PhaseOutcome.DRY_RUN
+            audio_files = [a.path for a in artifacts if a.state == ArtifactState.COMPLETE]
+            self.result = AudioPhaseResult(
+                outcome     = outcome,
+                artifacts   = artifacts,
+                message     = "dry-run",
+                audio_files = audio_files,
+            )
+            return self.result
+
+        # Nothing to do
+        if pending_count == 0:
+            audio_files = [a.path for a in artifacts if a.state == ArtifactState.COMPLETE]
+            self.result = AudioPhaseResult(
+                outcome     = PhaseOutcome.REUSED,
+                artifacts   = artifacts,
+                message     = "all audio artifacts reused",
+                audio_files = audio_files,
+            )
+            return self.result
+
+        # Execute audio processing
+        result = self._execute_audio(artifacts)
+        self.result = result
+        return result
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _ensure_dependencies(self, execute: bool) -> "AudioPhaseResult | None":
+        """Scan/run dependencies if they have no cached result; fail fast if incomplete.
+
+        Args:
+            execute: When ``True``, call ``dep.run()`` for deps without a cached result.
+
+        Returns:
+            A ``FAILED`` result if any dependency is not complete; ``None`` otherwise.
+        """
+        if self._job is None:
+            return _failed("AudioPhase requires JobPhase")
+
+        if self._job.result is None:
+            if execute:
+                self._job.run()
+            else:
+                self._job.scan()
+
+        if not self._job.result.is_complete:  # type: ignore[union-attr]
+            err = "JobPhase did not complete successfully"
+            logger.critical(err)
+            return _failed(err)
+
+        if self._extraction is None:
+            return _failed("AudioPhase requires ExtractionPhase")
+
+        if self._extraction.result is None:
+            if execute:
+                self._extraction.run()
+            else:
+                self._extraction.scan()
+
+        if not self._extraction.result.is_complete:  # type: ignore[union-attr]
+            err = "ExtractionPhase did not complete successfully"
+            logger.critical(err)
+            return _failed(err)
+
+        return None
+
+    def _recover(self, force_wipe: bool, execute: bool) -> list[AudioArtifact]:
+        """Classify audio artifacts and handle force-wipe.
+
+        Steps:
+        1. If ``force_wipe`` and execute: delete ``audio/``.
+        2. Clean up leftover ``.tmp`` files (execute mode only).
+        3. Build the processing plan from the current convert filter to determine
+           expected terminal outputs (AAC delivery files).
+        4. Load ``audio.yaml``; detect codec/bitrate changes (Type B config).
+        5. Classify each expected terminal output as ``COMPLETE``, ``STALE``, or ``ABSENT``.
+           Files present in ``audio/`` that are not terminal outputs are ``STALE``.
+
+        Args:
+            force_wipe: When ``True``, wipe all audio artifacts first.
+            execute:    When ``True``, wipe and ``.tmp`` cleanup are performed.
+
+        Returns:
+            List of ``AudioArtifact`` objects.
+        """
+        work_dir  = self._config.work_dir
+        audio_dir = work_dir / AUDIO_OUTPUT_DIR
+
+        # Step 1: force-wipe
+        if force_wipe and execute:
+            if audio_dir.exists():
+                shutil.rmtree(audio_dir)
+                logger.debug("force_wipe: deleted %s", audio_dir)
+
+        # Step 2: clean up .tmp files (execute mode only)
+        if execute and audio_dir.exists():
+            for tmp in audio_dir.glob(f"*{TEMP_SUFFIX}"):
+                try:
+                    tmp.unlink()
+                    logger.warning("Removed leftover temp file: %s", tmp)
+                except OSError as exc:
+                    logger.warning("Could not remove temp file %s: %s", tmp, exc)
+
+        # Step 3: build plan to determine expected terminal outputs
+        effective_convert_filter = self._effective_convert_filter()
+        terminal_outputs: set[str] = set()
+
+        if audio_dir.exists():
+            engine = _build_audio_engine(
+                audio_codec        = self._config.audio_codec,
+                audio_base_bitrate = self._config.audio_base_bitrate,
+            )
+            plan = engine.build_plan(
+                directory      = audio_dir,
+                convert_filter = effective_convert_filter,
+            )
+            # Terminal outputs are the outputs of ConversionStrategy tasks
+            terminal_outputs = {
+                t.output.name
+                for t in plan.tasks
+                if t.strategy.strategy_short == "aac"
+            }
+
+        # Step 4: load audio.yaml and detect codec/bitrate changes
+        audio_params = AudioParams.load(work_dir / _AUDIO_YAML)
+        codec_changed = (
+            audio_params is not None
+            and (
+                audio_params.audio_codec        != self._config.audio_codec
+                or audio_params.audio_base_bitrate != self._config.audio_base_bitrate
+            )
+        )
+        params_unknown = audio_params is None
+
+        if codec_changed:
+            logger.debug(
+                "audio.yaml codec/bitrate changed (%s/%s → %s/%s) — marking all artifacts STALE",
+                audio_params.audio_codec,        self._config.audio_codec,   # type: ignore[union-attr]
+                audio_params.audio_base_bitrate, self._config.audio_base_bitrate,
+            )
+
+        # Step 5: classify artifacts
+        if not audio_dir.exists():
+            return self._build_absent_artifacts()
+
+        existing = {
+            f.name: f
+            for f in audio_dir.iterdir()
+            if f.is_file() and not f.name.endswith(TEMP_SUFFIX)
+        }
+
+        artifacts: list[AudioArtifact] = []
+
+        # Classify expected terminal outputs
+        for name in terminal_outputs:
+            path = audio_dir / name
+            if name not in existing:
+                artifacts.append(AudioArtifact(path=path, state=ArtifactState.ABSENT))
+            elif params_unknown:
+                # Config unknown — cannot confirm content validity
+                artifacts.append(AudioArtifact(path=path, state=ArtifactState.ARTIFACT_ONLY))
+            elif codec_changed:
+                # AAC content must be regenerated
+                artifacts.append(AudioArtifact(path=path, state=ArtifactState.STALE))
+            else:
+                artifacts.append(AudioArtifact(path=path, state=ArtifactState.COMPLETE))
+
+        # Files present but not terminal outputs are STALE (intermediate-only)
+        for name, path in existing.items():
+            if name not in terminal_outputs:
+                artifacts.append(AudioArtifact(path=path, state=ArtifactState.STALE))
+
+        # If no terminal outputs were planned and no existing files, fall back to absent
+        if not artifacts:
+            return self._build_absent_artifacts()
+
+        return artifacts
+
+    def _effective_convert_filter(self) -> str:
+        """Return the effective convert filter: CLI override or config default."""
+        if self._config.audio_convert:
+            return self._config.audio_convert
+        from pyqenc.config import ConfigManager
+        return ConfigManager().get_audio_output_config().convert_filter
+
+    def _build_absent_artifacts(self) -> list[AudioArtifact]:
+        """Build a list of ABSENT artifacts from ExtractionPhase audio results.
+
+        Returns:
+            List of ``AudioArtifact`` with state ``ABSENT``, one per source audio file.
+        """
+        extraction_result = self._extraction.result if self._extraction else None  # type: ignore[union-attr]
+        audio_meta: list[AudioMetadata] = getattr(extraction_result, "audio", []) or []
+
+        work_dir  = self._config.work_dir
+        audio_dir = work_dir / AUDIO_OUTPUT_DIR
+
+        if not audio_meta:
+            # No audio tracks — return a single sentinel absent artifact so
+            # pending_count > 0 and the phase still runs (it will produce nothing).
+            return [AudioArtifact(path=audio_dir / "placeholder.aac", state=ArtifactState.ABSENT)]
+
+        return [
+            AudioArtifact(
+                path        = audio_dir / (m.path.stem + ".aac"),
+                state       = ArtifactState.ABSENT,
+                source_path = m.path,
+            )
+            for m in audio_meta
+        ]
+
+    def _execute_audio(self, artifacts: list[AudioArtifact]) -> "AudioPhaseResult":
+        """Process pending audio files via ``process_audio_streams``.
+
+        Args:
+            artifacts: Artifact list from ``_recover()``.
+
+        Returns:
+            ``AudioPhaseResult`` after processing.
+        """
+        work_dir  = self._config.work_dir
+        audio_dir = work_dir / AUDIO_OUTPUT_DIR
+        audio_dir.mkdir(parents=True, exist_ok=True)
+
+        # Collect source audio files from ExtractionPhase result
+        extraction_result = self._extraction.result if self._extraction else None  # type: ignore[union-attr]
+        audio_meta: list[AudioMetadata] = getattr(extraction_result, "audio", []) or []
+        source_files = [m.path for m in audio_meta]
+
+        if not source_files:
+            logger.warning("No extracted audio files available — skipping audio processing")
+            self.result = AudioPhaseResult(
+                outcome     = PhaseOutcome.REUSED,
+                artifacts   = [],
+                message     = "no audio tracks",
+                audio_files = [],
+            )
+            return self.result
+
+        audio_result = process_audio_streams(
+            audio_files        = source_files,
+            output_dir         = audio_dir,
+            force              = False,
+            dry_run            = False,
+            audio_convert      = self._config.audio_convert,
+            audio_codec        = self._config.audio_codec,
+            audio_base_bitrate = self._config.audio_base_bitrate,
+        )
+
+        if not audio_result.success:
+            err = audio_result.error or "Audio processing failed"
+            logger.critical(err)
+            return _failed(err)
+
+        # Re-scan audio_dir to build final artifact list
+        final_aac = sorted(audio_dir.glob("*.aac"))
+        final_artifacts = [
+            AudioArtifact(path=f, state=ArtifactState.COMPLETE)
+            for f in final_aac
+        ]
+
+        complete_count = len(final_artifacts)
+        logger.info(
+            "%s Audio complete: %d AAC delivery file(s) produced",
+            SUCCESS_SYMBOL_MINOR, complete_count,
+        )
+        logger.info(THICK_LINE)
+
+        # Persist audio.yaml with current codec/bitrate config
+        try:
+            AudioParams(
+                audio_codec        = self._config.audio_codec,
+                audio_base_bitrate = self._config.audio_base_bitrate,
+            ).save(self._config.work_dir / _AUDIO_YAML)
+        except Exception as exc:
+            logger.warning("Could not persist audio.yaml: %s", exc)
+
+        return AudioPhaseResult(
+            outcome     = PhaseOutcome.COMPLETED,
+            artifacts   = final_artifacts,
+            message     = f"produced {complete_count} AAC file(s)",
+            audio_files = final_aac,
+        )
+
+
+# ---------------------------------------------------------------------------
+# AudioPhase module-level helpers
+# ---------------------------------------------------------------------------
+
+def _outcome_from_artifacts(
+    artifacts: list[AudioArtifact],
+    did_work:  bool,
+) -> PhaseOutcome:
+    """Derive ``PhaseOutcome`` from artifact states."""
+    if any(a.state == ArtifactState.ABSENT for a in artifacts):
+        return PhaseOutcome.DRY_RUN
+    if all(a.state == ArtifactState.COMPLETE for a in artifacts) and artifacts:
+        return PhaseOutcome.REUSED if not did_work else PhaseOutcome.COMPLETED
+    return PhaseOutcome.DRY_RUN
+
+
+def _recovery_message(artifacts: list[AudioArtifact]) -> str:
+    complete = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
+    pending  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
+    return f"{complete} complete, {pending} pending"
+
+
+def _failed(error: str) -> AudioPhaseResult:
+    """Return a ``FAILED`` ``AudioPhaseResult`` with the given error message."""
+    return AudioPhaseResult(
+        outcome     = PhaseOutcome.FAILED,
+        artifacts   = [],
+        message     = error,
+        error       = error,
+        audio_files = [],
+    )

@@ -17,6 +17,7 @@ Two chunking modes are supported (see ``ChunkingMode``):
 * **REMUX**: stream-copy (``-c copy``); faster and smaller chunks but boundaries
   snap to the nearest I-frame before the scene timestamp.
 """
+# CHerSun 2026
 
 from __future__ import annotations
 
@@ -35,24 +36,22 @@ from pyqenc.constants import (
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
-from pyqenc.utils.alive import ProgressBar
 from pyqenc.models import (
-    ChunkMetadata,
     ChunkingMode,
+    ChunkMetadata,
     PhaseOutcome,
     SceneBoundary,
     VideoMetadata,
 )
 from pyqenc.state import (
     ArtifactState,
-    ChunkSidecar,
     ChunkingParams,
+    ChunkSidecar,
     JobState,
-    JobStateManager,
 )
+from pyqenc.utils.alive import ProgressBar
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 from pyqenc.utils.yaml_utils import write_yaml_atomic
-from pyqenc.phases.recovery import ChunkingRecovery, discover_inputs, recover_chunking
 
 config_handler.set_global(enrich_print=False)  # type: ignore
 logger = logging.getLogger(__name__)
@@ -110,20 +109,20 @@ class ChunkingResult:
 
 def detect_scenes(
     video_meta:       VideoMetadata,
-    state_manager:    JobStateManager,
+    chunking_yaml:    Path,
     scene_threshold:  float = 27.0,
     min_scene_length: int   = 15,
 ) -> list[SceneBoundary]:
     """Detect scene boundaries and persist them to ``chunking.yaml``.
 
     Runs PySceneDetect ContentDetector on ``video_meta.path`` and stores
-    the resulting boundary list via ``state_manager.save_chunking``.
+    the resulting boundary list via ``ChunkingParams.save``.
     If zero scenes are detected the entire video is treated as a single scene
     (one boundary at frame 0 / t=0.0) and a warning is logged.
 
     Args:
         video_meta:       Metadata for the source video file.
-        state_manager:    State manager used to persist scene boundaries.
+        chunking_yaml:    Path to ``chunking.yaml`` for persisting scene boundaries.
         scene_threshold:  PySceneDetect content-change threshold (default 27.0).
         min_scene_length: Minimum frames per scene (default 15).
 
@@ -167,7 +166,7 @@ def detect_scenes(
         logger.info("Scene detection complete: %d scene(s) detected.", len(boundaries))
 
     # Persist scene boundaries to chunking.yaml (Req 2.2)
-    state_manager.save_chunking(ChunkingParams(scenes=boundaries))
+    ChunkingParams(scenes=boundaries).save(chunking_yaml)
     logger.debug("Saved %d scene boundary(ies) to chunking.yaml", len(boundaries))
 
     return boundaries
@@ -177,7 +176,6 @@ def split_chunks(
     video_meta:    VideoMetadata,
     output_dir:    Path,
     boundaries:    list[SceneBoundary],
-    state_manager: JobStateManager,
     recovery:      ChunkingRecovery,
     chunking_mode: ChunkingMode = ChunkingMode.LOSSLESS,
 ) -> list[ChunkMetadata]:
@@ -190,7 +188,6 @@ def split_chunks(
         video_meta:    Metadata for the source video file.
         output_dir:    Directory where chunk files will be written.
         boundaries:    Scene boundaries to split at.
-        state_manager: State manager (used for context; sidecars written directly).
         recovery:      Recovery result from ``recover_chunking``; chunks already
                        ``COMPLETE`` are skipped.
         chunking_mode: LOSSLESS (FFV1 all-intra, default) or REMUX (stream-copy).
@@ -318,13 +315,12 @@ def _write_chunk_sidecar(chunk_file: Path, chunk_meta: ChunkMetadata) -> None:
 def chunk_video(
     video_file:       Path,
     output_dir:       Path,
-    state_manager:    JobStateManager,
+    work_dir:         Path,
     job:              JobState,
     chunking_mode:    ChunkingMode = ChunkingMode.LOSSLESS,
     scene_threshold:  float = 27.0,
     min_scene_length: int   = 15,
     dry_run:          bool  = False,
-    standalone:       bool  = False,
 ) -> ChunkingResult:
     """Split video into scene-based chunks using PySceneDetect.
 
@@ -332,37 +328,20 @@ def chunk_video(
     Scene boundaries are loaded from ``chunking.yaml`` when present, skipping
     re-detection.  Already-split chunks (``COMPLETE`` in recovery) are skipped.
 
-    When *standalone* is ``True`` (direct CLI invocation, not via the
-    auto-pipeline), ``discover_inputs`` is called first to verify that the
-    extraction phase has produced its outputs.  The auto-pipeline orchestrator
-    passes outputs directly and sets *standalone* to ``False`` to bypass this
-    check (Req 11.2).
-
     Args:
         video_file:       Path to source video file.
         output_dir:       Directory for chunk output.
-        state_manager:    State manager for persisting scene boundaries.
+        work_dir:         Pipeline working directory (for chunking.yaml).
         job:              Current job state.
         chunking_mode:    LOSSLESS (FFV1 all-intra, default) or REMUX (stream-copy).
         scene_threshold:  Scene detection threshold (default 27.0).
         min_scene_length: Minimum frames per scene (default 15).
         dry_run:          If True, only report status without performing work.
-        standalone:       If True, run inputs discovery before proceeding (Req 11.1).
 
     Returns:
         ``ChunkingResult`` with chunk information.
     """
     logger.info("Chunking phase: %s", video_file.name)
-
-    # Inputs discovery — only when invoked standalone (not via auto-pipeline)
-    if standalone:
-        discovery = discover_inputs("chunking", state_manager.work_dir, job)
-        if not discovery.ok:
-            return ChunkingResult(
-                outcome=PhaseOutcome.FAILED,
-                chunks=[], total_frames=0,
-                error=discovery.error,
-            )
 
     if not video_file.exists():
         return ChunkingResult(
@@ -381,11 +360,42 @@ def chunk_video(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Recovery: scan filesystem, classify chunks, load scene boundaries (Req 3.3, 5.1–5.7)
-    recovery = recover_chunking(
-        work_dir=state_manager.work_dir,
-        job=job,
-        state_manager=state_manager,
+    from pyqenc.phases.recovery import (
+        ChunkingRecovery,
+        ChunkRecovery,
+        _cleanup_tmp_files,
+        _parse_chunk_timestamps,
     )
+    _cleanup_tmp_files(output_dir)
+
+    chunking_yaml   = work_dir / "chunking.yaml"
+    chunking_params = ChunkingParams.load(chunking_yaml)
+    _scenes: list[SceneBoundary] = chunking_params.scenes if (chunking_params and chunking_params.scenes) else []
+
+    _chunk_recoveries: dict[str, ChunkRecovery] = {}
+    _pending: list[str] = []
+
+    if output_dir.exists():
+        for _cf in sorted(output_dir.glob("*.mkv")):
+            _cid = _cf.stem
+            if not CHUNK_NAME_PATTERN.match(_cid):
+                continue
+            _sidecar = _cf.with_suffix(".yaml")
+            if not _sidecar.exists():
+                _chunk_recoveries[_cid] = ChunkRecovery(chunk_id=_cid, path=_cf, state=ArtifactState.ARTIFACT_ONLY)
+                _pending.append(_cid)
+            else:
+                try:
+                    import yaml as _yaml
+                    with _sidecar.open("r", encoding="utf-8") as _fh:
+                        _sd = _yaml.safe_load(_fh)
+                    _meta = ChunkSidecar.from_yaml_dict(_sd, chunk_id=_cid, path=_cf).chunk
+                    _chunk_recoveries[_cid] = ChunkRecovery(chunk_id=_cid, path=_cf, state=ArtifactState.COMPLETE, metadata=_meta)
+                except Exception:
+                    _chunk_recoveries[_cid] = ChunkRecovery(chunk_id=_cid, path=_cf, state=ArtifactState.ARTIFACT_ONLY)
+                    _pending.append(_cid)
+
+    recovery = ChunkingRecovery(scenes=_scenes, chunks=_chunk_recoveries, pending=_pending)
 
     # Fast-path: all chunks COMPLETE and scenes loaded — nothing to do
     if recovery.scenes and not recovery.pending and recovery.chunks:
@@ -418,7 +428,7 @@ def chunk_video(
 
     return _chunk_video_impl(
         video_file, output_dir, chunking_mode,
-        scene_threshold, min_scene_length, state_manager, job, recovery,
+        scene_threshold, min_scene_length, work_dir, job, recovery,
     )
 
 
@@ -428,12 +438,13 @@ def _chunk_video_impl(
     chunking_mode:    ChunkingMode,
     scene_threshold:  float,
     min_scene_length: int,
-    state_manager:    JobStateManager,
+    work_dir:         Path,
     job:              JobState,
     recovery:         ChunkingRecovery,
 ) -> ChunkingResult:
     """Two-phase chunking with recovery-aware state persistence."""
-    video_meta = VideoMetadata(path=video_file)
+    video_meta    = VideoMetadata(path=video_file)
+    chunking_yaml = work_dir / "chunking.yaml"
 
     # Use recovered scene boundaries or run detection (Req 5.3, 5.4)
     if recovery.scenes:
@@ -445,10 +456,10 @@ def _chunk_video_impl(
     else:
         try:
             boundaries = detect_scenes(
-                video_meta=video_meta,
-                state_manager=state_manager,
-                scene_threshold=scene_threshold,
-                min_scene_length=min_scene_length,
+                video_meta       = video_meta,
+                chunking_yaml    = chunking_yaml,
+                scene_threshold  = scene_threshold,
+                min_scene_length = min_scene_length,
             )
         except Exception as exc:
             logger.error("Scene detection failed: %s", exc, exc_info=True)
@@ -460,12 +471,11 @@ def _chunk_video_impl(
 
     try:
         chunk_metas = split_chunks(
-            video_meta=video_meta,
-            output_dir=output_dir,
-            boundaries=boundaries,
-            state_manager=state_manager,
-            recovery=recovery,
-            chunking_mode=chunking_mode,
+            video_meta    = video_meta,
+            output_dir    = output_dir,
+            boundaries    = boundaries,
+            recovery      = recovery,
+            chunking_mode = chunking_mode,
         )
     except Exception as exc:
         logger.error("Chunk splitting failed: %s", exc, exc_info=True)
@@ -488,4 +498,591 @@ def _chunk_video_impl(
         outcome=PhaseOutcome.COMPLETED,
         chunks=chunk_metas,
         total_frames=total_frames,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ChunkingPhase — Phase object (task 6)
+# ---------------------------------------------------------------------------
+
+import shutil
+from dataclasses import dataclass as _dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pyqenc.models import PipelineConfig
+    from pyqenc.phase import Phase, PhaseResult
+    from pyqenc.phases.extraction import ExtractionPhase
+    from pyqenc.phases.job import JobPhase, JobPhaseResult
+
+from pyqenc.constants import (
+    CHUNKS_DIR,
+    EXTRACTED_DIR,
+    TEMP_SUFFIX,
+    THICK_LINE,
+    THIN_LINE,
+)
+from pyqenc.models import PhaseOutcome
+from pyqenc.phase import Artifact, Phase, PhaseResult
+from pyqenc.state import ArtifactState
+from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
+
+_CHUNKING_YAML     = "chunking.yaml"
+
+
+def _probe_chunk_metadata(chunk_file: Path, chunk_id: str) -> ChunkMetadata | None:
+    """Probe *chunk_file* with ffprobe to obtain its metadata.
+
+    Used when a chunk ``.mkv`` is present but its sidecar is missing
+    (``ARTIFACT_ONLY`` state).
+
+    Args:
+        chunk_file: Path to the chunk ``.mkv`` file.
+        chunk_id:   Chunk identifier (timestamp-range stem).
+
+    Returns:
+        ``ChunkMetadata`` on success, ``None`` on failure.
+    """
+    meta = VideoMetadata(path=chunk_file)
+    _ = meta.duration_seconds
+    _ = meta.fps
+    _ = meta.resolution
+    _ = meta.frame_count
+
+    if meta._duration_seconds is None:
+        logger.warning("Could not probe duration for chunk %s — skipping sidecar write", chunk_id)
+        return None
+
+    try:
+        parts = chunk_id.split(RANGE_SEPARATOR, 1)
+        if len(parts) != 2:
+            raise ValueError(f"Expected exactly one '{RANGE_SEPARATOR}' in chunk_id: {chunk_id!r}")
+
+        def _ts_to_seconds(ts: str) -> float:
+            hms = ts.split(TIME_SEPARATOR_SAFE)
+            if len(hms) != 3:
+                raise ValueError(f"Expected HH꞉MM꞉SS in timestamp: {ts!r}")
+            h, m, s_ms = hms
+            s_ms = s_ms.replace(TIME_SEPARATOR_MS, ".")
+            return int(h) * 3600 + int(m) * 60 + float(s_ms)
+
+        start_ts, end_ts = _ts_to_seconds(parts[0]), _ts_to_seconds(parts[1])
+    except ValueError as exc:
+        logger.warning("Could not parse timestamps from chunk_id %r: %s", chunk_id, exc)
+        return None
+
+    chunk_meta = ChunkMetadata(
+        path=chunk_file,
+        chunk_id=chunk_id,
+        start_timestamp=start_ts,
+        end_timestamp=end_ts,
+    )
+    chunk_meta._duration_seconds = meta._duration_seconds
+    chunk_meta._frame_count      = meta._frame_count
+    chunk_meta._fps              = meta._fps
+    chunk_meta._resolution       = meta._resolution
+    chunk_meta._pix_fmt          = meta._pix_fmt
+    return chunk_meta
+
+
+@_dataclass
+class ChunkArtifact(Artifact):
+    """Chunking artifact for a single video chunk.
+
+    Attributes:
+        metadata: Chunk metadata; populated when ``state`` is ``COMPLETE``.
+    """
+
+    metadata: ChunkMetadata | None = None
+
+
+@_dataclass
+class ChunkingPhaseResult(PhaseResult):
+    """``PhaseResult`` subclass carrying chunking-specific payload.
+
+    Attributes:
+        chunks: List of chunk metadata for all ``COMPLETE`` artifacts.
+    """
+
+    chunks: list[ChunkMetadata] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.chunks is None:
+            self.chunks = []
+
+
+class ChunkingPhase:
+    """Phase object for scene-based video chunking.
+
+    Owns artifact enumeration, recovery, invalidation, execution, and logging
+    for the chunking phase.  Wraps the existing ``detect_scenes`` and
+    ``split_chunks`` helpers.
+
+    Args:
+        config: Full pipeline configuration.
+        phases: Phase registry; used to resolve typed dependency references.
+    """
+
+    name: str = "chunking"
+
+    def __init__(
+        self,
+        config: "PipelineConfig",
+        phases: "dict[type[Phase], Phase] | None" = None,
+    ) -> None:
+        from typing import cast
+
+        from pyqenc.phases.extraction import ExtractionPhase as _ExtractionPhase
+        from pyqenc.phases.job import JobPhase as _JobPhase
+
+        self._config = config
+        self._job:        "_JobPhase | None"        = cast(_JobPhase,        phases[_JobPhase])        if phases else None
+        self._extraction: "_ExtractionPhase | None" = cast(_ExtractionPhase, phases[_ExtractionPhase]) if phases else None
+        self.result:      "ChunkingPhaseResult | None" = None
+        self.dependencies: "list[Phase]"            = [d for d in [self._job, self._extraction] if d is not None]
+
+    # ------------------------------------------------------------------
+    # Public Phase interface
+    # ------------------------------------------------------------------
+
+    def scan(self) -> "ChunkingPhaseResult":
+        """Classify existing chunk artifacts without executing any work.
+
+        Returns:
+            ``ChunkingPhaseResult`` with all artifacts classified.
+        """
+        if self.result is not None:
+            return self.result
+
+        dep_result = self._ensure_dependencies(execute=False)
+        if dep_result is not None:
+            self.result = dep_result
+            return self.result
+
+        job_result = self._job.result  # type: ignore[union-attr]
+        force_wipe = getattr(job_result, "force_wipe", False)
+
+        artifacts = self._recover(force_wipe=force_wipe, execute=False)
+        chunks    = [a.metadata for a in artifacts if a.state == ArtifactState.COMPLETE and a.metadata is not None]
+        outcome   = self._outcome_from_artifacts(artifacts, did_work=False)
+
+        self.result = ChunkingPhaseResult(
+            outcome   = outcome,
+            artifacts = artifacts,
+            message   = _recovery_message(artifacts),
+            chunks    = chunks,
+        )
+        return self.result
+
+    def run(self, dry_run: bool = False) -> "ChunkingPhaseResult":
+        """Recover, detect scenes if needed, split pending chunks, cache result.
+
+        Sequence:
+        1. Emit phase banner.
+        2. Ensure dependencies have results (scan if needed).
+        3. Run ``_recover()`` — handles ``force_wipe``.
+        4. Log recovery result line.
+        5. In dry-run mode: return ``DRY_RUN`` if any artifacts are pending.
+        6. Detect scenes if not cached; split pending chunks.
+        7. Log completion summary.
+
+        Args:
+            dry_run: When ``True``, report what would be done without writing files.
+
+        Returns:
+            ``ChunkingPhaseResult`` with all artifacts ``COMPLETE`` on success.
+        """
+        emit_phase_banner("CHUNKING", logger)
+
+        dep_result = self._ensure_dependencies(execute=True)
+        if dep_result is not None:
+            self.result = dep_result
+            return self.result
+
+        job_result = self._job.result  # type: ignore[union-attr]
+        force_wipe = getattr(job_result, "force_wipe", False)
+
+        # Key parameters
+        logger.info("Mode:  %s", self._config.chunking_mode.value)
+
+        artifacts = self._recover(force_wipe=force_wipe, execute=True)
+
+        complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
+        pending_count  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
+        log_recovery_line(logger, complete_count, pending_count)
+
+        # Action plan — log scene count and pending work before starting
+        recovered_scenes = getattr(self, "_recovered_scenes", [])
+        if recovered_scenes:
+            logger.info("Scenes:  %d (from chunking.yaml)", len(recovered_scenes))
+        if pending_count > 0:
+            logger.info("Pending: %d chunk(s) to split", pending_count)
+
+        # Dry-run path
+        if dry_run:
+            outcome = PhaseOutcome.REUSED if pending_count == 0 else PhaseOutcome.DRY_RUN
+            chunks  = [a.metadata for a in artifacts if a.state == ArtifactState.COMPLETE and a.metadata is not None]
+            self.result = ChunkingPhaseResult(
+                outcome   = outcome,
+                artifacts = artifacts,
+                message   = "dry-run",
+                chunks    = chunks,
+            )
+            return self.result
+
+        # Nothing to do
+        if pending_count == 0:
+            chunks = [a.metadata for a in artifacts if a.state == ArtifactState.COMPLETE and a.metadata is not None]
+            chunks.sort(key=lambda c: c.chunk_id)
+            self.result = ChunkingPhaseResult(
+                outcome   = PhaseOutcome.REUSED,
+                artifacts = artifacts,
+                message   = "all chunks reused",
+                chunks    = chunks,
+            )
+            return self.result
+
+        # Execute chunking
+        result = self._execute_chunking(artifacts)
+        self.result = result
+        return result
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _ensure_dependencies(self, execute: bool) -> "ChunkingPhaseResult | None":
+        """Scan/run dependencies if they have no cached result; fail fast if incomplete.
+
+        Args:
+            execute: When ``True``, call ``dep.run()`` for deps without a cached result.
+
+        Returns:
+            A ``FAILED`` result if any dependency is not complete; ``None`` otherwise.
+        """
+        if self._job is None:
+            return _failed("ChunkingPhase requires JobPhase")
+
+        if self._job.result is None:
+            if execute:
+                self._job.run()
+            else:
+                self._job.scan()
+
+        if not self._job.result.is_complete:  # type: ignore[union-attr]
+            err = "JobPhase did not complete successfully"
+            logger.critical(err)
+            return _failed(err)
+
+        if self._extraction is None:
+            return _failed("ChunkingPhase requires ExtractionPhase")
+
+        if self._extraction.result is None:
+            if execute:
+                self._extraction.run()
+            else:
+                self._extraction.scan()
+
+        if not self._extraction.result.is_complete:  # type: ignore[union-attr]
+            err = "ExtractionPhase did not complete successfully"
+            logger.critical(err)
+            return _failed(err)
+
+        return None
+
+    def _recover(self, force_wipe: bool, execute: bool) -> list[ChunkArtifact]:
+        """Classify chunk artifacts and handle force-wipe.
+
+        Steps:
+        1. If ``force_wipe`` and execute: delete ``chunks/`` and ``chunking.yaml``.
+        2. Clean up leftover ``.tmp`` files (execute mode only).
+        3. Load scene boundaries from ``chunking.yaml``.
+        4. Scan ``chunks/`` and classify each chunk.
+
+        Args:
+            force_wipe: When ``True``, wipe all chunk artifacts first.
+            execute:    When ``True``, wipe and ``.tmp`` cleanup are performed.
+
+        Returns:
+            List of ``ChunkArtifact`` objects.
+        """
+        work_dir   = self._config.work_dir
+        chunks_dir = work_dir / CHUNKS_DIR
+        yaml_path  = work_dir / _CHUNKING_YAML
+
+        # Step 1: force-wipe
+        if force_wipe and execute:
+            if chunks_dir.exists():
+                shutil.rmtree(chunks_dir)
+                logger.debug("force_wipe: deleted %s", chunks_dir)
+            if yaml_path.exists():
+                yaml_path.unlink()
+                logger.debug("force_wipe: deleted %s", yaml_path)
+
+        # Step 2: clean up .tmp files (execute mode only)
+        if execute and chunks_dir.exists():
+            for tmp in chunks_dir.glob(f"*{TEMP_SUFFIX}"):
+                try:
+                    tmp.unlink()
+                    logger.warning("Removed leftover temp file: %s", tmp)
+                except OSError as exc:
+                    logger.warning("Could not remove temp file %s: %s", tmp, exc)
+
+        if not chunks_dir.exists():
+            return []
+
+        # Step 3: load scene boundaries from chunking.yaml
+        chunking_params = ChunkingParams.load(yaml_path)
+        scenes: list[SceneBoundary] = []
+        if chunking_params is not None and chunking_params.scenes:
+            scenes = chunking_params.scenes
+            logger.debug(
+                "Chunking recovery: loaded %d scene boundary(ies) from chunking.yaml",
+                len(scenes),
+            )
+        else:
+            logger.debug("Chunking recovery: chunking.yaml absent or empty — scene detection needed")
+
+        # Step 4: scan chunks/ and classify each chunk
+        artifacts: list[ChunkArtifact] = []
+        pending_ids: list[str] = []
+
+        for chunk_file in sorted(chunks_dir.glob("*.mkv")):
+            chunk_id = chunk_file.stem
+            if not CHUNK_NAME_PATTERN.match(chunk_id):
+                logger.debug("Skipping non-chunk file: %s", chunk_file.name)
+                continue
+
+            sidecar_path = chunk_file.with_suffix(".yaml")
+
+            if not sidecar_path.exists():
+                # ARTIFACT_ONLY: probe and write sidecar
+                logger.debug(
+                    "Chunk %s: file present, sidecar missing — probing and writing sidecar", chunk_id
+                )
+                chunk_meta = _probe_chunk_metadata(chunk_file, chunk_id)
+                if chunk_meta is not None and execute:
+                    from pyqenc.state import ChunkSidecar as _ChunkSidecar
+                    from pyqenc.utils.yaml_utils import write_yaml_atomic as _write_yaml
+                    sidecar = _ChunkSidecar(chunk=chunk_meta)
+                    try:
+                        _write_yaml(sidecar_path, sidecar.to_yaml_dict())
+                        logger.info("Wrote missing sidecar for chunk %s", chunk_id)
+                        artifacts.append(ChunkArtifact(
+                            path     = chunk_file,
+                            state    = ArtifactState.COMPLETE,
+                            metadata = chunk_meta,
+                        ))
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not write sidecar for chunk %s: %s — treating as ARTIFACT_ONLY",
+                            chunk_id, exc,
+                        )
+                        artifacts.append(ChunkArtifact(
+                            path     = chunk_file,
+                            state    = ArtifactState.ARTIFACT_ONLY,
+                            metadata = None,
+                        ))
+                        pending_ids.append(chunk_id)
+                else:
+                    artifacts.append(ChunkArtifact(
+                        path     = chunk_file,
+                        state    = ArtifactState.ARTIFACT_ONLY,
+                        metadata = chunk_meta,
+                    ))
+                    pending_ids.append(chunk_id)
+            else:
+                # Sidecar present — load it
+                try:
+                    import yaml as _yaml
+                    with sidecar_path.open("r", encoding="utf-8") as fh:
+                        sidecar_data = _yaml.safe_load(fh)
+                    from pyqenc.state import ChunkSidecar as _ChunkSidecar
+                    chunk_meta = _ChunkSidecar.from_yaml_dict(
+                        sidecar_data, chunk_id=chunk_id, path=chunk_file
+                    ).chunk
+                    artifacts.append(ChunkArtifact(
+                        path     = chunk_file,
+                        state    = ArtifactState.COMPLETE,
+                        metadata = chunk_meta,
+                    ))
+                    logger.debug("Chunk %s: COMPLETE (sidecar loaded)", chunk_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Could not load sidecar for chunk %s: %s — treating as ARTIFACT_ONLY",
+                        chunk_id, exc,
+                    )
+                    artifacts.append(ChunkArtifact(
+                        path     = chunk_file,
+                        state    = ArtifactState.ARTIFACT_ONLY,
+                        metadata = None,
+                    ))
+                    pending_ids.append(chunk_id)
+
+        complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
+        logger.debug(
+            "Chunking recovery: %d chunk(s) found — %d COMPLETE, %d pending",
+            len(artifacts), complete_count, len(pending_ids),
+        )
+
+        # Store recovered scene boundaries for use in _execute_chunking
+        self._recovered_scenes: list[SceneBoundary] = scenes
+
+        return artifacts
+
+    def _execute_chunking(self, artifacts: list[ChunkArtifact]) -> "ChunkingPhaseResult":
+        """Detect scenes if needed and split pending chunks.
+
+        Args:
+            artifacts: Artifact list from ``_recover()``.
+
+        Returns:
+            ``ChunkingPhaseResult`` after chunking.
+        """
+        work_dir   = self._config.work_dir
+        chunks_dir = work_dir / CHUNKS_DIR
+        chunks_dir.mkdir(parents=True, exist_ok=True)
+
+        # Resolve the video file from ExtractionPhase result
+        video_file = self._resolve_video_file()
+        if video_file is None:
+            err = "No extracted video file available for chunking"
+            logger.critical(err)
+            return _failed(err)
+
+        if not video_file.exists():
+            err = f"Video file not found: {video_file}"
+            logger.critical(err)
+            return _failed(err)
+
+        video_meta = VideoMetadata(path=video_file)
+        job_result = self._job.result  # type: ignore[union-attr]
+        job_state  = getattr(job_result, "job", None)
+        if job_state is None:
+            from pyqenc.state import JobState as _JobState
+            job_state = _JobState(source=VideoMetadata(path=self._config.source_video))
+
+        # Use recovered scene boundaries or run detection
+        boundaries = getattr(self, "_recovered_scenes", [])
+        if boundaries:
+            logger.info(
+                "Scene boundaries already in chunking.yaml (%d) — skipping detection.",
+                len(boundaries),
+            )
+        else:
+            try:
+                boundaries = detect_scenes(
+                    video_meta       = video_meta,
+                    chunking_yaml    = work_dir / _CHUNKING_YAML,
+                    scene_threshold  = 27.0,
+                    min_scene_length = 15,
+                )
+            except Exception as exc:
+                logger.error("Scene detection failed: %s", exc, exc_info=True)
+                return _failed(str(exc))
+
+        # Build recovery object for split_chunks (it needs to know which chunks are already COMPLETE)
+        from pyqenc.phases.recovery import ChunkingRecovery, ChunkRecovery
+        recovery_obj = ChunkingRecovery(
+            scenes  = boundaries,
+            chunks  = {
+                a.metadata.chunk_id: ChunkRecovery(
+                    chunk_id = a.metadata.chunk_id,
+                    path     = a.path,
+                    state    = a.state,
+                    metadata = a.metadata,
+                )
+                for a in artifacts
+                if a.state == ArtifactState.COMPLETE and a.metadata is not None
+            },
+            pending = [
+                a.path.stem for a in artifacts
+                if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY)
+            ],
+        )
+
+        try:
+            chunk_metas = split_chunks(
+                video_meta    = video_meta,
+                output_dir    = chunks_dir,
+                boundaries    = boundaries,
+                recovery      = recovery_obj,
+                chunking_mode = self._config.chunking_mode,
+            )
+        except Exception as exc:
+            logger.error("Chunk splitting failed: %s", exc, exc_info=True)
+            return _failed(str(exc))
+
+        if not chunk_metas:
+            return _failed("No valid chunks created.")
+
+        # Build final artifact list
+        final_artifacts: list[ChunkArtifact] = []
+        for cm in chunk_metas:
+            final_artifacts.append(ChunkArtifact(
+                path     = cm.path,
+                state    = ArtifactState.COMPLETE,
+                metadata = cm,
+            ))
+
+        total_frames = sum(c._frame_count or 0 for c in chunk_metas)
+        logger.info(
+            "%s Chunking complete: %d chunk(s), %d total frames.",
+            "✔", len(chunk_metas), total_frames,
+        )
+        logger.info(THICK_LINE)
+
+        return ChunkingPhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            artifacts = final_artifacts,
+            message   = f"chunked into {len(chunk_metas)} chunk(s)",
+            chunks    = chunk_metas,
+        )
+
+    def _resolve_video_file(self) -> Path | None:
+        """Resolve the extracted video file from ExtractionPhase result."""
+        if self._extraction is None or self._extraction.result is None:
+            return None
+        video_meta = getattr(self._extraction.result, "video", None)
+        if video_meta is not None:
+            return video_meta.path
+        # Fallback: scan extracted/ for a .mkv file
+        extracted_dir = self._config.work_dir / EXTRACTED_DIR
+        if extracted_dir.exists():
+            for f in sorted(extracted_dir.glob("*.mkv")):
+                if not f.name.endswith(TEMP_SUFFIX):
+                    return f
+        return None
+
+    @staticmethod
+    def _outcome_from_artifacts(
+        artifacts: list[ChunkArtifact],
+        did_work:  bool,
+    ) -> PhaseOutcome:
+        """Derive ``PhaseOutcome`` from artifact states."""
+        if any(a.state == ArtifactState.ABSENT for a in artifacts):
+            return PhaseOutcome.DRY_RUN
+        if all(a.state == ArtifactState.COMPLETE for a in artifacts) and artifacts:
+            return PhaseOutcome.REUSED if not did_work else PhaseOutcome.COMPLETED
+        return PhaseOutcome.DRY_RUN
+
+
+# ---------------------------------------------------------------------------
+# Module-level logging helpers
+# ---------------------------------------------------------------------------
+
+def _recovery_message(artifacts: list[ChunkArtifact]) -> str:
+    complete = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
+    pending  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
+    return f"{complete} complete, {pending} pending"
+
+
+def _failed(error: str) -> ChunkingPhaseResult:
+    """Return a ``FAILED`` ``ChunkingPhaseResult`` with the given error."""
+    return ChunkingPhaseResult(
+        outcome   = PhaseOutcome.FAILED,
+        artifacts = [],
+        message   = error,
+        error     = error,
+        chunks    = [],
     )

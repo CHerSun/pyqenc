@@ -1,0 +1,520 @@
+
+# pyqenc Auto Pipeline — Process Flow Diagram
+# Color legend:
+#   Blue   (#4A90D9 fill, #1A5FA8 stroke) — public methods
+#   Yellow (#F5E642 fill, #B8A800 stroke) — internal methods (_)
+#   Coral  (#FF6B6B fill, #C0392B stroke) — private methods (__)
+
+direction: down
+
+classes: {
+  public: {
+    style: {
+      fill: "#4A90D9"
+      stroke: "#1A5FA8"
+      font-color: white
+      border-radius: 4
+    }
+  }
+  internal: {
+    style: {
+      fill: "#F5E642"
+      stroke: "#B8A800"
+      font-color: "#333"
+      border-radius: 4
+    }
+  }
+  private: {
+    style: {
+      fill: "#FF6B6B"
+      stroke: "#C0392B"
+      font-color: white
+      border-radius: 4
+    }
+  }
+  phase_box: {
+    style: {
+      fill: "#F0F4FF"
+      stroke: "#7B9ED9"
+      border-radius: 8
+      font-size: 14
+      bold: true
+    }
+  }
+  module_box: {
+    style: {
+      fill: "#FAFAFA"
+      stroke: "#AAAAAA"
+      border-radius: 6
+      font-size: 13
+    }
+  }
+}
+
+# ============================================================
+# ENTRY POINTS
+# ============================================================
+
+entry: "Entry Points" {
+  class: module_box
+
+  cli: "cli.py" {
+    class: module_box
+    main: "main()\nparse args, dispatch subcommand" { class: public }
+    cmd_auto: "_cmd_auto(args)\nbuild PipelineConfig, call run_pipeline()" { class: internal }
+    cmd_extract: "_cmd_extract(args)" { class: internal }
+    cmd_chunk: "_cmd_chunk(args)" { class: internal }
+    cmd_encode: "_cmd_encode(args)" { class: internal }
+    cmd_audio: "_cmd_audio(args)" { class: internal }
+    cmd_merge: "_cmd_merge(args)" { class: internal }
+  }
+
+  api: "api.py" {
+    class: module_box
+    run_pipeline: "run_pipeline(config, dry_run)\norchestrate full pipeline" { class: public }
+    extract_streams: "extract_streams(config)" { class: public }
+    chunk_video: "chunk_video(config)" { class: public }
+    encode_chunks: "encode_chunks(config)" { class: public }
+    process_audio: "process_audio(config)" { class: public }
+    merge_final: "merge_final(config)" { class: public }
+  }
+}
+
+# ============================================================
+# ORCHESTRATION
+# ============================================================
+
+orchestration: "Orchestration  ·  orchestrator.py" {
+  class: phase_box
+
+  PipelineOrchestrator: "PipelineOrchestrator" {
+    class: module_box
+    init: "__init__(config: PipelineConfig)" { class: public }
+    run: "run(dry_run) → PipelineResult\niterate registry, call phase.run()" { class: public }
+  }
+
+  _build_registry: "_build_registry(config)\nconstruct all phases in order,\nwire dependencies" { class: internal }
+
+  _collect_output_files: "_collect_output_files(result, output_files)\nextract final paths from MergePhase" { class: internal }
+  _run_post_pipeline_cleanup: "_run_post_pipeline_cleanup(work_dir, registry)\ndelete intermediate dirs" { class: internal }
+  _cleanup_extracted: "_cleanup_extracted(work_dir, registry)\nselectively delete extracted video/audio" { class: internal }
+
+  PipelineResult: "PipelineResult (dataclass)\nsuccess, phases_executed, phases_reused,\nphases_needing_work, output_files, error" {
+    class: module_box
+    style.fill: "#E8F5E9"
+    style.stroke: "#4CAF50"
+  }
+}
+
+# ============================================================
+# PHASE PROTOCOL  (phase.py)
+# ============================================================
+
+phase_protocol: "Phase Protocol  ·  phase.py" {
+  class: module_box
+  style.fill: "#FFF8E1"
+  style.stroke: "#FFC107"
+
+  Phase: "Phase (Protocol)\nname, dependencies, result" {
+    class: module_box
+    scan: "scan() → PhaseResult\nclassify artifacts, no work" { class: public }
+    run: "run(dry_run) → PhaseResult\nrecover + execute" { class: public }
+  }
+
+  PhaseResult: "PhaseResult (dataclass)\noutcome, artifacts, message, error" {
+    class: module_box
+    is_complete: "is_complete → bool" { class: public }
+    complete: "complete → list[Artifact]" { class: public }
+    pending: "pending → list[Artifact]" { class: public }
+    did_work: "did_work → bool" { class: public }
+  }
+
+  Artifact: "Artifact (dataclass)\npath: Path, state: ArtifactState" { class: module_box }
+
+  ArtifactState: "ArtifactState (Enum)\nABSENT | ARTIFACT_ONLY | STALE | COMPLETE" {
+    class: module_box
+    style.fill: "#E3F2FD"
+  }
+}
+
+# ============================================================
+# PHASE 1 — JOB
+# ============================================================
+
+job_phase: "Phase 1 — Job  ·  phases/job.py" {
+  class: phase_box
+
+  JobPhase: "JobPhase\n(no dependencies)" {
+    class: module_box
+    init: "__init__(config, phases)" { class: public }
+    scan: "scan() → JobPhaseResult\nload job.yaml if exists" { class: public }
+    run: "run(dry_run) → JobPhaseResult\nvalidate source, create/update job.yaml,\nresolve crop" { class: public }
+    _check_source_mismatch: "_check_source_mismatch(dry_run)\ndetect file changes" { class: internal }
+    _find_source_mismatches: "_find_source_mismatches(old, new)\ncompare metadata fields" { class: internal }
+    _create_or_update_job: "_create_or_update_job(force)\nprobe source or load cached" { class: internal }
+    _resolve_crop: "_resolve_crop(job)\nmanual → cached → auto-detect" { class: internal }
+  }
+
+  JobPhaseResult: "JobPhaseResult\njob: JobState, crop: CropParams,\nforce_wipe: bool" {
+    class: module_box
+    style.fill: "#E8F5E9"
+    style.stroke: "#4CAF50"
+  }
+
+  JobState: "JobState (Pydantic)\nsource: VideoMetadata\ncrop: CropParams | None\n→ job.yaml" {
+    class: module_box
+    style.fill: "#E3F2FD"
+  }
+}
+
+# ============================================================
+# PHASE 2 — EXTRACTION
+# ============================================================
+
+extraction_phase: "Phase 2 — Extraction  ·  phases/extraction.py" {
+  class: phase_box
+
+  ExtractionPhase: "ExtractionPhase\n(depends: Job)" {
+    class: module_box
+    init: "__init__(config, phases)" { class: public }
+    scan: "scan() → ExtractionPhaseResult\nclassify extracted streams" { class: public }
+    run: "run(dry_run) → ExtractionPhaseResult\nextract video/audio/subs/chapters/attachments" { class: public }
+    _ensure_dependencies: "_ensure_dependencies(execute)\ncheck Job complete" { class: internal }
+    _recover: "_recover(force_wipe, execute)\nclassify artifacts, handle stale" { class: internal }
+    _execute_extraction: "_execute_extraction(artifacts)\nrun mkvextract" { class: internal }
+    _outcome_from_artifacts: "_outcome_from_artifacts(artifacts)" { class: internal }
+  }
+
+  MKVTrackExtractor: "MKVTrackExtractor" {
+    class: module_box
+    init: "__init__(input_file)" { class: public }
+    _run_ffprobe: "_run_ffprobe()\nparse stream metadata" { class: internal }
+    format_track_list: "format_track_list() → list[str]" { class: public }
+    extract_tracks: "extract_tracks(tracks, output_dir)\ncall mkvextract" { class: public }
+  }
+
+  StreamFactory: "StreamFactory" {
+    class: module_box
+    create: "create(stream, index) → StreamBase\ndispatch to concrete stream type" { class: public }
+  }
+
+  streams: "Stream Types" {
+    class: module_box
+    style.fill: "#F3E5F5"
+    StreamBase: "StreamBase\ntrack_id, codec_type, language,\ntitle, mkvextract_parts()" { class: module_box }
+    VideoStream: "VideoStream\nresolution, file_extension" { class: module_box }
+    AudioStream: "AudioStream\nchannels_layout, file_extension" { class: module_box }
+    SubtitleStream: "SubtitleStream\nis_forced, file_extension" { class: module_box }
+    AttachmentStream: "AttachmentStream" { class: module_box }
+    ChaptersStream: "ChaptersStream" { class: module_box }
+  }
+
+  extract_streams_fn: "extract_streams(config, job, ...)\ntop-level extraction function" { class: public }
+
+  artifacts_ext: "Artifacts\nVideoArtifact\nAudioArtifact\nOtherArtifact" {
+    class: module_box
+    style.fill: "#E3F2FD"
+  }
+}
+
+# ============================================================
+# PHASE 3 — CHUNKING
+# ============================================================
+
+chunking_phase: "Phase 3 — Chunking  ·  phases/chunking.py" {
+  class: phase_box
+
+  ChunkingPhase: "ChunkingPhase\n(depends: Job, Extraction)" {
+    class: module_box
+    init: "__init__(config, phases)" { class: public }
+    scan: "scan() → ChunkingPhaseResult\nclassify chunk artifacts" { class: public }
+    run: "run(dry_run) → ChunkingPhaseResult\ndetect scenes, split video" { class: public }
+    _ensure_dependencies: "_ensure_dependencies(execute)\ncheck Job, Extraction complete" { class: internal }
+    _recover: "_recover(force_wipe, execute)\nclassify chunks, handle stale" { class: internal }
+    _execute_chunking: "_execute_chunking(artifacts)\nrun scene detection + splitting" { class: internal }
+    _resolve_video_file: "_resolve_video_file() → Path\nget extracted video path" { class: internal }
+    _outcome_from_artifacts: "_outcome_from_artifacts(artifacts)" { class: internal }
+  }
+
+  detect_scenes_fn: "detect_scenes(video, config, ...)\nrun PySceneDetect → list[SceneBoundary]" { class: public }
+  split_chunks_fn: "split_chunks(video, boundaries, ...)\nffmpeg split → list[ChunkMetadata]" { class: public }
+  chunk_video_fn: "chunk_video(config, job, ...)\norchestrate detect + split" { class: public }
+
+  _chunk_name_duration: "_chunk_name_duration(start_ts, end_ts)\ncanonical chunk file stem" { class: internal }
+  _write_chunk_sidecar: "_write_chunk_sidecar(chunk_file, meta)\nwrite YAML sidecar" { class: internal }
+  _probe_chunk_metadata: "_probe_chunk_metadata(chunk_file, id)\nffprobe chunk" { class: internal }
+
+  ChunkArtifact: "ChunkArtifact\npath, state, metadata: ChunkMetadata" {
+    class: module_box
+    style.fill: "#E3F2FD"
+  }
+
+  ChunkingParams: "ChunkingParams (Pydantic)\nscene boundaries → chunking.yaml" {
+    class: module_box
+    style.fill: "#E3F2FD"
+  }
+}
+
+# ============================================================
+# PHASE 4 — OPTIMIZATION
+# ============================================================
+
+optimization_phase: "Phase 4 — Optimization  ·  phases/optimization.py" {
+  class: phase_box
+
+  OptimizationPhase: "OptimizationPhase\n(depends: Job, Chunking)" {
+    class: module_box
+    init: "__init__(config, phases)" { class: public }
+    scan: "scan() → OptimizationPhaseResult\nload optimization.yaml if exists" { class: public }
+    run: "run(dry_run) → OptimizationPhaseResult\ntest encode strategies on sample chunks" { class: public }
+    _all_strategies_result: "_all_strategies_result()\nreturn all strategies (no-optimize mode)" { class: internal }
+    _run_all_strategies: "_run_all_strategies(dry_run)\nencode test chunks for all strategies" { class: internal }
+    _ensure_dependencies: "_ensure_dependencies(execute)" { class: internal }
+    _wipe_artifacts: "_wipe_artifacts(work_dir)\ndelete stale results on param change" { class: internal }
+    _apply_tolerance: "_apply_tolerance(results)\nselect strategies within tolerance" { class: internal }
+    _log_optimization_summary: "_log_optimization_summary(...)" { class: internal }
+  }
+
+  _select_test_chunks: "_select_test_chunks(chunks, n)\npick representative sample" { class: internal }
+  _encode_strategy_test_chunks: "_encode_strategy_test_chunks(strategy, chunks, ...)\nasync test encode" { class: internal }
+  _delete_encoded_result_sidecars: "_delete_encoded_result_sidecars(work_dir, strategies)" { class: internal }
+
+  OptimizationPhaseResult: "OptimizationPhaseResult\nselected_strategies: list[Strategy]\nstrategy_results: list[StrategyTestResult]" {
+    class: module_box
+    style.fill: "#E8F5E9"
+    style.stroke: "#4CAF50"
+  }
+}
+
+# ============================================================
+# PHASE 5 — ENCODING
+# ============================================================
+
+encoding_phase: "Phase 5 — Encoding  ·  phases/encoding.py" {
+  class: phase_box
+
+  EncodingPhase: "EncodingPhase\n(depends: Job, Chunking, Optimization)" {
+    class: module_box
+    init: "__init__(config, phases)" { class: public }
+    scan: "scan() → EncodingPhaseResult\nclassify encoded chunks" { class: public }
+    run: "run(dry_run) → EncodingPhaseResult\nencode all chunks with selected strategies" { class: public }
+    _ensure_dependencies: "_ensure_dependencies(execute)" { class: internal }
+    _recover: "_recover(force_wipe, execute)\nclassify encoded chunks, handle stale" { class: internal }
+    _execute_encoding: "_execute_encoding(artifacts)\nparallel CRF search per chunk/strategy" { class: internal }
+    _outcome_from_artifacts: "_outcome_from_artifacts(artifacts)" { class: internal }
+  }
+
+  ChunkEncoder: "ChunkEncoder" {
+    class: module_box
+    init: "__init__(chunk, config, ...)" { class: public }
+    encode_chunk: "encode_chunk(strategy, dry_run)\nCRF search loop → winning attempt" { class: public }
+    _get_output_dir: "_get_output_dir(strategy)" { class: internal }
+    _get_encoded_dir: "_get_encoded_dir(strategy)" { class: internal }
+    _get_attempt_path: "_get_attempt_path(strategy, crf)" { class: internal }
+    _check_existing_encoding: "_check_existing_encoding(strategy, crf)\ncheck if attempt already done" { class: internal }
+    _load_history_from_sidecars: "_load_history_from_sidecars(strategy)\nrebuild CRFHistory from disk" { class: internal }
+    _finalize_winning_attempt: "_finalize_winning_attempt(attempt, strategy)\nhardlink to encoded dir" { class: internal }
+    _encode_with_ffmpeg: "_encode_with_ffmpeg(cmd, ...)\ncall run_ffmpeg" { class: internal }
+  }
+
+  ChunkQueue: "ChunkQueue\nthread-safe work queue" {
+    class: module_box
+    init: "__init__(chunks, strategies)" { class: public }
+    get_next: "get_next() → (ChunkMetadata, strategy) | None" { class: public }
+    mark_complete: "mark_complete(chunk_id, strategy)" { class: public }
+    mark_failed: "mark_failed(chunk_id, strategy)" { class: public }
+    is_empty: "is_empty() → bool" { class: public }
+    get_progress: "get_progress() → (done, total)" { class: public }
+  }
+
+  encode_all_chunks_fn: "encode_all_chunks(chunks, strategies, config, ...)\ntop-level sync entry point" { class: public }
+  _encode_chunks_parallel: "_encode_chunks_parallel(queue, config, ...)\nasync parallel worker loop" { class: internal }
+  _encode_chunk_async: "_encode_chunk_async(chunk, strategy, encoder, ...)\nasync single chunk encode" { class: internal }
+
+  EncodedArtifact: "EncodedArtifact\npath, state, strategy, crf, metrics" {
+    class: module_box
+    style.fill: "#E3F2FD"
+  }
+}
+
+# ============================================================
+# PHASE 6 — AUDIO  (parallel with encoding)
+# ============================================================
+
+audio_phase: "Phase 6 — Audio  ·  phases/audio.py" {
+  class: phase_box
+
+  AudioPhase: "AudioPhase\n(depends: Job, Extraction)" {
+    class: module_box
+    init: "__init__(config, phases)" { class: public }
+    scan: "scan() → AudioPhaseResult\nclassify audio artifacts" { class: public }
+    run: "run(dry_run) → AudioPhaseResult\nprocess extracted audio streams" { class: public }
+    _ensure_dependencies: "_ensure_dependencies(execute)" { class: internal }
+    _recover: "_recover(force_wipe, execute)\nclassify audio files, handle stale" { class: internal }
+    _execute_audio: "_execute_audio(artifacts)\nbuild plan, execute strategies" { class: internal }
+    _effective_convert_filter: "_effective_convert_filter()\nresolve audio conversion filter" { class: internal }
+    _build_absent_artifacts: "_build_absent_artifacts()\nlist expected output files" { class: internal }
+  }
+
+  AudioEngine: "AudioEngine" {
+    class: module_box
+    init: "__init__(sources, strategies, ...)" { class: public }
+    build_plan: "build_plan() → PlanResult\nresolve task graph" { class: public }
+  }
+
+  runners: "Runners" {
+    class: module_box
+    style.fill: "#F3E5F5"
+    SynchronousRunner: "SynchronousRunner\nprocess(dry_run) → PlanExecutionResult" { class: module_box }
+    AsyncRunner: "AsyncRunner\nprocess(dry_run) → PlanExecutionResult\n_get_or_execute(task)\n_run_task(task)" { class: module_box }
+  }
+
+  strategies: "Audio Strategies (BaseStrategy)" {
+    class: module_box
+    style.fill: "#FFF3E0"
+    BaseStrategy: "BaseStrategy\ncheck(src), plan(src), execute(src, out),\nexecute_async(src, out)" { class: module_box }
+    DownmixStrategy71to51: "DownmixStrategy71to51\n7.1 → 5.1 downmix" { class: module_box }
+    DownmixStrategy51to20Std: "DownmixStrategy51to20Std\n5.1 → 2.0 standard" { class: module_box }
+    DownmixStrategy51to20Night: "DownmixStrategy51to20Night\n5.1 → 2.0 night mode" { class: module_box }
+    DownmixStrategy51to20NBoost: "DownmixStrategy51to20NBoost\n5.1 → 2.0 night+boost" { class: module_box }
+    NormStrategy: "NormStrategy\nEBU R128 loudnorm" { class: module_box }
+    DynaudnormStrategy: "DynaudnormStrategy\ndynamic normalisation" { class: module_box }
+    ConversionStrategy: "ConversionStrategy\ncodec conversion" { class: module_box }
+  }
+
+  _two_pass_loudnorm: "_two_pass_loudnorm(source, output, filters)\n2-pass EBU R128 normalisation" { class: internal }
+  process_audio_streams_fn: "process_audio_streams(sources, config, ...)\ntop-level audio processing" { class: public }
+}
+
+# ============================================================
+# PHASE 7 — MERGE
+# ============================================================
+
+merge_phase: "Phase 7 — Merge  ·  phases/merge.py" {
+  class: phase_box
+
+  MergePhase: "MergePhase\n(depends: Job, Encoding, Audio)" {
+    class: module_box
+    init: "__init__(config, phases)" { class: public }
+    scan: "scan() → MergePhaseResult\nclassify merged output files" { class: public }
+    run: "run(dry_run) → MergePhaseResult\nconcatenate chunks, measure quality" { class: public }
+    _ensure_dependencies: "_ensure_dependencies(execute)" { class: internal }
+    _recover: "_recover(force_wipe, execute)\nclassify outputs, handle stale" { class: internal }
+    _execute_merge: "_execute_merge(artifacts)\ncall merge_final_video()" { class: internal }
+    _get_expected_strategies: "_get_expected_strategies()\nlist (strategy, safe_name) pairs" { class: internal }
+    _collect_encoded_chunks: "_collect_encoded_chunks()\ngather chunks from EncodingPhase" { class: internal }
+    _ensure_encoding_result: "_ensure_encoding_result()\nvalidate encoding phase complete" { class: internal }
+  }
+
+  merge_final_video_fn: "merge_final_video(chunks, strategy, config, ...)\nconcatenate chunks → final MKV,\nmeasure metrics, generate plots" { class: public }
+  _measure_quality: "_measure_quality(output, config, ...)\nrun VMAF/PSNR/SSIM measurement" { class: internal }
+  _sidecar_path: "_sidecar_path(output_file) → Path" { class: internal }
+  _load_merge_sidecar: "_load_merge_sidecar(output_file) → dict" { class: internal }
+  _write_merge_sidecar: "_write_merge_sidecar(output_file, data)" { class: internal }
+
+  MergeArtifact: "MergeArtifact\npath, state, strategy_name,\nframe_count, metrics, targets_met, plot_path" {
+    class: module_box
+    style.fill: "#E3F2FD"
+  }
+}
+
+# ============================================================
+# STATE  (state.py)
+# ============================================================
+
+state_module: "State  ·  state.py" {
+  class: module_box
+  style.fill: "#FFF8E1"
+  style.stroke: "#FFC107"
+
+  ArtifactState: "ArtifactState (Enum)\nABSENT | ARTIFACT_ONLY | STALE | COMPLETE" { class: module_box }
+  JobState: "JobState\nsource: VideoMetadata, crop: CropParams" { class: module_box }
+  ExtractionParams: "ExtractionParams\nstream filter patterns → extraction.yaml" { class: module_box }
+  ChunkingParams: "ChunkingParams\nscene boundaries → chunking.yaml" { class: module_box }
+  OptimizationParams: "OptimizationParams\ntest results, selected strategies → optimization.yaml" { class: module_box }
+  EncodingParams: "EncodingParams\ncrop params → encoding.yaml" { class: module_box }
+  AudioParams: "AudioParams\ncodec, bitrate → audio.yaml" { class: module_box }
+  MetricsSidecar: "MetricsSidecar\nper-attempt metrics" { class: module_box }
+  EncodingResultSidecar: "EncodingResultSidecar\nwinning attempt + metrics per chunk" { class: module_box }
+  ChunkSidecar: "ChunkSidecar\nchunk metadata" { class: module_box }
+}
+
+# ============================================================
+# CONNECTIONS — top-level flow
+# ============================================================
+
+entry.cli.main -> entry.cli.cmd_auto: "auto subcommand"
+entry.cli.cmd_auto -> entry.api.run_pipeline
+entry.api.run_pipeline -> orchestration.PipelineOrchestrator.run
+
+orchestration.PipelineOrchestrator.run -> orchestration._build_registry: "1. build"
+orchestration._build_registry -> job_phase.JobPhase: "construct"
+orchestration._build_registry -> extraction_phase.ExtractionPhase: "construct"
+orchestration._build_registry -> chunking_phase.ChunkingPhase: "construct"
+orchestration._build_registry -> optimization_phase.OptimizationPhase: "construct"
+orchestration._build_registry -> encoding_phase.EncodingPhase: "construct"
+orchestration._build_registry -> audio_phase.AudioPhase: "construct"
+orchestration._build_registry -> merge_phase.MergePhase: "construct"
+
+orchestration.PipelineOrchestrator.run -> job_phase.JobPhase.run: "2. run phases in order"
+job_phase.JobPhase.run -> extraction_phase.ExtractionPhase.run
+extraction_phase.ExtractionPhase.run -> chunking_phase.ChunkingPhase.run
+chunking_phase.ChunkingPhase.run -> optimization_phase.OptimizationPhase.run
+optimization_phase.OptimizationPhase.run -> encoding_phase.EncodingPhase.run
+extraction_phase.ExtractionPhase.run -> audio_phase.AudioPhase.run: "parallel branch"
+encoding_phase.EncodingPhase.run -> merge_phase.MergePhase.run
+audio_phase.AudioPhase.run -> merge_phase.MergePhase.run
+
+orchestration.PipelineOrchestrator.run -> orchestration._run_post_pipeline_cleanup: "3. cleanup"
+orchestration.PipelineOrchestrator.run -> orchestration.PipelineResult: "4. return"
+
+# Phase internal flows
+job_phase.JobPhase.run -> job_phase.JobPhase._check_source_mismatch
+job_phase.JobPhase.run -> job_phase.JobPhase._create_or_update_job
+job_phase.JobPhase.run -> job_phase.JobPhase._resolve_crop
+job_phase.JobPhase.run -> job_phase.JobPhaseResult
+
+extraction_phase.ExtractionPhase.run -> extraction_phase.ExtractionPhase._ensure_dependencies
+extraction_phase.ExtractionPhase.run -> extraction_phase.ExtractionPhase._recover
+extraction_phase.ExtractionPhase.run -> extraction_phase.ExtractionPhase._execute_extraction
+extraction_phase.ExtractionPhase._execute_extraction -> extraction_phase.MKVTrackExtractor.extract_tracks
+extraction_phase.MKVTrackExtractor.extract_tracks -> extraction_phase.StreamFactory.create
+extraction_phase.ExtractionPhase.run -> extraction_phase.artifacts_ext
+
+chunking_phase.ChunkingPhase.run -> chunking_phase.ChunkingPhase._ensure_dependencies
+chunking_phase.ChunkingPhase.run -> chunking_phase.ChunkingPhase._recover
+chunking_phase.ChunkingPhase.run -> chunking_phase.ChunkingPhase._execute_chunking
+chunking_phase.ChunkingPhase._execute_chunking -> chunking_phase.detect_scenes_fn
+chunking_phase.ChunkingPhase._execute_chunking -> chunking_phase.split_chunks_fn
+chunking_phase.ChunkingPhase.run -> chunking_phase.ChunkArtifact
+
+optimization_phase.OptimizationPhase.run -> optimization_phase.OptimizationPhase._ensure_dependencies
+optimization_phase.OptimizationPhase.run -> optimization_phase.OptimizationPhase._run_all_strategies
+optimization_phase.OptimizationPhase._run_all_strategies -> optimization_phase._select_test_chunks
+optimization_phase.OptimizationPhase._run_all_strategies -> optimization_phase._encode_strategy_test_chunks
+optimization_phase.OptimizationPhase.run -> optimization_phase.OptimizationPhase._apply_tolerance
+optimization_phase.OptimizationPhase.run -> optimization_phase.OptimizationPhaseResult
+
+encoding_phase.EncodingPhase.run -> encoding_phase.EncodingPhase._ensure_dependencies
+encoding_phase.EncodingPhase.run -> encoding_phase.EncodingPhase._recover
+encoding_phase.EncodingPhase.run -> encoding_phase.EncodingPhase._execute_encoding
+encoding_phase.EncodingPhase._execute_encoding -> encoding_phase._encode_chunks_parallel
+encoding_phase._encode_chunks_parallel -> encoding_phase._encode_chunk_async
+encoding_phase._encode_chunk_async -> encoding_phase.ChunkEncoder.encode_chunk
+encoding_phase.ChunkEncoder.encode_chunk -> encoding_phase.ChunkEncoder._encode_with_ffmpeg
+encoding_phase.EncodingPhase.run -> encoding_phase.EncodedArtifact
+
+audio_phase.AudioPhase.run -> audio_phase.AudioPhase._ensure_dependencies
+audio_phase.AudioPhase.run -> audio_phase.AudioPhase._recover
+audio_phase.AudioPhase.run -> audio_phase.AudioPhase._execute_audio
+audio_phase.AudioPhase._execute_audio -> audio_phase.AudioEngine.build_plan
+audio_phase.AudioEngine.build_plan -> audio_phase.runners.AsyncRunner
+audio_phase.runners.AsyncRunner -> audio_phase.strategies.BaseStrategy: "execute_async()"
+audio_phase.strategies.BaseStrategy -> audio_phase._two_pass_loudnorm: "NormStrategy / DynaudnormStrategy"
+
+merge_phase.MergePhase.run -> merge_phase.MergePhase._ensure_dependencies
+merge_phase.MergePhase.run -> merge_phase.MergePhase._recover
+merge_phase.MergePhase.run -> merge_phase.MergePhase._execute_merge
+merge_phase.MergePhase._execute_merge -> merge_phase.merge_final_video_fn
+merge_phase.merge_final_video_fn -> merge_phase._measure_quality
+merge_phase.MergePhase.run -> merge_phase.MergeArtifact

@@ -5,6 +5,7 @@ that a crash during writing never leaves a partial file on disk.  The caller
 passes the final target path and a data dict; temp-file management is handled
 internally using the ``.tmp``-then-rename protocol.
 """
+# CHerSun 2026
 
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ import yaml
 
 from pyqenc.constants import TEMP_SUFFIX
 
-_logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def write_yaml_atomic(path: Path, data: dict) -> None:
@@ -41,7 +42,7 @@ def write_yaml_atomic(path: Path, data: dict) -> None:
         with tmp_path.open("w", encoding="utf-8") as fh:
             yaml.dump(data, fh, allow_unicode=True, sort_keys=False)
         tmp_path.replace(path)
-        _logger.debug("Wrote YAML atomically: %s", path)
+        logger.debug("Wrote YAML atomically: %s", path)
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise

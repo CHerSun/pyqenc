@@ -7,21 +7,11 @@ import pytest
 from pyqenc.config import ConfigManager
 from pyqenc.models import CropParams, PipelineConfig, QualityTarget
 from pyqenc.orchestrator import PipelineOrchestrator
-from pyqenc.state import JobStateManager
 from tests.fixtures.video_fixtures import get_sample_video_path, sample_video_exists
 
 
 def _qt(metric: str, statistic: str, value: float) -> QualityTarget:
     return QualityTarget(metric=metric, statistic=statistic, value=value)
-
-
-def _make_state_manager(config: PipelineConfig) -> JobStateManager:
-    """Create a JobStateManager for the given config."""
-    return JobStateManager(
-        work_dir=config.work_dir,
-        source_video=config.source_video,
-        force=getattr(config, "force", False),
-    )
 
 
 @pytest.mark.skipif(not sample_video_exists(), reason="Sample video not available")
@@ -46,7 +36,7 @@ class TestCompletePipeline:
             log_level="info",
         )
 
-        orchestrator = PipelineOrchestrator(config, _make_state_manager(config))
+        orchestrator = PipelineOrchestrator(config)
         result = orchestrator.run(dry_run=True, max_phases=None)
         assert result is not None
 
@@ -68,7 +58,7 @@ class TestCompletePipeline:
             crop_params=CropParams(top=100, bottom=100, left=0, right=0),
         )
 
-        orchestrator = PipelineOrchestrator(config, _make_state_manager(config))
+        orchestrator = PipelineOrchestrator(config)
         result = orchestrator.run(dry_run=True, max_phases=1)
         assert result is not None
 
@@ -89,7 +79,7 @@ class TestCompletePipeline:
             log_level="info",
         )
 
-        orchestrator = PipelineOrchestrator(config, _make_state_manager(config))
+        orchestrator = PipelineOrchestrator(config)
         result = orchestrator.run(dry_run=True, max_phases=2)
         assert result is not None
 
@@ -110,11 +100,11 @@ class TestCompletePipeline:
             log_level="info",
         )
 
-        orchestrator1 = PipelineOrchestrator(config, _make_state_manager(config))
+        orchestrator1 = PipelineOrchestrator(config)
         result1 = orchestrator1.run(dry_run=True, max_phases=1)
         assert result1 is not None
 
-        orchestrator2 = PipelineOrchestrator(config, _make_state_manager(config))
+        orchestrator2 = PipelineOrchestrator(config)
         result2 = orchestrator2.run(dry_run=True, max_phases=None)
         assert result2 is not None
 
@@ -134,7 +124,7 @@ class TestCompletePipeline:
             metrics_sampling=10,
             log_level="info",
         )
-        orchestrator1 = PipelineOrchestrator(config1, _make_state_manager(config1))
+        orchestrator1 = PipelineOrchestrator(config1)
         result1 = orchestrator1.run(dry_run=True, max_phases=1)
         assert result1 is not None
 
@@ -149,7 +139,7 @@ class TestCompletePipeline:
             metrics_sampling=10,
             log_level="info",
         )
-        orchestrator2 = PipelineOrchestrator(config2, _make_state_manager(config2))
+        orchestrator2 = PipelineOrchestrator(config2)
         result2 = orchestrator2.run(dry_run=True, max_phases=None)
         assert result2 is not None
 
@@ -169,7 +159,7 @@ class TestCompletePipeline:
             metrics_sampling=10,
             log_level="info",
         )
-        orchestrator1 = PipelineOrchestrator(config1, _make_state_manager(config1))
+        orchestrator1 = PipelineOrchestrator(config1)
         result1 = orchestrator1.run(dry_run=True, max_phases=1)
         assert result1 is not None
 
@@ -184,7 +174,7 @@ class TestCompletePipeline:
             metrics_sampling=10,
             log_level="info",
         )
-        orchestrator2 = PipelineOrchestrator(config2, _make_state_manager(config2))
+        orchestrator2 = PipelineOrchestrator(config2)
         result2 = orchestrator2.run(dry_run=True, max_phases=None)
         assert result2 is not None
 
@@ -206,7 +196,7 @@ class TestCompletePipeline:
             crop_params=None,
         )
 
-        orchestrator = PipelineOrchestrator(config, _make_state_manager(config))
+        orchestrator = PipelineOrchestrator(config)
         result = orchestrator.run(dry_run=True, max_phases=1)
         assert result is not None
 
@@ -228,7 +218,7 @@ class TestCompletePipeline:
             crop_params=CropParams(),
         )
 
-        orchestrator = PipelineOrchestrator(config, _make_state_manager(config))
+        orchestrator = PipelineOrchestrator(config)
         result = orchestrator.run(dry_run=True, max_phases=1)
         assert result is not None
 
@@ -254,7 +244,7 @@ class TestPipelineValidation:
             log_level="info",
         )
 
-        orchestrator = PipelineOrchestrator(config, _make_state_manager(config))
+        orchestrator = PipelineOrchestrator(config)
         assert orchestrator is not None
 
     def test_invalid_strategy(self, tmp_path):

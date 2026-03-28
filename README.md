@@ -1,12 +1,12 @@
-# pyqenc - Quality-Based Video Encoding Pipeline
+# pyqenc
 
 <!-- markdownlint-disable MD024 MD026 MD028 -->
 
-A comprehensive video encoding pipeline that achieves user-specified quality targets while optimizing file size through intelligent CRF adjustment, automatic black border detection, and scene-based chunking.
+pyqenc (`PY`thon `Q`uality-based `E`ncoder) - an encoding pipeline that achieves user-specified quality targets while optimizing file size through intelligent CRF adjustment, automatic crop detection, and scene-based chunking.
 
 > This project was inspired by [Av1an](https://github.com/rust-av/Av1an).
 
-> AWS and Kiro team, thank you for the tooling and welcome credits. This allowed me to prototype this project incredibly fast.
+> AWS and Kiro IDE team - thank you for the agentic IDE and welcome credits. This allowed me to prototype this project incredibly fast. Truly a new approach to development.
 
 ## Problem & Solution
 
@@ -16,7 +16,6 @@ Traditional video encoding approaches face several challenges:
 
 - **Fixed CRF encoding** produces unpredictable quality across different scenes
 - **Target bitrate encoding** doesn't guarantee consistent quality
-- **Black borders** waste encoding bits and disk space
 - **Manual quality verification** is time-consuming and subjective
 - **Interrupted encoding** requires starting over from scratch
 
@@ -36,16 +35,17 @@ pyqenc provides a quality-first encoding pipeline that:
 
 - ✅ Quality-targeted encoding with VMAF, SSIM, and PSNR metrics
 - ✅ Automatic black border detection and cropping
-- ✅ Scene-based chunking with frame-perfect splits (FFV1 lossless, default) or fast stream-copy (`--remux-chunking` mode is NOT recommended currently)
-- ✅ Intelligent target CRF search
+- ✅ Scene-based chunking with frame-perfect splits
+- ✅ Target CRF search
 - ✅ Multiple codec support (h.264 8-bit, h.265 10-bit)
-- ✅ Custom encoding profiles via YAML configuration
+- ✅ Custom encoding strategies via configuration
+- ✅ Optimization phase to choose the best encoding strategy (optional)
 - ✅ Parallel chunk encoding (configurable concurrency)
-- ✅ Audio processing with day/night normalization modes
+- ✅ Audio processing with day/night normalization modes and dialogs boosting
 - ✅ Artifact-based resumption (no explicit resume needed)
 - ✅ Dry-run mode to preview operations
 - ✅ Comprehensive logging and progress reporting
-- ✅ Support for multiple encoding strategies - either in optimization search (selects one best strategy) or in all mode (transcode to all strategies).
+- Currently targeting only MKV sources. Remux into MKV if needed.
 
 ## Installation
 
@@ -53,158 +53,121 @@ pyqenc provides a quality-first encoding pipeline that:
 
 #### External Dependencies:
 
-1. **FFmpeg** (>= 5.0) - Video encoding, scene detection, metrics calculation
-
-   ```sh
-   # Windows (using Scoop)
-   scoop install ffmpeg
-
-   # macOS (using Homebrew)
-   brew install ffmpeg
-
-   # Linux (Ubuntu/Debian)
-   sudo apt install ffmpeg
-   ```
-
-2. **MKVToolNix** (>= 70.0) - MKV stream extraction and merging
-
-   ```sh
-   # Windows (using Scoop)
-   scoop install mkvtoolnix
-
-   # macOS (using Homebrew)
-   brew install mkvtoolnix
-
-   # Linux (Ubuntu/Debian)
-   sudo apt install mkvtoolnix
-   ```
-
-#### Python Requirements:
-
-- Python >= 3.13
-
-### Install pyqenc
-
-Using `uv` (recommended):
+- **FFmpeg** - for video encoding, scene detection, metrics calculation.
+- **MKVToolNix** - MKV stream extraction and merging.
 
 ```sh
-# Clone the repository
+# Windows (using Scoop)
+scoop install ffmpeg mkvtoolnix
+
+# macOS (using Homebrew)
+brew install ffmpeg mkvtoolnix
+
+# Linux (Ubuntu/Debian)
+sudo apt install ffmpeg mkvtoolnix
+```
+
+### Run pyqenc directly using `uv`
+
+This is the recommended way. It has no external python dependencies, `uv` will create a local `.venv` with everything required.
+
+```sh
 git clone <repository-url>
 cd pyqenc
 
-# Install with uv
-uv pip install -e .
+uv run pyqenc <your_arguments>
 ```
 
-Using pip:
+### Install pyqenc
+
+This needs global python of version >=3.13. Install using `uv`:
 
 ```sh
-pip install -e .
+git clone <repository-url>
+cd pyqenc
+
+uv pip install .
 ```
 
-After installation, the `pyqenc` command will be available in your terminal.
+After installation, the `pyqenc` command will be available in your terminal. To run then:
+
+```sh
+pyqenc <your_arguments>
+```
 
 ## Quick Start
 
 ### Basic Usage
 
+See installation section on how to run depending on the way you installed. See `--help` for full help.
+
 ```sh
-# Dry-run mode (default) - preview what would be done
-pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq
+# Dry-run mode - preview what's to be done (1 phase ahead) with default settings
+pyqenc auto movie.mkv
 
-# Execute the pipeline
-pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq -y
+# Execute (`-y`) the automatic pipeline using the specified work dir with default settings.
+pyqenc auto movie.mkv --work-dir ./work -y
 
-# Execute with custom working directory
+# Execute with custom quality targets and strategies selection
 pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq --work-dir ./work -y
 ```
 
-### Common Workflows
+> NOTE: It is highly recommended to use separate `--work-dir` per encode.
 
-#### High-quality h.265 encoding:
+Default settings:
 
-```sh
-pyqenc auto movie.mkv \
-  --quality-target vmaf-min:95,vmaf-med:98 \
-  --strategies slow+h265-aq \
-  -y
-```
+- target VMAF min >=93, VMAF med >=96;
+- use all strategies defined in the config;
+- enable optimization phase to search for the best variant.
 
-#### Fast h.264 encoding:
+### Command line basic examples
 
-```sh
-pyqenc auto movie.mkv \
-  --quality-target vmaf-min:93 \
-  --strategies fast+h264-default \
-  -y
-```
-
-#### Multiple strategies with optimization:
+Slow h265 strategy tuned to better encode dark scenes and for crisper look with higher quality targets:
 
 ```sh
-# Tests multiple strategies, selects optimal one (smallest file size meeting quality)
-pyqenc auto movie.mkv \
-  --quality-target vmaf-min:95 \
-  --strategies slow+h265-aq,veryslow+h265-anime \
-  -y
+pyqenc auto movie.mkv --quality-target vmaf-min:95,vmaf-med:98 --strategies slow+h265-aq --work-dir ./work -y
 ```
 
-#### All strategies without optimization:
+Fast basic h.264 encoding strategy targeting only the VMAF min score:
 
 ```sh
-# Produces output for ALL specified strategies (no optimization)
-pyqenc auto movie.mkv \
-  --quality-target vmaf-min:95 \
-  --strategies slow+h265-aq,veryslow+h265-anime \
-  --all-strategies \
-  -y
+pyqenc auto movie.mkv --quality-target vmaf-min:93 --strategies fast+h264-default --work-dir ./work -y
 ```
 
-#### Using default strategies:
+Search through multiple strategies for the best one (or a few) and encode to it:
 
 ```sh
-# Uses default strategies from config: veryslow+h264*,slow+h265*
-pyqenc auto movie.mkv \
-  --quality-target vmaf-min:95 \
-  -y
+pyqenc auto movie.mkv --strategies slow+h265-aq,veryslow+h265-anime --work-dir ./work -y
 ```
 
-#### Wildcard strategy testing:
+Encode using all strategies chosen with NO optimization phase:
 
 ```sh
-# Tests all h265 profiles with slow preset
-pyqenc auto movie.mkv \
-  --quality-target vmaf-min:95 \
-  --strategies slow+h265* \
-  -y
+pyqenc auto movie.mkv --strategies slow+h265-aq,veryslow+h265-anime --all-strategies --work-dir ./work -y
 ```
 
-#### Disable automatic cropping:
+Wildcard strategy selection (slow preset + all h265 profiles):
 
 ```sh
-pyqenc auto movie.mkv \
-  --quality-target vmaf-min:95 \
-  --strategies slow+h265-aq \
-  --no-crop \
-  -y
+pyqenc auto movie.mkv --strategies slow+h265* --work-dir ./work -y
 ```
 
-#### Manual crop specification:
+> NOTE: Some shells might need to escape the `*` character. The easiest is to just enclose full `slow+h265*` in quotes `"slow+h265*"` - this normally helps.
+
+Disable automatic cropping:
+
+```sh
+pyqenc auto movie.mkv --no-crop --work-dir ./work -y
+```
+
+Manual crop specification:
 
 ```sh
 # Vertical crop only (most common)
-pyqenc auto movie.mkv \
-  --quality-target vmaf-min:95 \
-  --strategies slow+h265-aq \
-  --crop "140 140" \
-  -y
+pyqenc auto movie.mkv --crop "140 140" -y
 
 # Full crop specification (top bottom left right)
-pyqenc auto movie.mkv \
-  --quality-target vmaf-min:95 \
-  --strategies slow+h265-aq \
-  --crop "140 140 0 0" \
-  -y
+pyqenc auto movie.mkv --crop "140 140 0 0" -y
 ```
 
 ## CLI Reference
@@ -217,17 +180,17 @@ pyqenc auto <source_video> [options]
 
 ### Global Options
 
-| Option              | Description                                                       | Default  |
-| ------------------- | ----------------------------------------------------------------- | -------- |
-| `--work-dir PATH`   | Working directory for intermediate files                          | `./work` |
-| `--log-level LEVEL` | Logging level (debug, info, warning, critical)                    | `info`   |
-| `-y, --execute [N]` | Execute phases (no flag = dry-run, `-y` = all, `-y N` = N phases) | dry-run  |
+| Option              | Description                                        | Default  |
+| ------------------- | -------------------------------------------------- | -------- |
+| `--work-dir PATH`   | Working directory for intermediate files           | `./work` |
+| `--log-level LEVEL` | Logging level (debug, info, warning, critical)     | `info`   |
+| `-y, --execute`     | Execute phases (no flag = dry-run, `-y` = execute) | dry-run  |
 
 ### Quality & Strategy Options
 
 | Option                     | Description                                             | Default                        |
 | -------------------------- | ------------------------------------------------------- | ------------------------------ |
-| `--quality-target TARGETS` | Quality targets (see format below)                      | `vmaf-med:98`                  |
+| `--quality-target TARGETS` | Quality targets (see format below)                      | `vmaf-min:93,vmaf-med:96`      |
 | `--strategies STRATEGIES`  | Encoding strategies (see format below)                  | `veryslow+h264*,slow+h265*`    |
 | `--all-strategies`         | Disable optimization, produce output for all strategies | `False` (optimization enabled) |
 | `--max-parallel N`         | Maximum concurrent encoding processes                   | `2`                            |
@@ -244,15 +207,18 @@ pyqenc auto <source_video> [options]
 
 | Option            | Description                                                   | Default     |
 | ----------------- | ------------------------------------------------------------- | ----------- |
-| `--no-crop`       | Disable automatic black border detection                      | Enabled     |
+| `--no-crop`       | Disable automatic black border detection                      | Auto-detect |
 | `--crop "VALUES"` | Manual crop (format: "top bottom" or "top bottom left right") | Auto-detect |
+
+> NOTE: `--no-crop` is the same as `--crop "0 0 0 0"`, just a short-hand.
 
 ### Stream Filtering Options
 
-| Option                 | Description                           | Example     |
-| ---------------------- | ------------------------------------- | ----------- |
-| `--video-filter REGEX` | Regex pattern to filter video streams | `".*eng.*"` |
-| `--audio-filter REGEX` | Regex pattern to filter audio streams | `".*eng.*"` |
+| Option                  | Description                                                          | Example            | Default                            |
+| ----------------------- | -------------------------------------------------------------------- | ------------------ | ---------------------------------- |
+| `--include REGEX`       | Regex pattern to filter streams                                      | `"\b(RUS\|ENG)\b"` | Include all                        |
+| `--exclude REGEX`       | Regex pattern to filter streams away                                 | `"\bJPN\b"`        | Exclude none                       |
+| `--audio-convert REGEX` | Regex pattern to tell which audio streams to convert to final format | `"5\.1"`           | All normalized and all 2.0 results |
 
 ### Quality Target Format
 
@@ -262,16 +228,16 @@ Quality targets specify minimum acceptable quality using metrics and statistics:
 
 #### Metrics:
 
-- `vmaf` - Video Multimethod Assessment Fusion (0-100 scale)
-- `ssim` - Structural Similarity Index (0.0-1.0 scale)
-- `psnr` - Peak Signal-to-Noise Ratio (dB scale)
+- `vmaf` - Video Multimethod Assessment Fusion (0-100.0 scale)
+- `ssim` - Structural Similarity Index (0.0-1.0 scale normalized to 0.0-100.0 scale)
+- `psnr` - Peak Signal-to-Noise Ratio (dB scale, clipped to 0.0-100.0 scale; good quality is normally around 40-60)
 
 #### Statistics:
 
 - `min` - Minimum score across all frames
 - `med` or `median` - Median score across all frames
 
-**Default:** If not specified, defaults to `vmaf-med:98`
+**Default:** If not specified, defaults to `vmaf-min:93,vmaf-med:96`
 
 #### Examples:
 
@@ -282,14 +248,14 @@ Quality targets specify minimum acceptable quality using metrics and statistics:
 # Multiple targets: VMAF minimum 95 AND median 98
 --quality-target vmaf-min:95,vmaf-med:98
 
-# SSIM target (note 0-1 scale)
---quality-target ssim-min:0.98
+# SSIM target (note the normalized 0-100 scale)
+--quality-target ssim-min:98
 
-# PSNR target (dB scale)
+# PSNR target (dB scale clipped to 0-100, but normally in range ~40-60 for good quality)
 --quality-target psnr-min:45
 
 # Mixed metrics
---quality-target vmaf-min:95,ssim-med:0.99,psnr-min:45
+--quality-target vmaf-min:95,ssim-med:99,psnr-min:45
 ```
 
 ### Strategy Format
@@ -298,7 +264,7 @@ Strategies combine encoder presets with custom profiles. The pipeline supports f
 
 **Format:** `preset+profile[,preset+profile,...]`
 
-**Presets:** (ffmpeg encoder presets)
+**Presets:** (encoder presets)
 
 - `ultrafast`, `superfast`, `veryfast`, `faster`, `fast`
 - `medium`, `slow`, `slower`, `veryslow`, `placebo`
@@ -307,7 +273,7 @@ Strategies combine encoder presets with custom profiles. The pipeline supports f
 
 - `h264` - Default h.264 8-bit encoding
 - `h265` - Default h.265 10-bit encoding
-- `h265-aq` - h.265 with adaptive quantization tuning
+- `h265-aq` - h.265 with adaptive quantization tuning (crisper, better dark areas details)
 - `h265-anime` - h.265 optimized for anime content
 
 **Default Strategies:** If not specified, uses `veryslow+h264*,slow+h265*` from configuration file
@@ -369,189 +335,23 @@ The strategy specification supports wildcards for flexible testing:
 
 ## Phase-Specific Subcommands
 
-For advanced users who want to run individual phases:
+It is possible to run individual phases. See `--help` for subcommands (`extract`, `chunk` ...; see the `--help` for the list).
 
-### Extract Streams
-
-```sh
-pyqenc extract <source_video> [options]
-
-Options:
-  --work-dir PATH          Working directory
-  --video-filter REGEX     Filter video streams
-  --audio-filter REGEX     Filter audio streams
-  --no-crop                Disable crop detection
-  --crop "VALUES"          Manual crop specification
-  -y, --execute            Execute (default: dry-run)
-```
-
-### Chunk Video
-
-```sh
-pyqenc chunk <video_file> [options]
-
-Options:
-  --work-dir PATH          Working directory
-  --scene-threshold FLOAT  Scene detection sensitivity (0.0-1.0)
-  --min-scene-length INT   Minimum frames per chunk
-  --remux-chunking         Use stream-copy instead of FFV1 lossless re-encode
-  -y, --execute            Execute (default: dry-run)
-```
-
-### Encode Chunks
-
-```sh
-pyqenc encode <chunks_dir> [options]
-
-Options:
-  --work-dir PATH          Working directory
-  --strategies STRATEGIES  Encoding strategies
-  --quality-target TARGETS Quality targets
-  --max-parallel N         Concurrent processes
-  -y, --execute            Execute (default: dry-run)
-```
-
-### Process Audio
-
-```sh
-pyqenc audio <audio_dir> [options]
-
-Options:
-  --work-dir PATH          Working directory
-  -y, --execute            Execute (default: dry-run)
-```
-
-### Merge Final Video
-
-```sh
-pyqenc merge <video_dir> <audio_dir> [options]
-
-Options:
-  --work-dir PATH          Working directory
-  --output PATH            Output file path
-  -y, --execute            Execute (default: dry-run)
-```
+> NOTE: It is not recommended to use manual mode unless you really know what you are doing.
 
 ## Configuration File
-
-### Location
 
 Configuration files are searched in this order:
 
 1. `./pyqenc.yaml` (current directory)
 2. `~/.config/pyqenc/config.yaml` (user config)
-3. Built-in defaults (embedded in code)
+3. Built-in defaults (embedded in code `<project_folder>\pyqenc\default_config.yaml`)
 
-### Format
+It is NOT recommended to adjust built-in profile. Make a copy and edit it.
 
-Create a `pyqenc.yaml` file to customize codecs, profiles, and default strategies:
+Refer to comments in the config for formatting details.
 
-```yaml
-# Default strategies to use when --strategies not specified
-default_strategies:
-  - "veryslow+h264*"
-  - "slow+h265*"
-
-# Codec definitions with base settings
-codecs:
-  h264-8bit:
-    encoder: libx264
-    pixel_format: yuv420p
-    default_crf: 23
-    crf_range: [0, 51]
-    presets:
-      - ultrafast
-      - superfast
-      - veryfast
-      - faster
-      - fast
-      - medium
-      - slow
-      - slower
-      - veryslow
-      - placebo
-
-  h265-10bit:
-    encoder: libx265
-    pixel_format: yuv420p10le
-    default_crf: 20
-    crf_range: [0, 51]
-    presets:
-      - ultrafast
-      - superfast
-      - veryfast
-      - faster
-      - fast
-      - medium
-      - slow
-      - slower
-      - veryslow
-      - placebo
-
-# Encoding profiles organized by codec
-profiles:
-  # h.264 8-bit profiles
-  h264:
-    codec: h264-8bit
-    description: "Default h.264 8-bit encoding"
-    extra_args: []
-
-  # h.265 10-bit profiles
-  h265:
-    codec: h265-10bit
-    description: "Default h.265 10-bit encoding"
-    extra_args: []
-
-  h265-aq:
-    codec: h265-10bit
-    description: "h.265 with adaptive quantization"
-    extra_args:
-      - "-x265-params"
-      - "aq-mode=3:aq-strength=0.8"
-
-  h265-anime:
-    codec: h265-10bit
-    description: "h.265 optimized for anime"
-    extra_args:
-      - "-x265-params"
-      - "aq-mode=2:psy-rd=1.0:deblock=-1,-1"
-```
-
-### Customizing Profiles
-
-To add a custom profile:
-
-1. Choose a codec (`h264-8bit` or `h265-10bit`)
-2. Pick a unique profile name (e.g., `h265-custom`)
-3. Add encoder-specific arguments in `extra_args`
-
-Example custom profile:
-
-```yaml
-profiles:
-  h265-custom:
-    codec: h265-10bit
-    description: "Custom h.265 profile for specific content"
-    extra_args:
-      - "-x265-params"
-      - "aq-mode=3:aq-strength=1.0:psy-rd=2.0"
-```
-
-Then use it with:
-
-```sh
-pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-custom -y
-```
-
-### Customizing Default Strategies
-
-Modify the `default_strategies` section to change what strategies are used when `--strategies` is not specified:
-
-```yaml
-default_strategies:
-  - "slow+h265*"      # All h265 profiles with slow preset
-  - "medium+h264"     # h264 profile with medium preset
-```
+Through config you can adjust codecs, their presets and profiles, and many other settings.
 
 ## Chunking Modes
 
@@ -559,38 +359,30 @@ pyqenc supports two modes for splitting the source video into chunks.
 
 ### Lossless FFV1 (Default)
 
-By default, each chunk is re-encoded to **FFV1 with `-g 1`** (all-intra). Because every output frame is an I-frame, the split lands on the exact frame the scene detector identified — no I-frame snapping offset.
-
-```sh
-# Default behavior — no flag needed
-pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq -y
-```
+By default, each chunk is re-encoded to lossless FFV1 for frame-perfect scene splitting. No extra settings are required for this.
 
 #### Trade-offs:
 
 - Frame-perfect chunk boundaries
-- Chunks are ~5x larger than the source video stream (FFV1 all-intra expansion)
+- Chunks are ~5x larger than the source video stream (FFV1 all-intra expansion) - 100 GB per movie for chunking is to be expected.
 - Slightly slower chunking phase due to re-encode
 
 ### Remux / Stream-Copy (`--remux-chunking`)
 
-Pass `--remux-chunking` to fall back to the original `-c copy` split. Chunks are produced by copying the source bitstream directly, so boundaries snap to the nearest I-frame *before* the requested scene timestamp.
+Remux mode is NOT recommended currently.
+
+Pass `--remux-chunking` to use remuxing mode. It is impossible to do precise chunking in this mode, scene boundaries are aligned to original video I-frames.
 
 ```sh
-pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq --remux-chunking -y
+pyqenc auto movie.mkv <...> --remux-chunking -y
 ```
 
 #### Trade-offs:
 
-- Chunk boundaries may be off by up to one GOP (not frame-perfect)
-- Chunks are approximately the same size as the source video stream
-- Fastest possible chunking — no re-encode
-
-#### When to use `--remux-chunking`:
-
-- Disk space is constrained (chunks are ~5x smaller than lossless mode)
-- Chunking speed is critical and sub-GOP boundary precision is acceptable
-- Source video already has frequent I-frames (e.g., already all-intra)
+- Scenes are not perfectly aligned
+  - This could reduce encoding effectiveness
+  - This could introduce discrepancies in length between original video and resulting one, causing audio desync
+- Remuxing is much faster and needs less space (1x original video size).
 
 ## Crop Detection
 
@@ -598,17 +390,10 @@ pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq --r
 
 pyqenc automatically detects black borders using ffmpeg's `cropdetect` filter:
 
-- Samples multiple frames (beginning, middle, end)
-- Uses conservative crop (largest area removing all borders)
-- Stores crop parameters for use in all phases
-- Applies crop during chunking (chunks stored cropped)
-
-Example output:
-
-```log
-[INFO] Detected black borders: 140 top, 140 bottom, 0 left, 0 right
-[INFO] Original resolution: 1920x1080, Cropped resolution: 1920x800
-```
+- Samples multiple frames
+- Uses conservative crop
+- The same crop parameters are used through all phases
+- Applies crop during encoding only (chunks stay not cropped for compatibility with remux chunking)
 
 ### Manual Crop
 
@@ -639,13 +424,13 @@ By default, pyqenc optimizes encoding by finding the best strategy:
 1. **Test Chunk Selection**: Randomly selects ~1% of chunks (minimum 3) from the middle 80% of the video
 2. **Strategy Testing**: Encodes test chunks with all specified strategies
 3. **Quality Verification**: Ensures all test chunks meet quality targets
-4. **Optimal Selection**: Chooses strategy with smallest average file size
-5. **Full Encoding**: Encodes all chunks using only the optimal strategy
+4. **Optimal Selection**: Chooses strategy with the smallest resulting size (or a few, within tolerance threshold of 5% by default)
+5. **Full Encoding**: Encodes all chunks using only the optimal strategy(ies)
 
 #### Benefits:
 
-- Saves encoding time by testing strategies on representative samples
-- Produces single output with best size/quality ratio
+- Saves encoding time by testing multiple strategies on a small subset of chunks
+- Produces only outputs with the best size/quality ratio
 - Automatically adapts to content characteristics
 
 #### Example:
@@ -654,24 +439,17 @@ By default, pyqenc optimizes encoding by finding the best strategy:
 # Tests slow+h265-aq and veryslow+h265-anime on test chunks
 # Selects the one with smaller file size
 # Produces single output with optimal strategy
-pyqenc auto movie.mkv \
-  --quality-target vmaf-min:95 \
-  --strategies slow+h265-aq,veryslow+h265-anime \
-  -y
+pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq,veryslow+h265-anime -y
 ```
 
 ### Disable Optimization (All Strategies)
 
-Use `--all-strategies` to disable optimization and produce output for all strategies:
+Use `--all-strategies` to disable optimization and produce outputs for all strategies:
 
 ```sh
 # Encodes ALL chunks with BOTH strategies
 # Produces TWO output files (one per strategy)
-pyqenc auto movie.mkv \
-  --quality-target vmaf-min:95 \
-  --strategies slow+h265-aq,veryslow+h265-anime \
-  --all-strategies \
-  -y
+pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq,veryslow+h265-anime --all-strategies -y
 ```
 
 #### When to use:
@@ -688,29 +466,39 @@ All intermediate files are stored in the working directory:
 
 ```log
 work/
-├── progress.json              # Progress tracker state
-├── extracted/                 # Extracted streams
-│   ├── video_001.mkv
-│   ├── audio_001.mka
-│   └── audio_002.mka
-├── chunks/                    # Scene-based chunks (cropped)
-│   ├── chunk_0001.mkv
-│   ├── chunk_0002.mkv
+├── job.yaml               # Job parameters
+├── chunking.yaml          # Detected scenes for chunking
+├── optimization.yaml      # Optimization phase parameters
+├── encoding.yaml          # Encoding phase parameters
+├──
+├── extracted/                 # Extracted streams and attachments
+│   ├── "#0 ID=0 (video) res=1920x1080.mkv"
+│   ├── "#1 ID=1 (audio-dts) lang=rus ch=5.1(side).mka"
+│   ├── "#2 ID=2 (audio-ac3) lang=eng ch=5.1(side).mka"
+│   └── "chapters.xml"
+├── chunks/                    # Scene-based chunks
+│   ├── "00꞉00꞉00․000-00꞉01꞉18․667.mkv"
+│   ├── "00꞉01꞉18․667-00꞉01꞉39․542.mkv"
 │   └── ...
-├── encoded/                   # Encoded chunks by strategy
-│   └── slow+h265-aq/
-│       ├── chunk_0001_attempt_001.mkv
-│       ├── chunk_0001_attempt_001.psnr.log
-│       ├── chunk_0001_attempt_001.ssim.log
-│       ├── chunk_0001_attempt_001.vmaf.json
-│       ├── chunk_0001_attempt_001.png
+├── encoding/                  # Chunks encoding attempts
+│   └── slow+h265-aq/              # Strategy subfolder with its chunk attempts
+│       ├── "00꞉00꞉00․000-00꞉01꞉18․667.1920x1024.crf20.0/"          # raw metrics subfolder
+│       ├── "00꞉00꞉00․000-00꞉01꞉18․667.1920x1024.crf20.0.mkv"       # encoded attempt
+│       ├── "00꞉00꞉00․000-00꞉01꞉18․667.1920x1024.crf20.0.png"       # metrics graph for the attempt
+│       ├── "00꞉00꞉00․000-00꞉01꞉18․667.1920x1024.crf20.0.yaml"      # sidecar with calculated metrics snapshot
+│       └── ...
+├── encoded/                   # Winning chunks encoding attempts (hard-links or copies) - to be merged into final video
+│   └── slow+h265-aq/              # Strategy subfolder with its chunk attempts
+│       ├── "00꞉00꞉00․000-00꞉01꞉18․667.1920x1024.crf20.0.mkv"       # winning chunk attempt
+│       ├── "00꞉00꞉00․000-00꞉01꞉18․667.1920x1024.crf20.0.png"       # metrics graph for the winning attempt
+│       ├── "00꞉00꞉00․000-00꞉01꞉18․667.1920x1024.crf20.0.yaml"      # sidecar with calculated metrics snapshot
 │       └── ...
 ├── audio/                     # Processed audio
 │   ├── audio_001_day.aac
 │   ├── audio_001_night.aac
 │   └── ...
 └── final/                     # Final output
-    └── output_slow+h265-aq.mkv
+    └── movie_slow+h265-aq.mkv     # 1 variant per strategy used
 ```
 
 ## Resumption & Artifact Reuse
@@ -776,7 +564,7 @@ mkvextract --version
 
 **Error:** `No space left on device`
 
-**Solution:** Encoding requires significant intermediate disk space. The amount depends on chunking mode:
+**Solution:** Encoding requires significant intermediate disk space. The amount depends greatly on chunking mode and number of strategies:
 
 - **Lossless mode (default):** ~6-7x source size (5x for FFV1 chunks + extraction + audio)
 - **Remux mode (`--remux-chunking`):** ~2-3x source size (stream-copy chunks + extraction + audio)
@@ -786,6 +574,7 @@ Options:
 - Check available space: `df -h` (Linux/macOS) or `dir` (Windows)
 - Use a different working directory: `--work-dir /path/to/large/disk`
 - Use `--remux-chunking` to reduce chunk storage at the cost of frame-perfect splits
+- Use `--cleanup` flag for intermediate results cleanups (care: in case of changing arguments this could require re-encoding of all chunks).
 - Clean up previous working directories
 
 ### Slow Encoding
@@ -796,7 +585,7 @@ Options:
 
 1. **Use faster preset**: Try `fast` or `medium` instead of `slow`
 2. **Increase parallelism**: `--max-parallel 4` (if you have idle CPU cores; normally `ffmpeg` should use all already)
-3. **Use different codec**: for example, h.264 is significantly faster than h.265. AV1 is very slow.
+3. **Use different codec**: h.264 is significantly faster than h.265. AV1 is very slow.
 
 ### Invalid Strategy or Profile
 
@@ -808,53 +597,6 @@ Options:
 2. Use built-in profiles: `h264`, `h265`, `h265-aq`, `h265-anime`
 3. Verify profile name matches configuration exactly (case-sensitive)
 4. Check strategy format: `preset+profile` (e.g., `slow+h265-aq`)
-
-### Crop Detection Issues
-
-**Issue:** Automatic crop detection removes too much or too little
-
-#### Solutions:
-
-1. **Manual crop**: Specify crop values manually with `--crop "top bottom"`
-
-   ```sh
-   pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq --crop "140 140" -y
-   ```
-
-2. **Disable crop**: Use `--no-crop` if you want to keep original aspect ratio
-
-   ```sh
-   pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq --no-crop -y
-   ```
-
-3. **Check sample frames**: Review extraction logs for detected crop values
-
-### Progress Tracker Corruption
-
-**Issue:** Pipeline fails to resume or shows incorrect state
-
-**Solution:** Delete the progress tracker and restart:
-
-```sh
-# Remove progress tracker
-rm <work_folder>/progress.json
-
-# Restart pipeline (will reuse existing artifacts)
-pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq --work-dir <work_folder> -y
-```
-
-### Python Version Issues
-
-**Error:** `SyntaxError` or `ImportError`
-
-**Solution:** Ensure Python 3.13 or later is installed (globally or using venv):
-
-```sh
-# Check Python version
-python --version
-
-# Should show Python 3.13.x or later
-```
 
 ### Strategy Wildcard Not Expanding
 
@@ -888,18 +630,6 @@ pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq
 # - Stops at first incomplete phase
 ```
 
-### Phased Execution
-
-Execute a limited number of phases:
-
-```sh
-# Execute only the first phase (extraction)
-pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq -y 1
-
-# Execute first 3 phases (extraction, chunking, encoding)
-pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq -y 3
-```
-
 ### Debug Logging
 
 Enable detailed logging for troubleshooting:
@@ -921,57 +651,29 @@ Filter specific streams by language or properties:
 pyqenc auto movie.mkv \
   --quality-target vmaf-min:95 \
   --strategies slow+h265-aq \
-  --video-filter ".*eng.*" \
-  --audio-filter ".*eng.*" \
+  --include "\beng\b" \
   -y
 
 # Exclude commentary tracks
 pyqenc auto movie.mkv \
   --quality-target vmaf-min:95 \
   --strategies slow+h265-aq \
-  --audio-filter "^(?!.*commentary).*$" \
+  --exclude "commentary" \
   -y
 ```
 
-## Performance Tips
+## Performance notes
 
 1. **Use Strategy Optimization** (Default): Let the pipeline find the best strategy automatically
-   - Tests all strategies on ~1% of chunks (representative samples)
-   - Selects strategy with smallest file size meeting quality targets
-   - Adds ~5-10 minutes but can save hours of encoding time
-   - Enabled by default unless `--all-strategies` is used
+   - Tests all strategies on ~1% of chunks
+   - Selects strategy with the smallest file size meeting quality targets
+   - Uses extra time for optimization phase, but can save encoding time significantly
 
-2. **Parallel Encoding**: Increase `--max-parallel` if you have CPU cores available
-   - Default: 2 concurrent chunks
-   - Recommended: Number of physical CPU cores / 2
-   - Example: `--max-parallel 4` for 8-core CPU
+2. **Parallel Encoding**: We use concurrency of 2 to avoid orchestrator-caused time wasting. Normally ffmpeg already scales onto all available CPUs. You can control this via `--max-parallel` flag
 
-3. **Faster Presets**: Use `fast` or `medium` for quicker encoding (lower quality)
-   - `ultrafast`, `superfast`, `veryfast` - Very fast, lower quality
-   - `fast`, `faster` - Good balance of speed and quality
-   - `medium` - Default FFmpeg preset
-   - `slow`, `slower`, `veryslow` - Better quality, much slower
-
-4. **Lower Quality Targets**: Reduce targets to minimize encoding attempts
-   - Each CRF adjustment requires re-encoding the chunk
-   - Lower targets (e.g., VMAF 90 vs 95) converge faster
-
-5. **SSD Storage**: Use SSD for working directory to speed up I/O
-   - Chunking and metrics calculation are I/O intensive
-   - Significant speedup with fast storage
-
-6. **Process Priority**: Main process automatically runs at lower priority to avoid system interference
+3. **Process Priority**: Main process automatically runs at lower priority to avoid system interference
    - All subprocesses inherit the lowered priority
    - Ensures encoding doesn't impact other activities
-
-7. **Batch Updates**: Progress tracker batches updates to reduce disk I/O
-   - Updates are written periodically during encoding
-   - Reduces overhead during parallel encoding
-
-8. **Automatic Cropping**: Black border detection optimizes encoding efficiency
-   - Removes wasted bits on black borders
-   - Reduces file size and encoding time
-   - Enabled by default
 
 ## License
 

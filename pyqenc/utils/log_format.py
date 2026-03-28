@@ -3,7 +3,12 @@ Log formatting helpers for uniform chunk attempt and optimization output.
 
 All public functions return plain strings or lists of strings — no logging
 side-effects — so callers decide the log level.
+
+Exception: ``emit_phase_banner`` and ``log_recovery_line`` are side-effecting
+helpers that accept a logger and emit directly, since they are always called
+at ``info`` level and the pattern is too mechanical to benefit from separation.
 """
+# CHerSun 2026
 
 from __future__ import annotations
 
@@ -28,6 +33,51 @@ if TYPE_CHECKING:
     from pyqenc.phases.optimization import StrategyTestResult
 
 logger = logging.getLogger(__name__)
+
+
+def emit_phase_banner(name: str, log: logging.Logger) -> None:
+    """Emit the standard thick-line banner for a phase.
+
+    Args:
+        name: Phase name in UPPER CASE (e.g. ``"EXTRACTION"``).
+        log:  Logger instance belonging to the calling phase module.
+    """
+    log.info(THICK_LINE)
+    log.info(name)
+    log.info(THICK_LINE)
+
+
+def log_recovery_line(
+    log:      logging.Logger,
+    complete: int,
+    pending:  int,
+    stale:    int = 0,
+    unit:     str = "artifact",
+) -> None:
+    """Emit the standard single-line recovery summary.
+
+    Args:
+        log:      Logger instance belonging to the calling phase module.
+        complete: Number of artifacts already complete.
+        pending:  Number of artifacts needing work (ABSENT or ARTIFACT_ONLY).
+        stale:    Number of stale artifacts (present but parameters changed).
+        unit:     Singular noun for the artifact type (e.g. ``"chunk"``,
+                  ``"pair"``, ``"strategy result"``).  Pluralised by appending
+                  ``"s"`` when count ≠ 1.
+    """
+    def _plural(n: int) -> str:
+        return f"{n} {unit}{'s' if n != 1 else ''}"
+
+    if pending == 0 and stale == 0:
+        log.info("Recovery: %s complete, 0 pending — reusing", _plural(complete))
+    elif complete == 0 and stale == 0:
+        log.info("Recovery: 0 complete, %s pending — full run needed", _plural(pending))
+    else:
+        parts = [f"{_plural(complete)} complete", f"{_plural(pending)} pending"]
+        if stale:
+            parts.append(f"{stale} stale")
+        suffix = "resuming" if complete > 0 else "full run needed"
+        log.info("Recovery: %s — %s", ", ".join(parts), suffix)
 
 
 def _fmt_chunk_prefix(strategy: str, chunk_id: str) -> str:
@@ -82,50 +132,6 @@ def fmt_strategy_result_block(
     if error:
         lines.append(f"  Error     : {error}")
     lines.append(THIN_LINE)
-    return lines
-
-def fmt_optimization_summary(
-    optimal:  str,
-    results:  dict[str, StrategyTestResult],
-) -> list[str]:
-    """Return a visually distinct final optimization summary block.
-
-    Includes the winning strategy and a comparison table of all strategies
-    sorted by total file size ascending.  Bordered by ``═`` delimiter lines.
-
-    Args:
-        optimal:  Name of the selected optimal strategy.
-        results:  Mapping of strategy name → :class:`StrategyTestResult`.
-
-    Returns:
-        List of log lines.
-    """
-    lines: list[str] = [
-        THICK_LINE,
-        "OPTIMIZATION SUMMARY",
-        THICK_LINE,
-        f"  Optimal strategy : {optimal}",
-        "",
-        "  Comparison (all strategies, sorted by size):",
-        f"  {'Strategy':<30}  {'Avg CRF':>8}  {'Size (MB)':>12}  {'Status':>8}",
-        f"  {'-'*30}  {'-'*8}  {'-'*12}  {'-'*8}",
-    ]
-
-    sorted_results = sorted(
-        results.values(),
-        key=lambda r: r.total_file_size if r.total_file_size > 0 else float("inf"),
-    )
-
-    for res in sorted_results:
-        marker   = " ◀ optimal" if res.strategy == optimal else ""
-        status   = "passed" if res.all_passed else "failed"
-        size_mb  = res.total_file_size / (1024 * 1024) if res.total_file_size > 0 else 0.0
-        size_str = f"{size_mb:,.1f}".replace(",", "\u202f")  # space-thousands separator
-        lines.append(
-            f"  {res.strategy:<30}  {res.avg_crf:>8.2f}  {size_str:>12}  {status:>8}{marker}"
-        )
-
-    lines.append(THICK_LINE)
     return lines
 
 def fmt_key_value_table(kv_to_show):

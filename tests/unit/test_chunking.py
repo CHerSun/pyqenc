@@ -23,7 +23,6 @@ from pyqenc.state import (
     ArtifactState,
     ChunkingParams,
     JobState,
-    JobStateManager,
 )
 
 
@@ -31,12 +30,9 @@ from pyqenc.state import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_state_manager(tmp_path: Path) -> JobStateManager:
-    """Create a JobStateManager with a minimal work directory."""
-    return JobStateManager(
-        work_dir=tmp_path,
-        source_video=tmp_path / "source.mkv",
-    )
+def _chunking_yaml(tmp_path: Path) -> Path:
+    """Return the path to chunking.yaml in tmp_path."""
+    return tmp_path / "chunking.yaml"
 
 
 def _make_job(tmp_path: Path) -> JobState:
@@ -73,11 +69,11 @@ class TestChunkNameDuration:
 class TestDetectScenes:
     def test_zero_scenes_produces_single_boundary(self, tmp_path):
         """When the detector returns no scenes, a single boundary at frame 0 is stored."""
-        sm = _make_state_manager(tmp_path)
+        yaml_path  = _chunking_yaml(tmp_path)
         video_meta = VideoMetadata(path=tmp_path / "source.mkv")
 
         with patch("pyqenc.phases.chunking.detect", return_value=[]):
-            boundaries = detect_scenes(video_meta, sm)
+            boundaries = detect_scenes(video_meta, yaml_path)
 
         assert len(boundaries) == 1
         assert boundaries[0].frame == 0
@@ -85,19 +81,19 @@ class TestDetectScenes:
 
     def test_zero_scenes_persisted_in_chunking_yaml(self, tmp_path):
         """The single fallback boundary is persisted into chunking.yaml."""
-        sm = _make_state_manager(tmp_path)
+        yaml_path  = _chunking_yaml(tmp_path)
         video_meta = VideoMetadata(path=tmp_path / "source.mkv")
 
         with patch("pyqenc.phases.chunking.detect", return_value=[]):
-            detect_scenes(video_meta, sm)
+            detect_scenes(video_meta, yaml_path)
 
-        params = sm.load_chunking()
+        params = ChunkingParams.load(yaml_path)
         assert params is not None
         assert len(params.scenes) == 1
 
     def test_multiple_scenes_persisted(self, tmp_path):
         """Detected scene boundaries are all persisted."""
-        sm = _make_state_manager(tmp_path)
+        yaml_path  = _chunking_yaml(tmp_path)
         video_meta = VideoMetadata(path=tmp_path / "source.mkv")
 
         def _make_timecode(frame: int, seconds: float) -> MagicMock:
@@ -112,13 +108,13 @@ class TestDetectScenes:
         ]
 
         with patch("pyqenc.phases.chunking.detect", return_value=fake_scenes):
-            boundaries = detect_scenes(video_meta, sm)
+            boundaries = detect_scenes(video_meta, yaml_path)
 
         assert len(boundaries) == 2
         assert boundaries[0].frame == 0
         assert boundaries[1].frame == 320
 
-        params = sm.load_chunking()
+        params = ChunkingParams.load(yaml_path)
         assert params is not None
         assert len(params.scenes) == 2
 
@@ -126,12 +122,12 @@ class TestDetectScenes:
         """A warning is logged when zero scenes are detected."""
         import logging
 
-        sm = _make_state_manager(tmp_path)
+        yaml_path  = _chunking_yaml(tmp_path)
         video_meta = VideoMetadata(path=tmp_path / "source.mkv")
 
         with patch("pyqenc.phases.chunking.detect", return_value=[]):
             with caplog.at_level(logging.WARNING, logger="pyqenc.phases.chunking"):
-                detect_scenes(video_meta, sm)
+                detect_scenes(video_meta, yaml_path)
 
         assert any("0 scenes" in r.message or "one chunk" in r.message for r in caplog.records)
 
@@ -178,7 +174,6 @@ class TestSplitChunks:
         existing_chunk._frame_count = 320
 
         recovery = self._make_recovery_with_complete_chunk(tmp_path, chunk_id, existing_chunk)
-        sm = _make_state_manager(tmp_path)
 
         video_meta = VideoMetadata(path=tmp_path / "source.mkv")
         video_meta._duration_seconds = 26.67
@@ -204,7 +199,7 @@ class TestSplitChunks:
 
         with patch("pyqenc.phases.chunking.run_ffmpeg", side_effect=_fake_run_ffmpeg):
             result = split_chunks(
-                video_meta, output_dir, boundaries, sm, recovery,
+                video_meta, output_dir, boundaries, recovery,
                 chunking_mode=ChunkingMode.REMUX,
             )
 
@@ -213,17 +208,15 @@ class TestSplitChunks:
 
     def test_no_boundaries_raises(self, tmp_path):
         """RuntimeError is raised when no boundaries are provided."""
-        sm = _make_state_manager(tmp_path)
         video_meta = VideoMetadata(path=tmp_path / "source.mkv")
         recovery = ChunkingRecovery()
 
         with pytest.raises(RuntimeError, match="No scene boundaries"):
-            split_chunks(video_meta, tmp_path / "chunks", [], sm, recovery)
+            split_chunks(video_meta, tmp_path / "chunks", [], recovery)
 
     def test_missing_chunk_file_is_skipped(self, tmp_path):
         """A chunk whose file is missing after ffmpeg is not added to results."""
         boundaries = [SceneBoundary(frame=0, timestamp_seconds=0.0)]
-        sm = _make_state_manager(tmp_path)
         recovery = ChunkingRecovery()
 
         video_meta = VideoMetadata(path=tmp_path / "source.mkv")
@@ -244,7 +237,7 @@ class TestSplitChunks:
 
         with patch("pyqenc.phases.chunking.run_ffmpeg", side_effect=_fake_run_ffmpeg):
             result = split_chunks(
-                video_meta, output_dir, boundaries, sm, recovery,
+                video_meta, output_dir, boundaries, recovery,
                 chunking_mode=ChunkingMode.REMUX,
             )
 
@@ -269,7 +262,6 @@ class TestFFV1CommandConstruction:
             SceneBoundary(frame=0,   timestamp_seconds=0.0),
             SceneBoundary(frame=320, timestamp_seconds=13.33),
         ]
-        sm = _make_state_manager(tmp_path)
         recovery = ChunkingRecovery()
 
         video_meta = VideoMetadata(path=tmp_path / "source.mkv")
@@ -294,7 +286,7 @@ class TestFFV1CommandConstruction:
             return result
 
         with patch("pyqenc.phases.chunking.run_ffmpeg", side_effect=_fake_run_ffmpeg):
-            split_chunks(video_meta, output_dir, boundaries, sm, recovery, chunking_mode=chunking_mode)
+            split_chunks(video_meta, output_dir, boundaries, recovery, chunking_mode=chunking_mode)
 
         return captured_cmds
 
@@ -348,7 +340,6 @@ class TestFFV1CommandConstruction:
     def test_lossless_falls_back_to_yuv420p_when_pix_fmt_unknown(self, tmp_path):
         """When pix_fmt cannot be probed, LOSSLESS mode falls back to yuv420p."""
         boundaries = [SceneBoundary(frame=0, timestamp_seconds=0.0)]
-        sm = _make_state_manager(tmp_path)
         recovery = ChunkingRecovery()
 
         video_meta = VideoMetadata(path=tmp_path / "source.mkv")
@@ -375,7 +366,7 @@ class TestFFV1CommandConstruction:
         with patch.object(VideoMetadata, "_probe_metadata"), \
              patch("pyqenc.phases.chunking.run_ffmpeg", side_effect=_fake_run_ffmpeg):
             split_chunks(
-                video_meta, output_dir, boundaries, sm, recovery,
+                video_meta, output_dir, boundaries, recovery,
                 chunking_mode=ChunkingMode.LOSSLESS,
             )
 

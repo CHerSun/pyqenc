@@ -1,4 +1,5 @@
 """Module-level constants for pyqenc."""
+# CHerSun 2026
 
 import re
 
@@ -44,8 +45,10 @@ PADDING_CRF = "4.1f"
 """Padding for CRF values in log messages for consistent formatting."""
 
 # CRF optimization controls
-CRF_GRANULARITY = 0.5 # 0.5 might be too coarse; consider 0.2 or even 0.1 for finer search. Modifying this could require PADDING_CRF adjustment for log formatting.
+CRF_GRANULARITY   = 0.5  # 0.5 might be too coarse; consider 0.2 or even 0.1 for finer search. Modifying this could require PADDING_CRF adjustment for log formatting.
 """Granularity for CRF adjustments during optimization. This determines the step size when adjusting CRF values to find the optimal quality/size balance."""
+CRF_INITIAL_DEFAULT = 20.0
+"""Default starting CRF when no prior history or optimization result is available."""
 
 # Symbols for log messages
 SUCCESS_SYMBOL_MINOR = "✔"
@@ -70,6 +73,24 @@ BRACKET_LEFT = "｟"
 """Left bracket symbol for visually distinct log formatting."""
 BRACKET_RIGHT = " ｠"
 """Right bracket symbol for visually distinct log formatting."""
+UP_ARROW="↑"
+DOWN_ARROW="↓"
+LEFT_ARROW="←"
+RIGHT_ARROW="→"
+
+# Directory names for phase output
+EXTRACTED_DIR          = "extracted"
+"""Output directory for extracted streams (ExtractionPhase)."""
+CHUNKS_DIR             = "chunks"
+"""Output directory for video chunks (ChunkingPhase)."""
+ENCODING_WORKSPACE_DIR = "encoding"
+"""Working directory for CRF search attempt files (intermediate, per-strategy)."""
+ENCODED_OUTPUT_DIR     = "encoded"
+"""Output directory for finalized encoded artifacts (hard-linked winning attempts)."""
+AUDIO_OUTPUT_DIR       = "audio"
+"""Output directory for processed audio files (AudioPhase)."""
+FINAL_OUTPUT_DIR       = "final"
+"""Output directory for merged final outputs (MergePhase)."""
 
 # Artifact discovery patterns
 CHUNK_GLOB_PATTERN = "*.mkv"

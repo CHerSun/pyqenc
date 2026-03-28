@@ -5,23 +5,34 @@ This module handles extraction of streams from the source MKV file.
 It also provides the MKVTrackExtractor and stream model classes for
 parsing and extracting MKV tracks via ffprobe / mkvextract.
 """
+# CHerSun 2026
 
 import json
 import logging
 import re
+import shutil
 import subprocess
 import sys
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from os import PathLike
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from pyqenc.constants import FAILURE_SYMBOL_MINOR, SUCCESS_SYMBOL_MINOR
+from pyqenc.constants import (
+    FAILURE_SYMBOL_MINOR,
+    SUCCESS_SYMBOL_MINOR,
+    TEMP_SUFFIX,
+    THICK_LINE,
+)
 from pyqenc.models import AudioMetadata, PhaseOutcome, VideoMetadata
-from pyqenc.phases.recovery import recover_extraction
-from pyqenc.state import ArtifactState
+from pyqenc.phase import Artifact, Phase, PhaseResult
+from pyqenc.state import ArtifactState, ExtractionParams
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
+
+if TYPE_CHECKING:
+    from pyqenc.models import PipelineConfig
+    from pyqenc.phases.job import JobPhase, JobPhaseResult
 
 logger = logging.getLogger(__name__)
 
@@ -310,38 +321,46 @@ class StreamFactory:
         return StreamBase(stream, index)
 
 
-def _print_stream_table(
+def _log_stream_table(
     all_tracks:      list[StreamBase],
     selected_tracks: list[StreamBase],
+    on_disk_names:   set[str],
 ) -> None:
-    """Print a compact aligned table of all streams with include/exclude symbols.
+    """Log a 3-column stream table: wanted, present, artifact name.
 
-    Each row shows ``✔`` for included streams and ``✗`` for excluded streams,
-    followed by the would-be output filename.  Columns are vertically aligned.
+    Columns:
+    - wanted:  ``✔`` if the stream passes the current include/exclude filters,
+               ``✘`` otherwise.
+    - present: ``✔`` if the artifact file is already on disk, ``✘`` otherwise.
+               ``-`` for streams that are not wanted (not applicable).
+    - name:    The would-be output filename for the stream.
 
     Args:
-        all_tracks:      All streams discovered in the source file.
+        all_tracks:    All streams discovered in the source file.
         selected_tracks: Streams that passed the include/exclude filters.
+        on_disk_names: Set of filenames currently present in the extracted dir.
     """
     if not all_tracks:
         return
 
     selected_set = set(id(t) for t in selected_tracks)
 
-    max_track_num = len(all_tracks)
-    max_track_id  = max((t.track_id for t in all_tracks), default=0)
+    max_track_num   = len(all_tracks)
+    max_track_id    = max((t.track_id for t in all_tracks), default=0)
     track_num_width = len(str(max_track_num))
     track_id_width  = len(str(max(max_track_id, 0)))
 
-    lines: list[str] = []
-    for track in all_tracks:
-        symbol   = SUCCESS_SYMBOL_MINOR if id(track) in selected_set else FAILURE_SYMBOL_MINOR
-        filename = track.display_name(track_num_width, track_id_width)
-        lines.append(f"  {symbol}  {filename}")
-
     logger.info("Streams:")
-    for line in lines:
-        logger.info(line)
+    if all_tracks:
+        logger.info("Want  Present      Name")
+        for track in all_tracks:
+            wanted  = id(track) in selected_set
+            name    = track.display_name(track_num_width, track_id_width)
+            w_sym   = SUCCESS_SYMBOL_MINOR if wanted else FAILURE_SYMBOL_MINOR
+            p_sym   = (SUCCESS_SYMBOL_MINOR if name in on_disk_names else FAILURE_SYMBOL_MINOR) if wanted else "-"
+            logger.info("   %s  %s  \"%s\"", w_sym, p_sym, name)
+    else:
+        logger.error("No streams found")
 
 
 def streams_filter_plain_regex(
@@ -459,8 +478,6 @@ class MKVTrackExtractor:
 # ---------------------------------------------------------------------------
 # Pipeline extraction helpers
 # ---------------------------------------------------------------------------
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -581,7 +598,8 @@ def extract_streams(
     )
 
     # Compact stream display — shown in both dry-run and execute modes (Req 10.5, 10.6)
-    _print_stream_table(extractor.tracks, selected_tracks)
+    existing = {f.name for f in output_dir.iterdir() if f.is_file()} if output_dir.exists() else set()
+    _log_stream_table(extractor.tracks, selected_tracks, existing)
 
     video_tracks: list[VideoStream] = [t for t in selected_tracks if t.codec_type == "video"]  # type: ignore[assignment]
     audio_tracks: list[AudioStream] = [t for t in selected_tracks if t.codec_type == "audio"]  # type: ignore[assignment]
@@ -605,11 +623,20 @@ def extract_streams(
     # ------------------------------------------------------------------
     # Recovery: clean up .tmp files and check existing artifacts
     # ------------------------------------------------------------------
-    from pyqenc.state import ExtractionParams, JobStateManager
-    _state_manager = JobStateManager(work_dir=output_dir.parent, source_video=source_video)
-    from pyqenc.state import JobState
-    recovery = recover_extraction(work_dir=output_dir.parent, job=JobState(source=VideoMetadata(path=source_video)))
-    persisted_params = _state_manager.load_extraction()
+    _extraction_yaml = output_dir.parent / "extraction.yaml"
+
+    # Clean up leftover .tmp files
+    from pyqenc.phases.recovery import _cleanup_tmp_files
+    _cleanup_tmp_files(output_dir)
+
+    # Determine recovery state: COMPLETE if all expected files exist, ABSENT otherwise
+    artifact_files = [
+        f for f in output_dir.iterdir()
+        if f.is_file() and not f.name.endswith(TEMP_SUFFIX)
+    ] if output_dir.exists() else []
+    recovery_state = ArtifactState.COMPLETE if artifact_files else ArtifactState.ABSENT
+
+    persisted_params = ExtractionParams.load(_extraction_yaml)
     if persisted_params is not None:
         if persisted_params.include != include or persisted_params.exclude != exclude:
             logger.warning(
@@ -619,15 +646,14 @@ def extract_streams(
                 persisted_params.include, persisted_params.exclude,
                 include, exclude,
             )
-            # Mark phase as needing re-execution by treating artifacts as absent
-            recovery = type(recovery)(video_files=recovery.video_files, state=ArtifactState.ABSENT)
+            recovery_state = ArtifactState.ABSENT
 
     # ------------------------------------------------------------------
     # Reuse path — all artifacts present (COMPLETE via .tmp protocol)
     # ------------------------------------------------------------------
     all_exist = (
         not force
-        and recovery.state == ArtifactState.COMPLETE
+        and recovery_state == ArtifactState.COMPLETE
         and all(f.exists() for f in expected_video_files + expected_audio_files + expected_other_files)
     )
     if all_exist:
@@ -652,7 +678,7 @@ def extract_streams(
     # ------------------------------------------------------------------
     # Extraction path
     # ------------------------------------------------------------------
-    logger.info("Extracting streams...")
+    logger.debug("Extracting streams...")
     try:
         for track in video_tracks:
             output_file = output_dir / track.display_name()
@@ -698,7 +724,7 @@ def extract_streams(
 
         # Persist include/exclude filters in extraction.yaml sidecar (Req 10.11)
         try:
-            _state_manager.save_extraction(ExtractionParams(include=include, exclude=exclude))
+            ExtractionParams(include=include, exclude=exclude).save(_extraction_yaml)
         except Exception as e:
             logger.warning("Could not persist extraction.yaml: %s", e)
 
@@ -723,3 +749,607 @@ def extract_streams(
     return ExtractionResult(
         video=primary_video, audio=audio_meta, outcome=PhaseOutcome.COMPLETED,
     )
+
+
+# ---------------------------------------------------------------------------
+# ExtractionPhase — Phase object (task 5)
+# ---------------------------------------------------------------------------
+
+import shutil
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, TypeAlias, cast
+
+from pyqenc.constants import EXTRACTED_DIR, TEMP_SUFFIX, THICK_LINE, THIN_LINE
+from pyqenc.models import AudioMetadata, PhaseOutcome, VideoMetadata
+from pyqenc.phase import Artifact, Phase, PhaseResult
+from pyqenc.state import ArtifactState, ExtractionParams
+from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
+
+if TYPE_CHECKING:
+    from pyqenc.models import PipelineConfig
+    from pyqenc.phases.job import JobPhase, JobPhaseResult
+
+_EXTRACTION_YAML_NAME = "extraction.yaml"
+
+
+@dataclass
+class VideoArtifact(Artifact):
+    """Extraction artifact for a video stream.
+
+    Attributes:
+        meta: Video metadata; populated when ``state`` is ``COMPLETE``.
+    """
+
+    meta: VideoMetadata | None = None
+
+
+@dataclass
+class AudioArtifact(Artifact):
+    """Extraction artifact for an audio stream.
+
+    Attributes:
+        meta: Audio metadata; populated when ``state`` is ``COMPLETE``.
+    """
+
+    meta: AudioMetadata | None = None
+
+
+@dataclass
+class OtherArtifact(Artifact):
+    """Extraction artifact for subtitles, chapters, or attachments.
+
+    No additional metadata beyond the base ``path`` and ``state``.
+    """
+
+
+# Type alias for all extraction artifacts — use this in annotations throughout
+ExtractionArtifact: TypeAlias = VideoArtifact | AudioArtifact | OtherArtifact
+
+
+@dataclass
+class ExtractionPhaseResult(PhaseResult):
+    """``PhaseResult`` subclass carrying extraction-specific payload.
+
+    Attributes:
+        video:  Primary extracted video metadata; ``None`` on failure.
+        audio:  List of extracted audio track metadata.
+    """
+
+    video: VideoMetadata | None = None
+    audio: list[AudioMetadata] = field(default_factory=list)
+
+
+class ExtractionPhase:
+    """Phase object for stream extraction.
+
+    Owns artifact enumeration, recovery, invalidation, execution, and logging
+    for the extraction phase.  Wraps the existing ``MKVTrackExtractor`` and
+    ``extract_streams`` helpers.
+
+    Args:
+        config: Full pipeline configuration.
+        phases: Phase registry; used to resolve typed dependency references.
+    """
+
+    name: str = "extraction"
+
+    def __init__(
+        self,
+        config: "PipelineConfig",
+        phases: "dict[type[Phase], Phase] | None" = None,
+    ) -> None:
+        from pyqenc.phases.job import JobPhase as _JobPhase
+
+        self._config = config
+        self._job: "_JobPhase | None" = cast("_JobPhase", phases[_JobPhase]) if phases else None
+        self.result: ExtractionPhaseResult | None = None
+        self.dependencies: list[Phase] = [self._job] if self._job is not None else []
+
+    # ------------------------------------------------------------------
+    # Public Phase interface
+    # ------------------------------------------------------------------
+
+    def scan(self) -> ExtractionPhaseResult:
+        """Classify existing extraction artifacts without executing any work.
+
+        Calls ``_ensure_dependencies()`` to scan dependencies if needed, then
+        runs ``_recover()`` in read-only mode.
+
+        Returns:
+            ``ExtractionPhaseResult`` with all artifacts classified.
+        """
+        if self.result is not None:
+            return self.result
+
+        dep_result = self._ensure_dependencies(execute=False)
+        if dep_result is not None:
+            self.result = dep_result
+            return self.result
+
+        job_result = self._job.result  # type: ignore[union-attr]
+        force_wipe = getattr(job_result, "force_wipe", False)
+
+        artifacts, video_meta, audio_meta = self._recover(
+            force_wipe=force_wipe, execute=False
+        )
+        outcome = self._outcome_from_artifacts(artifacts, did_work=False)
+        self.result = ExtractionPhaseResult(
+            outcome   = outcome,
+            artifacts = artifacts,
+            message   = self._recovery_message(artifacts),
+            video     = video_meta,
+            audio     = audio_meta,
+        )
+        return self.result
+
+    def run(self, dry_run: bool = False) -> ExtractionPhaseResult:
+        """Recover, extract pending artifacts, persist ``extraction.yaml``.
+
+        Sequence:
+        1. Emit phase banner.
+        2. Ensure dependencies have results (scan if needed).
+        3. Run ``_recover()`` — handles ``force_wipe`` and filter-change detection.
+        4. Log recovery result line.
+        5. In dry-run mode: return ``DRY_RUN`` if any artifacts are pending.
+        6. Extract ``ABSENT`` artifacts; leave ``STALE`` on disk.
+        7. Persist ``extraction.yaml``.
+        8. Log completion summary.
+
+        Args:
+            dry_run: When ``True``, report what would be done without writing files.
+
+        Returns:
+            ``ExtractionPhaseResult`` with all artifacts ``COMPLETE`` on success.
+        """
+        emit_phase_banner("EXTRACTION", logger)
+
+        dep_result = self._ensure_dependencies(execute=True)
+        if dep_result is not None:
+            self.result = dep_result
+            return self.result
+
+        job_result = self._job.result  # type: ignore[union-attr]
+        force_wipe = getattr(job_result, "force_wipe", False)
+
+        # Key parameters
+        logger.info("Source:   %s", self._config.source_video.name)
+        if self._config.include or self._config.exclude:
+            logger.info("Filter:")
+            if self._config.include:
+                logger.info("  Include:  %s", self._config.include)
+            if self._config.exclude:
+                logger.info("  Exclude:  %s", self._config.exclude)
+
+        artifacts, video_meta, audio_meta = self._recover(
+            force_wipe=force_wipe, execute=True
+        )
+
+        # Log recovery result line
+        complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
+        pending_count  = sum(
+            1 for a in artifacts
+            if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY)
+        )
+        stale_count = sum(1 for a in artifacts if a.state == ArtifactState.STALE)
+        log_recovery_line(logger, complete_count, pending_count, stale=stale_count)
+
+        # Dry-run path
+        if dry_run:
+            if pending_count == 0 and stale_count == 0:
+                outcome = PhaseOutcome.REUSED
+            else:
+                outcome = PhaseOutcome.DRY_RUN
+            self.result = ExtractionPhaseResult(
+                outcome   = outcome,
+                artifacts = artifacts,
+                message   = "dry-run",
+                video     = video_meta,
+                audio     = audio_meta,
+            )
+            return self.result
+
+        # Nothing to do
+        if pending_count == 0:
+            self.result = ExtractionPhaseResult(
+                outcome   = PhaseOutcome.REUSED,
+                artifacts = artifacts,
+                message   = "all artifacts reused",
+                video     = video_meta,
+                audio     = audio_meta,
+            )
+            return self.result
+
+        # Execute extraction for ABSENT artifacts
+        result = self._execute_extraction(artifacts, video_meta, audio_meta)
+        self.result = result
+        return result
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _ensure_dependencies(self, execute: bool) -> "ExtractionPhaseResult | None":
+        """Scan dependencies if they have no cached result; fail fast if incomplete.
+
+        Args:
+            execute: When ``True``, call ``dep.run()`` instead of ``dep.scan()``
+                     for dependencies without a cached result.
+
+        Returns:
+            A ``FAILED`` result if any dependency is not complete; ``None`` otherwise.
+        """
+        if self._job is None:
+            return ExtractionPhaseResult(
+                outcome   = PhaseOutcome.FAILED,
+                artifacts = [],
+                message   = "JobPhase dependency not wired",
+                error     = "ExtractionPhase requires JobPhase",
+                video     = None,
+                audio     = [],
+            )
+
+        if self._job.result is None:
+            if execute:
+                self._job.run()
+            else:
+                self._job.scan()
+
+        if not self._job.result.is_complete:  # type: ignore[union-attr]
+            err = "JobPhase did not complete successfully"
+            logger.critical(err)
+            return ExtractionPhaseResult(
+                outcome   = PhaseOutcome.FAILED,
+                artifacts = [],
+                message   = err,
+                error     = err,
+                video     = None,
+                audio     = [],
+            )
+        return None
+
+    def _recover(
+        self,
+        force_wipe: bool,
+        execute: bool,
+    ) -> tuple[list[ExtractionArtifact], VideoMetadata | None, list[AudioMetadata]]:
+        """Classify extraction artifacts and handle force-wipe / filter changes.
+
+        Steps:
+        1. If ``force_wipe``: delete ``extracted/`` and ``extraction.yaml``.
+        2. Clean up leftover ``.tmp`` files.
+        3. Load persisted ``extraction.yaml``; compare include/exclude filters.
+        4. Scan ``extracted/`` and classify each file.
+
+        Args:
+            force_wipe: When ``True``, wipe all extraction artifacts first.
+            execute:    When ``True``, ``.tmp`` cleanup and wipe are performed;
+                        when ``False`` (scan mode), no files are written or deleted.
+
+        Returns:
+            ``(artifacts, primary_video_meta, audio_meta_list)`` tuple.
+        """
+        work_dir      = self._config.work_dir
+        extracted_dir = work_dir / EXTRACTED_DIR
+        yaml_path     = work_dir / _EXTRACTION_YAML_NAME
+
+        # Step 1: force-wipe
+        if force_wipe and execute:
+            if extracted_dir.exists():
+                shutil.rmtree(extracted_dir)
+                logger.debug("force_wipe: deleted %s", extracted_dir)
+            if yaml_path.exists():
+                yaml_path.unlink()
+                logger.debug("force_wipe: deleted %s", yaml_path)
+
+        # Step 2: clean up .tmp files (execute mode only)
+        if execute and extracted_dir.exists():
+            for tmp in extracted_dir.glob(f"*{TEMP_SUFFIX}"):
+                try:
+                    tmp.unlink()
+                    logger.warning("Removed leftover temp file: %s", tmp)
+                except OSError as exc:
+                    logger.warning("Could not remove temp file %s: %s", tmp, exc)
+
+        # Step 3: load persisted params and detect filter changes
+        persisted = ExtractionParams.load(yaml_path)
+        filter_changed = (
+            persisted is not None
+            and (persisted.include != self._config.include or persisted.exclude != self._config.exclude)
+        )
+
+        # Step 4: scan extracted/ and classify
+        if not extracted_dir.exists():
+            # Nothing extracted yet — show table with all streams absent
+            try:
+                extractor = MKVTrackExtractor(str(self._config.source_video))
+                selected  = streams_filter_plain_regex(
+                    extractor.tracks,
+                    include_pattern = self._config.include,
+                    exclude_pattern = self._config.exclude,
+                )
+                _log_stream_table(extractor.tracks, selected, set())
+            except Exception:
+                pass
+            return [], None, []
+
+        all_files = [
+            f for f in extracted_dir.iterdir()
+            if f.is_file() and not f.name.endswith(TEMP_SUFFIX)
+        ]
+        if not all_files:
+            # Dir exists but is empty — show table with all streams absent
+            try:
+                extractor = MKVTrackExtractor(str(self._config.source_video))
+                selected  = streams_filter_plain_regex(
+                    extractor.tracks,
+                    include_pattern = self._config.include,
+                    exclude_pattern = self._config.exclude,
+                )
+                _log_stream_table(extractor.tracks, selected, set())
+            except Exception:
+                pass
+            return [], None, []
+
+        # Build extractor to know what files are expected under current filters
+        try:
+            extractor = MKVTrackExtractor(str(self._config.source_video))
+        except Exception as exc:
+            logger.critical("Failed to analyse source video: %s", exc)
+            return [], None, []
+
+        selected_tracks = streams_filter_plain_regex(
+            extractor.tracks,
+            include_pattern = self._config.include,
+            exclude_pattern = self._config.exclude,
+        )
+        expected_names = {t.display_name() for t in selected_tracks}
+
+        artifacts: list[ExtractionArtifact] = []
+        primary_video: VideoMetadata | None = None
+        audio_list: list[AudioMetadata] = []
+
+        for f in sorted(all_files):
+            if filter_changed:
+                state = ArtifactState.COMPLETE if f.name in expected_names else ArtifactState.STALE
+            else:
+                state = ArtifactState.COMPLETE
+
+            if f.suffix == ".mkv":
+                vm = VideoMetadata(path=f) if state == ArtifactState.COMPLETE else None
+                if vm is not None and primary_video is None:
+                    primary_video = vm
+                artifacts.append(VideoArtifact(path=f, state=state, meta=vm))
+            elif f.suffix == ".mka":
+                am: AudioMetadata | None = None
+                if state == ArtifactState.COMPLETE:
+                    track = next(
+                        (t for t in selected_tracks
+                         if t.codec_type == "audio" and t.display_name() == f.name),
+                        None,
+                    )
+                    if track is not None:
+                        am = _audio_metadata_from_stream(f, track)  # type: ignore[arg-type]
+                        audio_list.append(am)
+                artifacts.append(AudioArtifact(path=f, state=state, meta=am))
+            else:
+                artifacts.append(OtherArtifact(path=f, state=state))
+
+        # Files expected but not yet on disk → ABSENT
+        on_disk_names = {f.name for f in all_files}
+        for track in selected_tracks:
+            name = track.display_name()
+            if name not in on_disk_names:
+                if track.codec_type == "video":
+                    artifacts.append(VideoArtifact(path=extracted_dir / name, state=ArtifactState.ABSENT))
+                elif track.codec_type == "audio":
+                    artifacts.append(AudioArtifact(path=extracted_dir / name, state=ArtifactState.ABSENT))
+                else:
+                    artifacts.append(OtherArtifact(path=extracted_dir / name, state=ArtifactState.ABSENT))
+
+        # Emit stream table with wanted + present columns
+        _log_stream_table(extractor.tracks, selected_tracks, on_disk_names)
+
+        return artifacts, primary_video, audio_list
+
+    def _execute_extraction(
+        self,
+        artifacts:   list[ExtractionArtifact],
+        video_meta:  VideoMetadata | None,
+        audio_meta:  list[AudioMetadata],
+    ) -> ExtractionPhaseResult:
+        """Extract ABSENT artifacts and persist ``extraction.yaml``.
+
+        Args:
+            artifacts:  Artifact list from ``_recover()``.
+            video_meta: Primary video metadata (may be ``None`` if not yet extracted).
+            audio_meta: Audio metadata list (may be incomplete).
+
+        Returns:
+            ``ExtractionPhaseResult`` after extraction.
+        """
+        work_dir      = self._config.work_dir
+        extracted_dir = work_dir / EXTRACTED_DIR
+        extracted_dir.mkdir(parents=True, exist_ok=True)
+
+        source = self._config.source_video
+        if not source.exists():
+            err = f"Source video not found: {source}"
+            logger.critical(err)
+            return ExtractionPhaseResult(
+                outcome=PhaseOutcome.FAILED, artifacts=artifacts,
+                message=err, error=err, video=None, audio=[],
+            )
+
+        # Re-build extractor and selected tracks for extraction
+        try:
+            extractor = MKVTrackExtractor(str(source))
+        except Exception as exc:
+            err = f"Failed to analyse source video: {exc}"
+            logger.critical(err)
+            return ExtractionPhaseResult(
+                outcome=PhaseOutcome.FAILED, artifacts=artifacts,
+                message=err, error=err, video=None, audio=[],
+            )
+
+        selected_tracks = streams_filter_plain_regex(
+            extractor.tracks,
+            include_pattern = self._config.include,
+            exclude_pattern = self._config.exclude,
+        )
+
+        video_tracks: list[VideoStream] = [t for t in selected_tracks if t.codec_type == "video"]  # type: ignore[assignment]
+        audio_tracks: list[AudioStream] = [t for t in selected_tracks if t.codec_type == "audio"]  # type: ignore[assignment]
+        other_tracks: list[StreamBase]  = [t for t in selected_tracks if t.codec_type not in ("video", "audio")]
+
+        if not video_tracks:
+            err = "No video streams found matching filters"
+            logger.critical(err)
+            return ExtractionPhaseResult(
+                outcome=PhaseOutcome.FAILED, artifacts=artifacts,
+                message=err, error=err, video=None, audio=[],
+            )
+
+        # Determine which files are ABSENT (need extraction)
+        absent_names = {
+            a.path.name for a in artifacts if a.state == ArtifactState.ABSENT
+        }
+
+        errors: list[str] = []
+
+        # Extract video tracks
+        for track in video_tracks:
+            output_file = extracted_dir / track.display_name()
+            if output_file.name not in absent_names:
+                continue
+            cmd: list[str | PathLike] = [
+                "ffmpeg", "-i", source,
+                "-map", f"0:{track.track_id}",
+                "-c", "copy",
+                "-fflags", "+genpts",
+                "-avoid_negative_ts", "make_zero",
+                "-y", output_file,
+            ]
+            logger.debug("Extracting video track %d: %s", track.track_id, output_file.name)
+            res = run_ffmpeg(cmd, output_file=output_file)
+            if not res.success:
+                err = f"ffmpeg failed extracting video track {track.track_id}"
+                logger.error(err)
+                errors.append(err)
+
+        # Extract audio tracks
+        for track in audio_tracks:
+            output_file = extracted_dir / track.display_name()
+            if output_file.name not in absent_names:
+                continue
+            cmd = [
+                "ffmpeg", "-i", source,
+                "-map", f"0:{track.track_id}",
+                "-c", "copy",
+                "-fflags", "+genpts",
+                "-avoid_negative_ts", "make_zero",
+                "-y", output_file,
+            ]
+            logger.debug("Extracting audio track %d: %s", track.track_id, output_file.name)
+            res = run_ffmpeg(cmd, output_file=output_file)
+            if not res.success:
+                err = f"ffmpeg failed extracting audio track {track.track_id}"
+                logger.error(err)
+                errors.append(err)
+
+        # Extract other tracks (subtitles, chapters, attachments) via mkvextract
+        other_absent = [t for t in other_tracks if (extracted_dir / t.display_name()).name in absent_names]
+        if other_absent:
+            logger.debug("Extracting %d other track(s) via mkvextract", len(other_absent))
+            extractor.extract_tracks(other_absent, extracted_dir)
+
+        # Persist extraction.yaml
+        try:
+            ExtractionParams(
+                include = self._config.include,
+                exclude = self._config.exclude,
+            ).save(work_dir / _EXTRACTION_YAML_NAME)
+        except Exception as exc:
+            logger.warning("Could not persist extraction.yaml: %s", exc)
+
+        # Re-scan to build final typed artifact list and metadata
+        final_artifacts: list[ExtractionArtifact] = []
+        final_video: VideoMetadata | None = None
+        final_audio: list[AudioMetadata] = []
+
+        for track in video_tracks:
+            f     = extracted_dir / track.display_name()
+            state = ArtifactState.COMPLETE if f.exists() and f.stat().st_size > 0 else ArtifactState.ABSENT
+            vm    = VideoMetadata(path=f) if state == ArtifactState.COMPLETE else None
+            if vm is not None and final_video is None:
+                final_video = vm
+            final_artifacts.append(VideoArtifact(path=f, state=state, meta=vm))
+
+        for track in audio_tracks:
+            f     = extracted_dir / track.display_name()
+            state = ArtifactState.COMPLETE if f.exists() and f.stat().st_size > 0 else ArtifactState.ABSENT
+            am: AudioMetadata | None = None
+            if state == ArtifactState.COMPLETE:
+                am = _audio_metadata_from_stream(f, track)  # type: ignore[arg-type]
+                final_audio.append(am)
+            final_artifacts.append(AudioArtifact(path=f, state=state, meta=am))
+
+        for track in other_tracks:
+            f     = extracted_dir / track.display_name()
+            state = ArtifactState.COMPLETE if f.exists() else ArtifactState.ABSENT
+            final_artifacts.append(OtherArtifact(path=f, state=state))
+
+        # Keep STALE artifacts from original recovery (they stay on disk)
+        for a in artifacts:
+            if a.state == ArtifactState.STALE:
+                final_artifacts.append(a)
+
+        if errors:
+            failed_count = sum(1 for a in final_artifacts if a.state == ArtifactState.ABSENT)
+            err_summary  = f"{len(errors)} extraction error(s): {'; '.join(errors)}"
+            logger.error(err_summary)
+            outcome = PhaseOutcome.FAILED if failed_count > 0 else PhaseOutcome.COMPLETED
+            return ExtractionPhaseResult(
+                outcome   = outcome,
+                artifacts = final_artifacts,
+                message   = err_summary,
+                error     = err_summary if outcome == PhaseOutcome.FAILED else None,
+                video     = final_video,
+                audio     = final_audio,
+            )
+
+        complete_count = sum(1 for a in final_artifacts if a.state == ArtifactState.COMPLETE)
+        logger.info(
+            "%s Extraction complete: %d artifact(s) extracted",
+            SUCCESS_SYMBOL_MINOR, complete_count,
+        )
+        logger.info(THICK_LINE)
+
+        return ExtractionPhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            artifacts = final_artifacts,
+            message   = f"extracted {complete_count} artifact(s)",
+            video     = final_video,
+            audio     = final_audio,
+        )
+
+    @staticmethod
+    def _outcome_from_artifacts(
+        artifacts: list[ExtractionArtifact],
+        did_work:  bool,
+    ) -> PhaseOutcome:
+        """Derive ``PhaseOutcome`` from artifact states."""
+        if any(a.state == ArtifactState.ABSENT for a in artifacts):
+            return PhaseOutcome.DRY_RUN
+        if all(a.state == ArtifactState.COMPLETE for a in artifacts) and artifacts:
+            return PhaseOutcome.REUSED if not did_work else PhaseOutcome.COMPLETED
+        return PhaseOutcome.DRY_RUN
+
+    @staticmethod
+    def _recovery_message(artifacts: list[ExtractionArtifact]) -> str:
+        complete = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
+        pending  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
+        stale    = sum(1 for a in artifacts if a.state == ArtifactState.STALE)
+        parts    = [f"{complete} complete", f"{pending} pending"]
+        if stale:
+            parts.append(f"{stale} stale")
+        return ", ".join(parts)

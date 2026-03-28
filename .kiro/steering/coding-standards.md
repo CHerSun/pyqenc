@@ -3,11 +3,12 @@
 - Targeting Python>=3.13 syntax.
 - For volatile things - try (not check).
 - All functions, classes and class members MUST BE type-hinted.
+- We do not keep legacy code for the sake of tests or backwards compatibility. Project is in pre-alpha state, there's no public api yet. Code cleanness is paramount over the legacy compatibility.
 - Type-hinting using newer rules: `int|None` instead of `Optional[int]`, newer generic classes without imports from `typing` where possible.
-- Use `alive-progress` for progress display to the end user for long tasks.
-- For subprocess cmd execution use type hint `list[str|os.PathLike]` and supply `Path` typed variables directly (without converting to `str`).
-- Progress and current status display must be detailed and self-explanatory, lively, with the end-user in mind.
-- `Path` from `pathlib` is mandatory for cross-platform path handling. NO `str` for paths (only during `Path` construction or string manipulation).
+- Use our `ProgressBar` for progress display to the end user for long tasks.
+- For any artifacts use .tmp-then-rename protocol for atomicity and consistency enforcement.
+- For subprocess cmd building use type hint `list[str|os.PathLike]` and supply `Path` typed variables directly (without converting to `str`).
+- `Path` from `pathlib` is mandatory for cross-platform path handling. NO `str` for paths.
 - When directly opening a file for reading or writing - use `Path`. This does NOT apply to libraries that handle their own file I/O (JSON, PNG, etc.).
 - NO MAGIC NUMBERS or MAGIC STRINGS allowed. Use named constants or enum values. `"psnr"` is NOT allowed; `MetricType.PSNR.value` is.
 - CLI is the mandatory starting point, but the final target is a client-server solution. The API MUST NOT be tailored only towards CLI.
@@ -25,6 +26,7 @@
   - `critical` — failures that prevent the program from doing any useful work
 - Follow DRY. If code is repeated 2-3+ times — make it reusable.
 - Follow rule of three — if there are 3+ similar entities, define a common interface (`Protocol` or base class) to unify the API.
+- Constants used multiple times must go into `constants.py`. `constants.py` must have no imports from the module (to avoid cycles).
 
 ## ffmpeg Execution
 

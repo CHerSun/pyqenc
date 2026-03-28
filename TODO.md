@@ -27,5 +27,3 @@
 - [ ] Make all tests pass
 - [ ] optimization phase tasks selection rework. Split into bins - either by duration or by mid-timestamp. Number of bins == number of chunks to select. From each bin select 1 task randomly. Limit max duration and prefilter chunks that do not match immediately. If picked still too large chunks - remove largest and re-random.
 - [ ] review specs to mark what was outdated already (for future human reference) (task for agent).
-
-- [ ] flag `  --keep-all            Keep all intermediate files (skip cleanup prompt after completion)` looks wrong. Replace with --clean for auto only? making the pipeline to purge all intermediate results (source is untouched + keeping the final results; everything else in workdir is purged; care, source could be there too).
