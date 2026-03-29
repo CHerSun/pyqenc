@@ -1,0 +1,44 @@
+2026-03-23 22:18 [INFO] ｟veryslow+h264 ｠ 00꞉13꞉52․542-00꞉13꞉55․125 attempt #4: ✘ miss with CRF 26.0 (vmaf_min=91.5, vmaf_median=100.0)
+2026-03-23 22:18 [INFO] ｟veryslow+h264 ｠ 00꞉13꞉52․542-00꞉13꞉55․125 attempt #5: ✔ pass with CRF 21.5 (vmaf_min=94.7, vmaf_median=100.0) NEW BEST
+2026-03-23 22:18 [INFO] ｟slow+h265-aq ｠ 00꞉13꞉49․583-00꞉13꞉52․542 attempt #4: ✘ miss with CRF 26.0 (vmaf_min=92.7, vmaf_median=97.2)
+2026-03-23 22:19 [INFO] ｟veryslow+h264 ｠ 00꞉13꞉52․542-00꞉13꞉55․125 attempt #6: ✔ pass with CRF 24.0 (vmaf_min=93.1, vmaf_median=100.0) NEW BEST
+2026-03-23 22:19 [INFO] ｟veryslow+h264 ｠ 00꞉13꞉52․542-00꞉13꞉55․125 attempt #7: ✘ miss with CRF 25.0 (vmaf_min=92.4, vmaf_median=100.0)
+2026-03-23 22:20 [INFO] ｟veryslow+h264 ｠ 00꞉13꞉52․542-00꞉13꞉55․125 attempt #8: ✘ miss with CRF 24.5 (vmaf_min=92.8, vmaf_median=100.0)
+2026-03-23 22:20 [INFO] ｟veryslow+h264 ｠ 00꞉13꞉52․542-00꞉13꞉55․125 success ✅ with CRF 24.0 after 8 attempts
+2026-03-23 22:20 [INFO] ｟slow+h265-aq ｠ 00꞉13꞉49․583-00꞉13꞉52․542 attempt #5: ✔ pass with CRF 25.0 (vmaf_min=93.3, vmaf_median=98.0) NEW BEST
+2026-03-23 22:21 [INFO] ｟slow+h265-aq ｠ 00꞉13꞉52․542-00꞉13꞉55․125 attempt #1: ✔ pass with CRF 24.0 (vmaf_min=94.9, vmaf_median=100.0) NEW BEST
+2026-03-23 22:21 [INFO] ｟slow+h265-aq ｠ 00꞉13꞉49․583-00꞉13꞉52․542 attempt #6: ✔ pass with CRF 25.5 (vmaf_min=93.1, vmaf_median=97.6) NEW BEST
+2026-03-23 22:21 [INFO] ｟slow+h265-aq ｠ 00꞉13꞉49․583-00꞉13꞉52․542 success ✅ with CRF 25.5 after 6 attempts
+2026-03-23 22:22 [INFO] ｟veryslow+h264 ｠ 00꞉13꞉55․125-00꞉14꞉02․708 attempt #1: ✔ pass with CRF 22.0 (vmaf_min=94.4, vmaf_median=100.0) NEW BEST
+2026-03-23 22:24 [INFO] ｟slow+h265-aq ｠ 00꞉13꞉52․542-00꞉13꞉55․125 attempt #2: ✘ miss with CRF 31.5 (vmaf_min=89.1, vmaf_median=97.7)
+2026-03-23 22:25 [INFO] ｟veryslow+h264 ｠ 00꞉13꞉55․125-00꞉14꞉02․708 attempt #2: ✘ miss with CRF 28.0 (vmaf_min=88.9, vmaf_median=100.0)
+2026-03-23 22:26 [INFO] ｟veryslow+h264 ｠ 00꞉13꞉55․125-00꞉14꞉02․708 attempt #3: ✔ pass with CRF 22.5 (vmaf_min=94.2, vmaf_median=100.0) NEW BEST
+2026-03-23 22:27 [INFO] ｟veryslow+h264 ｠ 00꞉13꞉55․125-00꞉14꞉02․708 attempt #4: ✘ miss with CRF 25.0 (vmaf_min=92.3, vmaf_median=100.0)
+2026-03-23 22:29 [INFO] ｟veryslow+h264 ｠ 00꞉13꞉55․125-00꞉14꞉02․708 attempt #5: ✔ pass with CRF 23.0 (vmaf_min=93.9, vmaf_median=100.0) NEW BEST
+2026-03-23 22:29 [INFO] ｟slow+h265-aq ｠ 00꞉13꞉52․542-00꞉13꞉55․125 attempt #3: ✔ pass with CRF 24.5 (vmaf_min=94.6, vmaf_median=100.0) NEW BEST
+2026-03-23 22:30 [INFO] ｟veryslow+h264 ｠ 00꞉13꞉55․125-00꞉14꞉02․708 attempt #6: ✔ pass with CRF 24.0 (vmaf_min=93.2, vmaf_median=100.0) NEW BEST
+2026-03-23 22:32 [INFO] ｟veryslow+h264 ｠ 00꞉13꞉55․125-00꞉14꞉02․708 attempt #7: ✘ miss with CRF 24.5 (vmaf_min=92.8, vmaf_median=100.0)
+2026-03-23 22:32 [INFO] ｟veryslow+h264 ｠ 00꞉13꞉55․125-00꞉14꞉02․708 success ✅ with CRF 24.0 after 7 attempts
+2026-03-23 22:32 [INFO] ｟slow+h265-aq ｠ 00꞉13꞉52․542-00꞉13꞉55․125 attempt #4: ✘ miss with CRF 28.0 (vmaf_min=92.6, vmaf_median=100.0)
+2026-03-23 22:33 [INFO] ｟slow+h265-aq ｠ 00꞉13꞉52․542-00꞉13꞉55․125 attempt #5: ✔ pass with CRF 26.5 (vmaf_min=93.6, vmaf_median=100.0) NEW BEST
+2026-03-23 22:35 [INFO] ｟slow+h265-aq ｠ 00꞉13꞉52․542-00꞉13꞉55․125 attempt #6: ✔ pass with CRF 27.0 (vmaf_min=93.3, vmaf_median=100.0) NEW BEST
+2026-03-23 22:36 [INFO] ｟slow+h265-aq ｠ 00꞉13꞉55․125-00꞉14꞉02․708 attempt #1: ✔ pass with CRF 24.5 (vmaf_min=94.3, vmaf_median=100.0) NEW BEST
+2026-03-23 22:36 [INFO] ｟slow+h265-aq ｠ 00꞉13꞉52․542-00꞉13꞉55․125 attempt #7: ✘ miss with CRF 27.5 (vmaf_min=93.0, vmaf_median=100.0)
+2026-03-23 22:36 [INFO] ｟slow+h265-aq ｠ 00꞉13꞉52․542-00꞉13꞉55․125 success ✅ with CRF 27.0 after 7 attempts
+2026-03-23 22:37 [INFO] ｟veryslow+h264 ｠ 00꞉14꞉02․708-00꞉14꞉05․833 attempt #1: ✘ miss with CRF 23.0 (vmaf_min=92.3, vmaf_median=100.0)
+2026-03-23 22:38 [INFO] ｟veryslow+h264 ｠ 00꞉14꞉02․708-00꞉14꞉05․833 attempt #2: ✔ pass with CRF 21.0 (vmaf_min=93.7, vmaf_median=100.0) NEW BEST
+2026-03-23 22:38 [INFO] ｟veryslow+h264 ｠ 00꞉14꞉02․708-00꞉14꞉05․833 attempt #3: ✔ pass with CRF 22.0 (vmaf_min=93.0, vmaf_median=100.0) NEW BEST
+2026-03-23 22:39 [INFO] ｟veryslow+h264 ｠ 00꞉14꞉02․708-00꞉14꞉05․833 attempt #4: ✘ miss with CRF 22.5 (vmaf_min=92.6, vmaf_median=100.0)
+2026-03-23 22:39 [INFO] ｟veryslow+h264 ｠ 00꞉14꞉02․708-00꞉14꞉05․833 success ✅ with CRF 22.0 after 4 attempts
+2026-03-23 22:41 [INFO] ｟slow+h265-aq ｠ 00꞉14꞉02․708-00꞉14꞉05․833 attempt #1: ✘ miss with CRF 26.0 (vmaf_min=91.7, vmaf_median=100.0)
+2026-03-23 22:41 [INFO] ｟slow+h265-aq ｠ 00꞉13꞉55․125-00꞉14꞉02․708 attempt #2: ✘ miss with CRF 29.5 (vmaf_min=90.7, vmaf_median=100.0)
+2026-03-23 22:43 [INFO] ｟slow+h265-aq ｠ 00꞉14꞉02․708-00꞉14꞉05․833 attempt #2: ✔ pass with CRF 22.0 (vmaf_min=94.0, vmaf_median=100.0) NEW BEST
+2026-03-23 22:44 [INFO] ｟slow+h265-aq ｠ 00꞉14꞉02․708-00꞉14꞉05․833 attempt #3: ✘ miss with CRF 24.0 (vmaf_min=92.9, vmaf_median=100.0)
+2026-03-23 22:46 [INFO] ｟slow+h265-aq ｠ 00꞉13꞉55․125-00꞉14꞉02․708 attempt #3: ✔ pass with CRF 25.0 (vmaf_min=94.2, vmaf_median=100.0) NEW BEST
+2026-03-23 22:46 [INFO] ｟slow+h265-aq ｠ 00꞉14꞉02․708-00꞉14꞉05․833 attempt #4: ✔ pass with CRF 23.5 (vmaf_min=93.2, vmaf_median=100.0) NEW BEST
+2026-03-23 22:46 [INFO] ｟slow+h265-aq ｠ 00꞉14꞉02․708-00꞉14꞉05․833 success ✅ with CRF 23.5 after 4 attempts
+2026-03-23 22:47 [INFO] ｟veryslow+h264 ｠ 00꞉14꞉05․833-00꞉14꞉11․125 attempt #1: ✘ miss with CRF 22.5 (vmaf_min=91.1, vmaf_median=93.0)
+2026-03-23 22:49 [INFO] ｟veryslow+h264 ｠ 00꞉14꞉05․833-00꞉14꞉11․125 attempt #2: ✔ pass with CRF 13.0 (vmaf_min=96.3, vmaf_median=97.6) NEW BEST
+2026-03-23 22:51 [INFO] ｟veryslow+h264 ｠ 00꞉14꞉05․833-00꞉14꞉11․125 attempt #3: ✘ miss with CRF 18.0 (vmaf_min=94.1, vmaf_median=95.5)
+2026-03-23 22:53 [INFO] ｟veryslow+h264 ｠ 00꞉14꞉05․833-00꞉14꞉11․125 attempt #4: ✔ pass with CRF 16.0 (vmaf_min=94.9, vmaf_median=96.3) NEW BEST
+2026-03-23 22:55 [INFO] ｟veryslow+h264 ｠ 00꞉14꞉05․833-00꞉14꞉11․125 attempt #5: ✘ miss with CRF 17.0 (vmaf_min=94.4, vmaf_median=95.9)
