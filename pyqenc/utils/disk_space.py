@@ -107,9 +107,9 @@ def estimate_required_space(
     )
 
     return source_size_gb * (
-        OVERHEAD_EXTRACTION_AND_AUDIO + chunks_multiplier               # extraction and chunking overheads
-        + OVERHEAD_PER_STRATEGY * num_strategies                        # per-strategy overhead scales with number of strategies
-        + OVERHEAD_FOR_OPTIMIZATION if include_optimization else 0.0    # optimization overhead if enabled
+        OVERHEAD_EXTRACTION_AND_AUDIO + chunks_multiplier                                           # extraction and chunking overheads
+        + OVERHEAD_PER_STRATEGY * num_strategies                                                    # per-strategy overhead scales with number of strategies
+        + (OVERHEAD_FOR_OPTIMIZATION if include_optimization else 0.0)                              # optimization overhead if enabled
     )
 
 
