@@ -175,6 +175,11 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
             "Values above 30 are not recommended due to measurement volatility."
         ),
     )
+    parser.add_argument(
+        "--no-visual-hash",
+        action="store_true",
+        help="Disable emoji visual hash prefix on chunk log lines (default: enabled).",
+    )
 
 
 def _add_filter_arguments(parser: argparse.ArgumentParser) -> None:
@@ -493,6 +498,7 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         audio_codec=args.audio_codec,
         audio_base_bitrate=args.audio_bitrate,
         metrics_sampling=metrics_sampling,
+        visual_hash=not args.no_visual_hash,
     )
 
     # Execute pipeline

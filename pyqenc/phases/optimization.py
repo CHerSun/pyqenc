@@ -413,7 +413,7 @@ class OptimizationPhase:
 
         # Step 10: run test encodes for pending strategies
         config_manager = ConfigManager()
-        encoder = _make_encoder(config_manager, work_dir, crop)
+        encoder = _make_encoder(config_manager, work_dir, crop, self._config.visual_hash)
         reference_dir  = work_dir / CHUNKS_DIR
 
         all_results: list[StrategyTestResult] = list(cached_results.values())
@@ -791,6 +791,7 @@ def _make_encoder(
     config_manager: ConfigManager,
     work_dir:       Path,
     crop_params:    CropParams | None,
+    visual_hash:    bool = True,
 ) -> "ChunkEncoder":
     """Construct a ``ChunkEncoder`` for test encodes.
 
@@ -798,6 +799,7 @@ def _make_encoder(
         config_manager: Configuration manager.
         work_dir:       Pipeline working directory.
         crop_params:    Crop parameters to apply.
+        visual_hash:    Whether to prepend emoji hash to chunk log lines.
 
     Returns:
         Configured ``ChunkEncoder`` instance.
@@ -808,6 +810,7 @@ def _make_encoder(
         quality_evaluator = QualityEvaluator(work_dir),
         work_dir          = work_dir,
         crop_params       = crop_params,
+        visual_hash       = visual_hash,
     )
 
 

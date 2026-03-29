@@ -514,6 +514,7 @@ class ChunkEncoder:
         work_dir:          Path,
         crop_params:       CropParams | None = None,
         cleanup_level:     CleanupLevel      = CleanupLevel.NONE,
+        visual_hash:       bool              = True,
     ):
         """Initialize chunk encoder.
 
@@ -524,12 +525,15 @@ class ChunkEncoder:
             crop_params:       Optional crop parameters to apply to every chunk attempt.
             cleanup_level:     Controls deletion of intermediate attempt files after
                                a pair converges (Req 12.3).
+            visual_hash:       When ``True``, prepend a deterministic emoji to every
+                               chunk log line for visual distinction in parallel output.
         """
         self.config_manager    = config_manager
         self.quality_evaluator = quality_evaluator
         self.work_dir          = work_dir
         self._crop_params      = crop_params
         self._cleanup_level    = cleanup_level
+        self._visual_hash      = visual_hash
 
     def _get_output_dir(self, strategy: str) -> Path:
         """Get the CRF search workspace directory for *strategy*.
@@ -912,7 +916,7 @@ class ChunkEncoder:
         Returns:
             ChunkEncodingResult with encoding outcome.
         """
-        logger.debug(fmt_chunk_start(strategy, chunk.chunk_id))
+        logger.debug(fmt_chunk_start(strategy, chunk.chunk_id, self._visual_hash))
 
         # Parse strategy up-front so we know the codec CRF range
         try:
@@ -952,7 +956,8 @@ class ChunkEncoder:
             current_crf = seed_crf
             logger.info(
                 fmt_chunk(strategy, chunk.chunk_id,
-                f"Restored {len(history.attempts)} attempt(s) from sidecars; resuming from best-passing CRF {current_crf:{PADDING_CRF}}")
+                f"Restored {len(history.attempts)} attempt(s) from sidecars; resuming from best-passing CRF {current_crf:{PADDING_CRF}}",
+                self._visual_hash)
             )
         else:
             current_crf = initial_crf
@@ -970,10 +975,11 @@ class ChunkEncoder:
                 logger.warning(
                     fmt_chunk(strategy, chunk.chunk_id,
                               f"reached {THRESHOLD_ATTEMPTS_WARNING} attempts without meeting targets — "
-                              "continuing search")
+                              "continuing search",
+                              self._visual_hash)
                 )
 
-            logger.debug(fmt_chunk_attempt_start(strategy, chunk.chunk_id, attempt_number, current_crf))
+            logger.debug(fmt_chunk_attempt_start(strategy, chunk.chunk_id, attempt_number, current_crf, self._visual_hash))
 
             # Determine the final output path for this CRF (resolution unknown yet)
             # We'll encode to a temp file, probe resolution, then rename to final path.
@@ -1035,6 +1041,7 @@ class ChunkEncoder:
                             fmt_chunk_attempt_result(
                                 strategy, chunk.chunk_id, attempt_number,
                                 f"{pass_fail} with CRF {existing.crf:{PADDING_CRF}} ({metric_summary}){best_string} [reused]",
+                                self._visual_hash,
                             )
                         )
                         history.add_attempt(existing.crf, metrics_dict)
@@ -1044,7 +1051,7 @@ class ChunkEncoder:
                         )
                         if next_crf is None:
                             if final_attempt is not None:
-                                logger.info(fmt_chunk_final(strategy, chunk.chunk_id, best_crf, attempt_number))
+                                logger.info(fmt_chunk_final(strategy, chunk.chunk_id, best_crf, attempt_number, self._visual_hash))
                                 # Hard-link winning attempt into encoded/ and write result sidecar
                                 self._finalize_winning_attempt(
                                     strategy=strategy,
@@ -1066,7 +1073,8 @@ class ChunkEncoder:
                         # File exists but sidecar is missing or incomplete — re-evaluate metrics only
                         logger.info(
                             fmt_chunk(strategy, chunk.chunk_id,
-                            f"existing attempt (crf={existing.crf:.2f}) — re-evaluating metrics"),
+                            f"existing attempt (crf={existing.crf:.2f}) — re-evaluating metrics",
+                            self._visual_hash),
                         )
                         output_file = existing.path
                         # Skip encoding, jump straight to quality evaluation below
@@ -1171,6 +1179,7 @@ class ChunkEncoder:
                 fmt_chunk_attempt_result(
                     strategy, chunk.chunk_id, attempt_number,
                     f"{pass_fail} with CRF {current_crf:{PADDING_CRF}} ({metric_summary}){best_string}",
+                    self._visual_hash,
                 )
             )
 
@@ -1181,7 +1190,7 @@ class ChunkEncoder:
 
             if next_crf is None:
                 if final_attempt is not None:
-                    logger.info(fmt_chunk_final(strategy, chunk.chunk_id, best_crf, attempt_number))
+                    logger.info(fmt_chunk_final(strategy, chunk.chunk_id, best_crf, attempt_number, self._visual_hash))
                     # Hard-link winning attempt into encoded/ and write result sidecar
                     self._finalize_winning_attempt(
                         strategy=strategy,
@@ -1542,6 +1551,7 @@ def encode_all_chunks(
     encoding_yaml:    Path | None  = None,
     cleanup_level:    CleanupLevel = CleanupLevel.NONE,
     optimization_crfs: dict[str, float] | None = None,
+    visual_hash:      bool         = True,
 ) -> EncodingResult:
     """Encode all chunks with quality-targeted CRF adjustment.
 
@@ -1649,6 +1659,7 @@ def encode_all_chunks(
         work_dir=work_dir,
         crop_params=crop_params,
         cleanup_level=cleanup_level,
+        visual_hash=visual_hash,
     )
 
     # Run parallel encoding — COMPLETE pairs are skipped inside _encode_chunks_parallel
@@ -1802,6 +1813,8 @@ class EncodingPhase:
             ``EncodingPhaseResult`` with all artifacts ``COMPLETE`` on success.
         """
         emit_phase_banner("ENCODING", logger)
+
+        logger.info("Scanning for existing artifacts...")
 
         dep_result = self._ensure_dependencies(execute=True)
         if dep_result is not None:
@@ -2116,6 +2129,7 @@ class EncodingPhase:
             encoding_yaml    = encoding_yaml,
             cleanup_level    = self._config.cleanup,
             optimization_crfs= optimization_crfs,
+            visual_hash      = self._config.visual_hash,
         )
 
         if enc_result.outcome == PhaseOutcome.FAILED:
