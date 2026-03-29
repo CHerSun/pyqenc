@@ -642,7 +642,7 @@ class ChunkMetadata(VideoMetadata):
     end_timestamp:   float
 
     @classmethod
-    def model_validate_full(cls, data: dict) -> "ChunkMetadata":  # type: ignore[override]
+    def model_validate_full(cls, data: dict) -> "ChunkMetadata":
         """Restore a ``ChunkMetadata`` from a ``model_dump_full()`` dict."""
         instance = cls.model_validate(data)
         instance._duration_seconds = data.get("duration_seconds")

@@ -35,27 +35,12 @@ def _set_process_priority() -> None:
 
 
 def _parse_quality_targets(targets_str: str) -> list[str]:
-    """Parse comma-separated quality targets.
-
-    Args:
-        targets_str: Comma-separated targets like "vmaf-min:95,ssim-med:98"
-
-    Returns:
-        List of target strings
-    """
+    """Parse comma-separated quality targets, i.e. "vmaf-min:95,ssim-med:98" into a list of strings"""
     return [t.strip() for t in targets_str.split(",") if t.strip()]
 
 
 def _parse_strategies(strategies_str: str | None) -> list[str] | None:
-    """Parse comma-separated encoding strategies.
-
-    Args:
-        strategies_str: Comma-separated strategies like "slow+h265-aq,veryslow+h264-anime",
-                       or None to use config defaults, or empty string for all combinations
-
-    Returns:
-        List of strategy strings, or None if not specified (use config defaults)
-    """
+    """Parse comma-separated encoding strategies, i.e. "slow+h265-aq,veryslow+h264-anime" into a list of strings. None meaning use defaults, while empty string means all combinations."""
     if strategies_str is None:
         return None
 
@@ -66,21 +51,14 @@ def _parse_strategies(strategies_str: str | None) -> list[str] | None:
 
 
 def _parse_cleanup_level(cleanup_value: str | None) -> CleanupLevel:
-    """Parse the --cleanup flag value into a ``CleanupLevel``.
-
-    Args:
-        cleanup_value: ``None`` (flag absent), ``""`` / ``"intermediate"``
-                       (flag present, no argument), or ``"all"``.
-
-    Returns:
-        Corresponding ``CleanupLevel`` enum value.
+    """Parse the --cleanup flag value into a ``CleanupLevel``. None for no cleanup, "" for intermediate, "all" for all.
 
     Raises:
         argparse.ArgumentTypeError: If the value is not recognised.
     """
     if cleanup_value is None:
         return CleanupLevel.NONE
-    if cleanup_value.lower() in ("", "intermediate"):
+    if cleanup_value.lower() == "":
         return CleanupLevel.INTERMEDIATE
     if cleanup_value.lower() == "all":
         return CleanupLevel.ALL
@@ -90,44 +68,17 @@ def _parse_cleanup_level(cleanup_value: str | None) -> CleanupLevel:
 
 
 def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add common arguments shared across subcommands.
-
-    Args:
-        parser: Argument parser to add arguments to
-    """
-    parser.add_argument(
-        "--work-dir",
-        type=Path,
-        default=Path("./work"),
-        help="Working directory for intermediate files and state (default: ./work)"
-    )
-    parser.add_argument(
-        "--log-level",
-        choices=["debug", "info", "warning", "critical"],
-        default="info",
-        help="Logging level (default: info)"
-    )
-    parser.add_argument(
-        "-y", "--execute",
-        action="store_true",
-        default=False,
-        help="Execute phases (default: dry-run). Without this flag only a dry-run is performed."
-    )
-    parser.add_argument(
-        "--cleanup",
-        nargs="?",
-        const="intermediate",
-        metavar="all",
-        help=(
+    """Add common arguments shared across subcommands to the given parser."""
+    parser.add_argument("--work-dir", type=Path, default=Path("./pyqenc"), help="Working directory for intermediate files and state (default: ./pyqenc)")
+    parser.add_argument("--log-level", choices=["debug", "info", "warning", "critical"], default="info", help="Logging level (default: info)")
+    parser.add_argument("-y", "--execute", action="store_true", default=False, help="Execute phases (default: dry-run). Without this flag only a dry-run is performed.")
+    parser.add_argument("--cleanup", nargs="?", const="intermediate", metavar="all", help=(
             "Cleanup level for intermediate files. "
             "--cleanup (no argument): delete workspace files per artifact after completion. "
             "--cleanup all: also delete remaining intermediate directories after full pipeline success."
         ),
     )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help=(
+    parser.add_argument("--force", action="store_true", help=(
             "When a source-file mismatch is detected in execute mode (-y), "
             "delete all intermediate artifacts and reset state, then continue "
             "with the new source file. Has no effect without -y."
@@ -654,6 +605,7 @@ Examples:
     # Install SIGINT handler early so CTRL+C always triggers immediate exit,
     # overriding asyncio's default handler which swallows the first keypress.
     import signal
+
     from pyqenc.utils.ffmpeg_runner import kill_all_ffmpeg
 
     def _sigint_handler(signum: int, frame: object) -> None:
