@@ -17,8 +17,11 @@ TEMP_SUFFIX = ".tmp"
 """A suffix to append to temporary files during processing. This helps avoid confusion with final output files and allows for easy cleanup of incomplete files."""
 
 # Disk space estimation constants
-OVERHEAD_EXTRACTION_AND_AUDIO = 1.3
-"""Multiplier for the source video size to account for overhead from extraction and audio processing. This includes temporary files created during these steps, which can be larger than the original source video stream due to formats used for intermediate processing."""
+OVERHEAD_EXTRACTION_AND_AUDIO = 3.5
+"""Multiplier for the source video size to account for extraction and audio processing overhead.
+Covers the extracted video stream (~1x source) plus intermediate FLAC files from normalization
+of typically 2 surround audio tracks with multiple normalization variants (~2.5x source).
+Audio is the dominant component for multi-track releases."""
 OVERHEAD_CHUNKING_REMUX = 1.0
 """Multiplier for the source video size to account for overhead from remuxing (stream-copying). This is typically close to the original source video size."""
 OVERHEAD_TIGHT_MARGIN = 1.2
@@ -33,7 +36,7 @@ typical movie content; 0.30 adds a conservative safety margin. Tune if estimates
 BITS_PER_PIXEL_ENCODED = 0.10
 """Estimated bits per pixel for encoded video output (attempts, final). Covers a wide range of
 content at typical quality targets. Tune this constant if estimates are consistently off."""
-AVG_ATTEMPTS_PER_CHUNK = 5
+AVG_ATTEMPTS_PER_CHUNK = 5.5
 """Average number of CRF search attempts per chunk per strategy. Used to estimate space consumed
 by intermediate attempt files during the encoding phase."""
 
