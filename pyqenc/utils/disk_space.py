@@ -8,15 +8,17 @@ from enum import StrEnum
 from pathlib import Path
 
 from pyqenc.constants import (
-    OVERHEAD_CHUNKING_LOSSLESS,
+    AVG_ATTEMPTS_PER_CHUNK,
+    BITS_PER_PIXEL_ENCODED,
+    BYTES_PER_PIXEL_FFV1,
+    OVERHEAD_CHUNKING_LOSSLESS_FALLBACK,
     OVERHEAD_CHUNKING_REMUX,
     OVERHEAD_EXTRACTION_AND_AUDIO,
-    OVERHEAD_FOR_OPTIMIZATION,
-    OVERHEAD_PER_STRATEGY,
+    OVERHEAD_PER_STRATEGY_FALLBACK,
     OVERHEAD_TIGHT_MARGIN,
     SUCCESS_SYMBOL_MINOR,
 )
-from pyqenc.models import ChunkingMode
+from pyqenc.models import ChunkingMode, VideoMetadata
 from pyqenc.utils.log_format import fmt_key_value_table
 
 logger = logging.getLogger(__name__)
@@ -25,196 +27,269 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DiskSpaceInfo:
     """Information about disk space availability."""
-    total_gb: float
-    used_gb: float
-    free_gb: float
+    total_gb:     float
+    used_gb:      float
+    free_gb:      float
     percent_used: float
 
+
 class AvailableSpaceLevel(StrEnum):
-    SUFFICIENT = "Sufficient"
+    SUFFICIENT   = "Sufficient"
     INSUFFICIENT = "Tight"
-    TIGHT = "Warning"
+    TIGHT        = "Warning"
+
 
 @dataclass
 class SpaceEstimate:
-    """Estimated space requirements for pipeline."""
-    source_size_gb: float
-    min_estimated_required_gb: float
-    max_estimated_required_gb: float
-    available_gb: float
-    sufficient: AvailableSpaceLevel
+    """Estimated space requirements for pipeline.
+
+    Attributes:
+        source_size_gb:  Size of the source video file in GB.
+        min_required_gb: Lower-bound estimate (minimum strategies).
+        max_required_gb: Upper-bound estimate with safety margin (maximum strategies).
+        available_gb:    Free space on the work directory filesystem.
+        level:           Whether available space is sufficient, tight, or insufficient.
+    """
+    source_size_gb:  float
+    min_required_gb: float
+    max_required_gb: float
+    available_gb:    float
+    level:           AvailableSpaceLevel
 
 
 def get_disk_space(path: Path) -> DiskSpaceInfo:
     """Get disk space information for the given path.
 
     Args:
-        path: Path to check disk space for
+        path: Path to check disk space for.
 
     Returns:
-        DiskSpaceInfo with disk space details
+        DiskSpaceInfo with disk space details.
     """
-    usage = shutil.disk_usage(path)
-
-    total_gb = usage.total / (1024 ** 3)
-    used_gb = usage.used / (1024 ** 3)
-    free_gb = usage.free / (1024 ** 3)
+    usage        = shutil.disk_usage(path)
+    total_gb     = usage.total / (1024 ** 3)
+    used_gb      = usage.used  / (1024 ** 3)
+    free_gb      = usage.free  / (1024 ** 3)
     percent_used = (usage.used / usage.total) * 100
+    return DiskSpaceInfo(total_gb=total_gb, used_gb=used_gb, free_gb=free_gb, percent_used=percent_used)
 
-    return DiskSpaceInfo(
-        total_gb=total_gb,
-        used_gb=used_gb,
-        free_gb=free_gb,
-        percent_used=percent_used
-    )
+
+def _parse_resolution(resolution: str) -> tuple[int, int] | None:
+    """Parse a ``'WxH'`` resolution string into ``(width, height)``.
+
+    Returns ``None`` if parsing fails.
+    """
+    try:
+        w, h = resolution.split("x")
+        return int(w), int(h)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _estimate_total_pixels(video: VideoMetadata) -> int | None:
+    """Derive total pixel count from cached VideoMetadata fields without triggering slow probes.
+
+    Uses ``frame_count`` if already cached, otherwise approximates from
+    ``fps x duration_seconds`` (both available from the fast ffprobe call).
+    Returns ``None`` if insufficient data is available.
+    """
+    res = _parse_resolution(video.resolution) if video.resolution else None
+    if res is None:
+        return None
+
+    # Prefer exact frame count if already cached — no extra I/O.
+    fc = video._frame_count  # noqa: SLF001
+    if fc is None:
+        fps      = video._fps               # noqa: SLF001
+        duration = video._duration_seconds  # noqa: SLF001
+        if fps is not None and duration is not None and fps > 0:
+            fc = int(fps * duration)
+
+    if fc is None:
+        return None
+
+    return res[0] * res[1] * fc
 
 
 def estimate_required_space(
-    source_video:         Path,
-    num_strategies:       int          = 1,
-    include_optimization: bool         = False,
-    chunking_mode:        ChunkingMode = ChunkingMode.LOSSLESS,
+    source_video:   Path,
+    num_strategies: int                  = 1,
+    chunking_mode:  ChunkingMode         = ChunkingMode.LOSSLESS,
+    video_metadata: VideoMetadata | None = None,
 ) -> float:
     """Estimate required disk space for pipeline execution.
 
-    Estimation formula:
+    Uses pixel-based estimation when ``video_metadata`` is available, which is
+    significantly more accurate than source-size multipliers.  Reads only
+    already-cached metadata fields — never triggers additional I/O probes.
 
-    - Extraction + audio overhead: ~1.2x source size
-    - Chunks:
-        - lossless FFV1 all-intra: ~5.0x source size
-        - remux stream-copy:       ~1.0x source size
-    - Per strategy overhead:       ~2.5x source size per strategy (encoding attempts, metrics, final output)
+    Estimation components (pixel-based path):
+
+    - Extraction + audio: ``source_size x OVERHEAD_EXTRACTION_AND_AUDIO``
+      (audio folded into this rough multiplier — good enough without AudioMetadata)
+    - FFV1 chunks:  ``total_pixels x BYTES_PER_PIXEL_FFV1``
+    - Remux chunks: ``source_size x OVERHEAD_CHUNKING_REMUX``
+    - Attempts:     ``total_pixels x (BITS_PER_PIXEL_ENCODED / 8) x AVG_ATTEMPTS_PER_CHUNK x num_strategies``
+    - Final output: ``total_pixels x (BITS_PER_PIXEL_ENCODED / 8) x num_strategies``
+
+    Falls back to source-size multipliers when metadata is unavailable.
 
     Args:
-        source_video:         Path to source video file.
-        num_strategies:       Number of encoding strategies.
-        include_optimization: Whether optimization phase is enabled.
-        chunking_mode:        Chunking strategy — affects chunk size estimate.
+        source_video:   Path to source video file.
+        num_strategies: Number of encoding strategies to estimate for.
+        chunking_mode:  Chunking strategy — affects chunk size estimate.
+        video_metadata: Optional ``VideoMetadata`` for pixel-based estimation.
 
     Returns:
         Estimated required space in GB.
     """
     if not source_video.exists():
-        logger.warning(f"Source video not found: {source_video}")
+        logger.warning("Source video not found: %s", source_video)
         return 0.0
 
     source_size_gb = source_video.stat().st_size / (1024 ** 3)
 
-    chunks_multiplier = (
-        OVERHEAD_CHUNKING_LOSSLESS
-        if chunking_mode == ChunkingMode.LOSSLESS
-        else OVERHEAD_CHUNKING_REMUX
-    )
+    total_pixels: int | None = None
+    if video_metadata is not None:
+        total_pixels = _estimate_total_pixels(video_metadata)
+        if total_pixels is not None:
+            logger.debug("Space estimate: pixel-based (%d Mpx total)", total_pixels // 1_000_000)
 
+    if total_pixels is not None:
+        extraction_gb        = source_size_gb * OVERHEAD_EXTRACTION_AND_AUDIO
+        bytes_per_encoded_px = BITS_PER_PIXEL_ENCODED / 8
+        chunks_gb   = (total_pixels * BYTES_PER_PIXEL_FFV1 / (1024 ** 3)
+                       if chunking_mode == ChunkingMode.LOSSLESS
+                       else source_size_gb * OVERHEAD_CHUNKING_REMUX)
+        attempts_gb = total_pixels * bytes_per_encoded_px * AVG_ATTEMPTS_PER_CHUNK * num_strategies / (1024 ** 3)
+        final_gb    = total_pixels * bytes_per_encoded_px * num_strategies / (1024 ** 3)
+        total_gb    = extraction_gb + chunks_gb + attempts_gb + final_gb
+        logger.debug(
+            "Space estimate breakdown: extraction=%.2f GB, chunks=%.2f GB, "
+            "attempts=%.2f GB, final=%.2f GB -> total=%.2f GB",
+            extraction_gb, chunks_gb, attempts_gb, final_gb, total_gb,
+        )
+        return total_gb
+
+    # Fallback: source-size multipliers when metadata is unavailable.
+    logger.debug("Space estimate: falling back to source-size multipliers (no metadata)")
+    chunks_mult = OVERHEAD_CHUNKING_LOSSLESS_FALLBACK if chunking_mode == ChunkingMode.LOSSLESS else OVERHEAD_CHUNKING_REMUX
     return source_size_gb * (
-        OVERHEAD_EXTRACTION_AND_AUDIO + chunks_multiplier                                           # extraction and chunking overheads
-        + OVERHEAD_PER_STRATEGY * num_strategies                                                    # per-strategy overhead scales with number of strategies
-        + (OVERHEAD_FOR_OPTIMIZATION if include_optimization else 0.0)                              # optimization overhead if enabled
+        OVERHEAD_EXTRACTION_AND_AUDIO
+        + chunks_mult
+        + OVERHEAD_PER_STRATEGY_FALLBACK * num_strategies
     )
 
 
 def check_disk_space(
-    source_video:         Path,
-    work_dir:             Path,
-    min_strategies:       int          = 1,
-    max_strategies:       int          = 1,
-    include_optimization: bool         = False,
-    chunking_mode:        ChunkingMode = ChunkingMode.LOSSLESS,
+    source_video:   Path,
+    work_dir:       Path,
+    min_strategies: int                  = 1,
+    max_strategies: int                  = 1,
+    chunking_mode:  ChunkingMode         = ChunkingMode.LOSSLESS,
+    video_metadata: VideoMetadata | None = None,
 ) -> SpaceEstimate:
-    """Check if sufficient disk space is available for pipeline execution. Accounts for multiple strategies possibilities.
+    """Check if sufficient disk space is available for pipeline execution.
+
+    Calls ``estimate_required_space`` twice — once for the minimum strategy
+    count (lower bound) and once for the maximum (upper bound).  The
+    recommended threshold adds a ``OVERHEAD_TIGHT_MARGIN`` safety buffer on
+    top of the upper-bound estimate.
 
     Args:
-        source_video:         Path to source video file.
-        work_dir:             Working directory where files will be stored.
-        num_strategies:       Number of encoding strategies.
-        include_optimization: Whether optimization phase is enabled.
-        chunking_mode:        Chunking strategy — affects chunk size estimate.
+        source_video:   Path to source video file.
+        work_dir:       Working directory where files will be stored.
+        min_strategies: Minimum number of strategies (lower-bound estimate).
+        max_strategies: Maximum number of strategies (upper-bound estimate).
+        chunking_mode:  Chunking strategy — affects chunk size estimate.
+        video_metadata: Optional ``VideoMetadata`` for pixel-based estimation.
 
     Returns:
-        tuple[SpaceEstimate, SpaceEstimate] with availability details min and max.
+        ``SpaceEstimate`` with min/max required and available space.
     """
-    # Get source size
     if not source_video.exists():
         return SpaceEstimate(0.0, 0.0, 0.0, 0.0, AvailableSpaceLevel.INSUFFICIENT)
 
-    source_size_gb = source_video.stat().st_size / (1024 ** 3)
+    source_size_gb  = source_video.stat().st_size / (1024 ** 3)
+    min_required_gb = estimate_required_space(source_video, min_strategies, chunking_mode, video_metadata)
+    max_required_gb = estimate_required_space(source_video, max_strategies, chunking_mode, video_metadata)
+    recommended_gb  = max_required_gb * OVERHEAD_TIGHT_MARGIN
 
-    # Estimate minimal required space (min num strategies)
-    estimated_required_gb_min = estimate_required_space(
-        source_video,
-        min_strategies,
-        include_optimization,
-        chunking_mode,
-    )
-    # Estimate maximal required space (max num strategies)
-    estimated_required_gb_max = estimate_required_space(
-        source_video,
-        max_strategies,
-        include_optimization,
-        chunking_mode,
-    )
-
-    # Get available space on work_dir's filesystem
-    # Create work_dir if it doesn't exist to check its filesystem
     work_dir.mkdir(parents=True, exist_ok=True)
     disk_info = get_disk_space(work_dir)
 
-    # Check if sufficient space available
-    min_required = estimated_required_gb_min
-    recommended_required = estimated_required_gb_max * 1.2
-    sufficient: bool = disk_info.free_gb >= min_required
-    recommended: bool = disk_info.free_gb >= recommended_required
-    level: AvailableSpaceLevel = AvailableSpaceLevel.INSUFFICIENT if not sufficient else AvailableSpaceLevel.TIGHT if not recommended else AvailableSpaceLevel.SUFFICIENT
+    sufficient:  bool = disk_info.free_gb >= min_required_gb
+    recommended: bool = disk_info.free_gb >= recommended_gb
+    level = (
+        AvailableSpaceLevel.INSUFFICIENT if not sufficient  else
+        AvailableSpaceLevel.TIGHT        if not recommended else
+        AvailableSpaceLevel.SUFFICIENT
+    )
 
-    return SpaceEstimate(source_size_gb, min_required, recommended_required, disk_info.free_gb, level)
-
+    return SpaceEstimate(
+        source_size_gb  = source_size_gb,
+        min_required_gb = min_required_gb,
+        max_required_gb = recommended_gb,
+        available_gb    = disk_info.free_gb,
+        level           = level,
+    )
 
 
 def log_disk_space_info(
-    source_video:         Path,
-    work_dir:             Path,
-    min_num_strategies:   int          = 1,
-    max_num_strategies:   int          = 1,
-    include_optimization: bool         = False,
-    chunking_mode:        ChunkingMode = ChunkingMode.LOSSLESS,
+    source_video:   Path,
+    work_dir:       Path,
+    min_strategies: int                  = 1,
+    max_strategies: int                  = 1,
+    chunking_mode:  ChunkingMode         = ChunkingMode.LOSSLESS,
+    video_metadata: VideoMetadata | None = None,
 ) -> AvailableSpaceLevel:
     """Check and log disk space information.
 
+    When ``min_strategies == max_strategies`` (fixed strategy count), logs a
+    single estimate value.  When they differ (optimization mode, where 1 to N
+    strategies may run), logs a ``{min} ... {max} GB`` range so the user
+    understands the uncertainty.
+
     Args:
-        source_video:         Path to source video file.
-        work_dir:             Working directory where files will be stored.
-        num_strategies:       Number of encoding strategies.
-        include_optimization: Whether optimization phase is enabled.
-        chunking_mode:        Chunking strategy — affects chunk size estimate.
+        source_video:   Path to source video file.
+        work_dir:       Working directory where files will be stored.
+        min_strategies: Minimum number of strategies (lower-bound estimate).
+        max_strategies: Maximum number of strategies (upper-bound estimate).
+        chunking_mode:  Chunking strategy — affects chunk size estimate.
+        video_metadata: Optional ``VideoMetadata`` for pixel-based estimation.
 
     Returns:
-        True if sufficient space available, False otherwise.
+        ``AvailableSpaceLevel`` indicating whether space is sufficient.
     """
     estimate = check_disk_space(
-        source_video,
-        work_dir,
-        min_num_strategies, max_num_strategies,
-        include_optimization,
-        chunking_mode,
+        source_video, work_dir, min_strategies, max_strategies, chunking_mode, video_metadata,
     )
 
-    # Log the results in a clear format
+    is_range = min_strategies != max_strategies
+    if is_range:
+        # max_required_gb has the margin baked in; strip it back for the raw upper bound display.
+        raw_max         = estimate.max_required_gb / OVERHEAD_TIGHT_MARGIN
+        required_str    = f"{estimate.min_required_gb:.2f} ... {raw_max:.2f} GB"
+        recommended_str = f"{estimate.min_required_gb * OVERHEAD_TIGHT_MARGIN:.2f} ... {estimate.max_required_gb:.2f} GB"
+    else:
+        required_str    = f"{estimate.min_required_gb:.2f} GB"
+        recommended_str = f"{estimate.max_required_gb:.2f} GB"
+
     kv_table = {
-        "Source video size": f"{estimate.source_size_gb:.2f} GB",
-        "Estimated required space": f"{estimate.min_estimated_required_gb:.2f} GB",
-        "Estimated recommended space": f"{estimate.max_estimated_required_gb:.2f} GB",
-        "Available space": f"{estimate.available_gb:.2f} GB",
+        "Source video size":           f"{estimate.source_size_gb:.2f} GB",
+        "Estimated required space":    required_str,
+        "Estimated recommended space": recommended_str,
+        "Available space":             f"{estimate.available_gb:.2f} GB",
     }
     fmt_key_value_table(kv_table)
 
-    # Log warnings or success message for disk space
     logger.info("")
-    if estimate.sufficient == AvailableSpaceLevel.INSUFFICIENT:
+    if estimate.level == AvailableSpaceLevel.INSUFFICIENT:
         logger.error("Insufficient disk space! Most likely you won't be able to finish processing. Consider freeing up more space or using `--cleanup` flag.")
-    elif estimate.sufficient == AvailableSpaceLevel.TIGHT:
+    elif estimate.level == AvailableSpaceLevel.TIGHT:
         logger.warning("Disk space is limited. Consider freeing up more space or using `--cleanup` flag.")
-    elif estimate.sufficient == AvailableSpaceLevel.SUFFICIENT:
-        logger.info(f"{SUCCESS_SYMBOL_MINOR} Sufficient disk space available.")
+    elif estimate.level == AvailableSpaceLevel.SUFFICIENT:
+        logger.info("%s Sufficient disk space available.", SUCCESS_SYMBOL_MINOR)
     logger.info("")
 
-    return estimate.sufficient
+    return estimate.level

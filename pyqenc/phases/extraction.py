@@ -935,7 +935,7 @@ class ExtractionPhase:
 
         # Dry-run path
         if dry_run:
-            if pending_count == 0 and stale_count == 0:
+            if pending_count == 0 and complete_count > 0:
                 outcome = PhaseOutcome.REUSED
             else:
                 outcome = PhaseOutcome.DRY_RUN
@@ -948,8 +948,8 @@ class ExtractionPhase:
             )
             return self.result
 
-        # Nothing to do
-        if pending_count == 0:
+        # Nothing to do — only skip if we actually have complete artifacts
+        if pending_count == 0 and complete_count > 0:
             self.result = ExtractionPhaseResult(
                 outcome   = PhaseOutcome.REUSED,
                 artifacts = artifacts,
@@ -1059,7 +1059,7 @@ class ExtractionPhase:
 
         # Step 4: scan extracted/ and classify
         if not extracted_dir.exists():
-            # Nothing extracted yet — show table with all streams absent
+            # Nothing extracted yet — build ABSENT artifact list for all expected streams
             try:
                 extractor = MKVTrackExtractor(str(self._config.source_video))
                 selected  = streams_filter_plain_regex(
@@ -1068,6 +1068,16 @@ class ExtractionPhase:
                     exclude_pattern = self._config.exclude,
                 )
                 _log_stream_table(extractor.tracks, selected, set())
+                absent: list[ExtractionArtifact] = []
+                for track in selected:
+                    path = extracted_dir / track.display_name()
+                    if track.codec_type == "video":
+                        absent.append(VideoArtifact(path=path, state=ArtifactState.ABSENT))
+                    elif track.codec_type == "audio":
+                        absent.append(AudioArtifact(path=path, state=ArtifactState.ABSENT))
+                    else:
+                        absent.append(OtherArtifact(path=path, state=ArtifactState.ABSENT))
+                return absent, None, []
             except Exception:
                 pass
             return [], None, []
@@ -1077,7 +1087,7 @@ class ExtractionPhase:
             if f.is_file() and not f.name.endswith(TEMP_SUFFIX)
         ]
         if not all_files:
-            # Dir exists but is empty — show table with all streams absent
+            # Dir exists but is empty — build ABSENT artifact list for all expected streams
             try:
                 extractor = MKVTrackExtractor(str(self._config.source_video))
                 selected  = streams_filter_plain_regex(
@@ -1086,6 +1096,16 @@ class ExtractionPhase:
                     exclude_pattern = self._config.exclude,
                 )
                 _log_stream_table(extractor.tracks, selected, set())
+                absent = []
+                for track in selected:
+                    path = extracted_dir / track.display_name()
+                    if track.codec_type == "video":
+                        absent.append(VideoArtifact(path=path, state=ArtifactState.ABSENT))
+                    elif track.codec_type == "audio":
+                        absent.append(AudioArtifact(path=path, state=ArtifactState.ABSENT))
+                    else:
+                        absent.append(OtherArtifact(path=path, state=ArtifactState.ABSENT))
+                return absent, None, []
             except Exception:
                 pass
             return [], None, []

@@ -687,7 +687,7 @@ class ChunkingPhase:
 
         # Dry-run path
         if dry_run:
-            outcome = PhaseOutcome.REUSED if pending_count == 0 else PhaseOutcome.DRY_RUN
+            outcome = PhaseOutcome.REUSED if (pending_count == 0 and complete_count > 0) else PhaseOutcome.DRY_RUN
             chunks  = [a.metadata for a in artifacts if a.state == ArtifactState.COMPLETE and a.metadata is not None]
             self.result = ChunkingPhaseResult(
                 outcome   = outcome,
@@ -697,8 +697,8 @@ class ChunkingPhase:
             )
             return self.result
 
-        # Nothing to do
-        if pending_count == 0:
+        # Nothing to do — only skip if we actually have complete chunks
+        if pending_count == 0 and complete_count > 0:
             chunks = [a.metadata for a in artifacts if a.state == ArtifactState.COMPLETE and a.metadata is not None]
             chunks.sort(key=lambda c: c.chunk_id)
             self.result = ChunkingPhaseResult(
@@ -931,9 +931,8 @@ class ChunkingPhase:
         final_artifacts: list[ChunkArtifact] = []
         for cm in chunk_metas:
             final_artifacts.append(ChunkArtifact(
-                path     = cm.path,
-                state    = ArtifactState.COMPLETE,
-                metadata = cm,
+                path  = cm.path,
+                state = ArtifactState.COMPLETE,
             ))
 
         total_frames = sum(c._frame_count or 0 for c in chunk_metas)

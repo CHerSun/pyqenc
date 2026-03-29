@@ -18,6 +18,7 @@ from pyqenc.models import (
     PipelineConfig,
     QualityTarget,
 )
+from pyqenc.state import ArtifactState
 from pyqenc.utils.log_format import fmt_key_value_table
 from pyqenc.utils.logging import setup_logging
 
@@ -539,7 +540,7 @@ def _cmd_extract(args: argparse.Namespace) -> int:
             dry_run=not execute,
         )
 
-        if result.success:
+        if result.is_complete:
             logger.info("Extraction completed successfully")
             return 0
         else:
@@ -580,7 +581,7 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
             dry_run=not execute,
         )
 
-        if result.success:
+        if result.is_complete:
             logger.info("Chunking completed successfully")
             return 0
         else:
@@ -627,7 +628,7 @@ def _cmd_encode(args: argparse.Namespace) -> int:
             dry_run=not execute,
         )
 
-        if result.success:
+        if result.is_complete:
             logger.info("Encoding completed successfully")
             return 0
         else:
@@ -665,7 +666,7 @@ def _cmd_audio(args: argparse.Namespace) -> int:
             dry_run=not execute,
         )
 
-        if result.success:
+        if result.is_complete:
             logger.info("Audio processing completed successfully")
             return 0
         else:
@@ -706,13 +707,12 @@ def _cmd_merge(args: argparse.Namespace) -> int:
             dry_run=not execute,
         )
 
-        if result.success:
-            if result.output_files:
-                logger.info(f"Merge completed successfully: {len(result.output_files)} file(s)")
-                for strategy, output_file in result.output_files.items():
-                    logger.info(f"  {strategy}: {output_file}")
-                    if strategy in result.frame_counts:
-                        logger.info(f"    Frame count: {result.frame_counts[strategy]}")
+        if result.is_complete:
+            completed = [a for a in result.merged if a.state == ArtifactState.COMPLETE]
+            if completed:
+                logger.info(f"Merge completed successfully: {len(completed)} file(s)")
+                for artifact in completed:
+                    logger.info(f"  {artifact.path}")
             else:
                 logger.info("Merge completed (no new files created)")
             return 0

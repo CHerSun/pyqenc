@@ -155,12 +155,11 @@ class JobPhase:
         # Disk space check (execute mode only)
         if not dry_run:
             log_disk_space_info(
-                source_video         = self._config.source_video,
-                work_dir             = self._config.work_dir,
-                min_num_strategies   = 1,
-                max_num_strategies   = len(self._config.strategies),
-                include_optimization = self._config.optimize,
-                chunking_mode        = self._config.chunking_mode,
+                source_video   = self._config.source_video,
+                work_dir       = self._config.work_dir,
+                min_strategies = 1 if self._config.optimize else len(self._config.strategies),
+                max_strategies = len(self._config.strategies),
+                chunking_mode  = self._config.chunking_mode,
             )
             # Insufficient space. Previously we stopped here, but now I don't want to block, just notify the user.
             #if not sufficient:

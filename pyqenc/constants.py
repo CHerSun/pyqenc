@@ -19,16 +19,31 @@ TEMP_SUFFIX = ".tmp"
 # Disk space estimation constants
 OVERHEAD_EXTRACTION_AND_AUDIO = 1.2
 """Multiplier for the source video size to account for overhead from extraction and audio processing. This includes temporary files created during these steps, which can be larger than the original source video stream due to formats used for intermediate processing."""
-OVERHEAD_CHUNKING_LOSSLESS = 5.0
-"""Multiplier for the source video size to account for overhead from lossless chunking using FFV1 all-intra. This format can be significantly larger than the original source video stream, especially for high-motion content, due to the nature of lossless compression."""
-OVERHEAD_CHUNKING_REMUX    = 1.0
+OVERHEAD_CHUNKING_REMUX = 1.0
 """Multiplier for the source video size to account for overhead from remuxing (stream-copying). This is typically close to the original source video size."""
-OVERHEAD_FOR_OPTIMIZATION = 0.5
-"""Additional multiplier to account for overhead from the optimization phase, which includes multiple encoding attempts, metrics calculations, and final output. This is an estimate and can vary widely based on the number of attempts and strategies used."""
-OVERHEAD_PER_STRATEGY = 2.5
-"""Additional multiplier per encoding strategy to account for overhead from multiple attempts, metrics, and final output. This is an estimate and can vary widely based on the number of attempts and strategies used."""
-OVERHEAD_TIGHT_MARGIN = 1.5
-"""When the estimated required space is within this multiplier of the available space, a warning should be issued about tight disk space. This helps alert users to potential issues before they occur, allowing them to free up space or adjust their strategy before running out of disk space during processing."""
+OVERHEAD_TIGHT_MARGIN = 1.2
+"""Multiplier applied to the max estimated space to derive the recommended space threshold.
+A 20% buffer on top of the upper-bound estimate."""
+
+# Pixel-based space estimation constants (used when VideoMetadata is available)
+BYTES_PER_PIXEL_FFV1 = 0.30
+"""Estimated bytes per pixel for FFV1 lossless all-intra chunks. FFV1 achieves roughly 5x compression
+over uncompressed YUV420 (1.5 bytes/pixel), giving ~0.30 bytes/pixel. Measured at ~0.24 B/px on
+typical movie content; 0.30 adds a conservative safety margin. Tune if estimates diverge."""
+BITS_PER_PIXEL_ENCODED = 0.10
+"""Estimated bits per pixel for encoded video output (attempts, final). Covers a wide range of
+content at typical quality targets. Tune this constant if estimates are consistently off."""
+AVG_ATTEMPTS_PER_CHUNK = 5
+"""Average number of CRF search attempts per chunk per strategy. Used to estimate space consumed
+by intermediate attempt files during the encoding phase."""
+
+# Fallback source-size multipliers (used only when VideoMetadata is unavailable)
+OVERHEAD_CHUNKING_LOSSLESS_FALLBACK = 5.0
+"""Fallback multiplier for FFV1 lossless chunking overhead relative to source size.
+Used only when pixel-based estimation is not possible (no VideoMetadata available)."""
+OVERHEAD_PER_STRATEGY_FALLBACK = 2.5
+"""Fallback multiplier per encoding strategy relative to source size.
+Used only when pixel-based estimation is not possible (no VideoMetadata available)."""
 
 # Vertical delimiters
 LINE_WIDTH  = 72
@@ -45,7 +60,7 @@ PADDING_CRF = "4.1f"
 """Padding for CRF values in log messages for consistent formatting."""
 
 # CRF optimization controls
-CRF_GRANULARITY   = 0.5  # 0.5 might be too coarse; consider 0.2 or even 0.1 for finer search. Modifying this could require PADDING_CRF adjustment for log formatting.
+CRF_GRANULARITY   = 0.5  # 0.5 might be too coarse; consider 0.2 or even 0.1 for finer search. Modifying this could require PADDING_CRF adjustment for log formatting. See PADDING_CRF too.
 """Granularity for CRF adjustments during optimization. This determines the step size when adjusting CRF values to find the optimal quality/size balance."""
 CRF_INITIAL_DEFAULT = 20.0
 """Default starting CRF when no prior history or optimization result is available."""
