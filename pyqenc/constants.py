@@ -17,7 +17,7 @@ TEMP_SUFFIX = ".tmp"
 """A suffix to append to temporary files during processing. This helps avoid confusion with final output files and allows for easy cleanup of incomplete files."""
 
 # Disk space estimation constants
-OVERHEAD_EXTRACTION_AND_AUDIO = 1.2
+OVERHEAD_EXTRACTION_AND_AUDIO = 1.3
 """Multiplier for the source video size to account for overhead from extraction and audio processing. This includes temporary files created during these steps, which can be larger than the original source video stream due to formats used for intermediate processing."""
 OVERHEAD_CHUNKING_REMUX = 1.0
 """Multiplier for the source video size to account for overhead from remuxing (stream-copying). This is typically close to the original source video size."""
