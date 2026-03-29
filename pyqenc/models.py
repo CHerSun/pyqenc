@@ -824,16 +824,21 @@ class PipelineConfig(BaseModel):
     quality_targets:    list[QualityTarget]
     strategies:         list[Strategy]
     optimize:           bool              = False
+    """Whether to search for optimal strategy (optimization phase)."""
     all_strategies:     bool              = False
     max_parallel:       int               = 2
+    """Maximum concurrent encoding processes."""
     metrics_sampling:   int               = 10
+    """Frame subsampling for metric calculation. 10 is the default - good tradeoff between speed and accuracy."""
     log_level:          str               = "info"
     crop_params:        CropParams | None = None
     include:            str | None        = None
     exclude:            str | None        = None
     cleanup:            CleanupLevel      = CleanupLevel.NONE
     chunking_mode:      ChunkingMode      = ChunkingMode.LOSSLESS
+    """Which chunking mode to use - lossless FFV1 reencoding (default) or stream-copy remux (bad, but cheaper)."""
     force:                       bool              = False
+    """A flag indicating whether user agrees to force actions, like forced cleanup."""
     audio_convert:               str | None        = None
     audio_codec:                 str | None        = None
     audio_base_bitrate:          str | None        = None
@@ -844,3 +849,5 @@ class PipelineConfig(BaseModel):
     strategy's size are also selected as optimal.  ``0.0`` means exactly one
     strategy is selected.
     """
+    visual_hash:                 bool              = True
+    """Whether to display extra visual cue for encoding logging."""

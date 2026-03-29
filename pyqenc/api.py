@@ -66,11 +66,7 @@ def run_pipeline(
         raise ValueError(f"Work directory is not a directory: {config.work_dir}")
 
     orchestrator = PipelineOrchestrator(config)
-    try:
-        return orchestrator.run(dry_run=dry_run)
-    except BaseException:
-        logger.warning("Unhandled exception — re-raising.")
-        raise
+    return orchestrator.run(dry_run=dry_run)
 
 
 def _minimal_config(

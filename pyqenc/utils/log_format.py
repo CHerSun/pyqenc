@@ -12,6 +12,7 @@ at ``info`` level and the pattern is too mechanical to benefit from separation.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -26,6 +27,7 @@ from pyqenc.constants import (
     SUCCESS_SYMBOL_MINOR,
     THICK_LINE,
     THIN_LINE,
+    VISUAL_HASH_EMOJIS_WIDE,
 )
 
 if TYPE_CHECKING:
@@ -80,23 +82,42 @@ def log_recovery_line(
         log.info("Recovery: %s — %s", ", ".join(parts), suffix)
 
 
-def _fmt_chunk_prefix(strategy: str, chunk_id: str) -> str:
-    return f"{BRACKET_LEFT}{strategy}{BRACKET_RIGHT} {chunk_id}"
+def visual_hash(strategy: str, chunk_id: str) -> str:
+    """Return 1 full-width emoji deterministically derived from strategy+chunk_id.
 
-def fmt_chunk(strategy: str, chunk_id: str, msg: str) -> str:
-    return _fmt_chunk_prefix(strategy, chunk_id) + f" {msg}"
+    Uses MD5 of ``"{strategy}:{chunk_id}"`` truncated to 4 bytes as the hash.
+    The result is stable across runs and unique per (strategy, chunk_id) pair
+    within the pool size (290 emojis), making parallel log lines visually
+    distinguishable at a glance.
 
-def fmt_chunk_start(strategy: str, chunk_id: str) -> str:
-    return fmt_chunk(strategy, chunk_id, "starting ...")
+    Args:
+        strategy: Encoding strategy name (e.g. ``"veryslow+h264"``).
+        chunk_id: Chunk timestamp range identifier.
+    """
+    h = int.from_bytes(
+        hashlib.md5(f"{strategy}:{chunk_id}".encode()).digest()[:4], "big"
+    )
+    return VISUAL_HASH_EMOJIS_WIDE[h % len(VISUAL_HASH_EMOJIS_WIDE)]
 
-def fmt_chunk_attempt_start(strategy: str, chunk_id: str, attempt: int, crf: float) -> str:
-    return fmt_chunk(strategy, chunk_id, f"starting attempt #{attempt} with CRF {crf:{PADDING_CRF}} ...")
 
-def fmt_chunk_attempt_result(strategy: str, chunk_id: str, attempt: int, msg: str) -> str:
-    return fmt_chunk(strategy, chunk_id, f"attempt #{attempt}: {msg}")
+def _fmt_chunk_prefix(strategy: str, chunk_id: str, use_visual_hash: bool = True) -> str:
+    prefix = f"{visual_hash(strategy, chunk_id)} " if use_visual_hash else ""
+    return f"{prefix}{BRACKET_LEFT}{strategy}{BRACKET_RIGHT} {chunk_id}"
 
-def fmt_chunk_final(strategy: str, chunk_id: str, crf: float, attempts: int) -> str:
-    return fmt_chunk(strategy, chunk_id, f"success {SUCCESS_SYMBOL_MAJOR} with CRF {crf:{PADDING_CRF}} after {attempts} attempts")
+def fmt_chunk(strategy: str, chunk_id: str, msg: str, use_visual_hash: bool = True) -> str:
+    return _fmt_chunk_prefix(strategy, chunk_id, use_visual_hash) + f" {msg}"
+
+def fmt_chunk_start(strategy: str, chunk_id: str, use_visual_hash: bool = True) -> str:
+    return fmt_chunk(strategy, chunk_id, "starting ...", use_visual_hash)
+
+def fmt_chunk_attempt_start(strategy: str, chunk_id: str, attempt: int, crf: float, use_visual_hash: bool = True) -> str:
+    return fmt_chunk(strategy, chunk_id, f"starting attempt #{attempt} with CRF {crf:{PADDING_CRF}} ...", use_visual_hash)
+
+def fmt_chunk_attempt_result(strategy: str, chunk_id: str, attempt: int, msg: str, use_visual_hash: bool = True) -> str:
+    return fmt_chunk(strategy, chunk_id, f"attempt #{attempt}: {msg}", use_visual_hash)
+
+def fmt_chunk_final(strategy: str, chunk_id: str, crf: float, attempts: int, use_visual_hash: bool = True) -> str:
+    return fmt_chunk(strategy, chunk_id, f"success {SUCCESS_SYMBOL_MAJOR} with CRF {crf:{PADDING_CRF}} after {attempts} attempts", use_visual_hash)
 
 def fmt_strategy_result_block(
     strategy:      str,

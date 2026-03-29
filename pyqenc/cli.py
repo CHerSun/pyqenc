@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -174,6 +175,11 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
             "Min: 1 (every frame measured). Default: 10 (recommended balance of speed and precision). "
             "Values above 30 are not recommended due to measurement volatility."
         ),
+    )
+    parser.add_argument(
+        "--no-visual-hash",
+        action="store_true",
+        help="Disable emoji visual hash prefix on chunk log lines (default: enabled).",
     )
 
 
@@ -493,6 +499,7 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         audio_codec=args.audio_codec,
         audio_base_bitrate=args.audio_bitrate,
         metrics_sampling=metrics_sampling,
+        visual_hash=not args.no_visual_hash,
     )
 
     # Execute pipeline
@@ -798,6 +805,18 @@ Examples:
 
     # Set process priority
     _set_process_priority()
+
+    # Install SIGINT handler early so CTRL+C always triggers immediate exit,
+    # overriding asyncio's default handler which swallows the first keypress.
+    import signal
+    from pyqenc.utils.ffmpeg_runner import kill_all_ffmpeg
+
+    def _sigint_handler(signum: int, frame: object) -> None:
+        kill_all_ffmpeg()
+        logger.warning("Cancelled by user.")
+        os._exit(130)
+
+    signal.signal(signal.SIGINT, _sigint_handler)
 
     # Execute subcommand
     return args.func(args)
