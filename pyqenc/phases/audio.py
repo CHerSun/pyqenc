@@ -814,7 +814,7 @@ class SynchronousRunner:
             return PlanExecutionResult(count_success, count_failed, count_skipped)
 
         try:
-            with ProgressBar(len(self.tasks), title="Audio Pipeline") as advance:
+            with ProgressBar(len(self.tasks), title="Audio Pipeline", total_count=len(self.tasks)) as advance:
                 for task in self.tasks:
                     if task.output.exists():
                         count_skipped += 1
@@ -873,7 +873,7 @@ class AsyncRunner:
         if not terminal_tasks:
             raise RuntimeError("Cyclic dependencies detected in plan.")
 
-        with ProgressBar(len(self.tasks), title="Audio Pipeline") as advance:
+        with ProgressBar(len(self.tasks), title="Audio Pipeline", total_count=len(self.tasks)) as advance:
             self._advance = advance
             await asyncio.gather(*(self._get_or_execute(t, dry_run) for t in terminal_tasks))
             self._advance = None

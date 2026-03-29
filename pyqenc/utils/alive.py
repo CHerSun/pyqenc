@@ -47,6 +47,7 @@ def ProgressBar(
     total: int | float,
     title: str,
     show_counters: bool = True,
+    total_count:   int | None = None,
 ) -> Generator[Callable[[int | float, AdvanceState], None], None, None]:
     """Context manager that opens an ``alive_bar`` progress bar.
 
@@ -65,6 +66,8 @@ def ProgressBar(
                        failures exist).  When ``False`` bar text shows
                        ``{cumulative:.1f} / {total:.1f}`` — useful for streaming
                        sub-second progress feeds where item counters are noise.
+        total_count:   Optional total number of items.  When provided, the counter
+                       section shows ``out of {total_count}`` after the item counters.
     """
     bar_state = ProgressBarState(total)
 
@@ -73,13 +76,15 @@ def ProgressBar(
             f"{bar_state.cumulative:.{int(bar_state.as_float)}f} out of {bar_state.remaining:.{int(bar_state.as_float)}f}" # format for int/float depending on state
         ]
         if show_counters:
-            # Bar text: "2.5 out of 10.0 (✔ 1  ⏭ 2  ✘ 3)"
+            # Bar text: "2.5 out of 10.0 (✔ 1  ⏭ 2  ✘ 3  out of 9)"
             counters: list[str] = []
             counters.append(f"{SUCCESS_SYMBOL_MINOR} {bar_state.success_count}")
             if bar_state.skipped_count > 0:
                 counters.append(f"{SKIPPED_SYMBOL} {bar_state.skipped_count}")
             if bar_state.failed_count > 0:
                 counters.append(f"{FAILURE_SYMBOL_MINOR} {bar_state.failed_count}")
+            if total_count is not None:
+                counters.append(f"out of {total_count}")
             elements.append("(" + "  ".join(counters) + ")")
         return " ".join(elements)
 

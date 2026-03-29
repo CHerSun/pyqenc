@@ -859,7 +859,7 @@ async def _encode_strategy_test_chunks(
     # then update after each winning test chunk so later chunks start closer to the optimum.
     moving_crf: float = round(initial_crf / CRF_GRANULARITY) * CRF_GRANULARITY
     total_seconds = sum(c.end_timestamp - c.start_timestamp for c in test_chunks)
-    with ProgressBar(total_seconds, title=f"Optimization [{strategy.name}]") as advance:
+    with ProgressBar(total_seconds, title=f"Optimization [{strategy.name}]", total_count=len(test_chunks)) as advance:
         async def _encode_one(chunk: ChunkMetadata) -> None:
             nonlocal moving_crf
             pair_rec = phase_recovery.pairs.get((chunk.chunk_id, strategy.name))

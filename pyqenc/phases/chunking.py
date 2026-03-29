@@ -49,7 +49,7 @@ from pyqenc.state import (
     ChunkSidecar,
     JobState,
 )
-from pyqenc.utils.alive import ProgressBar
+from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
@@ -230,7 +230,7 @@ def split_chunks(
     }
 
     total_seconds = video_meta.duration_seconds or 0.0
-    with ProgressBar(total_seconds, title="Chunking") as advance:
+    with ProgressBar(total_seconds, title="Chunking", total_count=len(boundaries)) as advance:
         for idx, start_boundary in enumerate(boundaries):
             end_ts = (
                 boundaries[idx + 1].timestamp_seconds
@@ -245,7 +245,7 @@ def split_chunks(
             if stem in complete_from_recovery:
                 result_chunks.append(complete_from_recovery[stem])
                 logger.debug("Skipping already-complete chunk: %s", stem)
-                advance(end_ts - start_ts)
+                advance(end_ts - start_ts, AdvanceState.SKIPPED)
                 continue
 
             duration = end_ts - start_ts
@@ -810,25 +810,67 @@ class ChunkingPhase:
         else:
             logger.debug("Chunking recovery: chunking.yaml absent or empty — scene detection needed")
 
-        # Step 4: scan chunks/ and classify each chunk.
-        # Sidecar presence (chunk.yaml alongside chunk.mkv) determines COMPLETE vs ARTIFACT_ONLY.
-        # Metadata is lazy-loaded from the sidecar on first access via ChunkArtifact.metadata.
+        # Step 4: classify chunks.
+        #
+        # When scene boundaries are known (from chunking.yaml), the scene list is
+        # the authoritative source of truth.  We iterate expected chunks derived
+        # from the boundaries and classify each one:
+        #   - file + sidecar present  → COMPLETE
+        #   - file present, no sidecar → ARTIFACT_ONLY (pending)
+        #   - file absent              → ABSENT (pending)
+        # Files on disk that are NOT in the expected set are STALE and are ignored
+        # (not added to artifacts, not counted as pending).
+        #
+        # When no scene boundaries are available yet, fall back to a plain disk
+        # scan — scene detection will run during execution to determine boundaries.
         artifacts:   list[ChunkArtifact] = []
         pending_ids: list[str]           = []
 
-        for chunk_file in sorted(chunks_dir.glob("*.mkv")):
-            chunk_id = chunk_file.stem
-            if not CHUNK_NAME_PATTERN.match(chunk_id):
-                logger.debug("Skipping non-chunk file: %s", chunk_file.name)
-                continue
+        if scenes:
+            # Get source duration from JobPhase result — it's already probed and cached there.
+            job_result = self._job.result if self._job else None  # type: ignore[union-attr]
+            job_state  = getattr(job_result, "job", None)
+            source_duration: float | None = (
+                job_state.source.duration_seconds if job_state is not None else None
+            )
 
-            if chunk_file.with_suffix(".yaml").exists():
-                artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.COMPLETE))
-                logger.debug("Chunk %s: COMPLETE", chunk_id)
-            else:
-                artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.ARTIFACT_ONLY))
-                pending_ids.append(chunk_id)
-                logger.debug("Chunk %s: ARTIFACT_ONLY (sidecar missing)", chunk_id)
+            for i, boundary in enumerate(scenes):
+                is_last = (i == len(scenes) - 1)
+                end_ts  = source_duration if is_last else scenes[i + 1].timestamp_seconds
+
+                if end_ts is None:
+                    logger.debug("Last chunk end timestamp unknown — skipping (will be resolved at execution)")
+                    break
+
+                stem       = _chunk_name_duration(boundary.timestamp_seconds, end_ts)
+                chunk_file = chunks_dir / f"{stem}.mkv"
+
+                if chunk_file.exists():
+                    if chunk_file.with_suffix(".yaml").exists():
+                        artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.COMPLETE))
+                        logger.debug("Chunk %s: COMPLETE", stem)
+                    else:
+                        artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.ARTIFACT_ONLY))
+                        pending_ids.append(stem)
+                        logger.debug("Chunk %s: ARTIFACT_ONLY (sidecar missing)", stem)
+                else:
+                    artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.ABSENT))
+                    pending_ids.append(stem)
+                    logger.debug("Chunk %s: ABSENT (missing from disk)", stem)
+        else:
+            # No scene boundaries yet — plain disk scan, scene detection will follow.
+            for chunk_file in sorted(chunks_dir.glob("*.mkv")):
+                stem = chunk_file.stem
+                if not CHUNK_NAME_PATTERN.match(stem):
+                    logger.debug("Skipping non-chunk file: %s", chunk_file.name)
+                    continue
+                if chunk_file.with_suffix(".yaml").exists():
+                    artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.COMPLETE))
+                    logger.debug("Chunk %s: COMPLETE", stem)
+                else:
+                    artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.ARTIFACT_ONLY))
+                    pending_ids.append(stem)
+                    logger.debug("Chunk %s: ARTIFACT_ONLY (sidecar missing)", stem)
 
         complete_count = len(artifacts) - len(pending_ids)
         logger.debug(

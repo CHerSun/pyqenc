@@ -1504,7 +1504,7 @@ def encode_all_chunks(
     # Run parallel encoding — COMPLETE pairs are skipped inside _encode_chunks_parallel
     logger.debug("Starting parallel encoding with %d workers", max_parallel)
     total_seconds = sum(c.end_timestamp - c.start_timestamp for c in chunks) * len(strategies)
-    with ProgressBar(total_seconds, title="Encoding") as advance:
+    with ProgressBar(total_seconds, title="Encoding", total_count=len(chunks) * len(strategies)) as advance:
         # Update the bar for completed chunks
         chunks_by_id = {c.chunk_id: c for c in chunks}
         for r in phase_recovery.pairs.values():
@@ -1977,11 +1977,13 @@ class EncodingPhase:
                 artifact_path = encoded_strategy_dir / f"{chunk_id}.mkv"
 
                 crf: float | None = None
-                if state == ArtifactState.COMPLETE and pair_rec and pair_rec.attempts:
-                    for ar in pair_rec.attempts:
-                        if ar.state == ArtifactState.COMPLETE:
-                            crf = ar.crf
-                            break
+                if state == ArtifactState.COMPLETE and pair_rec and pair_rec.winning_file:
+                    m = ENCODED_ATTEMPT_NAME_PATTERN.match(pair_rec.winning_file.name)
+                    if m:
+                        try:
+                            crf = float(m.group("crf"))
+                        except (ValueError, TypeError):
+                            pass
 
                 if state != ArtifactState.COMPLETE:
                     failed_pairs.append(f"{chunk_id}/{strategy_name}")
