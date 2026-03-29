@@ -1,10 +1,11 @@
-"""Unit tests for EncodingPhase quality target re-evaluation.
+"""Unit tests for encoding phase recovery.
 
-Covers requirement 5.7:
-- COMPLETE pairs whose metrics no longer meet updated quality targets are
-  downgraded to ARTIFACT_ONLY by ``_recover_pair`` (called from
-  ``EncodingPhase._recover()``).
-- COMPLETE pairs that still meet updated targets remain COMPLETE.
+Covers the fast presence-based recovery in ``_recover_encoding_attempts``:
+- A pair is COMPLETE when both a winning .mkv and its .yaml sidecar exist in
+  ``encoded/<strategy>/``.
+- A pair is ABSENT when neither is present.
+- ``winning_file`` is populated on COMPLETE pairs.
+- The index is built from a single ``iterdir()`` per strategy — no per-pair globs.
 """
 
 from __future__ import annotations
@@ -12,196 +13,120 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import yaml
 
-from pyqenc.models import QualityTarget
-from pyqenc.phases.encoding import _enc_recover_pair as _recover_pair
-from pyqenc.state import ArtifactState, EncodingResultSidecar
+from pyqenc.phases.encoding import _recover_encoding_attempts
+from pyqenc.state import ArtifactState
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Fixtures / helpers
 # ---------------------------------------------------------------------------
 
-_CHUNK_ID  = "00꞉00꞉00․000-00꞉01꞉30․000"
-_STRATEGY  = "slow+h265-aq"
+_CHUNK_ID   = "00꞉00꞉00․000-00꞉01꞉30․000"
+_STRATEGY   = "slow+h265-aq"
 _SAFE_STRAT = "slow_h265-aq"
 _RESOLUTION = "1920x800"
 _CRF        = 18.0
 
-_TARGET_VMAF_MIN_93 = QualityTarget(metric="vmaf", statistic="min", value=93.0)
-_TARGET_VMAF_MIN_96 = QualityTarget(metric="vmaf", statistic="min", value=96.0)
 
+def _make_complete_pair(encoded_dir: Path, chunk_id: str = _CHUNK_ID, crf: float = _CRF) -> Path:
+    """Write a winning .mkv and its result sidecar into encoded_dir.
 
-def _make_attempt_file(encoding_dir: Path, crf: float = _CRF) -> Path:
-    """Create a fake attempt .mkv file in encoding/<strategy>/."""
-    encoding_dir.mkdir(parents=True, exist_ok=True)
-    attempt_name = f"{_CHUNK_ID}.{_RESOLUTION}.crf{crf:4.1f}.mkv"
-    attempt_path = encoding_dir / attempt_name
-    attempt_path.write_bytes(b"\x00" * 1024)
-    return attempt_path
-
-
-def _write_attempt_sidecar(attempt_path: Path, metrics: dict[str, float], crf: float = _CRF) -> None:
-    """Write a per-attempt metrics sidecar alongside an attempt file."""
-    sidecar = attempt_path.with_suffix(".yaml")
-    data = {"crf": crf, "targets_met": True, "metrics": metrics}
-    write_yaml_atomic(sidecar, data)
-
-
-def _make_result_sidecar(encoded_dir: Path, winning_attempt: str, metrics: dict[str, float]) -> Path:
-    """Create a result sidecar in encoded/<strategy>/ marking the pair COMPLETE."""
+    Layout mirrors the real encoded/ directory:
+      <chunk_id>.<res>.crf<N>.mkv   — winning attempt
+      <chunk_id>.<res>.yaml          — result sidecar (no crf in name)
+    """
     encoded_dir.mkdir(parents=True, exist_ok=True)
-    # Create the winning attempt file (hard-link target)
-    winning_path = encoded_dir / winning_attempt
-    winning_path.write_bytes(b"\x00" * 1024)
-
-    sidecar_path = encoded_dir / f"{_CHUNK_ID}.{_RESOLUTION}.yaml"
-    data = EncodingResultSidecar(
-        winning_attempt = winning_attempt,
-        crf             = _CRF,
-        quality_targets = ["vmaf-min:93.0"],
-        metrics         = metrics,
-    ).to_yaml_dict()
-    write_yaml_atomic(sidecar_path, data)
-    return sidecar_path
+    mkv     = encoded_dir / f"{chunk_id}.{_RESOLUTION}.crf{crf:4.1f}.mkv"
+    sidecar = encoded_dir / f"{chunk_id}.{_RESOLUTION}.yaml"
+    mkv.write_bytes(b"\x00" * 512)
+    write_yaml_atomic(sidecar, {"crf": crf, "targets_met": True, "metrics": {"vmaf_min": 94.5}})
+    return mkv
 
 
 # ---------------------------------------------------------------------------
-# Tests: COMPLETE → ARTIFACT_ONLY downgrade when targets tighten
+# Tests
 # ---------------------------------------------------------------------------
 
-class TestQualityTargetReEvaluation:
-    """Tests for COMPLETE → ARTIFACT_ONLY downgrade when quality targets change."""
+class TestRecoverEncodingAttempts:
 
-    def test_complete_pair_stays_complete_when_targets_still_met(self, tmp_path: Path) -> None:
-        """A COMPLETE pair remains COMPLETE when its metrics still satisfy the targets."""
-        encoding_dir = tmp_path / "encoding" / _SAFE_STRAT
-        encoded_dir  = tmp_path / "encoded"  / _SAFE_STRAT
+    def test_complete_pair_detected(self, tmp_path: Path) -> None:
+        """A pair with mkv + yaml in encoded/ is classified COMPLETE."""
+        encoded_dir = tmp_path / "encoded" / _SAFE_STRAT
+        winning     = _make_complete_pair(encoded_dir)
 
-        attempt_file = _make_attempt_file(encoding_dir)
-        _write_attempt_sidecar(attempt_file, {"vmaf_min": 94.5})
-        winning_name = attempt_file.name
-        _make_result_sidecar(encoded_dir, winning_name, {"vmaf_min": 94.5})
-
-        # Target: vmaf_min >= 93.0 — metrics (94.5) still pass
-        recovery = _recover_pair(
-            chunk_id        = _CHUNK_ID,
-            strategy        = _STRATEGY,
-            encoding_dir    = encoding_dir,
-            encoded_dir     = encoded_dir,
-            quality_targets = [_TARGET_VMAF_MIN_93],
+        recovery = _recover_encoding_attempts(
+            work_dir  = tmp_path,
+            chunk_ids = [_CHUNK_ID],
+            strategies = [_STRATEGY],
         )
 
-        assert recovery.state == ArtifactState.COMPLETE
+        pair = recovery.pairs[(_CHUNK_ID, _STRATEGY)]
+        assert pair.state        == ArtifactState.COMPLETE
+        assert pair.winning_file == winning
+        assert recovery.pending  == []
 
-    def test_complete_pair_downgraded_when_targets_tightened(self, tmp_path: Path) -> None:
-        """A COMPLETE pair is downgraded to ARTIFACT_ONLY when tightened targets are not met."""
-        encoding_dir = tmp_path / "encoding" / _SAFE_STRAT
-        encoded_dir  = tmp_path / "encoded"  / _SAFE_STRAT
-
-        attempt_file = _make_attempt_file(encoding_dir)
-        _write_attempt_sidecar(attempt_file, {"vmaf_min": 94.5})
-        winning_name = attempt_file.name
-        # Result sidecar stores vmaf_min=94.5 (met old target of 93.0)
-        _make_result_sidecar(encoded_dir, winning_name, {"vmaf_min": 94.5})
-
-        # New target: vmaf_min >= 96.0 — metrics (94.5) no longer pass
-        recovery = _recover_pair(
-            chunk_id        = _CHUNK_ID,
-            strategy        = _STRATEGY,
-            encoding_dir    = encoding_dir,
-            encoded_dir     = encoded_dir,
-            quality_targets = [_TARGET_VMAF_MIN_96],
+    def test_absent_pair_when_no_encoded_dir(self, tmp_path: Path) -> None:
+        """A pair with no encoded/ directory is ABSENT."""
+        recovery = _recover_encoding_attempts(
+            work_dir  = tmp_path,
+            chunk_ids = [_CHUNK_ID],
+            strategies = [_STRATEGY],
         )
 
-        assert recovery.state == ArtifactState.ARTIFACT_ONLY
+        pair = recovery.pairs[(_CHUNK_ID, _STRATEGY)]
+        assert pair.state == ArtifactState.ABSENT
+        assert (_CHUNK_ID, _STRATEGY) in recovery.pending
 
-    def test_downgraded_pair_has_crf_history_from_attempts(self, tmp_path: Path) -> None:
-        """After downgrade, the CRF history from attempt files is preserved for resumption."""
-        encoding_dir = tmp_path / "encoding" / _SAFE_STRAT
-        encoded_dir  = tmp_path / "encoded"  / _SAFE_STRAT
-
-        attempt_file = _make_attempt_file(encoding_dir, crf=18.0)
-        _write_attempt_sidecar(attempt_file, {"vmaf_min": 94.5}, crf=18.0)
-        winning_name = attempt_file.name
-        _make_result_sidecar(encoded_dir, winning_name, {"vmaf_min": 94.5})
-
-        recovery = _recover_pair(
-            chunk_id        = _CHUNK_ID,
-            strategy        = _STRATEGY,
-            encoding_dir    = encoding_dir,
-            encoded_dir     = encoded_dir,
-            quality_targets = [_TARGET_VMAF_MIN_96],
-        )
-
-        assert recovery.state == ArtifactState.ARTIFACT_ONLY
-        # CRF history should contain the existing attempt
-        assert len(recovery.history.attempts) >= 1
-
-    def test_absent_pair_stays_absent(self, tmp_path: Path) -> None:
-        """A pair with no files at all is classified ABSENT."""
-        encoding_dir = tmp_path / "encoding" / _SAFE_STRAT
-        encoded_dir  = tmp_path / "encoded"  / _SAFE_STRAT
-
-        recovery = _recover_pair(
-            chunk_id        = _CHUNK_ID,
-            strategy        = _STRATEGY,
-            encoding_dir    = encoding_dir,
-            encoded_dir     = encoded_dir,
-            quality_targets = [_TARGET_VMAF_MIN_93],
-        )
-
-        assert recovery.state == ArtifactState.ABSENT
-
-    def test_artifact_only_pair_stays_artifact_only(self, tmp_path: Path) -> None:
-        """A pair with attempt files but no result sidecar is ARTIFACT_ONLY."""
-        encoding_dir = tmp_path / "encoding" / _SAFE_STRAT
-        encoded_dir  = tmp_path / "encoded"  / _SAFE_STRAT
-
-        attempt_file = _make_attempt_file(encoding_dir)
-        _write_attempt_sidecar(attempt_file, {"vmaf_min": 94.5})
-        # No result sidecar in encoded/
-
-        recovery = _recover_pair(
-            chunk_id        = _CHUNK_ID,
-            strategy        = _STRATEGY,
-            encoding_dir    = encoding_dir,
-            encoded_dir     = encoded_dir,
-            quality_targets = [_TARGET_VMAF_MIN_93],
-        )
-
-        assert recovery.state == ArtifactState.ARTIFACT_ONLY
-
-    def test_result_sidecar_with_missing_winning_file_treated_as_absent(
-        self, tmp_path: Path
-    ) -> None:
-        """If the result sidecar references a missing winning file and no attempt files
-        exist, the pair is ABSENT (sidecar is deleted, no attempts to resume from)."""
-        encoding_dir = tmp_path / "encoding" / _SAFE_STRAT
-        encoded_dir  = tmp_path / "encoded"  / _SAFE_STRAT
+    def test_absent_pair_when_mkv_missing_sidecar(self, tmp_path: Path) -> None:
+        """A .mkv without a .yaml sidecar is not COMPLETE — pair is ABSENT."""
+        encoded_dir = tmp_path / "encoded" / _SAFE_STRAT
         encoded_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{_CHUNK_ID}.{_RESOLUTION}.crf{_CRF:4.1f}"
+        (encoded_dir / f"{stem}.mkv").write_bytes(b"\x00" * 512)
+        # no .yaml written
 
-        # Write result sidecar referencing a non-existent winning file
-        sidecar_path = encoded_dir / f"{_CHUNK_ID}.{_RESOLUTION}.yaml"
-        data = EncodingResultSidecar(
-            winning_attempt = f"{_CHUNK_ID}.{_RESOLUTION}.crf{_CRF:4.1f}.mkv",
-            crf             = _CRF,
-            quality_targets = ["vmaf-min:93.0"],
-            metrics         = {"vmaf_min": 94.5},
-        ).to_yaml_dict()
-        write_yaml_atomic(sidecar_path, data)
-        # winning file does NOT exist, no attempt files either
-
-        recovery = _recover_pair(
-            chunk_id        = _CHUNK_ID,
-            strategy        = _STRATEGY,
-            encoding_dir    = encoding_dir,
-            encoded_dir     = encoded_dir,
-            quality_targets = [_TARGET_VMAF_MIN_93],
+        recovery = _recover_encoding_attempts(
+            work_dir  = tmp_path,
+            chunk_ids = [_CHUNK_ID],
+            strategies = [_STRATEGY],
         )
 
-        # Sidecar is deleted and no attempt files → ABSENT
-        assert recovery.state == ArtifactState.ABSENT
-        assert not sidecar_path.exists()
+        pair = recovery.pairs[(_CHUNK_ID, _STRATEGY)]
+        assert pair.state == ArtifactState.ABSENT
+
+    def test_multiple_chunks_mixed_states(self, tmp_path: Path) -> None:
+        """Multiple chunks: some COMPLETE, some ABSENT."""
+        chunk_a     = "00꞉00꞉00․000-00꞉01꞉00․000"
+        chunk_b     = "00꞉01꞉00․000-00꞉02꞉00․000"
+        encoded_dir = tmp_path / "encoded" / _SAFE_STRAT
+        _make_complete_pair(encoded_dir, chunk_id=chunk_a)
+        # chunk_b has no files
+
+        recovery = _recover_encoding_attempts(
+            work_dir  = tmp_path,
+            chunk_ids = [chunk_a, chunk_b],
+            strategies = [_STRATEGY],
+        )
+
+        assert recovery.pairs[(chunk_a, _STRATEGY)].state == ArtifactState.COMPLETE
+        assert recovery.pairs[(chunk_b, _STRATEGY)].state == ArtifactState.ABSENT
+        assert (chunk_b, _STRATEGY) in recovery.pending
+        assert (chunk_a, _STRATEGY) not in recovery.pending
+
+    def test_winning_file_path_is_correct(self, tmp_path: Path) -> None:
+        """winning_file points to the actual .mkv, not a placeholder."""
+        encoded_dir = tmp_path / "encoded" / _SAFE_STRAT
+        winning     = _make_complete_pair(encoded_dir)
+
+        recovery = _recover_encoding_attempts(
+            work_dir  = tmp_path,
+            chunk_ids = [_CHUNK_ID],
+            strategies = [_STRATEGY],
+        )
+
+        pair = recovery.pairs[(_CHUNK_ID, _STRATEGY)]
+        assert pair.winning_file is not None
+        assert pair.winning_file.exists()
+        assert pair.winning_file == winning

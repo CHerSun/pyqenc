@@ -850,7 +850,7 @@ async def _encode_strategy_test_chunks(
 
     # Recover existing attempt state for this strategy
     test_chunk_ids = [c.chunk_id for c in test_chunks]
-    phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, [strategy.name], quality_targets)
+    phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, [strategy.name])
 
     file_sizes: list[float] = []
     crfs:       list[float] = []
@@ -864,13 +864,21 @@ async def _encode_strategy_test_chunks(
             nonlocal moving_crf
             pair_rec = phase_recovery.pairs.get((chunk.chunk_id, strategy.name))
 
-            # Skip COMPLETE pairs
+            # Skip COMPLETE pairs — use the winning file size and CRF from the result sidecar
             if pair_rec is not None and pair_rec.state == ArtifactState.COMPLETE:
-                for ar in reversed(pair_rec.attempts):
-                    if ar.state == ArtifactState.COMPLETE and ar.path.exists():
-                        file_sizes.append(ar.path.stat().st_size)
-                        crfs.append(ar.crf)
-                        break
+                if pair_rec.winning_file is not None and pair_rec.winning_file.exists():
+                    file_sizes.append(pair_rec.winning_file.stat().st_size)
+                    # Load CRF from the result sidecar (lazy, only for COMPLETE pairs here)
+                    import yaml as _yaml
+                    yaml_sidecar = pair_rec.winning_file.with_suffix(".yaml")
+                    try:
+                        with yaml_sidecar.open("r", encoding="utf-8") as fh:
+                            sidecar_data = _yaml.safe_load(fh)
+                        crf_val = sidecar_data.get("crf") if sidecar_data else None
+                        if crf_val is not None:
+                            crfs.append(float(crf_val))
+                    except Exception:
+                        pass
                 advance(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.SKIPPED)
                 return
 
@@ -882,11 +890,6 @@ async def _encode_strategy_test_chunks(
 
             reference = VideoMetadata(path=reference_path)
 
-            # Inject recovered CRFHistory for ARTIFACT_ONLY pairs
-            recovered_history = None
-            if pair_rec is not None and pair_rec.state == ArtifactState.ARTIFACT_ONLY:
-                recovered_history = pair_rec.history
-
             async with semaphore:
                 chunk_result = await _encode_chunk_async(
                     encoder,
@@ -896,7 +899,6 @@ async def _encode_strategy_test_chunks(
                     quality_targets,
                     moving_crf,
                     force=False,
-                    initial_history=recovered_history,
                 )
 
             if chunk_result.success and chunk_result.encoded_file and chunk_result.encoded_file.path.exists():

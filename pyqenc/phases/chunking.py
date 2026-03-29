@@ -530,70 +530,37 @@ from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
 _CHUNKING_YAML     = "chunking.yaml"
 
 
-def _probe_chunk_metadata(chunk_file: Path, chunk_id: str) -> ChunkMetadata | None:
-    """Probe *chunk_file* with ffprobe to obtain its metadata.
-
-    Used when a chunk ``.mkv`` is present but its sidecar is missing
-    (``ARTIFACT_ONLY`` state).
-
-    Args:
-        chunk_file: Path to the chunk ``.mkv`` file.
-        chunk_id:   Chunk identifier (timestamp-range stem).
-
-    Returns:
-        ``ChunkMetadata`` on success, ``None`` on failure.
-    """
-    meta = VideoMetadata(path=chunk_file)
-    _ = meta.duration_seconds
-    _ = meta.fps
-    _ = meta.resolution
-    _ = meta.frame_count
-
-    if meta._duration_seconds is None:
-        logger.warning("Could not probe duration for chunk %s — skipping sidecar write", chunk_id)
-        return None
-
-    try:
-        parts = chunk_id.split(RANGE_SEPARATOR, 1)
-        if len(parts) != 2:
-            raise ValueError(f"Expected exactly one '{RANGE_SEPARATOR}' in chunk_id: {chunk_id!r}")
-
-        def _ts_to_seconds(ts: str) -> float:
-            hms = ts.split(TIME_SEPARATOR_SAFE)
-            if len(hms) != 3:
-                raise ValueError(f"Expected HH꞉MM꞉SS in timestamp: {ts!r}")
-            h, m, s_ms = hms
-            s_ms = s_ms.replace(TIME_SEPARATOR_MS, ".")
-            return int(h) * 3600 + int(m) * 60 + float(s_ms)
-
-        start_ts, end_ts = _ts_to_seconds(parts[0]), _ts_to_seconds(parts[1])
-    except ValueError as exc:
-        logger.warning("Could not parse timestamps from chunk_id %r: %s", chunk_id, exc)
-        return None
-
-    chunk_meta = ChunkMetadata(
-        path=chunk_file,
-        chunk_id=chunk_id,
-        start_timestamp=start_ts,
-        end_timestamp=end_ts,
-    )
-    chunk_meta._duration_seconds = meta._duration_seconds
-    chunk_meta._frame_count      = meta._frame_count
-    chunk_meta._fps              = meta._fps
-    chunk_meta._resolution       = meta._resolution
-    chunk_meta._pix_fmt          = meta._pix_fmt
-    return chunk_meta
-
-
-@_dataclass
 class ChunkArtifact(Artifact):
     """Chunking artifact for a single video chunk.
 
-    Attributes:
-        metadata: Chunk metadata; populated when ``state`` is ``COMPLETE``.
+    ``metadata`` is lazy-loaded from the sidecar YAML on first access.
+    The sidecar path is derived from ``path`` (same stem, ``.yaml`` suffix).
+    Returns ``None`` if the sidecar is absent or cannot be parsed.
     """
 
-    metadata: ChunkMetadata | None = None
+    def __init__(self, path: Path, state: ArtifactState) -> None:
+        super().__init__(path=path, state=state)
+        self._metadata:        ChunkMetadata | None = None
+        self._metadata_loaded: bool                 = False
+
+    @property
+    def metadata(self) -> ChunkMetadata | None:
+        """Chunk metadata; lazy-loaded from sidecar YAML on first access."""
+        if self._metadata_loaded:
+            return self._metadata
+        self._metadata_loaded = True
+        sidecar = self.path.with_suffix(".yaml")
+        try:
+            import yaml as _yaml
+            from pyqenc.state import ChunkSidecar as _ChunkSidecar
+            with sidecar.open("r", encoding="utf-8") as fh:
+                data = _yaml.safe_load(fh)
+            self._metadata = _ChunkSidecar.from_yaml_dict(
+                data, chunk_id=self.path.stem, path=self.path
+            ).chunk
+        except Exception:
+            pass
+        return self._metadata
 
 
 @_dataclass
@@ -843,9 +810,11 @@ class ChunkingPhase:
         else:
             logger.debug("Chunking recovery: chunking.yaml absent or empty — scene detection needed")
 
-        # Step 4: scan chunks/ and classify each chunk
-        artifacts: list[ChunkArtifact] = []
-        pending_ids: list[str] = []
+        # Step 4: scan chunks/ and classify each chunk.
+        # Sidecar presence (chunk.yaml alongside chunk.mkv) determines COMPLETE vs ARTIFACT_ONLY.
+        # Metadata is lazy-loaded from the sidecar on first access via ChunkArtifact.metadata.
+        artifacts:   list[ChunkArtifact] = []
+        pending_ids: list[str]           = []
 
         for chunk_file in sorted(chunks_dir.glob("*.mkv")):
             chunk_id = chunk_file.stem
@@ -853,73 +822,15 @@ class ChunkingPhase:
                 logger.debug("Skipping non-chunk file: %s", chunk_file.name)
                 continue
 
-            sidecar_path = chunk_file.with_suffix(".yaml")
-
-            if not sidecar_path.exists():
-                # ARTIFACT_ONLY: probe and write sidecar
-                logger.debug(
-                    "Chunk %s: file present, sidecar missing — probing and writing sidecar", chunk_id
-                )
-                chunk_meta = _probe_chunk_metadata(chunk_file, chunk_id)
-                if chunk_meta is not None and execute:
-                    from pyqenc.state import ChunkSidecar as _ChunkSidecar
-                    from pyqenc.utils.yaml_utils import write_yaml_atomic as _write_yaml
-                    sidecar = _ChunkSidecar(chunk=chunk_meta)
-                    try:
-                        _write_yaml(sidecar_path, sidecar.to_yaml_dict())
-                        logger.info("Wrote missing sidecar for chunk %s", chunk_id)
-                        artifacts.append(ChunkArtifact(
-                            path     = chunk_file,
-                            state    = ArtifactState.COMPLETE,
-                            metadata = chunk_meta,
-                        ))
-                    except Exception as exc:
-                        logger.warning(
-                            "Could not write sidecar for chunk %s: %s — treating as ARTIFACT_ONLY",
-                            chunk_id, exc,
-                        )
-                        artifacts.append(ChunkArtifact(
-                            path     = chunk_file,
-                            state    = ArtifactState.ARTIFACT_ONLY,
-                            metadata = None,
-                        ))
-                        pending_ids.append(chunk_id)
-                else:
-                    artifacts.append(ChunkArtifact(
-                        path     = chunk_file,
-                        state    = ArtifactState.ARTIFACT_ONLY,
-                        metadata = chunk_meta,
-                    ))
-                    pending_ids.append(chunk_id)
+            if chunk_file.with_suffix(".yaml").exists():
+                artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.COMPLETE))
+                logger.debug("Chunk %s: COMPLETE", chunk_id)
             else:
-                # Sidecar present — load it
-                try:
-                    import yaml as _yaml
-                    with sidecar_path.open("r", encoding="utf-8") as fh:
-                        sidecar_data = _yaml.safe_load(fh)
-                    from pyqenc.state import ChunkSidecar as _ChunkSidecar
-                    chunk_meta = _ChunkSidecar.from_yaml_dict(
-                        sidecar_data, chunk_id=chunk_id, path=chunk_file
-                    ).chunk
-                    artifacts.append(ChunkArtifact(
-                        path     = chunk_file,
-                        state    = ArtifactState.COMPLETE,
-                        metadata = chunk_meta,
-                    ))
-                    logger.debug("Chunk %s: COMPLETE (sidecar loaded)", chunk_id)
-                except Exception as exc:
-                    logger.warning(
-                        "Could not load sidecar for chunk %s: %s — treating as ARTIFACT_ONLY",
-                        chunk_id, exc,
-                    )
-                    artifacts.append(ChunkArtifact(
-                        path     = chunk_file,
-                        state    = ArtifactState.ARTIFACT_ONLY,
-                        metadata = None,
-                    ))
-                    pending_ids.append(chunk_id)
+                artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.ARTIFACT_ONLY))
+                pending_ids.append(chunk_id)
+                logger.debug("Chunk %s: ARTIFACT_ONLY (sidecar missing)", chunk_id)
 
-        complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
+        complete_count = len(artifacts) - len(pending_ids)
         logger.debug(
             "Chunking recovery: %d chunk(s) found — %d COMPLETE, %d pending",
             len(artifacts), complete_count, len(pending_ids),
