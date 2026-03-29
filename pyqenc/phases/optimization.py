@@ -31,6 +31,7 @@ from alive_progress import config_handler
 from pyqenc.config import ConfigManager
 from pyqenc.constants import (
     CHUNKS_DIR,
+    CRF_GRANULARITY,
     CRF_INITIAL_DEFAULT,
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
@@ -162,13 +163,18 @@ class OptimizationPhase:
                 strategy_results    = [],
             )
         else:
-            current_targets = _targets_as_strings(self._config.quality_targets)
-            if persisted.quality_targets and persisted.quality_targets != current_targets:
-                # Quality targets changed — work is needed; run() will invalidate encoded/ sidecars
+            current_targets  = _targets_as_strings(self._config.quality_targets)
+            current_sampling = self._config.metrics_sampling
+            params_stale = (
+                (persisted.quality_targets and persisted.quality_targets != current_targets)
+                or (persisted.metrics_sampling is not None and persisted.metrics_sampling != current_sampling)
+            )
+            if params_stale:
+                # Quality targets or metrics_sampling changed — work needed; run() will invalidate encoded/ sidecars
                 self.result = OptimizationPhaseResult(
                     outcome             = PhaseOutcome.DRY_RUN,
                     artifacts           = [],
-                    message             = "quality targets changed — re-run needed",
+                    message             = "quality targets or metrics_sampling changed — re-run needed",
                     selected_strategies = [],
                     strategy_results    = [],
                 )
@@ -226,16 +232,28 @@ class OptimizationPhase:
         # tolerance re-application can short-circuit without needing live phases)
         persisted = OptimizationParams.load(opt_yaml)
 
-        current_targets = _targets_as_strings(self._config.quality_targets)
+        current_targets  = _targets_as_strings(self._config.quality_targets)
+        current_sampling = self._config.metrics_sampling
 
-        # Step 2: quality-target change detection — must happen before tolerance
-        # re-application so we don't skip re-encoding when targets changed.
+        # Step 2: quality-target / metrics_sampling change detection — must happen before
+        # tolerance re-application so we don't skip re-encoding when params changed.
         targets_changed = (
             persisted is not None
             and bool(persisted.quality_targets)
             and persisted.quality_targets != current_targets
         )
-        if targets_changed and persisted is not None and persisted.strategy_results:
+        sampling_changed = (
+            persisted is not None
+            and persisted.metrics_sampling is not None
+            and persisted.metrics_sampling != current_sampling
+        )
+        params_changed = targets_changed or sampling_changed
+        if params_changed and persisted is not None and persisted.strategy_results:
+            if sampling_changed:
+                logger.debug(
+                    "metrics_sampling changed (%d → %d) — deleting encoded/ result sidecars",
+                    persisted.metrics_sampling, current_sampling,
+                )
             # Delete all result sidecars from encoded/ for every strategy so
             # EncodingPhase sees ARTIFACT_ONLY pairs and re-evaluates them.
             _delete_encoded_result_sidecars(work_dir, self._config.strategies)
@@ -247,6 +265,7 @@ class OptimizationPhase:
                 tolerance_pct    = persisted.tolerance_pct,
                 selected         = [],
                 quality_targets  = persisted.quality_targets,
+                metrics_sampling = persisted.metrics_sampling,
             )
 
         # Step 3: tolerance re-application — all results cached, only tolerance changed
@@ -256,7 +275,7 @@ class OptimizationPhase:
             and persisted.strategy_results
             and len(persisted.strategy_results) == len(self._config.strategies)
             and persisted.tolerance_pct != tolerance
-            and not targets_changed
+            and not params_changed
         ):
             emit_phase_banner("OPTIMIZATION", logger)
             logger.info("Strategies:  %s", ", ".join(s.name for s in self._config.strategies))
@@ -273,6 +292,7 @@ class OptimizationPhase:
                 tolerance_pct    = tolerance,
                 selected         = selected,
                 quality_targets  = current_targets,
+                metrics_sampling = current_sampling,
             ).save(opt_yaml)
             log_recovery_line(logger, len(persisted.strategy_results), 0, unit="strategy result")
             self._log_optimization_summary(persisted.strategy_results, selected)
@@ -294,7 +314,7 @@ class OptimizationPhase:
             and persisted.strategy_results
             and len(persisted.strategy_results) == len(self._config.strategies)
             and persisted.tolerance_pct == tolerance
-            and not targets_changed
+            and not params_changed
         ):
             emit_phase_banner("OPTIMIZATION", logger)
             logger.info("Strategies:  %s", ", ".join(s.name for s in self._config.strategies))
@@ -409,6 +429,7 @@ class OptimizationPhase:
             tolerance_pct    = tolerance,
             selected         = [],
             quality_targets  = current_targets,
+            metrics_sampling = current_sampling,
         ).save(opt_yaml)
 
         # Step 10: run test encodes for pending strategies
@@ -457,6 +478,7 @@ class OptimizationPhase:
                 tolerance_pct    = tolerance,
                 selected         = [],
                 quality_targets  = current_targets,
+                metrics_sampling = current_sampling,
             ).save(opt_yaml)
 
             # Log per-strategy result block
@@ -475,7 +497,7 @@ class OptimizationPhase:
         final_results = sorted(all_results, key=lambda r: r.total_size)
         selected      = self._apply_tolerance(final_results, tolerance)
 
-        # Persist final state with current quality targets
+        # Persist final state with current quality targets and sampling
         OptimizationParams(
             crop             = crop,
             test_chunks      = [c.chunk_id for c in test_chunks],
@@ -483,6 +505,7 @@ class OptimizationPhase:
             tolerance_pct    = tolerance,
             selected         = selected,
             quality_targets  = current_targets,
+            metrics_sampling = current_sampling,
         ).save(opt_yaml)
 
         self._log_optimization_summary(final_results, selected)
@@ -528,23 +551,28 @@ class OptimizationPhase:
         Returns:
             ``OptimizationPhaseResult`` with all configured strategies selected.
         """
-        work_dir        = self._config.work_dir
-        opt_yaml        = work_dir / _OPTIMIZATION_YAML
-        current_targets = _targets_as_strings(self._config.quality_targets)
+        work_dir         = self._config.work_dir
+        opt_yaml         = work_dir / _OPTIMIZATION_YAML
+        current_targets  = _targets_as_strings(self._config.quality_targets)
+        current_sampling = self._config.metrics_sampling
 
         if not dry_run:
             persisted = OptimizationParams.load(opt_yaml)
-            if (
+            params_stale = (
                 persisted is not None
-                and bool(persisted.quality_targets)
-                and persisted.quality_targets != current_targets
-            ):
+                and (
+                    (bool(persisted.quality_targets) and persisted.quality_targets != current_targets)
+                    or (persisted.metrics_sampling is not None and persisted.metrics_sampling != current_sampling)
+                )
+            )
+            if params_stale:
                 logger.debug(
-                    "All-strategies mode: quality targets changed — deleting encoded/ result sidecars"
+                    "All-strategies mode: quality targets or metrics_sampling changed"
+                    " — deleting encoded/ result sidecars"
                 )
                 _delete_encoded_result_sidecars(work_dir, self._config.strategies)
 
-            # Always write optimization.yaml with current targets
+            # Always write optimization.yaml with current targets and sampling
             work_dir.mkdir(parents=True, exist_ok=True)
             OptimizationParams(
                 crop             = None,
@@ -553,6 +581,7 @@ class OptimizationPhase:
                 tolerance_pct    = 0.0,
                 selected         = list(self._config.strategies),
                 quality_targets  = current_targets,
+                metrics_sampling = current_sampling,
             ).save(opt_yaml)
 
         return OptimizationPhaseResult(
@@ -891,13 +920,14 @@ async def _encode_strategy_test_chunks(
             reference = VideoMetadata(path=reference_path)
 
             async with semaphore:
+                chunk_initial_crf = round(moving_crf / CRF_GRANULARITY) * CRF_GRANULARITY
                 chunk_result = await _encode_chunk_async(
                     encoder,
                     chunk,
                     reference,
                     strategy.name,
                     quality_targets,
-                    moving_crf,
+                    chunk_initial_crf,
                     force=False,
                 )
 
@@ -905,7 +935,7 @@ async def _encode_strategy_test_chunks(
                 file_sizes.append(chunk_result.encoded_file.path.stat().st_size)
                 if chunk_result.final_crf is not None:
                     crfs.append(chunk_result.final_crf)
-                    # Update moving average: blend last stored seed with this winning CRF
+                    # Update moving average: blend last stored seed with this winning CRF.
                     moving_crf = (moving_crf + chunk_result.final_crf) / 2.0
                 advance(chunk.end_timestamp - chunk.start_timestamp)
             else:

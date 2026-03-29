@@ -193,26 +193,39 @@ class ExtractionParams(BaseModel):
 class ChunkingParams(BaseModel):
     """Phase parameter file model for chunking (``chunking.yaml``).
 
-    Stores detected scene boundaries.  Crop params are NOT stored here
-    since chunking does not apply or depend on cropping.
+    Stores the chunking mode and detected scene boundaries.  ``chunking_mode``
+    is written first so a mode change is immediately visible in the file.
+    Crop params are NOT stored here since chunking does not apply or depend on
+    cropping.
+
+    Attributes:
+        chunking_mode: The chunking mode used when chunks were produced.
+                       ``None`` for files written before this field was added
+                       (treated as unknown — no mismatch triggered).
+        scenes:        Detected scene boundaries.
     """
 
-    scenes: list[SceneBoundary] = Field(default_factory=list)
+    chunking_mode: str | None              = None
+    scenes:        list[SceneBoundary]     = Field(default_factory=list)
 
     def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict."""
+        """Serialise to a YAML-friendly dict (``chunking_mode`` comes first)."""
         return {
+            "chunking_mode": self.chunking_mode,
             "scenes": [
                 {"frame": s.frame, "timestamp_seconds": s.timestamp_seconds}
                 for s in self.scenes
-            ]
+            ],
         }
 
     @classmethod
     def from_yaml_dict(cls, data: dict) -> "ChunkingParams":
         """Restore from a dict loaded from ``chunking.yaml``."""
         scenes = [SceneBoundary(**s) for s in data.get("scenes", [])]
-        return cls(scenes=scenes)
+        return cls(
+            chunking_mode = data.get("chunking_mode"),
+            scenes        = scenes,
+        )
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
@@ -278,8 +291,9 @@ class OptimizationParams(BaseModel):
     """Phase parameter file model for optimization (``optimization.yaml``).
 
     Stores crop params active when optimization ran, selected test chunk IDs,
-    per-strategy test results, the tolerance used, the selected strategies, and
-    the quality targets active when the last run wrote this file.
+    per-strategy test results, the tolerance used, the selected strategies,
+    the quality targets, and the metrics sampling factor active when the last
+    run wrote this file.
 
     Attributes:
         crop:             Crop params active when optimization ran.
@@ -292,6 +306,9 @@ class OptimizationParams(BaseModel):
                           Written in both optimization mode and all-strategies mode so
                           ``OptimizationPhase`` can detect target changes on the next run
                           regardless of mode.
+        metrics_sampling: Frame subsampling factor used when test encodes ran.
+                          ``None`` for files written before this field was added
+                          (treated as unknown — no mismatch triggered).
     """
 
     model_config = {"arbitrary_types_allowed": True}
@@ -302,6 +319,7 @@ class OptimizationParams(BaseModel):
     tolerance_pct:    float                    = 0.0
     selected:         list[Strategy]           = Field(default_factory=list)
     quality_targets:  list[str]                = Field(default_factory=list)
+    metrics_sampling: int | None               = None
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
@@ -311,6 +329,7 @@ class OptimizationParams(BaseModel):
             "strategy_results": [r.to_yaml_dict() for r in self.strategy_results],
             "selected":         [s.name for s in self.selected],
             "quality_targets":  self.quality_targets,
+            "metrics_sampling": self.metrics_sampling,
         }
         if self.crop is not None:
             d["crop"] = {
@@ -333,6 +352,7 @@ class OptimizationParams(BaseModel):
             Strategy.from_name(name)
             for name in data.get("selected", [])
         ]
+        raw_sampling = data.get("metrics_sampling")
         return cls(
             crop             = crop,
             test_chunks      = data.get("test_chunks", []),
@@ -340,6 +360,7 @@ class OptimizationParams(BaseModel):
             tolerance_pct    = float(data.get("tolerance_pct", 0.0)),
             selected         = selected,
             quality_targets  = data.get("quality_targets", []),
+            metrics_sampling = int(raw_sampling) if raw_sampling is not None else None,
         )
 
     @classmethod
@@ -533,6 +554,68 @@ class AudioParams(BaseModel):
 
     def save(self, path: Path) -> None:
         """Write this ``AudioParams`` to *path* atomically.
+
+        Args:
+            path: Destination YAML file path.
+        """
+        write_yaml_atomic(path, self.to_yaml_dict())
+        logger.debug("Saved %s", path.name)
+
+
+class MergeParams(BaseModel):
+    """Phase parameter file model for merging (``merge.yaml``).
+
+    Stores the quality targets and metrics sampling factor active when the
+    last merge run wrote this file.  Used to detect changes on subsequent
+    runs and delete stale merge artifacts (sidecar + output) so the merge
+    phase re-runs with the new parameters.
+
+    Attributes:
+        quality_targets:  Quality targets serialised as ``"metric-statistic:value"``
+                          strings.  ``None`` / empty means no targets were configured.
+        metrics_sampling: Frame subsampling factor used during quality measurement.
+                          ``None`` for files written before this field was added
+                          (treated as unknown — no mismatch triggered).
+    """
+
+    quality_targets:  list[str]  = Field(default_factory=list)
+    metrics_sampling: int | None = None
+
+    def to_yaml_dict(self) -> dict:
+        """Serialise to a YAML-friendly dict."""
+        return {
+            "quality_targets":  self.quality_targets,
+            "metrics_sampling": self.metrics_sampling,
+        }
+
+    @classmethod
+    def from_yaml_dict(cls, data: dict) -> "MergeParams":
+        """Restore from a dict loaded from ``merge.yaml``."""
+        raw_sampling = data.get("metrics_sampling")
+        return cls(
+            quality_targets  = data.get("quality_targets", []),
+            metrics_sampling = int(raw_sampling) if raw_sampling is not None else None,
+        )
+
+    @classmethod
+    def load(cls, path: Path) -> "MergeParams | None":
+        """Load ``MergeParams`` from *path*.
+
+        Returns:
+            ``MergeParams`` if the file exists and is valid, ``None`` otherwise.
+        """
+        if not path.exists():
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh)
+            return cls.from_yaml_dict(data or {})
+        except Exception as exc:
+            logger.warning("Could not load %s: %s", path, exc)
+            return None
+
+    def save(self, path: Path) -> None:
+        """Write this ``MergeParams`` to *path* atomically.
 
         Args:
             path: Destination YAML file path.

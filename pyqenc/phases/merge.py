@@ -31,6 +31,7 @@ from pyqenc.constants import (
 )
 from pyqenc.models import CropParams, PhaseOutcome, QualityTarget, VideoMetadata
 from pyqenc.phase import Artifact, ArtifactState, Phase, PhaseResult
+from pyqenc.state import MergeParams
 from pyqenc.utils.ffmpeg_runner import get_frame_count, run_ffmpeg
 from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
 from pyqenc.utils.visualization import QualityEvaluator
@@ -51,6 +52,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Module-level constants
 # ---------------------------------------------------------------------------
+
+_MERGE_YAML = "merge.yaml"
+
+
+def _targets_as_strings(targets: list[QualityTarget]) -> list[str]:
+    """Serialise quality targets to ``"metric-statistic:value"`` strings."""
+    return [f"{t.metric}-{t.statistic}:{t.value}" for t in targets]
 
 
 # ---------------------------------------------------------------------------
@@ -844,10 +852,13 @@ class MergePhase:
         """Classify merge artifacts and handle force-wipe.
 
         Steps:
-        1. If ``force_wipe`` and execute: delete ``final/``.
-        2. Clean up leftover ``.tmp`` files (execute mode only).
-        3. Determine expected strategies from ``EncodingPhase.result``.
-        4. Scan ``final/`` for output + sidecar pairs; classify each.
+        1. If ``force_wipe`` and execute: delete ``final/`` and ``merge.yaml``.
+        2. Detect quality-target / metrics_sampling change — delete per-output
+           sidecars so stale COMPLETE artifacts are reclassified as ARTIFACT_ONLY
+           and the merge re-runs with fresh metrics.
+        3. Clean up leftover ``.tmp`` files (execute mode only).
+        4. Determine expected strategies from ``EncodingPhase.result``.
+        5. Scan ``final/`` for output + sidecar pairs; classify each.
 
         Args:
             force_wipe: When ``True``, wipe all merge artifacts first.
@@ -858,14 +869,40 @@ class MergePhase:
         """
         work_dir  = self._config.work_dir
         final_dir = work_dir / FINAL_OUTPUT_DIR
+        merge_yaml = work_dir / _MERGE_YAML
 
         # Step 1: force-wipe
         if force_wipe and execute:
             if final_dir.exists():
                 shutil.rmtree(final_dir)
                 logger.debug("force_wipe: deleted %s", final_dir)
+            merge_yaml.unlink(missing_ok=True)
+            logger.debug("force_wipe: deleted %s", merge_yaml)
 
-        # Step 2: clean up .tmp files (execute mode only)
+        # Step 2: quality-target / metrics_sampling change detection.
+        # When params change, delete all per-output sidecars so every artifact
+        # is reclassified as ARTIFACT_ONLY and the merge re-runs with fresh metrics.
+        if execute and not force_wipe and final_dir.exists():
+            persisted = MergeParams.load(merge_yaml)
+            if persisted is not None:
+                current_targets  = _targets_as_strings(self._config.quality_targets)
+                current_sampling = self._config.metrics_sampling
+                targets_changed  = bool(persisted.quality_targets) and persisted.quality_targets != current_targets
+                sampling_changed = persisted.metrics_sampling is not None and persisted.metrics_sampling != current_sampling
+                if targets_changed or sampling_changed:
+                    logger.info(
+                        "Merge params changed (%s) — deleting merge sidecars to re-measure quality",
+                        "quality targets" if targets_changed else "metrics_sampling",
+                    )
+                    for sidecar in final_dir.glob("*.yaml"):
+                        try:
+                            sidecar.unlink()
+                            logger.debug("Deleted stale merge sidecar: %s", sidecar.name)
+                        except OSError as exc:
+                            logger.warning("Could not delete merge sidecar %s: %s", sidecar.name, exc)
+                    merge_yaml.unlink(missing_ok=True)
+
+        # Step 3: clean up .tmp files (execute mode only)
         if execute and final_dir.exists():
             for tmp in final_dir.glob(f"*{TEMP_SUFFIX}"):
                 try:
@@ -874,14 +911,14 @@ class MergePhase:
                 except OSError as exc:
                     logger.warning("Could not remove temp file %s: %s", tmp, exc)
 
-        # Step 3: determine expected strategies
+        # Step 4: determine expected strategies
         strategies = self._get_expected_strategies()
         if not strategies:
             return []
 
         source_stem = self._config.source_video.stem
 
-        # Step 4: classify each expected output
+        # Step 5: classify each expected output
         artifacts: list[MergeArtifact] = []
         for strategy_name, safe_name in strategies:
             output_file = final_dir / f"{source_stem} {safe_name}.mkv"
@@ -1116,6 +1153,13 @@ class MergePhase:
 
         if failed_strategies and not final_artifacts:
             return _failed("All strategy merges failed")
+
+        # Persist merge params so quality-target / sampling changes are detected next run
+        if complete_count > 0:
+            MergeParams(
+                quality_targets  = _targets_as_strings(self._config.quality_targets),
+                metrics_sampling = self._config.metrics_sampling,
+            ).save(self._config.work_dir / _MERGE_YAML)
 
         if failed_strategies:
             return MergePhaseResult(

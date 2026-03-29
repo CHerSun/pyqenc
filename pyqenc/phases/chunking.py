@@ -84,6 +84,39 @@ def _chunk_name_duration(start_ts: float, end_ts: float) -> str:
     return f"{start_str}{RANGE_SEPARATOR}{end_str}"
 
 
+def _expand_scenes(
+    boundaries:      list[SceneBoundary],
+    source_duration: float | None,
+    output_dir:      Path,
+) -> list[tuple[float, float, str, Path]]:
+    """Expand scene boundaries into ``(start_ts, end_ts, stem, chunk_file)`` tuples.
+
+    For all but the last boundary ``end_ts`` is the next boundary's timestamp.
+    For the last boundary ``end_ts`` is ``source_duration``.  When
+    ``source_duration`` is ``None`` the last entry is omitted — the caller
+    cannot resolve it yet and must handle it at execution time.
+
+    Args:
+        boundaries:      Scene boundaries in order.
+        source_duration: Total video duration in seconds, or ``None`` if unknown.
+        output_dir:      Directory where chunk files live (used to build paths).
+
+    Returns:
+        One tuple per resolvable boundary.
+    """
+    result: list[tuple[float, float, str, Path]] = []
+    for i, boundary in enumerate(boundaries):
+        start_ts = boundary.timestamp_seconds
+        end_ts: float | None = (
+            boundaries[i + 1].timestamp_seconds if i + 1 < len(boundaries) else source_duration
+        )
+        if end_ts is None:
+            continue
+        stem = _chunk_name_duration(start_ts, end_ts)
+        result.append((start_ts, end_ts, stem, output_dir / f"{stem}.mkv"))
+    return result
+
+
 @dataclass
 class ChunkingResult:
     chunks:       list[ChunkMetadata]
@@ -112,6 +145,7 @@ def detect_scenes(
     chunking_yaml:    Path,
     scene_threshold:  float = 27.0,
     min_scene_length: int   = 15,
+    chunking_mode:    ChunkingMode = ChunkingMode.LOSSLESS,
 ) -> list[SceneBoundary]:
     """Detect scene boundaries and persist them to ``chunking.yaml``.
 
@@ -125,6 +159,7 @@ def detect_scenes(
         chunking_yaml:    Path to ``chunking.yaml`` for persisting scene boundaries.
         scene_threshold:  PySceneDetect content-change threshold (default 27.0).
         min_scene_length: Minimum frames per scene (default 15).
+        chunking_mode:    Chunking mode to persist alongside scene boundaries.
 
     Returns:
         List of ``SceneBoundary`` objects.
@@ -166,7 +201,7 @@ def detect_scenes(
         logger.info("Scene detection complete: %d scene(s) detected.", len(boundaries))
 
     # Persist scene boundaries to chunking.yaml (Req 2.2)
-    ChunkingParams(scenes=boundaries).save(chunking_yaml)
+    ChunkingParams(chunking_mode=chunking_mode.value, scenes=boundaries).save(chunking_yaml)
     logger.debug("Saved %d scene boundary(ies) to chunking.yaml", len(boundaries))
 
     return boundaries
@@ -231,15 +266,9 @@ def split_chunks(
 
     total_seconds = video_meta.duration_seconds or 0.0
     with ProgressBar(total_seconds, title="Chunking", total_count=len(boundaries)) as advance:
-        for idx, start_boundary in enumerate(boundaries):
-            end_ts = (
-                boundaries[idx + 1].timestamp_seconds
-                if idx + 1 < len(boundaries)
-                else video_meta.duration_seconds or 0.0
-            )
-            start_ts = start_boundary.timestamp_seconds
-            stem     = _chunk_name_duration(start_ts, end_ts)
-            chunk_file = output_dir / f"{stem}.mkv"
+        for start_ts, end_ts, stem, chunk_file in _expand_scenes(
+            boundaries, video_meta.duration_seconds, output_dir
+        ):
 
             # Skip chunks already COMPLETE from recovery (Req 5.2)
             if stem in complete_from_recovery:
@@ -460,6 +489,7 @@ def _chunk_video_impl(
                 chunking_yaml    = chunking_yaml,
                 scene_threshold  = scene_threshold,
                 min_scene_length = min_scene_length,
+                chunking_mode    = chunking_mode,
             )
         except Exception as exc:
             logger.error("Scene detection failed: %s", exc, exc_info=True)
@@ -607,6 +637,9 @@ class ChunkingPhase:
         self._extraction: "_ExtractionPhase | None" = cast(_ExtractionPhase, phases[_ExtractionPhase]) if phases else None
         self.result:      "ChunkingPhaseResult | None" = None
         self.dependencies: "list[Phase]"            = [d for d in [self._job, self._extraction] if d is not None]
+        # Set by _recover() when a chunking-mode mismatch is detected
+        self._mode_mismatch_error:    str  = ""
+        self._mode_changed_force_wipe: bool = False
 
     # ------------------------------------------------------------------
     # Public Phase interface
@@ -630,6 +663,11 @@ class ChunkingPhase:
         force_wipe = getattr(job_result, "force_wipe", False)
 
         artifacts = self._recover(force_wipe=force_wipe, execute=False)
+
+        if self._mode_mismatch_error:
+            self.result = _failed(self._mode_mismatch_error)
+            return self.result
+
         chunks    = [a.metadata for a in artifacts if a.state == ArtifactState.COMPLETE and a.metadata is not None]
         outcome   = self._outcome_from_artifacts(artifacts, did_work=False)
 
@@ -673,6 +711,17 @@ class ChunkingPhase:
         logger.info("Mode:  %s", self._config.chunking_mode.value)
 
         artifacts = self._recover(force_wipe=force_wipe, execute=True)
+
+        # Mode mismatch without --force: abort
+        if self._mode_mismatch_error:
+            self.result = _failed(self._mode_mismatch_error)
+            return self.result
+
+        # Mode changed with --force: chunks wiped, propagate force_wipe to downstream
+        # via JobPhaseResult so all downstream phases see it through the standard path.
+        if self._mode_changed_force_wipe:
+            job_result.force_wipe = True  # type: ignore[union-attr]
+            force_wipe = True
 
         complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
         pending_count  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
@@ -807,6 +856,35 @@ class ChunkingPhase:
                 "Chunking recovery: loaded %d scene boundary(ies) from chunking.yaml",
                 len(scenes),
             )
+
+            # Mode mismatch check: if the persisted mode differs from the current
+            # config, chunks are incompatible and cannot be reused.
+            persisted_mode = chunking_params.chunking_mode
+            current_mode   = self._config.chunking_mode.value
+            if persisted_mode is not None and persisted_mode != current_mode:
+                if self._config.force and execute:
+                    logger.warning(
+                        "Chunking mode changed (%s → %s) — --force: wiping chunks/ and downstream artifacts",
+                        persisted_mode, current_mode,
+                    )
+                    if chunks_dir.exists():
+                        shutil.rmtree(chunks_dir)
+                        logger.debug("force_wipe: deleted %s", chunks_dir)
+                    yaml_path.unlink(missing_ok=True)
+                    logger.debug("force_wipe: deleted %s", yaml_path)
+                    # Signal downstream phases to wipe their artifacts too
+                    self._mode_changed_force_wipe = True
+                    return []
+                else:
+                    err = (
+                        f"Chunking mode changed since last run "
+                        f"(persisted={persisted_mode!r}, current={current_mode!r}). "
+                        "Existing chunks are incompatible. "
+                        "Re-run with --force to delete stale chunks and continue."
+                    )
+                    logger.critical(err)
+                    self._mode_mismatch_error = err
+                    return []
         else:
             logger.debug("Chunking recovery: chunking.yaml absent or empty — scene detection needed")
 
@@ -834,17 +912,9 @@ class ChunkingPhase:
                 job_state.source.duration_seconds if job_state is not None else None
             )
 
-            for i, boundary in enumerate(scenes):
-                is_last = (i == len(scenes) - 1)
-                end_ts  = source_duration if is_last else scenes[i + 1].timestamp_seconds
-
-                if end_ts is None:
-                    logger.debug("Last chunk end timestamp unknown — skipping (will be resolved at execution)")
-                    break
-
-                stem       = _chunk_name_duration(boundary.timestamp_seconds, end_ts)
-                chunk_file = chunks_dir / f"{stem}.mkv"
-
+            for start_ts, end_ts, stem, chunk_file in _expand_scenes(
+                scenes, source_duration, chunks_dir
+            ):
                 if chunk_file.exists():
                     if chunk_file.with_suffix(".yaml").exists():
                         artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.COMPLETE))
@@ -908,12 +978,12 @@ class ChunkingPhase:
             logger.critical(err)
             return _failed(err)
 
-        video_meta = VideoMetadata(path=video_file)
         job_result = self._job.result  # type: ignore[union-attr]
         job_state  = getattr(job_result, "job", None)
         if job_state is None:
             from pyqenc.state import JobState as _JobState
             job_state = _JobState(source=VideoMetadata(path=self._config.source_video))
+        video_meta = job_state.source
 
         # Use recovered scene boundaries or run detection
         boundaries = getattr(self, "_recovered_scenes", [])

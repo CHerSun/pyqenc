@@ -1345,7 +1345,7 @@ async def _encode_chunks_parallel(
                     encoded_path = chunk_result.encoded_file.path if chunk_result.encoded_file else None
                     result.encoded_chunks[chunk.chunk_id][strategy] = encoded_path
 
-                    # Update moving-average seed: blend stored value with this winning CRF
+                    # Update moving-average seed: blend stored value with this winning CRF.
                     if chunk_result.final_crf is not None and not chunk_result.reused:
                         moving_crfs[strategy] = (moving_crfs[strategy] + chunk_result.final_crf) / 2.0
 

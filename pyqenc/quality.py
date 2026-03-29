@@ -7,6 +7,7 @@ algorithms for iterative encoding optimization.
 # CHerSun 2026
 
 import logging
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from os import PathLike
@@ -254,39 +255,38 @@ class CRFHistory:
         self,
         targets: list[QualityTarget]
     ) -> tuple[float | None, float | None]:
-        """Get CRF bounds where quality was too low/high.
+        """Get the tightest known CRF bracket around the quality target boundary.
 
         Args:
             targets: Quality targets to evaluate against
 
         Returns:
-            Tuple of (too_low_crf, too_high_crf) where:
-            - too_low_crf: Highest CRF where quality was below target
-            - too_high_crf: Lowest CRF where quality was above target
+            Tuple of (fail_crf, pass_crf) where:
+            - fail_crf: Lowest known CRF where quality was still below target
+              (tightest failing bound — closest to the passing zone)
+            - pass_crf: Highest known CRF where quality met all targets
+              (tightest passing bound — closest to the failing zone)
+
+            The optimal CRF lies in the open interval (pass_crf, fail_crf).
         """
-        too_low_crf:  float | None = None  # CRF where quality was below target
-        too_high_crf: float | None = None  # CRF where quality was above target
+        fail_crf: float | None = None  # lowest CRF that still failed (tightest upper bracket)
+        pass_crf: float | None = None  # highest CRF that still passed (tightest lower bracket)
 
         for crf, metrics in self.attempts:
-            # Check if this attempt met all targets
-            all_met: bool = True
-            for target in targets:
-                metric_key = f"{target.metric}_{target.statistic}"
-                actual = metrics.get(metric_key)
-                if actual is None or actual < target.value:
-                    all_met = False
-                    break
-
+            all_met: bool = all(
+                metrics.get(f"{t.metric}_{t.statistic}", -1.0) >= t.value
+                for t in targets
+            )
             if not all_met:
-                # Quality was below target
-                if too_low_crf is None or crf < too_low_crf:
-                    too_low_crf = crf
+                # Keep the lowest failing CRF — it's the tightest upper bound
+                if fail_crf is None or crf < fail_crf:
+                    fail_crf = crf
             else:
-                # Quality was above target
-                if too_high_crf is None or crf > too_high_crf:
-                    too_high_crf = crf
+                # Keep the highest passing CRF — it's the tightest lower bound
+                if pass_crf is None or crf > pass_crf:
+                    pass_crf = crf
 
-        return (too_low_crf, too_high_crf)
+        return (fail_crf, pass_crf)
 
 def normalize_metric(metric_type: MetricType, value: float) -> float:
     """Normalize a raw metric value to the 0–100 scale.
@@ -336,6 +336,10 @@ def normalize_metric_deficit(
     """
     return actual - target
 
+_MAX_METRIC = 100.0
+"""Upper bound of the normalized metric scale. All metrics are normalized to 0–100."""
+
+
 def adjust_crf(
     current_crf:     float,
     quality_results: dict[str, float],
@@ -344,20 +348,24 @@ def adjust_crf(
     crf_min:         float = 1.0,
     crf_max:         float = 51.0,
 ) -> float | None:
-    """Calculate next CRF using proportional interpolation with binary-search refinement.
+    """Calculate the next CRF to try using linear interpolation between known bounds.
 
-    The search has two phases:
-    1. **Find a passing CRF** — if targets are not met, interpolate proportionally
-       toward crf_min to increase quality.
-    2. **Squeeze toward optimal** — if targets ARE met, try a higher CRF (larger
-       value = smaller file) to find the efficiency boundary.  Binary search
-       between the last-passing and last-failing CRF until the gap is ≤ CRF_GRANULARITY
-       (minimum granularity), at which point the search is exhausted and None
-       is returned so the caller keeps the last passing result.
+    Uses a unified two-axis proportional model:
+    - CRF axis:    [pass_crf (or crf_min), fail_crf (or crf_max)]
+    - Metric axis: [target_val, _MAX_METRIC]
+
+    The worst-performing target determines the metric position.  Its signed
+    distance from the target (positive = surplus, negative = deficit) is
+    normalized against the metric range above the target, then mapped onto the
+    CRF range to produce a proportional estimate of the next CRF.
+
+    When both bounds are known the interpolation naturally converges; once the
+    gap between them is ≤ CRF_GRANULARITY the search is exhausted and ``None``
+    is returned so the caller keeps the last passing result.
 
     Args:
         current_crf:     CRF used in the most recent attempt.
-        quality_results: Measured quality metrics (e.g. ``{'vmaf_median': 92.0}``).
+        quality_results: Measured quality metrics (e.g. ``{'vmaf_min': 88.4}``).
         quality_targets: Quality targets to meet.
         history:         CRF attempt history for deduplication.
         crf_min:         Minimum valid CRF for the codec (default 1.0).
@@ -365,111 +373,102 @@ def adjust_crf(
 
     Returns:
         Next CRF to try, or ``None`` when the search space is exhausted
-        (caller should keep the last successful result).
+        (caller should keep the last passing result).
     """
-    too_low_crf, too_high_crf = history.get_bounds(quality_targets)
+    fail_crf, pass_crf = history.get_bounds(quality_targets)
 
-    # Determine whether current attempt passed
-    current_passed = all(
-        quality_results.get(f"{t.metric}_{t.statistic}", 0) >= t.value
-        for t in quality_targets
-    )
-
-    if current_passed:
-        # Targets met — try squeezing higher (larger CRF = smaller file)
-        if too_low_crf is not None:
-            # We have a known failing CRF above us — binary search between
-            # current (passing) and that failing point
-            gap = too_low_crf - current_crf
-            if gap <= CRF_GRANULARITY:
-                # Search space exhausted — current_crf is optimal
-                return None
-            next_crf = current_crf + gap / 2
-        else:
-            # No known failing CRF yet — make a proportional jump upward.
-            # Use the worst-passing target to estimate how much headroom we have.
-            worst_margin = float("inf")
-            for target in quality_targets:
-                metric_key = f"{target.metric}_{target.statistic}"
-                actual = quality_results.get(metric_key)
-                if actual is None:
-                    continue
-                deficit = normalize_metric_deficit(MetricType(target.metric), actual, target.value)
-                worst_margin = min(worst_margin, deficit)
-
-            if worst_margin == float("inf") or worst_margin <= 0:
-                return None
-
-            # Proportional upward step: margin / (max_metric - target) * remaining CRF range
-            metric_type = MetricType(quality_targets[0].metric)
-            max_metric = 100.0 # we adjust PSNR to 100 on inf.
-            target_val = quality_targets[0].value
-            headroom = max_metric - target_val
-            ratio = min(1.0, worst_margin / headroom) if headroom > 0 else 0.5
-            next_crf = current_crf + ratio * (crf_max - current_crf)
-
-    else:
-        # Targets not met — interpolate toward crf_min to increase quality
-        worst_deficit: float       = 0.0
-        worst_target:  QualityTarget | None = None
-        worst_actual:  float       = 0.0
-
-        for target in quality_targets:
-            metric_key = f"{target.metric}_{target.statistic}"
-            actual = quality_results.get(metric_key)
-            if actual is None:
-                continue
-            deficit = normalize_metric_deficit(MetricType(target.metric), actual, target.value)
-            if deficit < worst_deficit or worst_target is None:
-                worst_deficit = deficit
-                worst_target  = target
-                worst_actual  = actual
-
-        if worst_target is None:
-            logger.warning("No valid deficits calculated, cannot adjust CRF")
+    # Exhaustion check: if the bracket is already tight enough, we're done.
+    if fail_crf is not None and pass_crf is not None:
+        if fail_crf - pass_crf <= CRF_GRANULARITY:
             return None
 
-        metric_type = MetricType(worst_target.metric)
-        actual_pct = worst_actual if not (metric_type == MetricType.PSNR and worst_actual == float("inf")) else 60.0
-        target_pct = worst_target.value
-        max_metric = 100.0
+    # --- Find the worst-performing target (smallest surplus or largest deficit) ---
+    worst_delta:  float            = float("inf")   # actual - target; lower = worse
+    worst_target: QualityTarget | None = None
+    worst_actual: float            = 0.0
 
-        headroom = max_metric - actual_pct
-        if headroom > 0:
-            ratio = min(1.0, (target_pct - actual_pct) / headroom)
-        else:
-            ratio = 1.0
+    for target in quality_targets:
+        metric_key = f"{target.metric}_{target.statistic}"
+        actual = quality_results.get(metric_key)
+        if actual is None:
+            continue
+        # Treat PSNR=inf as a capped value so arithmetic stays finite
+        if MetricType(target.metric) == MetricType.PSNR and actual == float("inf"):
+            actual = _MAX_METRIC
+        delta = actual - target.value
+        if delta < worst_delta:
+            worst_delta  = delta
+            worst_target = target
+            worst_actual = actual
 
-        next_crf = current_crf - ratio * (current_crf - crf_min)
+    if worst_target is None:
+        logger.warning("No valid metric results found, cannot adjust CRF")
+        return None
 
-        # Clamp: must be strictly below any known failing CRF
-        if too_low_crf is not None:
-            next_crf = min(next_crf, too_low_crf - CRF_GRANULARITY)
+    # --- Establish the tightest known CRF bracket and compute next CRF ---
+    # pass_crf: highest CRF that passed  → lower bound of the search window
+    # fail_crf: lowest  CRF that failed  → upper bound of the search window
+    #
+    # Signed ratio: (actual - target) / (100 - target), clamped to [-1, +1]
+    #   positive → surplus (pass), negative → deficit (miss)
+    #
+    # Interpolation anchors from the bound on the *same side* as the current result:
+    #   pass (ratio ≥ 0): anchor = pass_crf (or crf_min), project toward fail_crf (or crf_max)
+    #     next = crf_lo + ratio * (crf_hi - crf_lo)
+    #     ratio=0 → crf_lo (on target, stay at passing boundary)
+    #     ratio=1 → crf_hi (maximum surplus, jump to failing boundary)
+    #   miss (ratio < 0): anchor = fail_crf (or crf_max), project toward pass_crf (or crf_min)
+    #     next = crf_hi + ratio * (crf_hi - crf_lo)
+    #     ratio=0  → crf_hi (on target, stay at failing boundary)
+    #     ratio=-1 → crf_lo (maximum deficit, jump to passing boundary)
+    target_val   = worst_target.value
+    metric_range = _MAX_METRIC - target_val          # always > 0 for sane targets
+    ratio        = (worst_actual - target_val) / metric_range if metric_range > 0 else 0.0
+    ratio        = max(-1.0, min(1.0, ratio))
 
-    # Clamp: must be strictly above any known passing CRF
-    if too_high_crf is not None:
-        next_crf = max(next_crf, too_high_crf + CRF_GRANULARITY)
+    current_passed = ratio >= 0
+    # Anchor selection:
+    #   pass: lower anchor = pass_crf (or current_crf if no history), upper = fail_crf (or crf_max)
+    #   miss: lower anchor = pass_crf (or crf_min), upper = fail_crf (or current_crf)
+    # Using current_crf as anchor when the relevant bound is unknown keeps the first
+    # proportional step relative to where we are rather than the codec extreme.
+    if current_passed:
+        crf_lo = pass_crf if pass_crf is not None else current_crf
+        crf_hi = fail_crf if fail_crf is not None else crf_max
+    else:
+        crf_lo = pass_crf if pass_crf is not None else crf_min
+        crf_hi = fail_crf if fail_crf is not None else current_crf
 
-    # Binary search fallback when both bounds are known and we're outside the window
-    if too_low_crf is not None and too_high_crf is not None:
-        gap = too_low_crf - too_high_crf
-        if gap <= CRF_GRANULARITY:
-            return None  # Optimal found
-        if next_crf >= too_low_crf or next_crf <= too_high_crf:
-            next_crf = too_high_crf + gap / 2
+    if current_passed:
+        next_crf = crf_lo + ratio * (crf_hi - crf_lo)
+    else:
+        next_crf = crf_hi + ratio * (crf_hi - crf_lo)
 
-    # Round to CRF granularity and hard-clamp
-    next_crf = round(next_crf / CRF_GRANULARITY) * CRF_GRANULARITY
+    logger.debug(
+        f"CRF interpolation: pass={pass_crf}, fail={fail_crf} "
+        f"metric target={target_val:.1f} actual={worst_actual:.2f} ratio={ratio:+.3f} "
+        f"→ CRF {next_crf:{PADDING_CRF}}"
+    )
+
+    # --- Directional rounding to CRF granularity ---
+    # Round away from the anchor to avoid landing back on an already-tried value
+    # and to make each step as large as possible within the granularity grid:
+    #   pass (moving up from crf_lo) → ceil  (step further from crf_lo)
+    #   miss (moving down from crf_hi) → floor (step further from crf_hi)
+    if current_passed:
+        next_crf = math.ceil(next_crf / CRF_GRANULARITY) * CRF_GRANULARITY
+    else:
+        next_crf = math.floor(next_crf / CRF_GRANULARITY) * CRF_GRANULARITY
     next_crf = max(crf_min, min(crf_max, next_crf))
 
-    # Deduplication
+    # --- Deduplication: fall back to bracket midpoint ---
     if history.has_attempted(next_crf):
-        logger.debug(f"CRF {next_crf:{PADDING_CRF}} already attempted, falling back to binary search")
-        if too_low_crf is not None and too_high_crf is not None:
-            gap = too_low_crf - too_high_crf
+        logger.debug(f"CRF {next_crf:{PADDING_CRF}} already attempted, trying bracket midpoint")
+        if fail_crf is not None and pass_crf is not None:
+            gap = fail_crf - pass_crf
             if gap <= CRF_GRANULARITY:
                 return None
-            candidate = round((too_high_crf + gap / 2) * (1 / CRF_GRANULARITY)) / (1 / CRF_GRANULARITY)
+            candidate = math.ceil((pass_crf + gap / 2) / CRF_GRANULARITY) * CRF_GRANULARITY
             if not history.has_attempted(candidate):
                 return candidate
         logger.warning("CRF search space exhausted — no untried CRF available")
