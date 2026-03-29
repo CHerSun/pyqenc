@@ -809,8 +809,10 @@ Examples:
     # Install SIGINT handler early so CTRL+C always triggers immediate exit,
     # overriding asyncio's default handler which swallows the first keypress.
     import signal
+    from pyqenc.utils.ffmpeg_runner import kill_all_ffmpeg
 
     def _sigint_handler(signum: int, frame: object) -> None:
+        kill_all_ffmpeg()
         logger.warning("Cancelled by user.")
         os._exit(130)
 

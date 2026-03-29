@@ -21,6 +21,7 @@ import asyncio
 import logging
 import os
 import shutil
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +33,28 @@ if TYPE_CHECKING:
     from pyqenc.models import VideoMetadata
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Live process registry — used by the SIGINT handler to kill ffmpeg on exit
+# ---------------------------------------------------------------------------
+
+_procs_lock: threading.Lock      = threading.Lock()
+_live_procs: set[asyncio.subprocess.Process] = set()
+
+
+def kill_all_ffmpeg() -> None:
+    """Kill all currently running ffmpeg subprocesses.
+
+    Called from the SIGINT handler before ``os._exit`` so that ffmpeg
+    processes do not outlive the main process.  Safe to call from any thread.
+    """
+    with _procs_lock:
+        procs = set(_live_procs)
+    for proc in procs:
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -316,13 +339,17 @@ async def run_ffmpeg_async(
         stderr=asyncio.subprocess.PIPE,
         cwd=str(cwd) if cwd is not None else None,
     )
-
-    frame_count, stderr_lines = await asyncio.gather(
-        _read_stdout(proc.stdout, progress_callback),  # type: ignore[arg-type]
-        _read_stderr(proc.stderr),                     # type: ignore[arg-type]
-    )
-
-    await proc.wait()
+    with _procs_lock:
+        _live_procs.add(proc)
+    try:
+        frame_count, stderr_lines = await asyncio.gather(
+            _read_stdout(proc.stdout, progress_callback),  # type: ignore[arg-type]
+            _read_stderr(proc.stderr),                     # type: ignore[arg-type]
+        )
+        await proc.wait()
+    finally:
+        with _procs_lock:
+            _live_procs.discard(proc)
 
     # Determine success: exit code 0 AND all temp files non-empty
     all_outputs_ok = all(
