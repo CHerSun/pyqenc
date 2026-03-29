@@ -799,7 +799,6 @@ class PipelineConfig(BaseModel):
         quality_targets:    List of quality targets to meet.
         strategies:         List of encoding strategies to use.
         optimize:           Whether to search for optimal strategy.
-        all_strategies:     Whether to produce output for all strategies.
         max_parallel:       Maximum concurrent encoding processes.
         metrics_sampling:   Frame subsampling for metric calculation.
         log_level:          Logging level (debug, info, warning, critical).
@@ -825,7 +824,6 @@ class PipelineConfig(BaseModel):
     strategies:         list[Strategy]
     optimize:           bool              = False
     """Whether to search for optimal strategy (optimization phase)."""
-    all_strategies:     bool              = False
     max_parallel:       int               = 2
     """Maximum concurrent encoding processes."""
     metrics_sampling:   int               = 10

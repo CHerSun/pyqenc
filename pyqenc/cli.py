@@ -486,7 +486,6 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         quality_targets=quality_targets,
         strategies=resolved_strategies,
         optimize=not args.all_strategies,  # optimize unless --all-strategies requested
-        all_strategies=args.all_strategies,
         max_parallel=args.max_parallel,
         log_level=args.log_level,
         include=args.include,
