@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -804,6 +805,16 @@ Examples:
 
     # Set process priority
     _set_process_priority()
+
+    # Install SIGINT handler early so CTRL+C always triggers immediate exit,
+    # overriding asyncio's default handler which swallows the first keypress.
+    import signal
+
+    def _sigint_handler(signum: int, frame: object) -> None:
+        logger.warning("Cancelled by user.")
+        os._exit(130)
+
+    signal.signal(signal.SIGINT, _sigint_handler)
 
     # Execute subcommand
     return args.func(args)
