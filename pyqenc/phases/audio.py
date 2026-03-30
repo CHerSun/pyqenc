@@ -814,7 +814,7 @@ class SynchronousRunner:
             return PlanExecutionResult(count_success, count_failed, count_skipped)
 
         try:
-            with ProgressBar(len(self.tasks), title="Audio Pipeline") as advance:
+            with ProgressBar(len(self.tasks), title="Audio Pipeline", total_count=len(self.tasks)) as advance:
                 for task in self.tasks:
                     if task.output.exists():
                         count_skipped += 1
@@ -873,7 +873,7 @@ class AsyncRunner:
         if not terminal_tasks:
             raise RuntimeError("Cyclic dependencies detected in plan.")
 
-        with ProgressBar(len(self.tasks), title="Audio Pipeline") as advance:
+        with ProgressBar(len(self.tasks), title="Audio Pipeline", total_count=len(self.tasks)) as advance:
             self._advance = advance
             await asyncio.gather(*(self._get_or_execute(t, dry_run) for t in terminal_tasks))
             self._advance = None
@@ -1314,6 +1314,7 @@ class AudioPhase:
         self._config:     "PipelineConfig"           = config
         self._job:        "_JobPhase | None"          = cast(_JobPhase,        phases[_JobPhase])        if phases else None
         self._extraction: "_ExtractionPhase | None"  = cast(_ExtractionPhase, phases[_ExtractionPhase]) if phases else None
+        self.params       = AudioParams(audio_codec=config.audio_codec, audio_base_bitrate=config.audio_base_bitrate)
         self.result:      "AudioPhaseResult | None"  = None
         self.dependencies: "list[Phase]"             = [d for d in [self._job, self._extraction] if d is not None]
 
@@ -1528,21 +1529,15 @@ class AudioPhase:
             }
 
         # Step 4: load audio.yaml and detect codec/bitrate changes
-        audio_params = AudioParams.load(work_dir / _AUDIO_YAML)
-        codec_changed = (
-            audio_params is not None
-            and (
-                audio_params.audio_codec        != self._config.audio_codec
-                or audio_params.audio_base_bitrate != self._config.audio_base_bitrate
-            )
-        )
-        params_unknown = audio_params is None
+        persisted      = AudioParams.load(work_dir / _AUDIO_YAML)
+        params_unknown = persisted is None
+        codec_changed  = persisted is not None and persisted != self.params
 
         if codec_changed:
             logger.debug(
                 "audio.yaml codec/bitrate changed (%s/%s → %s/%s) — marking all artifacts STALE",
-                audio_params.audio_codec,        self._config.audio_codec,   # type: ignore[union-attr]
-                audio_params.audio_base_bitrate, self._config.audio_base_bitrate,
+                persisted.audio_codec,        self.params.audio_codec,        # type: ignore[union-attr]
+                persisted.audio_base_bitrate, self.params.audio_base_bitrate,
             )
 
         # Step 5: classify artifacts
@@ -1674,10 +1669,7 @@ class AudioPhase:
 
         # Persist audio.yaml with current codec/bitrate config
         try:
-            AudioParams(
-                audio_codec        = self._config.audio_codec,
-                audio_base_bitrate = self._config.audio_base_bitrate,
-            ).save(self._config.work_dir / _AUDIO_YAML)
+            self.params.save(self._config.work_dir / _AUDIO_YAML)
         except Exception as exc:
             logger.warning("Could not persist audio.yaml: %s", exc)
 

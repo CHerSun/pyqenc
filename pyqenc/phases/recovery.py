@@ -1,11 +1,9 @@
 """Shared low-level recovery helpers for the pyqenc pipeline.
 
-This module retains only the helpers that are shared across multiple modules
-and the dataclasses used by legacy phase functions (``chunk_video``,
-``split_chunks``, etc.) that have not yet been migrated to the phase-object
-model.
+Contains helpers shared across multiple phase modules and dataclasses used
+by ``split_chunks`` (called from ``ChunkingPhase._execute_chunking``).
 
-Per-phase recovery logic has been moved into the respective phase objects:
+Per-phase recovery logic lives in the respective phase objects:
 - ``ExtractionPhase._recover()``  in ``pyqenc/phases/extraction.py``
 - ``ChunkingPhase._recover()``    in ``pyqenc/phases/chunking.py``
 - ``EncodingPhase._recover()``    in ``pyqenc/phases/encoding.py``
@@ -58,38 +56,10 @@ def _cleanup_tmp_files(directory: Path) -> None:
             logger.warning("Could not remove temp file %s: %s", tmp_file, exc)
 
 
-def _parse_chunk_timestamps(chunk_id: str) -> tuple[float, float]:
-    """Parse start and end timestamps (in seconds) from a chunk_id stem.
-
-    Chunk IDs have the form ``HH꞉MM꞉SS․mmm-HH꞉MM꞉SS․mmm`` where ``꞉`` is
-    ``TIME_SEPARATOR_SAFE`` and ``․`` is ``TIME_SEPARATOR_MS``.
-
-    Args:
-        chunk_id: Timestamp-range chunk identifier.
-
-    Returns:
-        ``(start_seconds, end_seconds)`` tuple.
-
-    Raises:
-        ValueError: If the chunk_id does not match the expected format.
-    """
-    parts = chunk_id.split(RANGE_SEPARATOR, 1)
-    if len(parts) != 2:
-        raise ValueError(f"Expected exactly one '{RANGE_SEPARATOR}' in chunk_id: {chunk_id!r}")
-
-    def _ts_to_seconds(ts: str) -> float:
-        hms = ts.split(TIME_SEPARATOR_SAFE)
-        if len(hms) != 3:
-            raise ValueError(f"Expected HH꞉MM꞉SS in timestamp: {ts!r}")
-        h, m, s_ms = hms
-        s_ms = s_ms.replace(TIME_SEPARATOR_MS, ".")
-        return int(h) * 3600 + int(m) * 60 + float(s_ms)
-
-    return _ts_to_seconds(parts[0]), _ts_to_seconds(parts[1])
 
 
 # ---------------------------------------------------------------------------
-# Dataclasses used by legacy chunking functions (chunk_video, split_chunks)
+# Dataclasses used by split_chunks (called from ChunkingPhase._execute_chunking)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -111,7 +81,7 @@ class ChunkRecovery:
 
 @dataclass
 class ChunkingRecovery:
-    """Result of chunking phase recovery (used by legacy ``split_chunks``).
+    """Result of chunking phase recovery (used by ``split_chunks``).
 
     Attributes:
         scenes:   Scene boundaries loaded from ``chunking.yaml``.

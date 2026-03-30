@@ -46,7 +46,7 @@ from pyqenc.models import (
 )
 from pyqenc.phase import Artifact, Phase, PhaseResult
 from pyqenc.quality import CRFHistory, adjust_crf
-from pyqenc.state import ArtifactState, EncodingResultSidecar, MetricsSidecar
+from pyqenc.state import ArtifactState, EncodingParams, EncodingResultSidecar, MetricsSidecar
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 from pyqenc.utils.log_format import (
@@ -1345,7 +1345,7 @@ async def _encode_chunks_parallel(
                     encoded_path = chunk_result.encoded_file.path if chunk_result.encoded_file else None
                     result.encoded_chunks[chunk.chunk_id][strategy] = encoded_path
 
-                    # Update moving-average seed: blend stored value with this winning CRF
+                    # Update moving-average seed: blend stored value with this winning CRF.
                     if chunk_result.final_crf is not None and not chunk_result.reused:
                         moving_crfs[strategy] = (moving_crfs[strategy] + chunk_result.final_crf) / 2.0
 
@@ -1425,8 +1425,6 @@ def encode_all_chunks(
     Returns:
         EncodingResult with paths to encoded chunks and statistics
     """
-    from pyqenc.state import EncodingParams
-
     logger.debug(
         "Encoding phase: %d chunks, %d strategies, %d quality targets",
         len(chunks), len(strategies), len(quality_targets),
@@ -1504,7 +1502,7 @@ def encode_all_chunks(
     # Run parallel encoding — COMPLETE pairs are skipped inside _encode_chunks_parallel
     logger.debug("Starting parallel encoding with %d workers", max_parallel)
     total_seconds = sum(c.end_timestamp - c.start_timestamp for c in chunks) * len(strategies)
-    with ProgressBar(total_seconds, title="Encoding") as advance:
+    with ProgressBar(total_seconds, title="Encoding", total_count=len(chunks) * len(strategies)) as advance:
         # Update the bar for completed chunks
         chunks_by_id = {c.chunk_id: c for c in chunks}
         for r in phase_recovery.pairs.values():
@@ -1598,6 +1596,7 @@ class EncodingPhase:
         self._job:          "_JobPhase | None"          = cast("_JobPhase",          phases[_JobPhase])          if phases else None
         self._chunking:     "_ChunkingPhase | None"     = cast("_ChunkingPhase",     phases[_ChunkingPhase])     if phases else None
         self._optimization: "_OptimizationPhase | None" = cast("_OptimizationPhase", phases[_OptimizationPhase]) if phases else None
+        self.params:        "EncodingParams | None"     = None
         self.result:        "EncodingPhaseResult | None" = None
         self.dependencies:  "list[Phase]"               = [d for d in [self._job, self._chunking, self._optimization] if d is not None]
 
@@ -1775,8 +1774,6 @@ class EncodingPhase:
         Returns:
             List of ``EncodedArtifact`` objects.
         """
-        from pyqenc.state import EncodingParams
-
         work_dir = self._config.work_dir
         enc_dir  = work_dir / ENCODING_WORKSPACE_DIR
         out_dir  = work_dir / ENCODED_OUTPUT_DIR
@@ -1797,8 +1794,9 @@ class EncodingPhase:
             persisted_enc = EncodingParams.load(yaml_path)
             job_result    = self._job.result  # type: ignore[union-attr]
             crop          = getattr(job_result, "crop", None)
+            self.params   = EncodingParams(crop=crop)
 
-            if persisted_enc is not None and persisted_enc.crop != crop:
+            if persisted_enc is not None and persisted_enc != self.params:
                 if self._config.force:
                     logger.warning(
                         "Crop params changed since last encoding run "
@@ -1895,7 +1893,6 @@ class EncodingPhase:
             ``EncodingPhaseResult`` after encoding.
         """
         from pyqenc.config import ConfigManager
-        from pyqenc.state import EncodingParams
 
         work_dir = self._config.work_dir
 
@@ -1927,7 +1924,9 @@ class EncodingPhase:
 
         # Persist encoding.yaml with current crop params
         encoding_yaml = work_dir / _ENCODING_YAML
-        EncodingParams(crop=crop).save(encoding_yaml)
+        if self.params is None:
+            self.params = EncodingParams(crop=crop)
+        self.params.save(encoding_yaml)
         logger.debug("Wrote encoding.yaml (crop=%s)", crop)
 
         # Reference dir is the chunks directory
@@ -1977,11 +1976,14 @@ class EncodingPhase:
                 artifact_path = encoded_strategy_dir / f"{chunk_id}.mkv"
 
                 crf: float | None = None
-                if state == ArtifactState.COMPLETE and pair_rec and pair_rec.attempts:
-                    for ar in pair_rec.attempts:
-                        if ar.state == ArtifactState.COMPLETE:
-                            crf = ar.crf
-                            break
+                if state == ArtifactState.COMPLETE and pair_rec and pair_rec.winning_file:
+                    artifact_path = pair_rec.winning_file
+                    m = ENCODED_ATTEMPT_NAME_PATTERN.match(pair_rec.winning_file.name)
+                    if m:
+                        try:
+                            crf = float(m.group("crf"))
+                        except (ValueError, TypeError):
+                            pass
 
                 if state != ArtifactState.COMPLETE:
                     failed_pairs.append(f"{chunk_id}/{strategy_name}")

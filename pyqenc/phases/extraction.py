@@ -475,26 +475,6 @@ class MKVTrackExtractor:
             print(f"\n\n--- Command output ---\n{e.output.decode()}", file=sys.stderr)
 
 
-# ---------------------------------------------------------------------------
-# Pipeline extraction helpers
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class ExtractionResult:
-    """Result of stream extraction phase.
-
-    Attributes:
-        video:   Extracted video metadata (single stream).
-        audio:   List of extracted audio track metadata.
-        outcome: Phase outcome (COMPLETED, REUSED, DRY_RUN, or FAILED).
-        error:   Error message if extraction failed.
-    """
-
-    video:   VideoMetadata | None
-    audio:   list[AudioMetadata]
-    outcome: PhaseOutcome
-    error:   str | None = None
 
 
 def _audio_metadata_from_stream(path: Path, track: "AudioStream") -> AudioMetadata:
@@ -535,220 +515,6 @@ def _audio_metadata_from_stream(path: Path, track: "AudioStream") -> AudioMetada
     )
 
 
-def extract_streams(
-    source_video: Path,
-    output_dir:   Path,
-    include:      str | None = None,
-    exclude:      str | None = None,
-    force:        bool = False,
-    dry_run:      bool = False,
-) -> ExtractionResult:
-    """Extract video and audio streams from source MKV file.
-
-    Performs extraction phase recovery first: cleans up leftover ``.tmp``
-    files and checks whether extracted artifacts already exist.  If all
-    artifacts are present (``ArtifactState.COMPLETE``), extraction is skipped
-    and existing files are reused.
-
-    On subsequent runs the persisted ``include``/``exclude`` values from
-    ``extraction.yaml`` are compared against the current values.  If they
-    differ, a warning is logged and the phase is marked as needing re-execution.
-
-    Args:
-        source_video: Path to source MKV file.
-        output_dir:   Directory for extracted streams.
-        include:      Regex pattern applied to ALL stream types; only streams
-                      whose would-be output filename matches are extracted.
-                      ``None`` means include all.
-        exclude:      Regex pattern applied to ALL stream types; streams whose
-                      would-be output filename matches are skipped even if they
-                      also match ``include``.  ``None`` means exclude none.
-        force:        If ``False``, reuse existing extracted files.
-        dry_run:      If ``True``, only report status without performing extraction.
-
-    Returns:
-        ``ExtractionResult`` with the first video stream,
-        a list of ``AudioMetadata`` objects, and a ``PhaseOutcome``.
-    """
-    logger.info("Extraction phase: %s", source_video.name)
-
-    if not source_video.exists():
-        error_msg = f"Source video not found: {source_video}"
-        logger.critical(error_msg)
-        return ExtractionResult(
-            video=None, audio=[], outcome=PhaseOutcome.FAILED, error=error_msg,
-        )
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    try:
-        extractor = MKVTrackExtractor(str(source_video))
-    except Exception as e:
-        error_msg = f"Failed to analyse source video: {e}"
-        logger.critical(error_msg)
-        return ExtractionResult(
-            video=None, audio=[], outcome=PhaseOutcome.FAILED, error=error_msg,
-        )
-
-    # Apply unified include/exclude filter to ALL stream types in one call (Req 10.1–10.4)
-    selected_tracks = streams_filter_plain_regex(
-        extractor.tracks,
-        include_pattern=include,
-        exclude_pattern=exclude,
-    )
-
-    # Compact stream display — shown in both dry-run and execute modes (Req 10.5, 10.6)
-    existing = {f.name for f in output_dir.iterdir() if f.is_file()} if output_dir.exists() else set()
-    _log_stream_table(extractor.tracks, selected_tracks, existing)
-
-    video_tracks: list[VideoStream] = [t for t in selected_tracks if t.codec_type == "video"]  # type: ignore[assignment]
-    audio_tracks: list[AudioStream] = [t for t in selected_tracks if t.codec_type == "audio"]  # type: ignore[assignment]
-    other_tracks: list[StreamBase]  = [t for t in selected_tracks if t.codec_type not in ("video", "audio")]
-
-    if not video_tracks:
-        error_msg = "No video streams found matching filters"
-        logger.critical(error_msg)
-        return ExtractionResult(
-            video=None, audio=[], outcome=PhaseOutcome.FAILED, error=error_msg,
-        )
-
-    expected_video_files = [output_dir / t.display_name() for t in video_tracks]
-    expected_audio_files = [output_dir / t.display_name() for t in audio_tracks]
-    expected_other_files = [output_dir / t.display_name() for t in other_tracks]
-    video_metas = [
-        VideoMetadata.from_stream(path=f, stream=t)
-        for f, t in zip(expected_video_files, video_tracks)
-    ]
-
-    # ------------------------------------------------------------------
-    # Recovery: clean up .tmp files and check existing artifacts
-    # ------------------------------------------------------------------
-    _extraction_yaml = output_dir.parent / "extraction.yaml"
-
-    # Clean up leftover .tmp files
-    from pyqenc.phases.recovery import _cleanup_tmp_files
-    _cleanup_tmp_files(output_dir)
-
-    # Determine recovery state: COMPLETE if all expected files exist, ABSENT otherwise
-    artifact_files = [
-        f for f in output_dir.iterdir()
-        if f.is_file() and not f.name.endswith(TEMP_SUFFIX)
-    ] if output_dir.exists() else []
-    recovery_state = ArtifactState.COMPLETE if artifact_files else ArtifactState.ABSENT
-
-    persisted_params = ExtractionParams.load(_extraction_yaml)
-    if persisted_params is not None:
-        if persisted_params.include != include or persisted_params.exclude != exclude:
-            logger.warning(
-                "Stream filter change detected — extraction needs re-execution. "
-                "Persisted: include=%r, exclude=%r. Current: include=%r, exclude=%r. "
-                "Re-run with --force to re-extract with the new filters.",
-                persisted_params.include, persisted_params.exclude,
-                include, exclude,
-            )
-            recovery_state = ArtifactState.ABSENT
-
-    # ------------------------------------------------------------------
-    # Reuse path — all artifacts present (COMPLETE via .tmp protocol)
-    # ------------------------------------------------------------------
-    all_exist = (
-        not force
-        and recovery_state == ArtifactState.COMPLETE
-        and all(f.exists() for f in expected_video_files + expected_audio_files + expected_other_files)
-    )
-    if all_exist:
-        primary_video = video_metas[0]
-        audio_meta = [_audio_metadata_from_stream(path, track)
-                      for path, track in zip(expected_audio_files, audio_tracks)]
-        return ExtractionResult(video=primary_video, audio=audio_meta, outcome=PhaseOutcome.REUSED)
-
-    # ------------------------------------------------------------------
-    # Dry-run path
-    # ------------------------------------------------------------------
-    if dry_run:
-        primary_video = video_metas[0] if video_metas else None
-        audio_meta = [
-            _audio_metadata_from_stream(path, track)
-            for path, track in zip(expected_audio_files, audio_tracks)
-        ]
-        return ExtractionResult(
-            video=primary_video, audio=audio_meta, outcome=PhaseOutcome.DRY_RUN,
-        )
-
-    # ------------------------------------------------------------------
-    # Extraction path
-    # ------------------------------------------------------------------
-    logger.debug("Extracting streams...")
-    try:
-        for track in video_tracks:
-            output_file = output_dir / track.display_name()
-            cmd: list[str | PathLike] = [
-                "ffmpeg",
-                "-i", source_video,
-                "-map", f"0:{track.track_id}",
-                "-c", "copy",
-                "-fflags", "+genpts",
-                "-avoid_negative_ts", "make_zero",
-                "-y",
-                output_file,
-            ]
-            logger.debug("Extracting video track %d: %s", track.track_id, output_file.name)
-            video_result = run_ffmpeg(cmd, output_file=output_file)
-            if not video_result.success:
-                raise RuntimeError(
-                    f"ffmpeg failed (exit {video_result.returncode}) extracting video track {track.track_id}"
-                )
-
-        for track in audio_tracks:
-            output_file = output_dir / track.display_name()
-            cmd = [
-                "ffmpeg",
-                "-i", source_video,
-                "-map", f"0:{track.track_id}",
-                "-c", "copy",
-                "-fflags", "+genpts",
-                "-avoid_negative_ts", "make_zero",
-                "-y",
-                output_file,
-            ]
-            logger.debug("Extracting audio track %d: %s", track.track_id, output_file.name)
-            audio_result = run_ffmpeg(cmd, output_file=output_file)
-            if not audio_result.success:
-                raise RuntimeError(
-                    f"ffmpeg failed (exit {audio_result.returncode}) extracting audio track {track.track_id}"
-                )
-
-        if other_tracks:
-            logger.debug("Extracting %d other track(s) via mkvextract", len(other_tracks))
-            extractor.extract_tracks(other_tracks, output_dir)
-
-        # Persist include/exclude filters in extraction.yaml sidecar (Req 10.11)
-        try:
-            ExtractionParams(include=include, exclude=exclude).save(_extraction_yaml)
-        except Exception as e:
-            logger.warning("Could not persist extraction.yaml: %s", e)
-
-    except RuntimeError as e:
-        error_msg = str(e)
-        logger.critical(error_msg)
-        return ExtractionResult(
-            video=None, audio=[], outcome=PhaseOutcome.FAILED, error=error_msg,
-        )
-    except Exception as e:
-        error_msg = f"Failed to extract streams: {e}"
-        logger.critical(error_msg)
-        return ExtractionResult(
-            video=None, audio=[], outcome=PhaseOutcome.FAILED, error=error_msg,
-        )
-
-    primary_video = video_metas[0]
-    audio_meta = [
-        _audio_metadata_from_stream(path, track)
-        for path, track in zip(expected_audio_files, audio_tracks)
-    ]
-    return ExtractionResult(
-        video=primary_video, audio=audio_meta, outcome=PhaseOutcome.COMPLETED,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -841,8 +607,9 @@ class ExtractionPhase:
         from pyqenc.phases.job import JobPhase as _JobPhase
 
         self._config = config
-        self._job: "_JobPhase | None" = cast("_JobPhase", phases[_JobPhase]) if phases else None
-        self.result: ExtractionPhaseResult | None = None
+        self._job:    "_JobPhase | None"          = cast("_JobPhase", phases[_JobPhase]) if phases else None
+        self.params   = ExtractionParams(include=config.include, exclude=config.exclude)
+        self.result:  ExtractionPhaseResult | None = None
         self.dependencies: list[Phase] = [self._job] if self._job is not None else []
 
     # ------------------------------------------------------------------
@@ -935,7 +702,7 @@ class ExtractionPhase:
 
         # Dry-run path
         if dry_run:
-            if pending_count == 0 and stale_count == 0:
+            if pending_count == 0 and complete_count > 0:
                 outcome = PhaseOutcome.REUSED
             else:
                 outcome = PhaseOutcome.DRY_RUN
@@ -948,8 +715,8 @@ class ExtractionPhase:
             )
             return self.result
 
-        # Nothing to do
-        if pending_count == 0:
+        # Nothing to do — only skip if we actually have complete artifacts
+        if pending_count == 0 and complete_count > 0:
             self.result = ExtractionPhaseResult(
                 outcome   = PhaseOutcome.REUSED,
                 artifacts = artifacts,
@@ -1051,15 +818,12 @@ class ExtractionPhase:
                     logger.warning("Could not remove temp file %s: %s", tmp, exc)
 
         # Step 3: load persisted params and detect filter changes
-        persisted = ExtractionParams.load(yaml_path)
-        filter_changed = (
-            persisted is not None
-            and (persisted.include != self._config.include or persisted.exclude != self._config.exclude)
-        )
+        persisted      = ExtractionParams.load(yaml_path)
+        filter_changed = persisted is not None and persisted != self.params
 
         # Step 4: scan extracted/ and classify
         if not extracted_dir.exists():
-            # Nothing extracted yet — show table with all streams absent
+            # Nothing extracted yet — build ABSENT artifact list for all expected streams
             try:
                 extractor = MKVTrackExtractor(str(self._config.source_video))
                 selected  = streams_filter_plain_regex(
@@ -1068,6 +832,16 @@ class ExtractionPhase:
                     exclude_pattern = self._config.exclude,
                 )
                 _log_stream_table(extractor.tracks, selected, set())
+                absent: list[ExtractionArtifact] = []
+                for track in selected:
+                    path = extracted_dir / track.display_name()
+                    if track.codec_type == "video":
+                        absent.append(VideoArtifact(path=path, state=ArtifactState.ABSENT))
+                    elif track.codec_type == "audio":
+                        absent.append(AudioArtifact(path=path, state=ArtifactState.ABSENT))
+                    else:
+                        absent.append(OtherArtifact(path=path, state=ArtifactState.ABSENT))
+                return absent, None, []
             except Exception:
                 pass
             return [], None, []
@@ -1077,7 +851,7 @@ class ExtractionPhase:
             if f.is_file() and not f.name.endswith(TEMP_SUFFIX)
         ]
         if not all_files:
-            # Dir exists but is empty — show table with all streams absent
+            # Dir exists but is empty — build ABSENT artifact list for all expected streams
             try:
                 extractor = MKVTrackExtractor(str(self._config.source_video))
                 selected  = streams_filter_plain_regex(
@@ -1086,6 +860,16 @@ class ExtractionPhase:
                     exclude_pattern = self._config.exclude,
                 )
                 _log_stream_table(extractor.tracks, selected, set())
+                absent = []
+                for track in selected:
+                    path = extracted_dir / track.display_name()
+                    if track.codec_type == "video":
+                        absent.append(VideoArtifact(path=path, state=ArtifactState.ABSENT))
+                    elif track.codec_type == "audio":
+                        absent.append(AudioArtifact(path=path, state=ArtifactState.ABSENT))
+                    else:
+                        absent.append(OtherArtifact(path=path, state=ArtifactState.ABSENT))
+                return absent, None, []
             except Exception:
                 pass
             return [], None, []
@@ -1264,10 +1048,7 @@ class ExtractionPhase:
 
         # Persist extraction.yaml
         try:
-            ExtractionParams(
-                include = self._config.include,
-                exclude = self._config.exclude,
-            ).save(work_dir / _EXTRACTION_YAML_NAME)
+            self.params.save(work_dir / _EXTRACTION_YAML_NAME)
         except Exception as exc:
             logger.warning("Could not persist extraction.yaml: %s", exc)
 

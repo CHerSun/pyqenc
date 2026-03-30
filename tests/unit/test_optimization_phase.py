@@ -54,7 +54,6 @@ def _make_config(
         quality_targets              = _QUALITY_TARGETS,
         strategies                   = strategies,
         optimize                     = optimize,
-        all_strategies               = not optimize,
         cleanup                      = CleanupLevel.NONE,
         chunking_mode                = ChunkingMode.LOSSLESS,
         force                        = force,

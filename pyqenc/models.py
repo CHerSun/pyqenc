@@ -429,54 +429,6 @@ class VideoMetadata(BaseModel):
         if self._duration_seconds is None or self._fps is None or self._resolution is None:
             self.populate_from_ffmpeg_output(stderr_lines)
 
-    # ------------------------------------------------------------------
-    # Opportunistic population helpers (public API)
-    # ------------------------------------------------------------------
-
-
-    @staticmethod
-    def from_stream(path: Path, stream: "VideoStream") -> "VideoMetadata":
-        # TODO: proper type hinting
-        # get sub-meta
-        raw = stream.raw
-        tags = stream.tags
-        # try get resolution
-        resolution = stream.resolution
-        if resolution is None:
-            width = raw.get('width')
-            height = raw.get('height')
-            if width and height:
-                resolution = f"{width}x{height}"
-        # try get duration
-        duration_seconds_str = tags.get('DURATION')
-        if duration_seconds_str:
-            # Convert from HH:MM:SS.ms format into float of seconds:
-            parts = duration_seconds_str.split(":") if duration_seconds_str else []
-            if len(parts) == 3:
-                try:
-                    hours = float(parts[0])
-                    minutes = float(parts[1])
-                    seconds = float(parts[2])
-                    duration_seconds = hours * 3600 + minutes * 60 + seconds
-                except ValueError:
-                    duration_seconds = None
-        # try get pix_fmt
-        pix_fmt = raw.get('pix_fmt', None)
-        # try to get frame count
-        frame_count = tags.get("NUMBER_OF_FRAMES")
-        # try get fps
-        fps = raw.get('r_frame_rate', None) or raw.get('avg_frame_rate')
-        if not fps and frame_count and duration_seconds:
-            fps = float(frame_count) / duration_seconds
-        # try get
-        return VideoMetadata(
-            path=path,
-            duration_seconds=duration_seconds,
-            fps=fps,
-            resolution=resolution,
-            pix_fmt = pix_fmt,
-            frame_count = frame_count,
-        )
 
     def populate_from_ffprobe(self, data: dict) -> None:
         """Fill backing fields from a pre-parsed ffprobe JSON dict.
@@ -642,7 +594,7 @@ class ChunkMetadata(VideoMetadata):
     end_timestamp:   float
 
     @classmethod
-    def model_validate_full(cls, data: dict) -> "ChunkMetadata":  # type: ignore[override]
+    def model_validate_full(cls, data: dict) -> "ChunkMetadata":
         """Restore a ``ChunkMetadata`` from a ``model_dump_full()`` dict."""
         instance = cls.model_validate(data)
         instance._duration_seconds = data.get("duration_seconds")
@@ -799,7 +751,6 @@ class PipelineConfig(BaseModel):
         quality_targets:    List of quality targets to meet.
         strategies:         List of encoding strategies to use.
         optimize:           Whether to search for optimal strategy.
-        all_strategies:     Whether to produce output for all strategies.
         max_parallel:       Maximum concurrent encoding processes.
         metrics_sampling:   Frame subsampling for metric calculation.
         log_level:          Logging level (debug, info, warning, critical).
@@ -825,7 +776,6 @@ class PipelineConfig(BaseModel):
     strategies:         list[Strategy]
     optimize:           bool              = False
     """Whether to search for optimal strategy (optimization phase)."""
-    all_strategies:     bool              = False
     max_parallel:       int               = 2
     """Maximum concurrent encoding processes."""
     metrics_sampling:   int               = 10

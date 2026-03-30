@@ -18,6 +18,7 @@ from pyqenc.models import (
     PipelineConfig,
     QualityTarget,
 )
+from pyqenc.state import ArtifactState
 from pyqenc.utils.log_format import fmt_key_value_table
 from pyqenc.utils.logging import setup_logging
 
@@ -34,27 +35,12 @@ def _set_process_priority() -> None:
 
 
 def _parse_quality_targets(targets_str: str) -> list[str]:
-    """Parse comma-separated quality targets.
-
-    Args:
-        targets_str: Comma-separated targets like "vmaf-min:95,ssim-med:98"
-
-    Returns:
-        List of target strings
-    """
+    """Parse comma-separated quality targets, i.e. "vmaf-min:95,ssim-med:98" into a list of strings"""
     return [t.strip() for t in targets_str.split(",") if t.strip()]
 
 
 def _parse_strategies(strategies_str: str | None) -> list[str] | None:
-    """Parse comma-separated encoding strategies.
-
-    Args:
-        strategies_str: Comma-separated strategies like "slow+h265-aq,veryslow+h264-anime",
-                       or None to use config defaults, or empty string for all combinations
-
-    Returns:
-        List of strategy strings, or None if not specified (use config defaults)
-    """
+    """Parse comma-separated encoding strategies, i.e. "slow+h265-aq,veryslow+h264-anime" into a list of strings. None meaning use defaults, while empty string means all combinations."""
     if strategies_str is None:
         return None
 
@@ -65,21 +51,14 @@ def _parse_strategies(strategies_str: str | None) -> list[str] | None:
 
 
 def _parse_cleanup_level(cleanup_value: str | None) -> CleanupLevel:
-    """Parse the --cleanup flag value into a ``CleanupLevel``.
-
-    Args:
-        cleanup_value: ``None`` (flag absent), ``""`` / ``"intermediate"``
-                       (flag present, no argument), or ``"all"``.
-
-    Returns:
-        Corresponding ``CleanupLevel`` enum value.
+    """Parse the --cleanup flag value into a ``CleanupLevel``. None for no cleanup, "" for intermediate, "all" for all.
 
     Raises:
         argparse.ArgumentTypeError: If the value is not recognised.
     """
     if cleanup_value is None:
         return CleanupLevel.NONE
-    if cleanup_value.lower() in ("", "intermediate"):
+    if cleanup_value.lower() == "":
         return CleanupLevel.INTERMEDIATE
     if cleanup_value.lower() == "all":
         return CleanupLevel.ALL
@@ -89,44 +68,17 @@ def _parse_cleanup_level(cleanup_value: str | None) -> CleanupLevel:
 
 
 def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add common arguments shared across subcommands.
-
-    Args:
-        parser: Argument parser to add arguments to
-    """
-    parser.add_argument(
-        "--work-dir",
-        type=Path,
-        default=Path("./work"),
-        help="Working directory for intermediate files and state (default: ./work)"
-    )
-    parser.add_argument(
-        "--log-level",
-        choices=["debug", "info", "warning", "critical"],
-        default="info",
-        help="Logging level (default: info)"
-    )
-    parser.add_argument(
-        "-y", "--execute",
-        action="store_true",
-        default=False,
-        help="Execute phases (default: dry-run). Without this flag only a dry-run is performed."
-    )
-    parser.add_argument(
-        "--cleanup",
-        nargs="?",
-        const="intermediate",
-        metavar="all",
-        help=(
+    """Add common arguments shared across subcommands to the given parser."""
+    parser.add_argument("--work-dir", type=Path, default=Path("./pyqenc"), help="Working directory for intermediate files and state (default: ./pyqenc)")
+    parser.add_argument("--log-level", choices=["debug", "info", "warning", "critical"], default="info", help="Logging level (default: info)")
+    parser.add_argument("-y", "--execute", action="store_true", default=False, help="Execute phases (default: dry-run). Without this flag only a dry-run is performed.")
+    parser.add_argument("--cleanup", nargs="?", const="intermediate", metavar="all", help=(
             "Cleanup level for intermediate files. "
             "--cleanup (no argument): delete workspace files per artifact after completion. "
             "--cleanup all: also delete remaining intermediate directories after full pipeline success."
         ),
     )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help=(
+    parser.add_argument("--force", action="store_true", help=(
             "When a source-file mismatch is detected in execute mode (-y), "
             "delete all intermediate artifacts and reset state, then continue "
             "with the new source file. Has no effect without -y."
@@ -287,138 +239,53 @@ def _create_auto_subcommand(subparsers) -> None:
 
 
 def _create_extract_subcommand(subparsers) -> None:
-    """Create the 'extract' subcommand for stream extraction.
-
-    Args:
-        subparsers: Subparsers object to add command to
-    """
-    extract_parser = subparsers.add_parser(
-        "extract",
-        help="Extract video and audio streams from source MKV"
-    )
-    extract_parser.add_argument(
-        "source",
-        type=Path,
-        help="Source MKV video file"
-    )
-    _add_common_arguments(extract_parser)
-    _add_filter_arguments(extract_parser)
-    _add_crop_arguments(extract_parser)
-    extract_parser.set_defaults(func=_cmd_extract)
+    """Create the 'extract' subcommand for stream extraction."""
+    p = subparsers.add_parser("extract", help="Extract video and audio streams from source MKV")
+    p.add_argument("source", type=Path, help="Source MKV video file")
+    _add_common_arguments(p)
+    _add_filter_arguments(p)
+    _add_crop_arguments(p)
+    p.set_defaults(func=_cmd_extract)
 
 
 def _create_chunk_subcommand(subparsers) -> None:
-    """Create the 'chunk' subcommand for video chunking.
-
-    Args:
-        subparsers: Subparsers object to add command to
-    """
-    chunk_parser = subparsers.add_parser(
-        "chunk",
-        help="Split video into scene-based chunks"
-    )
-    chunk_parser.add_argument(
-        "video",
-        type=Path,
-        help="Video file to chunk"
-    )
-    _add_common_arguments(chunk_parser)
-    chunk_parser.add_argument(
-        "--scene-threshold",
-        type=float,
-        default=0.3,
-        help="Scene detection sensitivity 0.0-1.0 (default: 0.3)"
-    )
-    chunk_parser.add_argument(
-        "--min-scene-length",
-        type=int,
-        default=24,
-        help="Minimum frames per chunk (default: 24)"
-    )
-    chunk_parser.add_argument(
-        "--remux-chunking",
-        action="store_true",
-        help=(
-            "Use stream-copy (remux) for chunking instead of the default FFV1 lossless re-encode. "
-            "Trades frame-perfect chunk boundaries for faster chunking and smaller intermediate files."
-        ),
-    )
-    chunk_parser.set_defaults(func=_cmd_chunk)
+    """Create the 'chunk' subcommand for video chunking."""
+    p = subparsers.add_parser("chunk", help="Split extracted video into scene-based chunks")
+    p.add_argument("source", type=Path, help="Source MKV video file")
+    _add_common_arguments(p)
+    p.add_argument("--scene-threshold", type=float, default=0.3,
+                   help="Scene detection sensitivity 0.0-1.0 (default: 0.3)")
+    p.add_argument("--min-scene-length", type=int, default=24,
+                   help="Minimum frames per chunk (default: 24)")
+    p.add_argument("--remux-chunking", action="store_true",
+                   help="Use stream-copy (remux) instead of FFV1 lossless re-encode.")
+    p.set_defaults(func=_cmd_chunk)
 
 
 def _create_encode_subcommand(subparsers) -> None:
-    """Create the 'encode' subcommand for chunk encoding.
-
-    Args:
-        subparsers: Subparsers object to add command to
-    """
-    encode_parser = subparsers.add_parser(
-        "encode",
-        help="Encode chunks to meet quality targets"
-    )
-    encode_parser.add_argument(
-        "chunks_dir",
-        type=Path,
-        help="Directory containing chunks to encode"
-    )
-    _add_common_arguments(encode_parser)
-    _add_quality_arguments(encode_parser)
-    encode_parser.set_defaults(func=_cmd_encode)
+    """Create the 'encode' subcommand for chunk encoding."""
+    p = subparsers.add_parser("encode", help="Encode chunks to meet quality targets")
+    p.add_argument("source", type=Path, help="Source MKV video file")
+    _add_common_arguments(p)
+    _add_quality_arguments(p)
+    p.set_defaults(func=_cmd_encode)
 
 
 def _create_audio_subcommand(subparsers) -> None:
-    """Create the 'audio' subcommand for audio processing.
-
-    Args:
-        subparsers: Subparsers object to add command to
-    """
-    audio_parser = subparsers.add_parser(
-        "audio",
-        help="Process audio streams with normalization"
-    )
-    audio_parser.add_argument(
-        "audio_dir",
-        type=Path,
-        help="Directory containing audio files to process"
-    )
-    _add_common_arguments(audio_parser)
-    _add_audio_convert_arguments(audio_parser)
-    audio_parser.set_defaults(func=_cmd_audio)
+    """Create the 'audio' subcommand for audio processing."""
+    p = subparsers.add_parser("audio", help="Process audio streams with normalization")
+    p.add_argument("source", type=Path, help="Source MKV video file")
+    _add_common_arguments(p)
+    _add_audio_convert_arguments(p)
+    p.set_defaults(func=_cmd_audio)
 
 
 def _create_merge_subcommand(subparsers) -> None:
-    """Create the 'merge' subcommand for final video merging.
-
-    Args:
-        subparsers: Subparsers object to add command to
-    """
-    merge_parser = subparsers.add_parser(
-        "merge",
-        help="Merge encoded chunks and audio into final MKV files"
-    )
-    merge_parser.add_argument(
-        "encoded_dir",
-        type=Path,
-        help="Directory containing encoded chunks organized by strategy"
-    )
-    merge_parser.add_argument(
-        "audio_dir",
-        type=Path,
-        help="Directory containing processed audio files"
-    )
-    _add_common_arguments(merge_parser)
-    merge_parser.add_argument(
-        "--output-dir",
-        type=Path,
-        help="Output directory for final MKV files (default: work_dir/final)"
-    )
-    merge_parser.add_argument(
-        "--verify-frames",
-        action="store_true",
-        default=True,
-        help="Verify frame count matches source (default: True)"
-    )
-    merge_parser.set_defaults(func=_cmd_merge)
+    """Create the 'merge' subcommand for final video merging."""
+    p = subparsers.add_parser("merge", help="Merge encoded chunks and audio into final MKV files")
+    p.add_argument("source", type=Path, help="Source MKV video file")
+    _add_common_arguments(p)
+    p.set_defaults(func=_cmd_merge)
 
 
 def _cmd_auto(args: argparse.Namespace) -> int:
@@ -486,7 +353,6 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         quality_targets=quality_targets,
         strategies=resolved_strategies,
         optimize=not args.all_strategies,  # optimize unless --all-strategies requested
-        all_strategies=args.all_strategies,
         max_parallel=args.max_parallel,
         log_level=args.log_level,
         include=args.include,
@@ -515,211 +381,141 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         return 1
 
 def _cmd_extract(args: argparse.Namespace) -> int:
-    """Execute the 'extract' subcommand.
-
-    Args:
-        args: Parsed command-line arguments
-
-    Returns:
-        Exit code (0 for success, non-zero for failure)
-    """
+    """Execute the 'extract' subcommand."""
     from pyqenc.api import extract_streams
 
     logger.info("Starting stream extraction")
     logger.info(f"Source: {args.source}")
 
-    # Parse execute flag
-    execute = args.execute
-
     try:
         result = extract_streams(
-            source_video=args.source,
-            output_dir=args.work_dir / "extracted",
-            include=args.include if hasattr(args, "include") else None,
-            exclude=args.exclude if hasattr(args, "exclude") else None,
-            dry_run=not execute,
+            source_video = args.source,
+            work_dir     = args.work_dir,
+            include      = getattr(args, "include", None),
+            exclude      = getattr(args, "exclude", None),
+            force        = args.force,
+            dry_run      = not args.execute,
         )
-
-        if result.success:
+        if result.is_complete:
             logger.info("Extraction completed successfully")
             return 0
-        else:
-            logger.critical(f"Extraction failed: {result.error}")
-            return 1
+        logger.critical(f"Extraction failed: {result.error}")
+        return 1
     except Exception as e:
         logger.critical(f"Extraction failed: {e}", exc_info=True)
         return 1
 
 
 def _cmd_chunk(args: argparse.Namespace) -> int:
-    """Execute the 'chunk' subcommand.
-
-    Args:
-        args: Parsed command-line arguments
-
-    Returns:
-        Exit code (0 for success, non-zero for failure)
-    """
+    """Execute the 'chunk' subcommand."""
     from pyqenc.api import chunk_video
     from pyqenc.models import ChunkingMode
 
     logger.info("Starting video chunking")
-    logger.info(f"Video: {args.video}")
-
-    # Parse execute flag
-    execute = args.execute
+    logger.info(f"Source: {args.source}")
 
     chunking_mode = ChunkingMode.REMUX if args.remux_chunking else ChunkingMode.LOSSLESS
 
     try:
         result = chunk_video(
-            video_file=args.video,
-            output_dir=args.work_dir / "chunks",
-            scene_threshold=args.scene_threshold,
-            min_scene_length=args.min_scene_length,
-            chunking_mode=chunking_mode,
-            dry_run=not execute,
+            source_video     = args.source,
+            work_dir         = args.work_dir,
+            scene_threshold  = args.scene_threshold,
+            min_scene_length = args.min_scene_length,
+            chunking_mode    = chunking_mode,
+            force            = args.force,
+            dry_run          = not args.execute,
         )
-
-        if result.success:
+        if result.is_complete:
             logger.info("Chunking completed successfully")
             return 0
-        else:
-            logger.critical(f"Chunking failed: {result.error}")
-            return 1
+        logger.critical(f"Chunking failed: {result.error}")
+        return 1
     except Exception as e:
         logger.critical(f"Chunking failed: {e}", exc_info=True)
         return 1
 
 
 def _cmd_encode(args: argparse.Namespace) -> int:
-    """Execute the 'encode' subcommand.
-
-    Args:
-        args: Parsed command-line arguments
-
-    Returns:
-        Exit code (0 for success, non-zero for failure)
-    """
+    """Execute the 'encode' subcommand."""
     from pyqenc.api import encode_chunks
 
     logger.info("Starting chunk encoding")
-    logger.info(f"Chunks directory: {args.chunks_dir}")
+    logger.info(f"Source: {args.source}")
 
-    # Parse execute flag
-    execute = args.execute
-
-    # Parse quality targets and strategies
     _quality_target_strs = _parse_quality_targets(args.quality_target)
-    try:
-        quality_targets = [QualityTarget.parse(t) for t in _quality_target_strs]
-    except ValueError as e:
-        logger.critical(f"Invalid quality target: {e}")
-        return 1
     strategies = _parse_strategies(args.strategies)
 
     try:
         result = encode_chunks(
-            chunks_dir=args.chunks_dir,
-            strategies=strategies,
-            quality_targets=quality_targets,
-            work_dir=args.work_dir,
-            max_parallel=args.max_parallel,
-            dry_run=not execute,
+            source_video    = args.source,
+            work_dir        = args.work_dir,
+            strategies      = strategies or [],
+            quality_targets = _quality_target_strs,
+            max_parallel    = args.max_parallel,
+            force           = args.force,
+            dry_run         = not args.execute,
         )
-
-        if result.success:
+        if result.is_complete:
             logger.info("Encoding completed successfully")
             return 0
-        else:
-            logger.critical(f"Encoding failed: {result.error}")
-            return 1
+        logger.critical(f"Encoding failed: {result.error}")
+        return 1
     except Exception as e:
         logger.critical(f"Encoding failed: {e}", exc_info=True)
         return 1
 
 
 def _cmd_audio(args: argparse.Namespace) -> int:
-    """Execute the 'audio' subcommand.
-
-    Args:
-        args: Parsed command-line arguments
-
-    Returns:
-        Exit code (0 for success, non-zero for failure)
-    """
+    """Execute the 'audio' subcommand."""
     from pyqenc.api import process_audio
 
     logger.info("Starting audio processing")
-    logger.info(f"Audio directory: {args.audio_dir}")
-
-    # Parse execute flag
-    execute = args.execute
+    logger.info(f"Source: {args.source}")
 
     try:
         result = process_audio(
-            audio_dir=args.audio_dir,
-            output_dir=args.work_dir / "audio",
-            audio_convert=args.audio_convert,
-            audio_codec=args.audio_codec,
-            audio_base_bitrate=args.audio_bitrate,
-            dry_run=not execute,
+            source_video       = args.source,
+            work_dir           = args.work_dir,
+            audio_convert      = getattr(args, "audio_convert", None),
+            audio_codec        = getattr(args, "audio_codec", None),
+            audio_base_bitrate = getattr(args, "audio_bitrate", None),
+            dry_run            = not args.execute,
         )
-
-        if result.success:
+        if result.is_complete:
             logger.info("Audio processing completed successfully")
             return 0
-        else:
-            logger.critical(f"Audio processing failed: {result.error}")
-            return 1
+        logger.critical(f"Audio processing failed: {result.error}")
+        return 1
     except Exception as e:
         logger.critical(f"Audio processing failed: {e}", exc_info=True)
         return 1
 
 
 def _cmd_merge(args: argparse.Namespace) -> int:
-    """Execute the 'merge' subcommand.
-
-    Args:
-        args: Parsed command-line arguments
-
-    Returns:
-        Exit code (0 for success, non-zero for failure)
-    """
+    """Execute the 'merge' subcommand."""
     from pyqenc.api import merge_final
 
     logger.info("Starting final merge")
-    logger.info(f"Encoded directory: {args.encoded_dir}")
-    logger.info(f"Audio directory: {args.audio_dir}")
-
-    # Parse execute flag
-    execute = args.execute
-
-    # Determine output directory
-    output_dir = args.output_dir if hasattr(args, "output_dir") and args.output_dir else args.work_dir / "final"
+    logger.info(f"Source: {args.source}")
 
     try:
         result = merge_final(
-            encoded_dir=args.encoded_dir,
-            audio_dir=args.audio_dir,
-            output_dir=output_dir,
-            verify_frames=args.verify_frames if hasattr(args, "verify_frames") else True,
-            dry_run=not execute,
+            source_video = args.source,
+            work_dir     = args.work_dir,
+            dry_run      = not args.execute,
         )
-
-        if result.success:
-            if result.output_files:
-                logger.info(f"Merge completed successfully: {len(result.output_files)} file(s)")
-                for strategy, output_file in result.output_files.items():
-                    logger.info(f"  {strategy}: {output_file}")
-                    if strategy in result.frame_counts:
-                        logger.info(f"    Frame count: {result.frame_counts[strategy]}")
+        if result.is_complete:
+            completed = [a for a in result.merged if a.state == ArtifactState.COMPLETE]
+            if completed:
+                logger.info(f"Merge completed successfully: {len(completed)} file(s)")
+                for artifact in completed:
+                    logger.info(f"  {artifact.path}")
             else:
                 logger.info("Merge completed (no new files created)")
             return 0
-        else:
-            logger.critical(f"Merge failed: {result.error}")
-            return 1
+        logger.critical(f"Merge failed: {result.error}")
+        return 1
     except Exception as e:
         logger.critical(f"Merge failed: {e}", exc_info=True)
         return 1
@@ -809,6 +605,7 @@ Examples:
     # Install SIGINT handler early so CTRL+C always triggers immediate exit,
     # overriding asyncio's default handler which swallows the first keypress.
     import signal
+
     from pyqenc.utils.ffmpeg_runner import kill_all_ffmpeg
 
     def _sigint_handler(signum: int, frame: object) -> None:

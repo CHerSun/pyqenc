@@ -2,11 +2,13 @@
 
 <!-- markdownlint-disable MD024 MD026 MD028 -->
 
-pyqenc (`PY`thon `Q`uality-based `E`ncoder) - an encoding pipeline that achieves user-specified quality targets while optimizing file size through intelligent CRF adjustment, automatic crop detection, and scene-based chunking.
+pyqenc (**PY**thon **Q**uality-based **ENC**oder) - an encoding pipeline that achieves user-specified quality targets while optimizing file size through intelligent CRF adjustment, automatic crop detection, and scene-based chunking.
 
 > This project was inspired by [Av1an](https://github.com/rust-av/Av1an).
 
 > AWS and Kiro IDE team - thank you for the agentic IDE and welcome credits. This allowed me to prototype this project incredibly fast. Truly a new approach to development.
+
+> NOTE: This is a pet project to solve my personal needs. It is not meant to be used in production, at least yet. Contributions are welcomed.
 
 ## Problem & Solution
 
@@ -23,9 +25,9 @@ Traditional video encoding approaches face several challenges:
 
 pyqenc provides a quality-first encoding pipeline that:
 
+- **Adjusts CRF iteratively** until quality targets are met for each scene
 - **Guarantees quality targets** using objective metrics (VMAF, SSIM, PSNR)
 - **Automatically detects and removes black borders** to optimize encoding efficiency
-- **Adjusts CRF iteratively** until quality targets are met for each scene
 - **Supports multiple codecs** (h.264 8-bit, h.265 10-bit) with custom profiles
 - **Resumes seamlessly** from interruptions using artifact-based detection
 - **Processes in parallel** to maximize CPU utilization
@@ -45,7 +47,7 @@ pyqenc provides a quality-first encoding pipeline that:
 - ✅ Artifact-based resumption (no explicit resume needed)
 - ✅ Dry-run mode to preview operations
 - ✅ Comprehensive logging and progress reporting
-- Currently targeting only MKV sources. Remux into MKV if needed.
+- Currently targeting only MKV sources. You should remux other containers into MKV beforehand.
 
 ## Installation
 
@@ -78,6 +80,12 @@ cd pyqenc
 uv run pyqenc <your_arguments>
 ```
 
+To update the pyqenc later:
+
+```sh
+git pull
+```
+
 ### Install pyqenc
 
 This needs global python of version >=3.13. Install using `uv`:
@@ -93,6 +101,13 @@ After installation, the `pyqenc` command will be available in your terminal. To 
 
 ```sh
 pyqenc <your_arguments>
+```
+
+To update later:
+
+```sh
+git pull
+uv pip install .
 ```
 
 ## Quick Start

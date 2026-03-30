@@ -46,19 +46,6 @@ class AudioOutputConfig:
     profiles:       dict[str, AudioConversionProfile]
 
 
-@dataclass
-class StreamFilterConfig:
-    """Include/exclude regex filters applied to all stream types during extraction.
-
-    Attributes:
-        include: Regex string selecting streams by would-be output filename.
-                 ``None`` means include all streams.
-        exclude: Regex string rejecting streams by would-be output filename.
-                 ``None`` means exclude no streams.  Exclusion takes precedence.
-    """
-
-    include: str | None
-    exclude: str | None
 
 
 @dataclass
@@ -206,13 +193,6 @@ class ConfigManager:
             )
         return self._profiles[name]
 
-    def list_codecs(self) -> list[str]:
-        """List all available codec names.
-
-        Returns:
-            List of codec names
-        """
-        return list(self._codecs.keys())
 
     def list_profiles(self, codec: str | None = None) -> list[str]:
         """List all available profile names.
@@ -231,20 +211,6 @@ class ConfigManager:
             if profile.codec == codec
         ]
 
-    def list_presets(self, codec: str) -> list[str]:
-        """List presets supported by specific codec.
-
-        Args:
-            codec: Codec name (e.g., 'h264-8bit', 'h265-10bit')
-
-        Returns:
-            List of preset names supported by this codec
-
-        Raises:
-            ValueError: If codec not found
-        """
-        codec_config = self.get_codec(codec)
-        return codec_config.presets.copy()
 
     def validate_strategy(self, strategy: str) -> bool:
         """Validate strategy string format.
@@ -514,15 +480,3 @@ class ConfigManager:
         """
         return int(self._config.get("metrics", {}).get("sampling", 10))
 
-    def get_stream_filter(self) -> StreamFilterConfig:
-        """Parse and return the ``streams`` filtering configuration section.
-
-        Returns:
-            :class:`StreamFilterConfig` populated from the loaded config.
-            Both ``include`` and ``exclude`` default to ``None`` when absent.
-        """
-        section: dict[str, Any] = self._config.get("streams", {})
-        return StreamFilterConfig(
-            include = section.get("include"),
-            exclude = section.get("exclude"),
-        )
