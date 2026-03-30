@@ -152,11 +152,17 @@ class JobPhase:
         Returns:
             ``JobPhaseResult`` with ``job``, ``crop``, and ``force_wipe`` set.
         """
-        # Disk space check (execute mode only)
+        # Disk space check (execute mode only).
+        # Reuse cached VideoMetadata from job.yaml when available (has fps/duration/resolution
+        # already populated → pixel-based estimate). Fall back to a bare instance on first run
+        # (file_size_bytes is the only field needed for the multiplier fallback — one stat() call).
         if not dry_run:
+            existing_job = JobState.load(self._config.work_dir / _JOB_YAML_FILENAME)
+            video        = existing_job.source if existing_job is not None \
+                           else VideoMetadata(path=self._config.source_video)
             n_strategies = len(self._config.strategies)
             log_disk_space_info(
-                source_video   = self._config.source_video,
+                video          = video,
                 work_dir       = self._config.work_dir,
                 min_strategies = 1 if (self._config.optimize or n_strategies == 0) else n_strategies,
                 max_strategies = max(1, n_strategies),
