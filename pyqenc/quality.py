@@ -316,25 +316,6 @@ def normalize_metric(metric_type: MetricType, value: float) -> float:
     else:
         assert_never(metric_type)
 
-def normalize_metric_deficit(
-    metric_type: MetricType,
-    actual:      float,
-    target:      float,
-) -> float:
-    """Compute quality deficit on the 0–100 scale for consistent CRF adjustment.
-
-    Both ``actual`` and ``target`` must already be on the 0–100 scale
-    (i.e. values returned by ``analyze_chunk_quality`` or ``normalize_metric``).
-
-    Args:
-        metric_type: Metric type enum value (unused; kept for API compatibility).
-        actual:      Actual measured value, already normalized to 0–100.
-        target:      Target value on the 0–100 scale.
-
-    Returns:
-        Deficit — positive when quality exceeds target, negative when below.
-    """
-    return actual - target
 
 _MAX_METRIC = 100.0
 """Upper bound of the normalized metric scale. All metrics are normalized to 0–100."""

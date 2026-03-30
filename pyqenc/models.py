@@ -429,54 +429,6 @@ class VideoMetadata(BaseModel):
         if self._duration_seconds is None or self._fps is None or self._resolution is None:
             self.populate_from_ffmpeg_output(stderr_lines)
 
-    # ------------------------------------------------------------------
-    # Opportunistic population helpers (public API)
-    # ------------------------------------------------------------------
-
-
-    @staticmethod
-    def from_stream(path: Path, stream: "VideoStream") -> "VideoMetadata":
-        # TODO: proper type hinting
-        # get sub-meta
-        raw = stream.raw
-        tags = stream.tags
-        # try get resolution
-        resolution = stream.resolution
-        if resolution is None:
-            width = raw.get('width')
-            height = raw.get('height')
-            if width and height:
-                resolution = f"{width}x{height}"
-        # try get duration
-        duration_seconds_str = tags.get('DURATION')
-        if duration_seconds_str:
-            # Convert from HH:MM:SS.ms format into float of seconds:
-            parts = duration_seconds_str.split(":") if duration_seconds_str else []
-            if len(parts) == 3:
-                try:
-                    hours = float(parts[0])
-                    minutes = float(parts[1])
-                    seconds = float(parts[2])
-                    duration_seconds = hours * 3600 + minutes * 60 + seconds
-                except ValueError:
-                    duration_seconds = None
-        # try get pix_fmt
-        pix_fmt = raw.get('pix_fmt', None)
-        # try to get frame count
-        frame_count = tags.get("NUMBER_OF_FRAMES")
-        # try get fps
-        fps = raw.get('r_frame_rate', None) or raw.get('avg_frame_rate')
-        if not fps and frame_count and duration_seconds:
-            fps = float(frame_count) / duration_seconds
-        # try get
-        return VideoMetadata(
-            path=path,
-            duration_seconds=duration_seconds,
-            fps=fps,
-            resolution=resolution,
-            pix_fmt = pix_fmt,
-            frame_count = frame_count,
-        )
 
     def populate_from_ffprobe(self, data: dict) -> None:
         """Fill backing fields from a pre-parsed ffprobe JSON dict.
