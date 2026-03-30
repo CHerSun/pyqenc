@@ -34,6 +34,7 @@ from pyqenc.constants import (
     TIME_SEPARATOR_SAFE,
 )
 from pyqenc.models import CropParams, PhaseOutcome, QualityTarget, VideoMetadata
+from pyqenc.quality import MetricType
 from pyqenc.phase import Artifact, ArtifactState, Phase, PhaseResult
 from pyqenc.state import MergeParams
 from pyqenc.utils.ffmpeg_runner import get_frame_count, run_ffmpeg
@@ -92,9 +93,6 @@ class MergeArtifact(Artifact):
 # Sidecar model
 # ---------------------------------------------------------------------------
 
-_MERGE_SIDECAR_VERSION = 1
-
-
 def _sidecar_path(output_file: Path) -> Path:
     """Return the sidecar YAML path for a merged output file."""
     return output_file.with_suffix(".yaml")
@@ -113,19 +111,46 @@ def _load_merge_sidecar(output_file: Path) -> dict | None:
         return None
 
 
+def _targeted_metrics(
+    all_metrics:     dict[str, float],
+    quality_targets: list[QualityTarget],
+) -> dict[str, float]:
+    """Return only the metric keys that correspond to user-requested quality targets.
+
+    Keys are in ``{metric}-{statistic}`` form (e.g. ``vmaf-min``), matching the
+    CLI input format and optimization.yaml convention.
+    Values are coerced to plain Python ``float`` to avoid numpy scalar serialisation artefacts.
+    """
+    return {
+        f"{t.metric}-{t.statistic}": float(all_metrics[f"{t.metric}_{t.statistic}"])
+        for t in quality_targets
+        if f"{t.metric}_{t.statistic}" in all_metrics
+    }
+
+
 def _write_merge_sidecar(
     output_file:     Path,
     frame_count:     int | None,
-    final_metrics:   dict[str, float],
+    all_metrics:     dict[str, float],
+    quality_targets: list[QualityTarget],
     targets_met:     bool,
     plot_path:       Path | None,
 ) -> None:
-    """Atomically write a merge sidecar alongside *output_file*."""
+    """Atomically write a merge sidecar alongside *output_file*.
+
+    Only metrics for user-requested quality targets are persisted.
+    Quality target values are written before measured metrics so the user
+    can directly compare target vs. actual in the YAML.
+    Keys use ``{metric}-{statistic}`` form (e.g. ``vmaf-min``) matching the CLI convention.
+    """
+    targets_section = {f"{t.metric}-{t.statistic}": t.value for t in quality_targets}
+    metrics_section = _targeted_metrics(all_metrics, quality_targets)
+
     data: dict = {
-        "version":     _MERGE_SIDECAR_VERSION,
-        "frame_count": frame_count,
-        "targets_met": targets_met,
-        "metrics":     final_metrics,
+        "frame_count":   frame_count,
+        "targets_met":   targets_met,
+        "targets":       targets_section,
+        "metrics":       metrics_section,
     }
     if plot_path is not None:
         data["plot"] = str(plot_path)
@@ -198,19 +223,26 @@ def _measure_quality(
     metrics_dict: dict[str, float] = {}
     for metric_name, metric_stats in evaluation.metrics.items():
         for stat_name, stat_value in metric_stats.items():
-            metrics_dict[f"{metric_name}_{stat_name}"] = stat_value
+            metrics_dict[f"{metric_name.value}_{stat_name}"] = stat_value
 
     plot_path = evaluation.artifacts.plot if evaluation.artifacts.plot else None
     return metrics_dict, evaluation.targets_met, plot_path
 
 
 def _log_metrics_summary(
-    strategy:        str,
-    metrics_dict:    dict[str, float],
-    quality_targets: list[QualityTarget],
-    targets_met:     bool,
+    strategy:         str,
+    metrics_dict:     dict[str, float],
+    quality_targets:  list[QualityTarget],
+    targets_met:      bool,
+    metrics_sampling: int,
 ) -> None:
-    """Log a compact quality metrics summary for *strategy*."""
+    """Log a compact quality metrics summary for *strategy*.
+
+    When targets are not met but the user requested VMAF and metrics subsampling
+    is active (factor > 1), the miss is expected — VMAF is motion-sensitive and
+    subsampling can skew its score.  In that case the overall result is logged at
+    INFO level with an explanatory note instead of WARNING.
+    """
     for target in quality_targets:
         key    = f"{target.metric}_{target.statistic}"
         value  = metrics_dict.get(key)
@@ -221,8 +253,20 @@ def _log_metrics_summary(
             "  %s %s-%s: %.2f (target: %.2f)",
             symbol, target.metric, target.statistic, value, target.value,
         )
+
     overall = SUCCESS_SYMBOL_MINOR if targets_met else FAILURE_SYMBOL_MINOR
-    logger.info("  %s %s: quality targets %s", overall, strategy, "met" if targets_met else "NOT met")
+    if targets_met:
+        logger.info("  %s %s: quality targets met", overall, strategy)
+    else:
+        vmaf_targeted = any(t.metric == MetricType.VMAF.value for t in quality_targets)
+        if vmaf_targeted and metrics_sampling > 1:
+            logger.info(
+                "  %s %s: quality targets NOT met"
+                " (VMAF is motion-sensitive; result may be unreliable at subsampling 1:%d)",
+                overall, strategy, metrics_sampling,
+            )
+        else:
+            logger.warning("  %s %s: quality targets NOT met", overall, strategy)
 
 
 def _collect_crf_data(
@@ -765,6 +809,7 @@ class MergePhase:
                         _log_metrics_summary(
                             strategy_name, metrics_dict,
                             self._config.quality_targets, targets_met,
+                            self._config.metrics_sampling,
                         )
 
                 # CRF distribution plot
@@ -788,11 +833,12 @@ class MergePhase:
 
                 # Write sidecar (marks this output as COMPLETE)
                 _write_merge_sidecar(
-                    output_file   = output_file,
-                    frame_count   = frame_count,
-                    final_metrics = metrics_dict,
-                    targets_met   = targets_met,
-                    plot_path     = plot_path,
+                    output_file     = output_file,
+                    frame_count     = frame_count,
+                    all_metrics     = metrics_dict,
+                    quality_targets = self._config.quality_targets,
+                    targets_met     = targets_met,
+                    plot_path       = plot_path,
                 )
 
                 symbol = SUCCESS_SYMBOL_MINOR if targets_met else FAILURE_SYMBOL_MINOR
