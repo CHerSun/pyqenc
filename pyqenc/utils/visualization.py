@@ -108,12 +108,20 @@ _BAR_HEIGHT: float = 0.7
 _BAR_ALPHA:  float = 0.8
 
 # Misc
-_PLOT_DPI:        int   = 200
+_PLOT_DPI:         int   = 200
 _GRID_ALPHA_MAJOR: float = 0.3
 _GRID_ALPHA_MINOR: float = 0.1
-_LEGEND_ALPHA:    float = 0.9
-_MARKER_SIZE:     int   = 10
-_MARKER_ALPHA:    float = 0.9
+_LEGEND_ALPHA:     float = 0.9
+_MARKER_SIZE:      int   = 10
+_MARKER_ALPHA:     float = 0.9
+_TIGHT_LAYOUT_PAD: float = 0.2   # outer padding for tight_layout (default ~1.08 is too large)
+
+# CRF plot
+_CRF_COLOR:       str   = "#8B0000"   # dark red
+_CRF_Y_MIN:       float = 0.0
+_CRF_Y_MAX:       float = 63.0        # x265 CRF range upper bound
+_CRF_Y_MAJOR_TICK: float = 5.0
+_CRF_Y_MINOR_TICK: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -486,29 +494,42 @@ def create_unified_plot(
         scaled_values[metric_type] = vals
         frame_index[metric_type]   = metric_data.df.index
 
-    max_frame = max(idx.max() for idx in frame_index.values()) + frame_offset
-    min_frame = min(idx.min() for idx in frame_index.values()) + frame_offset
-    x_pad     = (max_frame - min_frame) * _X_PADDING_RATIO
-    ax_main.set_xlim(min_frame - x_pad, max_frame + x_pad)
-    ax_main.xaxis.set_major_locator(ticker.MaxNLocator(nbins=_X_MAJOR_TICKS, integer=True))
-    ax_main.xaxis.set_minor_locator(ticker.MaxNLocator(nbins=_X_MINOR_TICKS, integer=True))
-
     if fps is not None and fps > 0:
+        # Capture total_frames before converting index to seconds
+        total_frames_for_summary: int = int(max(idx.max() for idx in frame_index.values()) + frame_offset) + 1
+
+        # Convert x-axis to seconds so tick positions align with the CRF plot.
+        # frame_index values are frame numbers; divide by fps to get seconds.
+        for mt in list(frame_index.keys()):
+            frame_index[mt] = frame_index[mt] / fps
+        frame_offset = frame_offset / fps  # already seconds/fps, now pure seconds
+
+        max_seconds = max(idx.max() for idx in frame_index.values()) + frame_offset
+        min_seconds = min(idx.min() for idx in frame_index.values()) + frame_offset
+        x_pad       = (max_seconds - min_seconds) * _X_PADDING_RATIO
+        ax_main.set_xlim(min_seconds - x_pad, max_seconds + x_pad)
+        ax_main.xaxis.set_major_locator(ticker.MaxNLocator(nbins=_X_MAJOR_TICKS))
+        ax_main.xaxis.set_minor_locator(ticker.MaxNLocator(nbins=_X_MINOR_TICKS))
         ax_main.set_xlabel("Timestamp / Frame Number", fontsize=_FONT_AXIS_LABEL, fontweight="bold")
 
-        def _dual_label_formatter(frame_num: float, _pos: int | None = None) -> str:
+        def _dual_label_formatter(seconds: float, _pos: int | None = None) -> str:
             """Format x-axis tick as 'HH:MM:SS\nframe N'."""
-            total_seconds = int(frame_num / fps)
-            hours         = total_seconds // 3600
-            minutes       = (total_seconds % 3600) // 60
-            seconds       = total_seconds % 60
-            timestamp     = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-            return f"{timestamp}\n{int(frame_num)}"
+            total_s = int(seconds)
+            hours   = total_s // 3600
+            minutes = (total_s % 3600) // 60
+            secs    = total_s % 60
+            frame_n = int(seconds * fps)
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}\n{frame_n}"
 
         ax_main.xaxis.set_major_formatter(ticker.FuncFormatter(_dual_label_formatter))
-        # Increase bottom margin so two-line labels don't get clipped
         ax_main.tick_params(axis="x", labelsize=_FONT_AXIS_TICKS_X, pad=4)
     else:
+        max_frame = max(idx.max() for idx in frame_index.values()) + frame_offset
+        min_frame = min(idx.min() for idx in frame_index.values()) + frame_offset
+        x_pad     = (max_frame - min_frame) * _X_PADDING_RATIO
+        ax_main.set_xlim(min_frame - x_pad, max_frame + x_pad)
+        ax_main.xaxis.set_major_locator(ticker.MaxNLocator(nbins=_X_MAJOR_TICKS, integer=True))
+        ax_main.xaxis.set_minor_locator(ticker.MaxNLocator(nbins=_X_MINOR_TICKS, integer=True))
         ax_main.set_xlabel("Frame Number", fontsize=_FONT_AXIS_LABEL, fontweight="bold")
 
     lines:  list[plt.Line2D] = []
@@ -559,7 +580,8 @@ def create_unified_plot(
     # Collect summary box data — rendered after tight_layout so axes position is final
     _summary_boxes: list[tuple[float, float, str, dict]] = []
 
-    total_frames   = max(idx.max() for idx in frame_index.values()) + 1
+    total_frames   = total_frames_for_summary if fps is not None and fps > 0 \
+                     else int(max(idx.max() for idx in frame_index.values()) + 1)
     frames_checked = max(len(v) for v in scaled_values.values())
     current_x      = _SUMMARY_BOX_START_X
 
@@ -650,7 +672,7 @@ def create_unified_plot(
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore",
                                 message="This figure includes Axes that are not compatible with tight_layout")
-        plt.tight_layout()
+        plt.tight_layout(pad=_TIGHT_LAYOUT_PAD)
 
     # -----------------------------------------------------------------------
     # Summary boxes — why fig.text() and NOT ax.text()
@@ -689,7 +711,8 @@ def create_unified_plot(
             family="monospace",
         )
 
-    fig.savefig(output_path, dpi=_PLOT_DPI, bbox_inches="tight")
+    fig.set_size_inches(_FIG_WIDTH, _FIG_HEIGHT)
+    fig.savefig(output_path, dpi=_PLOT_DPI)
     plt.close(fig)
 
     return stats
@@ -900,6 +923,172 @@ def analyze_chunk_quality(
             _save_stats_file(metric_type, full_stats[metric_type], metric_file)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# CRF distribution plot
+# ---------------------------------------------------------------------------
+
+def create_crf_plot(
+    chunks:      list[tuple[float, float, float]],
+    output_path: Path,
+    title:       str = "CRF Distribution",
+) -> None:
+    """Create a CRF-over-time plot and save it to disk.
+
+    Layout mirrors ``create_unified_plot`` exactly for side-by-side comparison:
+    same figure size, same gridspec (main + stats row), dual Y-axes both
+    labeled "CRF", same x-axis formatter (``HH:MM:SS`` / seconds, two lines),
+    same summary box, same DPI.
+
+    Args:
+        chunks:      List of ``(start_seconds, end_seconds, crf)`` tuples,
+                     one per winning chunk, in timeline order.
+        output_path: Destination path for the saved PNG.
+        title:       Plot title.
+
+    Raises:
+        ValueError: If ``chunks`` is empty.
+    """
+    if not chunks:
+        raise ValueError("No CRF data provided for visualization")
+
+    starts = np.array([c[0] for c in chunks])
+    ends   = np.array([c[1] for c in chunks])
+    crfs   = np.array([c[2] for c in chunks])
+
+    plt.style.use("seaborn-v0_8")
+    plt.rcParams["axes.grid"] = False
+
+    # Mirror create_unified_plot: 2 rows × 3 columns (same ratios/spacing as 3-metric plot)
+    # The stats subplot spans all 3 columns so the main plot width matches exactly.
+    _N_STAT_COLS: int = 3
+    fig = plt.figure(figsize=(_FIG_WIDTH, _FIG_HEIGHT))
+    gs  = fig.add_gridspec(
+        2, _N_STAT_COLS,
+        height_ratios=[_MAIN_PLOT_HEIGHT_RATIO, _STATS_PLOT_HEIGHT_RATIO],
+        hspace=_GRID_HSPACE,
+        wspace=_GRID_WSPACE,
+    )
+
+    ax_left  = fig.add_subplot(gs[0, :])
+    ax_right = ax_left.twinx()
+    ax_left.set_axisbelow(True)
+    ax_right.set_axisbelow(True)
+
+    def _configure_crf_axis(ax: plt.Axes) -> None:
+        ax.set_ylabel("CRF", color=_CRF_COLOR, fontsize=_FONT_AXIS_LABEL, fontweight="bold")
+        ax.set_ylim(_CRF_Y_MIN, _CRF_Y_MAX)
+        ax.tick_params(axis="y", labelcolor=_CRF_COLOR, labelsize=_FONT_AXIS_TICKS)
+        ax.yaxis.set_major_locator(plt.MultipleLocator(_CRF_Y_MAJOR_TICK))
+        ax.yaxis.set_minor_locator(plt.MultipleLocator(_CRF_Y_MINOR_TICK))
+        ax.set_axisbelow(True)
+        ax.grid(True, which="major", alpha=_GRID_ALPHA_MAJOR, zorder=0)
+        ax.grid(True, which="minor", alpha=_GRID_ALPHA_MINOR, zorder=0)
+
+    _configure_crf_axis(ax_left)
+    _configure_crf_axis(ax_right)
+
+    ax_left.set_title(title, fontsize=_FONT_TITLE, fontweight="bold", pad=20)
+    ax_left.tick_params(axis="x", labelsize=_FONT_AXIS_TICKS_X)
+
+    # X-axis: seconds, formatted as HH:MM:SS / s (two lines to match metrics plot height)
+    x_min = float(starts.min())
+    x_max = float(ends.max())
+    x_pad = (x_max - x_min) * _X_PADDING_RATIO
+    ax_left.set_xlim(x_min - x_pad, x_max + x_pad)
+    ax_left.xaxis.set_major_locator(ticker.MaxNLocator(nbins=_X_MAJOR_TICKS, integer=True))
+    ax_left.xaxis.set_minor_locator(ticker.MaxNLocator(nbins=_X_MINOR_TICKS, integer=True))
+    ax_left.set_xlabel("Timestamp / Seconds", fontsize=_FONT_AXIS_LABEL, fontweight="bold")
+
+    def _ts_formatter(seconds: float, _pos: int | None = None) -> str:
+        """Format x-axis tick as 'HH:MM:SS\n{s:.1f}s' — two lines like the metrics plot."""
+        total_s = int(seconds)
+        h       = total_s // 3600
+        m       = (total_s % 3600) // 60
+        s       = total_s % 60
+        return f"{h:02d}:{m:02d}:{s:02d}\n{seconds:.1f}s"
+
+    ax_left.xaxis.set_major_formatter(ticker.FuncFormatter(_ts_formatter))
+    ax_left.tick_params(axis="x", labelsize=_FONT_AXIS_TICKS_X, pad=4)
+
+    # Main plot: step line on left axis — append sentinel at ends[-1] so last chunk reaches right edge
+    order  = np.argsort(starts)
+    step_x = np.append(starts[order], ends[order[-1]])
+    step_y = np.append(crfs[order],   crfs[order[-1]])
+    line, = ax_left.step(
+        step_x, step_y,
+        where     = "post",
+        color     = _CRF_COLOR,
+        linewidth = _LINE_WIDTH_DEFAULT,
+        alpha     = _LINE_ALPHA,
+        label     = "CRF",
+        zorder    = 3,
+    )
+    ax_left.legend([line], ["CRF"], loc="lower right", fontsize=_FONT_LEGEND, framealpha=_LEGEND_ALPHA)
+
+    # Stats subplot — same structure as metric subplots in create_unified_plot
+    crf_series  = pd.Series(crfs)
+    crf_stats   = compute_statistics(crf_series, std_cutoff_max=_CRF_Y_MAX)
+
+    bar_labels  = ["Min", "5%", "25%", "50%", "75%", "95%", "Max"]
+    stat_keys   = ["min", "p5", "p25", "p50", "p75", "p95", "max"]
+    stat_values = [crf_stats[k] for k in stat_keys]
+
+    ax_stats    = fig.add_subplot(gs[1, :])
+    y_positions: np.ndarray                 = np.arange(len(bar_labels))
+    base_rgb:    tuple[float, float, float] = mcolors.to_rgb(_CRF_COLOR)
+    colors: list[tuple[float, ...]] = [
+        tuple(c * (1 - mix) + mix for c in base_rgb)
+        for mix in [0.15 + 0.40 * i / (len(bar_labels) - 1) for i in range(len(bar_labels))]
+    ]
+
+    for i, (pos, val, _label) in enumerate(zip(y_positions, stat_values, bar_labels)):
+        if not (np.isnan(val) or np.isinf(val)):
+            ax_stats.barh(pos, val, color=colors[i], alpha=_BAR_ALPHA, height=_BAR_HEIGHT)
+            ax_stats.text(val, pos, f" {val:.1f}",
+                          va="center", ha="left", fontsize=_FONT_BAR_LABEL, color=_CRF_COLOR)
+
+    ax_stats.set_yticks(y_positions)
+    ax_stats.set_yticklabels(bar_labels, fontsize=_FONT_AXIS_TICKS)
+    ax_stats.set_xlabel("CRF", fontsize=_FONT_SUBPLOT_XLABEL, fontweight="bold", color=_CRF_COLOR)
+    ax_stats.set_title("CRF Distribution", fontsize=_FONT_SUBPLOT_TITLE, fontweight="bold", color=_CRF_COLOR)
+    ax_stats.tick_params(axis="x", labelcolor=_CRF_COLOR, labelsize=_FONT_AXIS_TICKS_X)
+    ax_stats.tick_params(axis="y", labelsize=_FONT_AXIS_TICKS)
+    ax_stats.set_xlim(_CRF_Y_MIN, _CRF_Y_MAX)
+    ax_stats.grid(True, axis="x", alpha=_GRID_ALPHA_MAJOR, zorder=0)
+    ax_stats.set_axisbelow(True)
+
+    # Summary box — same pattern as create_unified_plot (fig.text after tight_layout)
+    summary_text = (
+        f"CRF:\n"
+        f"  Chunks: {len(chunks)}\n"
+        f"  Min: {crf_stats['min']:>5.1f}\n"
+        f"  Med: {crf_stats['p50']:>5.1f}\n"
+        f"  Max: {crf_stats['max']:>5.1f}\n"
+        f"  Std: {crf_stats['std']:>5.1f}"
+    )
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore",
+                                message="This figure includes Axes that are not compatible with tight_layout")
+        plt.tight_layout(pad=_TIGHT_LAYOUT_PAD)
+
+    axes_to_fig = ax_left.transAxes + fig.transFigure.inverted()
+    fx, fy      = axes_to_fig.transform((_SUMMARY_BOX_START_X, _SUMMARY_BOX_Y_POS))
+    fig.text(
+        fx, fy, summary_text,
+        transform         = fig.transFigure,
+        fontsize          = _FONT_SUMMARY_BOX,
+        verticalalignment = "bottom",
+        bbox              = dict(boxstyle="round", facecolor=_CRF_COLOR, alpha=_SUMMARY_BOX_METRIC_ALPHA),
+        family            = "monospace",
+    )
+
+    fig.set_size_inches(_FIG_WIDTH, _FIG_HEIGHT)
+    fig.savefig(output_path, dpi=_PLOT_DPI)
+    plt.close(fig)
+    logger.debug("CRF plot saved to %s", output_path)
 
 
 class QualityEvaluator:
@@ -1122,7 +1311,7 @@ class QualityEvaluator:
             vmaf_json=vmaf_json if vmaf_json.exists() else None,
             factor=subsample_factor,
             output_path=resolved_plot_path,
-            title=f"Quality metrics for {encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")}",
+            title=f"Quality metrics\n{encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")}",
             generate_plot=True,
             fps=fps_value,
             chunk_start_seconds=chunk_start_seconds,

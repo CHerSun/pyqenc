@@ -23,18 +23,22 @@ from typing import TYPE_CHECKING, cast
 import yaml
 
 from pyqenc.constants import (
+    ENCODED_ATTEMPT_NAME_PATTERN,
     FAILURE_SYMBOL_MINOR,
     FINAL_OUTPUT_DIR,
+    RANGE_SEPARATOR,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
     THICK_LINE,
+    TIME_SEPARATOR_MS,
+    TIME_SEPARATOR_SAFE,
 )
 from pyqenc.models import CropParams, PhaseOutcome, QualityTarget, VideoMetadata
 from pyqenc.phase import Artifact, ArtifactState, Phase, PhaseResult
 from pyqenc.state import MergeParams
 from pyqenc.utils.ffmpeg_runner import get_frame_count, run_ffmpeg
 from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
-from pyqenc.utils.visualization import QualityEvaluator
+from pyqenc.utils.visualization import QualityEvaluator, create_crf_plot
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 if TYPE_CHECKING:
@@ -219,6 +223,63 @@ def _log_metrics_summary(
         )
     overall = SUCCESS_SYMBOL_MINOR if targets_met else FAILURE_SYMBOL_MINOR
     logger.info("  %s %s: quality targets %s", overall, strategy, "met" if targets_met else "NOT met")
+
+
+def _collect_crf_data(
+    encoded:     "list[EncodedArtifact]",
+    strategy:    str,
+) -> list[tuple[float, float, float]]:
+    """Extract ``(start_seconds, end_seconds, crf)`` tuples for winning chunks of *strategy*.
+
+    Timestamps are parsed from the ``chunk_id`` stem, which encodes the range
+    as ``HH꞉MM꞉SS․mmm-HH꞉MM꞉SS․mmm`` using filesystem-safe separators.
+
+    Args:
+        encoded:  All ``EncodedArtifact`` objects from the encoding phase.
+        strategy: Strategy name to filter by.
+
+    Returns:
+        List of ``(start_s, end_s, crf)`` sorted by start time.
+        Chunks with missing CRF or unparseable IDs are silently skipped.
+    """
+    def _parse_ts(ts_str: str) -> float:
+        """Parse ``HH꞉MM꞉SS․mmm`` into seconds."""
+        parts = ts_str.split(TIME_SEPARATOR_SAFE)
+        if len(parts) != 3:
+            raise ValueError(f"Unexpected timestamp format: {ts_str!r}")
+        h, m, s_ms = parts
+        s, ms = s_ms.split(TIME_SEPARATOR_MS)
+        return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+
+    result: list[tuple[float, float, float]] = []
+    for artifact in encoded:
+        if artifact.strategy != strategy:
+            continue
+
+        crf = artifact.crf
+        if crf is None:
+            # Fallback: parse CRF from the artifact filename (e.g. "…crf26.5.mkv")
+            m = ENCODED_ATTEMPT_NAME_PATTERN.match(artifact.path.name)
+            if m:
+                try:
+                    crf = float(m.group("crf"))
+                except (ValueError, IndexError):
+                    pass
+
+        if crf is None:
+            logger.debug("No CRF available for chunk %r — skipping", artifact.chunk_id)
+            continue
+
+        try:
+            start_str, end_str = artifact.chunk_id.split(RANGE_SEPARATOR, 1)
+            start_s = _parse_ts(start_str)
+            end_s   = _parse_ts(end_str)
+            result.append((start_s, end_s, crf))
+        except Exception as exc:
+            logger.debug("Could not parse chunk_id %r for CRF plot: %s", artifact.chunk_id, exc)
+
+    result.sort(key=lambda t: t[0])
+    return result
 
 
 
@@ -634,7 +695,7 @@ class MergePhase:
                     failed_strategies.append(strategy_name)
                     continue
 
-                logger.info("  %d chunks to concatenate", len(strategy_chunks))
+                logger.info("  Starting concatenation of %d chunks...", len(strategy_chunks))
 
                 # Write concat list to a temp file
                 concat_file = final_dir / f"concat_{safe_name}{TEMP_SUFFIX}.txt"
@@ -705,6 +766,25 @@ class MergePhase:
                             strategy_name, metrics_dict,
                             self._config.quality_targets, targets_met,
                         )
+
+                # CRF distribution plot
+                encoded_artifacts = getattr(
+                    getattr(self._encoding, "result", None), "encoded", []
+                )
+                crf_data = _collect_crf_data(encoded_artifacts, strategy_name)
+                if crf_data:
+                    crf_plot_path = final_dir / f"{output_file.stem}.crf.png"
+                    try:
+                        create_crf_plot(
+                            chunks      = crf_data,
+                            output_path = crf_plot_path,
+                            title       = f"CRF\n{output_file.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")}",
+                        )
+                        logger.info("  CRF plot saved: %s", crf_plot_path.name)
+                    except Exception as exc:
+                        logger.warning("  Could not generate CRF plot: %s", exc)
+                else:
+                    logger.warning("No CRF data available for strategy %s — skipping CRF plot", strategy_name)
 
                 # Write sidecar (marks this output as COMPLETE)
                 _write_merge_sidecar(
