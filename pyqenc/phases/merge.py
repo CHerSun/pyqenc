@@ -420,6 +420,15 @@ class MergePhase:
             logger.critical(err)
             return _failed(err)
 
+        incomplete = [
+            a for a in self._encoding.result.encoded  # type: ignore[union-attr]
+            if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY)
+        ]
+        if incomplete:
+            err = f"EncodingPhase has {len(incomplete)} incomplete artifact(s) — cannot merge"
+            logger.critical(err)
+            return _failed(err)
+
         if self._audio is None:
             return _failed("MergePhase requires AudioPhase")
 

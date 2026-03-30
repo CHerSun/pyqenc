@@ -1977,6 +1977,7 @@ class EncodingPhase:
 
                 crf: float | None = None
                 if state == ArtifactState.COMPLETE and pair_rec and pair_rec.winning_file:
+                    artifact_path = pair_rec.winning_file
                     m = ENCODED_ATTEMPT_NAME_PATTERN.match(pair_rec.winning_file.name)
                     if m:
                         try:
