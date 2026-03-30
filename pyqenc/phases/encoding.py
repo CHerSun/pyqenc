@@ -46,7 +46,7 @@ from pyqenc.models import (
 )
 from pyqenc.phase import Artifact, Phase, PhaseResult
 from pyqenc.quality import CRFHistory, adjust_crf
-from pyqenc.state import ArtifactState, EncodingResultSidecar, MetricsSidecar
+from pyqenc.state import ArtifactState, EncodingParams, EncodingResultSidecar, MetricsSidecar
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 from pyqenc.utils.log_format import (
@@ -1425,8 +1425,6 @@ def encode_all_chunks(
     Returns:
         EncodingResult with paths to encoded chunks and statistics
     """
-    from pyqenc.state import EncodingParams
-
     logger.debug(
         "Encoding phase: %d chunks, %d strategies, %d quality targets",
         len(chunks), len(strategies), len(quality_targets),
@@ -1598,6 +1596,7 @@ class EncodingPhase:
         self._job:          "_JobPhase | None"          = cast("_JobPhase",          phases[_JobPhase])          if phases else None
         self._chunking:     "_ChunkingPhase | None"     = cast("_ChunkingPhase",     phases[_ChunkingPhase])     if phases else None
         self._optimization: "_OptimizationPhase | None" = cast("_OptimizationPhase", phases[_OptimizationPhase]) if phases else None
+        self.params:        "EncodingParams | None"     = None
         self.result:        "EncodingPhaseResult | None" = None
         self.dependencies:  "list[Phase]"               = [d for d in [self._job, self._chunking, self._optimization] if d is not None]
 
@@ -1775,8 +1774,6 @@ class EncodingPhase:
         Returns:
             List of ``EncodedArtifact`` objects.
         """
-        from pyqenc.state import EncodingParams
-
         work_dir = self._config.work_dir
         enc_dir  = work_dir / ENCODING_WORKSPACE_DIR
         out_dir  = work_dir / ENCODED_OUTPUT_DIR
@@ -1797,8 +1794,9 @@ class EncodingPhase:
             persisted_enc = EncodingParams.load(yaml_path)
             job_result    = self._job.result  # type: ignore[union-attr]
             crop          = getattr(job_result, "crop", None)
+            self.params   = EncodingParams(crop=crop)
 
-            if persisted_enc is not None and persisted_enc.crop != crop:
+            if persisted_enc is not None and persisted_enc != self.params:
                 if self._config.force:
                     logger.warning(
                         "Crop params changed since last encoding run "
@@ -1895,7 +1893,6 @@ class EncodingPhase:
             ``EncodingPhaseResult`` after encoding.
         """
         from pyqenc.config import ConfigManager
-        from pyqenc.state import EncodingParams
 
         work_dir = self._config.work_dir
 
@@ -1927,7 +1924,9 @@ class EncodingPhase:
 
         # Persist encoding.yaml with current crop params
         encoding_yaml = work_dir / _ENCODING_YAML
-        EncodingParams(crop=crop).save(encoding_yaml)
+        if self.params is None:
+            self.params = EncodingParams(crop=crop)
+        self.params.save(encoding_yaml)
         logger.debug("Wrote encoding.yaml (crop=%s)", crop)
 
         # Reference dir is the chunks directory
