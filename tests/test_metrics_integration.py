@@ -642,3 +642,158 @@ class TestChunkingPhaseTiming:
             result = phase.run()
 
         assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# AudioPhase — AUDIO and RECOVERY timing
+# ---------------------------------------------------------------------------
+
+class TestAudioPhaseTiming:
+    """Integration tests for ``AudioPhase`` timing instrumentation (Req 6.5)."""
+
+    def _make_phase(
+        self,
+        tmp_path: Path,
+        collector: MagicMock,
+    ) -> "AudioPhase":
+        """Return an ``AudioPhase`` with pre-wired job and extraction dependencies."""
+        from pyqenc.phases.audio import AudioPhase
+        from pyqenc.phases.extraction import ExtractionPhase
+        from pyqenc.phases.job import JobPhase
+        from pyqenc.models import PhaseOutcome
+        from pyqenc.phases.job import JobPhaseResult
+        from pyqenc.phases.extraction import ExtractionPhaseResult
+        from pyqenc.state import JobState
+
+        source = tmp_path / "source.mkv"
+        source.write_bytes(b"\x00" * 64)
+        stub_vm = _stub_video_metadata(source)
+
+        config = _make_config(tmp_path)
+        config.work_dir.mkdir(parents=True, exist_ok=True)
+
+        job_state = JobState(source=stub_vm, crop=CropParams())
+        job_result = JobPhaseResult(
+            outcome    = PhaseOutcome.COMPLETED,
+            artifacts  = [],
+            message    = "ok",
+            force_wipe = False,
+        )
+        job_result.job = job_state  # type: ignore[attr-defined]
+
+        extraction_result = ExtractionPhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            artifacts = [],
+            message   = "ok",
+            video     = stub_vm,
+        )
+
+        job_mock = MagicMock(spec=JobPhase)
+        job_mock.result = job_result
+
+        extraction_mock = MagicMock(spec=ExtractionPhase)
+        extraction_mock.result = extraction_result
+
+        phase = AudioPhase(config, collector=collector)
+        phase._job        = job_mock         # type: ignore[assignment]
+        phase._extraction = extraction_mock  # type: ignore[assignment]
+        return phase
+
+    def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
+        """``time(TimeKey.RECOVERY)`` must be called even when all artifacts are reused.
+
+        Validates: Requirements 6.5, 2.7
+        """
+        from pyqenc.phases.audio import AudioPhase, AudioArtifact
+        from pyqenc.state import ArtifactState
+
+        collector = _spy_collector()
+        phase     = self._make_phase(tmp_path, collector)
+
+        stub_artifact = MagicMock(spec=AudioArtifact)
+        stub_artifact.state = ArtifactState.COMPLETE
+        stub_artifact.path  = tmp_path / "track.aac"
+
+        with patch.object(AudioPhase, "_recover", return_value=[stub_artifact]):
+            phase.run()
+
+        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
+        assert TimeKey.RECOVERY in time_keys_called, (
+            f"Expected TimeKey.RECOVERY in time() calls, got: {time_keys_called}"
+        )
+
+    def test_audio_recorded_when_processing_runs(self, tmp_path: Path) -> None:
+        """``time(TimeKey.AUDIO)`` must be called when audio processing executes.
+
+        Validates: Requirements 6.5
+        """
+        from pyqenc.phases.audio import AudioPhase, AudioArtifact, AudioPhaseResult
+        from pyqenc.state import ArtifactState
+        from pyqenc.models import PhaseOutcome
+
+        collector = _spy_collector()
+        phase     = self._make_phase(tmp_path, collector)
+
+        stub_artifact = MagicMock(spec=AudioArtifact)
+        stub_artifact.state = ArtifactState.ABSENT
+
+        stub_result = AudioPhaseResult(
+            outcome     = PhaseOutcome.COMPLETED,
+            artifacts   = [],
+            message     = "ok",
+            audio_files = [],
+        )
+
+        with (
+            patch.object(AudioPhase, "_recover", return_value=[stub_artifact]),
+            patch.object(AudioPhase, "_execute_audio", return_value=stub_result),
+        ):
+            phase.run()
+
+        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
+        assert TimeKey.AUDIO in time_keys_called, (
+            f"Expected TimeKey.AUDIO in time() calls, got: {time_keys_called}"
+        )
+
+    def test_audio_not_recorded_when_all_reused(self, tmp_path: Path) -> None:
+        """``time(TimeKey.AUDIO)`` must NOT be called when all artifacts are already complete.
+
+        Validates: Requirements 6.5
+        """
+        from pyqenc.phases.audio import AudioPhase, AudioArtifact
+        from pyqenc.state import ArtifactState
+
+        collector = _spy_collector()
+        phase     = self._make_phase(tmp_path, collector)
+
+        stub_artifact = MagicMock(spec=AudioArtifact)
+        stub_artifact.state = ArtifactState.COMPLETE
+        stub_artifact.path  = tmp_path / "track.aac"
+
+        with patch.object(AudioPhase, "_recover", return_value=[stub_artifact]):
+            phase.run()
+
+        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
+        assert TimeKey.AUDIO not in time_keys_called, (
+            f"Expected TimeKey.AUDIO NOT called on reuse, got: {time_keys_called}"
+        )
+
+    def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
+        """``AudioPhase`` must run without error when given a ``NoOpMetricsCollector``.
+
+        Validates: Requirements 6.4, 6.5
+        """
+        from pyqenc.phases.audio import AudioPhase, AudioArtifact
+        from pyqenc.state import ArtifactState
+
+        collector = NoOpMetricsCollector()
+        phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
+
+        stub_artifact = MagicMock(spec=AudioArtifact)
+        stub_artifact.state = ArtifactState.COMPLETE
+        stub_artifact.path  = tmp_path / "track.aac"
+
+        with patch.object(AudioPhase, "_recover", return_value=[stub_artifact]):
+            result = phase.run()
+
+        assert result is not None

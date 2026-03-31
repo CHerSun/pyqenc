@@ -211,12 +211,12 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - Assert `record_step` called with `TimeKey.CHUNKING_SCENE_DETECT`, `TimeKey.CHUNKING_SPLIT`, and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 
-- [ ] 14. Instrument `AudioPhase` with timing calls
-  - [ ] 14.1 Wrap the full async engine execution in `run()` with `self._collector.time(TimeKey.AUDIO)`
+- [x] 14. Instrument `AudioPhase` with timing calls
+  - [x] 14.1 Wrap the full async engine execution in `run()` with `self._collector.time(TimeKey.AUDIO)`
     - _Requirements: 6.5_
-  - [ ] 14.2 Wrap `_recover()` call in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
+  - [x] 14.2 Wrap `_recover()` call in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
     - _Requirements: 6.5, 2.7_
-  - [ ] 14.3 Write phase integration test for `AudioPhase` timing
+  - [x] 14.3 Write phase integration test for `AudioPhase` timing
     - Assert `record_step` called with `TimeKey.AUDIO` and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 
