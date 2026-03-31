@@ -9,7 +9,7 @@ write protocol.  The report survives interruptions and resumes across runs.
 
 Usage (orchestrator)::
 
-    collector = YamlMetricsCollector(work_dir=config.work_dir, config=config)
+    collector = YamlMetricsCollector(work_dir=config.work_dir)
     registry  = _build_registry(config, collector)
     # ... run phases ...
     collector.flush(partial=False)
@@ -25,16 +25,13 @@ from __future__ import annotations
 __all__ = [
     # Enums
     "TimeKey",
-    "SpaceKey",
     # Dataclasses
     "ConvergenceUpdate",
     # Pydantic models
     "AttemptStats",
     "ConvergenceStats",
     "TimeEntry",
-    "SpaceEntry",
     "TimeDistribution",
-    "SpaceDistribution",
     "ConvergenceSection",
     "PipelineMetrics",
     # Protocol + implementations
@@ -44,7 +41,6 @@ __all__ = [
     "_ConvergenceAccumulator",
     "_update_accumulator",
     "_compute_convergence",
-    "_measure_space",
     # Added in task 7:
     "YamlMetricsCollector",
     # Active collector registry (task 19):
@@ -55,21 +51,18 @@ __all__ = [
 import contextlib
 import logging
 import math          # noqa: F401  (used in YamlMetricsCollector — task 7)
-import os            # noqa: F401  (used in _measure_space — task 5)
-import signal        # noqa: F401  (used in orchestrator signal handlers — task 19)
 import time as _time  # noqa: F401  (used in YamlMetricsCollector — task 7)
-from contextlib import contextmanager  # noqa: F401  (used in YamlMetricsCollector — task 7)
 from dataclasses import dataclass, field  # noqa: F401  (field used in ConvergenceAccumulator — task 5)
 from datetime import datetime  # noqa: F401  (used in flush — task 7)
 from enum import StrEnum
-from pathlib import Path  # noqa: F401  (used in _measure_space — task 5)
-from typing import TYPE_CHECKING, Iterator, Protocol  # noqa: F401
+from pathlib import Path  # noqa: F401  (used in YamlMetricsCollector — task 7)
+from typing import TYPE_CHECKING, Protocol  # noqa: F401
 
 import yaml  # noqa: F401  (used in YamlMetricsCollector — task 7)
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from pyqenc.config import PipelineConfig  # noqa: F401  (used in YamlMetricsCollector — task 7)
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -143,26 +136,6 @@ class TimeKey(StrEnum):
     RECOVERY              = "recovery"
 
 
-class SpaceKey(StrEnum):
-    """Dotted string keys identifying artifact storage categories.
-
-    Same ``StrEnum`` pattern as :class:`TimeKey`.  Internal storage is
-    ``dict[SpaceKey, int]`` (bytes, exact).  Grouping by prefix at report time
-    is derived by splitting on ``"."``.
-    """
-
-    SOURCE             = "source"
-    EXTRACTED_VIDEO    = "extracted.video"
-    EXTRACTED_AUDIO    = "extracted.audio"
-    EXTRACTED_OTHER    = "extracted.other"
-    CHUNKS             = "chunks"
-    AUDIO_INTERMEDIATE = "audio.intermediate"
-    AUDIO_FINAL        = "audio.final"
-    ENCODING_WORKSPACE = "encoding.workspace"
-    ENCODING_OUTPUTS   = "encoding.outputs"
-    FINAL              = "final"
-
-
 # ---------------------------------------------------------------------------
 # Helper formatting functions
 # ---------------------------------------------------------------------------
@@ -180,11 +153,6 @@ def _format_duration(seconds: int) -> str:
     if days:
         return f"{days}d {hours:02d}:{minutes:02d}:{secs:02d}"
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-
-
-def _format_gb(n: int) -> str:
-    """Format *n* bytes as a ``"X.XX GB"`` string (1024-based, 2 decimal places)."""
-    return f"{n / 1024 ** 3:.2f} GB"
 
 
 # ---------------------------------------------------------------------------
@@ -234,14 +202,6 @@ class TimeEntry(BaseModel):
     percent:  str  # "X.X%"
 
 
-class SpaceEntry(BaseModel):
-    """A single row in the space distribution breakdown."""
-
-    category: str  # SpaceKey value, e.g. "encoding.workspace"
-    size:     str  # "X.XX GB"
-    percent:  str  # "X.X%"
-
-
 class TimeDistribution(BaseModel):
     """Time distribution section of the metrics report."""
 
@@ -249,14 +209,6 @@ class TimeDistribution(BaseModel):
     total_seconds:  int
     total_duration: str             # "[Dd ]HH:MM:SS"
     breakdown:      list[TimeEntry] # sorted descending by seconds
-
-
-class SpaceDistribution(BaseModel):
-    """Space distribution section of the metrics report."""
-
-    updated_at: str              # "YYYY-MM-DD HH:MM:SS"
-    total_size: str              # "X.XX GB"
-    breakdown:  list[SpaceEntry] # sorted descending by bytes
 
 
 class ConvergenceSection(BaseModel):
@@ -276,11 +228,10 @@ class PipelineMetrics(BaseModel):
     (e.g. all chunks were reused from a prior run).
     """
 
-    run_date:           str                        # "YYYY-MM-DD HH:MM:SS" — last file write
-    partial:            bool
-    time_distribution:  TimeDistribution
-    space_distribution: SpaceDistribution
-    convergence:        ConvergenceSection | None = None
+    run_date:          str                        # "YYYY-MM-DD HH:MM:SS" — last file write
+    partial:           bool
+    time_distribution: TimeDistribution
+    convergence:       ConvergenceSection | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -407,88 +358,6 @@ def _compute_convergence(
 
 
 # ---------------------------------------------------------------------------
-# Space measurement
-# ---------------------------------------------------------------------------
-
-
-def _measure_space(work_dir: Path, config: "PipelineConfig") -> dict[SpaceKey, int]:
-    """Measure on-disk sizes for each :class:`SpaceKey` category.
-
-    Performs a point-in-time filesystem scan using only ``Path.stat()`` and
-    directory traversal — no ffprobe or ffmpeg calls.  Missing directories or
-    files contribute ``0`` bytes.  ``OSError`` on individual ``stat()`` calls
-    is caught and logged at DEBUG level.
-
-    Args:
-        work_dir: Pipeline work directory root.
-        config:   Pipeline configuration (provides ``source_video`` path).
-
-    Returns:
-        Mapping of :class:`SpaceKey` to byte counts.
-    """
-
-    def _safe_size(p: Path) -> int:
-        try:
-            return p.stat().st_size
-        except OSError as exc:
-            logger.debug("Space scan: cannot stat %s: %s", p, exc)
-            return 0
-
-    def _sum_dir_recursive(d: Path) -> int:
-        if not d.is_dir():
-            return 0
-        return sum(_safe_size(f) for f in d.rglob("*") if f.is_file())
-
-    def _sum_dir_flat(d: Path, *, suffix: str | None = None, exclude_suffix: str | None = None) -> int:
-        """Sum files in *d* (non-recursive), optionally filtered by suffix."""
-        if not d.is_dir():
-            return 0
-        total = 0
-        for f in d.iterdir():
-            if not f.is_file():
-                continue
-            if suffix is not None and f.suffix.lower() != suffix:
-                continue
-            if exclude_suffix is not None and f.suffix.lower() == exclude_suffix:
-                continue
-            total += _safe_size(f)
-        return total
-
-    extracted = work_dir / "extracted"
-    audio_dir = work_dir / "audio"
-
-    # extracted/ split: .mkv → video, .mka → audio, everything else → other
-    extracted_video = 0
-    extracted_audio = 0
-    extracted_other = 0
-    if extracted.is_dir():
-        for f in extracted.iterdir():
-            if not f.is_file():
-                continue
-            suf = f.suffix.lower()
-            sz  = _safe_size(f)
-            if suf == ".mkv":
-                extracted_video += sz
-            elif suf == ".mka":
-                extracted_audio += sz
-            else:
-                extracted_other += sz
-
-    return {
-        SpaceKey.SOURCE:             _safe_size(config.source_video),
-        SpaceKey.EXTRACTED_VIDEO:    extracted_video,
-        SpaceKey.EXTRACTED_AUDIO:    extracted_audio,
-        SpaceKey.EXTRACTED_OTHER:    extracted_other,
-        SpaceKey.CHUNKS:             _sum_dir_recursive(work_dir / "chunks"),
-        SpaceKey.AUDIO_INTERMEDIATE: _sum_dir_flat(audio_dir, suffix=".flac"),
-        SpaceKey.AUDIO_FINAL:        _sum_dir_flat(audio_dir, exclude_suffix=".flac"),
-        SpaceKey.ENCODING_WORKSPACE: _sum_dir_recursive(work_dir / "encoding"),
-        SpaceKey.ENCODING_OUTPUTS:   _sum_dir_recursive(work_dir / "encoded"),
-        SpaceKey.FINAL:              _sum_dir_recursive(work_dir / "final"),
-    }
-
-
-# ---------------------------------------------------------------------------
 # No-op implementation
 # ---------------------------------------------------------------------------
 
@@ -524,15 +393,12 @@ class NoOpMetricsCollector(MetricsCollector):
 class YamlMetricsCollector(MetricsCollector):
     """Concrete YAML-backed implementation of :class:`MetricsCollector`.
 
-    Accumulates wall-clock timing, disk space, and CRF convergence data
-    throughout a pipeline run and persists them incrementally to
-    ``metrics.yaml`` in the work directory root using the `.tmp`-then-rename
-    atomic write protocol.
+    Accumulates wall-clock timing and CRF convergence data throughout a
+    pipeline run and persists them incrementally to ``metrics.yaml`` in the
+    work directory root using the `.tmp`-then-rename atomic write protocol.
 
     Args:
         work_dir:   Pipeline work directory root.
-        config:     Pipeline configuration (provides ``source_video`` path for
-                    space measurement).
         force_wipe: When ``True``, delete any existing ``metrics.yaml`` and
                     start fresh.  When ``False`` (default), load and resume
                     from persisted state.
@@ -541,21 +407,17 @@ class YamlMetricsCollector(MetricsCollector):
     def __init__(
         self,
         work_dir:   Path,
-        config:     "PipelineConfig",
         force_wipe: bool = False,
     ) -> None:
-        self._work_dir: Path                              = work_dir
-        self._config:   "PipelineConfig"                  = config
-        self._metrics_path: Path                          = work_dir / METRICS_YAML_FILENAME
-        self._tmp_path:     Path                          = work_dir / (METRICS_YAML_FILENAME + _TEMP_SUFFIX)
+        self._work_dir:     Path = work_dir
+        self._metrics_path: Path = work_dir / METRICS_YAML_FILENAME
+        self._tmp_path:     Path = work_dir / (METRICS_YAML_FILENAME + _TEMP_SUFFIX)
 
         # Internal accumulators
-        self._time_accum:        dict[TimeKey, float]                = {k: 0.0 for k in TimeKey}
-        self._conv_accumulators: dict[str, _ConvergenceAccumulator]  = {}
-        self._space_snapshot:    dict[SpaceKey, int]                 = {}
-        self._space_updated_at:  str                                 = ""
-        self._flush_counter:     int                                 = 0
-        self._active_timers:     list[tuple[TimeKey, float]]         = []
+        self._time_accum:        dict[TimeKey, float]               = {k: 0.0 for k in TimeKey}
+        self._conv_accumulators: dict[str, _ConvergenceAccumulator] = {}
+        self._flush_counter:     int                                = 0
+        self._active_timers:     list[tuple[TimeKey, float]]        = []
 
         metrics_file = work_dir / METRICS_YAML_FILENAME
         if force_wipe:
@@ -588,17 +450,6 @@ class YamlMetricsCollector(MetricsCollector):
                 self._time_accum[key] = float(entry.seconds)
             except ValueError:
                 logger.debug("Metrics: unknown TimeKey %r in persisted file, skipping", entry.category)
-
-        # Restore space snapshot
-        for entry in pm.space_distribution.breakdown:
-            try:
-                key = SpaceKey(entry.category)
-                # Parse "X.XX GB" back to bytes
-                gb_str = entry.size.removesuffix(" GB")
-                self._space_snapshot[key] = int(round(float(gb_str) * 1024 ** 3))
-            except (ValueError, AttributeError):
-                logger.debug("Metrics: cannot parse space entry %r, skipping", entry)
-        self._space_updated_at = pm.space_distribution.updated_at
 
         # Restore convergence accumulators (resume Welford from stddev² * n)
         if pm.convergence is not None:
@@ -660,7 +511,7 @@ class YamlMetricsCollector(MetricsCollector):
             self._collector._time_accum[self._key] += elapsed
             self._collector._flush_counter += 1
             if self._collector._flush_counter >= FLUSH_INTERVAL:
-                self._collector._flush_incremental()
+                self._collector.flush(partial=True)
                 self._collector._flush_counter = 0
             # Always re-raise — we never suppress exceptions
 
@@ -694,7 +545,7 @@ class YamlMetricsCollector(MetricsCollector):
 
         self._flush_counter += 1
         if self._flush_counter >= FLUSH_INTERVAL:
-            self._flush_incremental()
+            self.flush(partial=True)
             self._flush_counter = 0
 
     def _snapshot_active_timers(self) -> dict[TimeKey, float]:
@@ -713,10 +564,9 @@ class YamlMetricsCollector(MetricsCollector):
     def _build_metrics(
         self,
         *,
-        partial:            bool,
-        now_str:            str,
-        time_updated_at:    str,
-        space_updated_at:   str,
+        partial:         bool,
+        now_str:         str,
+        time_updated_at: str,
     ) -> PipelineMetrics:
         """Assemble a :class:`PipelineMetrics` from current accumulator state.
 
@@ -750,26 +600,6 @@ class YamlMetricsCollector(MetricsCollector):
             breakdown=breakdown_time,
         )
 
-        # --- space distribution ---
-        space_bytes = self._space_snapshot
-        total_bytes = sum(space_bytes.values())
-        breakdown_space: list[SpaceEntry] = []
-        for key in SpaceKey:
-            b       = space_bytes.get(key, 0)
-            percent = f"{b / total_bytes * 100:.1f}%" if total_bytes > 0 else "0.0%"
-            breakdown_space.append(SpaceEntry(
-                category=key.value,
-                size=_format_gb(b),
-                percent=percent,
-            ))
-        breakdown_space.sort(key=lambda e: float(e.size.removesuffix(" GB")), reverse=True)
-
-        space_dist = SpaceDistribution(
-            updated_at=space_updated_at or now_str,
-            total_size=_format_gb(total_bytes),
-            breakdown=breakdown_space,
-        )
-
         # --- convergence ---
         convergence_stats = _compute_convergence(self._conv_accumulators)
         convergence: ConvergenceSection | None = None
@@ -783,7 +613,6 @@ class YamlMetricsCollector(MetricsCollector):
             run_date=now_str,
             partial=partial,
             time_distribution=time_dist,
-            space_distribution=space_dist,
             convergence=convergence,
         )
 
@@ -797,39 +626,23 @@ class YamlMetricsCollector(MetricsCollector):
         except OSError as exc:
             logger.warning("Metrics: failed to write %s: %s", self._metrics_path, exc)
 
-    def _flush_incremental(self) -> None:
-        """Write time and convergence accumulators only — no space scan.
-
-        Uses the last known ``_space_snapshot`` (may be empty on first call).
-        Sets ``partial=True``.
-        """
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        metrics = self._build_metrics(
-            partial=True,
-            now_str=now_str,
-            time_updated_at=now_str,
-            space_updated_at=self._space_updated_at,
-        )
-        self._write_atomic(metrics)
-
     def flush(self, partial: bool = True) -> None:
-        """Full flush: scan disk space, then write complete metrics.
+        """Write the current metrics state to disk atomically.
 
-        Logs an INFO message before scanning so the user sees why exit may be
-        delayed.  On write failure, logs a WARNING and does not raise.
+        Captures partial elapsed from any in-flight ``time()`` contexts so
+        that a forced exit (SIGINT, unhandled exception) does not lose
+        work-in-progress timing.  On write failure, logs a WARNING and does
+        not raise.
+
+        Args:
+            partial: When ``True`` (default), marks the report as in-progress.
+                     Set to ``False`` only by the orchestrator after all phases
+                     complete successfully.
         """
-        logger.info("Measuring disk space for metrics...")
-        try:
-            self._space_snapshot = _measure_space(self._work_dir, self._config)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Metrics: space measurement failed: %s", exc)
-
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self._space_updated_at = now_str
         metrics = self._build_metrics(
             partial=partial,
             now_str=now_str,
             time_updated_at=now_str,
-            space_updated_at=now_str,
         )
         self._write_atomic(metrics)

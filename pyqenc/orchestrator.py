@@ -105,7 +105,6 @@ class PipelineOrchestrator:
         else:
             collector = YamlMetricsCollector(
                 work_dir   = self.config.work_dir,
-                config     = self.config,
                 force_wipe = self.config.force,
             )
             register_active_collector(collector)

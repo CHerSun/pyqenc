@@ -3,7 +3,7 @@
 Covers enum membership, protocol conformance, and lifecycle behaviour.
 """
 
-from pyqenc.metrics import NoOpMetricsCollector, SpaceKey, TimeKey
+from pyqenc.metrics import NoOpMetricsCollector, TimeKey
 
 
 # ---------------------------------------------------------------------------
@@ -46,44 +46,6 @@ def test_time_key_is_str() -> None:
 
 
 # ---------------------------------------------------------------------------
-# SpaceKey enum membership
-# ---------------------------------------------------------------------------
-
-_EXPECTED_SPACE_KEYS: list[tuple[str, str]] = [
-    ("SOURCE",             "source"),
-    ("EXTRACTED_VIDEO",    "extracted.video"),
-    ("EXTRACTED_AUDIO",    "extracted.audio"),
-    ("EXTRACTED_OTHER",    "extracted.other"),
-    ("CHUNKS",             "chunks"),
-    ("AUDIO_INTERMEDIATE", "audio.intermediate"),
-    ("AUDIO_FINAL",        "audio.final"),
-    ("ENCODING_WORKSPACE", "encoding.workspace"),
-    ("ENCODING_OUTPUTS",   "encoding.outputs"),
-    ("FINAL",              "final"),
-]
-
-
-def test_space_key_member_count() -> None:
-    """SpaceKey must have exactly 10 members (Req 3.2)."""
-    assert len(SpaceKey) == 10
-
-
-def test_space_key_member_names_and_values() -> None:
-    """Every SpaceKey member must have the correct dotted string value (Req 3.2)."""
-    for name, expected_value in _EXPECTED_SPACE_KEYS:
-        member = SpaceKey[name]
-        assert member.value == expected_value, (
-            f"SpaceKey.{name}: expected {expected_value!r}, got {member.value!r}"
-        )
-
-
-def test_space_key_is_str() -> None:
-    """SpaceKey values must be plain strings (StrEnum contract)."""
-    for member in SpaceKey:
-        assert isinstance(member, str)
-
-
-# ---------------------------------------------------------------------------
 # Protocol conformance
 # ---------------------------------------------------------------------------
 
@@ -119,7 +81,7 @@ def test_noop_collector_flush_is_noop() -> None:
 
 import logging
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -132,21 +94,8 @@ from pyqenc.metrics import (
 )
 
 
-def _make_config(source_video: Path) -> MagicMock:
-    """Return a minimal PipelineConfig-like mock."""
-    cfg = MagicMock()
-    cfg.source_video = source_video
-    return cfg
-
-
 def _make_collector(tmp_path: Path, *, force_wipe: bool = False) -> YamlMetricsCollector:
-    source = tmp_path / "source.mkv"
-    source.write_bytes(b"x" * 100)
-    return YamlMetricsCollector(
-        work_dir=tmp_path,
-        config=_make_config(source),
-        force_wipe=force_wipe,
-    )
+    return YamlMetricsCollector(work_dir=tmp_path, force_wipe=force_wipe)
 
 
 def test_force_wipe_deletes_existing_metrics(tmp_path: Path) -> None:
@@ -231,17 +180,13 @@ def test_convergence_present_after_step(tmp_path: Path) -> None:
 
 def test_resume_restores_time_accum(tmp_path: Path) -> None:
     """Resuming from persisted metrics.yaml must restore time accumulators (Req 1.1)."""
-    source = tmp_path / "source.mkv"
-    source.write_bytes(b"x" * 100)
-    config = _make_config(source)
-
     # First run: set time directly and flush
-    c1 = YamlMetricsCollector(work_dir=tmp_path, config=config)
+    c1 = YamlMetricsCollector(work_dir=tmp_path)
     c1._time_accum[TimeKey.AUDIO] = 120.0
     c1.flush(partial=True)
 
     # Second run: resume and check accumulator
-    c2 = YamlMetricsCollector(work_dir=tmp_path, config=config)
+    c2 = YamlMetricsCollector(work_dir=tmp_path)
     assert c2._time_accum[TimeKey.AUDIO] == pytest.approx(120.0, abs=1.0)
 
 
@@ -251,14 +196,9 @@ def test_resume_bad_file_starts_fresh(
 ) -> None:
     """Corrupt metrics.yaml must log WARNING and start fresh (Req 1.5)."""
     (tmp_path / METRICS_YAML_FILENAME).write_text("not: valid: yaml: [[[", encoding="utf-8")
-    source = tmp_path / "source.mkv"
-    source.write_bytes(b"x")
 
     with caplog.at_level(logging.WARNING, logger="pyqenc.metrics"):
-        collector = YamlMetricsCollector(
-            work_dir=tmp_path,
-            config=_make_config(source),
-        )
+        collector = YamlMetricsCollector(work_dir=tmp_path)
 
     assert all(v == 0.0 for v in collector._time_accum.values())
     assert any("starting fresh" in r.message for r in caplog.records)
