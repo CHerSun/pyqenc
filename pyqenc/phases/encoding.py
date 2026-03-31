@@ -56,6 +56,7 @@ from pyqenc.utils.log_format import (
     fmt_chunk_attempt_start,
     fmt_chunk_final,
     fmt_chunk_start,
+    fmt_metric_value,
     log_recovery_line,
 )
 from pyqenc.utils.visualization import QualityEvaluator
@@ -888,7 +889,7 @@ class ChunkEncoder:
                         metrics_dict: dict[str, float] = {
                             k: v for k, v in all_sidecar_metrics.items() if k in targets_set_reused
                         }
-                        metric_summary = ", ".join(f"{k}={v:.1f}" for k, v in metrics_dict.items())
+                        metric_summary = ", ".join(f"{k}={fmt_metric_value(v)}" for k, v in metrics_dict.items())
                         pass_fail = (
                             f"{SUCCESS_SYMBOL_MINOR} pass"
                             if targets_met
@@ -1033,7 +1034,7 @@ class ChunkEncoder:
                     best_metrics  = all_metrics
                     best_string   = " NEW BEST"
 
-            metric_summary = ", ".join(f"{k}={v:.1f}" for k, v in metrics_dict.items())
+            metric_summary = ", ".join(f"{k}={fmt_metric_value(v)}" for k, v in metrics_dict.items())
             pass_fail = (
                 f"{SUCCESS_SYMBOL_MINOR} pass"
                 if evaluation.targets_met
