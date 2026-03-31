@@ -79,57 +79,57 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - Tag: `# Feature: pipeline-metrics-report, Property 5: Convergence stats math`
     - _Requirements: 4.2, 4.1a_
 
-- [-] 6. Checkpoint — Ensure all tests pass
+- [x] 6. Checkpoint — Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 7. Implement `YamlMetricsCollector`
-  - [ ] 7.1 Implement `YamlMetricsCollector.__init__` with `work_dir`, `config`, `force_wipe=False`
+- [x] 7. Implement `YamlMetricsCollector`
+  - [x] 7.1 Implement `YamlMetricsCollector.__init__` with `work_dir`, `config`, `force_wipe=False`
     - If `force_wipe=True`: delete existing `metrics.yaml` and start fresh
     - Otherwise: load existing `metrics.yaml` and restore `_time_accum`, `_conv_accumulators`, and `_space_snapshot` from persisted state (resume Welford from `stddev² * n`)
     - On load failure: log WARNING, start fresh
     - _Requirements: 1.1, 1.2, 1.5_
-  - [ ] 7.2 Implement `time(key: TimeKey)` context manager
+  - [x] 7.2 Implement `time(key: TimeKey)` context manager
     - Records `time.monotonic()` on enter; on exit calls `record_step(key, elapsed)`
     - Context manager catches exceptions and re-raises after recording elapsed
     - _Requirements: 2.1, 6.6_
-  - [ ] 7.3 Implement `record_step(key, elapsed_seconds, convergence_update=None)`
+  - [x] 7.3 Implement `record_step(key, elapsed_seconds, convergence_update=None)`
     - Adds `elapsed_seconds` to `_time_accum[key]`
     - If `convergence_update` is not None: update Welford accumulators for the strategy
     - Increment `_flush_counter`; if `>= FLUSH_INTERVAL` call `_flush_incremental()` and reset counter
     - _Requirements: 1.3, 2.2, 2.2a, 4.1a_
-  - [ ] 7.4 Implement `_flush_incremental()` — writes time and convergence only, no space scan
+  - [x] 7.4 Implement `_flush_incremental()` — writes time and convergence only, no space scan
     - Builds `PipelineMetrics` with current `_time_accum` and convergence accumulators
     - Sets `partial=True`, updates `time_distribution.updated_at` and `convergence.updated_at` to `datetime.now().strftime("%Y-%m-%d %H:%M:%S")`
     - Uses last known `_space_snapshot` (may be empty on first incremental flush)
     - Writes atomically via `.tmp`-then-rename using `TEMP_SUFFIX`
     - On write failure: log WARNING, do not raise
     - _Requirements: 1.3, 1.5, 5.3_
-  - [ ] 7.5 Implement `flush(partial: bool = True)` — full flush with space scan
+  - [x] 7.5 Implement `flush(partial: bool = True)` — full flush with space scan
     - Logs `INFO "Measuring disk space for metrics..."` before scanning
     - Calls `_measure_space()`, stores result in `_space_snapshot`
     - Updates `space_distribution.updated_at` to current local time
     - Builds complete `PipelineMetrics` and writes atomically
     - On write failure: log WARNING, do not raise
     - _Requirements: 1.4, 1.5, 3.1, 5.4_
-  - [ ] 7.6 Write unit tests for `YamlMetricsCollector` lifecycle
+  - [x] 7.6 Write unit tests for `YamlMetricsCollector` lifecycle
     - `force_wipe=True` deletes existing `metrics.yaml` and starts fresh (Req 1.2)
     - Write failure (mocked `Path.replace` raising `OSError`) logs WARNING and does not propagate (Req 1.5)
     - `flush(partial=False)` sets `partial: false`; `flush(partial=True)` sets `partial: true` (Req 5.4)
     - Empty convergence data produces `convergence: null` in YAML (Req 4.4)
     - _Requirements: 1.2, 1.5, 4.4, 5.4_
-  - [ ] 7.7 Write property test for time accumulation round-trip (Property 1)
+  - [x] 7.7 Write property test for time accumulation round-trip (Property 1)
     - **Property 1: Time accumulation round-trip**
     - **Validates: Requirements 2.1, 2.2, 2.2a**
     - Generate random `TimeKey` and random list of positive floats; assert `_time_accum[key] == sum(durations)` after all `record_step` calls
     - Tag: `# Feature: pipeline-metrics-report, Property 1: Time accumulation round-trip`
     - _Requirements: 2.1, 2.2, 2.2a_
-  - [ ] 7.8 Write property test for time distribution math (Property 2)
+  - [x] 7.8 Write property test for time distribution math (Property 2)
     - **Property 2: Time distribution math**
     - **Validates: Requirements 2.3, 2.5**
     - Generate random mapping of `TimeKey → float` (non-negative); assert `total_seconds == sum(values)`, each `percent == value / total * 100` (or 0.0 when total is 0)
     - Tag: `# Feature: pipeline-metrics-report, Property 2: Time distribution math`
     - _Requirements: 2.3, 2.5_
-  - [ ] 7.9 Write property test for breakdown sorted descending (Property 3)
+  - [x] 7.9 Write property test for breakdown sorted descending (Property 3)
     - **Property 3: Breakdown sorted descending**
     - **Validates: Requirements 2.6, 3.5**
     - Generate random `PipelineMetrics` instances; assert `time_distribution.breakdown` sorted descending by `seconds`; `space_distribution.breakdown` sorted descending by bytes

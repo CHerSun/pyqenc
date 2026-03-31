@@ -531,3 +531,163 @@ def test_convergence_stats_resume_from_yaml(counts: list[int]) -> None:
     assert stats_resumed.attempts.max    == stats_fresh.attempts.max
     assert abs(stats_resumed.attempts.mean   - stats_fresh.attempts.mean)   < 1e-6
     assert abs(stats_resumed.attempts.stddev - stats_fresh.attempts.stddev) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Property 1: Time accumulation round-trip
+# ---------------------------------------------------------------------------
+
+# Feature: pipeline-metrics-report, Property 1: Time accumulation round-trip
+
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock
+
+from pyqenc.metrics import TimeKey, YamlMetricsCollector
+
+
+def _make_yaml_collector(tmp_path: Path) -> YamlMetricsCollector:
+    source = tmp_path / "source.mkv"
+    source.write_bytes(b"x" * 100)
+    cfg = MagicMock()
+    cfg.source_video = source
+    return YamlMetricsCollector(work_dir=tmp_path, config=cfg)
+
+
+@settings(max_examples=200, deadline=None)
+@given(
+    key=st.sampled_from(list(TimeKey)),
+    durations=st.lists(st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False), min_size=1, max_size=50),
+)
+def test_time_accumulation_round_trip(key: TimeKey, durations: list[float]) -> None:
+    """Property 1: Time accumulation round-trip.
+
+    For any TimeKey and any sequence of positive elapsed durations recorded via
+    record_step, the accumulated seconds for that key must equal the sum of all
+    recorded durations.
+
+    Validates: Requirements 2.1, 2.2, 2.2a
+    """
+    # Feature: pipeline-metrics-report, Property 1: Time accumulation round-trip
+    with tempfile.TemporaryDirectory() as _tmp:
+        collector = _make_yaml_collector(Path(_tmp))
+        for d in durations:
+            collector.record_step(key, d)
+
+        expected = sum(durations)
+        # Use a relative tolerance: floating-point += accumulation vs. sum()
+        # can diverge by a few ULPs on large values.
+        tol = max(1e-9, abs(expected) * 1e-9)
+        assert abs(collector._time_accum[key] - expected) <= tol, (
+            f"Expected {expected}, got {collector._time_accum[key]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Property 2: Time distribution math
+# ---------------------------------------------------------------------------
+
+# Feature: pipeline-metrics-report, Property 2: Time distribution math
+
+from pyqenc.metrics import PipelineMetrics, TimeDistribution
+
+
+@settings(max_examples=200, deadline=None)
+@given(
+    time_map=st.fixed_dictionaries({
+        key: st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False)
+        for key in TimeKey
+    }),
+)
+def test_time_distribution_math(time_map: dict[TimeKey, float]) -> None:
+    """Property 2: Time distribution math.
+
+    For any mapping of TimeKey → float (non-negative), total_seconds must equal
+    the rounded sum of all accumulated seconds, and each key's percent must
+    equal (seconds / total_seconds) * 100 (or 0.0 when total is 0).
+    Zero-second keys must still appear in the breakdown.
+
+    Validates: Requirements 2.3, 2.5
+    """
+    # Feature: pipeline-metrics-report, Property 2: Time distribution math
+    with tempfile.TemporaryDirectory() as _tmp:
+        collector = _make_yaml_collector(Path(_tmp))
+        for key, elapsed in time_map.items():
+            if elapsed > 0:
+                collector.record_step(key, elapsed)
+
+        collector.flush(partial=True)
+
+        raw = yaml.safe_load((Path(_tmp) / "metrics.yaml").read_text(encoding="utf-8"))
+        td  = raw["pipeline_metrics"]["time_distribution"]
+
+        total_secs = td["total_seconds"]
+        breakdown  = td["breakdown"]
+
+        # All TimeKey values must appear
+        categories = {e["category"] for e in breakdown}
+        assert categories == {k.value for k in TimeKey}
+
+        # total_seconds must equal int(round(sum of all accumulated floats))
+        expected_total = int(round(sum(collector._time_accum.values())))
+        assert total_secs == expected_total
+
+        # Each percent must match seconds / total * 100 (within rounding tolerance)
+        for entry in breakdown:
+            secs = entry["seconds"]
+            pct_str = entry["percent"].rstrip("%")
+            pct = float(pct_str)
+            if total_secs > 0:
+                expected_pct = secs / total_secs * 100
+            else:
+                expected_pct = 0.0
+            assert abs(pct - expected_pct) < 0.15, (
+                f"category={entry['category']}: expected {expected_pct:.1f}%, got {pct:.1f}%"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Property 3: Breakdown sorted descending
+# ---------------------------------------------------------------------------
+
+# Feature: pipeline-metrics-report, Property 3: Breakdown sorted descending
+
+
+@settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
+@given(
+    time_map=st.fixed_dictionaries({
+        key: st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False)
+        for key in TimeKey
+    }),
+)
+def test_breakdown_sorted_descending(time_map: dict[TimeKey, float]) -> None:
+    """Property 3: Breakdown sorted descending.
+
+    For any set of time recordings flushed via YamlMetricsCollector,
+    time_distribution.breakdown must be sorted descending by seconds, and
+    space_distribution.breakdown must be sorted descending by bytes.
+
+    Validates: Requirements 2.6, 3.5
+    """
+    # Feature: pipeline-metrics-report, Property 3: Breakdown sorted descending
+    with tempfile.TemporaryDirectory() as _tmp:
+        collector = _make_yaml_collector(Path(_tmp))
+        for key, elapsed in time_map.items():
+            if elapsed > 0:
+                collector.record_step(key, elapsed)
+        collector.flush(partial=True)
+
+        raw = yaml.safe_load((Path(_tmp) / "metrics.yaml").read_text(encoding="utf-8"))
+        pm  = raw["pipeline_metrics"]
+
+        # time breakdown: sorted descending by seconds
+        time_secs = [e["seconds"] for e in pm["time_distribution"]["breakdown"]]
+        assert time_secs == sorted(time_secs, reverse=True), (
+            f"time breakdown not sorted descending: {time_secs}"
+        )
+
+        # space breakdown: sorted descending by GB value (ASCII digits only from _format_gb)
+        space_gb = [float(e["size"].removesuffix(" GB")) for e in pm["space_distribution"]["breakdown"]]
+        assert space_gb == sorted(space_gb, reverse=True), (
+            f"space breakdown not sorted descending: {space_gb}"
+        )

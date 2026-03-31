@@ -46,7 +46,7 @@ __all__ = [
     "_compute_convergence",
     "_measure_space",
     # Added in task 7:
-    # "YamlMetricsCollector",
+    "YamlMetricsCollector",
 ]
 
 import contextlib
@@ -481,3 +481,278 @@ class NoOpMetricsCollector(MetricsCollector):
 
     def flush(self, partial: bool = True) -> None:
         """No-op — nothing to flush."""
+
+
+# ---------------------------------------------------------------------------
+# YAML-backed implementation
+# ---------------------------------------------------------------------------
+
+
+class YamlMetricsCollector(MetricsCollector):
+    """Concrete YAML-backed implementation of :class:`MetricsCollector`.
+
+    Accumulates wall-clock timing, disk space, and CRF convergence data
+    throughout a pipeline run and persists them incrementally to
+    ``metrics.yaml`` in the work directory root using the `.tmp`-then-rename
+    atomic write protocol.
+
+    Args:
+        work_dir:   Pipeline work directory root.
+        config:     Pipeline configuration (provides ``source_video`` path for
+                    space measurement).
+        force_wipe: When ``True``, delete any existing ``metrics.yaml`` and
+                    start fresh.  When ``False`` (default), load and resume
+                    from persisted state.
+    """
+
+    def __init__(
+        self,
+        work_dir:   Path,
+        config:     "PipelineConfig",
+        force_wipe: bool = False,
+    ) -> None:
+        self._work_dir: Path                              = work_dir
+        self._config:   "PipelineConfig"                  = config
+        self._metrics_path: Path                          = work_dir / METRICS_YAML_FILENAME
+        self._tmp_path:     Path                          = work_dir / (METRICS_YAML_FILENAME + _TEMP_SUFFIX)
+
+        # Internal accumulators
+        self._time_accum:        dict[TimeKey, float]                = {k: 0.0 for k in TimeKey}
+        self._conv_accumulators: dict[str, _ConvergenceAccumulator]  = {}
+        self._space_snapshot:    dict[SpaceKey, int]                 = {}
+        self._space_updated_at:  str                                 = ""
+        self._flush_counter:     int                                 = 0
+
+        metrics_file = work_dir / METRICS_YAML_FILENAME
+        if force_wipe:
+            try:
+                metrics_file.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Metrics: could not delete existing %s: %s", metrics_file, exc)
+        else:
+            self._try_resume(metrics_file)
+
+    def _try_resume(self, metrics_file: Path) -> None:
+        """Load persisted state from *metrics_file* and restore accumulators.
+
+        On any failure, logs a WARNING and leaves accumulators at their
+        zero-initialised defaults (start fresh).
+        """
+        if not metrics_file.exists():
+            return
+        try:
+            raw = yaml.safe_load(metrics_file.read_text(encoding="utf-8"))
+            pm  = PipelineMetrics.model_validate(raw["pipeline_metrics"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Metrics: failed to load %s, starting fresh: %s", metrics_file, exc)
+            return
+
+        # Restore time accumulators
+        for entry in pm.time_distribution.breakdown:
+            try:
+                key = TimeKey(entry.category)
+                self._time_accum[key] = float(entry.seconds)
+            except ValueError:
+                logger.debug("Metrics: unknown TimeKey %r in persisted file, skipping", entry.category)
+
+        # Restore space snapshot
+        for entry in pm.space_distribution.breakdown:
+            try:
+                key = SpaceKey(entry.category)
+                # Parse "X.XX GB" back to bytes
+                gb_str = entry.size.removesuffix(" GB")
+                self._space_snapshot[key] = int(round(float(gb_str) * 1024 ** 3))
+            except (ValueError, AttributeError):
+                logger.debug("Metrics: cannot parse space entry %r, skipping", entry)
+        self._space_updated_at = pm.space_distribution.updated_at
+
+        # Restore convergence accumulators (resume Welford from stddev² * n)
+        if pm.convergence is not None:
+            for cs in pm.convergence.strategies:
+                n      = cs.chunks
+                stddev = cs.attempts.stddev
+                acc    = _ConvergenceAccumulator(
+                    n=n,
+                    total=cs.attempts.total,
+                    min=cs.attempts.min,
+                    max=cs.attempts.max,
+                    welford_mean=cs.attempts.mean,
+                    welford_M2=stddev ** 2 * n,
+                )
+                self._conv_accumulators[cs.strategy] = acc
+
+        logger.debug("Metrics: resumed from %s", metrics_file)
+
+    # ------------------------------------------------------------------
+    # MetricsCollector interface
+    # ------------------------------------------------------------------
+
+    def time(self, key: TimeKey) -> contextlib.AbstractContextManager[None]:
+        """Return a context manager that accumulates elapsed seconds for *key*.
+
+        Records ``time.monotonic()`` on enter; on exit calls
+        ``record_step(key, elapsed)``.  Exceptions are re-raised after
+        recording elapsed time so timing is never lost.
+        """
+        return self._TimingContext(self, key)
+
+    class _TimingContext:
+        """Inner context manager used by :meth:`YamlMetricsCollector.time`."""
+
+        __slots__ = ("_collector", "_key", "_t0")
+
+        def __init__(self, collector: "YamlMetricsCollector", key: TimeKey) -> None:
+            self._collector = collector
+            self._key       = key
+            self._t0:  float = 0.0
+
+        def __enter__(self) -> None:
+            self._t0 = _time.monotonic()
+
+        def __exit__(
+            self,
+            exc_type:  type[BaseException] | None,
+            exc_val:   BaseException | None,
+            exc_tb:    object,
+        ) -> None:
+            elapsed = _time.monotonic() - self._t0
+            self._collector.record_step(self._key, elapsed)
+            # Always re-raise — we never suppress exceptions
+
+    def record_step(
+        self,
+        key:                TimeKey,
+        elapsed_seconds:    float,
+        convergence_update: ConvergenceUpdate | None = None,
+    ) -> None:
+        """Accumulate *elapsed_seconds* for *key* and optionally update convergence.
+
+        Increments the internal flush counter; triggers an incremental flush
+        every :data:`FLUSH_INTERVAL` calls.
+        """
+        self._time_accum[key] += elapsed_seconds
+
+        if convergence_update is not None:
+            strategy = convergence_update.strategy
+            if strategy not in self._conv_accumulators:
+                self._conv_accumulators[strategy] = _ConvergenceAccumulator()
+            _update_accumulator(self._conv_accumulators[strategy], convergence_update.attempt_count)
+
+        self._flush_counter += 1
+        if self._flush_counter >= FLUSH_INTERVAL:
+            self._flush_incremental()
+            self._flush_counter = 0
+
+    def _build_metrics(
+        self,
+        *,
+        partial:            bool,
+        now_str:            str,
+        time_updated_at:    str,
+        space_updated_at:   str,
+    ) -> PipelineMetrics:
+        """Assemble a :class:`PipelineMetrics` from current accumulator state."""
+        # --- time distribution ---
+        total_secs = int(round(sum(self._time_accum.values())))
+        breakdown_time: list[TimeEntry] = []
+        for key in TimeKey:
+            secs    = int(round(self._time_accum[key]))
+            percent = f"{secs / total_secs * 100:.1f}%" if total_secs > 0 else "0.0%"
+            breakdown_time.append(TimeEntry(
+                category=key.value,
+                seconds=secs,
+                duration=_format_duration(secs),
+                percent=percent,
+            ))
+        breakdown_time.sort(key=lambda e: e.seconds, reverse=True)
+
+        time_dist = TimeDistribution(
+            updated_at=time_updated_at,
+            total_seconds=total_secs,
+            total_duration=_format_duration(total_secs),
+            breakdown=breakdown_time,
+        )
+
+        # --- space distribution ---
+        space_bytes = self._space_snapshot
+        total_bytes = sum(space_bytes.values())
+        breakdown_space: list[SpaceEntry] = []
+        for key in SpaceKey:
+            b       = space_bytes.get(key, 0)
+            percent = f"{b / total_bytes * 100:.1f}%" if total_bytes > 0 else "0.0%"
+            breakdown_space.append(SpaceEntry(
+                category=key.value,
+                size=_format_gb(b),
+                percent=percent,
+            ))
+        breakdown_space.sort(key=lambda e: float(e.size.removesuffix(" GB")), reverse=True)
+
+        space_dist = SpaceDistribution(
+            updated_at=space_updated_at or now_str,
+            total_size=_format_gb(total_bytes),
+            breakdown=breakdown_space,
+        )
+
+        # --- convergence ---
+        convergence_stats = _compute_convergence(self._conv_accumulators)
+        convergence: ConvergenceSection | None = None
+        if convergence_stats is not None:
+            convergence = ConvergenceSection(
+                updated_at=time_updated_at,
+                strategies=convergence_stats,
+            )
+
+        return PipelineMetrics(
+            run_date=now_str,
+            partial=partial,
+            time_distribution=time_dist,
+            space_distribution=space_dist,
+            convergence=convergence,
+        )
+
+    def _write_atomic(self, metrics: PipelineMetrics) -> None:
+        """Serialize *metrics* to YAML and write atomically via .tmp-then-rename."""
+        data = {"pipeline_metrics": metrics.model_dump()}
+        text = yaml.dump(data, default_flow_style=False, allow_unicode=True)
+        try:
+            self._tmp_path.write_text(text, encoding="utf-8")
+            self._tmp_path.replace(self._metrics_path)
+        except OSError as exc:
+            logger.warning("Metrics: failed to write %s: %s", self._metrics_path, exc)
+
+    def _flush_incremental(self) -> None:
+        """Write time and convergence accumulators only — no space scan.
+
+        Uses the last known ``_space_snapshot`` (may be empty on first call).
+        Sets ``partial=True``.
+        """
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        metrics = self._build_metrics(
+            partial=True,
+            now_str=now_str,
+            time_updated_at=now_str,
+            space_updated_at=self._space_updated_at,
+        )
+        self._write_atomic(metrics)
+
+    def flush(self, partial: bool = True) -> None:
+        """Full flush: scan disk space, then write complete metrics.
+
+        Logs an INFO message before scanning so the user sees why exit may be
+        delayed.  On write failure, logs a WARNING and does not raise.
+        """
+        logger.info("Measuring disk space for metrics...")
+        try:
+            self._space_snapshot = _measure_space(self._work_dir, self._config)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Metrics: space measurement failed: %s", exc)
+
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._space_updated_at = now_str
+        metrics = self._build_metrics(
+            partial=partial,
+            now_str=now_str,
+            time_updated_at=now_str,
+            space_updated_at=now_str,
+        )
+        self._write_atomic(metrics)
