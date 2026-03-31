@@ -48,6 +48,7 @@ Metrics are initialised once when the job starts and survive interruptions: the 
 - **Orchestrator**: `pyqenc/orchestrator.py` — the thin driver that runs phases in sequence and is the natural integration point for metrics collection.
 - **Flush interval**: The maximum number of incremental step updates between automatic `metrics.yaml` writes during a long-running phase. An incremental step update occurs after each per-chunk or per-attempt completion within a phase loop.
 - **Incremental step update**: A call to the MetricsCollector after each discrete unit of work within a phase loop (e.g. after each encoding attempt, after each chunk's winning encode is found), which accumulates elapsed time and attempt counts and may trigger a flush.
+- **NoOpMetricsCollector**: A concrete implementation of the `MetricsCollector` Protocol that satisfies the interface but discards all data without performing any I/O. Used when metrics output is suppressed (e.g. `--no-metrics` flag) or in standalone/test contexts.
 
 ## Requirements
 
@@ -226,6 +227,19 @@ Metrics are initialised once when the job starts and survive interruptions: the 
    - `record_step(key: TimeKey, elapsed_seconds: float, convergence_update: ConvergenceUpdate | None = None)` — incremental update after each per-chunk or per-attempt step; phases call this to record data only, with no knowledge of flushing
 7. Flushing is self-managed by the collector via `FLUSH_INTERVAL` — the Orchestrator does not flush after normal phase completion. THE Orchestrator SHALL call `collector.flush(partial=True)` only on abnormal exit: unhandled exceptions and OS signals (SIGINT, SIGTERM, Windows console control events). Phases SHALL NOT call `flush()` — it is not part of the phase-facing Protocol surface.
 8. WHEN the Orchestrator registers signal handlers for graceful shutdown, it SHALL call `collector.flush(partial=True)` as part of that shutdown sequence.
+
+### Requirement 8: --no-metrics CLI Flag
+
+**User Story:** As a developer, I want to suppress `metrics.yaml` output with a CLI flag, so that I can run the pipeline without any metrics file I/O when I don't need the report.
+
+#### Acceptance Criteria
+
+1. WHEN the `--no-metrics` flag is passed on the CLI, THE CLI SHALL set a `no_metrics: bool` field on `PipelineConfig` (default: `False`) so that the flag is propagated through the existing config path without requiring a separate parameter.
+2. WHEN `PipelineConfig.no_metrics` is `True`, THE Orchestrator SHALL construct a `NoOpMetricsCollector` instead of `YamlMetricsCollector` and pass it to every phase constructor — no `metrics.yaml` file is created or written at any point during the run.
+3. WHEN `PipelineConfig.no_metrics` is `False` (the default), THE Orchestrator SHALL behave exactly as specified in Requirements 1 and 6 — `YamlMetricsCollector` is used and `metrics.yaml` is written normally.
+4. WHEN `--no-metrics` is active, THE MetricsCollector SHALL still accept all `time()` and `record_step()` calls from phases without error — phases are unaware of whether metrics are being persisted.
+5. WHEN `--no-metrics` is active, THE Orchestrator SHALL NOT register signal handlers or `atexit` hooks for metrics flushing, since there is nothing to flush.
+6. THE `--no-metrics` flag SHALL be documented in the CLI help text as: `"Suppress metrics.yaml output (metrics are still collected internally but not written to disk)"`.
 
 ### Requirement 7: No New External Dependencies
 

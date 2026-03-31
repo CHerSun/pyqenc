@@ -16,25 +16,25 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
   - Define `FLUSH_INTERVAL = 10` and `METRICS_YAML_FILENAME = "metrics.yaml"` constants
   - _Requirements: 1.3, 7.1, 7.2_
 
-- [-] 2. Implement `TimeKey` and `SpaceKey` StrEnums
+- [x] 2. Implement `TimeKey` and `SpaceKey` StrEnums
   - [x] 2.1 Implement `TimeKey(StrEnum)` with all 11 dotted values as specified in the design
     - Values: `"job.probe"`, `"job.crop_detect"`, `"extraction.mkvextract"`, `"chunking.scene_detect"`, `"chunking.split"`, `"audio.processing"`, `"encoding.optimization"`, `"encoding.main"`, `"merge.concat"`, `"merge.quality_measure"`, `"recovery"`
     - _Requirements: 2.4_
   - [x] 2.2 Implement `SpaceKey(StrEnum)` with all 10 dotted values as specified in the design
     - Values: `"source"`, `"extracted.video"`, `"extracted.audio"`, `"extracted.other"`, `"chunks"`, `"audio.intermediate"`, `"audio.final"`, `"encoding.workspace"`, `"encoding.outputs"`, `"final"`
     - _Requirements: 3.2_
-  - [ ]* 2.3 Write unit tests for `TimeKey` and `SpaceKey` enum membership
+  - [x] 2.3 Write unit tests for `TimeKey` and `SpaceKey` enum membership
     - Assert `TimeKey` has exactly 11 members with correct dotted string values
     - Assert `SpaceKey` has exactly 10 members with correct dotted string values
     - _Requirements: 2.4, 3.2_
 
-- [ ] 3. Implement Pydantic data models in `pyqenc/metrics.py`
-  - [ ] 3.1 Implement `ConvergenceUpdate` dataclass, `AttemptStats`, `ConvergenceStats`, `TimeEntry`, `SpaceEntry`, `TimeDistribution`, `SpaceDistribution`, `ConvergenceSection`, `PipelineMetrics` Pydantic models
+- [x] 3. Implement Pydantic data models in `pyqenc/metrics.py`
+  - [x] 3.1 Implement `ConvergenceUpdate` dataclass, `AttemptStats`, `ConvergenceStats`, `TimeEntry`, `SpaceEntry`, `TimeDistribution`, `SpaceDistribution`, `ConvergenceSection`, `PipelineMetrics` Pydantic models
     - All fields typed per design; `convergence` field is `ConvergenceSection | None = None`
     - Implement `_format_duration(seconds: int) -> str` — omit days component when 0
     - Implement `_format_gb(n: int) -> str` — always GB, 2 decimal places, 1024-based
     - _Requirements: 5.1, 5.2, 5.3_
-  - [ ]* 3.2 Write property test for YAML serialization round-trip (Property 6)
+  - [x] 3.2 Write property test for YAML serialization round-trip (Property 6)
     - **Property 6: YAML serialization round-trip**
     - **Validates: Requirements 5.1, 5.2, 5.3, 5.4**
     - Generate random valid `PipelineMetrics` instances via `hypothesis`; serialize to YAML and deserialize back; assert field-by-field equivalence within tolerance
@@ -51,7 +51,7 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - `time()` returns a no-op context manager (use `contextlib.nullcontext`)
     - `record_step()` and `flush()` are no-ops
     - _Requirements: 6.4_
-  - [ ]* 4.3 Write unit test: `isinstance(NoOpMetricsCollector(), MetricsCollector)` is `True`
+  - [ ] 4.3 Write unit test: `isinstance(NoOpMetricsCollector(), MetricsCollector)` is `True`
     - _Requirements: 6.1_
 
 - [ ] 5. Implement `_measure_space` and `ConvergenceAccumulator` internals
@@ -66,13 +66,13 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - `ENCODING_WORKSPACE`: recursive sum of `encoding/`; `ENCODING_OUTPUTS`: recursive sum of `encoded/`; `FINAL`: recursive sum of `final/`
     - Missing dirs/files → 0; `OSError` on individual `stat()` → log DEBUG, treat as 0
     - _Requirements: 3.1, 3.2, 3.4, 3.6_
-  - [ ]* 5.3 Write property test for space measurement accuracy (Property 4)
+  - [ ] 5.3 Write property test for space measurement accuracy (Property 4)
     - **Property 4: Space measurement accuracy**
     - **Validates: Requirements 3.1, 3.3, 3.4**
     - Generate random directory trees with known file sizes using `tmp_path`; assert `_measure_space()` returns exact byte counts per category; total == sum of parts
     - Tag: `# Feature: pipeline-metrics-report, Property 4: Space measurement accuracy`
     - _Requirements: 3.1, 3.3, 3.4_
-  - [ ]* 5.4 Write property test for convergence stats math (Property 5)
+  - [ ] 5.4 Write property test for convergence stats math (Property 5)
     - **Property 5: Convergence stats math**
     - **Validates: Requirements 4.2, 4.1a**
     - Generate random sequences of attempt counts (integers ≥ 1) fed incrementally via `record_step`; assert all `ConvergenceStats` fields match `min/max/sum/mean/population_stddev/len` of input sequences; also assert resume from persisted YAML produces identical results
@@ -111,25 +111,25 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - Builds complete `PipelineMetrics` and writes atomically
     - On write failure: log WARNING, do not raise
     - _Requirements: 1.4, 1.5, 3.1, 5.4_
-  - [ ]* 7.6 Write unit tests for `YamlMetricsCollector` lifecycle
+  - [ ] 7.6 Write unit tests for `YamlMetricsCollector` lifecycle
     - `force_wipe=True` deletes existing `metrics.yaml` and starts fresh (Req 1.2)
     - Write failure (mocked `Path.replace` raising `OSError`) logs WARNING and does not propagate (Req 1.5)
     - `flush(partial=False)` sets `partial: false`; `flush(partial=True)` sets `partial: true` (Req 5.4)
     - Empty convergence data produces `convergence: null` in YAML (Req 4.4)
     - _Requirements: 1.2, 1.5, 4.4, 5.4_
-  - [ ]* 7.7 Write property test for time accumulation round-trip (Property 1)
+  - [ ] 7.7 Write property test for time accumulation round-trip (Property 1)
     - **Property 1: Time accumulation round-trip**
     - **Validates: Requirements 2.1, 2.2, 2.2a**
     - Generate random `TimeKey` and random list of positive floats; assert `_time_accum[key] == sum(durations)` after all `record_step` calls
     - Tag: `# Feature: pipeline-metrics-report, Property 1: Time accumulation round-trip`
     - _Requirements: 2.1, 2.2, 2.2a_
-  - [ ]* 7.8 Write property test for time distribution math (Property 2)
+  - [ ] 7.8 Write property test for time distribution math (Property 2)
     - **Property 2: Time distribution math**
     - **Validates: Requirements 2.3, 2.5**
     - Generate random mapping of `TimeKey → float` (non-negative); assert `total_seconds == sum(values)`, each `percent == value / total * 100` (or 0.0 when total is 0)
     - Tag: `# Feature: pipeline-metrics-report, Property 2: Time distribution math`
     - _Requirements: 2.3, 2.5_
-  - [ ]* 7.9 Write property test for breakdown sorted descending (Property 3)
+  - [ ] 7.9 Write property test for breakdown sorted descending (Property 3)
     - **Property 3: Breakdown sorted descending**
     - **Validates: Requirements 2.6, 3.5**
     - Generate random `PipelineMetrics` instances; assert `time_distribution.breakdown` sorted descending by `seconds`; `space_distribution.breakdown` sorted descending by bytes
@@ -161,7 +161,7 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - _Requirements: 6.2_
   - [ ] 9.7 Update `MergePhase.__init__` — add `collector: MetricsCollector`; store as `self._collector`
     - _Requirements: 6.2_
-  - [ ]* 9.8 Write unit tests: each phase constructor accepts a `collector` parameter and stores it
+  - [ ] 9.8 Write unit tests: each phase constructor accepts a `collector` parameter and stores it
     - Instantiate each phase with a `NoOpMetricsCollector`; assert `phase._collector` is the passed instance
     - _Requirements: 6.2_
 
@@ -174,7 +174,7 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
   - [ ] 11.2 Wrap `detect_crop_parameters` call in `_resolve_crop` with `self._collector.time(TimeKey.JOB_CROP_DETECT)`
     - Only when crop detection actually runs (not when returning manual or cached crop)
     - _Requirements: 6.5_
-  - [ ]* 11.3 Write phase integration test for `JobPhase` timing
+  - [ ] 11.3 Write phase integration test for `JobPhase` timing
     - Use a spy/mock `MetricsCollector`; call `phase.run()`; assert `record_step` was called with `TimeKey.JOB_PROBE`
     - _Requirements: 6.5_
 
@@ -183,7 +183,7 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - _Requirements: 6.5_
   - [ ] 12.2 Wrap `_recover()` call in `run()` with manual `time.monotonic()` bookends and `self._collector.record_step(TimeKey.RECOVERY, elapsed)`
     - _Requirements: 6.5, 2.7_
-  - [ ]* 12.3 Write phase integration test for `ExtractionPhase` timing
+  - [ ] 12.3 Write phase integration test for `ExtractionPhase` timing
     - Assert `record_step` called with `TimeKey.EXTRACTION` and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 
@@ -195,7 +195,7 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - _Requirements: 6.5, 2.2a_
   - [ ] 13.3 Wrap `_recover()` call in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
     - _Requirements: 6.5, 2.7_
-  - [ ]* 13.4 Write phase integration test for `ChunkingPhase` timing
+  - [ ] 13.4 Write phase integration test for `ChunkingPhase` timing
     - Assert `record_step` called with `TimeKey.CHUNKING_SCENE_DETECT`, `TimeKey.CHUNKING_SPLIT`, and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 
@@ -204,7 +204,7 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - _Requirements: 6.5_
   - [ ] 14.2 Wrap `_recover()` call in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
     - _Requirements: 6.5, 2.7_
-  - [ ]* 14.3 Write phase integration test for `AudioPhase` timing
+  - [ ] 14.3 Write phase integration test for `AudioPhase` timing
     - Assert `record_step` called with `TimeKey.AUDIO` and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 
@@ -215,7 +215,7 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - _Requirements: 6.5, 2.2a, 4.1a_
   - [ ] 15.2 Wrap the param-load / recovery section in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
     - _Requirements: 6.5, 2.7_
-  - [ ]* 15.3 Write phase integration test for `OptimizationPhase` timing
+  - [ ] 15.3 Write phase integration test for `OptimizationPhase` timing
     - Assert `record_step` called with `TimeKey.ENCODING_OPTIMIZATION` (with `convergence_update`) and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 
@@ -226,7 +226,7 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - _Requirements: 6.5, 2.2a, 4.1a_
   - [ ] 16.2 Wrap `_recover_encoding_attempts()` call in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
     - _Requirements: 6.5, 2.7_
-  - [ ]* 16.3 Write phase integration test for `EncodingPhase` timing
+  - [ ] 16.3 Write phase integration test for `EncodingPhase` timing
     - Assert `record_step` called with `TimeKey.ENCODING_MAIN` (with `convergence_update`) and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 
@@ -237,28 +237,39 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - _Requirements: 6.5_
   - [ ] 17.3 Wrap `_recover()` call in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
     - _Requirements: 6.5, 2.7_
-  - [ ]* 17.4 Write phase integration test for `MergePhase` timing
+  - [ ] 17.4 Write phase integration test for `MergePhase` timing
     - Assert `record_step` called with `TimeKey.MERGE_CONCAT`, `TimeKey.MERGE_QUALITY_MEASURE`, and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 
-- [ ] 18. Update `PipelineOrchestrator` to construct and manage `YamlMetricsCollector`
-  - [ ] 18.1 In `PipelineOrchestrator.__init__` or `run()`, construct `YamlMetricsCollector(work_dir=config.work_dir, config=config, force_wipe=...)` and pass it to `_build_registry(config, collector)`
-    - Determine `force_wipe` from `JobPhase` result after it runs, or pass `False` initially and let `YamlMetricsCollector` handle resume
-    - _Requirements: 1.1, 1.6, 6.3_
-  - [ ] 18.2 Register `signal.signal(SIGINT, ...)`, `signal.signal(SIGTERM, ...)`, and `signal.signal(CTRL_C_EVENT, ...)` (Windows) handlers that call `collector.flush(partial=True)` before re-raising
-    - Register `atexit.register(collector.flush, partial=True)` as safety net
-    - _Requirements: 1.4, 6.7, 6.8_
-  - [ ] 18.3 After all phases complete successfully, call `collector.flush(partial=False)` and log INFO with path to `metrics.yaml`
-    - This is the only place `partial=False` is set
-    - _Requirements: 5.4, 5.5_
-  - [ ]* 18.4 Write unit test for orchestrator signal handler registration
-    - Assert `atexit` handler is registered; assert `flush(partial=False)` is called on successful pipeline completion
-    - _Requirements: 1.4, 6.7, 6.8_
+- [ ] 18. Implement `--no-metrics` CLI flag and `PipelineConfig.no_metrics` field
+  - [ ] 18.1 Add `no_metrics: bool = False` field to `PipelineConfig`
+    - Default `False` so existing behaviour is unchanged
+    - _Requirements: 8.1_
+  - [ ] 18.2 Add `--no-metrics` argument to the CLI argument parser
+    - `action="store_true"`, `default=False`
+    - `help="Suppress metrics.yaml output (metrics are still collected internally but not written to disk)"`
+    - Wire into `PipelineConfig` construction: `no_metrics=args.no_metrics`
+    - _Requirements: 8.1, 8.6_
 
-- [ ] 19. Final checkpoint — Ensure all tests pass
+- [ ] 19. Update `PipelineOrchestrator` to construct and manage `YamlMetricsCollector`
+  - [ ] 19.1 In `PipelineOrchestrator.__init__` or `run()`, branch on `config.no_metrics`: construct `NoOpMetricsCollector()` when `True`, otherwise construct `YamlMetricsCollector(work_dir=config.work_dir, config=config, force_wipe=...)` and pass the result to `_build_registry(config, collector)`
+    - Determine `force_wipe` from `JobPhase` result after it runs, or pass `False` initially and let `YamlMetricsCollector` handle resume
+    - _Requirements: 1.1, 1.6, 6.3, 8.2, 8.3_
+  - [ ] 19.2 Register `signal.signal(SIGINT, ...)`, `signal.signal(SIGTERM, ...)`, and `signal.signal(CTRL_C_EVENT, ...)` (Windows) handlers that call `collector.flush(partial=True)` before re-raising — only when `config.no_metrics` is `False`
+    - Register `atexit.register(collector.flush, partial=True)` as safety net — only when `config.no_metrics` is `False`
+    - _Requirements: 1.4, 6.7, 6.8, 8.5_
+  - [ ] 19.3 After all phases complete successfully, call `collector.flush(partial=False)` and log INFO with path to `metrics.yaml` — only when `config.no_metrics` is `False`
+    - This is the only place `partial=False` is set
+    - _Requirements: 5.4, 5.5, 8.3_
+  - [ ] 19.4 Write unit tests for orchestrator collector construction and signal handler registration
+    - Assert `atexit` handler is registered and `flush(partial=False)` is called on successful completion when `config.no_metrics=False`
+    - Assert `NoOpMetricsCollector` is used, no signal handlers registered, and no `flush` calls made when `config.no_metrics=True`
+    - _Requirements: 1.4, 6.7, 6.8, 8.2, 8.5_
+
+- [ ] 20. Final checkpoint — Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 20. Review spec against other specs and update cross-spec summaries
+- [ ] 21. Review spec against other specs and update cross-spec summaries
   - Compare `pipeline-metrics-report` spec dates and content against other specs in `.kiro/specs/`
   - Add a summary section to the top of this spec and any related specs noting what was superseded or changed
   - Add `- Completed: <date>` to this spec's header

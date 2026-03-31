@@ -29,4 +29,5 @@ uv.lock
 # Local environment Kiro steering doc
 .kiro/steering/environment.md
 
-
+# Hypothesis testing
+.hypothesis

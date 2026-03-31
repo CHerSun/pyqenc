@@ -31,8 +31,9 @@ The design follows three principles established in the requirements discussion:
 ```
 PipelineOrchestrator
   │
-  ├── constructs YamlMetricsCollector(work_dir, config)
-  ├── registers signal handlers → collector.flush(partial=True)
+  ├── if config.no_metrics → constructs NoOpMetricsCollector()
+  │   else                 → constructs YamlMetricsCollector(work_dir, config)
+  │                          registers signal handlers → collector.flush(partial=True)
   ├── passes collector to every phase constructor
   │
   ├── JobPhase(config, registry, collector)
@@ -285,9 +286,9 @@ METRICS_YAML_FILENAME = "metrics.yaml"   # named constant
 
 **Atomic write:** Both flush paths write to `work_dir / (METRICS_YAML_FILENAME + TEMP_SUFFIX)` then rename to `work_dir / METRICS_YAML_FILENAME` via `Path.replace()`.
 
-**Orchestrator abnormal-exit flush:** The orchestrator registers `signal.signal(SIGINT, ...)` and `signal.signal(SIGTERM, ...)` handlers (plus `signal.signal(signal.CTRL_C_EVENT, ...)` on Windows) that call `collector.flush(partial=True)` before re-raising or exiting. An `atexit` handler also calls `flush(partial=True)` as a safety net for unhandled exceptions.
+**Orchestrator abnormal-exit flush:** When `config.no_metrics` is `False`, the orchestrator registers `signal.signal(SIGINT, ...)` and `signal.signal(SIGTERM, ...)` handlers (plus `signal.signal(signal.CTRL_C_EVENT, ...)` on Windows) that call `collector.flush(partial=True)` before re-raising or exiting. An `atexit` handler also calls `flush(partial=True)` as a safety net for unhandled exceptions. When `config.no_metrics` is `True`, no signal handlers or `atexit` hooks are registered — there is nothing to flush.
 
-**Final flush on success:** After all phases complete successfully, the orchestrator calls `collector.flush(partial=False)` to write the final report with `partial: false` and a complete space snapshot.
+**Final flush on success:** When `config.no_metrics` is `False`, after all phases complete successfully the orchestrator calls `collector.flush(partial=False)` to write the final report with `partial: false` and a complete space snapshot. When `config.no_metrics` is `True`, this call is skipped.
 
 ---
 
@@ -372,6 +373,57 @@ def _build_registry(
 ```
 
 When `collector` is `None`, a `NoOpMetricsCollector` is constructed internally as a safe default.
+
+### `PipelineConfig` — `no_metrics` field
+
+`PipelineConfig` gains one new field:
+
+```python
+no_metrics: bool = False
+```
+
+Default is `False` (metrics enabled). Set to `True` by the CLI when `--no-metrics` is passed. The field travels through the existing config path — no separate parameter threading is needed.
+
+### CLI — `--no-metrics` flag
+
+The CLI argument parser adds:
+
+```python
+parser.add_argument(
+    "--no-metrics",
+    action="store_true",
+    default=False,
+    help="Suppress metrics.yaml output (metrics are still collected internally but not written to disk)",
+)
+```
+
+Wiring in the CLI entry point:
+
+```python
+config = PipelineConfig(
+    ...
+    no_metrics = args.no_metrics,
+)
+```
+
+The flag is documented in help text exactly as: `"Suppress metrics.yaml output (metrics are still collected internally but not written to disk)"` (Req 8.6).
+
+### Orchestrator — collector construction
+
+```python
+if config.no_metrics:
+    collector: MetricsCollector = NoOpMetricsCollector()
+else:
+    collector = YamlMetricsCollector(work_dir=config.work_dir, config=config, force_wipe=force_wipe)
+    _register_metrics_signal_handlers(collector)
+    atexit.register(collector.flush, partial=True)
+```
+
+Signal handler and `atexit` registration are skipped entirely when `no_metrics` is `True`. The collector is then passed to `_build_registry` as before — phases are unaffected.
+
+### Phase transparency
+
+Phases always receive a `MetricsCollector` and call `time()` / `record_step()` normally. They have no knowledge of whether the injected implementation is `YamlMetricsCollector` or `NoOpMetricsCollector`. This is the core benefit of Protocol-based injection — the `--no-metrics` flag requires zero changes to any phase.
 
 ---
 
@@ -471,6 +523,7 @@ M2    += delta * (x - mean)   # uses updated mean
 - `NoOpMetricsCollector` satisfies `isinstance(noop, MetricsCollector)` via `runtime_checkable` (Req 6.1)
 - Each phase constructor accepts a `collector` parameter (Req 6.2)
 - `flush(partial=False)` sets `partial: false` in output; `flush(partial=True)` sets `partial: true` (Req 5.4)
+- When `config.no_metrics=True`, the orchestrator constructs `NoOpMetricsCollector` and skips signal handler / `atexit` registration (Req 8.2, 8.5)
 
 ### Property-Based Tests (using `hypothesis`)
 
