@@ -63,6 +63,7 @@ from pyqenc.utils.visualization import QualityEvaluator
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 if TYPE_CHECKING:
+    from pyqenc.metrics import MetricsCollector
     from pyqenc.models import PipelineConfig
     from pyqenc.phases.chunking import ChunkingPhase, ChunkingPhaseResult
     from pyqenc.phases.job import JobPhase, JobPhaseResult
@@ -1586,14 +1587,17 @@ class EncodingPhase:
 
     def __init__(
         self,
-        config: "PipelineConfig",
-        phases: "dict[type[Phase], Phase] | None" = None,
+        config:    "PipelineConfig",
+        phases:    "dict[type[Phase], Phase] | None" = None,
+        collector: "MetricsCollector | None" = None,
     ) -> None:
+        from pyqenc.metrics import NoOpMetricsCollector
         from pyqenc.phases.chunking import ChunkingPhase as _ChunkingPhase
         from pyqenc.phases.job import JobPhase as _JobPhase
         from pyqenc.phases.optimization import OptimizationPhase as _OptimizationPhase
 
         self._config:       "PipelineConfig"            = config
+        self._collector:    "MetricsCollector"          = collector if collector is not None else NoOpMetricsCollector()
         self._job:          "_JobPhase | None"          = cast("_JobPhase",          phases[_JobPhase])          if phases else None
         self._chunking:     "_ChunkingPhase | None"     = cast("_ChunkingPhase",     phases[_ChunkingPhase])     if phases else None
         self._optimization: "_OptimizationPhase | None" = cast("_OptimizationPhase", phases[_OptimizationPhase]) if phases else None

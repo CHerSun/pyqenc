@@ -58,6 +58,7 @@ from pyqenc.utils.log_format import (
 from pyqenc.utils.visualization import QualityEvaluator
 
 if TYPE_CHECKING:
+    from pyqenc.metrics import MetricsCollector
     from pyqenc.models import PipelineConfig
     from pyqenc.phases.chunking import ChunkingPhase, ChunkingPhaseResult
     from pyqenc.phases.job import JobPhase, JobPhaseResult
@@ -111,13 +112,16 @@ class OptimizationPhase:
 
     def __init__(
         self,
-        config: "PipelineConfig",
-        phases: "dict[type[Phase], Phase] | None" = None,
+        config:    "PipelineConfig",
+        phases:    "dict[type[Phase], Phase] | None" = None,
+        collector: "MetricsCollector | None" = None,
     ) -> None:
+        from pyqenc.metrics import NoOpMetricsCollector
         from pyqenc.phases.chunking import ChunkingPhase as _ChunkingPhase
         from pyqenc.phases.job import JobPhase as _JobPhase
 
-        self._config   = config
+        self._config    = config
+        self._collector: "MetricsCollector" = collector if collector is not None else NoOpMetricsCollector()
         self._job:      "_JobPhase | None"      = cast("_JobPhase",      phases[_JobPhase])      if phases else None
         self._chunking: "_ChunkingPhase | None" = cast("_ChunkingPhase", phases[_ChunkingPhase]) if phases else None
         self.result:    "OptimizationPhaseResult | None" = None

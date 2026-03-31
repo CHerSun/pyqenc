@@ -1189,6 +1189,7 @@ from dataclasses import dataclass as _dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pyqenc.metrics import MetricsCollector
     from pyqenc.models import PipelineConfig
     from pyqenc.phase import Phase, PhaseResult
     from pyqenc.phases.extraction import ExtractionPhase
@@ -1303,15 +1304,18 @@ class AudioPhase:
 
     def __init__(
         self,
-        config: "PipelineConfig",
-        phases: "dict[type[Phase], Phase] | None" = None,
+        config:    "PipelineConfig",
+        phases:    "dict[type[Phase], Phase] | None" = None,
+        collector: "MetricsCollector | None" = None,
     ) -> None:
         from typing import cast
 
+        from pyqenc.metrics import NoOpMetricsCollector
         from pyqenc.phases.extraction import ExtractionPhase as _ExtractionPhase
         from pyqenc.phases.job import JobPhase as _JobPhase
 
         self._config:     "PipelineConfig"           = config
+        self._collector:  "MetricsCollector"         = collector if collector is not None else NoOpMetricsCollector()
         self._job:        "_JobPhase | None"          = cast(_JobPhase,        phases[_JobPhase])        if phases else None
         self._extraction: "_ExtractionPhase | None"  = cast(_ExtractionPhase, phases[_ExtractionPhase]) if phases else None
         self.params       = AudioParams(audio_codec=config.audio_codec, audio_base_bitrate=config.audio_base_bitrate)

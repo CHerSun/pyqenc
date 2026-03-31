@@ -532,10 +532,9 @@ from pyqenc.state import ArtifactState, ExtractionParams
 from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
 
 if TYPE_CHECKING:
+    from pyqenc.metrics import MetricsCollector
     from pyqenc.models import PipelineConfig
     from pyqenc.phases.job import JobPhase, JobPhaseResult
-
-_EXTRACTION_YAML_NAME = "extraction.yaml"
 
 
 @dataclass
@@ -601,12 +600,15 @@ class ExtractionPhase:
 
     def __init__(
         self,
-        config: "PipelineConfig",
-        phases: "dict[type[Phase], Phase] | None" = None,
+        config:    "PipelineConfig",
+        phases:    "dict[type[Phase], Phase] | None" = None,
+        collector: "MetricsCollector | None" = None,
     ) -> None:
+        from pyqenc.metrics import NoOpMetricsCollector
         from pyqenc.phases.job import JobPhase as _JobPhase
 
-        self._config = config
+        self._config    = config
+        self._collector: "MetricsCollector" = collector if collector is not None else NoOpMetricsCollector()
         self._job:    "_JobPhase | None"          = cast("_JobPhase", phases[_JobPhase]) if phases else None
         self.params   = ExtractionParams(include=config.include, exclude=config.exclude)
         self.result:  ExtractionPhaseResult | None = None

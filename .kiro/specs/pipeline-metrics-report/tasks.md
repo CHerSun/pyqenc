@@ -146,22 +146,22 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - Each standalone function constructs `collector = NoOpMetricsCollector()` and passes it to `_build_registry(config, collector)`
     - _Requirements: 6.4_
 
-- [ ] 9. Add `collector: MetricsCollector` parameter to all phase constructors
-  - [ ] 9.1 Update `JobPhase.__init__` — add `collector: MetricsCollector` as required third parameter; store as `self._collector`
+- [x] 9. Add `collector: MetricsCollector` parameter to all phase constructors
+  - [x] 9.1 Update `JobPhase.__init__` — add `collector: MetricsCollector` as required third parameter; store as `self._collector`
     - _Requirements: 6.2_
-  - [ ] 9.2 Update `ExtractionPhase.__init__` — add `collector: MetricsCollector`; store as `self._collector`
+  - [x] 9.2 Update `ExtractionPhase.__init__` — add `collector: MetricsCollector`; store as `self._collector`
     - _Requirements: 6.2_
-  - [ ] 9.3 Update `ChunkingPhase.__init__` — add `collector: MetricsCollector`; store as `self._collector`
+  - [x] 9.3 Update `ChunkingPhase.__init__` — add `collector: MetricsCollector`; store as `self._collector`
     - _Requirements: 6.2_
-  - [ ] 9.4 Update `OptimizationPhase.__init__` — add `collector: MetricsCollector`; store as `self._collector`
+  - [x] 9.4 Update `OptimizationPhase.__init__` — add `collector: MetricsCollector`; store as `self._collector`
     - _Requirements: 6.2_
-  - [ ] 9.5 Update `EncodingPhase.__init__` — add `collector: MetricsCollector`; store as `self._collector`
+  - [x] 9.5 Update `EncodingPhase.__init__` — add `collector: MetricsCollector`; store as `self._collector`
     - _Requirements: 6.2_
-  - [ ] 9.6 Update `AudioPhase.__init__` — add `collector: MetricsCollector`; store as `self._collector`
+  - [x] 9.6 Update `AudioPhase.__init__` — add `collector: MetricsCollector`; store as `self._collector`
     - _Requirements: 6.2_
-  - [ ] 9.7 Update `MergePhase.__init__` — add `collector: MetricsCollector`; store as `self._collector`
+  - [x] 9.7 Update `MergePhase.__init__` — add `collector: MetricsCollector`; store as `self._collector`
     - _Requirements: 6.2_
-  - [ ] 9.8 Write unit tests: each phase constructor accepts a `collector` parameter and stores it
+  - [x] 9.8 Write unit tests: each phase constructor accepts a `collector` parameter and stores it
     - Instantiate each phase with a `NoOpMetricsCollector`; assert `phase._collector` is the passed instance
     - _Requirements: 6.2_
 

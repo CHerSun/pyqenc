@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from pyqenc.metrics import MetricsCollector
 from pyqenc.models import (
     CropParams,
     PhaseOutcome,
@@ -78,10 +79,13 @@ class JobPhase:
 
     def __init__(
         self,
-        config: PipelineConfig,
-        phases: dict[type[Phase], Phase] | None = None,
+        config:    PipelineConfig,
+        phases:    dict[type[Phase], Phase] | None = None,
+        collector: "MetricsCollector | None" = None,
     ) -> None:
-        self._config = config
+        from pyqenc.metrics import NoOpMetricsCollector
+        self._config    = config
+        self._collector: "MetricsCollector" = collector if collector is not None else NoOpMetricsCollector()
         self.result: JobPhaseResult | None = None
         # JobPhase has no dependencies; phases registry is accepted but unused.
 
