@@ -3,6 +3,7 @@
 <!-- markdownlint-disable MD024 -->
 
 - Created: 2026-06-10
+- Completed: 2026-04-01
 
 ## Overview
 
@@ -279,7 +280,7 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
 - [x] 20. Final checkpoint — Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 21. Review spec against other specs and update cross-spec summaries
+- [x] 21. Review spec against other specs and update cross-spec summaries
   - Compare `pipeline-metrics-report` spec dates and content against other specs in `.kiro/specs/`
   - Add a summary section to the top of this spec and any related specs noting what was superseded or changed
   - Add `- Completed: <date>` to this spec's header

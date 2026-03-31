@@ -4,6 +4,12 @@
 
 - Created: 2026-03-20
 
+## Cross-Spec Notes
+
+### Superseded by `pipeline-metrics-report` (2026-04-01)
+
+`pipeline-metrics-report` extends the `_build_registry` and phase constructor pattern established here. Every phase constructor now takes a required third parameter `collector: MetricsCollector` (after `config` and `phases`). `_build_registry` was updated to accept and thread the collector. Any future phase additions must include this parameter.
+
 ## Introduction
 
 This spec covers a structural refactor of the pipeline to make each phase a self-contained object. Currently phases are standalone functions, job initialisation only runs inside the auto-pipeline, input discovery is inconsistent across modes, and the pipeline always rescans the filesystem even when it just produced the data. The goal is a uniform `Phase` protocol where every phase owns its dependencies, artifact enumeration, recovery, execution, and logging — and the pipeline simply drives phase objects rather than containing phase logic itself.

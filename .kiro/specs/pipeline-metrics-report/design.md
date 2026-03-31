@@ -3,6 +3,25 @@
 <!-- markdownlint-disable MD024 -->
 
 - Created: 2026-06-10
+- Completed: 2026-04-01
+
+## Cross-Spec Notes
+
+### Relation to `phase-object-model` (2026-03-20)
+
+`phase-object-model` established `_build_registry` and the phase constructor pattern (`config`, `phases` registry). This spec extends that pattern by adding a required `collector: MetricsCollector` third parameter to every phase constructor and updating `_build_registry` to accept and thread the collector. The phase constructor signature is now `(config, phases, collector)`.
+
+### Relation to `phase-recovery-refactor` (2026-03-17)
+
+`phase-recovery-refactor` introduced signal handlers for state flushing. `ProgressTracker` no longer exists — it was removed as part of `phase-object-model`. This spec integrates metrics flushing into the existing CLI SIGINT handler via `register_active_collector` / `flush_active_collector` in `metrics.py`; no separate orchestrator-level signal registration is used.
+
+### Relation to `unified-metrics-visualization` (2026-03-15)
+
+Despite the name overlap, `unified-metrics-visualization` covers video quality metrics (PSNR/SSIM/VMAF frame-by-frame plots). This spec covers pipeline execution metrics (wall-clock time, disk space, CRF convergence). The two are entirely separate concerns with no shared code.
+
+### Relation to `disk_space.py` utility
+
+`pyqenc/utils/disk_space.py` estimates required space *before* the pipeline runs (pre-flight check). This spec's `_measure_space()` in `metrics.py` measures actual space *during/after* the run (reporting). Complementary, not overlapping.
 
 ## Overview
 

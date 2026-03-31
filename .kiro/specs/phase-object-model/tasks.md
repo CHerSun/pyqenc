@@ -4,6 +4,12 @@
 
 - Created: 2026-03-20
 
+## Cross-Spec Notes
+
+### Superseded by `pipeline-metrics-report` (2026-04-01)
+
+`pipeline-metrics-report` extends the `_build_registry` and phase constructor pattern established here. Every phase constructor now takes a required third parameter `collector: MetricsCollector` (after `config` and `phases`). `_build_registry` was updated to accept and thread the collector. Any future phase additions must include this parameter.
+
 - [x] 1. Core types and protocol
 
 
