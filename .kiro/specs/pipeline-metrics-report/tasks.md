@@ -200,14 +200,14 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - Assert that after the context exits normally, the final accumulated value equals the full elapsed (not double-counted)
     - _Requirements: 1.4_
 
-- [ ] 13. Instrument `ChunkingPhase` with timing calls
-  - [ ] 13.1 Wrap `detect_scenes()` call in `_execute_chunking` with `self._collector.time(TimeKey.CHUNKING_SCENE_DETECT)`
+- [x] 13. Instrument `ChunkingPhase` with timing calls
+  - [x] 13.1 Wrap `detect_scenes()` call in `_execute_chunking` with `self._collector.time(TimeKey.CHUNKING_SCENE_DETECT)`
     - _Requirements: 6.5_
-  - [ ] 13.2 Wrap the entire chunk-split loop in `split_chunks` with `self._collector.time(TimeKey.CHUNKING_SPLIT)`; call `self._collector.step(TimeKey.CHUNKING_SPLIT)` after each successful split — pass `collector` down from `ChunkingPhase._execute_chunking` to `split_chunks`
+  - [x] 13.2 Wrap the entire chunk-split loop in `split_chunks` with `self._collector.time(TimeKey.CHUNKING_SPLIT)`; call `self._collector.step(TimeKey.CHUNKING_SPLIT)` after each successful split — pass `collector` down from `ChunkingPhase._execute_chunking` to `split_chunks`
     - _Requirements: 6.5, 2.2a_
-  - [ ] 13.3 Wrap `_recover()` call in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
+  - [x] 13.3 Wrap `_recover()` call in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
     - _Requirements: 6.5, 2.7_
-  - [ ] 13.4 Write phase integration test for `ChunkingPhase` timing
+  - [x] 13.4 Write phase integration test for `ChunkingPhase` timing
     - Assert `record_step` called with `TimeKey.CHUNKING_SCENE_DETECT`, `TimeKey.CHUNKING_SPLIT`, and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 

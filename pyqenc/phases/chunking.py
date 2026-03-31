@@ -23,6 +23,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from pyqenc.metrics import MetricsCollector
+
 from alive_progress import alive_bar, config_handler
 from scenedetect import ContentDetector, detect
 
@@ -178,11 +181,15 @@ def split_chunks(
     boundaries:    list[SceneBoundary],
     recovery:      ChunkingRecovery,
     chunking_mode: ChunkingMode = ChunkingMode.LOSSLESS,
+    *,
+    collector:     "MetricsCollector",
 ) -> list[ChunkMetadata]:
     """Split the source video into chunks using scene boundaries.
 
     Skips chunks already present on disk (as determined by *recovery*).
     Writes a ``<chunk_stem>.yaml`` sidecar after each successful split (Req 5.5).
+    Calls ``collector.step(TimeKey.CHUNKING_SPLIT)`` after each successful split
+    to trigger incremental metrics flushes (Req 6.5, 2.2a).
 
     Args:
         video_meta:    Metadata for the source video file.
@@ -191,10 +198,12 @@ def split_chunks(
         recovery:      Recovery result from ``recover_chunking``; chunks already
                        ``COMPLETE`` are skipped.
         chunking_mode: LOSSLESS (FFV1 all-intra, default) or REMUX (stream-copy).
+        collector:     Metrics collector for step triggering after each split.
 
     Returns:
         List of ``ChunkMetadata`` for every chunk that was successfully split or reused.
     """
+    from pyqenc.metrics import TimeKey
     if not boundaries:
         raise RuntimeError(
             "No scene boundaries provided to split_chunks. "
@@ -285,6 +294,7 @@ def split_chunks(
 
             result_chunks.append(chunk_meta)
             logger.debug("Chunk %s split successfully", stem)
+            collector.step(TimeKey.CHUNKING_SPLIT)
             advance(end_ts - start_ts)
 
     return result_chunks
@@ -402,16 +412,16 @@ class ChunkingPhase:
         self,
         config:    "PipelineConfig",
         phases:    "dict[type[Phase], Phase] | None" = None,
-        collector: "MetricsCollector | None" = None,
+        *,
+        collector: "MetricsCollector",
     ) -> None:
         from typing import cast
 
-        from pyqenc.metrics import NoOpMetricsCollector
         from pyqenc.phases.extraction import ExtractionPhase as _ExtractionPhase
         from pyqenc.phases.job import JobPhase as _JobPhase
 
         self._config    = config
-        self._collector: "MetricsCollector" = collector if collector is not None else NoOpMetricsCollector()
+        self._collector: "MetricsCollector" = collector
         self._job:        "_JobPhase | None"        = cast(_JobPhase,        phases[_JobPhase])        if phases else None
         self._extraction: "_ExtractionPhase | None" = cast(_ExtractionPhase, phases[_ExtractionPhase]) if phases else None
         self.params       = ChunkingParams(chunking_mode=config.chunking_mode.value, scenes=[])
@@ -490,7 +500,9 @@ class ChunkingPhase:
         # Key parameters
         logger.info("Mode:  %s", self._config.chunking_mode.value)
 
-        artifacts = self._recover(force_wipe=force_wipe, execute=True)
+        from pyqenc.metrics import TimeKey as _TimeKey
+        with self._collector.time(_TimeKey.RECOVERY):
+            artifacts = self._recover(force_wipe=force_wipe, execute=True)
 
         # Mode mismatch without --force: abort
         if self._mode_mismatch_error:
@@ -742,6 +754,7 @@ class ChunkingPhase:
         Returns:
             ``ChunkingPhaseResult`` after chunking.
         """
+        from pyqenc.metrics import TimeKey
         work_dir   = self._config.work_dir
         chunks_dir = work_dir / CHUNKS_DIR
         chunks_dir.mkdir(parents=True, exist_ok=True)
@@ -774,11 +787,12 @@ class ChunkingPhase:
             )
         else:
             try:
-                boundaries = detect_scenes(
-                    video_meta       = video_meta,
-                    scene_threshold  = 27.0,
-                    min_scene_length = 15,
-                )
+                with self._collector.time(TimeKey.CHUNKING_SCENE_DETECT):
+                    boundaries = detect_scenes(
+                        video_meta       = video_meta,
+                        scene_threshold  = 27.0,
+                        min_scene_length = 15,
+                    )
                 self.params.scenes = boundaries
                 self.params.save(work_dir / _CHUNKING_YAML)
             except Exception as exc:
@@ -806,13 +820,15 @@ class ChunkingPhase:
         )
 
         try:
-            chunk_metas = split_chunks(
-                video_meta    = video_meta,
-                output_dir    = chunks_dir,
-                boundaries    = boundaries,
-                recovery      = recovery_obj,
-                chunking_mode = self._config.chunking_mode,
-            )
+            with self._collector.time(TimeKey.CHUNKING_SPLIT):
+                chunk_metas = split_chunks(
+                    video_meta    = video_meta,
+                    output_dir    = chunks_dir,
+                    boundaries    = boundaries,
+                    recovery      = recovery_obj,
+                    chunking_mode = self._config.chunking_mode,
+                    collector     = self._collector,
+                )
         except Exception as exc:
             logger.error("Chunk splitting failed: %s", exc, exc_info=True)
             return _failed(str(exc))

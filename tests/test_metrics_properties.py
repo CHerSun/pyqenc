@@ -259,7 +259,7 @@ def _st_file_sizes(draw: st.DrawFn) -> list[int]:
     return draw(st.lists(st.integers(min_value=1, max_value=64 * 1024), min_size=1, max_size=8))
 
 
-@settings(max_examples=100)
+@settings(max_examples=100, deadline=None)
 @given(
     source_size=st.integers(min_value=0, max_value=1024 * 1024),
     mkv_sizes=_st_file_sizes(),

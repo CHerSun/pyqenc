@@ -81,11 +81,11 @@ class JobPhase:
         self,
         config:    PipelineConfig,
         phases:    dict[type[Phase], Phase] | None = None,
-        collector: "MetricsCollector | None" = None,
+        *,
+        collector: "MetricsCollector",
     ) -> None:
-        from pyqenc.metrics import NoOpMetricsCollector
-        self._config    = config
-        self._collector: "MetricsCollector" = collector if collector is not None else NoOpMetricsCollector()
+        self._config:    PipelineConfig    = config
+        self._collector: "MetricsCollector" = collector
         self.result: JobPhaseResult | None = None
         # JobPhase has no dependencies; phases registry is accepted but unused.
 

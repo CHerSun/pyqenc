@@ -362,24 +362,6 @@ def test_merge_phase_stores_collector(tmp_path: Path) -> None:
     assert phase._collector is collector
 
 
-def test_phase_collector_defaults_to_noop_when_omitted(tmp_path: Path) -> None:
-    """When no collector is passed, each phase must default to NoOpMetricsCollector."""
-    from pyqenc.phases.audio import AudioPhase
-    from pyqenc.phases.chunking import ChunkingPhase
-    from pyqenc.phases.encoding import EncodingPhase
-    from pyqenc.phases.extraction import ExtractionPhase
-    from pyqenc.phases.job import JobPhase
-    from pyqenc.phases.merge import MergePhase
-    from pyqenc.phases.optimization import OptimizationPhase
-
-    config = _make_pipeline_config(tmp_path)
-    for cls in [JobPhase, ExtractionPhase, ChunkingPhase, OptimizationPhase,
-                EncodingPhase, AudioPhase, MergePhase]:
-        phase = cls(config)
-        assert isinstance(phase._collector, NoOpMetricsCollector), (
-            f"{cls.__name__}._collector should be NoOpMetricsCollector when omitted"
-        )
-
 
 # ---------------------------------------------------------------------------
 # Active-timer capture tests (Req 1.4)
