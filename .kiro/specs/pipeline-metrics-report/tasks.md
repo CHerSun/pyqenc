@@ -165,16 +165,16 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - Instantiate each phase with a `NoOpMetricsCollector`; assert `phase._collector` is the passed instance
     - _Requirements: 6.2_
 
-- [ ] 10. Checkpoint — Ensure all tests pass
+- [x] 10. Checkpoint — Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 11. Instrument `JobPhase` with timing calls
-  - [ ] 11.1 Wrap `VideoMetadata` probing calls in `_create_or_update_job` with `self._collector.time(TimeKey.JOB_PROBE)`
+- [x] 11. Instrument `JobPhase` with timing calls
+  - [x] 11.1 Wrap `VideoMetadata` probing calls in `_create_or_update_job` with `self._collector.time(TimeKey.JOB_PROBE)`
     - _Requirements: 6.5_
-  - [ ] 11.2 Wrap `detect_crop_parameters` call in `_resolve_crop` with `self._collector.time(TimeKey.JOB_CROP_DETECT)`
+  - [x] 11.2 Wrap `detect_crop_parameters` call in `_resolve_crop` with `self._collector.time(TimeKey.JOB_CROP_DETECT)`
     - Only when crop detection actually runs (not when returning manual or cached crop)
     - _Requirements: 6.5_
-  - [ ] 11.3 Write phase integration test for `JobPhase` timing
+  - [x] 11.3 Write phase integration test for `JobPhase` timing
     - Use a spy/mock `MetricsCollector`; call `phase.run()`; assert `record_step` was called with `TimeKey.JOB_PROBE`
     - _Requirements: 6.5_
 
