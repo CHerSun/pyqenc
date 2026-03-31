@@ -276,7 +276,7 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - Assert `NoOpMetricsCollector` is used, no signal handlers registered, and no `flush` calls made when `config.no_metrics=True`
     - _Requirements: 1.4, 6.7, 6.8, 8.2, 8.5_
 
-- [ ] 20. Final checkpoint — Ensure all tests pass
+- [x] 20. Final checkpoint — Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 21. Review spec against other specs and update cross-spec summaries
