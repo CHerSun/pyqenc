@@ -39,6 +39,7 @@ from pyqenc.constants import (
     THICK_LINE,
     THIN_LINE,
 )
+from pyqenc.metrics import TimeKey
 from pyqenc.models import (
     ChunkMetadata,
     CropParams,
@@ -288,16 +289,17 @@ class OptimizationPhase:
                 "All strategy results cached; tolerance changed (%.1f%% → %.1f%%) — re-selecting without re-encoding",
                 persisted.tolerance_pct, tolerance,
             )
-            selected = self._apply_tolerance(persisted.strategy_results, tolerance)
-            OptimizationParams(
-                crop             = persisted.crop,
-                test_chunks      = persisted.test_chunks,
-                strategy_results = persisted.strategy_results,
-                tolerance_pct    = tolerance,
-                selected         = selected,
-                quality_targets  = current_targets,
-                metrics_sampling = current_sampling,
-            ).save(opt_yaml)
+            with self._collector.time(TimeKey.RECOVERY):
+                selected = self._apply_tolerance(persisted.strategy_results, tolerance)
+                OptimizationParams(
+                    crop             = persisted.crop,
+                    test_chunks      = persisted.test_chunks,
+                    strategy_results = persisted.strategy_results,
+                    tolerance_pct    = tolerance,
+                    selected         = selected,
+                    quality_targets  = current_targets,
+                    metrics_sampling = current_sampling,
+                ).save(opt_yaml)
             log_recovery_line(logger, len(persisted.strategy_results), 0, unit="strategy result")
             self._log_optimization_summary(persisted.strategy_results, selected)
             self.result = OptimizationPhaseResult(
@@ -323,7 +325,8 @@ class OptimizationPhase:
             emit_phase_banner("OPTIMIZATION", logger)
             logger.info("Strategies:  %s", ", ".join(s.name for s in self._config.strategies))
             logger.info("Tolerance:   %.1f%%", tolerance)
-            selected = persisted.selected or self._apply_tolerance(persisted.strategy_results, tolerance)
+            with self._collector.time(TimeKey.RECOVERY):
+                selected = persisted.selected or self._apply_tolerance(persisted.strategy_results, tolerance)
             log_recovery_line(logger, len(persisted.strategy_results), 0, unit="strategy result")
             self._log_optimization_summary(persisted.strategy_results, selected)
             self.result = OptimizationPhaseResult(
@@ -467,6 +470,7 @@ class OptimizationPhase:
                     quality_targets= self._config.quality_targets,
                     max_parallel   = self._config.max_parallel,
                     work_dir       = work_dir,
+                    collector      = self._collector,
                     initial_crf    = strategy_initial_crf,
                 )
             )
@@ -855,6 +859,7 @@ async def _encode_strategy_test_chunks(
     quality_targets: list[QualityTarget],
     max_parallel:    int,
     work_dir:        Path,
+    collector:       "MetricsCollector",
     initial_crf:     float = CRF_INITIAL_DEFAULT,
 ) -> StrategyTestResult:
     """Encode all test chunks for a single strategy in parallel.
@@ -867,12 +872,14 @@ async def _encode_strategy_test_chunks(
         quality_targets: Quality targets to meet.
         max_parallel:    Maximum concurrent encoding workers.
         work_dir:        Pipeline working directory (for recovery).
+        collector:       Metrics collector for timing and convergence tracking.
         initial_crf:     Starting CRF for the first test chunk (moving average
                          from the last persisted result for this strategy).
 
     Returns:
         ``StrategyTestResult`` populated with totals and averages.
     """
+    from pyqenc.metrics import ConvergenceUpdate, TimeKey
     from pyqenc.phases.encoding import (
         ArtifactState,
         _encode_chunk_async,
@@ -892,7 +899,10 @@ async def _encode_strategy_test_chunks(
     # then update after each winning test chunk so later chunks start closer to the optimum.
     moving_crf: float = round(initial_crf / CRF_GRANULARITY) * CRF_GRANULARITY
     total_seconds = sum(c.end_timestamp - c.start_timestamp for c in test_chunks)
-    with ProgressBar(total_seconds, title=f"Optimization [{strategy.name}]", total_count=len(test_chunks)) as advance:
+    with (
+        collector.time(TimeKey.ENCODING_OPTIMIZATION),
+        ProgressBar(total_seconds, title=f"Optimization [{strategy.name}]", total_count=len(test_chunks)) as advance,
+    ):
         async def _encode_one(chunk: ChunkMetadata) -> None:
             nonlocal moving_crf
             pair_rec = phase_recovery.pairs.get((chunk.chunk_id, strategy.name))
@@ -941,6 +951,13 @@ async def _encode_strategy_test_chunks(
                     crfs.append(chunk_result.final_crf)
                     # Update moving average: blend last stored seed with this winning CRF.
                     moving_crf = (moving_crf + chunk_result.final_crf) / 2.0
+                collector.step(
+                    TimeKey.ENCODING_OPTIMIZATION,
+                    convergence_update=ConvergenceUpdate(
+                        strategy      = strategy.name,
+                        attempt_count = chunk_result.attempts,
+                    ),
+                )
                 advance(chunk.end_timestamp - chunk.start_timestamp)
             else:
                 logger.error("Test encode failed for chunk %s / %s", chunk.chunk_id, strategy.name)

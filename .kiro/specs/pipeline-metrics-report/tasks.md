@@ -220,13 +220,13 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - Assert `record_step` called with `TimeKey.AUDIO` and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 
-- [ ] 15. Instrument `OptimizationPhase` with timing calls
-  - [ ] 15.1 Wrap the entire optimization loop in `_encode_strategy_test_chunks` with `self._collector.time(TimeKey.ENCODING_OPTIMIZATION)`; call `self._collector.step(TimeKey.ENCODING_OPTIMIZATION, convergence_update=ConvergenceUpdate(strategy=strategy.name, attempt_count=attempt_number))` after each test-chunk attempt converges
+- [x] 15. Instrument `OptimizationPhase` with timing calls
+  - [x] 15.1 Wrap the entire optimization loop in `_encode_strategy_test_chunks` with `self._collector.time(TimeKey.ENCODING_OPTIMIZATION)`; call `self._collector.step(TimeKey.ENCODING_OPTIMIZATION, convergence_update=ConvergenceUpdate(strategy=strategy.name, attempt_count=attempt_number))` after each test-chunk attempt converges
     - Pass `collector` down from `OptimizationPhase.run()` to the async encode helper
     - _Requirements: 6.5, 2.2a, 4.1a_
-  - [ ] 15.2 Wrap the param-load / recovery section in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
+  - [x] 15.2 Wrap the param-load / recovery section in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
     - _Requirements: 6.5, 2.7_
-  - [ ] 15.3 Write phase integration test for `OptimizationPhase` timing
+  - [x] 15.3 Write phase integration test for `OptimizationPhase` timing
     - Assert `record_step` called with `TimeKey.ENCODING_OPTIMIZATION` (with `convergence_update`) and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 
