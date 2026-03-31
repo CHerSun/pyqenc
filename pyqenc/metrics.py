@@ -39,28 +39,29 @@ __all__ = [
     "PipelineMetrics",
     # Protocol + implementations
     "MetricsCollector",
-    "YamlMetricsCollector",
     "NoOpMetricsCollector",
+    # Added in task 7:
+    # "YamlMetricsCollector",
 ]
 
 import contextlib
 import logging
-import math
-import os
-import signal
-import time as _time
-from contextlib import contextmanager
-from dataclasses import dataclass, field
-from datetime import datetime
+import math          # noqa: F401  (used in YamlMetricsCollector — task 7)
+import os            # noqa: F401  (used in _measure_space — task 5)
+import signal        # noqa: F401  (used in orchestrator signal handlers — task 19)
+import time as _time  # noqa: F401  (used in YamlMetricsCollector — task 7)
+from contextlib import contextmanager  # noqa: F401  (used in YamlMetricsCollector — task 7)
+from dataclasses import dataclass, field  # noqa: F401  (field used in ConvergenceAccumulator — task 5)
+from datetime import datetime  # noqa: F401  (used in flush — task 7)
 from enum import StrEnum
-from pathlib import Path
-from typing import TYPE_CHECKING, Iterator, runtime_checkable
+from pathlib import Path  # noqa: F401  (used in _measure_space — task 5)
+from typing import TYPE_CHECKING, Iterator, Protocol  # noqa: F401
 
-import yaml
+import yaml  # noqa: F401  (used in YamlMetricsCollector — task 7)
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from pyqenc.config import PipelineConfig
+    from pyqenc.config import PipelineConfig  # noqa: F401  (used in YamlMetricsCollector — task 7)
 
 logger = logging.getLogger(__name__)
 
@@ -242,3 +243,89 @@ class PipelineMetrics(BaseModel):
     time_distribution:  TimeDistribution
     space_distribution: SpaceDistribution
     convergence:        ConvergenceSection | None = None
+
+
+# ---------------------------------------------------------------------------
+# Protocol
+# ---------------------------------------------------------------------------
+
+
+class MetricsCollector(Protocol):
+    """Phase-facing recording surface for pipeline metrics.
+
+    Defined as a ``Protocol`` so that alternative backends (e.g. OpenTelemetry,
+    Prometheus) can be substituted by injecting a different implementation
+    without changing any phase code.  Concrete implementations should inherit
+    from this class directly so conformance is verified at dev-time by the type
+    checker rather than relying on structural duck-typing.
+
+    Phases use only :meth:`time` and :meth:`record_step`.  :meth:`flush` is
+    intentionally part of the full interface but is **not** called by phases —
+    it is reserved for the orchestrator.
+    """
+
+    def time(self, key: TimeKey) -> contextlib.AbstractContextManager[None]:
+        """Return a context manager that accumulates elapsed seconds for *key*.
+
+        Records ``time.monotonic()`` on enter; on exit calls
+        ``record_step(key, elapsed)``.
+        """
+        ...
+
+    def record_step(
+        self,
+        key:                TimeKey,
+        elapsed_seconds:    float,
+        convergence_update: ConvergenceUpdate | None = None,
+    ) -> None:
+        """Accumulate *elapsed_seconds* for *key*.
+
+        If *convergence_update* is provided, the per-strategy Welford
+        accumulators are updated for the named strategy.
+
+        Phases call this after each discrete unit of work (e.g. after each
+        encoding attempt or chunk completion).  They have no knowledge of
+        flushing — that is self-managed by the collector.
+        """
+        ...
+
+    def flush(self, partial: bool = True) -> None:
+        """Write the current metrics state to disk.
+
+        *partial=True* (default) marks the report as in-progress.
+        *partial=False* is set only by the orchestrator after all phases
+        complete successfully.
+
+        This method is **not** part of the phase-facing surface — phases must
+        not call it.
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# No-op implementation
+# ---------------------------------------------------------------------------
+
+
+class NoOpMetricsCollector(MetricsCollector):
+    """Concrete no-op implementation of :class:`MetricsCollector`.
+
+    Inherits directly from the Protocol so the type checker verifies
+    conformance at definition time.  Discards all data without performing
+    any I/O.  Used in tests and ``api.py`` standalone callers.
+    """
+
+    def time(self, key: TimeKey) -> contextlib.AbstractContextManager[None]:
+        """Return a no-op context manager (``contextlib.nullcontext``)."""
+        return contextlib.nullcontext()
+
+    def record_step(
+        self,
+        key:                TimeKey,
+        elapsed_seconds:    float,
+        convergence_update: ConvergenceUpdate | None = None,
+    ) -> None:
+        """Discard all arguments — no-op."""
+
+    def flush(self, partial: bool = True) -> None:
+        """No-op — nothing to flush."""

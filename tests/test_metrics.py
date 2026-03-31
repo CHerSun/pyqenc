@@ -3,7 +3,7 @@
 Covers enum membership, protocol conformance, and lifecycle behaviour.
 """
 
-from pyqenc.metrics import SpaceKey, TimeKey
+from pyqenc.metrics import NoOpMetricsCollector, SpaceKey, TimeKey
 
 
 # ---------------------------------------------------------------------------
@@ -81,3 +81,34 @@ def test_space_key_is_str() -> None:
     """SpaceKey values must be plain strings (StrEnum contract)."""
     for member in SpaceKey:
         assert isinstance(member, str)
+
+
+# ---------------------------------------------------------------------------
+# Protocol conformance
+# ---------------------------------------------------------------------------
+
+
+def test_noop_collector_time_returns_context_manager() -> None:
+    """NoOpMetricsCollector.time() must return a usable context manager."""
+    collector = NoOpMetricsCollector()
+    with collector.time(TimeKey.ENCODING_MAIN):
+        pass  # must not raise
+
+
+def test_noop_collector_record_step_is_noop() -> None:
+    """NoOpMetricsCollector.record_step() must accept all args without error."""
+    from pyqenc.metrics import ConvergenceUpdate
+    collector = NoOpMetricsCollector()
+    collector.record_step(TimeKey.ENCODING_MAIN, 1.5)
+    collector.record_step(
+        TimeKey.ENCODING_MAIN,
+        2.0,
+        convergence_update=ConvergenceUpdate(strategy="slow+h265", attempt_count=3),
+    )
+
+
+def test_noop_collector_flush_is_noop() -> None:
+    """NoOpMetricsCollector.flush() must accept partial flag without error."""
+    collector = NoOpMetricsCollector()
+    collector.flush(partial=True)
+    collector.flush(partial=False)

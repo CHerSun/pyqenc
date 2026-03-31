@@ -41,17 +41,17 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - Tag: `# Feature: pipeline-metrics-report, Property 6: YAML serialization round-trip`
     - _Requirements: 5.1, 5.2, 5.3, 5.4_
 
-- [ ] 4. Implement `MetricsCollector` Protocol and `NoOpMetricsCollector`
-  - [ ] 4.1 Implement `MetricsCollector` as a `@runtime_checkable` Protocol with `time(key)`, `record_step(key, elapsed_seconds, convergence_update=None)`, and `flush(partial=True)` methods
+- [x] 4. Implement `MetricsCollector` Protocol and `NoOpMetricsCollector`
+  - [x] 4.1 Implement `MetricsCollector` as a `@runtime_checkable` Protocol with `time(key)`, `record_step(key, elapsed_seconds, convergence_update=None)`, and `flush(partial=True)` methods
     - `time(key: TimeKey) -> ContextManager[None]` — phase-facing surface
     - `record_step(key: TimeKey, elapsed_seconds: float, convergence_update: ConvergenceUpdate | None = None) -> None`
     - `flush(partial: bool = True) -> None` — orchestrator-only, not part of phase-facing surface
     - _Requirements: 6.1, 6.6_
-  - [ ] 4.2 Implement `NoOpMetricsCollector` satisfying the Protocol — discards all data
+  - [x] 4.2 Implement `NoOpMetricsCollector` satisfying the Protocol — discards all data
     - `time()` returns a no-op context manager (use `contextlib.nullcontext`)
     - `record_step()` and `flush()` are no-ops
     - _Requirements: 6.4_
-  - [ ] 4.3 Write unit test: `isinstance(NoOpMetricsCollector(), MetricsCollector)` is `True`
+  - [x] 4.3 Write unit test: `isinstance(NoOpMetricsCollector(), MetricsCollector)` is `True`
     - _Requirements: 6.1_
 
 - [ ] 5. Implement `_measure_space` and `ConvergenceAccumulator` internals
