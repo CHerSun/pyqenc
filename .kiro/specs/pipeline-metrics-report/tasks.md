@@ -261,17 +261,17 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - Wire into `PipelineConfig` construction: `no_metrics=args.no_metrics`
     - _Requirements: 8.1, 8.6_
 
-- [ ] 19. Update `PipelineOrchestrator` to construct and manage `YamlMetricsCollector`
-  - [ ] 19.1 In `PipelineOrchestrator.__init__` or `run()`, branch on `config.no_metrics`: construct `NoOpMetricsCollector()` when `True`, otherwise construct `YamlMetricsCollector(work_dir=config.work_dir, config=config, force_wipe=...)` and pass the result to `_build_registry(config, collector)`
+- [x] 19. Update `PipelineOrchestrator` to construct and manage `YamlMetricsCollector`
+  - [x] 19.1 In `PipelineOrchestrator.__init__` or `run()`, branch on `config.no_metrics`: construct `NoOpMetricsCollector()` when `True`, otherwise construct `YamlMetricsCollector(work_dir=config.work_dir, config=config, force_wipe=...)` and pass the result to `_build_registry(config, collector)`
     - Determine `force_wipe` from `JobPhase` result after it runs, or pass `False` initially and let `YamlMetricsCollector` handle resume
     - _Requirements: 1.1, 1.6, 6.3, 8.2, 8.3_
-  - [ ] 19.2 Register `signal.signal(SIGINT, ...)`, `signal.signal(SIGTERM, ...)`, and `signal.signal(CTRL_C_EVENT, ...)` (Windows) handlers that call `collector.flush(partial=True)` before re-raising — only when `config.no_metrics` is `False`
+  - [x] 19.2 Register `signal.signal(SIGINT, ...)`, `signal.signal(SIGTERM, ...)`, and `signal.signal(CTRL_C_EVENT, ...)` (Windows) handlers that call `collector.flush(partial=True)` before re-raising — only when `config.no_metrics` is `False`
     - Register `atexit.register(collector.flush, partial=True)` as safety net — only when `config.no_metrics` is `False`
     - _Requirements: 1.4, 6.7, 6.8, 8.5_
-  - [ ] 19.3 After all phases complete successfully, call `collector.flush(partial=False)` and log INFO with path to `metrics.yaml` — only when `config.no_metrics` is `False`
+  - [x] 19.3 After all phases complete successfully, call `collector.flush(partial=False)` and log INFO with path to `metrics.yaml` — only when `config.no_metrics` is `False`
     - This is the only place `partial=False` is set
     - _Requirements: 5.4, 5.5, 8.3_
-  - [ ] 19.4 Write unit tests for orchestrator collector construction and signal handler registration
+  - [x] 19.4 Write unit tests for orchestrator collector construction and signal handler registration
     - Assert `atexit` handler is registered and `flush(partial=False)` is called on successful completion when `config.no_metrics=False`
     - Assert `NoOpMetricsCollector` is used, no signal handlers registered, and no `flush` calls made when `config.no_metrics=True`
     - _Requirements: 1.4, 6.7, 6.8, 8.2, 8.5_

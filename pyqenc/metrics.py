@@ -47,6 +47,9 @@ __all__ = [
     "_measure_space",
     # Added in task 7:
     "YamlMetricsCollector",
+    # Active collector registry (task 19):
+    "register_active_collector",
+    "flush_active_collector",
 ]
 
 import contextlib
@@ -81,6 +84,36 @@ METRICS_YAML_FILENAME: str = "metrics.yaml"
 """Filename of the metrics sidecar written to the work directory root."""
 
 _TEMP_SUFFIX: str = ".tmp"
+
+# ---------------------------------------------------------------------------
+# Active collector registry — used by CLI signal handler
+# ---------------------------------------------------------------------------
+
+_active_collector: "MetricsCollector | None" = None
+
+
+def register_active_collector(collector: "MetricsCollector | None") -> None:
+    """Register *collector* as the process-wide active collector.
+
+    Called by the orchestrator when it constructs a ``YamlMetricsCollector``
+    so that the CLI's SIGINT handler can flush it on forced exit.
+    Pass ``None`` to clear the registration after the run completes.
+    """
+    global _active_collector
+    _active_collector = collector
+
+
+def flush_active_collector(partial: bool = True) -> None:
+    """Flush the active collector if one is registered.
+
+    Safe to call even when no collector is registered (no-op).  Used by the
+    CLI SIGINT handler so metrics are written before ``os._exit``.
+    """
+    if _active_collector is not None:
+        try:
+            _active_collector.flush(partial=partial)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Metrics: flush on exit failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
