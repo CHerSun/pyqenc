@@ -16,7 +16,7 @@ from typing import TypedDict, assert_never
 
 import pandas as pd
 
-from pyqenc.constants import CRF_GRANULARITY, PADDING_CRF
+from pyqenc.constants import CRF_GRANULARITY, CRF_METRIC_POSITIVE_DELTA, PADDING_CRF
 from pyqenc.utils.ffmpeg_runner import (
     FFmpegRunResult,
     ProgressCallback,
@@ -344,6 +344,10 @@ def adjust_crf(
     gap between them is ≤ CRF_GRANULARITY the search is exhausted and ``None``
     is returned so the caller keeps the last passing result.
 
+    Additionally, if all targets are met and the least-proficient metric surplus
+    is within ``CRF_POSITIVE_DELTA``, the result is accepted immediately without
+    attempting to squeeze to a higher CRF — saving an extra encoding pass.
+
     Args:
         current_crf:     CRF used in the most recent attempt.
         quality_results: Measured quality metrics (e.g. ``{'vmaf_min': 88.4}``).
@@ -384,6 +388,16 @@ def adjust_crf(
 
     if worst_target is None:
         logger.warning("No valid metric results found, cannot adjust CRF")
+        return None
+
+    # --- Early acceptance: all metrics pass and the tightest surplus is within delta ---
+    # If the least-proficient metric is already within CRF_POSITIVE_DELTA of its target,
+    # the result is close enough — no need to squeeze for a higher CRF.
+    if worst_delta >= 0 and worst_delta <= CRF_METRIC_POSITIVE_DELTA:
+        logger.debug(
+            f"Least-proficient metric surplus {worst_delta:.3f} ≤ CRF_METRIC_POSITIVE_DELTA "
+            f"({CRF_METRIC_POSITIVE_DELTA}), accepting CRF {current_crf:{PADDING_CRF}} as final."
+        )
         return None
 
     # --- Establish the tightest known CRF bracket and compute next CRF ---
