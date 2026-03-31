@@ -240,14 +240,14 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - Assert `record_step` called with `TimeKey.ENCODING_MAIN` (with `convergence_update`) and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 
-- [ ] 17. Instrument `MergePhase` with timing calls
-  - [ ] 17.1 Wrap ffmpeg concat call per strategy in `_execute_merge` with `self._collector.time(TimeKey.MERGE_CONCAT)`
+- [x] 17. Instrument `MergePhase` with timing calls
+  - [x] 17.1 Wrap ffmpeg concat call per strategy in `_execute_merge` with `self._collector.time(TimeKey.MERGE_CONCAT)`
     - _Requirements: 6.5_
-  - [ ] 17.2 Wrap `_measure_quality()` call per strategy in `_execute_merge` with `self._collector.time(TimeKey.MERGE_QUALITY_MEASURE)`
+  - [x] 17.2 Wrap `_measure_quality()` call per strategy in `_execute_merge` with `self._collector.time(TimeKey.MERGE_QUALITY_MEASURE)`
     - _Requirements: 6.5_
-  - [ ] 17.3 Wrap `_recover()` call in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
+  - [x] 17.3 Wrap `_recover()` call in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
     - _Requirements: 6.5, 2.7_
-  - [ ] 17.4 Write phase integration test for `MergePhase` timing
+  - [x] 17.4 Write phase integration test for `MergePhase` timing
     - Assert `record_step` called with `TimeKey.MERGE_CONCAT`, `TimeKey.MERGE_QUALITY_MEASURE`, and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 

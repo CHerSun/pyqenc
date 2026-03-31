@@ -1359,3 +1359,273 @@ class TestEncodingPhaseTiming:
             result = phase.run()
 
         assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# MergePhase — MERGE_CONCAT, MERGE_QUALITY_MEASURE, RECOVERY timing
+# ---------------------------------------------------------------------------
+
+
+class TestMergePhaseTiming:
+    """Integration tests for ``MergePhase`` timing instrumentation (Req 6.5)."""
+
+    def _make_job_result(self, tmp_path: Path) -> "JobPhaseResult":
+        """Return a minimal complete ``JobPhaseResult`` stub."""
+        from pyqenc.models import PhaseOutcome
+        from pyqenc.phases.job import JobPhaseResult
+        from pyqenc.state import JobState
+
+        source = tmp_path / "source.mkv"
+        source.write_bytes(b"\x00" * 64)
+        stub_vm = _stub_video_metadata(source)
+        job_state = JobState(source=stub_vm, crop=CropParams())
+
+        result = JobPhaseResult(
+            outcome    = PhaseOutcome.COMPLETED,
+            artifacts  = [],
+            message    = "ok",
+            force_wipe = False,
+        )
+        result.job = job_state  # type: ignore[attr-defined]
+        return result
+
+    def _make_encoding_result(self, tmp_path: Path) -> "EncodingPhaseResult":
+        """Return a minimal complete ``EncodingPhaseResult`` stub with one encoded artifact."""
+        from pyqenc.models import PhaseOutcome
+        from pyqenc.phases.encoding import EncodedArtifact, EncodingPhaseResult
+        from pyqenc.state import ArtifactState
+
+        encoded_path = tmp_path / "work" / "encoded" / "slow_h265" / "chunk_0.mkv"
+        encoded_path.parent.mkdir(parents=True, exist_ok=True)
+        encoded_path.write_bytes(b"\x00" * 128)
+
+        artifact = EncodedArtifact(
+            path     = encoded_path,
+            state    = ArtifactState.COMPLETE,
+            chunk_id = "chunk_0",
+            strategy = "slow+h265",
+            crf      = 28.0,
+        )
+        return EncodingPhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            artifacts = [artifact],
+            message   = "ok",
+            encoded   = [artifact],
+        )
+
+    def _make_audio_result(self) -> "AudioPhaseResult":
+        """Return a minimal complete ``AudioPhaseResult`` stub."""
+        from pyqenc.models import PhaseOutcome
+        from pyqenc.phases.audio import AudioPhaseResult
+
+        return AudioPhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            artifacts = [],
+            message   = "ok",
+        )
+
+    def _make_phase(
+        self,
+        tmp_path:  Path,
+        collector: MagicMock,
+    ) -> "MergePhase":
+        """Return a ``MergePhase`` with pre-wired job, encoding, and audio deps."""
+        from pyqenc.phases.audio import AudioPhase
+        from pyqenc.phases.encoding import EncodingPhase
+        from pyqenc.phases.job import JobPhase
+        from pyqenc.phases.merge import MergePhase
+
+        config = _make_config(tmp_path)
+        config.work_dir.mkdir(parents=True, exist_ok=True)
+
+        job_mock = MagicMock(spec=JobPhase)
+        job_mock.result = self._make_job_result(tmp_path)
+
+        encoding_mock = MagicMock(spec=EncodingPhase)
+        encoding_mock.result = self._make_encoding_result(tmp_path)
+
+        audio_mock = MagicMock(spec=AudioPhase)
+        audio_mock.result = self._make_audio_result()
+
+        phase = MergePhase(config, collector=collector)
+        phase._job      = job_mock       # type: ignore[assignment]
+        phase._encoding = encoding_mock  # type: ignore[assignment]
+        phase._audio    = audio_mock     # type: ignore[assignment]
+        return phase
+
+    def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
+        """``time(TimeKey.RECOVERY)`` must be called even when all artifacts are already complete.
+
+        Validates: Requirements 6.5, 2.7
+        """
+        from pyqenc.phases.merge import MergeArtifact, MergePhase
+        from pyqenc.state import ArtifactState
+
+        collector = _spy_collector()
+        phase     = self._make_phase(tmp_path, collector)
+
+        output_file = tmp_path / "work" / "final" / "source slow_h265.mkv"
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_file.write_bytes(b"\x00" * 64)
+
+        stub_artifact = MergeArtifact(
+            path          = output_file,
+            state         = ArtifactState.COMPLETE,
+            strategy_name = "slow+h265",
+        )
+
+        with patch.object(MergePhase, "_recover", return_value=[stub_artifact]):
+            phase.run()
+
+        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
+        assert TimeKey.RECOVERY in time_keys_called, (
+            f"Expected TimeKey.RECOVERY in time() calls, got: {time_keys_called}"
+        )
+
+    def test_merge_concat_recorded_when_merge_runs(self, tmp_path: Path) -> None:
+        """``time(TimeKey.MERGE_CONCAT)`` must be called when a pending strategy is merged.
+
+        Validates: Requirements 6.5
+        """
+        from pyqenc.phases.merge import MergeArtifact, MergePhase
+        from pyqenc.state import ArtifactState
+        from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
+
+        collector = _spy_collector()
+        phase     = self._make_phase(tmp_path, collector)
+
+        output_file = tmp_path / "work" / "final" / "source slow_h265.mkv"
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        stub_artifact = MergeArtifact(
+            path          = output_file,
+            state         = ArtifactState.ABSENT,
+            strategy_name = "slow+h265",
+        )
+
+        encoded_path = tmp_path / "work" / "encoded" / "slow_h265" / "chunk_0.mkv"
+        encoded_path.parent.mkdir(parents=True, exist_ok=True)
+        encoded_path.write_bytes(b"\x00" * 128)
+
+        success_result = FFmpegRunResult(success=True, returncode=0)
+
+        with (
+            patch.object(MergePhase, "_recover", return_value=[stub_artifact]),
+            patch("pyqenc.phases.merge.run_ffmpeg", return_value=success_result),
+            patch("pyqenc.phases.merge.get_frame_count", return_value=100),
+            patch.object(MergePhase, "_collect_encoded_chunks", return_value={
+                "chunk_0": {"slow+h265": encoded_path},
+            }),
+        ):
+            phase.run()
+
+        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
+        assert TimeKey.MERGE_CONCAT in time_keys_called, (
+            f"Expected TimeKey.MERGE_CONCAT in time() calls, got: {time_keys_called}"
+        )
+
+    def test_merge_quality_measure_recorded_when_targets_set(self, tmp_path: Path) -> None:
+        """``time(TimeKey.MERGE_QUALITY_MEASURE)`` must be called when quality targets are configured.
+
+        Validates: Requirements 6.5
+        """
+        from pyqenc.models import CleanupLevel, ChunkingMode, QualityTarget
+        from pyqenc.phases.merge import MergeArtifact, MergePhase
+        from pyqenc.state import ArtifactState
+        from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
+
+        collector = _spy_collector()
+
+        # Build config with a quality target so _measure_quality branch is entered
+        source = tmp_path / "source.mkv"
+        source.write_bytes(b"\x00" * 64)
+        config = PipelineConfig(
+            source_video    = source,
+            work_dir        = tmp_path / "work",
+            quality_targets = [QualityTarget(metric="psnr", statistic="mean", value=40.0)],
+            strategies      = [],
+            optimize        = False,
+            max_parallel    = 1,
+            include         = None,
+            exclude         = None,
+            cleanup         = CleanupLevel.NONE,
+            chunking_mode   = ChunkingMode.LOSSLESS,
+            force           = False,
+            crop_params     = None,
+        )
+        config.work_dir.mkdir(parents=True, exist_ok=True)
+
+        from pyqenc.phases.audio import AudioPhase
+        from pyqenc.phases.encoding import EncodingPhase
+        from pyqenc.phases.job import JobPhase
+
+        job_mock = MagicMock(spec=JobPhase)
+        job_mock.result = self._make_job_result(tmp_path)
+
+        encoding_mock = MagicMock(spec=EncodingPhase)
+        encoding_mock.result = self._make_encoding_result(tmp_path)
+
+        audio_mock = MagicMock(spec=AudioPhase)
+        audio_mock.result = self._make_audio_result()
+
+        phase = MergePhase(config, collector=collector)
+        phase._job      = job_mock       # type: ignore[assignment]
+        phase._encoding = encoding_mock  # type: ignore[assignment]
+        phase._audio    = audio_mock     # type: ignore[assignment]
+
+        output_file = tmp_path / "work" / "final" / "source slow_h265.mkv"
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        stub_artifact = MergeArtifact(
+            path          = output_file,
+            state         = ArtifactState.ABSENT,
+            strategy_name = "slow+h265",
+        )
+
+        encoded_path = tmp_path / "work" / "encoded" / "slow_h265" / "chunk_0.mkv"
+        encoded_path.parent.mkdir(parents=True, exist_ok=True)
+        encoded_path.write_bytes(b"\x00" * 128)
+
+        success_result = FFmpegRunResult(success=True, returncode=0)
+
+        with (
+            patch.object(MergePhase, "_recover", return_value=[stub_artifact]),
+            patch("pyqenc.phases.merge.run_ffmpeg", return_value=success_result),
+            patch("pyqenc.phases.merge.get_frame_count", return_value=100),
+            patch.object(MergePhase, "_collect_encoded_chunks", return_value={
+                "chunk_0": {"slow+h265": encoded_path},
+            }),
+            patch("pyqenc.phases.merge._measure_quality", return_value=({}, False, None)),
+        ):
+            phase.run()
+
+        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
+        assert TimeKey.MERGE_QUALITY_MEASURE in time_keys_called, (
+            f"Expected TimeKey.MERGE_QUALITY_MEASURE in time() calls, got: {time_keys_called}"
+        )
+
+    def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
+        """``MergePhase`` must run without error when given a ``NoOpMetricsCollector``.
+
+        Validates: Requirements 6.4, 6.5
+        """
+        from pyqenc.phases.merge import MergeArtifact, MergePhase
+        from pyqenc.state import ArtifactState
+
+        collector = NoOpMetricsCollector()
+        phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
+
+        output_file = tmp_path / "work" / "final" / "source slow_h265.mkv"
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_file.write_bytes(b"\x00" * 64)
+
+        stub_artifact = MergeArtifact(
+            path          = output_file,
+            state         = ArtifactState.COMPLETE,
+            strategy_name = "slow+h265",
+        )
+
+        with patch.object(MergePhase, "_recover", return_value=[stub_artifact]):
+            result = phase.run()
+
+        assert result is not None

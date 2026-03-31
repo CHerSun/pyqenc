@@ -456,7 +456,10 @@ class MergePhase:
                 f"{t.metric}-{t.statistic}≥{t.value}" for t in self._config.quality_targets
             ))
 
-        artifacts = self._recover(force_wipe=force_wipe, execute=True)
+        from pyqenc.metrics import TimeKey
+
+        with self._collector.time(TimeKey.RECOVERY):
+            artifacts = self._recover(force_wipe=force_wipe, execute=True)
 
         complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
         pending_count  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
@@ -699,6 +702,8 @@ class MergePhase:
         Returns:
             ``MergePhaseResult`` after merging.
         """
+        from pyqenc.metrics import TimeKey
+
         work_dir  = self._config.work_dir
         final_dir = work_dir / FINAL_OUTPUT_DIR
         final_dir.mkdir(parents=True, exist_ok=True)
@@ -764,7 +769,8 @@ class MergePhase:
                 ]
 
                 logger.debug("Concat command: %s", " ".join(str(a) for a in concat_cmd))
-                concat_result = run_ffmpeg(concat_cmd, output_file=output_file)
+                with self._collector.time(TimeKey.MERGE_CONCAT):
+                    concat_result = run_ffmpeg(concat_cmd, output_file=output_file)
                 concat_file.unlink(missing_ok=True)
 
                 if not concat_result.success:
@@ -798,14 +804,15 @@ class MergePhase:
                 if source_video and self._config.quality_targets:
                     logger.info("  Measuring final quality metrics...")
                     try:
-                        metrics_dict, targets_met, plot_path = _measure_quality(
-                            final_result     = output_file,
-                            source_video     = source_video,
-                            ref_crop         = crop,
-                            quality_targets  = self._config.quality_targets,
-                            output_dir       = final_dir,
-                            metrics_sampling = self._config.metrics_sampling,
-                        )
+                        with self._collector.time(TimeKey.MERGE_QUALITY_MEASURE):
+                            metrics_dict, targets_met, plot_path = _measure_quality(
+                                final_result     = output_file,
+                                source_video     = source_video,
+                                ref_crop         = crop,
+                                quality_targets  = self._config.quality_targets,
+                                output_dir       = final_dir,
+                                metrics_sampling = self._config.metrics_sampling,
+                            )
                     except Exception as exc:
                         logger.warning("  Could not measure quality: %s", exc)
 
