@@ -251,11 +251,11 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - Assert `record_step` called with `TimeKey.MERGE_CONCAT`, `TimeKey.MERGE_QUALITY_MEASURE`, and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 
-- [ ] 18. Implement `--no-metrics` CLI flag and `PipelineConfig.no_metrics` field
-  - [ ] 18.1 Add `no_metrics: bool = False` field to `PipelineConfig`
+- [x] 18. Implement `--no-metrics` CLI flag and `PipelineConfig.no_metrics` field
+  - [x] 18.1 Add `no_metrics: bool = False` field to `PipelineConfig`
     - Default `False` so existing behaviour is unchanged
     - _Requirements: 8.1_
-  - [ ] 18.2 Add `--no-metrics` argument to the CLI argument parser
+  - [x] 18.2 Add `--no-metrics` argument to the CLI argument parser
     - `action="store_true"`, `default=False`
     - `help="Suppress metrics.yaml output (metrics are still collected internally but not written to disk)"`
     - Wire into `PipelineConfig` construction: `no_metrics=args.no_metrics`

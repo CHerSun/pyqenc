@@ -801,3 +801,5 @@ class PipelineConfig(BaseModel):
     """
     visual_hash:                 bool              = True
     """Whether to display extra visual cue for encoding logging."""
+    no_metrics:                  bool              = False
+    """When True, suppress metrics.yaml output (NoOpMetricsCollector is used)."""
