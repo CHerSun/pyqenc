@@ -95,14 +95,13 @@ def test_noop_collector_time_returns_context_manager() -> None:
         pass  # must not raise
 
 
-def test_noop_collector_record_step_is_noop() -> None:
-    """NoOpMetricsCollector.record_step() must accept all args without error."""
+def test_noop_collector_step_is_noop() -> None:
+    """NoOpMetricsCollector.step() must accept all args without error."""
     from pyqenc.metrics import ConvergenceUpdate
     collector = NoOpMetricsCollector()
-    collector.record_step(TimeKey.ENCODING_MAIN, 1.5)
-    collector.record_step(
+    collector.step(TimeKey.ENCODING_MAIN)
+    collector.step(
         TimeKey.ENCODING_MAIN,
-        2.0,
         convergence_update=ConvergenceUpdate(strategy="slow+h265", attempt_count=3),
     )
 
@@ -214,12 +213,11 @@ def test_empty_convergence_produces_null_in_yaml(tmp_path: Path) -> None:
     assert raw["pipeline_metrics"]["convergence"] is None
 
 
-def test_convergence_present_after_record_step(tmp_path: Path) -> None:
-    """Convergence section must appear after a record_step with convergence_update."""
+def test_convergence_present_after_step(tmp_path: Path) -> None:
+    """Convergence section must appear after a step() with convergence_update."""
     collector = _make_collector(tmp_path)
-    collector.record_step(
+    collector.step(
         TimeKey.ENCODING_MAIN,
-        5.0,
         convergence_update=ConvergenceUpdate(strategy="slow+h265", attempt_count=3),
     )
     collector.flush(partial=True)
@@ -237,9 +235,9 @@ def test_resume_restores_time_accum(tmp_path: Path) -> None:
     source.write_bytes(b"x" * 100)
     config = _make_config(source)
 
-    # First run: record some time and flush
+    # First run: set time directly and flush
     c1 = YamlMetricsCollector(work_dir=tmp_path, config=config)
-    c1.record_step(TimeKey.AUDIO, 120.0)
+    c1._time_accum[TimeKey.AUDIO] = 120.0
     c1.flush(partial=True)
 
     # Second run: resume and check accumulator
@@ -381,3 +379,74 @@ def test_phase_collector_defaults_to_noop_when_omitted(tmp_path: Path) -> None:
         assert isinstance(phase._collector, NoOpMetricsCollector), (
             f"{cls.__name__}._collector should be NoOpMetricsCollector when omitted"
         )
+
+
+# ---------------------------------------------------------------------------
+# Active-timer capture tests (Req 1.4)
+# ---------------------------------------------------------------------------
+
+def test_flush_while_timer_active_includes_partial_elapsed(tmp_path: Path) -> None:
+    """flush() called while a time() context is active must include partial elapsed (Req 1.4)."""
+    collector = _make_collector(tmp_path)
+
+    ctx = collector.time(TimeKey.AUDIO)
+    ctx.__enter__()
+
+    # Flush while the context is still open
+    collector.flush(partial=True)
+
+    raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
+    breakdown = {e["category"]: e["seconds"] for e in raw["pipeline_metrics"]["time_distribution"]["breakdown"]}
+
+    # The partial elapsed must be > 0 (timer was running when flush happened)
+    assert breakdown[TimeKey.AUDIO.value] >= 0, "Expected non-negative partial elapsed for active timer"
+
+    # _time_accum must NOT have been mutated by the flush
+    assert collector._time_accum[TimeKey.AUDIO] == 0.0, (
+        "flush() must not mutate _time_accum for in-flight timers"
+    )
+
+    # Clean up — exit the context normally
+    ctx.__exit__(None, None, None)
+
+
+def test_active_timer_not_double_counted_after_exit(tmp_path: Path) -> None:
+    """After a time() context exits normally, the elapsed must not be double-counted (Req 1.4)."""
+    collector = _make_collector(tmp_path)
+
+    with collector.time(TimeKey.AUDIO):
+        # Trigger a flush mid-context via the flush counter
+        collector.flush(partial=True)
+        # _time_accum still 0 here — timer not yet exited
+
+    # After exit: _time_accum holds the real elapsed; active_timers is empty
+    assert len(collector._active_timers) == 0
+    elapsed_after = collector._time_accum[TimeKey.AUDIO]
+    assert elapsed_after > 0.0
+
+    # A second flush must report the same value (no double-count)
+    collector.flush(partial=True)
+    raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
+    breakdown = {e["category"]: e["seconds"] for e in raw["pipeline_metrics"]["time_distribution"]["breakdown"]}
+    # seconds is int(round(elapsed)) — must match what's in _time_accum
+    assert breakdown[TimeKey.AUDIO.value] == int(round(elapsed_after))
+
+
+def test_snapshot_active_timers_does_not_mutate(tmp_path: Path) -> None:
+    """_snapshot_active_timers() must not modify _active_timers or _time_accum."""
+    collector = _make_collector(tmp_path)
+
+    ctx = collector.time(TimeKey.ENCODING_MAIN)
+    ctx.__enter__()
+
+    before_accum  = collector._time_accum[TimeKey.ENCODING_MAIN]
+    before_timers = len(collector._active_timers)
+
+    snapshot = collector._snapshot_active_timers()
+
+    assert collector._time_accum[TimeKey.ENCODING_MAIN] == before_accum
+    assert len(collector._active_timers) == before_timers
+    assert TimeKey.ENCODING_MAIN in snapshot
+    assert snapshot[TimeKey.ENCODING_MAIN] >= 0.0
+
+    ctx.__exit__(None, None, None)

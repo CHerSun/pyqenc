@@ -46,8 +46,8 @@ Metrics are initialised once when the job starts and survive interruptions: the 
 - **Wall-clock interval**: The elapsed real time between the start and end of a phase category, measured with `time.monotonic()`. Not equivalent to CPU time when processes run in parallel or at reduced priority.
 - **CRF convergence**: The iterative binary-search process that finds the lowest CRF value meeting quality targets for a single chunk/strategy pair.
 - **Orchestrator**: `pyqenc/orchestrator.py` — the thin driver that runs phases in sequence and is the natural integration point for metrics collection.
-- **Flush interval**: The maximum number of incremental step updates between automatic `metrics.yaml` writes during a long-running phase. An incremental step update occurs after each per-chunk or per-attempt completion within a phase loop.
-- **Incremental step update**: A call to the MetricsCollector after each discrete unit of work within a phase loop (e.g. after each encoding attempt, after each chunk's winning encode is found), which accumulates elapsed time and attempt counts and may trigger a flush.
+- **Flush interval**: The maximum number of `step()` calls between automatic `metrics.yaml` writes during a long-running phase. A step call occurs after each per-chunk or per-attempt completion within a phase loop.
+- **Incremental step**: A call to `step()` on the MetricsCollector after each discrete unit of work within a phase loop (e.g. after each encoding attempt, after each chunk's winning encode is found). Steps carry no timing — timing is handled exclusively by `time()` context managers wrapping the whole action. Steps trigger flush-counter increments and carry optional convergence updates.
 - **NoOpMetricsCollector**: A concrete implementation of the `MetricsCollector` Protocol that satisfies the interface but discards all data without performing any I/O. Used when metrics output is suppressed (e.g. `--no-metrics` flag) or in standalone/test contexts.
 
 ## Requirements
@@ -60,8 +60,8 @@ Metrics are initialised once when the job starts and survive interruptions: the 
 
 1. WHEN a pipeline job starts (JobPhase initialises), THE MetricsCollector SHALL load any existing `metrics.yaml` from the work directory and resume accumulation from the persisted state, so that a resumed run adds to prior measurements rather than discarding them.
 2. WHEN `force_wipe` is active, THE MetricsCollector SHALL delete any existing `metrics.yaml` and start fresh, consistent with all other artifact resets.
-3. THE MetricsCollector SHALL automatically flush `metrics.yaml` atomically (`.tmp`-then-rename) after every `FLUSH_INTERVAL` recording calls (any combination of `time()` exits and `record_step()` calls), where `FLUSH_INTERVAL` is a named constant (default: 10). The collector tracks this counter internally — no external coordination is required.
-4. WHEN the process receives a termination signal (SIGINT, SIGTERM, or Windows console control event) or an unhandled exception propagates to the top level, THE MetricsCollector SHALL perform an immediate final flush before the process exits.
+3. THE MetricsCollector SHALL automatically flush `metrics.yaml` atomically (`.tmp`-then-rename) after every `FLUSH_INTERVAL` `step()` calls, where `FLUSH_INTERVAL` is a named constant (default: 10). The collector tracks this counter internally — no external coordination is required.
+4. WHEN the process receives a termination signal (SIGINT, SIGTERM, or Windows console control event) or an unhandled exception propagates to the top level, THE MetricsCollector SHALL perform an immediate final flush before the process exits. Any `time()` context managers that are still active at flush time SHALL have their partial elapsed (from enter to flush time) included in the flushed report — active timers are NOT discarded on forced exit.
 5. IF writing `metrics.yaml` fails for any reason, THE MetricsCollector SHALL log a WARNING and allow the pipeline to continue — metrics write failure is non-fatal.
 6. THE MetricsCollector SHALL be initialised once per pipeline run and shared across all phases via the Orchestrator; it SHALL NOT be re-created between phases.
 
@@ -73,7 +73,7 @@ Metrics are initialised once when the job starts and survive interruptions: the 
 
 1. THE MetricsCollector SHALL record a wall-clock start timestamp (via `time.monotonic()`) when each `TimeKey` activity begins and an end timestamp when it ends, accumulating elapsed seconds per key.
 2. THE MetricsCollector SHALL accumulate elapsed seconds per `TimeKey` so that keys that run multiple times (e.g. encoding chunks in a loop) sum correctly across calls.
-2a. FOR long-running phases that iterate over chunks or attempts (`TimeKey.ENCODING_OPTIMIZATION`, `TimeKey.ENCODING_MAIN`), THE MetricsCollector SHALL accept incremental time updates after each step (e.g. after each encoding attempt or chunk completion) so that `metrics.yaml` reflects current elapsed time mid-phase rather than only when the phase context-manager exits.
+2a. FOR long-running phases that iterate over chunks or attempts (`TimeKey.ENCODING_OPTIMIZATION`, `TimeKey.ENCODING_MAIN`, `TimeKey.CHUNKING_SPLIT`), THE phase SHALL wrap the entire loop with `time(key)` for wall-clock measurement and call `step(key)` after each iteration to trigger incremental flushes. Timing is NOT accumulated per-iteration — only the whole-loop wall-clock is recorded.
 3. WHEN the pipeline completes or is interrupted, THE MetricsCollector SHALL compute `total_seconds` as the sum of all key durations and express each key's duration as both absolute seconds and as a percentage of `total_seconds`.
 4. THE MetricsCollector SHALL track all `TimeKey` values defined in the Glossary as a minimum:
    - `TimeKey.JOB_PROBE` — VideoMetadata probing (ffprobe, stat calls in JobPhase)
@@ -223,8 +223,8 @@ Metrics are initialised once when the job starts and survive interruptions: the 
    - `EncodingPhase` → `TimeKey.ENCODING_MAIN` (per-attempt, incremental) and `TimeKey.RECOVERY`
    - `MergePhase` → `TimeKey.MERGE_CONCAT` (per-strategy), `TimeKey.MERGE_QUALITY_MEASURE` (per-strategy), and `TimeKey.RECOVERY`
 6. THE `MetricsCollector` Protocol SHALL expose only recording methods visible to phases:
-   - `time(key: TimeKey) -> ContextManager` — context manager that accumulates elapsed seconds for `key` on exit
-   - `record_step(key: TimeKey, elapsed_seconds: float, convergence_update: ConvergenceUpdate | None = None)` — incremental update after each per-chunk or per-attempt step; phases call this to record data only, with no knowledge of flushing
+   - `time(key: TimeKey) -> ContextManager` — context manager that measures wall-clock elapsed for `key` on exit; used for any single bounded action (recovery scan, extraction, full phase loop, etc.)
+   - `step(key: TimeKey, convergence_update: ConvergenceUpdate | None = None)` — signals one unit of work completed within a loop; carries no timing; triggers flush-counter increment and optional convergence update
 7. Flushing is self-managed by the collector via `FLUSH_INTERVAL` — the Orchestrator does not flush after normal phase completion. THE Orchestrator SHALL call `collector.flush(partial=True)` only on abnormal exit: unhandled exceptions and OS signals (SIGINT, SIGTERM, Windows console control events). Phases SHALL NOT call `flush()` — it is not part of the phase-facing Protocol surface.
 8. WHEN the Orchestrator registers signal handlers for graceful shutdown, it SHALL call `collector.flush(partial=True)` as part of that shutdown sequence.
 
@@ -237,7 +237,7 @@ Metrics are initialised once when the job starts and survive interruptions: the 
 1. WHEN the `--no-metrics` flag is passed on the CLI, THE CLI SHALL set a `no_metrics: bool` field on `PipelineConfig` (default: `False`) so that the flag is propagated through the existing config path without requiring a separate parameter.
 2. WHEN `PipelineConfig.no_metrics` is `True`, THE Orchestrator SHALL construct a `NoOpMetricsCollector` instead of `YamlMetricsCollector` and pass it to every phase constructor — no `metrics.yaml` file is created or written at any point during the run.
 3. WHEN `PipelineConfig.no_metrics` is `False` (the default), THE Orchestrator SHALL behave exactly as specified in Requirements 1 and 6 — `YamlMetricsCollector` is used and `metrics.yaml` is written normally.
-4. WHEN `--no-metrics` is active, THE MetricsCollector SHALL still accept all `time()` and `record_step()` calls from phases without error — phases are unaware of whether metrics are being persisted.
+4. WHEN `--no-metrics` is active, THE MetricsCollector SHALL still accept all `time()` and `step()` calls from phases without error — phases are unaware of whether metrics are being persisted.
 5. WHEN `--no-metrics` is active, THE Orchestrator SHALL NOT register signal handlers or `atexit` hooks for metrics flushing, since there is nothing to flush.
 6. THE `--no-metrics` flag SHALL be documented in the CLI help text as: `"Suppress metrics.yaml output (metrics are still collected internally but not written to disk)"`.
 

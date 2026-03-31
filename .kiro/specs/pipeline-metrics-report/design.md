@@ -11,8 +11,8 @@ This feature adds a `MetricsCollector` component that is injected into every pha
 The design follows three principles established in the requirements discussion:
 
 1. **Protocol-based injection** — `MetricsCollector` is a `Protocol`; phases depend only on the abstract surface, enabling OTel/Prometheus substitution later.
-2. **Phase-owned timing** — each phase calls `collector.time(key)` and `collector.record_step(...)` for its own sub-steps; the orchestrator does not wrap phase calls.
-3. **Self-managing flush** — the collector auto-flushes every `FLUSH_INTERVAL` recording calls; the orchestrator only calls `flush(partial=True)` on abnormal exit.
+2. **Phase-owned timing** — each phase calls `collector.time(key)` and `collector.step(...)` for its own sub-steps; the orchestrator does not wrap phase calls.
+3. **Self-managing flush** — the collector auto-flushes every `FLUSH_INTERVAL` `step()` calls; the orchestrator only calls `flush(partial=True)` on abnormal exit.
 
 ### Key Design Decisions
 
@@ -20,7 +20,7 @@ The design follows three principles established in the requirements discussion:
 - Time serializes as integer seconds + `"[Dd ]HH:MM:SS"` duration string + `"X.X%"` percent string. Space serializes as `"X.XX GB"` string + `"X.X%"` percent string. All formatting happens at serialization time — internal storage stays lossless.
 - `MetricsCollector` is injected as a **required** constructor parameter in every phase — no `None` fallback. Tests use `NoOpMetricsCollector`.
 - Space is measured at flush time via `Path.stat()` and directory traversal only — no ffprobe calls.
-- Convergence stats accumulate incrementally via `record_step(key, elapsed, convergence_update=...)` as each chunk converges.
+- Convergence stats accumulate incrementally via `step(key, convergence_update=...)` as each chunk converges. Timing for encoding loops is captured by wrapping the whole loop with `time(key)`.
 - `partial=False` is set only by the orchestrator calling `collector.flush(partial=False)` after all phases complete successfully. All auto-flushes and signal-handler flushes use `partial=True`.
 - `api.py` standalone callers construct and pass a `NoOpMetricsCollector` (or a real one if they want metrics).
 
@@ -98,7 +98,7 @@ class SpaceKey(StrEnum):
 
 ### `ConvergenceUpdate` dataclass
 
-Passed by phases to `record_step()` when a chunk's CRF search converges:
+Passed by phases to `step()` when a chunk's CRF search converges:
 
 ```python
 @dataclass
@@ -115,10 +115,9 @@ The phase-facing surface (recording only):
 @runtime_checkable
 class MetricsCollector(Protocol):
     def time(self, key: TimeKey) -> ContextManager[None]: ...
-    def record_step(
+    def step(
         self,
         key:                TimeKey,
-        elapsed_seconds:    float,
         convergence_update: ConvergenceUpdate | None = None,
     ) -> None: ...
 ```
@@ -151,15 +150,16 @@ class YamlMetricsCollector:
 - Stores `work_dir` and `config` for space measurement at flush time.
 
 **`time(key)` context manager:**
-- Records `time.monotonic()` on enter.
-- On exit: computes elapsed, calls `record_step(key, elapsed)`.
+- Records `time.monotonic()` on enter; registers `(key, t0)` into `_active_timers` (a `list[tuple[TimeKey, float]]` on the collector).
+- On exit: removes the entry from `_active_timers`, accumulates elapsed into `_time_accum[key]`, increments `_flush_counter`, triggers incremental flush if needed.
 
-**`record_step(key, elapsed_seconds, convergence_update=None)`:**
-- Adds `elapsed_seconds` to `_time_accum[key]`.
-- If `convergence_update` is not None: updates Welford accumulators for the strategy — increments `_conv_n[strategy]`, updates `_conv_min[strategy]`, `_conv_max[strategy]`, `_conv_total[strategy]`, and updates `_conv_welford_mean[strategy]` and `_conv_welford_M2[strategy]` using Welford's online algorithm.
-- Increments `_flush_counter`. If `_flush_counter >= FLUSH_INTERVAL`: calls `flush(partial=True)` and resets counter.
+**`step(key, convergence_update=None)`:**
+- Does NOT accumulate time — timing is handled exclusively by `time()`.
+- If `convergence_update` is not None: updates Welford accumulators for the strategy.
+- Increments `_flush_counter`. If `_flush_counter >= FLUSH_INTERVAL`: calls `_flush_incremental()` and resets counter.
 
 **`flush(partial)`:**
+- Before building metrics: iterates `_active_timers` and adds `time.monotonic() - t0` for each in-flight timer to `_time_accum`. The timers remain in `_active_timers` (they are still running) — this captures partial elapsed on forced exit without disturbing normal operation.
 - Measures current disk space via `_measure_space()`.
 - Builds `PipelineMetrics` from accumulated state.
 - Sets `partial` flag and updates `run_date` to current local time.
@@ -173,8 +173,8 @@ Satisfies the `MetricsCollector` Protocol but discards all data:
 ```python
 class NoOpMetricsCollector:
     def time(self, key: TimeKey) -> ContextManager[None]: ...      # no-op context manager
-    def record_step(self, key: TimeKey, elapsed_seconds: float,
-                    convergence_update: ConvergenceUpdate | None = None) -> None: ...
+    def step(self, key: TimeKey,
+             convergence_update: ConvergenceUpdate | None = None) -> None: ...
     def flush(self, partial: bool = True) -> None: ...
 ```
 
@@ -279,10 +279,12 @@ METRICS_YAML_FILENAME = "metrics.yaml"   # named constant
 
 **Two flush modes:**
 
-- `_flush_incremental()` — writes time and convergence accumulators only. No filesystem scan. Called automatically by `record_step()` every `FLUSH_INTERVAL` updates.
-- `flush(partial: bool)` — full flush: logs `"Measuring disk space for metrics..."` at INFO level (so the user sees why exit is delayed), runs `_measure_space()`, then writes time + convergence + space. Called only by the orchestrator on normal or abnormal exit.
+- `_flush_incremental()` — writes time and convergence accumulators only. No filesystem scan. Called automatically by `time()` exit and `step()` every `FLUSH_INTERVAL` increments of `_flush_counter`.
+- `flush(partial: bool)` — full flush: logs `"Measuring disk space for metrics..."` at INFO level, runs `_measure_space()`, then writes time + convergence + space. Called only by the orchestrator on normal or abnormal exit.
 
-**Counter-based auto-flush:** `_flush_counter` is incremented on every `record_step()` call (including those triggered by `time()` context manager exit). When `_flush_counter >= FLUSH_INTERVAL`, `_flush_incremental()` is called and the counter resets to 0. Space distribution is omitted from these intermediate writes.
+**Counter-based auto-flush:** `_flush_counter` is incremented on every `time()` context exit and every `step()` call. When `_flush_counter >= FLUSH_INTERVAL`, `_flush_incremental()` is called and the counter resets to 0.
+
+**Active timer capture:** `_active_timers: list[tuple[TimeKey, float]]` tracks all in-flight `time()` contexts. On `__enter__` the `(key, t0)` pair is appended; on `__exit__` it is removed. Both `_flush_incremental()` and `flush()` snapshot partial elapsed from active timers before building metrics — the timers remain registered since they are still running.
 
 **Atomic write:** Both flush paths write to `work_dir / (METRICS_YAML_FILENAME + TEMP_SUFFIX)` then rename to `work_dir / METRICS_YAML_FILENAME` via `Path.replace()`.
 
@@ -311,45 +313,54 @@ def __init__(
 
 ### Per-Phase Timing Calls
 
-| Phase | TimeKey(s) | Call site |
+| Phase | TimeKey(s) | Pattern |
 |---|---|---|
-| `JobPhase` | `JOB_PROBE` | wraps `VideoMetadata` probing calls in `_create_or_update_job` |
-| `JobPhase` | `JOB_CROP_DETECT` | wraps `detect_crop_parameters` call in `_resolve_crop` |
-| `ExtractionPhase` | `EXTRACTION` | wraps `extractor.extract_tracks()` call |
-| `ExtractionPhase` | `RECOVERY` | wraps `_recover()` call in `run()` |
-| `ChunkingPhase` | `CHUNKING_SCENE_DETECT` | wraps `detect_scenes()` call |
-| `ChunkingPhase` | `CHUNKING_SPLIT` | `record_step(CHUNKING_SPLIT, elapsed)` after each chunk split |
-| `ChunkingPhase` | `RECOVERY` | wraps `_recover()` call in `run()` |
-| `AudioPhase` | `AUDIO` | wraps the full async engine execution |
-| `AudioPhase` | `RECOVERY` | wraps `_recover()` call in `run()` |
-| `OptimizationPhase` | `ENCODING_OPTIMIZATION` | `record_step(ENCODING_OPTIMIZATION, elapsed, convergence_update)` after each test-chunk attempt converges |
-| `OptimizationPhase` | `RECOVERY` | wraps `_recover()` / param-load call in `run()` |
-| `EncodingPhase` | `ENCODING_MAIN` | `record_step(ENCODING_MAIN, elapsed, convergence_update)` after each chunk/strategy pair converges |
-| `EncodingPhase` | `RECOVERY` | wraps `_recover_encoding_attempts()` call in `run()` |
-| `MergePhase` | `MERGE_CONCAT` | wraps ffmpeg concat call per strategy |
-| `MergePhase` | `MERGE_QUALITY_MEASURE` | wraps `_measure_quality()` call per strategy |
-| `MergePhase` | `RECOVERY` | wraps `_recover()` call in `run()` |
+| `JobPhase` | `JOB_PROBE` | `time()` wraps `VideoMetadata` probing calls in `_create_or_update_job` |
+| `JobPhase` | `JOB_CROP_DETECT` | `time()` wraps `detect_crop_parameters` call in `_resolve_crop` |
+| `ExtractionPhase` | `EXTRACTION` | `time()` wraps `extractor.extract_tracks()` call |
+| `ExtractionPhase` | `RECOVERY` | `time()` wraps `_recover()` call in `run()` |
+| `ChunkingPhase` | `CHUNKING_SCENE_DETECT` | `time()` wraps `detect_scenes()` call |
+| `ChunkingPhase` | `CHUNKING_SPLIT` | `time()` wraps entire chunk-split loop; `step(CHUNKING_SPLIT)` after each chunk |
+| `ChunkingPhase` | `RECOVERY` | `time()` wraps `_recover()` call in `run()` |
+| `AudioPhase` | `AUDIO` | `time()` wraps the full async engine execution |
+| `AudioPhase` | `RECOVERY` | `time()` wraps `_recover()` call in `run()` |
+| `OptimizationPhase` | `ENCODING_OPTIMIZATION` | `time()` wraps entire optimization loop; `step(ENCODING_OPTIMIZATION, convergence_update)` after each attempt converges |
+| `OptimizationPhase` | `RECOVERY` | `time()` wraps `_recover()` / param-load call in `run()` |
+| `EncodingPhase` | `ENCODING_MAIN` | `time()` wraps entire encoding loop; `step(ENCODING_MAIN, convergence_update)` after each chunk/strategy pair converges |
+| `EncodingPhase` | `RECOVERY` | `time()` wraps `_recover_encoding_attempts()` call in `run()` |
+| `MergePhase` | `MERGE_CONCAT` | `time()` wraps ffmpeg concat call per strategy |
+| `MergePhase` | `MERGE_QUALITY_MEASURE` | `time()` wraps `_measure_quality()` call per strategy |
+| `MergePhase` | `RECOVERY` | `time()` wraps `_recover()` call in `run()` |
 
-**`RECOVERY` accumulation pattern:** each phase wraps its own `_recover()` call:
+**`RECOVERY` pattern** — each phase wraps its own `_recover()` call:
 
 ```python
-import time as _time
-_t0 = _time.monotonic()
-artifacts = self._recover(force_wipe=force_wipe, execute=True)
-self._collector.record_step(TimeKey.RECOVERY, _time.monotonic() - _t0)
+with self._collector.time(TimeKey.RECOVERY):
+    artifacts = self._recover(force_wipe=force_wipe, execute=True)
 ```
 
-**Convergence update pattern** (EncodingPhase, after `_finalize_winning_attempt`):
+**Encoding loop pattern** (EncodingPhase) — `time()` wraps the whole loop, `step()` fires per convergence:
 
 ```python
-self._collector.record_step(
-    TimeKey.ENCODING_MAIN,
-    elapsed_for_this_chunk,
-    convergence_update=ConvergenceUpdate(
-        strategy=strategy,
-        attempt_count=attempt_number,
-    ),
-)
+with self._collector.time(TimeKey.ENCODING_MAIN):
+    for chunk in chunks:
+        # ... parallel encode attempts ...
+        self._collector.step(
+            TimeKey.ENCODING_MAIN,
+            convergence_update=ConvergenceUpdate(
+                strategy=strategy,
+                attempt_count=attempt_number,
+            ),
+        )
+```
+
+**Chunking split pattern** — same structure, no convergence update:
+
+```python
+with self._collector.time(TimeKey.CHUNKING_SPLIT):
+    for chunk in chunks:
+        # ... split chunk ...
+        self._collector.step(TimeKey.CHUNKING_SPLIT)
 ```
 
 ### `api.py` Integration
@@ -423,7 +434,7 @@ Signal handler and `atexit` registration are skipped entirely when `no_metrics` 
 
 ### Phase transparency
 
-Phases always receive a `MetricsCollector` and call `time()` / `record_step()` normally. They have no knowledge of whether the injected implementation is `YamlMetricsCollector` or `NoOpMetricsCollector`. This is the core benefit of Protocol-based injection — the `--no-metrics` flag requires zero changes to any phase.
+Phases always receive a `MetricsCollector` and call `time()` / `step()` normally. They have no knowledge of whether the injected implementation is `YamlMetricsCollector` or `NoOpMetricsCollector`.
 
 ---
 
@@ -442,7 +453,7 @@ Phases always receive a `MetricsCollector` and call `time()` / `record_step()` n
   - `attempts.stddev` = `round(sqrt(welford_M2 / n), 1)` — population stddev; `0.0` when `n == 1`
 - Returns list sorted by strategy name for deterministic output.
 
-**Welford update on each `record_step` with `convergence_update`:**
+**Welford update on each `step()` with `convergence_update`:**
 ```python
 n     += 1
 total += x
@@ -465,7 +476,7 @@ M2    += delta * (x - mean)   # uses updated mean
 | `metrics.yaml` load fails on resume | Log WARNING, start fresh (do not abort) |
 | `stat()` fails on individual file during space scan | Log DEBUG, treat as 0 bytes |
 | `source_video` does not exist at flush time | Log DEBUG, record 0 for `SpaceKey.SOURCE` |
-| Phase raises exception before `time()` context exits | Context manager catches and re-raises; elapsed is still recorded |
+| Phase raises exception before `time()` context exits | Context manager catches and re-raises; elapsed is still recorded and entry removed from `_active_timers` |
 
 ---
 
@@ -530,8 +541,8 @@ M2    += delta * (x - mean)   # uses updated mean
 Each property test runs a minimum of 100 iterations. Tag format: `# Feature: pipeline-metrics-report, Property N: <text>`
 
 **Property 1 — Time accumulation round-trip**
-Generate: random `TimeKey`, random list of positive floats as elapsed durations.
-Assert: `collector._time_accum[key] == sum(durations)` after all `record_step` calls.
+Generate: random `TimeKey`, random list of positive floats as elapsed durations fed via `time()` context managers.
+Assert: `collector._time_accum[key] == sum(durations)` after all `time()` exits.
 
 **Property 2 — Time distribution math**
 Generate: random mapping of `TimeKey → float` (non-negative).
@@ -546,7 +557,7 @@ Generate: random directory trees with known file sizes (using `tmp_path` fixture
 Assert: `_measure_space()` returns exact byte counts per category; total == sum of parts.
 
 **Property 5 — Convergence stats math**
-Generate: random sequences of attempt counts (integers ≥ 1) fed incrementally via `record_step`.
+Generate: random sequences of attempt counts (integers ≥ 1) fed incrementally via `step()` with `convergence_update`.
 Assert: all `ConvergenceStats` fields match `min/max/sum/mean/population_stddev/len` of the input sequences. Also assert that resume from persisted YAML produces identical results to a fresh run.
 
 **Property 6 — YAML serialization round-trip**
@@ -557,4 +568,4 @@ Assert: `deserialize(serialize(m)) == m` (field-by-field comparison within toler
 
 - `hypothesis` is already an approved test dependency (used via `pytest-hypothesis` or direct import). If not yet in `pyproject.toml`, it must be added to `[dependency-groups] test`.
 - Property tests live in `tests/test_metrics_properties.py`; unit tests in `tests/test_metrics.py`.
-- Phase integration tests (verifying that phases actually call the collector) use a spy/mock `MetricsCollector` and verify `record_step` was called with the expected keys after `phase.run()`.
+- Phase integration tests (verifying that phases actually call the collector) use a spy/mock `MetricsCollector` and verify `time()` and `step()` were called with the expected keys after `phase.run()`.

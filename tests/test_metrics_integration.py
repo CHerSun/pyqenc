@@ -1,8 +1,8 @@
 """Phase integration tests for MetricsCollector timing instrumentation.
 
-Verifies that phases call ``record_step`` with the expected ``TimeKey`` values
-when their core work methods run.  External I/O (ffprobe, ffmpeg, crop detect)
-is mocked out so tests run without real media files.
+Verifies that phases call ``time()`` and ``step()`` with the expected ``TimeKey``
+values when their core work methods run.  External I/O (ffprobe, ffmpeg, crop
+detect) is mocked out so tests run without real media files.
 
 Tests live here per the spec: tests/test_metrics_integration.py
 """
@@ -54,7 +54,7 @@ def _spy_collector() -> MagicMock:
     """Return a ``MagicMock`` that satisfies the ``MetricsCollector`` Protocol.
 
     ``time()`` returns a real no-op context manager so ``with collector.time(key):``
-    works correctly in phase code.  ``record_step`` is a plain mock so calls
+    works correctly in phase code.  ``step`` is a plain mock so calls
     can be inspected via ``assert_called_with`` / ``call_args_list``.
     """
     collector = MagicMock(spec=MetricsCollector)
@@ -84,7 +84,7 @@ class TestJobPhaseTiming:
     """Integration tests for ``JobPhase`` timing instrumentation (Req 6.5)."""
 
     def test_job_probe_recorded_on_run(self, tmp_path: Path) -> None:
-        """``record_step`` must be called with ``TimeKey.JOB_PROBE`` when ``run()`` executes.
+        """``time(TimeKey.JOB_PROBE)`` must be called when ``run()`` executes.
 
         Validates: Requirements 6.5
         """
@@ -238,6 +238,155 @@ class TestJobPhaseTiming:
             patch("pyqenc.phases.job.VideoMetadata", return_value=stub_vm),
             patch("pyqenc.utils.crop.detect_crop_parameters", return_value=CropParams()),
             patch("pyqenc.phases.job.log_disk_space_info"),
+        ):
+            result = phase.run()
+
+        assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# ExtractionPhase — EXTRACTION and RECOVERY timing
+# ---------------------------------------------------------------------------
+
+class TestExtractionPhaseTiming:
+    """Integration tests for ``ExtractionPhase`` timing instrumentation (Req 6.5)."""
+
+    def _make_job_result(self) -> "JobPhaseResult":
+        """Return a minimal complete ``JobPhaseResult`` stub."""
+        from pyqenc.phases.job import JobPhaseResult
+        from pyqenc.models import PhaseOutcome
+        return JobPhaseResult(
+            outcome    = PhaseOutcome.COMPLETED,
+            artifacts  = [],
+            message    = "ok",
+            force_wipe = False,
+        )
+
+    def _make_phase(
+        self,
+        tmp_path: Path,
+        collector: MagicMock,
+    ) -> "ExtractionPhase":
+        """Return an ``ExtractionPhase`` with a pre-wired job dependency."""
+        from pyqenc.phases.extraction import ExtractionPhase
+        from pyqenc.phases.job import JobPhase
+
+        config   = _make_config(tmp_path)
+        job_mock = MagicMock(spec=JobPhase)
+        job_mock.result = self._make_job_result()
+
+        phase = ExtractionPhase(config, collector=collector)
+        phase._job = job_mock  # type: ignore[assignment]
+        return phase
+
+    def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
+        """``time(TimeKey.RECOVERY)`` must be called even when all artifacts are reused.
+
+        Validates: Requirements 6.5, 2.7
+        """
+        from pyqenc.phases.extraction import ExtractionPhase
+        from pyqenc.state import ArtifactState
+        from pyqenc.phases.extraction import VideoArtifact
+
+        collector = _spy_collector()
+        phase     = self._make_phase(tmp_path, collector)
+
+        # Stub a complete artifact so _recover returns all-complete → REUSED path
+        stub_artifact = MagicMock(spec=VideoArtifact)
+        stub_artifact.state = ArtifactState.COMPLETE
+
+        with patch.object(
+            ExtractionPhase, "_recover",
+            return_value=([stub_artifact], None, []),
+        ):
+            phase.run()
+
+        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
+        assert TimeKey.RECOVERY in time_keys_called, (
+            f"Expected TimeKey.RECOVERY in time() calls, got: {time_keys_called}"
+        )
+
+    def test_extraction_recorded_for_mkvextract_tracks(self, tmp_path: Path) -> None:
+        """``time(TimeKey.EXTRACTION)`` must be called when mkvextract runs for other tracks.
+
+        Validates: Requirements 6.5
+        """
+        from pyqenc.phases.extraction import (
+            ExtractionPhase,
+            MKVTrackExtractor,
+            OtherArtifact,
+            SubtitleStream,
+            VideoStream,
+        )
+        from pyqenc.state import ArtifactState
+
+        collector = _spy_collector()
+        phase     = self._make_phase(tmp_path, collector)
+
+        extracted_dir = phase._config.work_dir / "extracted"
+        extracted_dir.mkdir(parents=True, exist_ok=True)
+
+        # Stub a subtitle stream (other track) that is ABSENT — triggers mkvextract
+        absent_path = extracted_dir / "sub_0_eng.srt"
+        stub_sub = MagicMock(spec=SubtitleStream)
+        stub_sub.codec_type = "subtitle"
+        stub_sub.display_name.return_value = absent_path.name
+
+        # Stub a video stream so _execute_extraction doesn't bail out early
+        stub_video = MagicMock(spec=VideoStream)
+        stub_video.codec_type = "video"
+        stub_video.track_id   = 0
+        stub_video.display_name.return_value = "video_0.mkv"
+
+        stub_extractor = MagicMock(spec=MKVTrackExtractor)
+        stub_extractor.tracks = [stub_video, stub_sub]
+
+        # ABSENT artifact for the subtitle track
+        stub_artifact = MagicMock(spec=OtherArtifact)
+        stub_artifact.state = ArtifactState.ABSENT
+        stub_artifact.path  = absent_path
+
+        with (
+            patch.object(
+                ExtractionPhase, "_recover",
+                return_value=([stub_artifact], None, []),
+            ),
+            patch(
+                "pyqenc.phases.extraction.MKVTrackExtractor",
+                return_value=stub_extractor,
+            ),
+            patch(
+                "pyqenc.phases.extraction.streams_filter_plain_regex",
+                return_value=[stub_video, stub_sub],
+            ),
+            patch("pyqenc.phases.extraction.run_ffmpeg") as mock_ffmpeg,
+        ):
+            # Make ffmpeg succeed for the video track extraction
+            mock_ffmpeg.return_value = MagicMock(success=True)
+            phase.run()
+
+        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
+        assert TimeKey.EXTRACTION in time_keys_called, (
+            f"Expected TimeKey.EXTRACTION in time() calls, got: {time_keys_called}"
+        )
+
+    def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
+        """``ExtractionPhase`` must run without error when given a ``NoOpMetricsCollector``.
+
+        Validates: Requirements 6.4, 6.5
+        """
+        from pyqenc.phases.extraction import ExtractionPhase, VideoArtifact
+        from pyqenc.state import ArtifactState
+
+        collector = NoOpMetricsCollector()
+        phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
+
+        stub_artifact = MagicMock(spec=VideoArtifact)
+        stub_artifact.state = ArtifactState.COMPLETE
+
+        with patch.object(
+            ExtractionPhase, "_recover",
+            return_value=([stub_artifact], None, []),
         ):
             result = phase.run()
 

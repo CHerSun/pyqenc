@@ -161,7 +161,7 @@ def _format_gb(n: int) -> str:
 
 @dataclass
 class ConvergenceUpdate:
-    """Passed by phases to :meth:`MetricsCollector.record_step` when a chunk's
+    """Passed by phases to :meth:`MetricsCollector.step` when a chunk's
     CRF search converges.
     """
 
@@ -264,29 +264,30 @@ class MetricsCollector(Protocol):
     from this class directly so conformance is verified at dev-time by the type
     checker rather than relying on structural duck-typing.
 
-    Phases use only :meth:`time` and :meth:`record_step`.  :meth:`flush` is
+    Phases use only :meth:`time` and :meth:`step`.  :meth:`flush` is
     intentionally part of the full interface but is **not** called by phases —
     it is reserved for the orchestrator.
     """
 
     def time(self, key: TimeKey) -> contextlib.AbstractContextManager[None]:
-        """Return a context manager that accumulates elapsed seconds for *key*.
+        """Return a context manager that measures wall-clock elapsed for *key*.
 
-        Records ``time.monotonic()`` on enter; on exit calls
-        ``record_step(key, elapsed)``.
+        Records ``time.monotonic()`` on enter; on exit accumulates elapsed
+        seconds into ``_time_accum[key]`` and increments the flush counter.
+        Exceptions are re-raised after recording so timing is never lost.
         """
         ...
 
-    def record_step(
+    def step(
         self,
         key:                TimeKey,
-        elapsed_seconds:    float,
         convergence_update: ConvergenceUpdate | None = None,
     ) -> None:
-        """Accumulate *elapsed_seconds* for *key*.
+        """Signal one unit of work completed within a loop.
 
-        If *convergence_update* is provided, the per-strategy Welford
-        accumulators are updated for the named strategy.
+        Carries no timing — timing is handled exclusively by :meth:`time`.
+        Increments the flush counter (may trigger an incremental flush) and
+        optionally updates per-strategy Welford convergence accumulators.
 
         Phases call this after each discrete unit of work (e.g. after each
         encoding attempt or chunk completion).  They have no knowledge of
@@ -471,10 +472,9 @@ class NoOpMetricsCollector(MetricsCollector):
         """Return a no-op context manager (``contextlib.nullcontext``)."""
         return contextlib.nullcontext()
 
-    def record_step(
+    def step(
         self,
         key:                TimeKey,
-        elapsed_seconds:    float,
         convergence_update: ConvergenceUpdate | None = None,
     ) -> None:
         """Discard all arguments — no-op."""
@@ -522,6 +522,7 @@ class YamlMetricsCollector(MetricsCollector):
         self._space_snapshot:    dict[SpaceKey, int]                 = {}
         self._space_updated_at:  str                                 = ""
         self._flush_counter:     int                                 = 0
+        self._active_timers:     list[tuple[TimeKey, float]]         = []
 
         metrics_file = work_dir / METRICS_YAML_FILENAME
         if force_wipe:
@@ -590,9 +591,10 @@ class YamlMetricsCollector(MetricsCollector):
     def time(self, key: TimeKey) -> contextlib.AbstractContextManager[None]:
         """Return a context manager that accumulates elapsed seconds for *key*.
 
-        Records ``time.monotonic()`` on enter; on exit calls
-        ``record_step(key, elapsed)``.  Exceptions are re-raised after
-        recording elapsed time so timing is never lost.
+        Records ``time.monotonic()`` on enter; on exit accumulates elapsed into
+        ``_time_accum[key]``, increments the flush counter, and triggers an
+        incremental flush if needed.  Exceptions are re-raised after recording
+        elapsed time so timing is never lost.
         """
         return self._TimingContext(self, key)
 
@@ -608,6 +610,7 @@ class YamlMetricsCollector(MetricsCollector):
 
         def __enter__(self) -> None:
             self._t0 = _time.monotonic()
+            self._collector._active_timers.append((self._key, self._t0))
 
         def __exit__(
             self,
@@ -616,22 +619,29 @@ class YamlMetricsCollector(MetricsCollector):
             exc_tb:    object,
         ) -> None:
             elapsed = _time.monotonic() - self._t0
-            self._collector.record_step(self._key, elapsed)
+            # Remove this timer from active list (remove first matching entry)
+            try:
+                self._collector._active_timers.remove((self._key, self._t0))
+            except ValueError:
+                pass  # already removed (shouldn't happen, but be defensive)
+            self._collector._time_accum[self._key] += elapsed
+            self._collector._flush_counter += 1
+            if self._collector._flush_counter >= FLUSH_INTERVAL:
+                self._collector._flush_incremental()
+                self._collector._flush_counter = 0
             # Always re-raise — we never suppress exceptions
 
-    def record_step(
+    def step(
         self,
         key:                TimeKey,
-        elapsed_seconds:    float,
         convergence_update: ConvergenceUpdate | None = None,
     ) -> None:
-        """Accumulate *elapsed_seconds* for *key* and optionally update convergence.
+        """Signal one unit of work completed within a loop.
 
-        Increments the internal flush counter; triggers an incremental flush
-        every :data:`FLUSH_INTERVAL` calls.
+        Carries no timing — timing is handled exclusively by :meth:`time`.
+        Increments the flush counter (may trigger an incremental flush) and
+        optionally updates per-strategy Welford convergence accumulators.
         """
-        self._time_accum[key] += elapsed_seconds
-
         if convergence_update is not None:
             strategy = convergence_update.strategy
             if strategy not in self._conv_accumulators:
@@ -643,6 +653,19 @@ class YamlMetricsCollector(MetricsCollector):
             self._flush_incremental()
             self._flush_counter = 0
 
+    def _snapshot_active_timers(self) -> dict[TimeKey, float]:
+        """Return partial elapsed seconds for all currently in-flight ``time()`` contexts.
+
+        Does not modify ``_active_timers`` or ``_time_accum`` — the timers are
+        still running.  Called by both ``_flush_incremental()`` and ``flush()``
+        so that a forced exit captures partial elapsed rather than losing it.
+        """
+        now = _time.monotonic()
+        partial: dict[TimeKey, float] = {}
+        for key, t0 in self._active_timers:
+            partial[key] = partial.get(key, 0.0) + (now - t0)
+        return partial
+
     def _build_metrics(
         self,
         *,
@@ -651,12 +674,22 @@ class YamlMetricsCollector(MetricsCollector):
         time_updated_at:    str,
         space_updated_at:   str,
     ) -> PipelineMetrics:
-        """Assemble a :class:`PipelineMetrics` from current accumulator state."""
+        """Assemble a :class:`PipelineMetrics` from current accumulator state.
+
+        Merges partial elapsed from any in-flight ``time()`` contexts so that
+        a forced flush captures work-in-progress timing.
+        """
+        # Merge in-flight timer partial elapsed (read-only snapshot)
+        active_partial = self._snapshot_active_timers()
+        effective_accum = {
+            k: self._time_accum[k] + active_partial.get(k, 0.0)
+            for k in TimeKey
+        }
         # --- time distribution ---
-        total_secs = int(round(sum(self._time_accum.values())))
+        total_secs = int(round(sum(effective_accum.values())))
         breakdown_time: list[TimeEntry] = []
         for key in TimeKey:
-            secs    = int(round(self._time_accum[key]))
+            secs    = int(round(effective_accum[key]))
             percent = f"{secs / total_secs * 100:.1f}%" if total_secs > 0 else "0.0%"
             breakdown_time.append(TimeEntry(
                 category=key.value,

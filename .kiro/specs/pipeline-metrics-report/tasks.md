@@ -178,20 +178,32 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - Use a spy/mock `MetricsCollector`; call `phase.run()`; assert `record_step` was called with `TimeKey.JOB_PROBE`
     - _Requirements: 6.5_
 
-- [ ] 12. Instrument `ExtractionPhase` with timing calls
-  - [ ] 12.1 Wrap `extractor.extract_tracks()` call in `_execute_extraction` with `self._collector.time(TimeKey.EXTRACTION)`
+- [x] 12. Instrument `ExtractionPhase` with timing calls
+  - [x] 12.1 Wrap `extractor.extract_tracks()` call in `_execute_extraction` with `self._collector.time(TimeKey.EXTRACTION)`
     - _Requirements: 6.5_
-  - [ ] 12.2 Wrap `_recover()` call in `run()` with manual `time.monotonic()` bookends and `self._collector.record_step(TimeKey.RECOVERY, elapsed)`
+  - [x] 12.2 Wrap `_recover()` call in `run()` with manual `time.monotonic()` bookends and `self._collector.record_step(TimeKey.RECOVERY, elapsed)`
     - _Requirements: 6.5, 2.7_
-  - [ ] 12.3 Write phase integration test for `ExtractionPhase` timing
-    - Assert `record_step` called with `TimeKey.EXTRACTION` and `TimeKey.RECOVERY`
+  - [x] 12.3 Write phase integration test for `ExtractionPhase` timing
+    - Assert `time()` called with `TimeKey.EXTRACTION` and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
+
+- [x] 12.5 Implement active-timer capture for in-flight `time()` contexts on forced flush
+  - [x] 12.5.1 Add `_active_timers: list[tuple[TimeKey, float]]` to `YamlMetricsCollector.__init__`
+    - On `_TimingContext.__enter__`: append `(key, t0)` to `_active_timers`
+    - On `_TimingContext.__exit__`: remove the entry from `_active_timers` (by identity/index), then accumulate elapsed normally
+    - _Requirements: 1.4_
+  - [x] 12.5.2 Add `_snapshot_active_timers()` helper that returns `dict[TimeKey, float]` of partial elapsed for all in-flight timers (does not modify `_active_timers` or `_time_accum`)
+    - Call this in both `_flush_incremental()` and `flush()` before building metrics: add partial elapsed to a copy of `_time_accum` used only for that build — do NOT mutate `_time_accum` itself (timers are still running)
+    - _Requirements: 1.4_
+  - [x] 12.5.3 Write unit tests for active-timer capture
+    - Assert that `flush()` called while a `time()` context is active includes partial elapsed in the written YAML
+    - Assert that after the context exits normally, the final accumulated value equals the full elapsed (not double-counted)
+    - _Requirements: 1.4_
 
 - [ ] 13. Instrument `ChunkingPhase` with timing calls
   - [ ] 13.1 Wrap `detect_scenes()` call in `_execute_chunking` with `self._collector.time(TimeKey.CHUNKING_SCENE_DETECT)`
     - _Requirements: 6.5_
-  - [ ] 13.2 Add `self._collector.record_step(TimeKey.CHUNKING_SPLIT, elapsed)` after each successful chunk split in `split_chunks` — pass `collector` down from `ChunkingPhase._execute_chunking` to `split_chunks`
-    - Measure elapsed per chunk with `time.monotonic()` around the `run_ffmpeg` call
+  - [ ] 13.2 Wrap the entire chunk-split loop in `split_chunks` with `self._collector.time(TimeKey.CHUNKING_SPLIT)`; call `self._collector.step(TimeKey.CHUNKING_SPLIT)` after each successful split — pass `collector` down from `ChunkingPhase._execute_chunking` to `split_chunks`
     - _Requirements: 6.5, 2.2a_
   - [ ] 13.3 Wrap `_recover()` call in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
     - _Requirements: 6.5, 2.7_
@@ -209,9 +221,8 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - _Requirements: 6.5_
 
 - [ ] 15. Instrument `OptimizationPhase` with timing calls
-  - [ ] 15.1 Add `self._collector.record_step(TimeKey.ENCODING_OPTIMIZATION, elapsed, convergence_update=ConvergenceUpdate(strategy=strategy.name, attempt_count=attempt_number))` after each test-chunk attempt converges in `_encode_strategy_test_chunks`
+  - [ ] 15.1 Wrap the entire optimization loop in `_encode_strategy_test_chunks` with `self._collector.time(TimeKey.ENCODING_OPTIMIZATION)`; call `self._collector.step(TimeKey.ENCODING_OPTIMIZATION, convergence_update=ConvergenceUpdate(strategy=strategy.name, attempt_count=attempt_number))` after each test-chunk attempt converges
     - Pass `collector` down from `OptimizationPhase.run()` to the async encode helper
-    - Measure elapsed per attempt with `time.monotonic()`
     - _Requirements: 6.5, 2.2a, 4.1a_
   - [ ] 15.2 Wrap the param-load / recovery section in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
     - _Requirements: 6.5, 2.7_
@@ -220,9 +231,8 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - _Requirements: 6.5_
 
 - [ ] 16. Instrument `EncodingPhase` with timing calls
-  - [ ] 16.1 Add `self._collector.record_step(TimeKey.ENCODING_MAIN, elapsed, convergence_update=ConvergenceUpdate(strategy=strategy, attempt_count=attempt_number))` after each chunk/strategy pair converges in `ChunkEncoder` (after `_finalize_winning_attempt`)
+  - [ ] 16.1 Wrap the entire encoding loop in `ChunkEncoder` with `self._collector.time(TimeKey.ENCODING_MAIN)`; call `self._collector.step(TimeKey.ENCODING_MAIN, convergence_update=ConvergenceUpdate(strategy=strategy, attempt_count=attempt_number))` after each chunk/strategy pair converges (after `_finalize_winning_attempt`)
     - Pass `collector` down from `EncodingPhase.run()` to `ChunkEncoder`
-    - Measure elapsed per convergence with `time.monotonic()`
     - _Requirements: 6.5, 2.2a, 4.1a_
   - [ ] 16.2 Wrap `_recover_encoding_attempts()` call in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
     - _Requirements: 6.5, 2.7_
