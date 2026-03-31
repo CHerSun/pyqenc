@@ -537,6 +537,8 @@ if TYPE_CHECKING:
     from pyqenc.models import PipelineConfig
     from pyqenc.phases.job import JobPhase, JobPhaseResult
 
+_EXTRACTION_YAML_NAME = "extraction.yaml"
+
 
 @dataclass
 class VideoArtifact(Artifact):

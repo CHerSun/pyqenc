@@ -664,6 +664,17 @@ class YamlMetricsCollector(MetricsCollector):
                 self._collector._flush_counter = 0
             # Always re-raise — we never suppress exceptions
 
+        async def __aenter__(self) -> None:
+            self.__enter__()
+
+        async def __aexit__(
+            self,
+            exc_type:  type[BaseException] | None,
+            exc_val:   BaseException | None,
+            exc_tb:    object,
+        ) -> None:
+            self.__exit__(exc_type, exc_val, exc_tb)
+
     def step(
         self,
         key:                TimeKey,
