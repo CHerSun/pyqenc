@@ -1061,3 +1061,301 @@ class TestOptimizationPhaseTiming:
             result = phase.run()
 
         assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# EncodingPhase — ENCODING_MAIN and RECOVERY timing
+# ---------------------------------------------------------------------------
+
+
+class TestEncodingPhaseTiming:
+    """Integration tests for ``EncodingPhase`` timing instrumentation (Req 6.5)."""
+
+    def _make_job_result(self, tmp_path: Path) -> "JobPhaseResult":
+        """Return a minimal complete ``JobPhaseResult`` stub."""
+        from pyqenc.models import PhaseOutcome
+        from pyqenc.phases.job import JobPhaseResult
+        from pyqenc.state import JobState
+
+        source = tmp_path / "source.mkv"
+        source.write_bytes(b"\x00" * 64)
+        stub_vm = _stub_video_metadata(source)
+        job_state = JobState(source=stub_vm, crop=CropParams())
+
+        result = JobPhaseResult(
+            outcome    = PhaseOutcome.COMPLETED,
+            artifacts  = [],
+            message    = "ok",
+            force_wipe = False,
+        )
+        result.job = job_state  # type: ignore[attr-defined]
+        return result
+
+    def _make_chunking_result(self, tmp_path: Path) -> "ChunkingPhaseResult":
+        """Return a minimal complete ``ChunkingPhaseResult`` stub with one chunk."""
+        from pyqenc.models import ChunkMetadata, PhaseOutcome
+        from pyqenc.phases.chunking import ChunkingPhaseResult
+
+        chunk = MagicMock(spec=ChunkMetadata)
+        chunk.chunk_id        = "chunk_0"
+        chunk.start_timestamp = 0.0
+        chunk.end_timestamp   = 1.0
+        chunk.path            = tmp_path / "chunks" / "chunk_0.mkv"
+
+        return ChunkingPhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            artifacts = [],
+            message   = "ok",
+            chunks    = [chunk],
+        )
+
+    def _make_optimization_result(self, tmp_path: Path) -> "OptimizationPhaseResult":
+        """Return a minimal complete ``OptimizationPhaseResult`` stub."""
+        from pyqenc.models import PhaseOutcome, Strategy
+        from pyqenc.phases.optimization import OptimizationPhaseResult
+        from pyqenc.state import StrategyTestResult
+
+        strategy = Strategy.from_name("slow+h265")
+        return OptimizationPhaseResult(
+            outcome           = PhaseOutcome.COMPLETED,
+            artifacts         = [],
+            message           = "ok",
+            selected_strategies = [strategy],
+            strategy_results  = [StrategyTestResult(strategy=strategy, total_size=1024, avg_crf=28.0)],
+        )
+
+    def _make_phase(
+        self,
+        tmp_path:  Path,
+        collector: MagicMock,
+    ) -> "EncodingPhase":
+        """Return an ``EncodingPhase`` with pre-wired job, chunking, and optimization deps."""
+        from pyqenc.phases.chunking import ChunkingPhase
+        from pyqenc.phases.encoding import EncodingPhase
+        from pyqenc.phases.job import JobPhase
+        from pyqenc.phases.optimization import OptimizationPhase
+
+        config = _make_config(tmp_path)
+        config.work_dir.mkdir(parents=True, exist_ok=True)
+
+        job_mock = MagicMock(spec=JobPhase)
+        job_mock.result = self._make_job_result(tmp_path)
+
+        chunking_mock = MagicMock(spec=ChunkingPhase)
+        chunking_mock.result = self._make_chunking_result(tmp_path)
+
+        optimization_mock = MagicMock(spec=OptimizationPhase)
+        optimization_mock.result = self._make_optimization_result(tmp_path)
+
+        phase = EncodingPhase(config, collector=collector)
+        phase._job          = job_mock           # type: ignore[assignment]
+        phase._chunking     = chunking_mock      # type: ignore[assignment]
+        phase._optimization = optimization_mock  # type: ignore[assignment]
+        return phase
+
+    def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
+        """``time(TimeKey.RECOVERY)`` must be called even when all pairs are already complete.
+
+        Validates: Requirements 6.5, 2.7
+        """
+        from pyqenc.phases.encoding import EncodingPhase, EncodedArtifact
+        from pyqenc.state import ArtifactState
+
+        collector = _spy_collector()
+        phase     = self._make_phase(tmp_path, collector)
+
+        stub_artifact = MagicMock(spec=EncodedArtifact)
+        stub_artifact.state    = ArtifactState.COMPLETE
+        stub_artifact.chunk_id = "chunk_0"
+        stub_artifact.strategy = "slow+h265"
+
+        with patch.object(EncodingPhase, "_recover", return_value=[stub_artifact]):
+            phase.run()
+
+        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
+        assert TimeKey.RECOVERY in time_keys_called, (
+            f"Expected TimeKey.RECOVERY in time() calls, got: {time_keys_called}"
+        )
+
+    def test_encoding_main_recorded_when_encodes_run(self, tmp_path: Path) -> None:
+        """``time(TimeKey.ENCODING_MAIN)`` must be called when encoding executes.
+
+        Uses ``_encode_chunks_parallel`` directly with mocked inner encode calls
+        to verify the collector receives the timing call.
+
+        Validates: Requirements 6.5, 2.2a
+        """
+        import asyncio
+        from pyqenc.models import ChunkMetadata
+        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
+
+        collector = _spy_collector()
+
+        chunk = MagicMock(spec=ChunkMetadata)
+        chunk.chunk_id        = "chunk_0"
+        chunk.start_timestamp = 0.0
+        chunk.end_timestamp   = 1.0
+        chunk.path            = tmp_path / "chunk_0.mkv"
+
+        encoded_path = tmp_path / "chunk_0_enc.mkv"
+        encoded_path.write_bytes(b"\x00" * 128)
+
+        successful_result = ChunkEncodingResult(
+            chunk_id     = "chunk_0",
+            strategy     = "slow+h265",
+            success      = True,
+            final_crf    = 28.0,
+            attempts     = 2,
+            encoded_file = MagicMock(path=encoded_path),
+            reused       = False,
+        )
+
+        with patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result):
+            asyncio.run(
+                _encode_chunks_parallel(
+                    encoder          = MagicMock(),
+                    chunks           = [chunk],
+                    reference_dir    = tmp_path,
+                    strategies       = ["slow+h265"],
+                    quality_targets  = [],
+                    max_parallel     = 1,
+                    force            = False,
+                    collector        = collector,
+                )
+            )
+
+        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
+        assert TimeKey.ENCODING_MAIN in time_keys_called, (
+            f"Expected TimeKey.ENCODING_MAIN in time() calls, got: {time_keys_called}"
+        )
+
+    def test_step_called_with_convergence_update_per_chunk(self, tmp_path: Path) -> None:
+        """``step(TimeKey.ENCODING_MAIN, convergence_update=...)`` must be called
+        once per successfully converged (non-reused) chunk/strategy pair.
+
+        Validates: Requirements 6.5, 4.1a
+        """
+        import asyncio
+        from pyqenc.metrics import ConvergenceUpdate
+        from pyqenc.models import ChunkMetadata
+        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
+
+        collector = _spy_collector()
+
+        chunk = MagicMock(spec=ChunkMetadata)
+        chunk.chunk_id        = "chunk_0"
+        chunk.start_timestamp = 0.0
+        chunk.end_timestamp   = 1.0
+        chunk.path            = tmp_path / "chunk_0.mkv"
+
+        # Reference file must exist so the encode path is reached (not skipped)
+        (tmp_path / "chunk_0.mkv").write_bytes(b"\x00" * 64)
+
+        encoded_path = tmp_path / "chunk_0_enc.mkv"
+        encoded_path.write_bytes(b"\x00" * 128)
+
+        successful_result = ChunkEncodingResult(
+            chunk_id     = "chunk_0",
+            strategy     = "slow+h265",
+            success      = True,
+            final_crf    = 28.0,
+            attempts     = 3,
+            encoded_file = MagicMock(path=encoded_path),
+            reused       = False,
+        )
+
+        with patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result):
+            asyncio.run(
+                _encode_chunks_parallel(
+                    encoder          = MagicMock(),
+                    chunks           = [chunk],
+                    reference_dir    = tmp_path,
+                    strategies       = ["slow+h265"],
+                    quality_targets  = [],
+                    max_parallel     = 1,
+                    force            = False,
+                    collector        = collector,
+                )
+            )
+
+        step_calls = collector.step.call_args_list
+        assert len(step_calls) == 1, f"Expected 1 step() call, got {len(step_calls)}"
+        call_key    = step_calls[0].args[0]
+        call_update = step_calls[0].kwargs.get("convergence_update")
+        assert call_key == TimeKey.ENCODING_MAIN, f"Wrong key: {call_key}"
+        assert isinstance(call_update, ConvergenceUpdate), f"Expected ConvergenceUpdate, got: {call_update}"
+        assert call_update.strategy      == "slow+h265", f"Wrong strategy: {call_update.strategy}"
+        assert call_update.attempt_count == 3,           f"Wrong attempt_count: {call_update.attempt_count}"
+
+    def test_step_not_called_for_reused_pairs(self, tmp_path: Path) -> None:
+        """``step(TimeKey.ENCODING_MAIN)`` must NOT be called for reused pairs.
+
+        Reused pairs have already been counted in a prior run — no new convergence
+        data to record.
+
+        Validates: Requirements 6.5, 4.1a
+        """
+        import asyncio
+        from pyqenc.models import ChunkMetadata
+        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
+
+        collector = _spy_collector()
+
+        chunk = MagicMock(spec=ChunkMetadata)
+        chunk.chunk_id        = "chunk_0"
+        chunk.start_timestamp = 0.0
+        chunk.end_timestamp   = 1.0
+        chunk.path            = tmp_path / "chunk_0.mkv"
+
+        encoded_path = tmp_path / "chunk_0_enc.mkv"
+        encoded_path.write_bytes(b"\x00" * 128)
+
+        reused_result = ChunkEncodingResult(
+            chunk_id     = "chunk_0",
+            strategy     = "slow+h265",
+            success      = True,
+            final_crf    = 28.0,
+            attempts     = 1,
+            encoded_file = MagicMock(path=encoded_path),
+            reused       = True,
+        )
+
+        with patch("pyqenc.phases.encoding._encode_chunk_async", return_value=reused_result):
+            asyncio.run(
+                _encode_chunks_parallel(
+                    encoder          = MagicMock(),
+                    chunks           = [chunk],
+                    reference_dir    = tmp_path,
+                    strategies       = ["slow+h265"],
+                    quality_targets  = [],
+                    max_parallel     = 1,
+                    force            = False,
+                    collector        = collector,
+                )
+            )
+
+        step_calls = collector.step.call_args_list
+        assert len(step_calls) == 0, (
+            f"Expected no step() calls for reused pair, got: {step_calls}"
+        )
+
+    def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
+        """``EncodingPhase`` must run without error when given a ``NoOpMetricsCollector``.
+
+        Validates: Requirements 6.4, 6.5
+        """
+        from pyqenc.phases.encoding import EncodedArtifact, EncodingPhase
+        from pyqenc.state import ArtifactState
+
+        collector = NoOpMetricsCollector()
+        phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
+
+        stub_artifact = MagicMock(spec=EncodedArtifact)
+        stub_artifact.state    = ArtifactState.COMPLETE
+        stub_artifact.chunk_id = "chunk_0"
+        stub_artifact.strategy = "slow+h265"
+
+        with patch.object(EncodingPhase, "_recover", return_value=[stub_artifact]):
+            result = phase.run()
+
+        assert result is not None

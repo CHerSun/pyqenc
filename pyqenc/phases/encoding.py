@@ -1230,6 +1230,7 @@ async def _encode_chunks_parallel(
     quality_targets:  list[QualityTarget],
     max_parallel:     int,
     force:            bool,
+    collector:        "MetricsCollector",
     optimization_crfs: dict[str, float] | None = None,
     phase_recovery:   "_PhaseRecovery | None"  = None,
     bar:              Callable[[int | float, AdvanceState|None], None] | None = None,
@@ -1254,6 +1255,11 @@ async def _encode_chunks_parallel(
         bar:               Optional advance callable from ``ProgressBar``; called with
                            chunk duration in seconds and an ``AdvanceState`` on each
                            chunk completion.
+        collector:         Metrics collector for timing and convergence tracking;
+                           wraps the entire encoding loop with
+                           ``time(TimeKey.ENCODING_MAIN)`` and calls
+                           ``step(TimeKey.ENCODING_MAIN, convergence_update=...)``
+                           after each chunk/strategy pair converges.
 
     Returns:
         EncodingResult with all encoding outcomes
@@ -1359,6 +1365,15 @@ async def _encode_chunks_parallel(
                         result.encoded_count += 1
                         if bar is not None:
                             bar(chunk.end_timestamp - chunk.start_timestamp)
+                        # Record convergence for this chunk/strategy pair
+                        from pyqenc.metrics import ConvergenceUpdate, TimeKey
+                        collector.step(
+                            TimeKey.ENCODING_MAIN,
+                            convergence_update=ConvergenceUpdate(
+                                strategy      = strategy,
+                                attempt_count = chunk_result.attempts,
+                            ),
+                        )
 
                     queue.mark_complete(chunk.chunk_id, strategy)
                 else:
@@ -1373,7 +1388,9 @@ async def _encode_chunks_parallel(
     workers = [asyncio.create_task(encode_worker()) for _ in range(max_parallel)]
 
     # Wait for all workers to complete
-    await asyncio.gather(*workers)
+    from pyqenc.metrics import TimeKey
+    async with collector.time(TimeKey.ENCODING_MAIN):
+        await asyncio.gather(*workers)
 
     return result
 
@@ -1385,6 +1402,7 @@ def encode_all_chunks(
     quality_targets:  list[QualityTarget],
     work_dir:         Path,
     config_manager:   ConfigManager,
+    collector:        "MetricsCollector",
     max_parallel:     int          = 2,
     force:            bool         = False,
     dry_run:          bool         = False,
@@ -1423,6 +1441,8 @@ def encode_all_chunks(
         optimization_crfs: Per-strategy moving-average CRF from the optimization phase
                            (``StrategyTestResult.avg_crf``).  When provided, used as the
                            initial seed instead of the codec ``default_crf``.
+        collector:         Metrics collector; passed through to
+                           ``_encode_chunks_parallel`` for timing and convergence tracking.
 
     Returns:
         EncodingResult with paths to encoded chunks and statistics
@@ -1524,6 +1544,7 @@ def encode_all_chunks(
                 optimization_crfs = optimization_crfs,
                 phase_recovery    = phase_recovery,
                 bar               = advance,
+                collector         = collector,
             )
         )
 
@@ -1664,12 +1685,15 @@ class EncodingPhase:
             self.result = dep_result
             return self.result
 
+        from pyqenc.metrics import TimeKey
+
         job_result = self._job.result  # type: ignore[union-attr]
         force_wipe = getattr(job_result, "force_wipe", False)
         crop       = getattr(job_result, "crop", None)
 
         # Key parameters — strategies come from OptimizationPhase after deps are resolved
-        artifacts = self._recover(force_wipe=force_wipe, execute=True)
+        with self._collector.time(TimeKey.RECOVERY):
+            artifacts = self._recover(force_wipe=force_wipe, execute=True)
 
         # Log key parameters now that dependencies are resolved
         opt_result = self._optimization.result if self._optimization else None  # type: ignore[union-attr]
@@ -1945,6 +1969,7 @@ class EncodingPhase:
             quality_targets  = self._config.quality_targets,
             work_dir         = work_dir,
             config_manager   = ConfigManager(),
+            collector        = self._collector,
             max_parallel     = self._config.max_parallel,
             force            = self._config.force,
             dry_run          = False,

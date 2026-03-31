@@ -230,13 +230,13 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - Assert `record_step` called with `TimeKey.ENCODING_OPTIMIZATION` (with `convergence_update`) and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 
-- [ ] 16. Instrument `EncodingPhase` with timing calls
-  - [ ] 16.1 Wrap the entire encoding loop in `ChunkEncoder` with `self._collector.time(TimeKey.ENCODING_MAIN)`; call `self._collector.step(TimeKey.ENCODING_MAIN, convergence_update=ConvergenceUpdate(strategy=strategy, attempt_count=attempt_number))` after each chunk/strategy pair converges (after `_finalize_winning_attempt`)
+- [x] 16. Instrument `EncodingPhase` with timing calls
+  - [x] 16.1 Wrap the entire encoding loop in `ChunkEncoder` with `self._collector.time(TimeKey.ENCODING_MAIN)`; call `self._collector.step(TimeKey.ENCODING_MAIN, convergence_update=ConvergenceUpdate(strategy=strategy, attempt_count=attempt_number))` after each chunk/strategy pair converges (after `_finalize_winning_attempt`)
     - Pass `collector` down from `EncodingPhase.run()` to `ChunkEncoder`
     - _Requirements: 6.5, 2.2a, 4.1a_
-  - [ ] 16.2 Wrap `_recover_encoding_attempts()` call in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
+  - [x] 16.2 Wrap `_recover_encoding_attempts()` call in `run()` with `record_step(TimeKey.RECOVERY, elapsed)`
     - _Requirements: 6.5, 2.7_
-  - [ ] 16.3 Write phase integration test for `EncodingPhase` timing
+  - [x] 16.3 Write phase integration test for `EncodingPhase` timing
     - Assert `record_step` called with `TimeKey.ENCODING_MAIN` (with `convergence_update`) and `TimeKey.RECOVERY`
     - _Requirements: 6.5_
 
