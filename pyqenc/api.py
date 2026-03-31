@@ -18,6 +18,7 @@ from pyqenc.models import (
     QualityTarget,
     Strategy,
 )
+from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.orchestrator import PipelineOrchestrator, PipelineResult
 from pyqenc.phase import _build_registry
 
@@ -135,7 +136,7 @@ def extract_streams(
 
     work_dir.mkdir(parents=True, exist_ok=True)
     config   = _minimal_config(source_video=source_video, work_dir=work_dir, include=include, exclude=exclude, force=force)
-    registry = _build_registry(config)
+    registry = _build_registry(config, NoOpMetricsCollector())
     phase    = registry[ExtractionPhase]
     return phase.run(dry_run=dry_run)  # type: ignore[return-value]
 
@@ -182,7 +183,7 @@ def chunk_video(
 
     work_dir.mkdir(parents=True, exist_ok=True)
     config   = _minimal_config(source_video=source_video, work_dir=work_dir, chunking_mode=chunking_mode, force=force)
-    registry = _build_registry(config)
+    registry = _build_registry(config, NoOpMetricsCollector())
     phase    = registry[ChunkingPhase]
     return phase.run(dry_run=dry_run)  # type: ignore[return-value]
 
@@ -240,7 +241,7 @@ def encode_chunks(
         max_parallel    = max_parallel,
         force           = force,
     )
-    registry = _build_registry(config)
+    registry = _build_registry(config, NoOpMetricsCollector())
     phase    = registry[EncodingPhase]
     return phase.run(dry_run=dry_run)  # type: ignore[return-value]
 
@@ -284,7 +285,7 @@ def process_audio(
         audio_codec        = audio_codec,
         audio_base_bitrate = audio_base_bitrate,
     )
-    registry = _build_registry(config)
+    registry = _build_registry(config, NoOpMetricsCollector())
     phase    = registry[AudioPhase]
     return phase.run(dry_run=dry_run)  # type: ignore[return-value]
 
@@ -316,7 +317,7 @@ def merge_final(
 
     work_dir.mkdir(parents=True, exist_ok=True)
     config   = _minimal_config(source_video=source_video, work_dir=work_dir)
-    registry = _build_registry(config)
+    registry = _build_registry(config, NoOpMetricsCollector())
     phase    = registry[MergePhase]
     return phase.run(dry_run=dry_run)  # type: ignore[return-value]
 

@@ -136,12 +136,12 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
     - Tag: `# Feature: pipeline-metrics-report, Property 3: Breakdown sorted descending`
     - _Requirements: 2.6, 3.5_
 
-- [ ] 8. Update `_build_registry` in `phase.py` and `api.py`
-  - [ ] 8.1 Update `_build_registry(config, collector: MetricsCollector | None = None)` signature in `phase.py`
+- [x] 8. Update `_build_registry` in `phase.py` and `api.py`
+  - [x] 8.1 Update `_build_registry(config, collector: MetricsCollector | None = None)` signature in `phase.py`
     - When `collector` is `None`, construct `NoOpMetricsCollector` internally
     - Pass `collector` as the third positional argument to every phase constructor call in the loop
     - _Requirements: 6.2, 6.3, 6.4_
-  - [ ] 8.2 Update every `_build_registry` call in `api.py` to pass `NoOpMetricsCollector()`
+  - [x] 8.2 Update every `_build_registry` call in `api.py` to pass `NoOpMetricsCollector()`
     - Import `NoOpMetricsCollector` from `pyqenc.metrics`
     - Each standalone function constructs `collector = NoOpMetricsCollector()` and passes it to `_build_registry(config, collector)`
     - _Requirements: 6.4_
