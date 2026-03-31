@@ -54,32 +54,32 @@ Implement `MetricsCollector` injection across the full pipeline. All metrics cod
   - [x] 4.3 Write unit test: `isinstance(NoOpMetricsCollector(), MetricsCollector)` is `True`
     - _Requirements: 6.1_
 
-- [ ] 5. Implement `_measure_space` and `ConvergenceAccumulator` internals
-  - [ ] 5.1 Implement `ConvergenceAccumulator` internal dataclass with Welford fields: `n`, `total`, `min`, `max`, `welford_mean`, `welford_M2`
+- [x] 5. Implement `_measure_space` and `ConvergenceAccumulator` internals
+  - [x] 5.1 Implement `ConvergenceAccumulator` internal dataclass with Welford fields: `n`, `total`, `min`, `max`, `welford_mean`, `welford_M2`
     - Implement `_compute_convergence(accumulators) -> list[ConvergenceStats] | None`
     - Returns `None` when all accumulators have `n == 0`; population stddev = `sqrt(M2/n)`, `0.0` when `n == 1`
     - Results sorted by strategy name
     - _Requirements: 4.2_
-  - [ ] 5.2 Implement `_measure_space(work_dir: Path, config: PipelineConfig) -> dict[SpaceKey, int]`
+  - [x] 5.2 Implement `_measure_space(work_dir: Path, config: PipelineConfig) -> dict[SpaceKey, int]`
     - `SOURCE`: `config.source_video.stat().st_size`; `EXTRACTED_VIDEO`: sum `*.mkv` in `extracted/`; `EXTRACTED_AUDIO`: sum `*.mka`; `EXTRACTED_OTHER`: all other files in `extracted/` (non-recursive)
     - `CHUNKS`: recursive sum of `chunks/`; `AUDIO_INTERMEDIATE`: `.flac` files in `audio/` (non-recursive); `AUDIO_FINAL`: non-`.flac` files in `audio/` (non-recursive)
     - `ENCODING_WORKSPACE`: recursive sum of `encoding/`; `ENCODING_OUTPUTS`: recursive sum of `encoded/`; `FINAL`: recursive sum of `final/`
     - Missing dirs/files → 0; `OSError` on individual `stat()` → log DEBUG, treat as 0
     - _Requirements: 3.1, 3.2, 3.4, 3.6_
-  - [ ] 5.3 Write property test for space measurement accuracy (Property 4)
+  - [x] 5.3 Write property test for space measurement accuracy (Property 4)
     - **Property 4: Space measurement accuracy**
     - **Validates: Requirements 3.1, 3.3, 3.4**
     - Generate random directory trees with known file sizes using `tmp_path`; assert `_measure_space()` returns exact byte counts per category; total == sum of parts
     - Tag: `# Feature: pipeline-metrics-report, Property 4: Space measurement accuracy`
     - _Requirements: 3.1, 3.3, 3.4_
-  - [ ] 5.4 Write property test for convergence stats math (Property 5)
+  - [x] 5.4 Write property test for convergence stats math (Property 5)
     - **Property 5: Convergence stats math**
     - **Validates: Requirements 4.2, 4.1a**
     - Generate random sequences of attempt counts (integers ≥ 1) fed incrementally via `record_step`; assert all `ConvergenceStats` fields match `min/max/sum/mean/population_stddev/len` of input sequences; also assert resume from persisted YAML produces identical results
     - Tag: `# Feature: pipeline-metrics-report, Property 5: Convergence stats math`
     - _Requirements: 4.2, 4.1a_
 
-- [ ] 6. Checkpoint — Ensure all tests pass
+- [-] 6. Checkpoint — Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 7. Implement `YamlMetricsCollector`

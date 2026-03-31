@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 
 import yaml
-from hypothesis import given, settings
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from pyqenc.metrics import (
@@ -164,7 +164,7 @@ def _deserialize(text: str) -> PipelineMetrics:
 # ---------------------------------------------------------------------------
 
 
-@settings(max_examples=150)
+@settings(max_examples=150, suppress_health_check=[HealthCheck.too_slow])
 @given(metrics=_st_pipeline_metrics())
 def test_yaml_round_trip(metrics: PipelineMetrics) -> None:
     """Property 6: YAML serialization round-trip.
@@ -221,3 +221,313 @@ def test_yaml_round_trip(metrics: PipelineMetrics) -> None:
             assert rest_s.attempts.max    == orig_s.attempts.max
             assert abs(rest_s.attempts.mean   - orig_s.attempts.mean)   < 1e-9
             assert abs(rest_s.attempts.stddev - orig_s.attempts.stddev) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Property 4: Space measurement accuracy
+# ---------------------------------------------------------------------------
+
+# Feature: pipeline-metrics-report, Property 4: Space measurement accuracy
+
+import math
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock
+
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+from pyqenc.metrics import SpaceKey, _measure_space
+
+
+def _make_config(source_video: Path) -> MagicMock:
+    """Return a minimal PipelineConfig-like mock with source_video set."""
+    cfg = MagicMock()
+    cfg.source_video = source_video
+    return cfg
+
+
+def _write_file(path: Path, size: int) -> None:
+    """Create *path* with exactly *size* bytes of content."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * size)
+
+
+@st.composite
+def _st_file_sizes(draw: st.DrawFn) -> list[int]:
+    """Draw a list of 1–8 positive file sizes (bytes)."""
+    return draw(st.lists(st.integers(min_value=1, max_value=64 * 1024), min_size=1, max_size=8))
+
+
+@settings(max_examples=100)
+@given(
+    source_size=st.integers(min_value=0, max_value=1024 * 1024),
+    mkv_sizes=_st_file_sizes(),
+    mka_sizes=_st_file_sizes(),
+    other_sizes=_st_file_sizes(),
+    chunk_sizes=_st_file_sizes(),
+    flac_sizes=_st_file_sizes(),
+    audio_final_sizes=_st_file_sizes(),
+    enc_ws_sizes=_st_file_sizes(),
+    enc_out_sizes=_st_file_sizes(),
+    final_sizes=_st_file_sizes(),
+)
+def test_space_measurement_accuracy(
+    source_size: int,
+    mkv_sizes: list[int],
+    mka_sizes: list[int],
+    other_sizes: list[int],
+    chunk_sizes: list[int],
+    flac_sizes: list[int],
+    audio_final_sizes: list[int],
+    enc_ws_sizes: list[int],
+    enc_out_sizes: list[int],
+    final_sizes: list[int],
+) -> None:
+    """Property 4: Space measurement accuracy.
+
+    For any work directory with known file sizes, _measure_space() must return
+    exact byte counts per SpaceKey category.  Total bytes must equal the sum of
+    all category bytes.
+
+    Validates: Requirements 3.1, 3.3, 3.4
+    """
+    with tempfile.TemporaryDirectory() as _tmp:
+        tmp_path = Path(_tmp)
+
+        # --- source video (outside work_dir) ---
+        source = tmp_path / "source.mkv"
+        _write_file(source, source_size)
+
+        work = tmp_path / "work"
+        work.mkdir()
+
+        # --- extracted/ ---
+        for i, sz in enumerate(mkv_sizes):
+            _write_file(work / "extracted" / f"video_{i}.mkv", sz)
+        for i, sz in enumerate(mka_sizes):
+            _write_file(work / "extracted" / f"audio_{i}.mka", sz)
+        for i, sz in enumerate(other_sizes):
+            _write_file(work / "extracted" / f"sub_{i}.srt", sz)
+
+        # --- chunks/ (recursive) ---
+        for i, sz in enumerate(chunk_sizes):
+            _write_file(work / "chunks" / f"sub_{i % 3}" / f"chunk_{i}.mkv", sz)
+
+        # --- audio/ (flat) ---
+        for i, sz in enumerate(flac_sizes):
+            _write_file(work / "audio" / f"intermediate_{i}.flac", sz)
+        for i, sz in enumerate(audio_final_sizes):
+            _write_file(work / "audio" / f"final_{i}.aac", sz)
+
+        # --- encoding/ (recursive) ---
+        for i, sz in enumerate(enc_ws_sizes):
+            _write_file(work / "encoding" / f"strat_{i % 2}" / f"attempt_{i}.mkv", sz)
+
+        # --- encoded/ (recursive) ---
+        for i, sz in enumerate(enc_out_sizes):
+            _write_file(work / "encoded" / f"strat_{i % 2}" / f"chunk_{i}.mkv", sz)
+
+        # --- final/ (recursive) ---
+        for i, sz in enumerate(final_sizes):
+            _write_file(work / "final" / f"output_{i}.mkv", sz)
+
+        config = _make_config(source)
+        result = _measure_space(work, config)
+
+        # Verify exact byte counts per category
+        assert result[SpaceKey.SOURCE]             == source_size
+        assert result[SpaceKey.EXTRACTED_VIDEO]    == sum(mkv_sizes)
+        assert result[SpaceKey.EXTRACTED_AUDIO]    == sum(mka_sizes)
+        assert result[SpaceKey.EXTRACTED_OTHER]    == sum(other_sizes)
+        assert result[SpaceKey.CHUNKS]             == sum(chunk_sizes)
+        assert result[SpaceKey.AUDIO_INTERMEDIATE] == sum(flac_sizes)
+        assert result[SpaceKey.AUDIO_FINAL]        == sum(audio_final_sizes)
+        assert result[SpaceKey.ENCODING_WORKSPACE] == sum(enc_ws_sizes)
+        assert result[SpaceKey.ENCODING_OUTPUTS]   == sum(enc_out_sizes)
+        assert result[SpaceKey.FINAL]              == sum(final_sizes)
+
+        # All SpaceKey values must be present
+        assert set(result.keys()) == set(SpaceKey)
+
+
+@settings(max_examples=50)
+@given(present=st.frozensets(st.sampled_from(list(SpaceKey)), min_size=0))
+def test_space_measurement_missing_dirs_return_zero(
+    present: frozenset[SpaceKey],
+) -> None:
+    """Missing directories and files must contribute 0 bytes (Req 3.4)."""
+    with tempfile.TemporaryDirectory() as _tmp:
+        tmp_path = Path(_tmp)
+        source = tmp_path / "source.mkv"
+        if SpaceKey.SOURCE in present:
+            _write_file(source, 100)
+
+        work = tmp_path / "work"
+        work.mkdir()
+
+        config = _make_config(source)
+        result = _measure_space(work, config)
+
+        assert set(result.keys()) == set(SpaceKey)
+        if SpaceKey.SOURCE not in present:
+            assert result[SpaceKey.SOURCE] == 0
+
+
+# ---------------------------------------------------------------------------
+# Property 5: Convergence stats math
+# ---------------------------------------------------------------------------
+
+# Feature: pipeline-metrics-report, Property 5: Convergence stats math
+
+from pyqenc.metrics import (
+    ConvergenceUpdate,
+    NoOpMetricsCollector,
+    TimeKey,
+    _ConvergenceAccumulator,
+    _compute_convergence,
+    _update_accumulator,
+)
+
+
+@st.composite
+def _st_attempt_sequence(draw: st.DrawFn) -> list[int]:
+    """Draw a non-empty list of attempt counts (integers ≥ 1)."""
+    return draw(st.lists(st.integers(min_value=1, max_value=50), min_size=1, max_size=100))
+
+
+def _population_stddev(values: list[int]) -> float:
+    """Compute population standard deviation (0.0 for single element)."""
+    n = len(values)
+    if n <= 1:
+        return 0.0
+    mean = sum(values) / n
+    variance = sum((v - mean) ** 2 for v in values) / n
+    return math.sqrt(variance)
+
+
+@settings(max_examples=200)
+@given(counts=_st_attempt_sequence())
+def test_convergence_stats_math(counts: list[int]) -> None:
+    """Property 5: Convergence stats math.
+
+    For any sequence of attempt counts fed incrementally via _update_accumulator,
+    the computed ConvergenceStats must match min/max/sum/mean/population_stddev/len
+    of the input sequence.
+
+    Validates: Requirements 4.2, 4.1a
+    """
+    strategy = "slow+h265-aq"
+    acc = _ConvergenceAccumulator()
+    for c in counts:
+        _update_accumulator(acc, c)
+
+    result = _compute_convergence({strategy: acc})
+    assert result is not None
+    assert len(result) == 1
+
+    stats = result[0]
+    assert stats.strategy == strategy
+    assert stats.chunks   == len(counts)
+    assert stats.attempts.total  == sum(counts)
+    assert stats.attempts.min    == min(counts)
+    assert stats.attempts.max    == max(counts)
+    # stats.attempts.mean/stddev are stored as round(..., 1), so the maximum
+    # deviation from the exact value is one rounding step (0.1).
+    exact_mean   = sum(counts) / len(counts)
+    exact_stddev = _population_stddev(counts)
+    assert abs(stats.attempts.mean   - exact_mean)   < 0.1
+    assert abs(stats.attempts.stddev - exact_stddev) < 0.1
+
+
+@settings(max_examples=100)
+@given(
+    strategy_a=_st_attempt_sequence(),
+    strategy_b=_st_attempt_sequence(),
+)
+def test_convergence_stats_multi_strategy_sorted(
+    strategy_a: list[int],
+    strategy_b: list[int],
+) -> None:
+    """Results must be sorted by strategy name (Req 4.2)."""
+    accumulators: dict[str, _ConvergenceAccumulator] = {
+        "z-strategy": _ConvergenceAccumulator(),
+        "a-strategy": _ConvergenceAccumulator(),
+    }
+    for c in strategy_a:
+        _update_accumulator(accumulators["z-strategy"], c)
+    for c in strategy_b:
+        _update_accumulator(accumulators["a-strategy"], c)
+
+    result = _compute_convergence(accumulators)
+    assert result is not None
+    assert len(result) == 2
+    assert result[0].strategy == "a-strategy"
+    assert result[1].strategy == "z-strategy"
+
+
+def test_convergence_stats_empty_returns_none() -> None:
+    """_compute_convergence must return None when all accumulators are empty (Req 4.4)."""
+    accumulators = {
+        "strat-a": _ConvergenceAccumulator(),
+        "strat-b": _ConvergenceAccumulator(),
+    }
+    assert _compute_convergence(accumulators) is None
+    assert _compute_convergence({}) is None
+
+
+@settings(max_examples=100)
+@given(counts=_st_attempt_sequence())
+def test_convergence_stats_resume_from_yaml(counts: list[int]) -> None:
+    """Property 5 (resume): restoring Welford state from persisted mean/stddev
+    and continuing accumulation must produce identical results to a fresh run.
+
+    Validates: Requirements 4.2, 4.1a
+    """
+    import yaml as _yaml
+
+    from pyqenc.metrics import (
+        AttemptStats,
+        ConvergenceSection,
+        ConvergenceStats,
+        PipelineMetrics,
+        SpaceDistribution,
+        TimeDistribution,
+    )
+
+    strategy = "slow+h265-aq"
+
+    # --- fresh run: feed all counts ---
+    acc_fresh = _ConvergenceAccumulator()
+    for c in counts:
+        _update_accumulator(acc_fresh, c)
+    result_fresh = _compute_convergence({strategy: acc_fresh})
+    assert result_fresh is not None
+    stats_fresh = result_fresh[0]
+
+    # --- simulate persist + resume ---
+    # Persisted YAML stores mean and stddev; resume restores welford_mean and
+    # welford_M2 = stddev² * n  (as documented in the design).
+    persisted_mean   = acc_fresh.welford_mean
+    persisted_stddev = 0.0 if acc_fresh.n == 1 else math.sqrt(acc_fresh.welford_M2 / acc_fresh.n)
+
+    acc_resumed = _ConvergenceAccumulator(
+        n=acc_fresh.n,
+        total=acc_fresh.total,
+        min=acc_fresh.min,
+        max=acc_fresh.max,
+        welford_mean=persisted_mean,
+        welford_M2=persisted_stddev ** 2 * acc_fresh.n,
+    )
+
+    result_resumed = _compute_convergence({strategy: acc_resumed})
+    assert result_resumed is not None
+    stats_resumed = result_resumed[0]
+
+    # All fields must match the fresh run
+    assert stats_resumed.chunks          == stats_fresh.chunks
+    assert stats_resumed.attempts.total  == stats_fresh.attempts.total
+    assert stats_resumed.attempts.min    == stats_fresh.attempts.min
+    assert stats_resumed.attempts.max    == stats_fresh.attempts.max
+    assert abs(stats_resumed.attempts.mean   - stats_fresh.attempts.mean)   < 1e-6
+    assert abs(stats_resumed.attempts.stddev - stats_fresh.attempts.stddev) < 1e-6

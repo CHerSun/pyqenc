@@ -40,6 +40,11 @@ __all__ = [
     # Protocol + implementations
     "MetricsCollector",
     "NoOpMetricsCollector",
+    # Internal helpers exposed for testing
+    "_ConvergenceAccumulator",
+    "_update_accumulator",
+    "_compute_convergence",
+    "_measure_space",
     # Added in task 7:
     # "YamlMetricsCollector",
 ]
@@ -300,6 +305,153 @@ class MetricsCollector(Protocol):
         not call it.
         """
         ...
+
+
+# ---------------------------------------------------------------------------
+# Internal convergence accumulator
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _ConvergenceAccumulator:
+    """Per-strategy running state for Welford's online mean/variance algorithm.
+
+    All fields are updated incrementally via :func:`_update_accumulator` so
+    that no raw attempt list needs to be stored in memory or on disk.
+    """
+
+    n:            int   = 0    # number of chunks that completed convergence
+    total:        int   = 0    # sum of all attempt counts
+    min:          int   = 0    # minimum attempt count seen
+    max:          int   = 0    # maximum attempt count seen
+    welford_mean: float = 0.0  # running mean (Welford)
+    welford_M2:   float = 0.0  # running sum of squared deviations (Welford)
+
+
+def _update_accumulator(acc: _ConvergenceAccumulator, x: int) -> None:
+    """Update *acc* with a new observation *x* using Welford's online algorithm."""
+    acc.n     += 1
+    acc.total += x
+    acc.min    = x if acc.n == 1 else min(acc.min, x)
+    acc.max    = x if acc.n == 1 else max(acc.max, x)
+    delta      = x - acc.welford_mean
+    acc.welford_mean += delta / acc.n
+    acc.welford_M2   += delta * (x - acc.welford_mean)  # uses updated mean
+
+
+def _compute_convergence(
+    accumulators: dict[str, _ConvergenceAccumulator],
+) -> list[ConvergenceStats] | None:
+    """Build :class:`ConvergenceStats` list from running accumulators.
+
+    Returns ``None`` when all accumulators have ``n == 0`` (no data collected),
+    which causes the ``convergence`` section to be omitted from the YAML output.
+    Results are sorted by strategy name for deterministic output.
+    """
+    if all(acc.n == 0 for acc in accumulators.values()):
+        return None
+
+    results: list[ConvergenceStats] = []
+    for strategy, acc in sorted(accumulators.items()):
+        if acc.n == 0:
+            continue
+        stddev = 0.0 if acc.n == 1 else math.sqrt(acc.welford_M2 / acc.n)
+        results.append(
+            ConvergenceStats(
+                strategy=strategy,
+                chunks=acc.n,
+                attempts=AttemptStats(
+                    total=acc.total,
+                    min=acc.min,
+                    mean=round(acc.welford_mean, 1),
+                    max=acc.max,
+                    stddev=round(stddev, 1),
+                ),
+            )
+        )
+    return results or None
+
+
+# ---------------------------------------------------------------------------
+# Space measurement
+# ---------------------------------------------------------------------------
+
+
+def _measure_space(work_dir: Path, config: "PipelineConfig") -> dict[SpaceKey, int]:
+    """Measure on-disk sizes for each :class:`SpaceKey` category.
+
+    Performs a point-in-time filesystem scan using only ``Path.stat()`` and
+    directory traversal — no ffprobe or ffmpeg calls.  Missing directories or
+    files contribute ``0`` bytes.  ``OSError`` on individual ``stat()`` calls
+    is caught and logged at DEBUG level.
+
+    Args:
+        work_dir: Pipeline work directory root.
+        config:   Pipeline configuration (provides ``source_video`` path).
+
+    Returns:
+        Mapping of :class:`SpaceKey` to byte counts.
+    """
+
+    def _safe_size(p: Path) -> int:
+        try:
+            return p.stat().st_size
+        except OSError as exc:
+            logger.debug("Space scan: cannot stat %s: %s", p, exc)
+            return 0
+
+    def _sum_dir_recursive(d: Path) -> int:
+        if not d.is_dir():
+            return 0
+        return sum(_safe_size(f) for f in d.rglob("*") if f.is_file())
+
+    def _sum_dir_flat(d: Path, *, suffix: str | None = None, exclude_suffix: str | None = None) -> int:
+        """Sum files in *d* (non-recursive), optionally filtered by suffix."""
+        if not d.is_dir():
+            return 0
+        total = 0
+        for f in d.iterdir():
+            if not f.is_file():
+                continue
+            if suffix is not None and f.suffix.lower() != suffix:
+                continue
+            if exclude_suffix is not None and f.suffix.lower() == exclude_suffix:
+                continue
+            total += _safe_size(f)
+        return total
+
+    extracted = work_dir / "extracted"
+    audio_dir = work_dir / "audio"
+
+    # extracted/ split: .mkv → video, .mka → audio, everything else → other
+    extracted_video = 0
+    extracted_audio = 0
+    extracted_other = 0
+    if extracted.is_dir():
+        for f in extracted.iterdir():
+            if not f.is_file():
+                continue
+            suf = f.suffix.lower()
+            sz  = _safe_size(f)
+            if suf == ".mkv":
+                extracted_video += sz
+            elif suf == ".mka":
+                extracted_audio += sz
+            else:
+                extracted_other += sz
+
+    return {
+        SpaceKey.SOURCE:             _safe_size(config.source_video),
+        SpaceKey.EXTRACTED_VIDEO:    extracted_video,
+        SpaceKey.EXTRACTED_AUDIO:    extracted_audio,
+        SpaceKey.EXTRACTED_OTHER:    extracted_other,
+        SpaceKey.CHUNKS:             _sum_dir_recursive(work_dir / "chunks"),
+        SpaceKey.AUDIO_INTERMEDIATE: _sum_dir_flat(audio_dir, suffix=".flac"),
+        SpaceKey.AUDIO_FINAL:        _sum_dir_flat(audio_dir, exclude_suffix=".flac"),
+        SpaceKey.ENCODING_WORKSPACE: _sum_dir_recursive(work_dir / "encoding"),
+        SpaceKey.ENCODING_OUTPUTS:   _sum_dir_recursive(work_dir / "encoded"),
+        SpaceKey.FINAL:              _sum_dir_recursive(work_dir / "final"),
+    }
 
 
 # ---------------------------------------------------------------------------
