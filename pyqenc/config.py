@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from pyqenc.models import CodecConfig, Strategy, StrategyConfig
+from pyqenc.models import CodecConfig, Strategy
 
 
 @dataclass
@@ -227,25 +227,25 @@ class ConfigManager:
         except ValueError:
             return False
 
-    def parse_strategy(self, strategy: str) -> list[StrategyConfig]:
-        """Parse strategy string into list of encoder configurations.
+    def parse_strategy(self, strategy: str) -> list[Strategy]:
+        """Parse strategy string into a list of resolved ``Strategy`` objects.
 
         Supports flexible specifications:
-        - "slow+h265-aq": specific preset+profile
-        - "slow+h265*": preset with profile wildcard (all h265 profiles)
-        - "slow": all profiles with slow preset (validated per codec)
-        - "+h265*": all presets with h265 profiles (wildcard, from h265-10bit codec)
-        - "+h265-aq": all presets with specific profile (from h265-10bit codec)
-        - "": all preset+profile combinations (all codecs, all presets per codec)
+        - ``"slow+h265-aq"``: specific preset+profile
+        - ``"slow+h265*"``: preset with profile wildcard (all h265 profiles)
+        - ``"slow"``: all profiles with slow preset (validated per codec)
+        - ``"+h265*"``: all presets with h265 profiles (wildcard)
+        - ``"+h265-aq"``: all presets with specific profile
+        - ``""``: all preset+profile combinations (all codecs, all presets per codec)
 
         Args:
-            strategy: Strategy string
+            strategy: Strategy string.
 
         Returns:
-            List of StrategyConfig instances
+            List of resolved ``Strategy`` instances.
 
         Raises:
-            ValueError: If strategy format is invalid or components not found
+            ValueError: If strategy format is invalid or components not found.
         """
         # Handle empty string - all combinations
         if strategy == "":
@@ -270,49 +270,45 @@ class ConfigManager:
         # Handle preset+profile case
         return self._expand_preset_profile(preset_part, profile_part)
 
-    def _expand_all_combinations(self) -> list[StrategyConfig]:
+    def _expand_all_combinations(self) -> list[Strategy]:
         """Expand empty strategy to all preset+profile combinations.
 
         Returns:
-            List of all possible StrategyConfig instances
+            List of all possible ``Strategy`` instances.
         """
         configs = []
-
         for profile_name, profile in self._profiles.items():
             codec = self.get_codec(profile.codec)
             for preset in codec.presets:
-                configs.append(StrategyConfig(
-                    preset=preset,
-                    profile=profile_name,
-                    codec=codec,
-                    profile_args=profile.extra_args
+                configs.append(Strategy(
+                    preset       = preset,
+                    profile      = profile_name,
+                    codec        = codec,
+                    profile_args = profile.extra_args,
                 ))
-
         return configs
 
     def _expand_profile_pattern(
         self,
         preset: str | None,
         profile_pattern: str
-    ) -> list[StrategyConfig]:
+    ) -> list[Strategy]:
         """Expand profile pattern with optional preset.
 
         Args:
-            preset: Preset name or None for all presets
-            profile_pattern: Profile pattern (may contain wildcards)
+            preset:          Preset name or ``None`` for all presets.
+            profile_pattern: Profile pattern (may contain wildcards).
 
         Returns:
-            List of StrategyConfig instances
+            List of resolved ``Strategy`` instances.
         """
         # Find matching profiles
         matching_profiles = []
         if "*" in profile_pattern:
-            # Wildcard matching
             for profile_name in self._profiles.keys():
                 if fnmatch.fnmatch(profile_name, profile_pattern):
                     matching_profiles.append(profile_name)
         else:
-            # Exact match
             if profile_pattern in self._profiles:
                 matching_profiles.append(profile_pattern)
             else:
@@ -327,123 +323,93 @@ class ConfigManager:
                 f"Available profiles: {list(self._profiles.keys())}"
             )
 
-        # Generate configs
         configs = []
         for profile_name in matching_profiles:
             profile = self._profiles[profile_name]
-            codec = self.get_codec(profile.codec)
+            codec   = self.get_codec(profile.codec)
 
             if preset is None:
-                # All presets for this profile's codec
                 for p in codec.presets:
-                    configs.append(StrategyConfig(
-                        preset=p,
-                        profile=profile_name,
-                        codec=codec,
-                        profile_args=profile.extra_args
+                    configs.append(Strategy(
+                        preset       = p,
+                        profile      = profile_name,
+                        codec        = codec,
+                        profile_args = profile.extra_args,
                     ))
             else:
-                # Validate preset is supported by this codec
                 if preset not in codec.presets:
                     raise ValueError(
                         f"Preset '{preset}' not supported by codec '{codec.name}'. "
                         f"Supported presets: {codec.presets}"
                     )
-                configs.append(StrategyConfig(
-                    preset=preset,
-                    profile=profile_name,
-                    codec=codec,
-                    profile_args=profile.extra_args
+                configs.append(Strategy(
+                    preset       = preset,
+                    profile      = profile_name,
+                    codec        = codec,
+                    profile_args = profile.extra_args,
                 ))
-
         return configs
 
     def _expand_preset_profile(
         self,
         preset: str,
         profile_pattern: str
-    ) -> list[StrategyConfig]:
+    ) -> list[Strategy]:
         """Expand preset+profile pattern.
 
         Args:
-            preset: Preset name
-            profile_pattern: Profile pattern (may contain wildcards or be '*' for all)
+            preset:          Preset name.
+            profile_pattern: Profile pattern (may contain wildcards or be ``'*'`` for all).
 
         Returns:
-            List of StrategyConfig instances
+            List of resolved ``Strategy`` instances.
         """
-        # Handle wildcard for all profiles
         if profile_pattern == "*":
             configs = []
             for profile_name, profile in self._profiles.items():
                 codec = self.get_codec(profile.codec)
-                # Validate preset is supported by this codec
                 if preset in codec.presets:
-                    configs.append(StrategyConfig(
-                        preset=preset,
-                        profile=profile_name,
-                        codec=codec,
-                        profile_args=profile.extra_args
+                    configs.append(Strategy(
+                        preset       = preset,
+                        profile      = profile_name,
+                        codec        = codec,
+                        profile_args = profile.extra_args,
                     ))
-
             if not configs:
                 raise ValueError(
                     f"Preset '{preset}' is not supported by any codec. "
                     f"Available codecs: {list(self._codecs.keys())}"
                 )
-
             return configs
-
-        # Use profile pattern expansion with specific preset
         return self._expand_profile_pattern(preset, profile_pattern)
 
-    def expand_strategies(self, strategies: list[str] | None) -> list[StrategyConfig]:
-        """Expand strategy specifications into full list of configurations.
+    def resolve_strategies(self, strategies: list[str] | None) -> list[Strategy]:
+        """Resolve strategy pattern strings into fully resolved ``Strategy`` objects.
+
+        Expands each pattern, deduplicates by ``(preset, profile)``, and returns
+        the resolved list.  Pass ``None`` to use the defaults from the config file.
 
         Args:
-            strategies: List of strategy patterns, or None for default from config
+            strategies: List of strategy pattern strings, or ``None`` for defaults.
 
         Returns:
-            List of fully resolved StrategyConfig objects
+            Deduplicated list of :class:`~pyqenc.models.Strategy` objects.
         """
-        # Use default strategies if none provided
         if strategies is None:
             strategies = self.get_default_strategies()
 
-        # Expand each strategy pattern
-        all_configs = []
-        for strategy in strategies:
-            configs = self.parse_strategy(strategy)
-            all_configs.extend(configs)
+        all_configs: list[Strategy] = []
+        for s in strategies:
+            all_configs.extend(self.parse_strategy(s))
 
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_configs = []
-        for config in all_configs:
-            key = (config.preset, config.profile)
+        seen: set[tuple[str, str]] = set()
+        unique: list[Strategy] = []
+        for cfg in all_configs:
+            key = (cfg.preset, cfg.profile)
             if key not in seen:
                 seen.add(key)
-                unique_configs.append(config)
-
-        return unique_configs
-
-    def resolve_strategies(self, strategies: list[str] | None) -> list[Strategy]:
-        """Resolve strategy patterns into typed ``Strategy`` objects.
-
-        Expands each pattern via :meth:`expand_strategies`, then converts each
-        resolved ``StrategyConfig`` into a ``Strategy`` using the canonical
-        ``preset+profile`` display name.
-
-        Args:
-            strategies: List of strategy pattern strings, or ``None`` to use
-                        the defaults from the loaded config file.
-
-        Returns:
-            Deduplicated list of :class:`~pyqenc.models.Strategy` objects in
-            the same order as the expanded configurations.
-        """
-        configs = self.expand_strategies(strategies)
-        return [Strategy.from_name(f"{sc.preset}+{sc.profile}") for sc in configs]
+                unique.append(cfg)
+        return unique
 
     def get_audio_output_config(self) -> AudioOutputConfig:
         """Parse and return the ``audio_output`` configuration section.

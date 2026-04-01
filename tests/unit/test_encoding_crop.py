@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pyqenc.models import ChunkMetadata, CodecConfig, CropParams, StrategyConfig
+from pyqenc.models import ChunkMetadata, CodecConfig, CropParams, Strategy
 from pyqenc.phases.encoding import ChunkEncoder
 from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
 
@@ -15,14 +15,13 @@ from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
 def _make_encoder(crop_params: CropParams | None = None) -> ChunkEncoder:
     """Build a minimal ChunkEncoder with mocked dependencies."""
     return ChunkEncoder(
-        config_manager=MagicMock(),
         quality_evaluator=MagicMock(),
         work_dir=Path("/tmp/work"),
         crop_params=crop_params,
     )
 
 
-def _make_strategy_config() -> StrategyConfig:
+def _make_strategy() -> Strategy:
     codec = CodecConfig(
         name="h265-8bit",
         encoder="libx265",
@@ -30,7 +29,7 @@ def _make_strategy_config() -> StrategyConfig:
         default_crf=28.0,
         crf_range=(0.0, 51.0),
     )
-    return StrategyConfig(preset="fast", profile="h265", codec=codec, profile_args=[])
+    return Strategy(preset="fast", profile="h265", codec=codec, profile_args=[])
 
 
 def _make_chunk() -> ChunkMetadata:
@@ -50,7 +49,7 @@ def _captured_cmd(encoder: ChunkEncoder, crop: CropParams | None) -> list[str]:
     """Run _encode_with_ffmpeg with a mocked runner and return the captured cmd."""
     encoder._crop_params = crop
     chunk = _make_chunk()
-    strategy = _make_strategy_config()
+    strategy = _make_strategy()
     output = Path("/tmp/out.mkv")
 
     captured: list[list] = []

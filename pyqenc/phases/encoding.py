@@ -8,6 +8,7 @@ quality targets, including parallel execution and artifact-based resumption.
 
 import asyncio
 import logging
+import os
 import shutil as _shutil
 import subprocess
 from collections.abc import Callable
@@ -41,7 +42,7 @@ from pyqenc.models import (
     CropParams,
     PhaseOutcome,
     QualityTarget,
-    StrategyConfig,
+    Strategy,
     VideoMetadata,
 )
 from pyqenc.phase import Artifact, Phase, PhaseResult
@@ -396,7 +397,6 @@ class ChunkEncoder:
 
     def __init__(
         self,
-        config_manager:    ConfigManager,
         quality_evaluator: QualityEvaluator,
         work_dir:          Path,
         crop_params:       CropParams | None = None,
@@ -406,38 +406,35 @@ class ChunkEncoder:
         """Initialize chunk encoder.
 
         Args:
-            config_manager:    Configuration manager for strategy parsing
-            quality_evaluator: Quality evaluator for metric calculation
-            work_dir:          Working directory for artifacts
+            quality_evaluator: Quality evaluator for metric calculation.
+            work_dir:          Working directory for artifacts.
             crop_params:       Optional crop parameters to apply to every chunk attempt.
             cleanup_level:     Controls deletion of intermediate attempt files after
                                a pair converges (Req 12.3).
             visual_hash:       When ``True``, prepend a deterministic emoji to every
                                chunk log line for visual distinction in parallel output.
         """
-        self.config_manager    = config_manager
         self.quality_evaluator = quality_evaluator
         self.work_dir          = work_dir
         self._crop_params      = crop_params
         self._cleanup_level    = cleanup_level
         self._visual_hash      = visual_hash
 
-    def _get_output_dir(self, strategy: str) -> Path:
+    def _get_output_dir(self, strategy: Strategy) -> Path:
         """Get the CRF search workspace directory for *strategy*.
 
         Attempt files (intermediate) are written here during the CRF search.
         On convergence the winning attempt is hard-linked into ``_get_encoded_dir``.
 
         Args:
-            strategy: Strategy name (display form, e.g. ``'slow+h265-aq'``).
+            strategy: Encoding strategy.
 
         Returns:
             Path to ``<work_dir>/encoding/<safe_strategy>/``.
         """
-        safe_strategy = strategy.replace("+", "_").replace(":", "_")
-        return self.work_dir / ENCODING_WORKSPACE_DIR / safe_strategy
+        return self.work_dir / ENCODING_WORKSPACE_DIR / strategy.safe_name
 
-    def _get_encoded_dir(self, strategy: str) -> Path:
+    def _get_encoded_dir(self, strategy: Strategy) -> Path:
         """Get the finalized output directory for *strategy*.
 
         Hard-linked winning attempts, result sidecars, and quality graphs are
@@ -445,18 +442,17 @@ class ChunkEncoder:
         ``COMPLETE``.
 
         Args:
-            strategy: Strategy name (display form, e.g. ``'slow+h265-aq'``).
+            strategy: Encoding strategy.
 
         Returns:
             Path to ``<work_dir>/encoded/<safe_strategy>/``.
         """
-        safe_strategy = strategy.replace("+", "_").replace(":", "_")
-        return self.work_dir / ENCODED_OUTPUT_DIR / safe_strategy
+        return self.work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name
 
     def _get_attempt_path(
         self,
         chunk_id:   str,
-        strategy:   str,
+        strategy:   Strategy,
         resolution: str | None = None,
         crf:        float | None = None,
     ) -> Path:
@@ -468,7 +464,7 @@ class ChunkEncoder:
 
         Args:
             chunk_id:   Chunk identifier (e.g. ``'00꞉00꞉00․000-00꞉05꞉20․000'``).
-            strategy:   Strategy name.
+            strategy:   Encoding strategy.
             resolution: Output resolution string (e.g. ``'1920x800'``).
             crf:        CRF value used for this attempt.
 
@@ -485,7 +481,7 @@ class ChunkEncoder:
     def _check_existing_encoding(
         self,
         chunk_id:   str,
-        strategy:   str,
+        strategy:   Strategy,
         resolution: str | None,
         crf:        float,
     ) -> AttemptMetadata | None:
@@ -497,7 +493,7 @@ class ChunkEncoder:
 
         Args:
             chunk_id:   Chunk identifier.
-            strategy:   Strategy name.
+            strategy:   Encoding strategy.
             resolution: Expected resolution string (e.g. ``'1920x800'``).
                         When ``None`` any resolution is accepted.
             crf:        CRF value to look for.
@@ -509,7 +505,7 @@ class ChunkEncoder:
         if not output_dir.exists():
             return None
 
-        for candidate in output_dir.glob(ENCODED_ATTEMPT_GLOB_PATTERN):
+        for candidate in output_dir.glob(f"{chunk_id}.*.crf*.mkv"):
             m = ENCODED_ATTEMPT_NAME_PATTERN.match(candidate.name)
             if m is None:
                 continue
@@ -534,7 +530,7 @@ class ChunkEncoder:
             return AttemptMetadata(
                 path=candidate,
                 chunk_id=chunk_id,
-                strategy=strategy,
+                strategy=strategy.name,
                 crf=file_crf,
                 resolution=file_resolution,
                 file_size_bytes=size,
@@ -544,17 +540,15 @@ class ChunkEncoder:
     def _load_history_from_sidecars(
         self,
         chunk_id:        str,
-        strategy:        str,
+        strategy:        Strategy,
         quality_targets: list[QualityTarget],
-        crf_min:         float,
-        crf_max:         float,
     ) -> tuple[CRFHistory, float | None]:
         """Pre-populate a ``CRFHistory`` from all existing per-attempt sidecar files.
 
-        Scans every ``*.yaml`` in the strategy output directory that belongs to
-        ``chunk_id`` and adds each attempt to the history.  Also returns the
-        highest-passing CRF as the recommended starting point for the next
-        search iteration.
+        Scans ``<chunk_id>.*.crf*.yaml`` in the strategy output directory so the
+        filesystem does the chunk filtering rather than Python.  Also returns the
+        highest-passing CRF as the recommended starting point for the next search
+        iteration.
 
         Per-attempt sidecars store ALL measured metrics; pass/fail is always
         re-evaluated from ``metrics`` against the current quality targets
@@ -565,10 +559,8 @@ class ChunkEncoder:
 
         Args:
             chunk_id:        Chunk identifier to filter sidecars.
-            strategy:        Strategy name.
+            strategy:        Encoding strategy (provides CRF range and safe_name).
             quality_targets: Current quality targets for pass/fail re-evaluation.
-            crf_min:         Minimum valid CRF for the codec (sentinel init).
-            crf_max:         Maximum valid CRF for the codec (sentinel init).
 
         Returns:
             Tuple of ``(history, seed_crf)`` where ``seed_crf`` is the highest
@@ -578,6 +570,7 @@ class ChunkEncoder:
         import yaml as _yaml
 
         output_dir = self._get_output_dir(strategy)
+        crf_min, crf_max = strategy.codec.crf_range if strategy.codec else (0.0, 63.0)
         history    = CRFHistory(fail_crf=crf_max, pass_crf=crf_min)
         seed_crf:  float | None = None
 
@@ -586,9 +579,10 @@ class ChunkEncoder:
 
         required_keys = {f"{t.metric}_{t.statistic}" for t in quality_targets}
 
-        for candidate in output_dir.glob(ENCODED_ATTEMPT_GLOB_PATTERN):
+        # Use chunk_id in the glob so the filesystem filters — avoids scanning all files
+        for candidate in output_dir.glob(f"{chunk_id}.*.crf*.mkv"):
             m = ENCODED_ATTEMPT_NAME_PATTERN.match(candidate.name)
-            if m is None or m.group("chunk_id") != chunk_id:
+            if m is None:
                 continue
 
             # Try YAML sidecar first, then legacy JSON
@@ -636,7 +630,7 @@ class ChunkEncoder:
 
     def _finalize_winning_attempt(
         self,
-        strategy:        str,
+        strategy:        Strategy,
         chunk_id:        str,
         resolution:      str,
         winning_attempt: Path,
@@ -653,7 +647,7 @@ class ChunkEncoder:
            ``encoded/<strategy>/`` — its presence marks the pair as ``COMPLETE``.
 
         Args:
-            strategy:        Strategy name (display form).
+            strategy:        Encoding strategy.
             chunk_id:        Chunk identifier.
             resolution:      Output resolution string (e.g. ``'1920x800'``).
             winning_attempt: Path to the winning attempt ``.mkv`` in ``encoding/``.
@@ -690,7 +684,7 @@ class ChunkEncoder:
         if self._cleanup_level >= CleanupLevel.INTERMEDIATE:
             encoding_dir = self._get_output_dir(strategy)
             if encoding_dir.exists():
-                for attempt_file in list(encoding_dir.glob(ENCODED_ATTEMPT_GLOB_PATTERN)):
+                for attempt_file in list(encoding_dir.glob(f"{chunk_id}.*.crf*.mkv")):
                     m = ENCODED_ATTEMPT_NAME_PATTERN.match(attempt_file.name)
                     if m and m.group("chunk_id") == chunk_id:
                         # Delete the attempt .mkv, its per-attempt sidecar, and its graph
@@ -725,35 +719,31 @@ class ChunkEncoder:
 
     def _encode_with_ffmpeg(
         self,
-        chunk:           ChunkMetadata,
-        strategy_config: StrategyConfig,
-        crf:             float,
-        output_file:     Path,
+        chunk:       ChunkMetadata,
+        strategy:    Strategy,
+        crf:         float,
+        output_file: Path,
     ) -> bool:
         """Encode chunk with FFmpeg using the runner's ``.tmp``-then-rename protocol.
 
-        The runner substitutes ``output_file`` with a ``<stem>.tmp`` sibling,
-        runs ffmpeg, and renames to the final name on success.
-
         Args:
-            chunk:           Chunk information.
-            strategy_config: Strategy configuration.
-            crf:             CRF value to use.
-            output_file:     Intended final output path.
+            chunk:       Chunk information.
+            strategy:    Encoding strategy (provides ffmpeg args).
+            crf:         CRF value to use.
+            output_file: Intended final output path.
 
         Returns:
             ``True`` if encoding succeeded, ``False`` otherwise.
         """
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Build FFmpeg command
-        ffmpeg_args = strategy_config.to_ffmpeg_args(crf)
+        ffmpeg_args = strategy.to_ffmpeg_args(crf)
 
         # Inject crop filter when crop params are set and non-empty
         if self._crop_params and not self._crop_params.is_empty():
             ffmpeg_args = ["-vf", self._crop_params.to_ffmpeg_filter(), *ffmpeg_args]
 
-        cmd: list[str | Path] = [
+        cmd: list[str | os.PathLike] = [
             "ffmpeg",
             "-y",
             "-i", chunk.path,
@@ -784,7 +774,7 @@ class ChunkEncoder:
         self,
         chunk:            ChunkMetadata,
         reference:        VideoMetadata,
-        strategy:         str,
+        strategy:         Strategy,
         quality_targets:  list[QualityTarget],
         initial_crf:      float = CRF_INITIAL_DEFAULT,
         force:            bool  = False,
@@ -795,7 +785,7 @@ class ChunkEncoder:
         Args:
             chunk:           Chunk information.
             reference:       Reference chunk for quality comparison.
-            strategy:        Strategy string (e.g., ``'slow+h265-aq'``).
+            strategy:        Encoding strategy.
             quality_targets: Quality targets to meet.
             initial_crf:     Initial CRF value (if no history available).
             force:           If ``False``, reuse existing encoding that meets targets.
@@ -804,33 +794,18 @@ class ChunkEncoder:
         Returns:
             ChunkEncodingResult with encoding outcome.
         """
-        logger.debug(fmt_chunk_start(strategy, chunk.chunk_id, self._visual_hash))
-
-        # Parse strategy up-front so we know the codec CRF range
-        try:
-            strategy_configs = self.config_manager.parse_strategy(strategy)
-            if not strategy_configs:
-                raise ValueError(f"Strategy '{strategy}' resolved to no configurations")
-            strategy_config = strategy_configs[0]
-        except ValueError as e:
-            logger.error("Invalid strategy '%s': %s", strategy, e)
-            return ChunkEncodingResult(
-                chunk_id=chunk.chunk_id,
-                strategy=strategy,
-                success=False,
-                error=str(e),
-            )
-
-        crf_min, crf_max = strategy_config.codec.crf_range
+        logger.debug(fmt_chunk_start(strategy.name, chunk.chunk_id, self._visual_hash))
 
         # Pre-populate CRF history from sidecar files so adjust_crf has complete
         # bounds from the very first call and the search resumes correctly.
-        history, seed_crf = self._load_history_from_sidecars(chunk.chunk_id, strategy, quality_targets, crf_min, crf_max)
+        history, seed_crf = self._load_history_from_sidecars(
+            chunk.chunk_id, strategy, quality_targets,
+        )
 
         if seed_crf is not None:
             current_crf = seed_crf
             logger.info(
-                fmt_chunk(strategy, chunk.chunk_id,
+                fmt_chunk(strategy.name, chunk.chunk_id,
                 f"Restored {history.attempts} attempt(s) from sidecars; resuming from best-passing CRF {current_crf:{PADDING_CRF}}",
                 self._visual_hash)
             )
@@ -848,13 +823,13 @@ class ChunkEncoder:
 
             if attempt_number == THRESHOLD_ATTEMPTS_WARNING:
                 logger.warning(
-                    fmt_chunk(strategy, chunk.chunk_id,
+                    fmt_chunk(strategy.name, chunk.chunk_id,
                               f"reached {THRESHOLD_ATTEMPTS_WARNING} attempts without meeting targets — "
                               "continuing search",
                               self._visual_hash)
                 )
 
-            logger.debug(fmt_chunk_attempt_start(strategy, chunk.chunk_id, attempt_number, current_crf, self._visual_hash))
+            logger.debug(fmt_chunk_attempt_start(strategy.name, chunk.chunk_id, attempt_number, current_crf, self._visual_hash))
 
             # Determine the final output path for this CRF (resolution unknown yet)
             # We'll encode to a temp file, probe resolution, then rename to final path.
@@ -914,7 +889,7 @@ class ChunkEncoder:
                                 best_string   = " NEW BEST"
                         logger.info(
                             fmt_chunk_attempt_result(
-                                strategy, chunk.chunk_id, attempt_number,
+                                strategy.name, chunk.chunk_id, attempt_number,
                                 f"{pass_fail} with CRF {existing.crf:{PADDING_CRF}} ({metric_summary}){best_string} [reused]",
                                 self._visual_hash,
                             )
@@ -925,7 +900,7 @@ class ChunkEncoder:
                         )
                         if next_crf is None:
                             if final_attempt is not None:
-                                logger.info(fmt_chunk_final(strategy, chunk.chunk_id, best_crf, attempt_number, self._visual_hash))
+                                logger.info(fmt_chunk_final(strategy.name, chunk.chunk_id, best_crf, attempt_number, self._visual_hash))
                                 # Hard-link winning attempt into encoded/ and write result sidecar
                                 self._finalize_winning_attempt(
                                     strategy=strategy,
@@ -938,7 +913,7 @@ class ChunkEncoder:
                             else:
                                 logger.warning(
                                     "CRF search space exhausted for chunk %s strategy %s after %d attempts",
-                                    chunk.chunk_id, strategy, attempt_number,
+                                    chunk.chunk_id, strategy.name, attempt_number,
                                 )
                             break
                         current_crf = next_crf
@@ -946,7 +921,7 @@ class ChunkEncoder:
                     else:
                         # File exists but sidecar is missing or incomplete — re-evaluate metrics only
                         logger.info(
-                            fmt_chunk(strategy, chunk.chunk_id,
+                            fmt_chunk(strategy.name, chunk.chunk_id,
                             f"existing attempt (crf={existing.crf:.2f}) — re-evaluating metrics",
                             self._visual_hash),
                         )
@@ -966,7 +941,7 @@ class ChunkEncoder:
                     chunk.chunk_id, strategy, resolution=resolution, crf=current_crf
                 )
                 encode_success = self._encode_with_ffmpeg(
-                    chunk, strategy_config, current_crf, output_file
+                    chunk, strategy, current_crf, output_file
                 )
 
                 if not encode_success:
@@ -974,7 +949,7 @@ class ChunkEncoder:
                     logger.error(error_msg)
                     return ChunkEncodingResult(
                         chunk_id=chunk.chunk_id,
-                        strategy=strategy,
+                        strategy=strategy.name,
                         success=False,
                         attempts=attempt_number,
                         error=error_msg,
@@ -1027,7 +1002,7 @@ class ChunkEncoder:
             attempt_meta = AttemptMetadata(
                 path=output_file,
                 chunk_id=chunk.chunk_id,
-                strategy=strategy,
+                strategy=strategy.name,
                 crf=current_crf,
                 resolution=resolution or "",
                 file_size_bytes=output_file.stat().st_size,
@@ -1051,7 +1026,7 @@ class ChunkEncoder:
             )
             logger.info(
                 fmt_chunk_attempt_result(
-                    strategy, chunk.chunk_id, attempt_number,
+                    strategy.name, chunk.chunk_id, attempt_number,
                     f"{pass_fail} with CRF {current_crf:{PADDING_CRF}} ({metric_summary}){best_string}",
                     self._visual_hash,
                 )
@@ -1063,7 +1038,7 @@ class ChunkEncoder:
 
             if next_crf is None:
                 if final_attempt is not None:
-                    logger.info(fmt_chunk_final(strategy, chunk.chunk_id, best_crf, attempt_number, self._visual_hash))
+                    logger.info(fmt_chunk_final(strategy.name, chunk.chunk_id, best_crf, attempt_number, self._visual_hash))
                     # Hard-link winning attempt into encoded/ and write result sidecar
                     self._finalize_winning_attempt(
                         strategy=strategy,
@@ -1076,7 +1051,7 @@ class ChunkEncoder:
                 else:
                     logger.warning(
                         "CRF search space exhausted for chunk %s strategy %s after %d attempts",
-                        chunk.chunk_id, strategy, attempt_number,
+                        chunk.chunk_id, strategy.name, attempt_number,
                     )
                 break
 
@@ -1086,7 +1061,7 @@ class ChunkEncoder:
         if final_attempt is not None:
             return ChunkEncodingResult(
                 chunk_id=chunk.chunk_id,
-                strategy=strategy,
+                strategy=strategy.name,
                 success=True,
                 final_crf=best_crf,
                 attempts=attempt_number,
@@ -1098,7 +1073,7 @@ class ChunkEncoder:
             logger.error("Chunk %s: %s", chunk.chunk_id, error_msg)
             return ChunkEncodingResult(
                 chunk_id=chunk.chunk_id,
-                strategy=strategy,
+                strategy=strategy.name,
                 success=False,
                 attempts=attempt_number,
                 error=error_msg,
@@ -1112,72 +1087,72 @@ class ChunkQueue:
     Prioritizes completing started chunks before starting new ones.
     """
 
-    def __init__(self, chunks: list[ChunkMetadata], strategies: list[str]):
+    def __init__(self, chunks: list[ChunkMetadata], strategies: list[Strategy]):
         """Initialize chunk queue.
 
         Args:
-            chunks: List of chunks to encode
-            strategies: List of strategies to apply
+            chunks:     List of chunks to encode.
+            strategies: List of strategies to apply.
         """
-        self.chunks = chunks
+        self.chunks     = chunks
         self.strategies = strategies
-        self._pending: list[tuple[ChunkMetadata, str]] = []
-        self._in_progress: set[tuple[str, str]] = set()
-        self._completed: set[tuple[str, str]] = set()
+        self._pending:     list[tuple[ChunkMetadata, Strategy]] = []
+        self._in_progress: set[tuple[str, str]]                 = set()
+        self._completed:   set[tuple[str, str]]                 = set()
 
         # Build initial queue (all chunk+strategy combinations)
         for chunk in chunks:
             for strategy in strategies:
                 self._pending.append((chunk, strategy))
 
-    def get_next(self) -> tuple[ChunkMetadata, str] | None:
+    def get_next(self) -> tuple[ChunkMetadata, Strategy] | None:
         """Get next chunk+strategy to encode.
 
         Prioritizes completing started chunks before starting new ones.
 
         Returns:
-            Tuple of (chunk, strategy) or None if queue empty
+            Tuple of (chunk, strategy) or None if queue empty.
         """
         if not self._pending:
             return None
 
         # Check if any in-progress chunks have other strategies pending
         for chunk, strategy in self._pending:
-            if any((chunk.chunk_id, s) in self._in_progress for s in self.strategies):
+            if any((chunk.chunk_id, s.name) in self._in_progress for s in self.strategies):
                 # This chunk has work in progress, prioritize it
                 self._pending.remove((chunk, strategy))
-                self._in_progress.add((chunk.chunk_id, strategy))
+                self._in_progress.add((chunk.chunk_id, strategy.name))
                 return (chunk, strategy)
 
         # No in-progress chunks, take first pending
         chunk, strategy = self._pending.pop(0)
-        self._in_progress.add((chunk.chunk_id, strategy))
+        self._in_progress.add((chunk.chunk_id, strategy.name))
         return (chunk, strategy)
 
-    def mark_complete(self, chunk_id: str, strategy: str) -> None:
+    def mark_complete(self, chunk_id: str, strategy: Strategy) -> None:
         """Mark chunk+strategy as complete.
 
         Args:
-            chunk_id: Chunk identifier
-            strategy: Strategy name
+            chunk_id: Chunk identifier.
+            strategy: Encoding strategy.
         """
-        self._in_progress.discard((chunk_id, strategy))
-        self._completed.add((chunk_id, strategy))
+        self._in_progress.discard((chunk_id, strategy.name))
+        self._completed.add((chunk_id, strategy.name))
 
-    def mark_failed(self, chunk_id: str, strategy: str) -> None:
+    def mark_failed(self, chunk_id: str, strategy: Strategy) -> None:
         """Mark chunk+strategy as failed.
 
         Args:
-            chunk_id: Chunk identifier
-            strategy: Strategy name
+            chunk_id: Chunk identifier.
+            strategy: Encoding strategy.
         """
-        self._in_progress.discard((chunk_id, strategy))
+        self._in_progress.discard((chunk_id, strategy.name))
 
     def is_empty(self) -> bool:
         """Check if queue is empty.
 
         Returns:
-            True if no more work to do
+            True if no more work to do.
         """
         return len(self._pending) == 0 and len(self._in_progress) == 0
 
@@ -1185,9 +1160,9 @@ class ChunkQueue:
         """Get current progress.
 
         Returns:
-            Tuple of (completed, total)
+            Tuple of (completed, total).
         """
-        total = len(self.chunks) * len(self.strategies)
+        total     = len(self.chunks) * len(self.strategies)
         completed = len(self._completed)
         return (completed, total)
 
@@ -1196,7 +1171,7 @@ async def _encode_chunk_async(
     encoder:         ChunkEncoder,
     chunk:           ChunkMetadata,
     reference:       VideoMetadata,
-    strategy:        str,
+    strategy:        Strategy,
     quality_targets: list[QualityTarget],
     initial_crf:     float,
     force:           bool,
@@ -1207,7 +1182,7 @@ async def _encode_chunk_async(
         encoder:         ChunkEncoder instance.
         chunk:           Chunk to encode.
         reference:       Reference chunk.
-        strategy:        Strategy to use.
+        strategy:        Encoding strategy.
         quality_targets: Quality targets.
         initial_crf:     Initial CRF value.
         force:           Whether to force re-encoding.
@@ -1233,7 +1208,7 @@ async def _encode_chunks_parallel(
     encoder:          ChunkEncoder,
     chunks:           list[ChunkMetadata],
     reference_dir:    Path,
-    strategies:       list[str],
+    strategies:       list[Strategy],
     quality_targets:  list[QualityTarget],
     max_parallel:     int,
     force:            bool,
@@ -1245,13 +1220,13 @@ async def _encode_chunks_parallel(
     """Encode chunks in parallel with semaphore control.
 
     Args:
-        encoder:           ChunkEncoder instance
-        chunks:            List of chunks to encode
-        reference_dir:     Directory containing reference chunks
-        strategies:        List of strategies to use
-        quality_targets:   Quality targets to meet
-        max_parallel:      Maximum concurrent encodings
-        force:             Whether to force re-encoding
+        encoder:           ChunkEncoder instance.
+        chunks:            List of chunks to encode.
+        reference_dir:     Directory containing reference chunks.
+        strategies:        List of strategies to use.
+        quality_targets:   Quality targets to meet.
+        max_parallel:      Maximum concurrent encodings.
+        force:             Whether to force re-encoding.
         optimization_crfs: Per-strategy moving-average CRF from the optimization phase.
                            When provided, used as the initial seed instead of the codec
                            ``default_crf``.  Updated as ``(stored + new) / 2`` after each
@@ -1269,7 +1244,7 @@ async def _encode_chunks_parallel(
                            after each chunk/strategy pair converges.
 
     Returns:
-        EncodingResult with all encoding outcomes
+        EncodingResult with all encoding outcomes.
     """
     result    = EncodingResult()
     semaphore = asyncio.Semaphore(max_parallel)
@@ -1278,41 +1253,37 @@ async def _encode_chunks_parallel(
     # Per-strategy moving-average CRF seed.  Prefer optimization avg_crf when available;
     # fall back to the codec default_crf, then to CRF_INITIAL_DEFAULT.
     # Updated after each winning chunk as (stored + new) / 2.
-    def _initial_crf(strategy: str) -> float:
-        if optimization_crfs and strategy in optimization_crfs and optimization_crfs[strategy] > 0.0:
-            return optimization_crfs[strategy]
-        try:
-            cfgs = encoder.config_manager.parse_strategy(strategy)
-            return cfgs[0].codec.default_crf if cfgs else CRF_INITIAL_DEFAULT
-        except (ValueError, IndexError):
-            return CRF_INITIAL_DEFAULT
+    def _initial_crf(strategy: Strategy) -> float:
+        if optimization_crfs and strategy.name in optimization_crfs and optimization_crfs[strategy.name] > 0.0:
+            return optimization_crfs[strategy.name]
+        return strategy.codec.default_crf
 
-    moving_crfs: dict[str, float] = {s: _initial_crf(s) for s in strategies}
+    moving_crfs: dict[str, float] = {s.name: _initial_crf(s) for s in strategies}
 
     # Pre-populate result with COMPLETE pairs from recovery (skip them in the queue)
     complete_pairs: set[tuple[str, str]] = set()
     if phase_recovery is not None:
         for chunk in chunks:
             for strategy in strategies:
-                pair_recovery = phase_recovery.pairs.get((chunk.chunk_id, strategy))
+                pair_recovery = phase_recovery.pairs.get((chunk.chunk_id, strategy.name))
                 if pair_recovery is not None and pair_recovery.state == ArtifactState.COMPLETE:
                     logger.debug(
                         "Skipping COMPLETE pair %s/%s (encoding result sidecar valid)",
-                        chunk.chunk_id, strategy,
+                        chunk.chunk_id, strategy.name,
                     )
                     if chunk.chunk_id not in result.encoded_chunks:
                         result.encoded_chunks[chunk.chunk_id] = {}
                     if pair_recovery.winning_file is None:
-                        raise ValueError(f"Winning file not found for {chunk.chunk_id}/{strategy}")
-                    result.encoded_chunks[chunk.chunk_id][strategy] = pair_recovery.winning_file
+                        raise ValueError(f"Winning file not found for {chunk.chunk_id}/{strategy.name}")
+                    result.encoded_chunks[chunk.chunk_id][strategy.name] = pair_recovery.winning_file
                     result.reused_count += 1
-                    complete_pairs.add((chunk.chunk_id, strategy))
+                    complete_pairs.add((chunk.chunk_id, strategy.name))
 
     queue = ChunkQueue(chunks, strategies)
     # Remove already-complete pairs from the queue
     queue._pending = [
         (c, s) for (c, s) in queue._pending
-        if (c.chunk_id, s) not in complete_pairs
+        if (c.chunk_id, s.name) not in complete_pairs
     ]
     queue._completed = complete_pairs.copy()
 
@@ -1339,7 +1310,7 @@ async def _encode_chunks_parallel(
 
                 # Use moving-average CRF seed for this strategy (rounded to granularity),
                 # falling back to the codec default_crf when no winners yet.
-                stored_crf        = moving_crfs[strategy]
+                stored_crf        = moving_crfs[strategy.name]
                 chunk_initial_crf = round(stored_crf / CRF_GRANULARITY) * CRF_GRANULARITY
 
                 # Encode chunk
@@ -1358,11 +1329,11 @@ async def _encode_chunks_parallel(
                     if chunk.chunk_id not in result.encoded_chunks:
                         result.encoded_chunks[chunk.chunk_id] = {}
                     encoded_path = chunk_result.encoded_file.path if chunk_result.encoded_file else None
-                    result.encoded_chunks[chunk.chunk_id][strategy] = encoded_path
+                    result.encoded_chunks[chunk.chunk_id][strategy.name] = encoded_path
 
                     # Update moving-average seed: blend stored value with this winning CRF.
                     if chunk_result.final_crf is not None and not chunk_result.reused:
-                        moving_crfs[strategy] = (moving_crfs[strategy] + chunk_result.final_crf) / 2.0
+                        moving_crfs[strategy.name] = (moving_crfs[strategy.name] + chunk_result.final_crf) / 2.0
 
                     if chunk_result.reused:
                         result.reused_count += 1
@@ -1377,7 +1348,7 @@ async def _encode_chunks_parallel(
                         collector.step(
                             TimeKey.ENCODING_MAIN,
                             convergence_update=ConvergenceUpdate(
-                                strategy      = strategy,
+                                strategy      = strategy.name,
                                 attempt_count = chunk_result.attempts,
                             ),
                         )
@@ -1389,7 +1360,6 @@ async def _encode_chunks_parallel(
                     counter_failed += 1
                     if bar is not None:
                         bar(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.FAILED)
-
 
     # Start worker tasks
     workers = [asyncio.create_task(encode_worker()) for _ in range(max_parallel)]
@@ -1403,21 +1373,20 @@ async def _encode_chunks_parallel(
 
 
 def encode_all_chunks(
-    chunks:           list[ChunkMetadata],
-    reference_dir:    Path,
-    strategies:       list[str],
-    quality_targets:  list[QualityTarget],
-    work_dir:         Path,
-    config_manager:   ConfigManager,
-    collector:        "MetricsCollector",
-    max_parallel:     int          = 2,
-    force:            bool         = False,
-    dry_run:          bool         = False,
-    crop_params:      CropParams | None = None,
-    encoding_yaml:    Path | None  = None,
-    cleanup_level:    CleanupLevel = CleanupLevel.NONE,
+    chunks:            list[ChunkMetadata],
+    reference_dir:     Path,
+    strategies:        list[str],
+    quality_targets:   list[QualityTarget],
+    work_dir:          Path,
+    collector:         "MetricsCollector",
+    max_parallel:      int               = 2,
+    force:             bool              = False,
+    dry_run:           bool              = False,
+    crop_params:       CropParams | None = None,
+    encoding_yaml:     Path | None       = None,
+    cleanup_level:     CleanupLevel      = CleanupLevel.NONE,
     optimization_crfs: dict[str, float] | None = None,
-    visual_hash:      bool         = True,
+    visual_hash:       bool              = True,
 ) -> EncodingResult:
     """Encode all chunks with quality-targeted CRF adjustment.
 
@@ -1429,16 +1398,16 @@ def encode_all_chunks(
     - Parallel encoding of chunks that need work
 
     Args:
-        chunks:            List of chunks to encode
-        reference_dir:     Directory containing reference chunks (already cropped)
-        strategies:        List of encoding strategies to use
-        quality_targets:   Quality targets to meet
-        work_dir:          Working directory for artifacts
-        config_manager:    Configuration manager
+        chunks:            List of chunks to encode.
+        reference_dir:     Directory containing reference chunks (already cropped).
+        strategies:        List of encoding strategy name strings to use.
+        quality_targets:   Quality targets to meet.
+        work_dir:          Working directory for artifacts.
+        collector:         Metrics collector for timing and convergence tracking.
         max_parallel:      Maximum concurrent encoding processes
         force:             If False, reuse existing encodings that meet current targets
         dry_run:           If True, only report what would be done without encoding
-        crop_params:       Crop parameters to apply uniformly to every chunk attempt.
+        crop_params:       Crop parameters to apply uniformly to every chunk attempt.                           When ``None``, no cropping is applied.
                            When ``None``, no cropping is applied.
         encoding_yaml:     Optional path to ``encoding.yaml`` for crop pre-validation
                            and persistence.  When provided, crop pre-validation
@@ -1503,12 +1472,13 @@ def encode_all_chunks(
         logger.debug("Wrote encoding.yaml (crop=%s)", crop_params)
 
     # --- Step 3: Artifact recovery via _recover_encoding_attempts (Req 3.6) ---
-    chunk_ids = [c.chunk_id for c in chunks]
-    phase_recovery = _recover_encoding_attempts(work_dir, chunk_ids, strategies)
+    chunk_ids      = [c.chunk_id for c in chunks]
+    strategy_names = [s if isinstance(s, str) else s.name for s in strategies]
+    phase_recovery = _recover_encoding_attempts(work_dir, chunk_ids, strategy_names)
 
     if dry_run:
-        pending_count = len(phase_recovery.pending)
-        complete_count = len(chunk_ids) * len(strategies) - pending_count
+        pending_count  = len(phase_recovery.pending)
+        complete_count = len(chunk_ids) * len(strategy_names) - pending_count
         logger.info("[DRY-RUN] Encoding recovery: %d COMPLETE, %d pending", complete_count, pending_count)
         if pending_count == 0:
             logger.info("[DRY-RUN] Status: Complete (all chunks already encoded)")
@@ -1518,20 +1488,22 @@ def encode_all_chunks(
         result.reused_count = complete_count
         return result
 
+    # Resolve Strategy objects (with codec) for the parallel worker
+    resolved_strategies: list[Strategy] = ConfigManager().resolve_strategies(strategy_names)
+
     # Create encoder
     encoder = ChunkEncoder(
-        config_manager=config_manager,
-        quality_evaluator=QualityEvaluator(work_dir),
-        work_dir=work_dir,
-        crop_params=crop_params,
-        cleanup_level=cleanup_level,
-        visual_hash=visual_hash,
+        quality_evaluator = QualityEvaluator(work_dir),
+        work_dir          = work_dir,
+        crop_params       = crop_params,
+        cleanup_level     = cleanup_level,
+        visual_hash       = visual_hash,
     )
 
     # Run parallel encoding — COMPLETE pairs are skipped inside _encode_chunks_parallel
     logger.debug("Starting parallel encoding with %d workers", max_parallel)
-    total_seconds = sum(c.end_timestamp - c.start_timestamp for c in chunks) * len(strategies)
-    with ProgressBar(total_seconds, title="Encoding", total_count=len(chunks) * len(strategies)) as advance:
+    total_seconds = sum(c.end_timestamp - c.start_timestamp for c in chunks) * len(resolved_strategies)
+    with ProgressBar(total_seconds, title="Encoding", total_count=len(chunks) * len(resolved_strategies)) as advance:
         # Update the bar for completed chunks
         chunks_by_id = {c.chunk_id: c for c in chunks}
         for r in phase_recovery.pairs.values():
@@ -1544,7 +1516,7 @@ def encode_all_chunks(
                 encoder           = encoder,
                 chunks            = chunks,
                 reference_dir     = reference_dir,
-                strategies        = strategies,
+                strategies        = resolved_strategies,
                 quality_targets   = quality_targets,
                 max_parallel      = max_parallel,
                 force             = force,
@@ -1928,8 +1900,6 @@ class EncodingPhase:
         Returns:
             ``EncodingPhaseResult`` after encoding.
         """
-        from pyqenc.config import ConfigManager
-
         work_dir = self._config.work_dir
 
         # Resolve chunks and strategies from dependencies
@@ -1975,7 +1945,6 @@ class EncodingPhase:
             strategies       = strategy_names,
             quality_targets  = self._config.quality_targets,
             work_dir         = work_dir,
-            config_manager   = ConfigManager(),
             collector        = self._collector,
             max_parallel     = self._config.max_parallel,
             force            = self._config.force,

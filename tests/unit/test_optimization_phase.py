@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from pyqenc.config import ConfigManager
 from pyqenc.models import (
     ChunkingMode,
     CleanupLevel,
@@ -34,9 +35,8 @@ from pyqenc.state import OptimizationParams, StrategyTestResult
 
 _QUALITY_TARGETS = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
 
-_S1 = Strategy.from_name("slow+h265-aq")
-_S2 = Strategy.from_name("slow+h265")
-_S3 = Strategy.from_name("veryslow+h265-aq")
+_cm = ConfigManager()
+_S1, _S2, _S3 = _cm.resolve_strategies(["slow+h265-aq", "slow+h265", "veryslow+h265-aq"])
 
 
 def _make_config(
@@ -70,7 +70,7 @@ def _persist_optimization(
     source: Path,
     strategy_results: list[StrategyTestResult],
     tolerance_pct: float,
-    selected: list[Strategy],
+    selected: list[str],
     crop: CropParams | None = None,
 ) -> None:
     """Write optimization.yaml with given results."""
@@ -88,7 +88,7 @@ def _make_results(sizes: list[int]) -> list[StrategyTestResult]:
     """Create StrategyTestResult list for S1, S2, S3 with given sizes."""
     strategies = [_S1, _S2, _S3]
     return [
-        StrategyTestResult(strategy=s, total_size=sz, avg_crf=20.0)
+        StrategyTestResult(strategy_name=s.name, total_size=sz, avg_crf=20.0)
         for s, sz in zip(strategies, sizes)
     ]
 
@@ -104,16 +104,14 @@ class TestApplyTolerance:
         results = _make_results([100, 110, 120])
         selected = OptimizationPhase._apply_tolerance(results, 0.0)
         assert len(selected) == 1
-        assert selected[0] == _S1
+        assert selected[0] == _S1.name
 
     def test_tolerance_includes_within_threshold(self) -> None:
-        # S1=100, S2=104 (4% above best), S3=120 (20% above best)
-        # With 5% tolerance: S1 and S2 selected
         results = _make_results([100, 104, 120])
         selected = OptimizationPhase._apply_tolerance(results, 5.0)
-        assert _S1 in selected
-        assert _S2 in selected
-        assert _S3 not in selected
+        assert _S1.name in selected
+        assert _S2.name in selected
+        assert _S3.name not in selected
 
     def test_tolerance_100_selects_all(self) -> None:
         results = _make_results([100, 150, 200])
@@ -126,20 +124,19 @@ class TestApplyTolerance:
     def test_zero_size_results_excluded(self) -> None:
         """Strategies with total_size=0 (failed) are excluded."""
         results = [
-            StrategyTestResult(strategy=_S1, total_size=0,   avg_crf=0.0),
-            StrategyTestResult(strategy=_S2, total_size=100, avg_crf=20.0),
+            StrategyTestResult(strategy_name=_S1.name, total_size=0,   avg_crf=0.0),
+            StrategyTestResult(strategy_name=_S2.name, total_size=100, avg_crf=20.0),
         ]
         selected = OptimizationPhase._apply_tolerance(results, 5.0)
-        assert _S1 not in selected
-        assert _S2 in selected
+        assert _S1.name not in selected
+        assert _S2.name in selected
 
     def test_exact_threshold_boundary_included(self) -> None:
         """A strategy exactly at the threshold (100% * (1 + tol/100)) is included."""
-        # S1=100, S2=105 — exactly at 5% threshold
         results = _make_results([100, 105, 200])
         selected = OptimizationPhase._apply_tolerance(results, 5.0)
-        assert _S1 in selected
-        assert _S2 in selected
+        assert _S1.name in selected
+        assert _S2.name in selected
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +159,7 @@ class TestToleranceReapplication:
             source    = config.source_video,
             strategy_results = results,
             tolerance_pct    = 5.0,   # old tolerance
-            selected         = [_S1, _S2],
+            selected         = [_S1.name, _S2.name],
         )
 
         phase = _make_phase(config)
@@ -184,7 +181,7 @@ class TestToleranceReapplication:
             source           = config.source_video,
             strategy_results = results,
             tolerance_pct    = 5.0,   # old tolerance — only S1, S2 selected
-            selected         = [_S1, _S2],
+            selected         = [_S1.name, _S2.name],
         )
 
         phase = _make_phase(config)
@@ -206,7 +203,7 @@ class TestToleranceReapplication:
             source           = config.source_video,
             strategy_results = results,
             tolerance_pct    = 5.0,
-            selected         = [_S1, _S2],
+            selected         = [_S1.name, _S2.name],
         )
 
         phase = _make_phase(config)
@@ -229,7 +226,7 @@ class TestToleranceReapplication:
             source           = config.source_video,
             strategy_results = results,
             tolerance_pct    = 5.0,   # same tolerance
-            selected         = [_S1, _S2],
+            selected         = [_S1.name, _S2.name],
         )
 
         phase = _make_phase(config)
@@ -253,7 +250,7 @@ class TestToleranceReapplication:
             source           = config.source_video,
             strategy_results = results,
             tolerance_pct    = 5.0,
-            selected         = [_S1, _S2],
+            selected         = [_S1.name, _S2.name],
         )
 
         phase = _make_phase(config)
@@ -270,23 +267,19 @@ class TestToleranceReapplication:
 
         # Only 2 of 3 strategies have results
         partial_results = [
-            StrategyTestResult(strategy=_S1, total_size=100, avg_crf=20.0),
-            StrategyTestResult(strategy=_S2, total_size=104, avg_crf=20.5),
+            StrategyTestResult(strategy_name=_S1.name, total_size=100, avg_crf=20.0),
+            StrategyTestResult(strategy_name=_S2.name, total_size=104, avg_crf=20.5),
         ]
         _persist_optimization(
             work_dir         = work_dir,
             source           = config.source_video,
             strategy_results = partial_results,
             tolerance_pct    = 5.0,
-            selected         = [_S1, _S2],
+            selected         = [_S1.name, _S2.name],
         )
 
         phase = _make_phase(config)
-        # With no chunking phase wired, this will fail on dependency check —
-        # that's expected; we just verify it does NOT return REUSED from re-application
         result = phase.run(dry_run=False)
-        # Should not be a REUSED result from tolerance re-application
-        # (it will fail on missing dependencies, which is correct)
         assert result.outcome != PhaseOutcome.REUSED or len(result.strategy_results) == 3
 
 

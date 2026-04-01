@@ -17,13 +17,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pyqenc.metrics import MetricsCollector, NoOpMetricsCollector, TimeKey
+from pyqenc.config import ConfigManager as _ConfigManager
 from pyqenc.models import (
     ChunkingMode,
     CleanupLevel,
     CropParams,
     PipelineConfig,
+    Strategy,
     VideoMetadata,
 )
+
+_STRATEGY_SLOW_H265 = _ConfigManager().resolve_strategies(["slow+h265"])[0]
 
 
 # ---------------------------------------------------------------------------
@@ -861,7 +865,7 @@ class TestOptimizationPhaseTiming:
         config = _make_config(tmp_path)
         config.work_dir.mkdir(parents=True, exist_ok=True)
         config.optimize   = optimize  # type: ignore[attr-defined]
-        config.strategies = [Strategy.from_name("slow+h265")]  # type: ignore[attr-defined]
+        config.strategies = [_STRATEGY_SLOW_H265]  # type: ignore[attr-defined]
 
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
@@ -885,15 +889,15 @@ class TestOptimizationPhaseTiming:
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector, optimize=True)
 
-        strategy = Strategy.from_name("slow+h265")
+        strategy = _STRATEGY_SLOW_H265
         # tolerance_pct and metrics_sampling must match config defaults so the
         # full-reuse path (step 4) is taken rather than falling through to encodes.
         persisted = OptimizationParams(
             crop             = CropParams(),
             test_chunks      = ["chunk_0"],
-            strategy_results = [StrategyTestResult(strategy=strategy, total_size=1024, avg_crf=28.0)],
+            strategy_results = [StrategyTestResult(strategy_name=strategy.name, total_size=1024, avg_crf=28.0)],
             tolerance_pct    = 5.0,   # matches PipelineConfig.strategy_selection_tolerance default
-            selected         = [strategy],
+            selected         = [strategy.name],
             quality_targets  = [],
             metrics_sampling = 10,    # matches PipelineConfig.metrics_sampling default
         )
@@ -922,7 +926,7 @@ class TestOptimizationPhaseTiming:
         from pyqenc.phases.optimization import _encode_strategy_test_chunks
 
         collector = _spy_collector()
-        strategy  = Strategy.from_name("slow+h265")
+        strategy  = _STRATEGY_SLOW_H265
 
         chunk = MagicMock(spec=ChunkMetadata)
         chunk.chunk_id        = "chunk_0"
@@ -981,7 +985,7 @@ class TestOptimizationPhaseTiming:
         from pyqenc.phases.optimization import _encode_strategy_test_chunks
 
         collector = _spy_collector()
-        strategy  = Strategy.from_name("slow+h265")
+        strategy  = _STRATEGY_SLOW_H265
 
         chunk = MagicMock(spec=ChunkMetadata)
         chunk.chunk_id        = "chunk_0"
@@ -1046,13 +1050,13 @@ class TestOptimizationPhaseTiming:
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector, optimize=True)  # type: ignore[arg-type]
 
-        strategy = Strategy.from_name("slow+h265")
+        strategy = _STRATEGY_SLOW_H265
         persisted = OptimizationParams(
             crop             = CropParams(),
             test_chunks      = ["chunk_0"],
-            strategy_results = [StrategyTestResult(strategy=strategy, total_size=1024, avg_crf=28.0)],
+            strategy_results = [StrategyTestResult(strategy_name=strategy.name, total_size=1024, avg_crf=28.0)],
             tolerance_pct    = 0.0,
-            selected         = [strategy],
+            selected         = [strategy.name],
             quality_targets  = [],
             metrics_sampling = 1,
         )
@@ -1115,13 +1119,13 @@ class TestEncodingPhaseTiming:
         from pyqenc.phases.optimization import OptimizationPhaseResult
         from pyqenc.state import StrategyTestResult
 
-        strategy = Strategy.from_name("slow+h265")
+        strategy = _STRATEGY_SLOW_H265
         return OptimizationPhaseResult(
             outcome           = PhaseOutcome.COMPLETED,
             artifacts         = [],
             message           = "ok",
             selected_strategies = [strategy],
-            strategy_results  = [StrategyTestResult(strategy=strategy, total_size=1024, avg_crf=28.0)],
+            strategy_results  = [StrategyTestResult(strategy_name=strategy.name, total_size=1024, avg_crf=28.0)],
         )
 
     def _make_phase(

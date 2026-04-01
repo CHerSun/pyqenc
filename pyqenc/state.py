@@ -27,7 +27,6 @@ from pyqenc.models import (
     ChunkMetadata,
     CropParams,
     SceneBoundary,
-    Strategy,
     VideoMetadata,
 )
 from pyqenc.utils.yaml_utils import write_yaml_atomic
@@ -258,21 +257,19 @@ class StrategyTestResult(BaseModel):
     """Per-strategy test result stored in ``optimization.yaml``.
 
     Attributes:
-        strategy:    The encoding strategy that was tested.
-        total_size:  Total encoded size across all test chunks in bytes.
-        avg_crf:     Average CRF value used across test chunks.
+        strategy_name: Display name of the strategy that was tested (e.g. ``'slow+h265-aq'``).
+        total_size:    Total encoded size across all test chunks in bytes.
+        avg_crf:       Average CRF value used across test chunks.
     """
 
-    strategy:   Strategy
-    total_size: int
-    avg_crf:    float
-
-    model_config = {"arbitrary_types_allowed": True}
+    strategy_name: str
+    total_size:    int
+    avg_crf:       float
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
         return {
-            "strategy":   self.strategy.name,
+            "strategy":   self.strategy_name,
             "total_size": self.total_size,
             "avg_crf":    self.avg_crf,
         }
@@ -281,9 +278,9 @@ class StrategyTestResult(BaseModel):
     def from_yaml_dict(cls, data: dict) -> "StrategyTestResult":
         """Restore from a dict loaded from ``optimization.yaml``."""
         return cls(
-            strategy   = Strategy.from_name(data["strategy"]),
-            total_size = int(data["total_size"]),
-            avg_crf    = float(data["avg_crf"]),
+            strategy_name = str(data["strategy"]),
+            total_size    = int(data["total_size"]),
+            avg_crf       = float(data["avg_crf"]),
         )
 
 
@@ -311,13 +308,13 @@ class OptimizationParams(BaseModel):
                           (treated as unknown — no mismatch triggered).
     """
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = {}
 
     crop:             CropParams | None        = None
     test_chunks:      list[str]                = Field(default_factory=list)
     strategy_results: list[StrategyTestResult] = Field(default_factory=list)
     tolerance_pct:    float                    = 0.0
-    selected:         list[Strategy]           = Field(default_factory=list)
+    selected:         list[str]                = Field(default_factory=list)
     quality_targets:  list[str]                = Field(default_factory=list)
     metrics_sampling: int | None               = None
 
@@ -327,7 +324,7 @@ class OptimizationParams(BaseModel):
             "test_chunks":      self.test_chunks,
             "tolerance_pct":    self.tolerance_pct,
             "strategy_results": [r.to_yaml_dict() for r in self.strategy_results],
-            "selected":         [s.name for s in self.selected],
+            "selected":         self.selected,
             "quality_targets":  self.quality_targets,
             "metrics_sampling": self.metrics_sampling,
         }
@@ -348,17 +345,13 @@ class OptimizationParams(BaseModel):
             StrategyTestResult.from_yaml_dict(r)
             for r in data.get("strategy_results", [])
         ]
-        selected = [
-            Strategy.from_name(name)
-            for name in data.get("selected", [])
-        ]
         raw_sampling = data.get("metrics_sampling")
         return cls(
             crop             = crop,
             test_chunks      = data.get("test_chunks", []),
             strategy_results = strategy_results,
             tolerance_pct    = float(data.get("tolerance_pct", 0.0)),
-            selected         = selected,
+            selected         = [str(n) for n in data.get("selected", [])],
             quality_targets  = data.get("quality_targets", []),
             metrics_sampling = int(raw_sampling) if raw_sampling is not None else None,
         )

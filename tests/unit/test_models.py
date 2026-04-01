@@ -7,7 +7,7 @@ from pyqenc.models import (
     CodecConfig,
     CropParams,
     QualityTarget,
-    StrategyConfig,
+    Strategy,
 )
 
 
@@ -97,8 +97,8 @@ class TestCropParams:
         assert str(crop) == "140 140 10 10"
 
 
-class TestStrategyConfig:
-    """Tests for StrategyConfig FFmpeg argument generation."""
+class TestStrategy:
+    """Tests for Strategy FFmpeg argument generation."""
 
     def test_to_ffmpeg_args(self):
         """Test FFmpeg argument generation."""
@@ -110,7 +110,7 @@ class TestStrategyConfig:
             crf_range=(0.0, 51.0)
         )
 
-        strategy = StrategyConfig(
+        strategy = Strategy(
             preset="slow",
             profile="h265-aq",
             codec=codec,

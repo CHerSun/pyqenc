@@ -27,8 +27,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from alive_progress import config_handler
-
-from pyqenc.config import ConfigManager
 from pyqenc.constants import (
     CHUNKS_DIR,
     CRF_GRANULARITY,
@@ -192,7 +190,7 @@ class OptimizationPhase:
                         state = ArtifactState.COMPLETE,
                     )],
                     message             = f"optimization.yaml loaded — {len(selected)} strategy(ies) selected",
-                    selected_strategies = selected,
+                    selected_strategies = self._resolve_selected(selected),
                     strategy_results    = persisted.strategy_results,
                 )
 
@@ -309,7 +307,7 @@ class OptimizationPhase:
                     state = ArtifactState.COMPLETE,
                 )],
                 message             = "tolerance re-applied from cached results",
-                selected_strategies = selected,
+                selected_strategies = self._resolve_selected(selected),
                 strategy_results    = persisted.strategy_results,
             )
             return self.result
@@ -336,7 +334,7 @@ class OptimizationPhase:
                     state = ArtifactState.COMPLETE,
                 )],
                 message             = "all strategy results reused",
-                selected_strategies = selected,
+                selected_strategies = self._resolve_selected(selected),
                 strategy_results    = persisted.strategy_results,
             )
             return self.result
@@ -388,7 +386,7 @@ class OptimizationPhase:
         cached_results: dict[str, StrategyTestResult] = {}
         if persisted is not None:
             for r in persisted.strategy_results:
-                cached_results[r.strategy.name] = r
+                cached_results[r.strategy_name] = r
 
         strategies_to_test = [
             s for s in self._config.strategies
@@ -440,9 +438,8 @@ class OptimizationPhase:
         ).save(opt_yaml)
 
         # Step 10: run test encodes for pending strategies
-        config_manager = ConfigManager()
-        encoder = _make_encoder(config_manager, work_dir, crop, self._config.visual_hash)
-        reference_dir  = work_dir / CHUNKS_DIR
+        encoder       = _make_encoder(work_dir, crop, self._config.visual_hash)
+        reference_dir = work_dir / CHUNKS_DIR
 
         all_results: list[StrategyTestResult] = list(cached_results.values())
 
@@ -455,11 +452,7 @@ class OptimizationPhase:
             if persisted_for_strategy is not None and persisted_for_strategy.avg_crf > 0.0:
                 strategy_initial_crf = persisted_for_strategy.avg_crf
             else:
-                try:
-                    strategy_configs     = config_manager.parse_strategy(strategy.name)
-                    strategy_initial_crf = strategy_configs[0].codec.default_crf if strategy_configs else CRF_INITIAL_DEFAULT
-                except (ValueError, IndexError):
-                    strategy_initial_crf = CRF_INITIAL_DEFAULT
+                strategy_initial_crf = strategy.codec.default_crf
 
             strategy_result = asyncio.run(
                 _encode_strategy_test_chunks(
@@ -525,7 +518,7 @@ class OptimizationPhase:
                 state = ArtifactState.COMPLETE,
             )],
             message             = f"{len(selected)} strategy(ies) selected",
-            selected_strategies = selected,
+            selected_strategies = self._resolve_selected(selected),
             strategy_results    = final_results,
         )
         return self.result
@@ -533,6 +526,19 @@ class OptimizationPhase:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _resolve_selected(self, selected_names: list[str]) -> list[Strategy]:
+        """Resolve strategy name strings to ``Strategy`` objects from the live config.
+
+        Args:
+            selected_names: Strategy display names from ``_apply_tolerance``.
+
+        Returns:
+            Matching ``Strategy`` objects from ``self._config.strategies``,
+            preserving the order of *selected_names*.
+        """
+        by_name = {s.name: s for s in self._config.strategies}
+        return [by_name[n] for n in selected_names if n in by_name]
 
     def _all_strategies_result(self) -> "OptimizationPhaseResult":
         """Return all configured strategies silently (all-strategies mode, scan path)."""
@@ -587,7 +593,7 @@ class OptimizationPhase:
                 test_chunks      = [],
                 strategy_results = [],
                 tolerance_pct    = 0.0,
-                selected         = list(self._config.strategies),
+                selected         = [s.name for s in self._config.strategies],
                 quality_targets  = current_targets,
                 metrics_sampling = current_sampling,
             ).save(opt_yaml)
@@ -663,8 +669,8 @@ class OptimizationPhase:
     def _apply_tolerance(
         results:       list[StrategyTestResult],
         tolerance_pct: float,
-    ) -> list[Strategy]:
-        """Select strategies within *tolerance_pct* of the best (smallest) result.
+    ) -> list[str]:
+        """Select strategy names within *tolerance_pct* of the best (smallest) result.
 
         Args:
             results:       Per-strategy test results ordered by increasing total size.
@@ -673,7 +679,7 @@ class OptimizationPhase:
                            ``0.0`` means exactly one strategy is selected.
 
         Returns:
-            List of selected ``Strategy`` objects.
+            List of selected strategy name strings.
         """
         successful = [r for r in results if r.total_size > 0]
         if not successful:
@@ -682,12 +688,12 @@ class OptimizationPhase:
         best_size = successful[0].total_size
         threshold = best_size * (1.0 + tolerance_pct / 100.0)
 
-        return [r.strategy for r in successful if r.total_size <= threshold]
+        return [r.strategy_name for r in successful if r.total_size <= threshold]
 
     def _log_optimization_summary(
         self,
         results:  list[StrategyTestResult],
-        selected: list[Strategy],
+        selected: list[str],
     ) -> None:
         """Emit the optimization summary table to the log.
 
@@ -695,7 +701,7 @@ class OptimizationPhase:
             results:  All strategy test results ordered by size.
             selected: Selected strategies.
         """
-        selected_names = {s.name for s in selected}
+        selected_names = set(selected)
 
         logger.info("")
         logger.info(
@@ -710,11 +716,11 @@ class OptimizationPhase:
         for res in results:
             size_mb  = res.total_size / (1024 * 1024) if res.total_size > 0 else 0.0
             size_str = f"{size_mb:,.1f}".replace(",", "\u202f")
-            marker   = " ◀ selected" if res.strategy.name in selected_names else ""
+            marker   = " ◀ selected" if res.strategy_name in selected_names else ""
             status   = "passed" if res.total_size > 0 else "failed"
             logger.info(
                 "  %-30s  %8.2f  %12s  %8s%s",
-                res.strategy.name[:30], res.avg_crf, size_str, status, marker,
+                res.strategy_name[:30], res.avg_crf, size_str, status, marker,
             )
 
         logger.info("")
@@ -825,25 +831,22 @@ def _select_test_chunks(
 
 
 def _make_encoder(
-    config_manager: ConfigManager,
-    work_dir:       Path,
-    crop_params:    CropParams | None,
-    visual_hash:    bool = True,
+    work_dir:    Path,
+    crop_params: CropParams | None,
+    visual_hash: bool = True,
 ) -> "ChunkEncoder":
     """Construct a ``ChunkEncoder`` for test encodes.
 
     Args:
-        config_manager: Configuration manager.
-        work_dir:       Pipeline working directory.
-        crop_params:    Crop parameters to apply.
-        visual_hash:    Whether to prepend emoji hash to chunk log lines.
+        work_dir:    Pipeline working directory.
+        crop_params: Crop parameters to apply.
+        visual_hash: Whether to prepend emoji hash to chunk log lines.
 
     Returns:
         Configured ``ChunkEncoder`` instance.
     """
     from pyqenc.phases.encoding import ChunkEncoder
     return ChunkEncoder(
-        config_manager    = config_manager,
         quality_evaluator = QualityEvaluator(work_dir),
         work_dir          = work_dir,
         crop_params       = crop_params,
@@ -939,7 +942,7 @@ async def _encode_strategy_test_chunks(
                     encoder,
                     chunk,
                     reference,
-                    strategy.name,
+                    strategy,
                     quality_targets,
                     chunk_initial_crf,
                     force=False,
@@ -969,7 +972,7 @@ async def _encode_strategy_test_chunks(
     avg_crf    = sum(crfs) / len(crfs) if crfs else 0.0
 
     return StrategyTestResult(
-        strategy   = strategy,
-        total_size = total_size,
-        avg_crf    = avg_crf,
+        strategy_name = strategy.name,
+        total_size    = total_size,
+        avg_crf       = avg_crf,
     )

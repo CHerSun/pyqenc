@@ -35,8 +35,10 @@ from pyqenc.state import JobState
 # Helpers
 # ---------------------------------------------------------------------------
 
+from pyqenc.config import ConfigManager
+
 _QUALITY_TARGETS = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
-_STRATEGY        = Strategy.from_name("slow+h265-aq")
+_STRATEGY        = ConfigManager().resolve_strategies(["slow+h265-aq"])[0]
 
 
 def _make_source(tmp_path: Path, size: int = 1024) -> Path:

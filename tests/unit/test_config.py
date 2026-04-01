@@ -236,11 +236,11 @@ class TestConfigManager:
         assert not config.validate_strategy("invalid+h265-aq")
         assert not config.validate_strategy("slow+invalid")
 
-    def test_expand_strategies_with_none(self):
+    def test_resolve_strategies_with_none(self):
         """Test expanding strategies with None uses defaults."""
         config = ConfigManager()
 
-        strategies = config.expand_strategies(None)
+        strategies = config.resolve_strategies(None)
         assert len(strategies) > 0
 
         # Should use default strategies from config
@@ -249,11 +249,11 @@ class TestConfigManager:
         assert any("h264" in p for p in profile_names)
         assert any("h265" in p for p in profile_names)
 
-    def test_expand_strategies_with_list(self):
+    def test_resolve_strategies_with_list(self):
         """Test expanding list of strategy patterns."""
         config = ConfigManager()
 
-        strategies = config.expand_strategies(["slow+h265-aq", "veryslow+h264"])
+        strategies = config.resolve_strategies(["slow+h265-aq", "veryslow+h264"])
         assert len(strategies) == 2
 
         # Check first strategy
@@ -264,12 +264,12 @@ class TestConfigManager:
         assert strategies[1].preset == "veryslow"
         assert strategies[1].profile == "h264"
 
-    def test_expand_strategies_removes_duplicates(self):
+    def test_resolve_strategies_removes_duplicates(self):
         """Test that duplicate strategies are removed."""
         config = ConfigManager()
 
         # Specify same strategy twice
-        strategies = config.expand_strategies(["slow+h265-aq", "slow+h265-aq"])
+        strategies = config.resolve_strategies(["slow+h265-aq", "slow+h265-aq"])
         assert len(strategies) == 1
         assert strategies[0].preset == "slow"
         assert strategies[0].profile == "h265-aq"
