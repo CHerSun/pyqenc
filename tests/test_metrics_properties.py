@@ -20,7 +20,6 @@ from hypothesis import strategies as st
 
 from pyqenc.metrics import (
     AttemptStats,
-    ConvergenceSection,
     ConvergenceStats,
     PipelineMetrics,
     TimeDistribution,
@@ -105,14 +104,11 @@ def _st_time_distribution(draw: st.DrawFn) -> TimeDistribution:
 
 
 @st.composite
-def _st_convergence_section(draw: st.DrawFn) -> ConvergenceSection:
-    strategies = draw(st.lists(_st_convergence_stats(), min_size=1, max_size=10))
-    return ConvergenceSection(strategies=strategies)
-
-
-@st.composite
 def _st_pipeline_metrics(draw: st.DrawFn) -> PipelineMetrics:
-    convergence = draw(st.one_of(st.none(), _st_convergence_section()))
+    convergence = draw(st.one_of(
+        st.none(),
+        st.lists(_st_convergence_stats(), min_size=1, max_size=10),
+    ))
     return PipelineMetrics(
         time_distribution=draw(_st_time_distribution()),
         convergence=convergence,
@@ -166,16 +162,14 @@ def test_yaml_round_trip(metrics: PipelineMetrics) -> None:
 
     assert (restored.convergence is None) == (metrics.convergence is None)
     if metrics.convergence is not None and restored.convergence is not None:
-        cv_orig = metrics.convergence
-        cv_rest = restored.convergence
-        assert len(cv_rest.strategies) == len(cv_orig.strategies)
-        for orig_s, rest_s in zip(cv_orig.strategies, cv_rest.strategies):
+        assert len(restored.convergence) == len(metrics.convergence)
+        for orig_s, rest_s in zip(metrics.convergence, restored.convergence):
             assert rest_s.strategy == orig_s.strategy
             assert rest_s.chunks   == orig_s.chunks
             assert rest_s.attempts.total  == orig_s.attempts.total
             assert rest_s.attempts.min    == orig_s.attempts.min
             assert rest_s.attempts.max    == orig_s.attempts.max
-            assert abs(rest_s.attempts.avg   - orig_s.attempts.avg)   < 1e-9
+            assert abs(rest_s.attempts.avg    - orig_s.attempts.avg)    < 1e-9
             assert abs(rest_s.attempts.stddev - orig_s.attempts.stddev) < 1e-9
 
 

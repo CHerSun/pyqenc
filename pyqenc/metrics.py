@@ -32,7 +32,6 @@ __all__ = [
     "ConvergenceStats",
     "TimeEntry",
     "TimeDistribution",
-    "ConvergenceSection",
     "PipelineMetrics",
     # Protocol + implementations
     "MetricsCollector",
@@ -210,15 +209,6 @@ class TimeDistribution(BaseModel):
     breakdown: list[TimeEntry] # sorted descending by seconds, zeros omitted
 
 
-class ConvergenceSection(BaseModel):
-    """Convergence statistics section of the metrics report.
-
-    Omitted from the report when no convergence data has been collected.
-    """
-
-    strategies: list[ConvergenceStats]
-
-
 class PipelineMetrics(BaseModel):
     """Top-level Pydantic model serialised to ``metrics.yaml``.
 
@@ -227,7 +217,7 @@ class PipelineMetrics(BaseModel):
     """
 
     time_distribution: TimeDistribution
-    convergence:       ConvergenceSection | None = None
+    convergence:       list[ConvergenceStats] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +435,7 @@ class YamlMetricsCollector(MetricsCollector):
 
         # Restore convergence accumulators (resume Welford from stddev² * n)
         if pm.convergence is not None:
-            for cs in pm.convergence.strategies:
+            for cs in pm.convergence:
                 n      = cs.chunks
                 stddev = cs.attempts.stddev
                 acc    = _ConvergenceAccumulator(
@@ -588,13 +578,10 @@ class YamlMetricsCollector(MetricsCollector):
         )
 
         convergence_stats = _compute_convergence(self._conv_accumulators)
-        convergence: ConvergenceSection | None = None
-        if convergence_stats is not None:
-            convergence = ConvergenceSection(strategies=convergence_stats)
 
         return PipelineMetrics(
             time_distribution=time_dist,
-            convergence=convergence,
+            convergence=convergence_stats,
         )
 
     def _write_atomic(self, metrics: PipelineMetrics) -> None:

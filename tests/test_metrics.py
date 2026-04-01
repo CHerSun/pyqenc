@@ -161,7 +161,7 @@ def test_convergence_present_after_step(tmp_path: Path) -> None:
 
     raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
     assert raw["pipeline_metrics"]["convergence"] is not None
-    strategies = raw["pipeline_metrics"]["convergence"]["strategies"]
+    strategies = raw["pipeline_metrics"]["convergence"]
     assert len(strategies) == 1
     assert strategies[0]["strategy"] == "slow+h265"
 
