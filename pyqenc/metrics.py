@@ -49,9 +49,12 @@ __all__ = [
 
 import contextlib
 import logging
-import math          # noqa: F401  (used in YamlMetricsCollector — task 7)
+import math  # noqa: F401  (used in YamlMetricsCollector — task 7)
 import time as _time  # noqa: F401  (used in YamlMetricsCollector — task 7)
-from dataclasses import dataclass, field  # noqa: F401  (field used in ConvergenceAccumulator — task 5)
+from dataclasses import (  # noqa: F401  (field used in ConvergenceAccumulator — task 5)
+    dataclass,
+    field,
+)
 from datetime import datetime  # noqa: F401  (used in flush — task 7)
 from enum import StrEnum
 from pathlib import Path  # noqa: F401  (used in YamlMetricsCollector — task 7)
@@ -69,7 +72,7 @@ logger = logging.getLogger(__name__)
 # Named constants
 # ---------------------------------------------------------------------------
 
-FLUSH_INTERVAL: int = 10
+FLUSH_INTERVAL: int = 3
 """Number of recording calls between automatic incremental flushes."""
 
 METRICS_YAML_FILENAME: str = "metrics.yaml"
