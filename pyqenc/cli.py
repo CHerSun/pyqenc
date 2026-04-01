@@ -84,6 +84,12 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
             "with the new source file. Has no effect without -y."
         ),
     )
+    parser.add_argument(
+        "--no-metrics",
+        action="store_true",
+        default=False,
+        help="Suppress metrics.yaml output (metrics are still collected internally but not written to disk)",
+    )
 
 
 def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
@@ -366,6 +372,7 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         audio_base_bitrate=args.audio_bitrate,
         metrics_sampling=metrics_sampling,
         visual_hash=not args.no_visual_hash,
+        no_metrics=args.no_metrics,
     )
 
     # Execute pipeline
@@ -606,10 +613,13 @@ Examples:
     # overriding asyncio's default handler which swallows the first keypress.
     import signal
 
+    from pyqenc.metrics import flush_active_collector
     from pyqenc.utils.ffmpeg_runner import kill_all_ffmpeg
 
     def _sigint_handler(signum: int, frame: object) -> None:
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
         kill_all_ffmpeg()
+        flush_active_collector()
         logger.warning("Cancelled by user.")
         os._exit(130)
 

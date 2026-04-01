@@ -24,6 +24,7 @@ from pyqenc.models import CleanupLevel, PhaseOutcome, Strategy
 from pyqenc.state import ArtifactState
 
 if TYPE_CHECKING:
+    from pyqenc.metrics import MetricsCollector
     from pyqenc.models import PipelineConfig
 
 __all__ = [
@@ -185,13 +186,16 @@ class Phase(Protocol):
 # Phase registry factory
 # ---------------------------------------------------------------------------
 
-def _build_registry(config: "PipelineConfig") -> dict[type[Phase], Phase]:
+def _build_registry(
+    config:    "PipelineConfig",
+    collector: "MetricsCollector",
+) -> dict[type[Phase], Phase]:
     """Construct all phase objects in execution order and wire their dependencies.
 
-    Each phase is constructed with ``(config, registry)`` so it can resolve
-    typed references to its dependencies directly in ``__init__``.  The registry
-    is a plain ``dict`` keyed by phase *class* (not instance), preserving
-    insertion order (Python 3.7+).
+    Each phase is constructed with ``(config, registry, collector)`` so it can
+    resolve typed references to its dependencies directly in ``__init__``.  The
+    registry is a plain ``dict`` keyed by phase *class* (not instance),
+    preserving insertion order (Python 3.7+).
 
     Execution order matches the pipeline dependency graph:
 
@@ -204,7 +208,8 @@ def _build_registry(config: "PipelineConfig") -> dict[type[Phase], Phase]:
     7. ``MergePhase``        — depends on Job, Encoding, Audio
 
     Args:
-        config: Full pipeline configuration shared by all phases.
+        config:    Full pipeline configuration shared by all phases.
+        collector: Metrics collector injected into every phase constructor.
 
     Returns:
         Ordered ``dict[type[Phase], Phase]`` mapping each phase class to its
@@ -223,8 +228,8 @@ def _build_registry(config: "PipelineConfig") -> dict[type[Phase], Phase]:
     registry: dict[type[Phase], Phase] = {}
 
     # Construct in execution order — each phase receives the partially-built
-    # registry so it can cast and store typed references to already-constructed
-    # dependencies directly in __init__.
+    # registry and the shared collector so it can store typed references to
+    # already-constructed dependencies directly in __init__.
     for cls in [
         JobPhase,
         ExtractionPhase,
@@ -234,6 +239,6 @@ def _build_registry(config: "PipelineConfig") -> dict[type[Phase], Phase]:
         AudioPhase,
         MergePhase,
     ]:
-        registry[cls] = cls(config, registry)  # type: ignore[call-arg]
+        registry[cls] = cls(config, registry, collector=collector)  # type: ignore[call-arg]
 
     return registry

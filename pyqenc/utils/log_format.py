@@ -12,6 +12,7 @@ at ``info`` level and the pattern is too mechanical to benefit from separation.
 
 from __future__ import annotations
 
+import decimal
 import hashlib
 import logging
 from pathlib import Path
@@ -22,6 +23,7 @@ from pyqenc.constants import (
     BRACKET_RIGHT,
     FAILURE_SYMBOL_MAJOR,
     FAILURE_SYMBOL_MINOR,
+    METRIC_LOG_DECIMAL_PLACES,
     PADDING_CRF,
     SUCCESS_SYMBOL_MAJOR,
     SUCCESS_SYMBOL_MINOR,
@@ -36,6 +38,25 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Quantizer for floor-truncating metric values to METRIC_LOG_DECIMAL_PLACES.
+# Built once at import time so formatting stays cheap.
+_METRIC_LOG_QUANTIZER = decimal.Decimal(10) ** -METRIC_LOG_DECIMAL_PLACES
+
+
+def fmt_metric_value(value: float) -> str:
+    """Format a metric float for log display, truncating (flooring) to ``METRIC_LOG_DECIMAL_PLACES``.
+
+    Uses ``decimal.ROUND_FLOOR`` so a miss can never display as a pass due to
+    rounding up.  E.g. ``92.9999`` → ``"93.0"`` with normal rounding, but
+    ``"92.9"`` with this function.
+
+    Args:
+        value: Raw metric float (e.g. VMAF score).
+
+    Returns:
+        Truncated string representation with ``METRIC_LOG_DECIMAL_PLACES`` decimal places.
+    """
+    return str(decimal.Decimal(str(value)).quantize(_METRIC_LOG_QUANTIZER, rounding=decimal.ROUND_FLOOR))
 
 def emit_phase_banner(name: str, log: logging.Logger) -> None:
     """Emit the standard thick-line banner for a phase.
@@ -198,7 +219,7 @@ def _fmt_target_value(
     if value is None:
         return "N/A"
     symbol = SUCCESS_SYMBOL_MINOR if value >= target.value else FAILURE_SYMBOL_MINOR
-    return f"{value:.1f} {symbol}"
+    return f"{fmt_metric_value(value)} {symbol}"
 
 
 

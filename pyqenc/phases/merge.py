@@ -43,6 +43,7 @@ from pyqenc.utils.visualization import QualityEvaluator, create_crf_plot
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 if TYPE_CHECKING:
+    from pyqenc.metrics import MetricsCollector
     from pyqenc.models import PipelineConfig
     from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
     from pyqenc.phases.encoding import (
@@ -367,14 +368,17 @@ class MergePhase:
 
     def __init__(
         self,
-        config: "PipelineConfig",
-        phases: "dict[type[Phase], Phase] | None" = None,
+        config:    "PipelineConfig",
+        phases:    "dict[type[Phase], Phase] | None" = None,
+        *,
+        collector: "MetricsCollector",
     ) -> None:
         from pyqenc.phases.audio import AudioPhase as _AudioPhase
         from pyqenc.phases.encoding import EncodingPhase as _EncodingPhase
         from pyqenc.phases.job import JobPhase as _JobPhase
 
         self._config:    "PipelineConfig"           = config
+        self._collector: "MetricsCollector"         = collector
         self._job:       "_JobPhase | None"          = cast("_JobPhase",      phases[_JobPhase])      if phases else None
         self._encoding:  "_EncodingPhase | None"     = cast("_EncodingPhase", phases[_EncodingPhase]) if phases else None
         self._audio:     "_AudioPhase | None"        = cast("_AudioPhase",    phases[_AudioPhase])    if phases else None
@@ -452,7 +456,10 @@ class MergePhase:
                 f"{t.metric}-{t.statistic}≥{t.value}" for t in self._config.quality_targets
             ))
 
-        artifacts = self._recover(force_wipe=force_wipe, execute=True)
+        from pyqenc.metrics import TimeKey
+
+        with self._collector.time(TimeKey.RECOVERY):
+            artifacts = self._recover(force_wipe=force_wipe, execute=True)
 
         complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
         pending_count  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
@@ -695,6 +702,8 @@ class MergePhase:
         Returns:
             ``MergePhaseResult`` after merging.
         """
+        from pyqenc.metrics import TimeKey
+
         work_dir  = self._config.work_dir
         final_dir = work_dir / FINAL_OUTPUT_DIR
         final_dir.mkdir(parents=True, exist_ok=True)
@@ -760,7 +769,8 @@ class MergePhase:
                 ]
 
                 logger.debug("Concat command: %s", " ".join(str(a) for a in concat_cmd))
-                concat_result = run_ffmpeg(concat_cmd, output_file=output_file)
+                with self._collector.time(TimeKey.MERGE_CONCAT):
+                    concat_result = run_ffmpeg(concat_cmd, output_file=output_file)
                 concat_file.unlink(missing_ok=True)
 
                 if not concat_result.success:
@@ -794,14 +804,15 @@ class MergePhase:
                 if source_video and self._config.quality_targets:
                     logger.info("  Measuring final quality metrics...")
                     try:
-                        metrics_dict, targets_met, plot_path = _measure_quality(
-                            final_result     = output_file,
-                            source_video     = source_video,
-                            ref_crop         = crop,
-                            quality_targets  = self._config.quality_targets,
-                            output_dir       = final_dir,
-                            metrics_sampling = self._config.metrics_sampling,
-                        )
+                        with self._collector.time(TimeKey.MERGE_QUALITY_MEASURE):
+                            metrics_dict, targets_met, plot_path = _measure_quality(
+                                final_result     = output_file,
+                                source_video     = source_video,
+                                ref_crop         = crop,
+                                quality_targets  = self._config.quality_targets,
+                                output_dir       = final_dir,
+                                metrics_sampling = self._config.metrics_sampling,
+                            )
                     except Exception as exc:
                         logger.warning("  Could not measure quality: %s", exc)
 

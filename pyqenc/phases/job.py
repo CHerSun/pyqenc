@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from pyqenc.metrics import MetricsCollector, TimeKey
 from pyqenc.models import (
     CropParams,
     PhaseOutcome,
@@ -78,10 +79,13 @@ class JobPhase:
 
     def __init__(
         self,
-        config: PipelineConfig,
-        phases: dict[type[Phase], Phase] | None = None,
+        config:    PipelineConfig,
+        phases:    dict[type[Phase], Phase] | None = None,
+        *,
+        collector: "MetricsCollector",
     ) -> None:
-        self._config = config
+        self._config:    PipelineConfig    = config
+        self._collector: "MetricsCollector" = collector
         self.result: JobPhaseResult | None = None
         # JobPhase has no dependencies; phases registry is accepted but unused.
 
@@ -366,11 +370,12 @@ class JobPhase:
 
         source = VideoMetadata(path=self._config.source_video)
         # Eagerly probe all fields so they are persisted in job.yaml
-        _ = source.file_size_bytes
-        _ = source.duration_seconds
-        _ = source.fps
-        _ = source.resolution
-        _ = source.frame_count
+        with self._collector.time(TimeKey.JOB_PROBE):
+            _ = source.file_size_bytes
+            _ = source.duration_seconds
+            _ = source.fps
+            _ = source.resolution
+            _ = source.frame_count
 
         job = JobState(source=source)
         logger.info("Initialized job.yaml for new pipeline run")
@@ -402,5 +407,6 @@ class JobPhase:
         # 3. Auto-detect
         logger.info("Cropping: detecting black borders...")
         source = VideoMetadata(path=self._config.source_video)
-        crop = detect_crop_parameters(source)
+        with self._collector.time(TimeKey.JOB_CROP_DETECT):
+            crop = detect_crop_parameters(source)
         return crop

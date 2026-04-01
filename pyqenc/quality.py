@@ -16,7 +16,7 @@ from typing import TypedDict, assert_never
 
 import pandas as pd
 
-from pyqenc.constants import CRF_GRANULARITY, PADDING_CRF
+from pyqenc.constants import CRF_GRANULARITY, CRF_METRIC_DEFICIT_RANGE, CRF_METRIC_POSITIVE_DELTA, PADDING_CRF
 from pyqenc.utils.ffmpeg_runner import (
     FFmpegRunResult,
     ProgressCallback,
@@ -344,6 +344,10 @@ def adjust_crf(
     gap between them is ≤ CRF_GRANULARITY the search is exhausted and ``None``
     is returned so the caller keeps the last passing result.
 
+    Additionally, if all targets are met and the least-proficient metric surplus
+    is within ``CRF_POSITIVE_DELTA``, the result is accepted immediately without
+    attempting to squeeze to a higher CRF — saving an extra encoding pass.
+
     Args:
         current_crf:     CRF used in the most recent attempt.
         quality_results: Measured quality metrics (e.g. ``{'vmaf_min': 88.4}``).
@@ -386,6 +390,16 @@ def adjust_crf(
         logger.warning("No valid metric results found, cannot adjust CRF")
         return None
 
+    # --- Early acceptance: all metrics pass and the tightest surplus is within delta ---
+    # If the least-proficient metric is already within CRF_POSITIVE_DELTA of its target,
+    # the result is close enough — no need to squeeze for a higher CRF.
+    if worst_delta >= 0 and worst_delta <= CRF_METRIC_POSITIVE_DELTA:
+        logger.debug(
+            f"Least-proficient metric surplus {worst_delta:.3f} ≤ CRF_METRIC_POSITIVE_DELTA "
+            f"({CRF_METRIC_POSITIVE_DELTA}), accepting CRF {current_crf:{PADDING_CRF}} as final."
+        )
+        return None
+
     # --- Establish the tightest known CRF bracket and compute next CRF ---
     # pass_crf: highest CRF that passed  → lower bound of the search window
     # fail_crf: lowest  CRF that failed  → upper bound of the search window
@@ -402,8 +416,14 @@ def adjust_crf(
     #     next = crf_hi + ratio * (crf_hi - crf_lo)
     #     ratio=0  → crf_hi (on target, stay at failing boundary)
     #     ratio=-1 → crf_lo (maximum deficit, jump to passing boundary)
-    target_val   = worst_target.value
-    metric_range = _MAX_METRIC - target_val          # always > 0 for sane targets
+    target_val = worst_target.value
+    # Surplus side: range = 100 - target (metric is physically bounded above by 100).
+    # Deficit side: fixed CRF_METRIC_DEFICIT_RANGE, independent of the target value.
+    #   A deficit of that many points is treated as the worst case (ratio = -1.0).
+    #   Using 100 - target here would make the range tiny for high targets (e.g. 3 for
+    #   target=97), causing even a modest miss to clamp to -1.0 and jump the full CRF
+    #   window — the exact overreaction we want to avoid.
+    metric_range = (_MAX_METRIC - target_val) if worst_delta >= 0 else CRF_METRIC_DEFICIT_RANGE
     ratio        = (worst_actual - target_val) / metric_range if metric_range > 0 else 0.0
     ratio        = max(-1.0, min(1.0, ratio))
 
@@ -411,8 +431,6 @@ def adjust_crf(
     # Anchor selection:
     #   pass: lower anchor = pass_crf (or current_crf if no history), upper = fail_crf (or crf_max)
     #   miss: lower anchor = pass_crf (or crf_min), upper = fail_crf (or current_crf)
-    # Using current_crf as anchor when the relevant bound is unknown keeps the first
-    # proportional step relative to where we are rather than the codec extreme.
     if current_passed:
         crf_lo = pass_crf if pass_crf is not None else current_crf
         crf_hi = fail_crf if fail_crf is not None else crf_max

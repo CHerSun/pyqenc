@@ -31,6 +31,7 @@ from pyqenc.state import ArtifactState, ExtractionParams
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 
 if TYPE_CHECKING:
+    from pyqenc.metrics import MetricsCollector
     from pyqenc.models import PipelineConfig
     from pyqenc.phases.job import JobPhase, JobPhaseResult
 
@@ -532,6 +533,7 @@ from pyqenc.state import ArtifactState, ExtractionParams
 from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
 
 if TYPE_CHECKING:
+    from pyqenc.metrics import MetricsCollector
     from pyqenc.models import PipelineConfig
     from pyqenc.phases.job import JobPhase, JobPhaseResult
 
@@ -601,12 +603,15 @@ class ExtractionPhase:
 
     def __init__(
         self,
-        config: "PipelineConfig",
-        phases: "dict[type[Phase], Phase] | None" = None,
+        config:    "PipelineConfig",
+        phases:    "dict[type[Phase], Phase] | None" = None,
+        *,
+        collector: "MetricsCollector",
     ) -> None:
         from pyqenc.phases.job import JobPhase as _JobPhase
 
-        self._config = config
+        self._config    = config
+        self._collector: "MetricsCollector" = collector
         self._job:    "_JobPhase | None"          = cast("_JobPhase", phases[_JobPhase]) if phases else None
         self.params   = ExtractionParams(include=config.include, exclude=config.exclude)
         self.result:  ExtractionPhaseResult | None = None
@@ -687,9 +692,11 @@ class ExtractionPhase:
             if self._config.exclude:
                 logger.info("  Exclude:  %s", self._config.exclude)
 
-        artifacts, video_meta, audio_meta = self._recover(
-            force_wipe=force_wipe, execute=True
-        )
+        from pyqenc.metrics import TimeKey
+        with self._collector.time(TimeKey.RECOVERY):
+            artifacts, video_meta, audio_meta = self._recover(
+                force_wipe=force_wipe, execute=True
+            )
 
         # Log recovery result line
         complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
@@ -1044,7 +1051,9 @@ class ExtractionPhase:
         other_absent = [t for t in other_tracks if (extracted_dir / t.display_name()).name in absent_names]
         if other_absent:
             logger.debug("Extracting %d other track(s) via mkvextract", len(other_absent))
-            extractor.extract_tracks(other_absent, extracted_dir)
+            from pyqenc.metrics import TimeKey
+            with self._collector.time(TimeKey.EXTRACTION):
+                extractor.extract_tracks(other_absent, extracted_dir)
 
         # Persist extraction.yaml
         try:

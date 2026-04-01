@@ -1189,6 +1189,7 @@ from dataclasses import dataclass as _dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pyqenc.metrics import MetricsCollector
     from pyqenc.models import PipelineConfig
     from pyqenc.phase import Phase, PhaseResult
     from pyqenc.phases.extraction import ExtractionPhase
@@ -1303,8 +1304,10 @@ class AudioPhase:
 
     def __init__(
         self,
-        config: "PipelineConfig",
-        phases: "dict[type[Phase], Phase] | None" = None,
+        config:    "PipelineConfig",
+        phases:    "dict[type[Phase], Phase] | None" = None,
+        *,
+        collector: "MetricsCollector",
     ) -> None:
         from typing import cast
 
@@ -1312,6 +1315,7 @@ class AudioPhase:
         from pyqenc.phases.job import JobPhase as _JobPhase
 
         self._config:     "PipelineConfig"           = config
+        self._collector:  "MetricsCollector"         = collector
         self._job:        "_JobPhase | None"          = cast(_JobPhase,        phases[_JobPhase])        if phases else None
         self._extraction: "_ExtractionPhase | None"  = cast(_ExtractionPhase, phases[_ExtractionPhase]) if phases else None
         self.params       = AudioParams(audio_codec=config.audio_codec, audio_base_bitrate=config.audio_base_bitrate)
@@ -1387,7 +1391,10 @@ class AudioPhase:
         if self._config.audio_base_bitrate:
             logger.info("Base bitrate:    %s", self._config.audio_base_bitrate)
 
-        artifacts = self._recover(force_wipe=force_wipe, execute=True)
+        from pyqenc.metrics import TimeKey
+
+        with self._collector.time(TimeKey.RECOVERY):
+            artifacts = self._recover(force_wipe=force_wipe, execute=True)
 
         complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
         pending_count  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
@@ -1424,7 +1431,8 @@ class AudioPhase:
             return self.result
 
         # Execute audio processing
-        result = self._execute_audio(artifacts)
+        with self._collector.time(TimeKey.AUDIO):
+            result = self._execute_audio(artifacts)
         self.result = result
         return result
 
