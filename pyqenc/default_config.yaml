@@ -96,7 +96,7 @@ codecs:
   h264-8bit:
     encoder: libx264
     pixel_format: yuv420p
-    default_crf: 23
+    default_crf: 20
     crf_range: [0, 51]
     presets:
       - ultrafast

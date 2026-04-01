@@ -22,6 +22,7 @@ from pydantic import (  # noqa: F401 (ConfigDict used in PipelineConfig)
     ConfigDict,
     Field,
     PrivateAttr,
+    field_validator,
 )
 
 from pyqenc.constants import (
@@ -147,35 +148,53 @@ class PhaseOutcome(Enum):
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class Strategy:
-    """Typed representation of an encoding strategy.
+class Strategy(BaseModel):
+    """Resolved encoding strategy — single owner of identity, codec, and ffmpeg args.
 
-    Replaces bare string strategy names throughout the codebase.
+    Carries everything needed to identify the strategy (``name``/``safe_name``
+    for logs, YAML keys, and filesystem paths) and to encode with it
+    (codec config, profile args, ffmpeg arg generation).
 
     Attributes:
-        name:      Display form used in logs and YAML (e.g. ``slow+h265-aq``).
-        safe_name: Filesystem-safe form used for directory names
-                   (e.g. ``slow_h265-aq``).
+        preset:       FFmpeg preset (e.g. ``'slow'``, ``'veryslow'``).
+        profile:      Profile name (e.g. ``'h265-aq'``, ``'h264-anime'``).
+        codec:        Resolved codec configuration.
+        profile_args: Resolved profile extra ffmpeg arguments.
     """
 
-    name:      str
-    safe_name: str
+    model_config = ConfigDict(frozen=True)
 
-    @staticmethod
-    def from_name(name: str) -> "Strategy":
-        """Construct a ``Strategy`` from a display name.
+    preset:       str
+    profile:      str
+    codec:        "CodecConfig"
+    profile_args: list[str]
 
-        Replaces ``+`` and ``:`` with ``_`` to produce the filesystem-safe form.
+    @property
+    def name(self) -> str:
+        """Display name used in logs and YAML (e.g. ``'slow+h265-aq'``)."""
+        return f"{self.preset}+{self.profile}"
+
+    @property
+    def safe_name(self) -> str:
+        """Filesystem-safe name for directory paths (e.g. ``'slow_h265-aq'``)."""
+        return self.name.replace("+", "_").replace(":", "_")
+
+    def to_ffmpeg_args(self, crf: float) -> list[str]:
+        """Generate FFmpeg video encoding arguments for this strategy.
 
         Args:
-            name: Display strategy name (e.g. ``slow+h265-aq``).
+            crf: CRF value to use.
 
         Returns:
-            ``Strategy`` instance with ``safe_name`` derived from ``name``.
+            List of FFmpeg command-line arguments.
         """
-        safe = name.replace("+", "_").replace(":", "_")
-        return Strategy(name=name, safe_name=safe)
+        return [
+            "-c:v",     self.codec.encoder,
+            "-preset",  self.preset,
+            "-crf",     str(crf),
+            "-pix_fmt", self.codec.pixel_format,
+            *self.profile_args,
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +281,8 @@ class CodecConfig(BaseModel):
         encoder:       FFmpeg encoder name (e.g., ``'libx264'``, ``'libx265'``).
         pixel_format:  Pixel format (e.g., ``'yuv420p'``, ``'yuv420p10le'``).
         default_crf:   Default CRF value for this codec.
-        crf_range:     Valid CRF range as ``(min, max)`` tuple.
+        crf_range:     Valid CRF range as ``(min, max)`` tuple; order is normalised
+                       on construction so ``crf_range[0] <= crf_range[1]`` always holds.
         presets:       List of presets supported by this encoder.
     """
 
@@ -273,38 +293,13 @@ class CodecConfig(BaseModel):
     crf_range:    tuple[float, float]
     presets:      list[str] = Field(default_factory=list)
 
+    @field_validator("crf_range", mode="before")
+    @classmethod
+    def _normalise_crf_range(cls, v: tuple[float, float] | list[float]) -> tuple[float, float]:
+        """Ensure ``crf_range`` is always ``(min, max)`` regardless of input order."""
+        a, b = v
+        return (min(float(a), float(b)), max(float(a), float(b)))
 
-class StrategyConfig(BaseModel):
-    """Parsed encoding strategy configuration.
-
-    Attributes:
-        preset:       FFmpeg preset (e.g., ``'slow'``, ``'veryslow'``).
-        profile:      Profile name (e.g., ``'h265-aq'``, ``'h264-anime'``).
-        codec:        Resolved codec configuration.
-        profile_args: Resolved profile extra arguments.
-    """
-
-    preset:       str
-    profile:      str
-    codec:        CodecConfig
-    profile_args: list[str]
-
-    def to_ffmpeg_args(self, crf: float) -> list[str]:
-        """Generate FFmpeg arguments for this strategy.
-
-        Args:
-            crf: CRF value to use.
-
-        Returns:
-            List of FFmpeg command-line arguments.
-        """
-        return [
-            "-c:v",    self.codec.encoder,
-            "-preset", self.preset,
-            "-crf",    str(crf),
-            "-pix_fmt", self.codec.pixel_format,
-            *self.profile_args,
-        ]
 
 
 
