@@ -600,7 +600,7 @@ class YamlMetricsCollector(MetricsCollector):
     def _write_atomic(self, metrics: PipelineMetrics) -> None:
         """Serialize *metrics* to YAML and write atomically via .tmp-then-rename."""
         data = {"pipeline_metrics": metrics.model_dump()}
-        text = yaml.dump(data, default_flow_style=False, allow_unicode=True)
+        text = yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
         try:
             self._tmp_path.write_text(text, encoding="utf-8")
             self._tmp_path.replace(self._metrics_path)
