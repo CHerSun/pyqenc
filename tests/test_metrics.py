@@ -69,10 +69,9 @@ def test_noop_collector_step_is_noop() -> None:
 
 
 def test_noop_collector_flush_is_noop() -> None:
-    """NoOpMetricsCollector.flush() must accept partial flag without error."""
+    """NoOpMetricsCollector.flush() must not raise."""
     collector = NoOpMetricsCollector()
-    collector.flush(partial=True)
-    collector.flush(partial=False)
+    collector.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +111,7 @@ def test_force_wipe_false_does_not_delete(tmp_path: Path) -> None:
     """force_wipe=False must not delete an existing metrics.yaml."""
     # Write a valid metrics file first
     collector = _make_collector(tmp_path)
-    collector.flush(partial=True)
+    collector.flush()
     assert (tmp_path / METRICS_YAML_FILENAME).exists()
 
     # Re-open without force_wipe — file must still be there
@@ -128,35 +127,24 @@ def test_write_failure_logs_warning_and_does_not_raise(
     collector = _make_collector(tmp_path)
     with caplog.at_level(logging.WARNING, logger="pyqenc.metrics"):
         with patch.object(Path, "replace", side_effect=OSError("disk full")):
-            collector.flush(partial=True)  # must not raise
+            collector.flush()  # must not raise
 
     assert any("failed to write" in r.message for r in caplog.records), (
         "Expected a WARNING about write failure"
     )
 
 
-def test_flush_partial_false_sets_partial_false(tmp_path: Path) -> None:
-    """flush(partial=False) must write partial: false in YAML (Req 5.4)."""
+def test_flush_writes_yaml(tmp_path: Path) -> None:
+    """flush() must write a valid metrics.yaml."""
     collector = _make_collector(tmp_path)
-    collector.flush(partial=False)
-
-    raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
-    assert raw["pipeline_metrics"]["partial"] is False
-
-
-def test_flush_partial_true_sets_partial_true(tmp_path: Path) -> None:
-    """flush(partial=True) must write partial: true in YAML (Req 5.4)."""
-    collector = _make_collector(tmp_path)
-    collector.flush(partial=True)
-
-    raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
-    assert raw["pipeline_metrics"]["partial"] is True
+    collector.flush()
+    assert (tmp_path / METRICS_YAML_FILENAME).exists()
 
 
 def test_empty_convergence_produces_null_in_yaml(tmp_path: Path) -> None:
     """No convergence data must produce convergence: null in YAML (Req 4.4)."""
     collector = _make_collector(tmp_path)
-    collector.flush(partial=True)
+    collector.flush()
 
     raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
     assert raw["pipeline_metrics"]["convergence"] is None
@@ -169,7 +157,7 @@ def test_convergence_present_after_step(tmp_path: Path) -> None:
         TimeKey.ENCODING_MAIN,
         convergence_update=ConvergenceUpdate(strategy="slow+h265", attempt_count=3),
     )
-    collector.flush(partial=True)
+    collector.flush()
 
     raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
     assert raw["pipeline_metrics"]["convergence"] is not None
@@ -183,7 +171,7 @@ def test_resume_restores_time_accum(tmp_path: Path) -> None:
     # First run: set time directly and flush
     c1 = YamlMetricsCollector(work_dir=tmp_path)
     c1._time_accum[TimeKey.AUDIO] = 120.0
-    c1.flush(partial=True)
+    c1.flush()
 
     # Second run: resume and check accumulator
     c2 = YamlMetricsCollector(work_dir=tmp_path)
@@ -315,13 +303,15 @@ def test_flush_while_timer_active_includes_partial_elapsed(tmp_path: Path) -> No
     ctx.__enter__()
 
     # Flush while the context is still open
-    collector.flush(partial=True)
+    collector.flush()
 
     raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
     breakdown = {e["category"]: e["seconds"] for e in raw["pipeline_metrics"]["time_distribution"]["breakdown"]}
 
-    # The partial elapsed must be > 0 (timer was running when flush happened)
-    assert breakdown[TimeKey.AUDIO.value] >= 0, "Expected non-negative partial elapsed for active timer"
+    # The partial elapsed must be >= 0 (timer was running when flush happened)
+    # Key may be absent if elapsed rounds to 0 (zero entries are omitted)
+    elapsed_in_yaml = breakdown.get(TimeKey.AUDIO.value, 0)
+    assert elapsed_in_yaml >= 0, "Expected non-negative partial elapsed for active timer"
 
     # _time_accum must NOT have been mutated by the flush
     assert collector._time_accum[TimeKey.AUDIO] == 0.0, (
@@ -338,7 +328,7 @@ def test_active_timer_not_double_counted_after_exit(tmp_path: Path) -> None:
 
     with collector.time(TimeKey.AUDIO):
         # Trigger a flush mid-context via the flush counter
-        collector.flush(partial=True)
+        collector.flush()
         # _time_accum still 0 here — timer not yet exited
 
     # After exit: _time_accum holds the real elapsed; active_timers is empty
@@ -347,11 +337,15 @@ def test_active_timer_not_double_counted_after_exit(tmp_path: Path) -> None:
     assert elapsed_after > 0.0
 
     # A second flush must report the same value (no double-count)
-    collector.flush(partial=True)
+    collector.flush()
     raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
     breakdown = {e["category"]: e["seconds"] for e in raw["pipeline_metrics"]["time_distribution"]["breakdown"]}
-    # seconds is int(round(elapsed)) — must match what's in _time_accum
-    assert breakdown[TimeKey.AUDIO.value] == int(round(elapsed_after))
+    # seconds is int(round(elapsed)); if it rounds to 0 the key is absent (zeros omitted)
+    expected_secs = int(round(elapsed_after))
+    if expected_secs == 0:
+        assert TimeKey.AUDIO.value not in breakdown
+    else:
+        assert breakdown[TimeKey.AUDIO.value] == expected_secs
 
 
 def test_snapshot_active_timers_does_not_mutate(tmp_path: Path) -> None:

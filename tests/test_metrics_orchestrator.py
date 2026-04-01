@@ -2,7 +2,7 @@
 
 Covers:
 - YamlMetricsCollector constructed and registered as active when no_metrics=False (Req 1.1, 6.3)
-- flush(partial=False) called on successful pipeline completion when no_metrics=False (Req 5.4, 8.3)
+- flush() called on successful pipeline completion when no_metrics=False (Req 5.4, 8.3)
 - Active collector cleared after run completes or fails (Req 1.6)
 - NoOpMetricsCollector used, no registration, no flush calls when no_metrics=True (Req 8.2, 8.5)
 - flush_active_collector is a safe no-op when no collector is registered (Req 8.5)
@@ -167,10 +167,10 @@ class TestActiveCollectorRegistration:
 # ---------------------------------------------------------------------------
 
 class TestFinalFlush:
-    """flush(partial=False) is called only on successful non-dry-run completion."""
+    """flush() is called only on successful non-dry-run completion."""
 
-    def test_flush_partial_false_on_success(self, tmp_path: Path) -> None:
-        """flush(partial=False) called after all phases complete when no_metrics=False (Req 5.4, 8.3)."""
+    def test_flush_on_success(self, tmp_path: Path) -> None:
+        """flush() called after all phases complete when no_metrics=False (Req 5.4, 8.3)."""
         config = _make_config(tmp_path, no_metrics=False)
 
         with (
@@ -183,7 +183,7 @@ class TestFinalFlush:
 
             PipelineOrchestrator(config).run(dry_run=False)
 
-        mock_collector.flush.assert_called_once_with(partial=False)
+        mock_collector.flush.assert_called_once_with()
 
     def test_no_flush_on_dry_run(self, tmp_path: Path) -> None:
         """flush is NOT called in dry-run mode."""
@@ -226,18 +226,18 @@ class TestFlushActiveCollector:
     def test_noop_when_no_collector_registered(self) -> None:
         """flush_active_collector does nothing when no collector is active (Req 8.5)."""
         register_active_collector(None)
-        flush_active_collector(partial=True)  # must not raise
+        flush_active_collector()  # must not raise
 
     def test_flushes_registered_collector(self) -> None:
-        """flush_active_collector calls flush(partial=True) on the active collector."""
+        """flush_active_collector calls flush() on the active collector."""
         mock_collector = MagicMock(spec=MetricsCollector)
         register_active_collector(mock_collector)
         try:
-            flush_active_collector(partial=True)
+            flush_active_collector()
         finally:
             register_active_collector(None)
 
-        mock_collector.flush.assert_called_once_with(partial=True)
+        mock_collector.flush.assert_called_once_with()
 
     def test_logs_warning_on_flush_failure(self) -> None:
         """flush_active_collector logs WARNING and does not raise when flush fails (Req 1.5)."""
@@ -245,6 +245,6 @@ class TestFlushActiveCollector:
         mock_collector.flush.side_effect = OSError("disk full")
         register_active_collector(mock_collector)
         try:
-            flush_active_collector(partial=True)  # must not raise
+            flush_active_collector()  # must not raise
         finally:
             register_active_collector(None)

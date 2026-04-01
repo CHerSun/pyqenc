@@ -617,12 +617,9 @@ Examples:
     from pyqenc.utils.ffmpeg_runner import kill_all_ffmpeg
 
     def _sigint_handler(signum: int, frame: object) -> None:
-        # Restore default handler immediately so a second Ctrl+C kills the
-        # process outright instead of re-entering this handler while flush I/O
-        # is in progress (which would cause infinite recursion).
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         kill_all_ffmpeg()
-        flush_active_collector(partial=True)
+        flush_active_collector()
         logger.warning("Cancelled by user.")
         os._exit(130)
 

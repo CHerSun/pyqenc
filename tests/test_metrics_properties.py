@@ -79,7 +79,7 @@ def _st_attempt_stats(draw: st.DrawFn) -> AttemptStats:
     return AttemptStats(
         total=draw(st.integers(min_value=mn, max_value=10_000)),
         min=mn,
-        mean=round(draw(st.floats(min_value=mn, max_value=mx, allow_nan=False)), 1),
+        avg=round(draw(st.floats(min_value=mn, max_value=mx, allow_nan=False)), 1),
         max=mx,
         stddev=round(draw(st.floats(min_value=0.0, max_value=50.0, allow_nan=False)), 1),
     )
@@ -98,9 +98,8 @@ def _st_convergence_stats(draw: st.DrawFn) -> ConvergenceStats:
 def _st_time_distribution(draw: st.DrawFn) -> TimeDistribution:
     entries = draw(st.lists(_st_time_entry(), min_size=0, max_size=15))
     return TimeDistribution(
-        updated_at=draw(_st_datetime),
-        total_seconds=draw(st.integers(min_value=0, max_value=10_000_000)),
-        total_duration=draw(_st_duration),
+        seconds=draw(st.integers(min_value=0, max_value=10_000_000)),
+        duration=draw(_st_duration),
         breakdown=entries,
     )
 
@@ -108,18 +107,13 @@ def _st_time_distribution(draw: st.DrawFn) -> TimeDistribution:
 @st.composite
 def _st_convergence_section(draw: st.DrawFn) -> ConvergenceSection:
     strategies = draw(st.lists(_st_convergence_stats(), min_size=1, max_size=10))
-    return ConvergenceSection(
-        updated_at=draw(_st_datetime),
-        strategies=strategies,
-    )
+    return ConvergenceSection(strategies=strategies)
 
 
 @st.composite
 def _st_pipeline_metrics(draw: st.DrawFn) -> PipelineMetrics:
     convergence = draw(st.one_of(st.none(), _st_convergence_section()))
     return PipelineMetrics(
-        run_date=draw(_st_datetime),
-        partial=draw(st.booleans()),
         time_distribution=draw(_st_time_distribution()),
         convergence=convergence,
     )
@@ -159,14 +153,10 @@ def test_yaml_round_trip(metrics: PipelineMetrics) -> None:
     """
     restored = _deserialize(_serialize(metrics))
 
-    assert restored.run_date == metrics.run_date
-    assert restored.partial  == metrics.partial
-
     td_orig = metrics.time_distribution
     td_rest = restored.time_distribution
-    assert td_rest.updated_at     == td_orig.updated_at
-    assert td_rest.total_seconds  == td_orig.total_seconds
-    assert td_rest.total_duration == td_orig.total_duration
+    assert td_rest.seconds  == td_orig.seconds
+    assert td_rest.duration == td_orig.duration
     assert len(td_rest.breakdown) == len(td_orig.breakdown)
     for orig_e, rest_e in zip(td_orig.breakdown, td_rest.breakdown):
         assert rest_e.category == orig_e.category
@@ -178,7 +168,6 @@ def test_yaml_round_trip(metrics: PipelineMetrics) -> None:
     if metrics.convergence is not None and restored.convergence is not None:
         cv_orig = metrics.convergence
         cv_rest = restored.convergence
-        assert cv_rest.updated_at == cv_orig.updated_at
         assert len(cv_rest.strategies) == len(cv_orig.strategies)
         for orig_s, rest_s in zip(cv_orig.strategies, cv_rest.strategies):
             assert rest_s.strategy == orig_s.strategy
@@ -186,7 +175,7 @@ def test_yaml_round_trip(metrics: PipelineMetrics) -> None:
             assert rest_s.attempts.total  == orig_s.attempts.total
             assert rest_s.attempts.min    == orig_s.attempts.min
             assert rest_s.attempts.max    == orig_s.attempts.max
-            assert abs(rest_s.attempts.mean   - orig_s.attempts.mean)   < 1e-9
+            assert abs(rest_s.attempts.avg   - orig_s.attempts.avg)   < 1e-9
             assert abs(rest_s.attempts.stddev - orig_s.attempts.stddev) < 1e-9
 
 
@@ -230,7 +219,7 @@ def test_convergence_stats_math(counts: list[int]) -> None:
     assert stats.attempts.total  == sum(counts)
     assert stats.attempts.min    == min(counts)
     assert stats.attempts.max    == max(counts)
-    assert abs(stats.attempts.mean   - sum(counts) / len(counts)) < 0.1
+    assert abs(stats.attempts.avg   - sum(counts) / len(counts)) < 0.1
     assert abs(stats.attempts.stddev - _population_stddev(counts)) < 0.1
 
 
@@ -300,7 +289,7 @@ def test_convergence_stats_resume_from_yaml(counts: list[int]) -> None:
     assert stats_resumed.attempts.total  == stats_fresh.attempts.total
     assert stats_resumed.attempts.min    == stats_fresh.attempts.min
     assert stats_resumed.attempts.max    == stats_fresh.attempts.max
-    assert abs(stats_resumed.attempts.mean   - stats_fresh.attempts.mean)   < 1e-6
+    assert abs(stats_resumed.attempts.avg   - stats_fresh.attempts.avg)   < 1e-6
     assert abs(stats_resumed.attempts.stddev - stats_fresh.attempts.stddev) < 1e-6
 
 
@@ -357,15 +346,18 @@ def test_time_distribution_math(time_map: dict[TimeKey, float]) -> None:
             if elapsed > 0:
                 collector._time_accum[key] = elapsed
 
-        collector.flush(partial=True)
+        collector.flush()
 
         raw = yaml.safe_load((Path(_tmp) / "metrics.yaml").read_text(encoding="utf-8"))
         td  = raw["pipeline_metrics"]["time_distribution"]
 
-        total_secs = td["total_seconds"]
+        total_secs = td["seconds"]
         breakdown  = td["breakdown"]
 
-        assert {e["category"] for e in breakdown} == {k.value for k in TimeKey}
+        # Only non-zero categories appear in breakdown (zeros are omitted)
+        present_categories = {e["category"] for e in breakdown}
+        expected_nonzero   = {k.value for k in TimeKey if int(round(collector._time_accum[k])) > 0}
+        assert present_categories == expected_nonzero
         assert total_secs == int(round(sum(collector._time_accum.values())))
 
         for entry in breakdown:
@@ -398,8 +390,9 @@ def test_breakdown_sorted_descending(time_map: dict[TimeKey, float]) -> None:
         for key, elapsed in time_map.items():
             if elapsed > 0:
                 collector._time_accum[key] = elapsed
-        collector.flush(partial=True)
+        collector.flush()
 
         raw      = yaml.safe_load((Path(_tmp) / "metrics.yaml").read_text(encoding="utf-8"))
         secs_lst = [e["seconds"] for e in raw["pipeline_metrics"]["time_distribution"]["breakdown"]]
         assert secs_lst == sorted(secs_lst, reverse=True)
+

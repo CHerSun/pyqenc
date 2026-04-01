@@ -174,7 +174,7 @@ class PipelineOrchestrator:
         # Final metrics flush on successful completion (Req 5.4, 5.5, 8.3)
         if not self.config.no_metrics:
             if not dry_run:
-                collector.flush(partial=False)
+                collector.flush()
                 metrics_path = self.config.work_dir / METRICS_YAML_FILENAME
                 logger.info("Metrics written to: %s", metrics_path)
             register_active_collector(None)

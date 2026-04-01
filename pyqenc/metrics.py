@@ -96,7 +96,7 @@ def register_active_collector(collector: "MetricsCollector | None") -> None:
     _active_collector = collector
 
 
-def flush_active_collector(partial: bool = True) -> None:
+def flush_active_collector() -> None:
     """Flush the active collector if one is registered.
 
     Safe to call even when no collector is registered (no-op).  Used by the
@@ -104,7 +104,7 @@ def flush_active_collector(partial: bool = True) -> None:
     """
     if _active_collector is not None:
         try:
-            _active_collector.flush(partial=partial)
+            _active_collector.flush()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Metrics: flush on exit failed: %s", exc)
 
@@ -180,7 +180,7 @@ class AttemptStats(BaseModel):
 
     total:  int
     min:    int
-    mean:   float  # rounded to 1 decimal place
+    avg:    float  # arithmetic mean, rounded to 1 decimal place
     max:    int
     stddev: float  # population stddev, rounded to 1 decimal place
 
@@ -205,10 +205,9 @@ class TimeEntry(BaseModel):
 class TimeDistribution(BaseModel):
     """Time distribution section of the metrics report."""
 
-    updated_at:     str             # "YYYY-MM-DD HH:MM:SS"
-    total_seconds:  int
-    total_duration: str             # "[Dd ]HH:MM:SS"
-    breakdown:      list[TimeEntry] # sorted descending by seconds
+    seconds:   int             # total wall-clock seconds across all phases
+    duration:  str             # "[Dd ]HH:MM:SS" total
+    breakdown: list[TimeEntry] # sorted descending by seconds, zeros omitted
 
 
 class ConvergenceSection(BaseModel):
@@ -217,7 +216,6 @@ class ConvergenceSection(BaseModel):
     Omitted from the report when no convergence data has been collected.
     """
 
-    updated_at: str                    # same as TimeDistribution.updated_at
     strategies: list[ConvergenceStats]
 
 
@@ -228,8 +226,6 @@ class PipelineMetrics(BaseModel):
     (e.g. all chunks were reused from a prior run).
     """
 
-    run_date:          str                        # "YYYY-MM-DD HH:MM:SS" — last file write
-    partial:           bool
     time_distribution: TimeDistribution
     convergence:       ConvergenceSection | None = None
 
@@ -279,12 +275,8 @@ class MetricsCollector(Protocol):
         """
         ...
 
-    def flush(self, partial: bool = True) -> None:
+    def flush(self) -> None:
         """Write the current metrics state to disk.
-
-        *partial=True* (default) marks the report as in-progress.
-        *partial=False* is set only by the orchestrator after all phases
-        complete successfully.
 
         This method is **not** part of the phase-facing surface — phases must
         not call it.
@@ -348,7 +340,7 @@ def _compute_convergence(
                 attempts=AttemptStats(
                     total=acc.total,
                     min=acc.min,
-                    mean=round(acc.welford_mean, 1),
+                    avg=round(acc.welford_mean, 1),
                     max=acc.max,
                     stddev=round(stddev, 1),
                 ),
@@ -381,7 +373,7 @@ class NoOpMetricsCollector(MetricsCollector):
     ) -> None:
         """Discard all arguments — no-op."""
 
-    def flush(self, partial: bool = True) -> None:
+    def flush(self) -> None:
         """No-op — nothing to flush."""
 
 
@@ -461,7 +453,7 @@ class YamlMetricsCollector(MetricsCollector):
                     total=cs.attempts.total,
                     min=cs.attempts.min,
                     max=cs.attempts.max,
-                    welford_mean=cs.attempts.mean,
+                    welford_mean=cs.attempts.avg,
                     welford_M2=stddev ** 2 * n,
                 )
                 self._conv_accumulators[cs.strategy] = acc
@@ -511,7 +503,7 @@ class YamlMetricsCollector(MetricsCollector):
             self._collector._time_accum[self._key] += elapsed
             self._collector._flush_counter += 1
             if self._collector._flush_counter >= FLUSH_INTERVAL:
-                self._collector.flush(partial=True)
+                self._collector.flush()
                 self._collector._flush_counter = 0
             # Always re-raise — we never suppress exceptions
 
@@ -545,7 +537,7 @@ class YamlMetricsCollector(MetricsCollector):
 
         self._flush_counter += 1
         if self._flush_counter >= FLUSH_INTERVAL:
-            self.flush(partial=True)
+            self.flush()
             self._flush_counter = 0
 
     def _snapshot_active_timers(self) -> dict[TimeKey, float]:
@@ -561,29 +553,25 @@ class YamlMetricsCollector(MetricsCollector):
             partial[key] = partial.get(key, 0.0) + (now - t0)
         return partial
 
-    def _build_metrics(
-        self,
-        *,
-        partial:         bool,
-        now_str:         str,
-        time_updated_at: str,
-    ) -> PipelineMetrics:
+    def _build_metrics(self) -> PipelineMetrics:
         """Assemble a :class:`PipelineMetrics` from current accumulator state.
 
         Merges partial elapsed from any in-flight ``time()`` contexts so that
-        a forced flush captures work-in-progress timing.
+        a forced flush captures work-in-progress timing.  Zero-second entries
+        are omitted from the breakdown.
         """
-        # Merge in-flight timer partial elapsed (read-only snapshot)
         active_partial = self._snapshot_active_timers()
         effective_accum = {
             k: self._time_accum[k] + active_partial.get(k, 0.0)
             for k in TimeKey
         }
-        # --- time distribution ---
+
         total_secs = int(round(sum(effective_accum.values())))
         breakdown_time: list[TimeEntry] = []
         for key in TimeKey:
-            secs    = int(round(effective_accum[key]))
+            secs = int(round(effective_accum[key]))
+            if secs == 0:
+                continue
             percent = f"{secs / total_secs * 100:.1f}%" if total_secs > 0 else "0.0%"
             breakdown_time.append(TimeEntry(
                 category=key.value,
@@ -594,24 +582,17 @@ class YamlMetricsCollector(MetricsCollector):
         breakdown_time.sort(key=lambda e: e.seconds, reverse=True)
 
         time_dist = TimeDistribution(
-            updated_at=time_updated_at,
-            total_seconds=total_secs,
-            total_duration=_format_duration(total_secs),
+            seconds=total_secs,
+            duration=_format_duration(total_secs),
             breakdown=breakdown_time,
         )
 
-        # --- convergence ---
         convergence_stats = _compute_convergence(self._conv_accumulators)
         convergence: ConvergenceSection | None = None
         if convergence_stats is not None:
-            convergence = ConvergenceSection(
-                updated_at=time_updated_at,
-                strategies=convergence_stats,
-            )
+            convergence = ConvergenceSection(strategies=convergence_stats)
 
         return PipelineMetrics(
-            run_date=now_str,
-            partial=partial,
             time_distribution=time_dist,
             convergence=convergence,
         )
@@ -626,23 +607,12 @@ class YamlMetricsCollector(MetricsCollector):
         except OSError as exc:
             logger.warning("Metrics: failed to write %s: %s", self._metrics_path, exc)
 
-    def flush(self, partial: bool = True) -> None:
+    def flush(self) -> None:
         """Write the current metrics state to disk atomically.
 
         Captures partial elapsed from any in-flight ``time()`` contexts so
         that a forced exit (SIGINT, unhandled exception) does not lose
         work-in-progress timing.  On write failure, logs a WARNING and does
         not raise.
-
-        Args:
-            partial: When ``True`` (default), marks the report as in-progress.
-                     Set to ``False`` only by the orchestrator after all phases
-                     complete successfully.
         """
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        metrics = self._build_metrics(
-            partial=partial,
-            now_str=now_str,
-            time_updated_at=now_str,
-        )
-        self._write_atomic(metrics)
+        self._write_atomic(self._build_metrics())
