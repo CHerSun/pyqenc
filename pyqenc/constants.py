@@ -67,14 +67,6 @@ CRF_GRANULARITY   = 0.5  # 0.5 might be too coarse; consider 0.2 or even 0.1 for
 """Granularity for CRF adjustments during optimization. This determines the step size when adjusting CRF values to find the optimal quality/size balance."""
 CRF_METRIC_POSITIVE_DELTA = 0.15
 """Acceptable positive metric surplus above target during the CRF search to indicate early success. When the least-proficient metric is within this delta above its target, the current CRF is accepted as final without attempting to squeeze further. Saves an extra encoding pass when the result is already close enough."""
-CRF_METRIC_DEFICIT_RANGE = 10.0
-"""Normalisation range used on the miss (deficit) side of the CRF interpolation.
-A deficit of this many points is treated as the worst-case scenario (ratio = -1.0),
-meaning the algorithm will jump the full available CRF window toward lower CRF.
-Kept fixed and independent of the target value because: the surplus side is naturally
-bounded by 100 - target (metric cannot exceed 100), but the deficit side has no such
-physical bound — a miss of 10 points is already extreme in practice and treating it
-as the maximum avoids wild jumps to CRF extremes on the first miss."""
 METRIC_LOG_DECIMAL_PLACES = 1
 """Decimal places used when formatting metric values in log messages. Values are always truncated (floored), never rounded, to prevent a miss from displaying as a pass due to rounding."""
 CRF_INITIAL_DEFAULT = 20.0

@@ -46,7 +46,12 @@ from pyqenc.models import (
 )
 from pyqenc.phase import Artifact, Phase, PhaseResult
 from pyqenc.quality import CRFHistory, adjust_crf
-from pyqenc.state import ArtifactState, EncodingParams, EncodingResultSidecar, MetricsSidecar
+from pyqenc.state import (
+    ArtifactState,
+    EncodingParams,
+    EncodingResultSidecar,
+    MetricsSidecar,
+)
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 from pyqenc.utils.log_format import (
@@ -541,6 +546,8 @@ class ChunkEncoder:
         chunk_id:        str,
         strategy:        str,
         quality_targets: list[QualityTarget],
+        crf_min:         float,
+        crf_max:         float,
     ) -> tuple[CRFHistory, float | None]:
         """Pre-populate a ``CRFHistory`` from all existing per-attempt sidecar files.
 
@@ -560,6 +567,8 @@ class ChunkEncoder:
             chunk_id:        Chunk identifier to filter sidecars.
             strategy:        Strategy name.
             quality_targets: Current quality targets for pass/fail re-evaluation.
+            crf_min:         Minimum valid CRF for the codec (sentinel init).
+            crf_max:         Maximum valid CRF for the codec (sentinel init).
 
         Returns:
             Tuple of ``(history, seed_crf)`` where ``seed_crf`` is the highest
@@ -569,7 +578,7 @@ class ChunkEncoder:
         import yaml as _yaml
 
         output_dir = self._get_output_dir(strategy)
-        history    = CRFHistory()
+        history    = CRFHistory(fail_crf=crf_max, pass_crf=crf_min)
         seed_crf:  float | None = None
 
         if not output_dir.exists():
@@ -609,17 +618,17 @@ class ChunkEncoder:
             try:
                 crf     = float(sidecar_data["crf"])
                 metrics = {k: float(v) for k, v in sidecar_data.get("metrics", {}).items()}
-                history.add_attempt(crf, metrics)
 
                 # Re-evaluate pass/fail from metrics against current targets (Req 6a.2)
-                if required_keys and required_keys.issubset(metrics.keys()):
-                    targets_met = all(
-                        metrics.get(f"{t.metric}_{t.statistic}", 0.0) >= t.value
-                        for t in quality_targets
-                    )
-                    if targets_met:
-                        if seed_crf is None or crf > seed_crf:
-                            seed_crf = crf
+                targets_met = (
+                    required_keys.issubset(metrics.keys()) and
+                    all(metrics.get(f"{t.metric}_{t.statistic}", 0.0) >= t.value for t in quality_targets)
+                ) if required_keys else False
+                history.add(crf, targets_met)
+
+                if targets_met:
+                    if seed_crf is None or crf > seed_crf:
+                        seed_crf = crf
             except Exception:
                 continue
 
@@ -816,20 +825,20 @@ class ChunkEncoder:
 
         # Pre-populate CRF history from sidecar files so adjust_crf has complete
         # bounds from the very first call and the search resumes correctly.
-        history, seed_crf = self._load_history_from_sidecars(chunk.chunk_id, strategy, quality_targets)
+        history, seed_crf = self._load_history_from_sidecars(chunk.chunk_id, strategy, quality_targets, crf_min, crf_max)
 
         if seed_crf is not None:
             current_crf = seed_crf
             logger.info(
                 fmt_chunk(strategy, chunk.chunk_id,
-                f"Restored {len(history.attempts)} attempt(s) from sidecars; resuming from best-passing CRF {current_crf:{PADDING_CRF}}",
+                f"Restored {history.attempts} attempt(s) from sidecars; resuming from best-passing CRF {current_crf:{PADDING_CRF}}",
                 self._visual_hash)
             )
         else:
             current_crf = initial_crf
             logger.debug(f"No prior sidecars found; starting from CRF {current_crf:{PADDING_CRF}}")
 
-        attempt_number    = 0
+        attempt_number    = history.attempts
         final_attempt:    AttemptMetadata | None = None
         best_crf:         float | None           = None
         best_metrics:     dict[str, float]       = {}
@@ -910,10 +919,9 @@ class ChunkEncoder:
                                 self._visual_hash,
                             )
                         )
-                        history.add_attempt(existing.crf, metrics_dict)
+                        history.add(existing.crf, targets_met)
                         next_crf = adjust_crf(
                             existing.crf, metrics_dict, quality_targets, history,
-                            crf_min=crf_min, crf_max=crf_max,
                         )
                         if next_crf is None:
                             if final_attempt is not None:
@@ -1025,7 +1033,7 @@ class ChunkEncoder:
                 file_size_bytes=output_file.stat().st_size,
             )
 
-            history.add_attempt(current_crf, metrics_dict)
+            history.add(current_crf, evaluation.targets_met)
 
             best_string = ""
             if evaluation.targets_met:
@@ -1051,7 +1059,6 @@ class ChunkEncoder:
 
             next_crf = adjust_crf(
                 current_crf, metrics_dict, quality_targets, history,
-                crf_min=crf_min, crf_max=crf_max,
             )
 
             if next_crf is None:
