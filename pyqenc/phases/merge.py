@@ -32,6 +32,7 @@ from pyqenc.constants import (
     THICK_LINE,
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
+    WARNING_SYMBOL,
 )
 from pyqenc.models import CropParams, PhaseOutcome, QualityTarget, VideoMetadata
 from pyqenc.quality import MetricType
@@ -268,6 +269,133 @@ def _log_metrics_summary(
             )
         else:
             logger.warning("  %s %s: quality targets NOT met", overall, strategy)
+
+
+def _log_merge_summary(
+    artifacts:         list[MergeArtifact],
+    source_stem:       str,
+    source_video_path: Path | None,
+    quality_targets:   list[QualityTarget],
+    metrics_sampling:  int,
+) -> None:
+    """Log the final merge summary: source row + strategy table with sizes, % of source,
+    and quality pass/miss marks; followed by a targets reminder and per-miss details.
+
+    Args:
+        artifacts:         Completed merge artifacts, sorted by file size ascending.
+        source_stem:       Source video stem (filename without extension).
+        source_video_path: Path to the original source file for size comparison; ``None`` if unavailable.
+        quality_targets:   Quality targets that were checked.
+        metrics_sampling:  Frame subsampling factor used during measurement.
+    """
+    if not artifacts:
+        logger.info("  No output files produced.")
+        return
+
+    def _file_size(path: Path) -> int:
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+
+    source_size = _file_size(source_video_path) if source_video_path else 0
+    has_targets = bool(quality_targets)
+
+    sorted_artifacts = sorted(artifacts, key=lambda a: _file_size(a.path))
+
+    def _pct_str(size: int) -> str:
+        if source_size <= 0:
+            return "  N/A"
+        return f"{size / source_size * 100:5.1f}%"
+
+    # --- Table header ---
+    if has_targets:
+        logger.info("  %-25s  %12s  %7s  %s", "Strategy", "Size (MB)", "vs src", "Quality")
+        logger.info("  %-25s  %12s  %7s  %s", "-" * 25, "-" * 12, "-" * 7, "-" * 7)
+    else:
+        logger.info("  %-25s  %12s  %7s", "Strategy", "Size (MB)", "vs src")
+        logger.info("  %-25s  %12s  %7s", "-" * 25, "-" * 12, "-" * 7)
+
+    # --- Source row ---
+    if source_video_path:
+        src_mb  = source_size / (1024 * 1024)
+        src_str = f"{src_mb:,.1f}".replace(",", "\u202f")
+        if has_targets:
+            logger.info("  %-25s  %12s  %7s  %s", source_stem[:25], src_str, "100.0%", "")
+        else:
+            logger.info("  %-25s  %12s  %7s", source_stem[:25], src_str, "100.0%")
+
+    # --- Strategy rows ---
+    any_miss = False
+    for artifact in sorted_artifacts:
+        size_bytes = _file_size(artifact.path)
+        size_mb    = size_bytes / (1024 * 1024)
+        size_str   = f"{size_mb:,.1f}".replace(",", "\u202f")
+        display    = _strategy_display_name(artifact.strategy_name)
+        pct        = _pct_str(size_bytes)
+
+        if has_targets:
+            if artifact.metrics:
+                mark = SUCCESS_SYMBOL_MINOR if artifact.targets_met else FAILURE_SYMBOL_MINOR
+                if not artifact.targets_met:
+                    any_miss = True
+            else:
+                mark = "-"
+            logger.info("  %-25s  %12s  %7s  %s", display[:25], size_str, pct, mark)
+        else:
+            logger.info("  %-25s  %12s  %7s", display[:25], size_str, pct)
+
+    # --- Output location note ---
+    output_dir = sorted_artifacts[0].path.parent
+    logger.info("")
+    logger.info("  Files named: %s *.mkv  (where * is the strategy)", source_stem)
+    logger.info("  Location: %s", output_dir)
+
+    if not has_targets:
+        return
+
+    # --- Targets reminder ---
+    targets_str = "  Targets: " + ",  ".join(
+        f"{t.metric}-{t.statistic} ≥ {t.value:.2f}"
+        for t in quality_targets
+    )
+    logger.info("")
+    logger.info(targets_str)
+
+    if not any_miss:
+        logger.info("  %s All quality targets met.", SUCCESS_SYMBOL_MINOR)
+        return
+
+    # --- Per-miss details ---
+    vmaf_targeted = any(t.metric == MetricType.VMAF.value for t in quality_targets)
+    for artifact in sorted_artifacts:
+        if artifact.targets_met or not artifact.metrics:
+            continue
+        display = _strategy_display_name(artifact.strategy_name)
+        for target in quality_targets:
+            key   = f"{target.metric}_{target.statistic}"
+            value = artifact.metrics.get(key)
+            if value is None:
+                logger.warning(
+                    "  %s %s — %s-%s: not measured (target: %.2f)",
+                    WARNING_SYMBOL, display, target.metric, target.statistic, target.value,
+                )
+            elif value < target.value:
+                if vmaf_targeted and metrics_sampling > 1:
+                    logger.info(
+                        "  %s %s — %s-%s: %.2f (target: %.2f)"
+                        " [VMAF may be unreliable at subsampling 1:%d]",
+                        WARNING_SYMBOL, display,
+                        target.metric, target.statistic, value, target.value,
+                        metrics_sampling,
+                    )
+                else:
+                    logger.warning(
+                        "  %s %s — %s-%s: %.2f (target: %.2f)",
+                        WARNING_SYMBOL, display,
+                        target.metric, target.statistic, value, target.value,
+                    )
+
 
 
 def _collect_crf_data(
@@ -878,9 +1006,15 @@ class MergePhase:
         logger.info(THICK_LINE)
         logger.info("MERGE SUMMARY")
         logger.info(THICK_LINE)
-        logger.info("  Complete: %d output file(s)", complete_count)
         if failed_strategies:
             logger.error("  Failed strategies: %s", ", ".join(failed_strategies))
+        _log_merge_summary(
+            artifacts          = [a for a in final_artifacts if a.state == ArtifactState.COMPLETE],
+            source_stem        = source_stem,
+            source_video_path  = source_video.path if source_video else None,
+            quality_targets    = self._config.quality_targets,
+            metrics_sampling   = self._config.metrics_sampling,
+        )
         logger.info(THICK_LINE)
 
         if failed_strategies and not final_artifacts:
