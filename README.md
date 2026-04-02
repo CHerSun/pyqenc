@@ -205,7 +205,7 @@ pyqenc auto <source_video> [options]
 
 | Option                     | Description                                             | Default                        |
 | -------------------------- | ------------------------------------------------------- | ------------------------------ |
-| `--quality-target TARGETS` | Quality targets (see format below)                      | `vmaf-min:93,vmaf-med:96`      |
+| `--quality-target TARGETS` | Quality targets (see format below)                      | `vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94`      |
 | `--strategies STRATEGIES`  | Encoding strategies (see format below)                  | `veryslow+h264*,slow+h265*`    |
 | `--all-strategies`         | Disable optimization, produce output for all strategies | `False` (optimization enabled) |
 | `--max-parallel N`         | Maximum concurrent encoding processes                   | `2`                            |
@@ -252,7 +252,7 @@ Quality targets specify minimum acceptable quality using metrics and statistics:
 - `min` - Minimum score across all frames
 - `med` or `median` - Median score across all frames
 
-**Default:** If not specified, defaults to `vmaf-min:93,vmaf-med:96`
+**Default:** If not specified, defaults to `vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94`
 
 #### Examples:
 
