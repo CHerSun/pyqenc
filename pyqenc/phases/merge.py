@@ -27,6 +27,7 @@ from pyqenc.constants import (
     FAILURE_SYMBOL_MINOR,
     FINAL_OUTPUT_DIR,
     RANGE_SEPARATOR,
+    SUCCESS_SYMBOL_MAJOR,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
     THICK_LINE,
@@ -35,11 +36,16 @@ from pyqenc.constants import (
     WARNING_SYMBOL,
 )
 from pyqenc.models import CropParams, PhaseOutcome, QualityTarget, VideoMetadata
-from pyqenc.quality import MetricType
 from pyqenc.phase import Artifact, ArtifactState, Phase, PhaseResult
-from pyqenc.state import MergeParams
+
+from pyqenc.state import MergeParams, MergeStrategySummary
 from pyqenc.utils.ffmpeg_runner import get_frame_count, run_ffmpeg
-from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
+from pyqenc.utils.log_format import (
+    emit_phase_banner,
+    fmt_key_value_table,
+    fmt_metric_value,
+    log_recovery_line,
+)
 from pyqenc.utils.visualization import QualityEvaluator, create_crf_plot
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
@@ -128,6 +134,48 @@ def _targeted_metrics(
         for t in quality_targets
         if f"{t.metric}_{t.statistic}" in all_metrics
     }
+
+
+def _safe_file_size(path: Path) -> int:
+    """Return the file size of *path* in bytes, or ``0`` on any OS error."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _build_strategy_summaries(
+    artifacts:         list["MergeArtifact"],
+    source_video_path: Path | None,
+) -> tuple[int, list[MergeStrategySummary]]:
+    """Build per-strategy summary rows and source size from completed artifacts.
+
+    Args:
+        artifacts:         Completed ``MergeArtifact`` objects.
+        source_video_path: Path to the source video for size capture; ``None`` if unavailable.
+
+    Returns:
+        Tuple of ``(source_size_bytes, strategy_summaries)``.
+    """
+    source_size = 0
+    if source_video_path is not None:
+        try:
+            source_size = source_video_path.stat().st_size
+        except OSError:
+            pass
+
+    summaries: list[MergeStrategySummary] = []
+    for artifact in artifacts:
+        if artifact.state != ArtifactState.COMPLETE:
+            continue
+        summaries.append(MergeStrategySummary(
+            strategy_name   = artifact.strategy_name,
+            output_path     = artifact.path,
+            file_size_bytes = _safe_file_size(artifact.path),
+            metrics         = artifact.metrics,
+            targets_met     = artifact.targets_met,
+        ))
+    return source_size, summaries
 
 
 def _write_merge_sidecar(
@@ -231,52 +279,38 @@ def _measure_quality(
     return metrics_dict, evaluation.targets_met, plot_path
 
 
-def _log_metrics_summary(
-    strategy:         str,
-    metrics_dict:     dict[str, float],
-    quality_targets:  list[QualityTarget],
-    targets_met:      bool,
-    metrics_sampling: int,
-) -> None:
-    """Log a compact quality metrics summary for *strategy*.
+def _fmt_inline_metrics(
+    metrics_dict:    dict[str, float],
+    quality_targets: list[QualityTarget],
+) -> str:
+    """Return a compact single-line metrics string for the completion log line.
 
-    When targets are not met but the user requested VMAF and metrics subsampling
-    is active (factor > 1), the miss is expected — VMAF is motion-sensitive and
-    subsampling can skew its score.  In that case the overall result is logged at
-    INFO level with an explanatory note instead of WARNING.
+    Example: ``"vmaf-min=94.1 ✔  vmaf-median=97.4 ✔  psnr-min=41.5 ✘  ssim-min=95.7 ✔"``
+
+    Args:
+        metrics_dict:    Measured metric values keyed by ``"{metric}_{statistic}"``.
+        quality_targets: Targets used to determine pass/fail symbols.
+
+    Returns:
+        Space-separated metric readings, or empty string if no targets.
     """
+    parts: list[str] = []
     for target in quality_targets:
-        key    = f"{target.metric}_{target.statistic}"
-        value  = metrics_dict.get(key)
+        key   = f"{target.metric}_{target.statistic}"
+        value = metrics_dict.get(key)
         if value is None:
             continue
         symbol = SUCCESS_SYMBOL_MINOR if value >= target.value else FAILURE_SYMBOL_MINOR
-        logger.info(
-            "  %s %s-%s: %.2f (target: %.2f)",
-            symbol, target.metric, target.statistic, value, target.value,
-        )
-
-    overall = SUCCESS_SYMBOL_MINOR if targets_met else FAILURE_SYMBOL_MINOR
-    if targets_met:
-        logger.info("  %s %s: quality targets met", overall, strategy)
-    else:
-        vmaf_targeted = any(t.metric == MetricType.VMAF.value for t in quality_targets)
-        if vmaf_targeted and metrics_sampling > 1:
-            logger.info(
-                "  %s %s: quality targets NOT met"
-                " (VMAF is motion-sensitive; result may be unreliable at subsampling 1:%d)",
-                overall, strategy, metrics_sampling,
-            )
-        else:
-            logger.warning("  %s %s: quality targets NOT met", overall, strategy)
+        parts.append(f"{target.metric}-{target.statistic}={fmt_metric_value(value)} {symbol}")
+    return "  ".join(parts)
 
 
 def _log_merge_summary(
-    artifacts:         list[MergeArtifact],
-    source_stem:       str,
-    source_video_path: Path | None,
-    quality_targets:   list[QualityTarget],
-    metrics_sampling:  int,
+    artifacts:        list[MergeArtifact],
+    source_stem:      str,
+    source_size_bytes: int,
+    quality_targets:  list[QualityTarget],
+    metrics_sampling: int,
 ) -> None:
     """Log the final merge summary: source row + strategy table with sizes, % of source,
     and quality pass/miss marks; followed by a targets reminder and per-miss details.
@@ -284,7 +318,7 @@ def _log_merge_summary(
     Args:
         artifacts:         Completed merge artifacts, sorted by file size ascending.
         source_stem:       Source video stem (filename without extension).
-        source_video_path: Path to the original source file for size comparison; ``None`` if unavailable.
+        source_size_bytes: Size of the source video in bytes; ``0`` if unavailable.
         quality_targets:   Quality targets that were checked.
         metrics_sampling:  Frame subsampling factor used during measurement.
     """
@@ -292,16 +326,10 @@ def _log_merge_summary(
         logger.info("  No output files produced.")
         return
 
-    def _file_size(path: Path) -> int:
-        try:
-            return path.stat().st_size
-        except OSError:
-            return 0
-
-    source_size = _file_size(source_video_path) if source_video_path else 0
+    source_size = source_size_bytes
     has_targets = bool(quality_targets)
 
-    sorted_artifacts = sorted(artifacts, key=lambda a: _file_size(a.path))
+    sorted_artifacts = sorted(artifacts, key=lambda a: _safe_file_size(a.path))
 
     def _pct_str(size: int) -> str:
         if source_size <= 0:
@@ -317,7 +345,7 @@ def _log_merge_summary(
         logger.info("  %-25s  %12s  %7s", "-" * 25, "-" * 12, "-" * 7)
 
     # --- Source row ---
-    if source_video_path:
+    if source_size > 0:
         src_mb  = source_size / (1024 * 1024)
         src_str = f"{src_mb:,.1f}".replace(",", "\u202f")
         if has_targets:
@@ -328,7 +356,7 @@ def _log_merge_summary(
     # --- Strategy rows ---
     any_miss = False
     for artifact in sorted_artifacts:
-        size_bytes = _file_size(artifact.path)
+        size_bytes = _safe_file_size(artifact.path)
         size_mb    = size_bytes / (1024 * 1024)
         size_str   = f"{size_mb:,.1f}".replace(",", "\u202f")
         display    = _strategy_display_name(artifact.strategy_name)
@@ -366,36 +394,67 @@ def _log_merge_summary(
         logger.info("  %s All quality targets met.", SUCCESS_SYMBOL_MINOR)
         return
 
-    # --- Per-miss details ---
-    vmaf_targeted = any(t.metric == MetricType.VMAF.value for t in quality_targets)
+    # --- Per-miss details as key-value table ---
+    miss_table: dict[str, str | list] = {}
+
     for artifact in sorted_artifacts:
         if artifact.targets_met or not artifact.metrics:
             continue
-        display = _strategy_display_name(artifact.strategy_name)
+        display      = _strategy_display_name(artifact.strategy_name)
+        missed_lines = []
         for target in quality_targets:
             key   = f"{target.metric}_{target.statistic}"
             value = artifact.metrics.get(key)
             if value is None:
-                logger.warning(
-                    "  %s %s — %s-%s: not measured (target: %.2f)",
-                    WARNING_SYMBOL, display, target.metric, target.statistic, target.value,
-                )
+                missed_lines.append(f"{target.metric}-{target.statistic}: not measured (target: {target.value:.2f})")
             elif value < target.value:
-                if vmaf_targeted and metrics_sampling > 1:
-                    logger.info(
-                        "  %s %s — %s-%s: %.2f (target: %.2f)"
-                        " [VMAF may be unreliable at subsampling 1:%d]",
-                        WARNING_SYMBOL, display,
-                        target.metric, target.statistic, value, target.value,
-                        metrics_sampling,
-                    )
-                else:
-                    logger.warning(
-                        "  %s %s — %s-%s: %.2f (target: %.2f)",
-                        WARNING_SYMBOL, display,
-                        target.metric, target.statistic, value, target.value,
-                    )
+                missed_lines.append(f"{target.metric}-{target.statistic}: {value:.2f} (target: {target.value:.2f})")
+        if missed_lines:
+            miss_table[f"{WARNING_SYMBOL} {display}"] = missed_lines if len(missed_lines) > 1 else missed_lines[0]
 
+    fmt_key_value_table(miss_table)
+
+    if miss_table and metrics_sampling > 1:
+        logger.info("  (Subsampling 1:%d — with fewer frames measured, there's a higher chance to miss outliers, making quality targeting less reliable)", metrics_sampling)
+
+
+
+def _log_merge_summary_from_params(
+    params:          MergeParams,
+    quality_targets: list[QualityTarget],
+) -> None:
+    """Replay the merge summary table from persisted ``MergeParams``.
+
+    Reconstructs ``MergeArtifact`` objects from ``params.strategy_summaries``
+    and delegates to ``_log_merge_summary``.  Called on the REUSED path so the
+    user sees the same table as on the original run.
+
+    Args:
+        params:          Loaded ``MergeParams`` from ``merge.yaml``.
+        quality_targets: Current quality targets (for miss-detail rendering).
+    """
+    if not params.strategy_summaries:
+        logger.info("  No summary data saved — re-run to generate.")
+        return
+
+    artifacts: list[MergeArtifact] = [
+        MergeArtifact(
+            path          = s.output_path,
+            state         = ArtifactState.COMPLETE,
+            strategy_name = s.strategy_name,
+            metrics       = s.metrics,
+            targets_met   = s.targets_met,
+        )
+        for s in params.strategy_summaries
+    ]
+
+    _log_merge_summary(
+        artifacts         = artifacts,
+        source_stem       = params.source_stem,
+        source_size_bytes = params.source_size_bytes,
+        quality_targets   = quality_targets,
+        metrics_sampling  = params.metrics_sampling or 1,
+    )
 
 
 def _collect_crf_data(
@@ -606,6 +665,13 @@ class MergePhase:
 
         # Nothing to do
         if pending_count == 0:
+            merge_yaml = self._config.work_dir / _MERGE_YAML
+            persisted  = MergeParams.load(merge_yaml)
+            if persisted is not None:
+                logger.info(THICK_LINE)
+                logger.info("MERGE SUMMARY")
+                logger.info(THICK_LINE)
+                _log_merge_summary_from_params(persisted, self._config.quality_targets)
             self.result = MergePhaseResult(
                 outcome   = PhaseOutcome.REUSED,
                 artifacts = artifacts,
@@ -906,10 +972,11 @@ class MergePhase:
                     failed_strategies.append(strategy_name)
                     continue
 
-                logger.info("  Concatenation complete: %s", output_file.name)
+                logger.debug("  Concatenation complete: %s", output_file.name)
 
                 # Verify frame count
-                frame_count: int | None = None
+                frame_count:       int | None = None
+                frame_count_ok:    bool       = False
                 try:
                     frame_count = get_frame_count(output_file)
                     if source_frame_count is not None:
@@ -920,7 +987,7 @@ class MergePhase:
                                 source_frame_count, frame_count, diff,
                             )
                         else:
-                            logger.info("  Frame count verified: %d %s", frame_count, SUCCESS_SYMBOL_MINOR)
+                            frame_count_ok = True
                 except Exception as exc:
                     logger.warning("  Could not verify frame count: %s", exc)
 
@@ -930,7 +997,6 @@ class MergePhase:
                 plot_path:    Path | None       = None
 
                 if source_video and self._config.quality_targets:
-                    logger.info("  Measuring final quality metrics...")
                     try:
                         with self._collector.time(TimeKey.MERGE_QUALITY_MEASURE):
                             metrics_dict, targets_met, plot_path = _measure_quality(
@@ -943,13 +1009,6 @@ class MergePhase:
                             )
                     except Exception as exc:
                         logger.warning("  Could not measure quality: %s", exc)
-
-                    if metrics_dict:
-                        _log_metrics_summary(
-                            strategy_name, metrics_dict,
-                            self._config.quality_targets, targets_met,
-                            self._config.metrics_sampling,
-                        )
 
                 # CRF distribution plot
                 encoded_artifacts = getattr(
@@ -964,7 +1023,7 @@ class MergePhase:
                             output_path = crf_plot_path,
                             title       = f"CRF\n{output_file.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")}",
                         )
-                        logger.info("  CRF plot saved: %s", crf_plot_path.name)
+                        logger.debug("  CRF plot saved: %s", crf_plot_path.name)
                     except Exception as exc:
                         logger.warning("  Could not generate CRF plot: %s", exc)
                 else:
@@ -980,11 +1039,14 @@ class MergePhase:
                     plot_path       = plot_path,
                 )
 
-                symbol = SUCCESS_SYMBOL_MINOR if targets_met else FAILURE_SYMBOL_MINOR
+                symbol      = SUCCESS_SYMBOL_MAJOR if targets_met else WARNING_SYMBOL
+                frames_sym  = SUCCESS_SYMBOL_MINOR if frame_count_ok else FAILURE_SYMBOL_MINOR
+                frames_str  = str(frame_count) if frame_count is not None else "unknown"
+                metrics_str = _fmt_inline_metrics(metrics_dict, self._config.quality_targets)
                 logger.info(
-                    "%s %s: merged successfully (frames=%s)",
-                    symbol, strategy_name,
-                    str(frame_count) if frame_count is not None else "unknown",
+                    "%s Merged %s:  frames=%s %s%s",
+                    symbol, strategy_name, frames_str, frames_sym,
+                    f"  {metrics_str}" if metrics_str else "",
                 )
 
                 final_artifacts.append(MergeArtifact(
@@ -1011,18 +1073,27 @@ class MergePhase:
         _log_merge_summary(
             artifacts          = [a for a in final_artifacts if a.state == ArtifactState.COMPLETE],
             source_stem        = source_stem,
-            source_video_path  = source_video.path if source_video else None,
+            source_size_bytes  = _safe_file_size(source_video.path) if source_video else 0,
             quality_targets    = self._config.quality_targets,
             metrics_sampling   = self._config.metrics_sampling,
         )
-        logger.info(THICK_LINE)
-
         if failed_strategies and not final_artifacts:
             return _failed("All strategy merges failed")
 
-        # Persist merge params so quality-target / sampling changes are detected next run
+        # Persist merge params (with summary) so quality-target / sampling changes are
+        # detected next run and the summary table can be replayed on rerun.
         if complete_count > 0:
-            self.params.save(self._config.work_dir / _MERGE_YAML)
+            source_size_bytes, strategy_summaries = _build_strategy_summaries(
+                final_artifacts,
+                source_video.path if source_video else None,
+            )
+            MergeParams(
+                quality_targets    = self.params.quality_targets,
+                metrics_sampling   = self.params.metrics_sampling,
+                source_stem        = source_stem,
+                source_size_bytes  = source_size_bytes,
+                strategy_summaries = strategy_summaries,
+            ).save(self._config.work_dir / _MERGE_YAML)
 
         if failed_strategies:
             return MergePhaseResult(
