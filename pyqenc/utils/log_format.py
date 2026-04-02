@@ -24,6 +24,7 @@ from pyqenc.constants import (
     FAILURE_SYMBOL_MAJOR,
     FAILURE_SYMBOL_MINOR,
     METRIC_LOG_DECIMAL_PLACES,
+    NEUTRAL_INDICATOR_SYMBOL,
     PADDING_CRF,
     SUCCESS_SYMBOL_MAJOR,
     SUCCESS_SYMBOL_MINOR,
@@ -57,6 +58,44 @@ def fmt_metric_value(value: float) -> str:
         Truncated string representation with ``METRIC_LOG_DECIMAL_PLACES`` decimal places.
     """
     return str(decimal.Decimal(str(value)).quantize(_METRIC_LOG_QUANTIZER, rounding=decimal.ROUND_FLOOR))
+
+
+def fmt_metric_summary(
+    metrics_dict:    dict[str, float],
+    quality_targets: "list[QualityTarget]",
+) -> str:
+    """Format a metric summary string, marking the worst-deficit metric.
+
+    The metric with the smallest surplus (or largest deficit) — i.e. the one
+    that most constrains the CRF search — is marked with ``BOTTLENECK_SYMBOL``
+    (•) on a pass or ``FAILURE_SYMBOL_MINOR`` (✘) on a miss.  All other values are
+    plain.  This makes it immediately visible which metric drove the next CRF
+    selection.
+
+    Args:
+        metrics_dict:    Measured metrics keyed as ``"<metric>_<stat>"``.
+        quality_targets: Quality targets used to determine worst deficit.
+
+    Returns:
+        Space-separated string where each value has a trailing symbol:
+        ``•`` for the bottleneck (least surplus on pass),
+        ``✘`` for the worst deficit (on miss),
+        `` `` (space) for all others — keeping columns aligned across log lines.
+        Example: ``"psnr_min=41.8✘ ssim_min=97.8  vmaf_min=95.9 "``
+    """
+    from pyqenc.quality import _find_worst_target
+    found      = _find_worst_target(metrics_dict, quality_targets)
+    worst_key  = f"{found[0].metric}_{found[0].statistic}" if found is not None else None
+    worst_pass = found[1] >= 0 if found is not None else True
+
+    parts: list[str] = []
+    for k, v in metrics_dict.items():
+        if k == worst_key:
+            symbol = NEUTRAL_INDICATOR_SYMBOL if worst_pass else FAILURE_SYMBOL_MINOR
+        else:
+            symbol = " "
+        parts.append(f"{k}={fmt_metric_value(v)}{symbol}")
+    return " ".join(parts).strip()
 
 def emit_phase_banner(name: str, log: logging.Logger) -> None:
     """Emit the standard thick-line banner for a phase.
@@ -139,42 +178,6 @@ def fmt_chunk_attempt_result(strategy: str, chunk_id: str, attempt: int, msg: st
 
 def fmt_chunk_final(strategy: str, chunk_id: str, crf: float, attempts: int, use_visual_hash: bool = True) -> str:
     return fmt_chunk(strategy, chunk_id, f"success {SUCCESS_SYMBOL_MAJOR} with CRF {crf:{PADDING_CRF}} after {attempts} attempts", use_visual_hash)
-
-def fmt_strategy_result_block(
-    strategy:      str,
-    avg_crf:       float,
-    total_size_mb: float,
-    num_chunks:    int,
-    passed:        bool,
-    error:         str | None = None,
-) -> list[str]:
-    """Return a visually distinct block of log lines for one strategy result.
-
-    The block is bordered by ``─`` delimiter lines (72 chars wide).
-
-    Args:
-        strategy:      Strategy name.
-        avg_crf:       Average CRF across test chunks.
-        total_size_mb: Total size of encoded test chunks in MB.
-        num_chunks:    Number of test chunks encoded.
-        passed:        Whether all chunks met quality targets.
-        error:         Optional error message if the strategy failed.
-
-    Returns:
-        List of log lines (caller emits each at the desired level).
-    """
-    status_icon = f"{SUCCESS_SYMBOL_MAJOR} PASSED" if passed else f"{FAILURE_SYMBOL_MAJOR} FAILED"
-    lines: list[str] = [
-        THIN_LINE,
-        f"Strategy result: {strategy}",
-        f"  Status    : {status_icon}",
-        f"  Avg CRF   : {avg_crf:.2f}",
-        f"  Total size: {total_size_mb:.2f} MB  ({num_chunks} chunks)",
-    ]
-    if error:
-        lines.append(f"  Error     : {error}")
-    lines.append(THIN_LINE)
-    return lines
 
 def fmt_key_value_table(kv_to_show: dict[str, str | list | object]) -> None:
     """Log a key-value table at INFO level with aligned columns.

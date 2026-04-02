@@ -432,13 +432,10 @@ class OptimizationPhase:
         encoder       = _make_encoder(work_dir, crop, self._config.visual_hash, self._config.metrics_sampling)
         reference_dir = work_dir / CHUNKS_DIR
 
-        # Seed per-strategy initial CRF from cached results (moving average), falling back to codec default.
-        optimization_crfs: dict[str, float] = {
-            s.name: (cached_results[s.name].avg_crf if s.name in cached_results and cached_results[s.name].avg_crf > 0.0 else s.codec.default_crf)
-            for s in strategies_to_test
-        }
-
-        from pyqenc.phases.encoding import _encode_chunks_parallel, _recover_encoding_attempts
+        from pyqenc.phases.encoding import (
+            _encode_chunks_parallel,
+            _recover_encoding_attempts,
+        )
 
         test_chunk_seconds = sum(c.end_timestamp - c.start_timestamp for c in test_chunks)
         total_seconds      = test_chunk_seconds * len(strategies_to_test)
@@ -457,17 +454,16 @@ class OptimizationPhase:
 
             enc_result = asyncio.run(
                 _encode_chunks_parallel(
-                    encoder           = encoder,
-                    chunks            = test_chunks,
-                    reference_dir     = reference_dir,
-                    strategies        = strategies_to_test,
-                    quality_targets   = self._config.quality_targets,
-                    max_parallel      = self._config.max_parallel,
-                    force             = False,
-                    collector         = self._collector,
-                    optimization_crfs = optimization_crfs,
-                    phase_recovery    = phase_recovery,
-                    bar               = advance,
+                    encoder         = encoder,
+                    chunks          = test_chunks,
+                    reference_dir   = reference_dir,
+                    strategies      = strategies_to_test,
+                    quality_targets = self._config.quality_targets,
+                    max_parallel    = self._config.max_parallel,
+                    force           = False,
+                    collector       = self._collector,
+                    phase_recovery  = phase_recovery,
+                    advance         = advance,
                 )
             )
 
@@ -476,23 +472,13 @@ class OptimizationPhase:
         new_results: list[StrategyTestResult] = []
         for strategy in strategies_to_test:
             file_sizes: list[float] = []
-            crfs:       list[float] = []
             for chunk in test_chunks:
                 encoded_path = enc_result.encoded_chunks.get(chunk.chunk_id, {}).get(strategy.name)
                 if encoded_path is not None and encoded_path.exists():
                     file_sizes.append(encoded_path.stat().st_size)
-                    yaml_sidecar = encoded_path.with_suffix(".yaml")
-                    try:
-                        sidecar_data = _yaml.safe_load(yaml_sidecar.read_text(encoding="utf-8"))
-                        crf_val = sidecar_data.get("crf") if sidecar_data else None
-                        if crf_val is not None:
-                            crfs.append(float(crf_val))
-                    except Exception:
-                        pass
             new_results.append(StrategyTestResult(
                 strategy_name = strategy.name,
                 total_size    = int(sum(file_sizes)),
-                avg_crf       = sum(crfs) / len(crfs) if crfs else 0.0,
             ))
 
         all_results: list[StrategyTestResult] = list(cached_results.values()) + new_results
@@ -713,12 +699,12 @@ class OptimizationPhase:
 
         logger.info("")
         logger.info(
-            "  %-30s  %8s  %12s  %8s",
-            "Strategy", "Avg CRF", "Size (MB)", "Status",
+            "  %-30s  %12s  %8s",
+            "Strategy", "Size (MB)", "Status",
         )
         logger.info(
-            "  %-30s  %8s  %12s  %8s",
-            "-" * 30, "-" * 8, "-" * 12, "-" * 8,
+            "  %-30s  %12s  %8s",
+            "-" * 30, "-" * 12, "-" * 8,
         )
 
         for res in results:
@@ -727,8 +713,8 @@ class OptimizationPhase:
             marker   = " ◀ selected" if res.strategy_name in selected_names else ""
             status   = "passed" if res.total_size > 0 else "failed"
             logger.info(
-                "  %-30s  %8.2f  %12s  %8s%s",
-                res.strategy_name[:30], res.avg_crf, size_str, status, marker,
+                "  %-30s  %12s  %8s%s",
+                res.strategy_name[:30], size_str, status, marker,
             )
 
         logger.info("")

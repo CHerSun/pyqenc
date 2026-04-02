@@ -259,19 +259,16 @@ class StrategyTestResult(BaseModel):
     Attributes:
         strategy_name: Display name of the strategy that was tested (e.g. ``'slow+h265-aq'``).
         total_size:    Total encoded size across all test chunks in bytes.
-        avg_crf:       Average CRF value used across test chunks.
     """
 
     strategy_name: str
     total_size:    int
-    avg_crf:       float
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
         return {
             "strategy":   self.strategy_name,
             "total_size": self.total_size,
-            "avg_crf":    self.avg_crf,
         }
 
     @classmethod
@@ -280,7 +277,6 @@ class StrategyTestResult(BaseModel):
         return cls(
             strategy_name = str(data["strategy"]),
             total_size    = int(data["total_size"]),
-            avg_crf       = float(data["avg_crf"]),
         )
 
 

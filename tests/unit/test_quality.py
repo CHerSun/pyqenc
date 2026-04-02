@@ -128,3 +128,27 @@ class TestAdjustCRF:
         next_crf = adjust_crf(20.0, results, targets, history)
         assert next_crf is not None
         assert round(next_crf / CRF_GRANULARITY, 10) % 1 == 0
+
+    def test_result_never_equals_boundary(self):
+        """Returned CRF must never equal pass_crf or fail_crf — always strictly interior."""
+        targets = [QualityTarget(metric="vmaf", statistic="min", value=95.0)]
+        # Simulate the reported bug: pass=10.0, fail=20.0, proportional lands on 20.0
+        history = _history((20.0, False), (10.0, True))
+
+        # Any result from this bracket must be strictly inside (10.0, 20.0)
+        for vmaf in [94.0, 95.5, 90.0, 99.0]:
+            h = _history((20.0, False), (10.0, True))
+            result = adjust_crf(15.0, {"vmaf_min": vmaf}, targets, h)
+            if result is not None:
+                assert result > h.pass_crf, f"result {result} ≤ pass_crf {h.pass_crf}"
+                assert result < h.fail_crf, f"result {result} ≥ fail_crf {h.fail_crf}"
+
+    def test_exhausted_when_only_one_interior_step_possible(self):
+        """When bracket is exactly 2×CRF_GRANULARITY, one interior step exists."""
+        targets = [QualityTarget(metric="vmaf", statistic="min", value=95.0)]
+        h = CRFHistory(fail_crf=20.0, pass_crf=20.0 - 2 * CRF_GRANULARITY)
+        result = adjust_crf(19.0, {"vmaf_min": 94.0}, targets, h)
+        # Exactly one interior point exists: pass_crf + CRF_GRANULARITY
+        if result is not None:
+            assert result > h.pass_crf
+            assert result < h.fail_crf

@@ -88,7 +88,7 @@ def _make_results(sizes: list[int]) -> list[StrategyTestResult]:
     """Create StrategyTestResult list for S1, S2, S3 with given sizes."""
     strategies = [_S1, _S2, _S3]
     return [
-        StrategyTestResult(strategy_name=s.name, total_size=sz, avg_crf=20.0)
+        StrategyTestResult(strategy_name=s.name, total_size=sz)
         for s, sz in zip(strategies, sizes)
     ]
 
@@ -125,7 +125,7 @@ class TestApplyTolerance:
         """Strategies with total_size=0 (failed) are excluded."""
         results = [
             StrategyTestResult(strategy_name=_S1.name, total_size=0,   avg_crf=0.0),
-            StrategyTestResult(strategy_name=_S2.name, total_size=100, avg_crf=20.0),
+            StrategyTestResult(strategy_name=_S2.name, total_size=100),
         ]
         selected = OptimizationPhase._apply_tolerance(results, 5.0)
         assert _S1.name not in selected
@@ -267,8 +267,8 @@ class TestToleranceReapplication:
 
         # Only 2 of 3 strategies have results
         partial_results = [
-            StrategyTestResult(strategy_name=_S1.name, total_size=100, avg_crf=20.0),
-            StrategyTestResult(strategy_name=_S2.name, total_size=104, avg_crf=20.5),
+            StrategyTestResult(strategy_name=_S1.name, total_size=100),
+            StrategyTestResult(strategy_name=_S2.name, total_size=104),
         ]
         _persist_optimization(
             work_dir         = work_dir,

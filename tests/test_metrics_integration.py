@@ -895,7 +895,7 @@ class TestOptimizationPhaseTiming:
         persisted = OptimizationParams(
             crop             = CropParams(),
             test_chunks      = ["chunk_0"],
-            strategy_results = [StrategyTestResult(strategy_name=strategy.name, total_size=1024, avg_crf=28.0)],
+            strategy_results = [StrategyTestResult(strategy_name=strategy.name, total_size=1024)],
             tolerance_pct    = 5.0,   # matches PipelineConfig.strategy_selection_tolerance default
             selected         = [strategy.name],
             quality_targets  = [],
@@ -1054,7 +1054,7 @@ class TestOptimizationPhaseTiming:
         persisted = OptimizationParams(
             crop             = CropParams(),
             test_chunks      = ["chunk_0"],
-            strategy_results = [StrategyTestResult(strategy_name=strategy.name, total_size=1024, avg_crf=28.0)],
+            strategy_results = [StrategyTestResult(strategy_name=strategy.name, total_size=1024)],
             tolerance_pct    = 0.0,
             selected         = [strategy.name],
             quality_targets  = [],
@@ -1125,7 +1125,7 @@ class TestEncodingPhaseTiming:
             artifacts         = [],
             message           = "ok",
             selected_strategies = [strategy],
-            strategy_results  = [StrategyTestResult(strategy_name=strategy.name, total_size=1024, avg_crf=28.0)],
+            strategy_results  = [StrategyTestResult(strategy_name=strategy.name, total_size=1024)],
         )
 
     def _make_phase(
