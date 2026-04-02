@@ -444,3 +444,319 @@ class TestWriteSidecar:
         assert data["target_duration_seconds"] is None
         assert data["crop_params"] == {"top": 10, "bottom": 20, "left": 0, "right": 0}
         assert MetricType.VMAF.value in data["metrics"]
+
+
+# ---------------------------------------------------------------------------
+# _capture_screenshots
+# ---------------------------------------------------------------------------
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from pyqenc.phases.measure import _capture_screenshots
+from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
+
+
+def _make_ffmpeg_result(success: bool = True, returncode: int = 0) -> FFmpegRunResult:
+    return FFmpegRunResult(returncode=returncode, success=success, stderr_lines=[], frame_count=None)
+
+
+class TestCaptureScreenshots:
+    """Unit tests for _capture_screenshots."""
+
+    def test_empty_timestamps_returns_empty(self, tmp_path: Path) -> None:
+        """Empty timestamp list returns [] immediately without calling ffmpeg."""
+        result = asyncio.run(
+            _capture_screenshots(
+                video_path      = tmp_path / "video.mkv",
+                timestamps_s    = [],
+                screenshots_dir = tmp_path,
+                crop_params     = None,
+                fps             = 24.0,
+                has_timestamps  = True,
+            )
+        )
+        assert result == []
+
+    def test_timestamp_mode_used_when_has_timestamps_true(self, tmp_path: Path) -> None:
+        """When has_timestamps=True, select filter uses eq(t,...) not eq(n,...)."""
+        captured_cmd: list = []
+
+        async def fake_ffmpeg(cmd, output_file, **kwargs):
+            captured_cmd.extend(cmd)
+            # Create fake output files so rename logic runs
+            (tmp_path / ".tmp_capture_video" / "0001.png").parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / ".tmp_capture_video" / "0001.png").write_bytes(b"PNG")
+            return _make_ffmpeg_result(success=True)
+
+        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
+            asyncio.run(
+                _capture_screenshots(
+                    video_path      = tmp_path / "video.mkv",
+                    timestamps_s    = [30.0],
+                    screenshots_dir = tmp_path,
+                    crop_params     = None,
+                    fps             = 24.0,
+                    has_timestamps  = True,
+                )
+            )
+
+        vf_arg = next(str(a) for a in captured_cmd if "select=" in str(a))
+        assert "eq(t," in vf_arg
+        assert "eq(n," not in vf_arg
+
+    def test_frame_number_mode_used_when_no_timestamps_and_fps_known(self, tmp_path: Path) -> None:
+        """When has_timestamps=False and fps known, select filter uses eq(n,...)."""
+        captured_cmd: list = []
+
+        async def fake_ffmpeg(cmd, output_file, **kwargs):
+            captured_cmd.extend(cmd)
+            (tmp_path / ".tmp_capture_video" / "0001.png").parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / ".tmp_capture_video" / "0001.png").write_bytes(b"PNG")
+            return _make_ffmpeg_result(success=True)
+
+        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
+            asyncio.run(
+                _capture_screenshots(
+                    video_path      = tmp_path / "video.mkv",
+                    timestamps_s    = [30.0],
+                    screenshots_dir = tmp_path,
+                    crop_params     = None,
+                    fps             = 24.0,
+                    has_timestamps  = False,
+                )
+            )
+
+        vf_arg = next(str(a) for a in captured_cmd if "select=" in str(a))
+        assert "eq(n," in vf_arg
+        assert "eq(t," not in vf_arg
+
+    def test_timestamp_mode_fallback_when_fps_unknown(self, tmp_path: Path) -> None:
+        """When has_timestamps=False but fps is None, falls back to timestamp mode."""
+        captured_cmd: list = []
+
+        async def fake_ffmpeg(cmd, output_file, **kwargs):
+            captured_cmd.extend(cmd)
+            (tmp_path / ".tmp_capture_video" / "0001.png").parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / ".tmp_capture_video" / "0001.png").write_bytes(b"PNG")
+            return _make_ffmpeg_result(success=True)
+
+        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
+            asyncio.run(
+                _capture_screenshots(
+                    video_path      = tmp_path / "video.mkv",
+                    timestamps_s    = [30.0],
+                    screenshots_dir = tmp_path,
+                    crop_params     = None,
+                    fps             = None,
+                    has_timestamps  = False,
+                )
+            )
+
+        vf_arg = next(str(a) for a in captured_cmd if "select=" in str(a))
+        assert "eq(t," in vf_arg
+
+    def test_crop_included_in_filter_when_non_empty(self, tmp_path: Path) -> None:
+        """Non-empty crop params are included in the vf filter chain."""
+        captured_cmd: list = []
+
+        async def fake_ffmpeg(cmd, output_file, **kwargs):
+            captured_cmd.extend(cmd)
+            (tmp_path / ".tmp_capture_video" / "0001.png").parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / ".tmp_capture_video" / "0001.png").write_bytes(b"PNG")
+            return _make_ffmpeg_result(success=True)
+
+        crop = CropParams(top=138, bottom=138, left=0, right=0)
+        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
+            asyncio.run(
+                _capture_screenshots(
+                    video_path      = tmp_path / "video.mkv",
+                    timestamps_s    = [30.0],
+                    screenshots_dir = tmp_path,
+                    crop_params     = crop,
+                    fps             = 24.0,
+                    has_timestamps  = True,
+                )
+            )
+
+        vf_arg = next(str(a) for a in captured_cmd if "select=" in str(a))
+        assert "crop=" in vf_arg
+
+    def test_crop_omitted_when_empty(self, tmp_path: Path) -> None:
+        """Empty (no-op) crop params are NOT added to the filter chain."""
+        captured_cmd: list = []
+
+        async def fake_ffmpeg(cmd, output_file, **kwargs):
+            captured_cmd.extend(cmd)
+            (tmp_path / ".tmp_capture_video" / "0001.png").parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / ".tmp_capture_video" / "0001.png").write_bytes(b"PNG")
+            return _make_ffmpeg_result(success=True)
+
+        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
+            asyncio.run(
+                _capture_screenshots(
+                    video_path      = tmp_path / "video.mkv",
+                    timestamps_s    = [30.0],
+                    screenshots_dir = tmp_path,
+                    crop_params     = CropParams(),
+                    fps             = 24.0,
+                    has_timestamps  = True,
+                )
+            )
+
+        vf_arg = next(str(a) for a in captured_cmd if "select=" in str(a))
+        assert "crop=" not in vf_arg
+
+    def test_vsync_0_in_command(self, tmp_path: Path) -> None:
+        """The ffmpeg command includes -vsync 0."""
+        captured_cmd: list = []
+
+        async def fake_ffmpeg(cmd, output_file, **kwargs):
+            captured_cmd.extend(cmd)
+            (tmp_path / ".tmp_capture_video" / "0001.png").parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / ".tmp_capture_video" / "0001.png").write_bytes(b"PNG")
+            return _make_ffmpeg_result(success=True)
+
+        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
+            asyncio.run(
+                _capture_screenshots(
+                    video_path      = tmp_path / "video.mkv",
+                    timestamps_s    = [30.0],
+                    screenshots_dir = tmp_path,
+                    crop_params     = None,
+                    fps             = None,
+                    has_timestamps  = True,
+                )
+            )
+
+        cmd_strs = [str(a) for a in captured_cmd]
+        assert "-vsync" in cmd_strs
+        vsync_idx = cmd_strs.index("-vsync")
+        assert cmd_strs[vsync_idx + 1] == "0"
+
+    def test_ffmpeg_failure_returns_empty_and_logs_warning(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        """When ffmpeg fails, returns [] and logs a warning."""
+        async def fake_ffmpeg(cmd, output_file, **kwargs):
+            return _make_ffmpeg_result(success=False, returncode=1)
+
+        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
+            with caplog.at_level(logging.WARNING, logger="pyqenc.phases.measure"):
+                result = asyncio.run(
+                    _capture_screenshots(
+                        video_path      = tmp_path / "video.mkv",
+                        timestamps_s    = [30.0],
+                        screenshots_dir = tmp_path,
+                        crop_params     = None,
+                        fps             = None,
+                        has_timestamps  = True,
+                    )
+                )
+
+        assert result == []
+        assert any("ffmpeg exited" in r.message for r in caplog.records)
+
+    def test_successful_capture_returns_named_paths(self, tmp_path: Path) -> None:
+        """Successful capture returns list of final named screenshot paths."""
+        async def fake_ffmpeg(cmd, output_file, **kwargs):
+            # Create two fake output files
+            out_dir = tmp_path / ".tmp_capture_video"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "0001.png").write_bytes(b"PNG1")
+            (out_dir / "0002.png").write_bytes(b"PNG2")
+            return _make_ffmpeg_result(success=True)
+
+        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
+            result = asyncio.run(
+                _capture_screenshots(
+                    video_path      = tmp_path / "video.mkv",
+                    timestamps_s    = [30.0, 60.0],
+                    screenshots_dir = tmp_path,
+                    crop_params     = None,
+                    fps             = None,
+                    has_timestamps  = True,
+                )
+            )
+
+        assert len(result) == 2
+        for path in result:
+            assert path.exists()
+            assert path.suffix == ".png"
+            assert "video" in path.name
+
+    def test_final_filenames_use_timestamp_format(self, tmp_path: Path) -> None:
+        """Output filenames follow HH꞉MM꞉SS․mmm_stem.png format."""
+        async def fake_ffmpeg(cmd, output_file, **kwargs):
+            out_dir = tmp_path / ".tmp_capture_video"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "0001.png").write_bytes(b"PNG")
+            return _make_ffmpeg_result(success=True)
+
+        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
+            result = asyncio.run(
+                _capture_screenshots(
+                    video_path      = tmp_path / "video.mkv",
+                    timestamps_s    = [3723.456],
+                    screenshots_dir = tmp_path,
+                    crop_params     = None,
+                    fps             = None,
+                    has_timestamps  = True,
+                )
+            )
+
+        assert len(result) == 1
+        sep  = TIME_SEPARATOR_SAFE
+        msep = TIME_SEPARATOR_MS
+        assert result[0].name == f"01{sep}02{sep}03{msep}456_video.png"
+
+    def test_no_tmp_files_left_after_success(self, tmp_path: Path) -> None:
+        """No .tmp files remain in screenshots_dir after successful capture."""
+        async def fake_ffmpeg(cmd, output_file, **kwargs):
+            out_dir = tmp_path / ".tmp_capture_video"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "0001.png").write_bytes(b"PNG")
+            return _make_ffmpeg_result(success=True)
+
+        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
+            asyncio.run(
+                _capture_screenshots(
+                    video_path      = tmp_path / "video.mkv",
+                    timestamps_s    = [30.0],
+                    screenshots_dir = tmp_path,
+                    crop_params     = None,
+                    fps             = None,
+                    has_timestamps  = True,
+                )
+            )
+
+        tmp_files = list(tmp_path.glob("*.tmp"))
+        assert tmp_files == [], f"Unexpected .tmp files: {tmp_files}"
+        tmp_dirs = [d for d in tmp_path.iterdir() if d.is_dir() and d.name.startswith(".tmp_")]
+        assert tmp_dirs == [], f"Unexpected temp dirs: {tmp_dirs}"
+
+    def test_frame_numbers_derived_from_fps(self, tmp_path: Path) -> None:
+        """Frame numbers in fallback mode are round(timestamp * fps)."""
+        captured_cmd: list = []
+
+        async def fake_ffmpeg(cmd, output_file, **kwargs):
+            captured_cmd.extend(cmd)
+            out_dir = tmp_path / ".tmp_capture_video"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "0001.png").write_bytes(b"PNG")
+            return _make_ffmpeg_result(success=True)
+
+        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
+            asyncio.run(
+                _capture_screenshots(
+                    video_path      = tmp_path / "video.mkv",
+                    timestamps_s    = [1.0],   # 1.0 * 24 = 24
+                    screenshots_dir = tmp_path,
+                    crop_params     = None,
+                    fps             = 24.0,
+                    has_timestamps  = False,
+                )
+            )
+
+        vf_arg = next(str(a) for a in captured_cmd if "select=" in str(a))
+        assert "eq(n,24)" in vf_arg

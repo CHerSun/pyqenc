@@ -120,8 +120,8 @@ Implement the `measure` subcommand end-to-end. New module `pyqenc/phases/measure
     - Mock `write_yaml_atomic` to raise `OSError`; assert warning is logged and no exception propagates
     - _Requirements: 5.7_
 
-- [ ] 9. Implement screenshot capture in `pyqenc/phases/measure.py`
-  - [ ] 9.1 Implement `_capture_screenshots(video_path, timestamps_s, screenshots_dir, crop_params, fps, has_timestamps) -> list[Path]`
+- [x] 9. Implement screenshot capture in `pyqenc/phases/measure.py`
+  - [x] 9.1 Implement `_capture_screenshots(video_path, timestamps_s, screenshots_dir, crop_params, fps, has_timestamps) -> list[Path]`
     - Single ffmpeg pass using `select` filter (no fast-seek)
     - Primary mode: timestamp-based `select='eq(t,T1)+eq(t,T2)+...'`
     - Fallback mode: frame-number-based `select='eq(n,F1)+eq(n,F2)+...'` when `has_timestamps=False` and `fps` known
@@ -132,30 +132,30 @@ Implement the `measure` subcommand end-to-end. New module `pyqenc/phases/measure
     - On individual frame failure: log warning, continue
     - _Requirements: 7.3, 7.4, 7.5, 7.6, 7.8, 7.9_
 
-- [ ] 10. Implement `run_measure` top-level async entry point in `pyqenc/phases/measure.py`
-  - [ ] 10.1 Implement input validation and crop resolution
+- [x] 10. Implement `run_measure` top-level async entry point in `pyqenc/phases/measure.py`
+  - [x] 10.1 Implement input validation and crop resolution
     - Raise `FileNotFoundError` if `source_video` missing or any path in `target_videos` missing
     - Raise `ValueError` if `metrics_sampling < 1` or `screenshot_count < 1`
     - Call `_resolve_crop(crop_params, work_dir, source_video)`
     - _Requirements: 8.5, 8.6, 11.1, 11.2, 11.3, 11.4, 11.5_
-  - [ ] 10.2 Implement resolution validation and parameter summary logging
+  - [x] 10.2 Implement resolution validation and parameter summary logging
     - Probe resolutions of source and all targets upfront
     - Call `_check_resolution_match` for each target; stop entirely if any fails
     - Log key-value parameter summary via `fmt_key_value_table`: source, target count, target stems (list), crop, width, screenshot mode
     - _Requirements: 3c.1, 3c.2, 3c.3, 11.1, 11.2, 11.3_
-  - [ ] 10.3 Implement directory creation and duration probing
+  - [x] 10.3 Implement directory creation and duration probing
     - Create `measure_dir`, per-target `metrics_dir`, per-target `target_screenshots_dir`, `source_screenshots_dir`
     - Probe durations of source and all targets; compute `effective_duration[t] = min(source_duration, target_duration)` per target
     - Compute `shared_duration = min(effective_duration[t] for all t)` for screenshot timestamps
     - Log warning when durations differ by >1s; handle unavailable durations per design error table
     - _Requirements: 3.1, 3.6, 3b.1, 3b.2, 3b.3, 3b.4, 3b.5_
-  - [ ] 10.4 Implement screenshot timestamp computation and source screenshot capture
+  - [x] 10.4 Implement screenshot timestamp computation and source screenshot capture
     - Compute shared timestamps using `_screenshot_timestamps_count` or `_screenshot_timestamps_interval` from `shared_duration`
     - Log warning when fewer timestamps fit than requested; log error and skip if timestamp set is empty
     - Capture source screenshots once using shared timestamps → `source_screenshots_dir`
     - Log info when running in screenshots-only mode (no targets)
     - _Requirements: 7.1, 7.2, 7.7, 7.10, 7.11, 7.12, 1b.1, 1b.2, 1b.3, 1b.4, 1b.5_
-  - [ ] 10.5 Implement per-target loop: metrics, sidecar, screenshots
+  - [x] 10.5 Implement per-target loop: metrics, sidecar, screenshots
     - For each target sequentially: run metrics via `_run_metrics`, write sidecar via `_write_sidecar`, capture target screenshots via `_capture_screenshots`
     - Pass `Effective_Duration` to metric computation when available
     - Log summary at info level: metrics per target, total screenshot count
