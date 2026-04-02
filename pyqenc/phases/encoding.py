@@ -402,6 +402,7 @@ class ChunkEncoder:
         crop_params:       CropParams | None = None,
         cleanup_level:     CleanupLevel      = CleanupLevel.NONE,
         visual_hash:       bool              = True,
+        metrics_sampling:  int               = 10,
     ):
         """Initialize chunk encoder.
 
@@ -413,12 +414,14 @@ class ChunkEncoder:
                                a pair converges (Req 12.3).
             visual_hash:       When ``True``, prepend a deterministic emoji to every
                                chunk log line for visual distinction in parallel output.
+            metrics_sampling:  Frame subsampling factor for quality metric generation.
         """
         self.quality_evaluator = quality_evaluator
         self.work_dir          = work_dir
         self._crop_params      = crop_params
         self._cleanup_level    = cleanup_level
         self._visual_hash      = visual_hash
+        self._metrics_sampling = metrics_sampling
 
     def _get_output_dir(self, strategy: Strategy) -> Path:
         """Get the CRF search workspace directory for *strategy*.
@@ -979,6 +982,7 @@ class ChunkEncoder:
                 ref_crop=self._crop_params or CropParams(),
                 targets=quality_targets,
                 output_dir=attempt_metrics_dir,
+                subsample_factor=self._metrics_sampling,
                 plot_path=attempt_plot_path,
                 chunk_start_seconds=chunk.start_timestamp,
             )
@@ -1387,6 +1391,7 @@ def encode_all_chunks(
     cleanup_level:     CleanupLevel      = CleanupLevel.NONE,
     optimization_crfs: dict[str, float] | None = None,
     visual_hash:       bool              = True,
+    metrics_sampling:  int               = 10,
 ) -> EncodingResult:
     """Encode all chunks with quality-targeted CRF adjustment.
 
@@ -1419,6 +1424,9 @@ def encode_all_chunks(
                            initial seed instead of the codec ``default_crf``.
         collector:         Metrics collector; passed through to
                            ``_encode_chunks_parallel`` for timing and convergence tracking.
+        metrics_sampling:  Frame subsampling factor for quality metric generation.
+                           Passed through to ``ChunkEncoder`` and then to
+                           ``QualityEvaluator.evaluate_chunk``.
 
     Returns:
         EncodingResult with paths to encoded chunks and statistics
@@ -1498,6 +1506,7 @@ def encode_all_chunks(
         crop_params       = crop_params,
         cleanup_level     = cleanup_level,
         visual_hash       = visual_hash,
+        metrics_sampling  = metrics_sampling,
     )
 
     # Run parallel encoding — COMPLETE pairs are skipped inside _encode_chunks_parallel
@@ -1954,6 +1963,7 @@ class EncodingPhase:
             cleanup_level    = self._config.cleanup,
             optimization_crfs= optimization_crfs,
             visual_hash      = self._config.visual_hash,
+            metrics_sampling = self._config.metrics_sampling,
         )
 
         if enc_result.outcome == PhaseOutcome.FAILED:
