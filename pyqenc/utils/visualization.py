@@ -1108,13 +1108,14 @@ class QualityEvaluator:
 
     async def _generate_metrics(
         self,
-        encoded: Path,
-        reference: Path,
-        ref_crop: CropParams,
-        output_prefix: str,
-        metrics_sampling: int = 10,
-        bar_advance: Callable[[float], None] | None = None,
-        duration_seconds: float = 0.0,
+        encoded:          Path,
+        reference:        Path,
+        ref_crop:         CropParams,
+        output_prefix:    str,
+        metrics_sampling: int                          = 10,
+        bar_advance:      Callable[[float], None] | None = None,
+        duration_seconds: float                        = 0.0,
+        width:            int                          = 0,
     ) -> tuple[Path, Path, Path]:
         """Generate metric log files for quality comparison.
 
@@ -1141,6 +1142,7 @@ class QualityEvaluator:
                               by the given number of seconds.
             duration_seconds: Duration of the encoded clip in seconds; used to
                               cap per-process bar advances.
+            width:            Scale both inputs to this width (0 = no scaling).
 
         Returns:
             Tuple of (psnr_log, ssim_log, vmaf_json) final paths
@@ -1181,7 +1183,7 @@ class QualityEvaluator:
                 crop_distorted=CropParams(),
                 crop_reference=ref_crop,
                 duration=0,
-                width=0,
+                width=width,
                 use_gpu=False,
                 subsample=metrics_sampling,
                 output_prefix=tmp_prefix,
@@ -1224,15 +1226,16 @@ class QualityEvaluator:
 
     def evaluate_chunk(
         self,
-        encoded: Path,
-        reference: Path,
-        ref_crop: CropParams,
-        targets: list[QualityTarget],
-        output_dir: Path,
-        subsample_factor: int = 10,
-        show_progress: bool = False,
-        plot_path: Path | None = None,
-        chunk_start_seconds: float = 0.0,
+        encoded:             Path,
+        reference:           Path,
+        ref_crop:            CropParams,
+        targets:             list[QualityTarget],
+        output_dir:          Path,
+        subsample_factor:    int               = 10,
+        show_progress:       bool              = False,
+        plot_path:           Path | None       = None,
+        chunk_start_seconds: float             = 0.0,
+        width:               int               = 0,
     ) -> QualityEvaluation:
         """Evaluate encoded chunk against reference and quality targets.
 
@@ -1252,6 +1255,8 @@ class QualityEvaluator:
             chunk_start_seconds: Start timestamp of the chunk in seconds.  Used to
                                  offset the x-axis so the graph reflects the actual
                                  position in the source video.
+            width:               Scale both inputs to this width during metric
+                                 computation (0 = no scaling).
 
         Returns:
             QualityEvaluation with metrics and target evaluation results
@@ -1287,6 +1292,7 @@ class QualityEvaluator:
                         subsample_factor,
                         bar_advance=advance,
                         duration_seconds=duration_seconds or 0.0,
+                        width=width,
                     )
                 )
         else:
@@ -1299,6 +1305,7 @@ class QualityEvaluator:
                     subsample_factor,
                     bar_advance=None,
                     duration_seconds=duration_seconds or 0.0,
+                    width=width,
                 )
             )
 

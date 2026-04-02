@@ -10,7 +10,13 @@ from pathlib import Path
 import psutil
 
 import pyqenc
-from pyqenc.constants import CRF_GRANULARITY, FAILURE_SYMBOL_MAJOR, SUCCESS_SYMBOL_MAJOR
+from pyqenc.constants import (
+    CRF_GRANULARITY,
+    DEFAULT_METRICS_SAMPLING,
+    DEFAULT_SCREENSHOT_COUNT,
+    FAILURE_SYMBOL_MAJOR,
+    SUCCESS_SYMBOL_MAJOR,
+)
 from pyqenc.models import (
     ChunkingMode,
     CleanupLevel,
@@ -560,6 +566,99 @@ def _cmd_merge(args: argparse.Namespace) -> int:
         return 1
 
 
+def _create_measure_subcommand(subparsers) -> None:
+    """Create the 'measure' subcommand for standalone quality measurement."""
+    p = subparsers.add_parser("measure", help="Measure quality metrics between source and encoded video(s)")
+    p.add_argument(
+        "source",
+        type=Path,
+        help=(
+            "Reference (original/lossless) video file. "
+            "ORDER MATTERS: swapping source and target produces incorrect metrics (VMAF is not symmetric)."
+        ),
+    )
+    p.add_argument(
+        "targets",
+        type=Path,
+        nargs="*",
+        default=[],
+        help=(
+            "Zero or more encoded/distorted video files to evaluate against the source. "
+            "Omit all to run in screenshots-only mode (no metric computation)."
+        ),
+    )
+    _add_base_arguments(p)
+    _add_crop_arguments(p)
+    p.add_argument(
+        "--metrics-sampling",
+        type=int,
+        default=DEFAULT_METRICS_SAMPLING,
+        metavar="N",
+        help=f"Measure every N-th frame (default: {DEFAULT_METRICS_SAMPLING})",
+    )
+    p.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        metavar="W",
+        help=(
+            "Scale both source and target to width W (preserving aspect ratio) during metric "
+            "computation. Crop is applied first. Does not affect screenshots."
+        ),
+    )
+    p.add_argument(
+        "--screenshots",
+        type=int,
+        default=DEFAULT_SCREENSHOT_COUNT,
+        metavar="N",
+        help=f"Screenshots to capture from each video (default: {DEFAULT_SCREENSHOT_COUNT}, min 1)",
+    )
+    p.add_argument(
+        "--every",
+        type=str,
+        default=None,
+        metavar="DURATION",
+        help=(
+            "Capture one screenshot per interval (e.g. 30, 30s, 5m, 1h30m). "
+            "Can be combined with --screenshots to cap the total count."
+        ),
+    )
+    p.set_defaults(func=_cmd_measure)
+
+
+def _cmd_measure(args: argparse.Namespace) -> int:
+    """Execute the 'measure' subcommand."""
+    from pyqenc.api import measure_quality
+
+    try:
+        crop_params = _resolve_crop_params(args)
+    except ValueError as e:
+        logger.critical(f"Invalid crop parameters: {e}")
+        return 1
+
+    try:
+        measure_quality(
+            source_video         = args.source,
+            target_videos        = args.targets,
+            work_dir             = args.work_dir,
+            crop_params          = crop_params,
+            metrics_sampling     = args.metrics_sampling,
+            screenshot_count     = args.screenshots,
+            screenshot_interval  = args.every,
+            width                = args.width,
+        )
+        return 0
+    except FileNotFoundError as e:
+        logger.critical("%s", e)
+        return 1
+    except ValueError as e:
+        logger.critical("Invalid arguments: %s", e)
+        return 1
+    except Exception as e:
+        logger.critical("Measure failed: %s", e, exc_info=True)
+        return 1
+
+
 def main() -> int:
     """Main CLI entry point.
 
@@ -630,6 +729,7 @@ Examples:
     _create_encode_subcommand(subparsers)
     _create_audio_subcommand(subparsers)
     _create_merge_subcommand(subparsers)
+    _create_measure_subcommand(subparsers)
 
     # Parse arguments
     args = parser.parse_args()

@@ -33,8 +33,8 @@ Implement the `measure` subcommand end-to-end. New module `pyqenc/phases/measure
     - Update `_cmd_auto` and `_cmd_extract` to use this helper
     - _Requirements: 2.1, 2.2_
 
-- [ ] 4. Add `_create_measure_subcommand` and `_cmd_measure` to `pyqenc/cli.py`
-  - [ ] 4.1 Implement `_create_measure_subcommand(subparsers)` registering the `measure` subparser
+- [x] 4. Add `_create_measure_subcommand` and `_cmd_measure` to `pyqenc/cli.py`
+  - [x] 4.1 Implement `_create_measure_subcommand(subparsers)` registering the `measure` subparser
     - Positional `source` (Path) with help warning about argument order
     - Positional `targets` (Path, `nargs='*'`, default `[]`) with screenshots-only mode hint
     - Calls `_add_base_arguments` only (no `_add_pipeline_arguments`)
@@ -44,79 +44,79 @@ Implement the `measure` subcommand end-to-end. New module `pyqenc/phases/measure
     - `--screenshots N` (int, default `DEFAULT_SCREENSHOT_COUNT`, min 1)
     - `--every DURATION` (str, optional)
     - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 1.10, 1.11_
-  - [ ] 4.2 Implement `_cmd_measure(args) -> int`
+  - [x] 4.2 Implement `_cmd_measure(args) -> int`
     - Calls `_resolve_crop_params(args)`, then `measure_quality(...)` from `pyqenc.api`
     - Catches `FileNotFoundError`, `ValueError`, and generic `Exception`; logs critical and returns 1
     - _Requirements: 1.1, 2.1, 2.2, 11.3, 11.4, 11.5, 11.6_
 
-- [ ] 5. Create `pyqenc/phases/measure.py` — data models and helpers
-  - [ ] 5.1 Define `TargetMeasureResult` and `MeasureResult` dataclasses
+- [x] 5. Create `pyqenc/phases/measure.py` — data models and helpers
+  - [x] 5.1 Define `TargetMeasureResult` and `MeasureResult` dataclasses
     - `TargetMeasureResult`: `target_video`, `graph`, `sidecar`, `screenshots_dir`, `metrics`
     - `MeasureResult`: `source_screenshots_dir`, `targets: list[TargetMeasureResult]`
     - _Requirements: 8.3_
-  - [ ] 5.2 Implement `_parse_duration(value: str) -> float`
+  - [x] 5.2 Implement `_parse_duration(value: str) -> float`
     - Accepts plain int/float and human-friendly strings: `30s`, `5m`, `1h`, `1h30m`, `1h30m45s`
     - Raises `ValueError` on invalid input
     - _Requirements: 1.7_
-  - [ ] 5.3 Implement `_screenshot_timestamps_count(duration: float, count: int) -> list[float]`
+  - [x] 5.3 Implement `_screenshot_timestamps_count(duration: float, count: int) -> list[float]`
     - `step = duration / (count + 1)`; returns `[step, 2*step, ..., count*step]`
     - Filters out any timestamp `>= duration`
     - _Requirements: 7.2_
-  - [ ]* 5.4 Write property test for `_screenshot_timestamps_count` (Property 1)
+  - [x] 5.4 Write property test for `_screenshot_timestamps_count` (Property 1)
     - **Property 1: Screenshot timestamp distribution**
     - **Validates: Requirements 7.2**
     - For any `duration > 0` and `count >= 1`: result has exactly `count` values, all in `(0, duration)`, evenly spaced with step `duration / (count + 1)`
     - _Requirements: 7.2_
-  - [ ] 5.5 Implement `_screenshot_timestamps_interval(duration: float, interval_s: float) -> list[float]`
+  - [x] 5.5 Implement `_screenshot_timestamps_interval(duration: float, interval_s: float) -> list[float]`
     - Returns `[interval_s, 2*interval_s, ...]` up to (exclusive) `duration`
     - Returns empty list if `interval_s >= duration`
     - _Requirements: 7.2_
-  - [ ] 5.6 Implement `_screenshot_filename(timestamp_s: float, video_stem: str) -> str`
+  - [x] 5.6 Implement `_screenshot_filename(timestamp_s: float, video_stem: str) -> str`
     - Zero-padded `HH꞉MM꞉SS․mmm_stem.png` using `TIME_SEPARATOR_SAFE` and `TIME_SEPARATOR_MS`
     - _Requirements: 7.5_
-  - [ ]* 5.7 Write property test for `_screenshot_filename` sort order (Property 2)
+  - [x] 5.7 Write property test for `_screenshot_filename` sort order (Property 2)
     - **Property 2: Screenshot filename sort order**
     - **Validates: Requirements 7.5**
     - For any list of timestamps, lexicographic sort of filenames matches numeric sort of timestamps
     - _Requirements: 7.5_
-  - [ ]* 5.8 Write unit tests for `_parse_duration`, `_screenshot_timestamps_count`, `_screenshot_timestamps_interval`, `_screenshot_filename`
+  - [x] 5.8 Write unit tests for `_parse_duration`, `_screenshot_timestamps_count`, `_screenshot_timestamps_interval`, `_screenshot_filename`
     - `_parse_duration`: plain int/float, all human-friendly formats, invalid input raises `ValueError`
     - `_screenshot_filename`: correct zero-padding, correct separators, example `3723.456 → 01꞉02꞉03․456_stem.png`
     - _Requirements: 1.7, 7.2, 7.5_
 
-- [ ] 6. Implement crop resolution and resolution validation helpers in `pyqenc/phases/measure.py`
-  - [ ] 6.1 Implement `_resolve_crop(crop_params: CropParams | None, work_dir: Path, source_video: Path) -> CropParams`
+- [x] 6. Implement crop resolution and resolution validation helpers in `pyqenc/phases/measure.py`
+  - [x] 6.1 Implement `_resolve_crop(crop_params: CropParams | None, work_dir: Path, source_video: Path) -> CropParams`
     - If `crop_params` is a `CropParams` instance: return it directly
     - If `None`: attempt `JobState.load(work_dir / "job.yaml")`; use crop if source matches; otherwise return empty `CropParams` and log info
     - Never writes or modifies `job.yaml`
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6_
-  - [ ]* 6.2 Write unit tests for `_resolve_crop`
+  - [x] 6.2 Write unit tests for `_resolve_crop`
     - Explicit `CropParams` returned unchanged
     - `None` with no `job.yaml` returns empty `CropParams` and logs info
     - `None` with matching `job.yaml` returns crop from file
     - `None` with non-matching source in `job.yaml` returns empty `CropParams`
     - _Requirements: 2.1, 2.2, 2.3, 2.4_
-  - [ ] 6.3 Implement `_check_resolution_match(source_meta, target_meta, crop_params, width) -> None`
+  - [x] 6.3 Implement `_check_resolution_match(source_meta, target_meta, crop_params, width) -> None`
     - Computes effective post-crop, post-scale dimensions for both videos
     - Raises `ValueError` with actionable suggestion (`--crop TOP BOTTOM [--width W]`) on mismatch
     - Suggestion includes final effective resolution both videos would be scaled to
     - _Requirements: 3c.1, 3c.2, 3c.3, 3c.4, 3c.5_
 
-- [ ] 7. Checkpoint — Ensure all tests pass
+- [x] 7. Checkpoint — Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 8. Implement metric computation and sidecar writing in `pyqenc/phases/measure.py`
-  - [ ] 8.1 Implement `_run_metrics(source_video, target_video, crop_params, width, metrics_dir, graph_path, subsample_factor) -> ChunkQualityStats`
+- [x] 8. Implement metric computation and sidecar writing in `pyqenc/phases/measure.py`
+  - [x] 8.1 Implement `_run_metrics(source_video, target_video, crop_params, width, metrics_dir, graph_path, subsample_factor) -> ChunkQualityStats`
     - Delegates to `QualityEvaluator(measure_dir).evaluate_chunk(...)` with `targets=[]`
     - Passes `width` through to `run_metric` via existing `width` parameter
     - Returns `evaluation.metrics`
     - _Requirements: 4.1, 4.2, 4.3, 4.5, 4.6, 6.1, 6.2, 6.3_
-  - [ ] 8.2 Implement `_write_sidecar(path, source_video, target_video, subsample_factor, crop_params, metrics, source_duration_seconds, target_duration_seconds, effective_duration_seconds) -> None`
+  - [x] 8.2 Implement `_write_sidecar(path, source_video, target_video, subsample_factor, crop_params, metrics, source_duration_seconds, target_duration_seconds, effective_duration_seconds) -> None`
     - Writes YAML to `path` using `.tmp`-then-rename atomic protocol via `write_yaml_atomic`
     - Includes all fields from design: paths, durations, `subsample_factor`, `crop_params` dict, `metrics` stats
     - On write failure: log warning, do not raise
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 3b.6_
-  - [ ]* 8.3 Write unit test for `_write_sidecar` failure handling
+  - [x] 8.3 Write unit test for `_write_sidecar` failure handling
     - Mock `write_yaml_atomic` to raise `OSError`; assert warning is logged and no exception propagates
     - _Requirements: 5.7_
 
