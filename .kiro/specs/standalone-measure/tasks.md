@@ -11,23 +11,23 @@ Implement the `measure` subcommand end-to-end. New module `pyqenc/phases/measure
 
 ## Tasks
 
-- [ ] 1. Add measure constants to `pyqenc/constants.py`
+- [x] 1. Add measure constants to `pyqenc/constants.py`
   - Add `MEASURE_DIR`, `METRICS_SUBDIR_SUFFIX`, `SCREENSHOTS_SUBDIR_SUFFIX`, `SCREENSHOT_TIMESTAMP_FMT`, `DEFAULT_SCREENSHOT_COUNT`, `DEFAULT_METRICS_SAMPLING`
   - No imports from the module (constants.py must remain import-free from the project)
   - _Requirements: 3.1, 7.5_
 
-- [ ] 2. Update `fmt_key_value_table` in `pyqenc/utils/log_format.py`
+- [x] 2. Update `fmt_key_value_table` in `pyqenc/utils/log_format.py`
   - Update signature and body to support `list` values with vertical alignment
   - Check `isinstance(value, str)` first (before list check) to avoid str-as-iterable bug
   - Continuation lines use blank key column aligned to value column
   - All existing callers passing `str` values remain unaffected
   - _Requirements: 11.1, 11.2_
 
-- [ ] 3. Refactor CLI argument helpers in `pyqenc/cli.py`
-  - [ ] 3.1 Split `_add_common_arguments` into `_add_base_arguments` (universal: `--work-dir`, `--log-level`) and `_add_pipeline_arguments` (phases only: `-y`/`--execute`, `--cleanup`, `--force`, `--no-metrics`)
+- [x] 3. Refactor CLI argument helpers in `pyqenc/cli.py`
+  - [x] 3.1 Split `_add_common_arguments` into `_add_base_arguments` (universal: `--work-dir`, `--log-level`) and `_add_pipeline_arguments` (phases only: `-y`/`--execute`, `--cleanup`, `--force`, `--no-metrics`)
     - All existing phase subcommands call both helpers to preserve current behaviour
     - _Requirements: 1.4_
-  - [ ] 3.2 Extract `_resolve_crop_params(args) -> CropParams | None` helper from inline logic in `_cmd_auto`
+  - [x] 3.2 Extract `_resolve_crop_params(args) -> CropParams | None` helper from inline logic in `_cmd_auto`
     - Returns explicit `CropParams` when `--crop` or `--no-crop` given; `None` as sentinel for auto-resolve
     - Raises `ValueError` on bad `--crop` format
     - Update `_cmd_auto` and `_cmd_extract` to use this helper

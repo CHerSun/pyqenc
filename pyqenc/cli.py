@@ -67,10 +67,14 @@ def _parse_cleanup_level(cleanup_value: str | None) -> CleanupLevel:
     )
 
 
-def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add common arguments shared across subcommands to the given parser."""
+def _add_base_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments universal to ALL subcommands (including measure)."""
     parser.add_argument("--work-dir", type=Path, default=Path("./pyqenc"), help="Working directory for intermediate files and state (default: ./pyqenc)")
     parser.add_argument("--log-level", choices=["debug", "info", "warning", "critical"], default="info", help="Logging level (default: info)")
+
+
+def _add_pipeline_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments specific to pipeline phases (NOT used by measure)."""
     parser.add_argument("-y", "--execute", action="store_true", default=False, help="Execute phases (default: dry-run). Without this flag only a dry-run is performed.")
     parser.add_argument("--cleanup", nargs="?", const="intermediate", metavar="all", help=(
             "Cleanup level for intermediate files. "
@@ -213,6 +217,24 @@ def _add_crop_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _resolve_crop_params(args: argparse.Namespace) -> CropParams | None:
+    """Parse crop parameters from CLI args into a CropParams instance.
+
+    Returns:
+        An explicit ``CropParams`` (including empty/no-op) if ``--crop`` or ``--no-crop`` given.
+        ``None`` as a sentinel meaning "auto-resolve from job.yaml" (handled by the phase layer).
+
+    Raises:
+        ValueError: On bad ``--crop`` format. Caller should catch and log critical.
+    """
+    if getattr(args, "no_crop", False):
+        return CropParams(top=0, bottom=0, left=0, right=0)
+    crop_str = getattr(args, "crop", None)
+    if crop_str:
+        return CropParams.parse(crop_str)
+    return None
+
+
 def _create_auto_subcommand(subparsers) -> None:
     """Create the 'auto' subcommand for full pipeline execution.
 
@@ -228,7 +250,8 @@ def _create_auto_subcommand(subparsers) -> None:
         type=Path,
         help="Source MKV video file"
     )
-    _add_common_arguments(auto_parser)
+    _add_base_arguments(auto_parser)
+    _add_pipeline_arguments(auto_parser)
     _add_quality_arguments(auto_parser)
     _add_filter_arguments(auto_parser)
     _add_crop_arguments(auto_parser)
@@ -248,7 +271,8 @@ def _create_extract_subcommand(subparsers) -> None:
     """Create the 'extract' subcommand for stream extraction."""
     p = subparsers.add_parser("extract", help="Extract video and audio streams from source MKV")
     p.add_argument("source", type=Path, help="Source MKV video file")
-    _add_common_arguments(p)
+    _add_base_arguments(p)
+    _add_pipeline_arguments(p)
     _add_filter_arguments(p)
     _add_crop_arguments(p)
     p.set_defaults(func=_cmd_extract)
@@ -258,7 +282,8 @@ def _create_chunk_subcommand(subparsers) -> None:
     """Create the 'chunk' subcommand for video chunking."""
     p = subparsers.add_parser("chunk", help="Split extracted video into scene-based chunks")
     p.add_argument("source", type=Path, help="Source MKV video file")
-    _add_common_arguments(p)
+    _add_base_arguments(p)
+    _add_pipeline_arguments(p)
     p.add_argument("--scene-threshold", type=float, default=0.3,
                    help="Scene detection sensitivity 0.0-1.0 (default: 0.3)")
     p.add_argument("--min-scene-length", type=int, default=24,
@@ -272,7 +297,8 @@ def _create_encode_subcommand(subparsers) -> None:
     """Create the 'encode' subcommand for chunk encoding."""
     p = subparsers.add_parser("encode", help="Encode chunks to meet quality targets")
     p.add_argument("source", type=Path, help="Source MKV video file")
-    _add_common_arguments(p)
+    _add_base_arguments(p)
+    _add_pipeline_arguments(p)
     _add_quality_arguments(p)
     p.set_defaults(func=_cmd_encode)
 
@@ -281,7 +307,8 @@ def _create_audio_subcommand(subparsers) -> None:
     """Create the 'audio' subcommand for audio processing."""
     p = subparsers.add_parser("audio", help="Process audio streams with normalization")
     p.add_argument("source", type=Path, help="Source MKV video file")
-    _add_common_arguments(p)
+    _add_base_arguments(p)
+    _add_pipeline_arguments(p)
     _add_audio_convert_arguments(p)
     p.set_defaults(func=_cmd_audio)
 
@@ -290,7 +317,8 @@ def _create_merge_subcommand(subparsers) -> None:
     """Create the 'merge' subcommand for final video merging."""
     p = subparsers.add_parser("merge", help="Merge encoded chunks and audio into final MKV files")
     p.add_argument("source", type=Path, help="Source MKV video file")
-    _add_common_arguments(p)
+    _add_base_arguments(p)
+    _add_pipeline_arguments(p)
     p.set_defaults(func=_cmd_merge)
 
 
@@ -321,13 +349,11 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         logger.critical(f"Invalid quality target: {e}")
         return 1
     # Parse crop parameters
-    crop_params: CropParams | None = None
-    if hasattr(args, "crop") and args.crop:
-        try:
-            crop_params = CropParams.parse(args.crop)
-        except ValueError as e:
-            logger.critical(f"Invalid crop parameters: {e}")
-            return 1
+    try:
+        crop_params = _resolve_crop_params(args)
+    except ValueError as e:
+        logger.critical(f"Invalid crop parameters: {e}")
+        return 1
 
     # Resolve metrics sampling: CLI arg takes precedence over config file
     config_manager = ConfigManager()
@@ -393,6 +419,12 @@ def _cmd_extract(args: argparse.Namespace) -> int:
 
     logger.info("Starting stream extraction")
     logger.info(f"Source: {args.source}")
+
+    try:
+        _resolve_crop_params(args)  # validate format early; crop is stored in job.yaml by the job phase
+    except ValueError as e:
+        logger.critical(f"Invalid crop parameters: {e}")
+        return 1
 
     try:
         result = extract_streams(

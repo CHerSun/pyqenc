@@ -113,6 +113,26 @@ AUDIO_OUTPUT_DIR       = "audio"
 """Output directory for processed audio files (AudioPhase)."""
 FINAL_OUTPUT_DIR       = "final"
 """Output directory for merged final outputs (MergePhase)."""
+MEASURE_DIR            = "measure"
+"""Output subdirectory name for standalone measure artifacts."""
+
+# Measure artifact naming
+METRICS_SUBDIR_SUFFIX     = ".metrics"
+"""Suffix appended to target stem to form the raw metric logs subdirectory."""
+SCREENSHOTS_SUBDIR_SUFFIX = ".screenshots"
+"""Suffix appended to target stem to form the screenshots subdirectory."""
+SCREENSHOT_TIMESTAMP_FMT  = "{h:02d}{sep}{m:02d}{sep}{s:02d}{ms_sep}{ms:03d}"
+"""Zero-padded timestamp format for screenshot filenames.
+
+Uses TIME_SEPARATOR_SAFE and TIME_SEPARATOR_MS from constants — the same
+separators used in chunk filenames — producing e.g. ``01꞉02꞉03․456``.
+"""
+
+# Measure defaults
+DEFAULT_SCREENSHOT_COUNT  = 20
+"""Default number of screenshots captured from each video."""
+DEFAULT_METRICS_SAMPLING  = 10
+"""Default frame subsampling factor for metric computation."""
 
 # Artifact discovery patterns
 CHUNK_GLOB_PATTERN = "*.mkv"

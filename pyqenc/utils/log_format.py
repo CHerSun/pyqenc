@@ -176,11 +176,37 @@ def fmt_strategy_result_block(
     lines.append(THIN_LINE)
     return lines
 
-def fmt_key_value_table(kv_to_show):
-    """Format a dictionary of key-value pairs into aligned log lines for display as a table."""
-    max_key_len = max(len(k) for k in kv_to_show.keys())+1
+def fmt_key_value_table(kv_to_show: dict[str, str | list | object]) -> None:
+    """Log a key-value table at INFO level with aligned columns.
+
+    Value dispatch (checked in this order):
+    1. ``isinstance(value, str)`` → single line, formatted as-is.
+    2. ``isinstance(value, list)`` → multi-line: first item on the key line,
+       subsequent items on continuation lines aligned to the value column
+       (key column is blank).
+    3. Anything else → single line via ``f"{value}"``.
+
+    ``str`` is checked before ``list`` because ``str`` is iterable and would
+    otherwise incorrectly satisfy a bare ``isinstance(v, list)`` check.
+
+    Example output::
+
+        source    /path/to/source.mkv
+        targets   target_a.mkv
+                  target_b.mkv
+        crop      top=138 bottom=138
+        sampling  10
+    """
+    max_key_len = max(len(k) for k in kv_to_show) + 1
     for key, value in kv_to_show.items():
-        logger.info(f"{key:<{max_key_len}} {value}")
+        if isinstance(value, str):
+            logger.info(f"{key:<{max_key_len}} {value}")
+        elif isinstance(value, list):
+            for i, item in enumerate(value):
+                prefix = key if i == 0 else ""
+                logger.info(f"{prefix:<{max_key_len}} {item}")
+        else:
+            logger.info(f"{key:<{max_key_len}} {value}")
 
 
 # ---------------------------------------------------------------------------
