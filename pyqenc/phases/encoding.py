@@ -141,10 +141,11 @@ def _read_metrics_sidecar(attempt_path: Path) -> dict | None:
 
 
 def _write_metrics_sidecar(
-    attempt_path: Path,
-    targets_met:  bool,
-    crf:          float,
-    metrics:      dict[str, float],
+    attempt_path:     Path,
+    targets_met:      bool,
+    crf:              float,
+    metrics:          dict[str, float],
+    metrics_sampling: int,
 ) -> None:
     """Atomically write a per-attempt metrics sidecar alongside an encoded attempt.
 
@@ -153,13 +154,19 @@ def _write_metrics_sidecar(
     so the CRF history is reusable when quality targets change (Req 6a.1).
 
     Args:
-        attempt_path: Path to the encoded attempt ``.mkv`` file.
-        targets_met:  Whether quality targets were met (for human inspection only).
-        crf:          CRF value used for this attempt.
-        metrics:      ALL measured quality metrics dict (not filtered to targets).
+        attempt_path:     Path to the encoded attempt ``.mkv`` file.
+        targets_met:      Whether quality targets were met (for human inspection only).
+        crf:              CRF value used for this attempt.
+        metrics:          ALL measured quality metrics dict (not filtered to targets).
+        metrics_sampling: Frame subsampling factor used when metrics were measured.
     """
     sidecar = attempt_path.with_suffix(".yaml")
-    data    = MetricsSidecar(crf=crf, targets_met=targets_met, metrics=metrics)
+    data    = MetricsSidecar(
+        crf              = crf,
+        targets_met      = targets_met,
+        metrics          = metrics,
+        metrics_sampling = metrics_sampling,
+    )
     try:
         write_yaml_atomic(sidecar, data.to_yaml_dict())
     except Exception as e:
@@ -613,8 +620,19 @@ class ChunkEncoder:
                 continue
 
             try:
-                crf     = float(sidecar_data["crf"])
-                metrics = {k: float(v) for k, v in sidecar_data.get("metrics", {}).items()}
+                crf              = float(sidecar_data["crf"])
+                metrics          = {k: float(v) for k, v in sidecar_data.get("metrics", {}).items()}
+                raw_sampling     = sidecar_data.get("metrics_sampling")
+                sidecar_sampling = int(raw_sampling) if raw_sampling is not None else None
+
+                # Stale metrics — measured at a different sampling rate; skip for history
+                # so the attempt is re-measured (without re-encoding) on the next run.
+                if sidecar_sampling is not None and sidecar_sampling != self._metrics_sampling:
+                    logger.debug(
+                        "Skipping stale sidecar %s: metrics_sampling %d != current %d",
+                        candidate.name, sidecar_sampling, self._metrics_sampling,
+                    )
+                    continue
 
                 # Re-evaluate pass/fail from metrics against current targets (Req 6a.2)
                 targets_met = (
@@ -860,8 +878,15 @@ class ChunkEncoder:
                     sidecar = _read_metrics_sidecar(existing.path)
                     # Validate sidecar contains all required metric keys (Req 10.4)
                     required_keys = {f"{t.metric}_{t.statistic}" for t in quality_targets}
+                    raw_sidecar_sampling = sidecar.get("metrics_sampling") if sidecar is not None else None
+                    sidecar_sampling     = int(raw_sidecar_sampling) if raw_sidecar_sampling is not None else None
+                    sampling_stale       = (
+                        sidecar_sampling is not None
+                        and sidecar_sampling != self._metrics_sampling
+                    )
                     sidecar_valid = (
                         sidecar is not None
+                        and not sampling_stale
                         and required_keys.issubset(sidecar.get("metrics", {}).keys())
                     )
                     if sidecar_valid and sidecar is not None:
@@ -922,10 +947,15 @@ class ChunkEncoder:
                         current_crf = next_crf
                         continue
                     else:
-                        # File exists but sidecar is missing or incomplete — re-evaluate metrics only
+                        # File exists but sidecar is missing, incomplete, or stale (sampling changed)
+                        reason = (
+                            f"metrics_sampling changed ({sidecar_sampling} → {self._metrics_sampling})"
+                            if sampling_stale
+                            else "sidecar missing or incomplete"
+                        )
                         logger.info(
                             fmt_chunk(strategy.name, chunk.chunk_id,
-                            f"existing attempt (crf={existing.crf:.2f}) — re-evaluating metrics",
+                            f"existing attempt (crf={existing.crf:.2f}) — re-evaluating metrics ({reason})",
                             self._visual_hash),
                         )
                         output_file = existing.path
@@ -1000,7 +1030,7 @@ class ChunkEncoder:
             metrics_dict = {k: v for k, v in all_metrics.items() if k in targets_set}
 
             # Write per-attempt metrics sidecar atomically (Req 6a.1)
-            _write_metrics_sidecar(output_file, evaluation.targets_met, current_crf, all_metrics)
+            _write_metrics_sidecar(output_file, evaluation.targets_met, current_crf, all_metrics, self._metrics_sampling)
 
             # Build AttemptMetadata for this attempt
             attempt_meta = AttemptMetadata(

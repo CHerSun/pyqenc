@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from alive_progress import config_handler
+
 from pyqenc.constants import (
     CHUNKS_DIR,
     CRF_GRANULARITY,

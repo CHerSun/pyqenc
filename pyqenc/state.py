@@ -438,27 +438,37 @@ class MetricsSidecar(BaseModel):
     Stores ALL measured metric values — not filtered to current targets.
     ``targets_met`` is for human inspection only; the algorithm always
     re-evaluates pass/fail from ``metrics`` against current quality targets.
+
+    ``metrics_sampling`` records the frame subsampling factor used when the
+    metrics were measured.  On recovery, if this differs from the current
+    config the sidecar is treated as stale and the attempt is re-measured
+    (without re-encoding).  ``None`` for legacy sidecars written before this
+    field was added — treated as unknown, no staleness check triggered.
     """
 
-    crf:         float
-    targets_met: bool                # for human inspection only
-    metrics:     dict[str, float]    # all measured values, e.g. vmaf_min, ssim_median
+    crf:              float
+    targets_met:      bool                # for human inspection only
+    metrics_sampling: int | None = None   # subsampling factor used when metrics were measured
+    metrics:          dict[str, float]    # all measured values, e.g. vmaf_min, ssim_median
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
         return {
-            "crf":         self.crf,
-            "targets_met": self.targets_met,
-            "metrics":     self.metrics,
+            "crf":              self.crf,
+            "targets_met":      self.targets_met,
+            "metrics_sampling": self.metrics_sampling,
+            "metrics":          self.metrics,
         }
 
     @classmethod
     def from_yaml_dict(cls, data: dict) -> "MetricsSidecar":
         """Restore from a dict loaded from an attempt sidecar YAML."""
+        raw_sampling = data.get("metrics_sampling")
         return cls(
-            crf=float(data["crf"]),
-            targets_met=bool(data["targets_met"]),
-            metrics={k: float(v) for k, v in data.get("metrics", {}).items()},
+            crf              = float(data["crf"]),
+            targets_met      = bool(data["targets_met"]),
+            metrics_sampling = int(raw_sampling) if raw_sampling is not None else None,
+            metrics          = {k: float(v) for k, v in data.get("metrics", {}).items()},
         )
 
 
