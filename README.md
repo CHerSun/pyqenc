@@ -4,6 +4,8 @@
 
 pyqenc (**PY**thon **Q**uality-based **ENC**oder) - an encoding pipeline that achieves user-specified quality targets while optimizing file size through intelligent CRF adjustment, automatic crop detection, and scene-based chunking.
 
+Current state: α (ALPHA) — already working & giving proper results, but not widely tested and not bug-free.
+
 > This project was inspired by [Av1an](https://github.com/rust-av/Av1an).
 
 > AWS and Kiro IDE team - thank you for the agentic IDE and welcome credits. This allowed me to prototype this project incredibly fast. Truly a new approach to development.
@@ -129,11 +131,17 @@ pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq --w
 
 > NOTE: It is highly recommended to use separate `--work-dir` per encode job. I.e. if you change source file - change the dir, don't reuse.
 
+pyqenc pipeline gives final results in form of individual processed audio files (per strategy) and video files (per strategy). It is up to you to choose what you like and package that into a single container afterwards. The simplest way is the MKVmerge GUI - just drag wanted video stream and wanted audio streams there, add metadata (cover, descriptions, chapters, etc) and mux that.
+
+For audios - `audio` subfolder - it takes all filtered streams (see `include`/`exclude` arguments) and applies all strategies - downmixing (different modes, including night and dialogs boosting), normalization, dynamic normalization and converts to your wanted format (default = AAC CBR 96kbps per channel).
+
+For videos - `final` subfolder - the number of results depends on selected strategies and optimization phase results. You will get 1 video stream per selected processing strategy.
+
 Default settings:
 
-- target VMAF min >=94, VMAF med >=97, SSIM min >= 94, PSNR min >= 42;
-- use all strategies defined in the config;
-- enable optimization phase to search for the best variant.
+- target quality `vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94` - a balanced set of metrics for very good visual quality and rather small size;
+- strategies selector `veryslow+h264*,slow+h265*` - use all defined h264 profiles with veryslow preset and all h265 profiles with slow preset - focus on quality and resulting size, rather then encoding speed;
+- optimization phase enabled - allow pyqenc to test & choose the optimal strategies.
 
 ### Manual inspection
 
@@ -217,12 +225,12 @@ pyqenc auto <source_video> [options]
 
 ### Quality & Strategy Options
 
-| Option                     | Description                                             | Default                        |
-| -------------------------- | ------------------------------------------------------- | ------------------------------ |
-| `--quality-target TARGETS` | Quality targets (see format below)                      | `vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94`      |
-| `--strategies STRATEGIES`  | Encoding strategies (see format below)                  | `veryslow+h264*,slow+h265*`    |
-| `--all-strategies`         | Disable optimization, produce output for all strategies | `False` (optimization enabled) |
-| `--max-parallel N`         | Maximum concurrent encoding processes                   | `2`                            |
+| Option                     | Description                                             | Default                                           |
+| -------------------------- | ------------------------------------------------------- | ------------------------------------------------- |
+| `--quality-target TARGETS` | Quality targets (see format below)                      | `vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94` |
+| `--strategies STRATEGIES`  | Encoding strategies (see format below)                  | `veryslow+h264*,slow+h265*`                       |
+| `--all-strategies`         | Disable optimization, produce output for all strategies | `False` (optimization enabled)                    |
+| `--max-parallel N`         | Maximum concurrent encoding processes                   | `2`                                               |
 
 ### Chunking Options
 
