@@ -439,7 +439,7 @@ class OptimizationPhase:
         ).save(opt_yaml)
 
         # Step 10: run test encodes for pending strategies
-        encoder       = _make_encoder(work_dir, crop, self._config.visual_hash)
+        encoder       = _make_encoder(work_dir, crop, self._config.visual_hash, self._config.metrics_sampling)
         reference_dir = work_dir / CHUNKS_DIR
 
         all_results: list[StrategyTestResult] = list(cached_results.values())
@@ -581,11 +581,16 @@ class OptimizationPhase:
                 )
             )
             if params_stale:
-                logger.debug(
+                logger.info(
                     "All-strategies mode: quality targets or metrics_sampling changed"
                     " — wiping encoded/ dirs"
                 )
                 _wipe_encoded_dir(work_dir, self._config.strategies)
+            elif persisted is not None:
+                logger.debug(
+                    "All-strategies mode: params unchanged (sampling=%s, targets=%s) — encoded/ kept",
+                    persisted.metrics_sampling, persisted.quality_targets,
+                )
 
             # Always write optimization.yaml with current targets and sampling
             work_dir.mkdir(parents=True, exist_ok=True)
@@ -758,12 +763,34 @@ def _wipe_encoded_dir(work_dir: Path, strategies: "list[Strategy]") -> None:
     Called when quality targets or ``metrics_sampling`` change, since both
     invalidate the previously selected winners and their recorded metrics.
 
+    If the strategy list does not cover all subdirs present (e.g. strategies
+    were renamed), wipes the entire ``encoded/`` base directory as a fallback
+    to guarantee no stale data remains.
+
     Args:
         work_dir:   Pipeline working directory.
         strategies: All configured strategies (safe_name used for directory lookup).
     """
     encoded_base = work_dir / ENCODED_OUTPUT_DIR
     if not encoded_base.exists():
+        return
+
+    # Collect all existing strategy subdirs
+    existing_dirs = [d for d in encoded_base.iterdir() if d.is_dir()]
+    expected_names = {s.safe_name for s in strategies}
+    unexpected = [d for d in existing_dirs if d.name not in expected_names]
+
+    if unexpected:
+        # Stale dirs from old/renamed strategies present — wipe the whole base
+        logger.debug(
+            "Wiping entire encoded/ base dir (unexpected subdirs: %s)",
+            ", ".join(d.name for d in unexpected),
+        )
+        try:
+            shutil.rmtree(encoded_base)
+            logger.debug("Wiped encoded/ base dir: %s", encoded_base)
+        except OSError as exc:
+            logger.warning("Could not wipe encoded/ base dir %s: %s", encoded_base, exc)
         return
 
     for strategy in strategies:
@@ -830,16 +857,18 @@ def _select_test_chunks(
 
 
 def _make_encoder(
-    work_dir:    Path,
-    crop_params: CropParams | None,
-    visual_hash: bool = True,
+    work_dir:         Path,
+    crop_params:      CropParams | None,
+    visual_hash:      bool = True,
+    metrics_sampling: int  = 10,
 ) -> "ChunkEncoder":
     """Construct a ``ChunkEncoder`` for test encodes.
 
     Args:
-        work_dir:    Pipeline working directory.
-        crop_params: Crop parameters to apply.
-        visual_hash: Whether to prepend emoji hash to chunk log lines.
+        work_dir:         Pipeline working directory.
+        crop_params:      Crop parameters to apply.
+        visual_hash:      Whether to prepend emoji hash to chunk log lines.
+        metrics_sampling: Frame subsampling factor for quality metric generation.
 
     Returns:
         Configured ``ChunkEncoder`` instance.
@@ -850,6 +879,7 @@ def _make_encoder(
         work_dir          = work_dir,
         crop_params       = crop_params,
         visual_hash       = visual_hash,
+        metrics_sampling  = metrics_sampling,
     )
 
 

@@ -1843,33 +1843,35 @@ class EncodingPhase:
             crop          = getattr(job_result, "crop", None)
             self.params   = EncodingParams(crop=crop)
 
-            if persisted_enc is not None and persisted_enc != self.params:
-                if self._config.force:
-                    logger.warning(
-                        "Crop params changed since last encoding run "
-                        "(persisted=%s, current=%s) — --force: deleting encoding artifacts",
-                        persisted_enc.crop, crop,
-                    )
-                    for d in (enc_dir, out_dir):
-                        if d.exists():
-                            _shutil.rmtree(d)
-                            logger.debug("Crop mismatch --force: deleted %s", d)
-                    if yaml_path.exists():
-                        yaml_path.unlink()
-                else:
-                    err = (
-                        "Crop params changed since last encoding run "
-                        f"(persisted={persisted_enc.crop}, current={crop}). "
-                        "Re-run with --force to delete stale encoding artifacts and continue."
-                    )
-                    logger.critical(err)
-                    # Return a single ABSENT artifact to signal failure upstream
-                    return [EncodedArtifact(
-                        path     = work_dir / _ENCODING_YAML,
-                        state    = ArtifactState.ABSENT,
-                        chunk_id = "__crop_mismatch__",
-                        strategy = "",
-                    )]
+            if persisted_enc is not None:
+                # Crop mismatch: requires --force to proceed
+                crop_changed = persisted_enc.crop != crop
+                if crop_changed:
+                    if self._config.force:
+                        logger.warning(
+                            "Crop params changed since last encoding run "
+                            "(persisted=%s, current=%s) — --force: deleting encoding artifacts",
+                            persisted_enc.crop, crop,
+                        )
+                        for d in (enc_dir, out_dir):
+                            if d.exists():
+                                _shutil.rmtree(d)
+                                logger.debug("Crop mismatch --force: deleted %s", d)
+                        if yaml_path.exists():
+                            yaml_path.unlink()
+                    else:
+                        err = (
+                            "Crop params changed since last encoding run "
+                            f"(persisted={persisted_enc.crop}, current={crop}). "
+                            "Re-run with --force to delete stale encoding artifacts and continue."
+                        )
+                        logger.critical(err)
+                        return [EncodedArtifact(
+                            path     = work_dir / _ENCODING_YAML,
+                            state    = ArtifactState.ABSENT,
+                            chunk_id = "__crop_mismatch__",
+                            strategy = "",
+                        )]
 
         # Step 3: clean up .tmp files (execute mode only)
         if execute and enc_dir.exists():
