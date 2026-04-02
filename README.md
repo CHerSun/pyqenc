@@ -118,7 +118,7 @@ See installation section on how to run depending on the way you installed. See `
 
 ```sh
 # Dry-run mode - preview what's to be done (1 phase ahead) with default settings
-pyqenc auto movie.mkv
+pyqenc auto movie.mkv --work-dir ./work
 
 # Execute (`-y`) the automatic pipeline using the specified work dir with default settings.
 pyqenc auto movie.mkv --work-dir ./work -y
@@ -127,13 +127,27 @@ pyqenc auto movie.mkv --work-dir ./work -y
 pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq --work-dir ./work -y
 ```
 
-> NOTE: It is highly recommended to use separate `--work-dir` per encode.
+> NOTE: It is highly recommended to use separate `--work-dir` per encode job. I.e. if you change source file - change the dir, don't reuse.
 
 Default settings:
 
-- target VMAF min >=93, VMAF med >=96;
+- target VMAF min >=94, VMAF med >=97, SSIM min >= 94, PSNR min >= 42;
 - use all strategies defined in the config;
 - enable optimization phase to search for the best variant.
+
+### Manual inspection
+
+At any point you can go into the work dir and inspect created artifacts. Unless you use `--cleanup` - all the artifacts are kept intact.
+
+### Resume the process
+
+pyqenc is made so that it can be stopped and resumed at any point with minimal progress loss possible. If your encoding stopped for whatever reason - just repeat the same command to continue.
+
+### Change parameters mid-way or later
+
+Unless you use `--cleanup` pyqenc can dynamically adjust the flow to most of changes.
+
+For example, if you did a full encode with default settings, but the resulting quality didn't suit you. Just rerun with the same source and new quality targets - pyqenc will recover using all of the available intermediate steps and do the minimum possible work to reach new targets.
 
 ### Command line basic examples
 
