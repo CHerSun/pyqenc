@@ -255,12 +255,12 @@ class OptimizationPhase:
         if params_changed and persisted is not None and persisted.strategy_results:
             if sampling_changed:
                 logger.debug(
-                    "metrics_sampling changed (%d → %d) — deleting encoded/ result sidecars",
+                    "metrics_sampling changed (%d → %d) — wiping encoded/ dirs",
                     persisted.metrics_sampling, current_sampling,
                 )
-            # Delete all result sidecars from encoded/ for every strategy so
-            # EncodingPhase sees ARTIFACT_ONLY pairs and re-evaluates them.
-            _delete_encoded_result_sidecars(work_dir, self._config.strategies)
+            # Wipe encoded/ for every strategy — contents are hard-linked attempts
+            # and result sidecars; EncodingPhase will re-discover from encoding/.
+            _wipe_encoded_dir(work_dir, self._config.strategies)
             # Treat all cached strategy results as stale — force re-encoding
             persisted = OptimizationParams(
                 crop             = persisted.crop,
@@ -583,9 +583,9 @@ class OptimizationPhase:
             if params_stale:
                 logger.debug(
                     "All-strategies mode: quality targets or metrics_sampling changed"
-                    " — deleting encoded/ result sidecars"
+                    " — wiping encoded/ dirs"
                 )
-                _delete_encoded_result_sidecars(work_dir, self._config.strategies)
+                _wipe_encoded_dir(work_dir, self._config.strategies)
 
             # Always write optimization.yaml with current targets and sampling
             work_dir.mkdir(parents=True, exist_ok=True)
@@ -748,12 +748,15 @@ def _targets_as_strings(quality_targets: "list[QualityTarget]") -> list[str]:
     return sorted(f"{t.metric}-{t.statistic}:{t.value}" for t in quality_targets)
 
 
-def _delete_encoded_result_sidecars(work_dir: Path, strategies: "list[Strategy]") -> None:
-    """Delete all ``<chunk_id>.<res>.yaml`` result sidecars from ``encoded/<strategy>/``.
+def _wipe_encoded_dir(work_dir: Path, strategies: "list[Strategy]") -> None:
+    """Delete the entire ``encoded/<strategy>/`` directory for each strategy.
 
-    Leaves attempt files in ``encoding/`` intact so CRF history can be replayed.
-    After this call ``EncodingPhase._recover()`` will see ``ARTIFACT_ONLY`` pairs
-    (attempt files present, result sidecar absent) and resume from CRF history.
+    All contents are hard-linked winning attempts and result sidecars — no
+    unique data lives here.  ``EncodingPhase._recover()`` will re-discover
+    attempts from ``encoding/`` and re-evaluate them from scratch.
+
+    Called when quality targets or ``metrics_sampling`` change, since both
+    invalidate the previously selected winners and their recorded metrics.
 
     Args:
         work_dir:   Pipeline working directory.
@@ -767,16 +770,11 @@ def _delete_encoded_result_sidecars(work_dir: Path, strategies: "list[Strategy]"
         strategy_dir = encoded_base / strategy.safe_name
         if not strategy_dir.exists():
             continue
-        for sidecar in list(strategy_dir.glob("*.yaml")):
-            # Result sidecars match <chunk_id>.<resolution>.yaml — they do NOT
-            # match the attempt pattern (which includes .crf<N>. in the stem).
-            # We delete all .yaml files here; attempt .yaml sidecars live in
-            # encoding/<strategy>/, not encoded/<strategy>/.
-            try:
-                sidecar.unlink()
-                logger.debug("Deleted stale result sidecar: %s", sidecar)
-            except OSError as exc:
-                logger.warning("Could not delete result sidecar %s: %s", sidecar, exc)
+        try:
+            shutil.rmtree(strategy_dir)
+            logger.debug("Wiped stale encoded dir: %s", strategy_dir)
+        except OSError as exc:
+            logger.warning("Could not wipe encoded dir %s: %s", strategy_dir, exc)
 
 
 def _failed(error: str) -> "OptimizationPhaseResult":
