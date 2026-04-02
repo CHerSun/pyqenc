@@ -101,8 +101,8 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--quality-target",
         type=str,
-        default="vmaf-min:93,vmaf-med:96",
-        help="Quality targets (e.g., 'vmaf-min:95,ssim-med:98') (default: vmaf-min:93,vmaf-med:96). NOTE: all metrics are scaled to 0-100 range, so targets should be specified accordingly (e.g., ssim-med:98 means 0.98 raw SSIM)."
+        default="vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94",
+        help="Quality targets (e.g., 'vmaf-min:95,ssim-med:98') (default: vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94). NOTE: all metrics are scaled to 0-100 range, so targets should be specified accordingly (e.g., ssim-med:98 means 0.98 raw SSIM)."
     )
     parser.add_argument(
         "--strategies",
