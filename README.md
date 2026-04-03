@@ -83,7 +83,15 @@ git pull
 
 ### Install pyqenc
 
-This needs installed Python of version >=3.13. Install using `pip`:
+Either using `uv` (local, self-contained):
+
+```sh
+uv tool install .
+```
+
+> NOTE: you might need to update your PATH manually or using uv, see the `uv` output for details.
+
+Or using `pip` for global tool installation (needs installed Python>=3.13):
 
 ```sh
 git clone https://github.com/CHerSun/pyqenc.git
@@ -98,12 +106,7 @@ After installation, the `pyqenc` command will be available in your terminal. To 
 pyqenc <your_arguments>
 ```
 
-To update later:
-
-```sh
-git pull
-pip install .
-```
+To update later - repeat the steps above after `git pull`'ing.
 
 ## Quick Start
 
@@ -136,32 +139,62 @@ Default settings:
 - strategies selector `veryslow+h264*,slow+h265*` - use all defined h264 profiles with veryslow preset and all h265 profiles with slow preset - focus on quality and resulting size, rather then encoding speed;
 - optimization phase enabled - allow pyqenc to test & choose the optimal strategies.
 
+### Get CLI help
+
+For top-level help use:
+
+```sh
+pyqenc --help
+```
+
+To get command-specific help use `--help` after the command, like:
+
+```sh
+pyqenc auto --help
+```
+
 ### Manual inspection
 
-At any point you can go into the work dir and inspect created artifacts. Unless you use `--cleanup` - all the artifacts are kept intact.
+At any point you can go into the work dir and inspect created artifacts. Unless you use `--cleanup` - all the artifacts are preserved.
 
 ### Resume the process
 
 pyqenc is made so that it can be stopped and resumed at any point with minimal progress loss possible. If your encoding stopped for whatever reason - just repeat the same command to continue.
 
-### Change parameters mid-way or later
+### Change parameters when you want
 
-Unless you use `--cleanup` pyqenc can dynamically adjust the flow to most of changes.
+Unless you use `--cleanup` pyqenc can dynamically adjust the flow to most of the changes with as minimal re-work overhead as possible.
 
-For example, if you did a full encode with default settings, but the resulting quality didn't suit you. Just rerun with the same source and new quality targets - pyqenc will recover using all of the available intermediate steps and do the minimum possible work to reach new targets.
+For example, if you did a full encode with default settings, but the resulting quality didn't suit you. Just rerun with the same source and work dir, and new quality targets - pyqenc will recover using all of the available intermediate steps and will do only the minimum possible work to reach new targets.
+
+### Measure against other variants
+
+One of the purpose of the pyqenc is to provide ability to compare results. You might want to do different encodes using different tools. As long as they stay synced - you can consistently measure those using pyqenc built-in mechanics (same as used for pipeline):
+
+```sh
+pyqenc measure <source_video> <target_video> [<target_video> ...] --work_dir <work_dir_for_source_video>
+```
+
+This will give under the `measure` subfolder:
+
+- supported metrics measured stats (mind the `--metrics-subsampling` tradeoff between speed and accuracy)
+- metrics plot over the video duration
+- screenshots of each supplied video (by default - 20 screenshot, distributed over the duration; controllable by arguments)
+
+You should be able to measure even incomplete encodings.
 
 ### Command line basic examples
 
 Slow h265 strategy tuned to better encode dark scenes and for crisper look with higher quality targets:
 
 ```sh
-pyqenc auto movie.mkv --quality-target vmaf-min:95,vmaf-med:98 --strategies slow+h265-aq --work-dir ./work -y
+pyqenc auto movie.mkv --work-dir ./movie --quality-target vmaf-min:95,vmaf-med:98 --strategies slow+h265-aq -y
 ```
 
 Fast basic h.264 encoding strategy targeting only the VMAF min score:
 
 ```sh
-pyqenc auto movie.mkv --quality-target vmaf-min:93 --strategies fast+h264-default --work-dir ./work -y
+pyqenc auto movie.mkv --work-dir ./movie --quality-target vmaf-min:93 --strategies fast+h264 -y
 ```
 
 Search through multiple strategies for the best one (or a few) and encode to it:
@@ -170,7 +203,7 @@ Search through multiple strategies for the best one (or a few) and encode to it:
 pyqenc auto movie.mkv --strategies slow+h265-aq,veryslow+h265-anime --work-dir ./work -y
 ```
 
-Encode using all strategies chosen with NO optimization phase:
+Encode using all specified strategies chosen with NO optimization phase:
 
 ```sh
 pyqenc auto movie.mkv --strategies slow+h265-aq,veryslow+h265-anime --all-strategies --work-dir ./work -y
@@ -180,6 +213,12 @@ Wildcard strategy selection (slow preset + all h265 profiles):
 
 ```sh
 pyqenc auto movie.mkv --strategies slow+h265* --work-dir ./work -y
+```
+
+Encode using all presets of specified profile (ultrafast...placebo of h265 basic profile):
+
+```sh
+pyqenc auto movie.mkv --strategies +h265 --work-dir ./work -y
 ```
 
 > NOTE: Some shells might need to escape the `*` character. The easiest is to just enclose full `slow+h265*` in quotes `"slow+h265*"` - this normally helps.

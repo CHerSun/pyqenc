@@ -22,7 +22,7 @@ cd pyqenc
 # Create virtual environment and install dependencies
 uv venv
 uv pip install -e ".[dev]"
-# OPTIONAL: activate venv
+# OPTIONAL if using uv: activate venv
 ## On Windows:
 # .venv\Scripts\activate
 ## On Linux:
@@ -84,7 +84,7 @@ pyqenc/
 ### Python Style
 
 - **Python Version**: Target Python 3.13+ syntax.
-- **Type Hints**: All functions, classes, and class members MUST be type-hinted. Avoid `Any` too.
+- **Type Hints**: All functions, classes, and class members MUST be type-hinted. Avoid `Any` and untyped generics.
 - **Modern Syntax**: Use `int | None` instead of `Optional[int]`.
 - **Path Handling**: Use `pathlib.Path` for all file paths (no strings).
 - **Constants**: NO MAGIC NUMBERS - use named constants or enums.
@@ -98,11 +98,12 @@ pyqenc/
 - **Rule of Three**: If 3+ similar entities exist, create a common interface.
 - **Clean Code**: Self-explanatory, simple code is preferable over "patterns" over-engineering.
 - **Vertical Alignment**: Use vertical alignment for arguments/parameters when sensible.
+- **Single source of truth**: Where possible - prefer single source of truth / ownership.
 
 ### Logging
 
 - **Debug**: Hidden by default, detailed operation information.
-- **Info**: End-user notifying, phase transitions, progress. Must be concise to avoid walls of text for end-user.
+- **Info**: End-user notifying, phase transitions, progress. Must be concise to avoid walls of text for the end-user.
 - **Warning**: Non-critical errors allowing continuation.
 - **Critical**: Problems preventing actual work.
 
@@ -114,6 +115,7 @@ pyqenc/
   - `CriticalError`: Halts execution
   - `RecoverableError`: Allows continuation
   - `ValidationError`: Early detection of invalid input
+- **Use .tmp-then-rename protocol**: to ensure any produced artifacts get final name only after they are fully complete.
 
 ## Development Workflow
 
@@ -123,11 +125,11 @@ pyqenc/
 2. **Create a branch** in your forked repo for your commits and check it out.
    - **Write tests** for new functionality. Tests are not concrete: if code changes are required - update existing tests.
    - **Follow coding standards** outlined above.
-   - **Run linting**: `ruff check .`
-   - **Run tests**: `pytest`
+   - **Run linting**: `ruff check .` if outside of IDE.
+   - **Ensure tests are passing**: `uv run pytest ...`
    - **Update documentation** if needed
    - **Commit** changes to your branch.
-3. **Create a pull request** to origin repository, add concise explanation of changes.
+3. **Create a pull request** to origin repository, add explanation of changes.
 
 ### Testing
 
@@ -168,43 +170,46 @@ The pipeline follows a phased architecture where each phase:
 
 - Has clear inputs and outputs.
 - Can be executed independently via CLI subcommands.
-- Maintains its state in the progress tracker.
+- Recovers its state from own sidecar and on-disk artifacts.
 - Produces artifacts in the working directory.
 
 #### Phase Order:
 
-1. **Extraction**: Extract video/audio streams, detect black borders.
-2. **Chunking**: Split video into scene-based chunks.
-3. **Optimization** (optional): Test strategies to find optimal one.
-4. **Encoding**: Encode chunks with CRF adjustment to meet quality targets.
-5. **Audio**: Process audio with day/night normalization.
-6. **Merge**: Concatenate chunks and merge with audio.
+0. **Job**: starting point for all runs, ensures we are working with expected source and detects black borders.
+1. **Extraction**: Extract video/audio streams.
+2. **Chunking**: Split video stream into scene-based chunks.
+3. **Optimization** (optional): Test strategies to find the optimal one.
+4. **Encoding**: Encode chunks with CRF adjustment to meet quality targets per scene.
+5. **Audio**: Process audio with day/night normalization and different downmixing strategies.
+6. **Merge**: Concatenate winning encoded chunks into the final video streams.
+7. To merge video and audio streams is on the end-user, as we don't know what exactly he wants. Current include/exclude/keep patterns are not clear enough to make the decision.
 
 ### Key Design Principles
 
-1. **Resumability**: All operations are tracked persistently.
+1. **Resumability**: All operations can be recovered from persisted state with focus on recovery from artifacts.
 2. **Modularity**: Each phase is independent with clear APIs.
 3. **Reusability**: Leverage existing tested modules.
-4. **CPU-First**: Default to CPU processing for consistency and quality.
+4. **CPU-First**: Default to CPU processing for compatibility, consistency and quality. GPU could be used, but never must be the only way to do things.
 5. **Quality-First**: Never compromise on quality targets.
-6. **Transparency**: Preserve artifacts until user confirmation.
-7. **Content-Aware**: Automatic black border detection, color spaces, etc.
+6. **Transparency**: Preserve all reusable artifacts, unless user tells differently. They can be used for resuming and manual inspection.
+7. **Content-Aware**: Automatic black border detection, color spaces, best strategy selection, etc.
 
 ### Artifact-Based Resumption
 
 The pipeline doesn't have explicit "resume" logic. Instead:
 
-- Each phase checks for existing artifacts.
+- Each phase
+  - Requests previous phase for its results - to be used as inputs
+  - Checks for existing artifacts and synchronizes state
 - Valid artifacts are reused automatically.
 - Missing/invalid artifacts trigger re-work.
-- Configuration changes (new strategies, quality targets) detected automatically.
+- Configuration changes (new strategies, quality targets) detected automatically with proper state invalidation.
 
 This approach supports:
 
 - Recovering from interruptions with minimal overhead.
-- Adding new strategies midway.
-- Changing quality targets.
-- Manual artifact cleanup for re-encoding (user intervention between reruns).
+- Changing parameters midway: strategies, target qualities, metrics subsampling, etc.
+- Manual interventions between reruns, like artifact/state cleanup (the pipeline isn't bug free, this allows better control and testing).
 
 ## Adding New Features
 
@@ -221,7 +226,7 @@ This approach supports:
        crf_range: [0, 63]
    ```
 
-2. Add profiles for the codec:
+2. Add at least one profile for the codec:
 
    ```yaml
    profiles:
@@ -235,10 +240,9 @@ This approach supports:
 
 ### Adding a New Quality Metric
 
-1. Update `pyqenc/quality.py` to support the new metric
-2. Add metric calculation in quality evaluator
-3. Update normalization logic in `normalize_metric_deficit()`
-4. Add tests for the new metric
+1. Update `pyqenc/quality.py` to support the new metric via MetricInfo. Mind the normalization
+2. Add metric calculation in quality evaluator. This is currently head-ache, especially for the graph.
+3. Add tests for the new metric
 
 ### Adding a New Phase
 
