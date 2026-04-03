@@ -12,6 +12,7 @@ dependencies = [
     "alive-progress>=3.3.0",
     "matplotlib>=3.10.0",
     "pandas>=3.0.0",
+    "python-dateutil>=2.9.0",
     "psutil>=7.2.2",
     "pydantic>=2.0",
     "pyyaml>=6.0",
