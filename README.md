@@ -100,7 +100,7 @@ cd pyqenc
 pip install .
 ```
 
-After installation, the `pyqenc` command will be available in your terminal. To run then:
+After the installation, the `pyqenc` command will be available in your terminal. To run:
 
 ```sh
 pyqenc <your_arguments>
@@ -153,13 +153,41 @@ To get command-specific help use `--help` after the command, like:
 pyqenc auto --help
 ```
 
+### CLI progress display
+
+#### Optimization phase summary
+
+![sample optimization summary](samples/optimization_summary_numbered.png)
+
+1. Summary of input parameters - strategies, tolerance for optimal strategy selection, recovery summary
+2. Results of the optimization phase - all strategies, size of their tested chunks, selected strategies (1 or more) for full encoding.
+
+#### Encoding attempts log
+
+![sample log of encoding attempts](samples/encoding_log_numbered.png)
+
+1. Summary of actions to be taken - strategies, number of chunks, cropping, quality targets, recovery summary
+2. Visual hashing - a single emoji to help distinguishing between chunks, followed by strategy name and chunk id
+3. Last attempt number and its status. `pass` for satisfying quality or `miss`.
+4. Targeted quality metrics snapshot with the least performing metric marked with either `✘` for a miss or `•` for a pass. This metric is used for next CRF search attempt.
+5. Chunk success - winning attempt found for the strategy+chunk pair.
+
+#### Encoding progress bar
+
+![sample encoding progress bar](samples/progress_bar_numbered.png)
+
+1. Action in progress
+2. %-based progress reporting & ETA of completion
+3. duration-based (seconds of video) progress display out of remaining work after recovery
+4. chunk-count based progress display, denoted with `✔` for completed chunks, `⏭` for reused chunks (recovered), `✘` for failed chunks (shouldn't happen normally) out of full total of chunks across all strategies.
+
 ### Manual inspection
 
 At any point you can go into the work dir and inspect created artifacts. Unless you use `--cleanup` - all the artifacts are preserved.
 
 ### Resume the process
 
-pyqenc is made so that it can be stopped and resumed at any point with minimal progress loss possible. If your encoding stopped for whatever reason - just repeat the same command to continue.
+pyqenc is made so that it can be stopped and resumed at any point with as minimal progress loss possible. If your encoding stopped for whatever reason - just repeat the same command to continue.
 
 ### Change parameters when you want
 
