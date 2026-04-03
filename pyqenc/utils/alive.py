@@ -15,12 +15,16 @@ from pyqenc.constants import FAILURE_SYMBOL_MINOR, SKIPPED_SYMBOL, SUCCESS_SYMBO
 class AdvanceState(Enum):
     """Outcome of a completed pipeline item reported to :func:`ProgressBar`."""
 
-    SUCCESS = "success"
+    SUCCESS  = "success"
     """The item was processed successfully."""
-    SKIPPED = "skipped"
+    SKIPPED  = "skipped"
     """The item was skipped because its output already exists (reused artifact)."""
-    FAILED  = "failed"
+    FAILED   = "failed"
     """The item failed to process."""
+    COMPLETE = "complete"
+    """The phase has fully finished all work.  Forces the bar to 100 % without
+    affecting item counters.  Call once as the last action inside the
+    ``with ProgressBar(...)`` block when the phase genuinely completed."""
 
 
 @dataclass
@@ -105,6 +109,11 @@ def ProgressBar(
 
     with alive_bar(manual=True, title=title) as bar:
         def advance(increment: int | float = 1, state: AdvanceState = AdvanceState.SUCCESS) -> None:  # noqa: E501
+            if state == AdvanceState.COMPLETE:
+                # Phase explicitly declares full completion — force 100 %, no counter change.
+                bar(1.0)
+                bar.text = _text()
+                return
             if state == AdvanceState.SKIPPED:
                 bar_state.skipped_count += 1
                 bar_state.remaining -= increment

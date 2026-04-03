@@ -88,15 +88,37 @@ def test_skipped_then_success_fraction() -> None:
 
 def test_failed_does_not_change_fraction() -> None:
     fractions, _ = _collect(10.0, [(5.0, AdvanceState.SUCCESS), (5.0, AdvanceState.FAILED)])
-    # Only one fraction update (from SUCCESS); FAILED produces no bar() call
-    assert len(fractions) == 1
+    # FAILED calls bar() but doesn't change cumulative — fraction stays at 0.5
     assert fractions[0] == pytest.approx(0.5)
+    assert fractions[1] == pytest.approx(0.5)
 
 
 def test_failed_does_not_reduce_remaining() -> None:
     # After FAILED, a subsequent SUCCESS should still use original remaining
     fractions, _ = _collect(10.0, [(5.0, AdvanceState.FAILED), (5.0, AdvanceState.SUCCESS)])
-    assert fractions[0] == pytest.approx(0.5)
+    assert fractions[1] == pytest.approx(0.5)
+
+
+# ---------------------------------------------------------------------------
+# COMPLETE
+# ---------------------------------------------------------------------------
+
+def test_complete_forces_fraction_to_1() -> None:
+    # Even with float drift leaving cumulative short, COMPLETE forces 1.0
+    fractions, _ = _collect(10.0, [(9.9, AdvanceState.SUCCESS), (0, AdvanceState.COMPLETE)])
+    assert fractions[-1] == pytest.approx(1.0)
+
+
+def test_complete_does_not_change_counters() -> None:
+    _, texts = _collect(10.0, [(5.0, AdvanceState.SUCCESS), (0, AdvanceState.COMPLETE)])
+    # Counter after COMPLETE should still show only 1 success
+    assert "✔ 1" in texts[-1]
+
+
+def test_complete_without_prior_advances() -> None:
+    # COMPLETE on a fresh bar still forces 1.0
+    fractions, _ = _collect(10.0, [(0, AdvanceState.COMPLETE)])
+    assert fractions[-1] == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -117,9 +139,9 @@ def test_indeterminate_mode_does_not_crash() -> None:
 
 def test_text_no_failures() -> None:
     _, texts = _collect(10.0, [(1.0, AdvanceState.SUCCESS), (1.0, AdvanceState.SKIPPED)])
-    # After success: ✔ 1  ⏭ 0
+    # After success: ✔ 1, no skipped counter yet
     assert "✔ 1" in texts[0]
-    assert "⏭ 0" in texts[0]
+    assert "⏭" not in texts[0]
     assert "✘" not in texts[0]
     # After skipped: ✔ 1  ⏭ 1
     assert "⏭ 1" in texts[1]
@@ -132,5 +154,5 @@ def test_text_with_failures() -> None:
 
 def test_text_show_counters_false() -> None:
     _, texts = _collect(10.0, [(5.0, AdvanceState.SUCCESS)], show_counters=False)
-    # Should show "5.0 / 10.0"
-    assert "5.0 / 10.0" in texts[0]
+    # Should show "5.0 out of 10.0"
+    assert "5.0 out of 10.0" in texts[0]

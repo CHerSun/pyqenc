@@ -467,6 +467,7 @@ class OptimizationPhase:
                     advance         = advance,
                 )
             )
+            advance(0, AdvanceState.COMPLETE)
 
         # Derive per-strategy results from encoded output
         import yaml as _yaml

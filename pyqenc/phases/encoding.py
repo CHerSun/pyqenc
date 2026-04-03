@@ -1545,6 +1545,7 @@ def encode_all_chunks(
                 collector       = collector,
             )
         )
+        advance(0, AdvanceState.COMPLETE)
 
     # Log summary
     logger.info(

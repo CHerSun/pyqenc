@@ -1297,6 +1297,7 @@ class QualityEvaluator:
                         width=width,
                     )
                 )
+                advance(0, AdvanceState.COMPLETE)
         else:
             psnr_log, ssim_log, vmaf_json = asyncio.run(
                 self._generate_metrics(
