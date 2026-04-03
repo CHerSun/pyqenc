@@ -136,12 +136,12 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--metrics-sampling",
         type=int,
-        default=None,
+        default=DEFAULT_METRICS_SAMPLING,
         metavar="N",
         help=(
             "Metrics sampling factor: measure every N-th frame. "
-            "Min: 1 (every frame measured). Default: 10 (recommended balance of speed and precision). "
-            "Values above 30 are not recommended due to measurement volatility."
+            f"Min: 1 (every frame measured). Default: {DEFAULT_METRICS_SAMPLING}. Directly affects reliability of metrics. A tradeoff between precision and speed. "
+            "Values above 30 are not recommended due to measurement volatility. 1 gives the highest precision but lowest speed. 2-4 are a good compromise. 5-10 start to become unreliable.."
         ),
     )
     parser.add_argument(
@@ -594,7 +594,11 @@ def _create_measure_subcommand(subparsers) -> None:
         type=int,
         default=DEFAULT_METRICS_SAMPLING,
         metavar="N",
-        help=f"Measure every N-th frame (default: {DEFAULT_METRICS_SAMPLING})",
+        help=(
+            "Metrics sampling factor: measure every N-th frame. "
+            f"Min: 1 (every frame measured). Default: {DEFAULT_METRICS_SAMPLING}. Directly affects reliability of metrics. A tradeoff between precision and speed. "
+            "Values above 30 are not recommended due to measurement volatility. 1 gives the highest precision but lowest speed. 2-4 are a good compromise. 5-10 start to become unreliable.."
+        ),
     )
     p.add_argument(
         "--width",

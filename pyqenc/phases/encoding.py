@@ -24,6 +24,7 @@ from pyqenc.constants import (
     CHUNKS_DIR,
     CRF_GRANULARITY,
     CRF_INITIAL_DEFAULT,
+    DEFAULT_METRICS_SAMPLING,
     ENCODED_ATTEMPT_GLOB_PATTERN,
     ENCODED_ATTEMPT_NAME_PATTERN,
     ENCODED_OUTPUT_DIR,
@@ -410,7 +411,7 @@ class ChunkEncoder:
         crop_params:       CropParams | None = None,
         cleanup_level:     CleanupLevel      = CleanupLevel.NONE,
         visual_hash:       bool              = True,
-        metrics_sampling:  int               = 10,
+        metrics_sampling:  int               = DEFAULT_METRICS_SAMPLING,
     ):
         """Initialize chunk encoder.
 

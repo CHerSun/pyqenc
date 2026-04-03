@@ -13,6 +13,7 @@ from typing import Any
 
 import yaml
 
+from pyqenc.constants import DEFAULT_METRICS_SAMPLING
 from pyqenc.models import CodecConfig, Strategy
 
 
@@ -444,5 +445,5 @@ class ConfigManager:
         Returns:
             Metrics sampling factor (minimum 1, default 10).
         """
-        return int(self._config.get("metrics", {}).get("sampling", 10))
+        return int(self._config.get("metrics", {}).get("sampling", DEFAULT_METRICS_SAMPLING))
 

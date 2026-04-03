@@ -29,6 +29,7 @@ from alive_progress import config_handler
 
 from pyqenc.constants import (
     CHUNKS_DIR,
+    DEFAULT_METRICS_SAMPLING,
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
 )
@@ -719,7 +720,7 @@ class OptimizationPhase:
 
         logger.info("")
         if selected:
-            logger.info("Selected strategies: %s", ", ".join(s.name for s in selected))
+            logger.info("Selected strategies: %s", ", ".join(selected))
         else:
             logger.critical("NO strategies selected (all failed).")
 
@@ -848,7 +849,7 @@ def _make_encoder(
     work_dir:         Path,
     crop_params:      CropParams | None,
     visual_hash:      bool = True,
-    metrics_sampling: int  = 10,
+    metrics_sampling: int  = DEFAULT_METRICS_SAMPLING,
 ) -> "ChunkEncoder":
     """Construct a ``ChunkEncoder`` for test encodes.
 

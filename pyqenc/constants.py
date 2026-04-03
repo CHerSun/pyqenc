@@ -133,7 +133,7 @@ separators used in chunk filenames — producing e.g. ``01꞉02꞉03․456``.
 # Measure defaults
 DEFAULT_SCREENSHOT_COUNT  = 20
 """Default number of screenshots captured from each video."""
-DEFAULT_METRICS_SAMPLING  = 10
+DEFAULT_METRICS_SAMPLING  = 1
 """Default frame subsampling factor for metric computation."""
 
 # Artifact discovery patterns
