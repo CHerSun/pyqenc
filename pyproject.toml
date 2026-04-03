@@ -28,6 +28,9 @@ package = true
 where = ["."]
 include = ["pyqenc*"]
 
+[tool.setuptools.package-data]
+pyqenc = ["*.yaml"]
+
 [tool.setuptools.dynamic]
 version = {attr = "pyqenc.__version__"}
 
