@@ -523,19 +523,19 @@ def adjust_crf(
 
     ## Algorithm
 
-    Two phases depending on whether both bracket boundaries have observed metric
-    values (stored in ``history.fail_metric`` / ``history.pass_metric``):
+    Builds a candidate list of interpolation fractions ``t ∈ [0, 1]`` along
+    ``[pass_crf, fail_crf]`` and takes the first valid one:
 
-    **Phase 1 — Binary bootstrap** (one or both boundaries lack observed metrics):
-    Use true binary search: next CRF = midpoint of ``[pass_crf, fail_crf]``,
-    rounded toward the current side.  This guarantees both boundaries get real
-    metric observations within 2 attempts, after which Phase 2 takes over.
+    1. **Primary**: interpolate from the current worst target's metric curve
+       between the two boundary dicts.  Valid when the metric actually straddles
+       the target inside the bracket (``t ∈ [0, 1]``).
+    2. **Reverse**: re-find the worst target from the *opposite* boundary's
+       metrics (the boundary not just updated), then interpolate.  Catches the
+       case where the current worst metric passes at both boundaries.
+    3. **Binary**: ``t = 0.5`` (midpoint) — always valid, always last.
 
-    **Phase 2 — Proportional interpolation** (both boundaries have metrics):
-    The worst-performing target drives the estimate.  Its deficit is linearly
-    interpolated between the observed metric values at the two CRF boundaries
-    to find the CRF where the deficit would be zero (i.e. exactly on target).
-    The result is rounded to ``CRF_GRANULARITY`` and clamped to the bracket.
+    When boundary metrics are absent (early attempts), interpolation candidates
+    return ``None`` and binary is used automatically.
 
     **Early acceptance**: when all targets pass and the tightest surplus is
     within ``CRF_METRIC_POSITIVE_DELTA``, the current CRF is accepted without
@@ -599,85 +599,75 @@ def adjust_crf(
             return None
         return max(lo, min(hi, crf))
 
-    # --- Phase 1: binary bootstrap until both boundaries have observed metrics ---
-    if history.fail_metrics is None or history.pass_metrics is None:
-        midpoint = (fail_crf + pass_crf) / 2.0
-        if current_passed:
-            next_crf = math.ceil(midpoint / CRF_GRANULARITY) * CRF_GRANULARITY
-        else:
-            next_crf = math.floor(midpoint / CRF_GRANULARITY) * CRF_GRANULARITY
-        result = _clamp_interior(next_crf)
-        logger.debug(
-            "CRF binary bootstrap: pass=%.1f (%s) fail=%.1f (%s) → CRF %s",
-            pass_crf,
-            "metrics" if history.pass_metrics is not None else "?",
-            fail_crf,
-            "metrics" if history.fail_metrics is not None else "?",
-            f"{result:{PADDING_CRF}}" if result is not None else "None (exhausted)",
-        )
-        return result
-
-    # --- Phase 2: proportional interpolation on observed metric line ---
-    # Look up the *current* worst target's key in both boundary dicts.
-    # The worst target can differ between attempts; using the full stored dicts
-    # ensures we always interpolate on the correct metric's observed curve.
+    # --- CRF estimate: candidate list, first t ∈ [0, 1] wins ---
+    # Candidates (in priority order):
+    #   1. Primary:   interpolate from current worst target's metric curve.
+    #   2. Reverse:   re-find worst target from the *opposite* boundary's metrics
+    #                 (the boundary we did NOT just update), then interpolate.
+    #                 If we just passed, the opposite is the fail boundary — its
+    #                 worst metric is what actually caused the prior failure.
+    #   3. Binary:    t = 0.5 (midpoint), always valid.
     #
-    # For higher_is_better metrics:
-    #   pass_val > target.value > fail_val  (pass has surplus, fail has deficit)
-    # For inverted metrics (lower_is_better):
-    #   pass_val < target.value < fail_val
+    # When boundary metrics are absent (early attempts), interpolation candidates
+    # return None and binary (t=0.5) is used automatically — no separate phase
+    # needed.
     #
-    # We work in deficit space (info.deficit) so the sign is always:
-    #   deficit_at_pass > 0  (surplus)
-    #   deficit_at_fail < 0  (deficit)
-    #
-    # Linear interpolation: find t where deficit == 0
+    # We work in deficit space: deficit_at_pass > 0, deficit_at_fail < 0.
+    # Linear interpolation finds t where deficit == 0:
     #   t = deficit_at_pass / (deficit_at_pass - deficit_at_fail)
-    #   next_crf = pass_crf + t * crf_span
-    metric_key = f"{worst_target.metric}_{worst_target.statistic}"
-    info       = MetricType(worst_target.metric).info
+    # t ∈ [0, 1] means the metric straddles the target inside the bracket.
+    # t outside [0, 1] means the metric never crosses the target here — skip.
 
-    pass_val = history.pass_metrics.get(metric_key)
-    fail_val = history.fail_metrics.get(metric_key)
+    def _t_for_target(
+        target:    QualityTarget,
+        p_metrics: dict[str, float] | None,
+        f_metrics: dict[str, float] | None,
+    ) -> float | None:
+        """Return interpolation t for *target*, or ``None`` if outside [0, 1]."""
+        if p_metrics is None or f_metrics is None:
+            return None
+        key      = f"{target.metric}_{target.statistic}"
+        p_val    = p_metrics.get(key)
+        f_val    = f_metrics.get(key)
+        if p_val is None or f_val is None:
+            return None
+        tgt_info = MetricType(target.metric).info
+        d_pass   = tgt_info.deficit(p_val, target.value)
+        d_fail   = tgt_info.deficit(f_val, target.value)
+        span     = d_pass - d_fail
+        if abs(span) < 1e-9:
+            return None
+        t = d_pass / span
+        return t if 0.0 <= t <= 1.0 else None
 
-    if pass_val is None or fail_val is None:
-        # Boundary doesn't have this metric key — fall back to binary midpoint
-        midpoint = (fail_crf + pass_crf) / 2.0
-        next_crf = round(midpoint / CRF_GRANULARITY) * CRF_GRANULARITY
-        result   = _clamp_interior(next_crf)
-        logger.debug(
-            "CRF binary fallback (metric key %s missing in boundary): → CRF %s",
-            metric_key, f"{result:{PADDING_CRF}}" if result is not None else "None (exhausted)",
-        )
-        return result
+    opposite_metrics = history.fail_metrics if current_passed else history.pass_metrics
+    opp_worst        = _find_worst_target(opposite_metrics, quality_targets) if opposite_metrics else None
+    opp_target       = opp_worst[0] if opp_worst is not None else None
 
-    deficit_at_pass = info.deficit(pass_val, worst_target.value)   # > 0
-    deficit_at_fail = info.deficit(fail_val, worst_target.value)   # < 0
-    deficit_span    = deficit_at_pass - deficit_at_fail             # > 0
+    candidates: list[tuple[float, str]] = []
 
-    if abs(deficit_span) < 1e-9:
-        # Degenerate: flat metric line — fall back to binary midpoint
-        raw_crf = (fail_crf + pass_crf) / 2.0
-        next_crf = round(raw_crf / CRF_GRANULARITY) * CRF_GRANULARITY
+    t_primary = _t_for_target(worst_target, history.pass_metrics, history.fail_metrics)
+    if t_primary is not None:
+        candidates.append((t_primary, f"primary worst={worst_target.metric}_{worst_target.statistic}"))
+
+    if opp_target is not None:
+        t_reverse = _t_for_target(opp_target, history.pass_metrics, history.fail_metrics)
+        if t_reverse is not None:
+            candidates.append((t_reverse, f"reverse worst={opp_target.metric}_{opp_target.statistic}"))
+
+    candidates.append((0.5, "binary"))
+
+    t_chosen, label = candidates[0]
+    raw_crf = pass_crf + t_chosen * crf_span
+    if current_passed:
+        next_crf = math.ceil(raw_crf / CRF_GRANULARITY) * CRF_GRANULARITY
     else:
-        t       = deficit_at_pass / deficit_span   # fraction along [pass_crf, fail_crf]
-        t       = max(0.0, min(1.0, t))
-        raw_crf = pass_crf + t * crf_span
-        # Round toward the current side to avoid oscillation
-        if current_passed:
-            next_crf = math.ceil(raw_crf / CRF_GRANULARITY) * CRF_GRANULARITY
-        else:
-            next_crf = math.floor(raw_crf / CRF_GRANULARITY) * CRF_GRANULARITY
-
+        next_crf = math.floor(raw_crf / CRF_GRANULARITY) * CRF_GRANULARITY
     result = _clamp_interior(next_crf)
 
     logger.debug(
-        "CRF proportional: pass=%.1f (m=%.3f→deficit=%.3f) fail=%.1f (m=%.3f→deficit=%.3f) "
-        "worst=%s actual=%.3f target=%.3f → CRF %s",
-        pass_crf, pass_val, deficit_at_pass,
-        fail_crf, fail_val, deficit_at_fail,
-        metric_key, worst_actual, worst_target.value,
+        "CRF [%s]: pass=%.1f fail=%.1f t=%.3f raw=%.2f → CRF %s",
+        label, pass_crf, fail_crf, t_chosen, raw_crf,
         f"{result:{PADDING_CRF}}" if result is not None else "None (exhausted)",
     )
-
     return result
