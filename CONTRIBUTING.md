@@ -246,6 +246,8 @@ This approach supports:
 
 ### Adding a New Phase
 
+Shouldn't be required, but just in case:
+
 1. Create phase module in `pyqenc/phases/`
 2. Implement phase function with standard signature
 3. Add phase to `Phase` enum in `orchestrator.py`
