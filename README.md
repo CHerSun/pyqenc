@@ -4,9 +4,9 @@
 
 pyqenc (**PY**thon **Q**uality-based **ENC**oder) - an encoding pipeline that achieves user-specified quality targets while optimizing file size through intelligent CRF adjustment, automatic crop detection, and scene-based chunking.
 
-Current state: α (ALPHA) — already working & giving proper results, but not widely tested and not bug-free.
+Current state: β (beta) — already working & giving proper results, but not widely tested and not bug-free.
 
-> This project was inspired by [Av1an](https://github.com/rust-av/Av1an).
+> This project was inspired by [Av1an](https://github.com/rust-av/Av1an) and [Handbrake](https://handbrake.fr/).
 
 > AWS and Kiro IDE team - thank you for the agentic IDE and welcome credits. This allowed me to prototype this project incredibly fast. Truly a new approach to development.
 
@@ -14,12 +14,16 @@ Current state: α (ALPHA) — already working & giving proper results, but not w
 
 ## Problem & Solution
 
+### Purpose
+
+To give automatic encoding pipeline to prepare video for archiving (storage) - i.e. to achieve the required quality while keeping the resulting size as low as possible.
+
 ### The Problem
 
 Traditional video encoding approaches face several challenges:
 
 - **Fixed CRF encoding** produces unpredictable quality across different scenes
-- **Target bitrate encoding** doesn't guarantee consistent quality
+- **Target bitrate encoding** also doesn't guarantee consistent quality
 - **Manual quality verification** is time-consuming and subjective
 - **Interrupted encoding** requires starting over from scratch
 
@@ -29,27 +33,16 @@ pyqenc provides a quality-first encoding pipeline that:
 
 - **Adjusts CRF iteratively** until quality targets are met for each scene
 - **Guarantees quality targets** using objective metrics (VMAF, SSIM, PSNR)
-- **Automatically detects and removes black borders** to optimize encoding efficiency
+- **Automatically detects cropping** to remove black borders and optimize encoding efficiency
 - **Supports multiple codecs** (h.264 8-bit, h.265 10-bit) with custom profiles
 - **Resumes seamlessly** from interruptions using artifact-based detection
 - **Processes in parallel** to maximize CPU utilization
 - **Provides detailed progress** with visual feedback and logging
+- **Supports multiple strategies** search for the best suited combination via optimization phase
+- **Provides simple CLI** usable without ethoteric knowledge
+- **Applies multiple audio strategies** to give consistent normalized and downmixed streams to pick from
 
-## Features
-
-- ✅ Quality-targeted encoding with VMAF, SSIM, and PSNR metrics
-- ✅ Automatic black border detection and cropping
-- ✅ Scene-based chunking with frame-perfect splits
-- ✅ Target CRF search
-- ✅ Multiple codec support (h.264 8-bit, h.265 10-bit)
-- ✅ Custom encoding strategies via configuration
-- ✅ Optimization phase to choose the best encoding strategy (optional)
-- ✅ Parallel chunk encoding (configurable concurrency)
-- ✅ Audio processing with day/night normalization modes and dialogs boosting
-- ✅ Artifact-based resumption (no explicit resume needed)
-- ✅ Dry-run mode to preview operations
-- ✅ Comprehensive logging and progress reporting
-- Currently targeting only MKV sources. You should remux other containers into MKV beforehand.
+> NOTE: pyqenc currently targets only `.mkv` containers. You can try using other containers directly. In case of any problems - remux into `.mkv` via MKVmerge GUI.
 
 ## Installation
 
@@ -73,10 +66,10 @@ sudo apt install ffmpeg mkvtoolnix
 
 ### Run pyqenc directly using `uv`
 
-This is the recommended way. It has no external python dependencies, `uv` will create a local `.venv` with everything required.
+[uv](https://docs.astral.sh/uv/) is a new fast Python package manager. Using `uv` is the recommended way to run pyqenc directly from source code. `uv` will create a local `.venv` with everything required.
 
 ```sh
-git clone <repository-url>
+git clone https://github.com/CHerSun/pyqenc.git
 cd pyqenc
 
 uv run pyqenc <your_arguments>
@@ -90,13 +83,13 @@ git pull
 
 ### Install pyqenc
 
-This needs global python of version >=3.13. Install using `uv`:
+This needs installed Python of version >=3.13. Install using `pip`:
 
 ```sh
-git clone <repository-url>
+git clone https://github.com/CHerSun/pyqenc.git
 cd pyqenc
 
-uv pip install .
+pip install .
 ```
 
 After installation, the `pyqenc` command will be available in your terminal. To run then:
@@ -109,7 +102,7 @@ To update later:
 
 ```sh
 git pull
-uv pip install .
+pip install .
 ```
 
 ## Quick Start
