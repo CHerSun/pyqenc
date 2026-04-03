@@ -301,15 +301,15 @@ def compute_statistics(
     levels = [0.00, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
     keys   = ["min", "p5", "p10", "p25", "p50", "p75", "p90", "p95", "max", "std"]
 
-    stats: list[float] = list(values.quantile(levels))
-    stats.append(values.max())
+    stats: list[float] = [float(v) for v in values.quantile(levels)]
+    stats.append(float(values.max()))
 
     std_values = values
     if std_cutoff_max is not None:
         std_values = std_values[std_values <= std_cutoff_max]
     if std_cutoff_min is not None:
         std_values = std_values[std_values >= std_cutoff_min]
-    stats.append(std_values.std())
+    stats.append(float(std_values.std()))
 
     return dict(zip(keys, stats))  # type: ignore[return-value]
 
