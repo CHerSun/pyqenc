@@ -502,8 +502,9 @@ class TestCaptureScreenshots:
             )
 
         vf_arg = next(str(a) for a in captured_cmd if "select=" in str(a))
-        assert "eq(t," in vf_arg
-        assert "eq(n," not in vf_arg
+        assert "gte(t," in vf_arg
+        assert "not(gte(prev_selected_t," in vf_arg
+        assert "gte(n," not in vf_arg
 
     def test_frame_number_mode_used_when_no_timestamps_and_fps_known(self, tmp_path: Path) -> None:
         """When has_timestamps=False and fps known, select filter uses eq(n,...)."""
@@ -528,8 +529,9 @@ class TestCaptureScreenshots:
             )
 
         vf_arg = next(str(a) for a in captured_cmd if "select=" in str(a))
-        assert "eq(n," in vf_arg
-        assert "eq(t," not in vf_arg
+        assert "gte(n," in vf_arg
+        assert "not(gte(prev_selected_n," in vf_arg
+        assert "gte(t," not in vf_arg
 
     def test_timestamp_mode_fallback_when_fps_unknown(self, tmp_path: Path) -> None:
         """When has_timestamps=False but fps is None, falls back to timestamp mode."""
@@ -554,7 +556,8 @@ class TestCaptureScreenshots:
             )
 
         vf_arg = next(str(a) for a in captured_cmd if "select=" in str(a))
-        assert "eq(t," in vf_arg
+        assert "gte(t," in vf_arg
+        assert "not(gte(prev_selected_t," in vf_arg
 
     def test_crop_included_in_filter_when_non_empty(self, tmp_path: Path) -> None:
         """Non-empty crop params are included in the vf filter chain."""
@@ -759,4 +762,5 @@ class TestCaptureScreenshots:
             )
 
         vf_arg = next(str(a) for a in captured_cmd if "select=" in str(a))
-        assert "eq(n,24)" in vf_arg
+        assert "gte(n,24)" in vf_arg
+        assert "not(gte(prev_selected_n,24))" in vf_arg

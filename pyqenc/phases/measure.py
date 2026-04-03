@@ -217,7 +217,7 @@ def _resolve_crop(
 # ---------------------------------------------------------------------------
 
 
-def _run_metrics(
+async def _run_metrics(
     source_video:     Path,
     target_video:     Path,
     crop_params:      CropParams,
@@ -225,10 +225,11 @@ def _run_metrics(
     metrics_dir:      Path,
     graph_path:       Path,
     subsample_factor: int,
+    bar_title:        str,
 ) -> ChunkQualityStats:
     """Run quality metric computation for one source/target pair.
 
-    Delegates to ``QualityEvaluator.evaluate_chunk`` with ``targets=[]`` so
+    Delegates to ``QualityEvaluator.evaluate_chunk_async`` with ``targets=[]`` so
     no pass/fail evaluation is performed — only metric statistics are returned.
 
     Args:
@@ -247,7 +248,7 @@ def _run_metrics(
     from pyqenc.utils.visualization import QualityEvaluator
 
     evaluator  = QualityEvaluator(metrics_dir)
-    evaluation = evaluator.evaluate_chunk(
+    evaluation = await evaluator.evaluate_chunk_async(
         encoded          = target_video,
         reference        = source_video,
         ref_crop         = crop_params,
@@ -257,6 +258,7 @@ def _run_metrics(
         show_progress    = True,
         plot_path        = graph_path,
         width            = width or 0,
+        bar_title        = bar_title,
     )
     return evaluation.metrics
 
@@ -521,19 +523,35 @@ async def _capture_screenshots(
 
     video_stem = video_path.stem
 
-    # Build the select expression
+    # Build the select expression.
+    #
+    # eq(t, X) requires exact float match — almost never hits in practice.
+    # eq(n, N) is reliable for CBR/CFR but wrong for VFR.
+    #
+    # The correct single-pass approach for both CBR and VFR:
+    #   gte(t,T)*not(gte(prev_selected_t,T))
+    # This fires exactly once: the first frame whose PTS >= T.
+    # prev_selected_t is -1 before any frame is selected, so the first term
+    # fires as soon as t >= T, and the second term prevents re-firing.
+    #
+    # Frame-number fallback (no embedded timestamps, fps known):
+    #   gte(n,N)*not(gte(prev_selected_n,N))
+    # Same logic using frame index instead of PTS.
+
     use_frame_numbers = (not has_timestamps) and (fps is not None)
 
     if use_frame_numbers:
         assert fps is not None  # narrowing for type checker
         frame_nums = [round(t * fps) for t in timestamps_s]
-        select_expr = "+".join(f"eq(n,{n})" for n in frame_nums)
+        select_expr = "+".join(f"gte(n,{n})*not(gte(prev_selected_n,{n}))" for n in frame_nums)
         logger.debug(
             "Screenshot mode: frame-number-based (has_timestamps=False, fps=%.3f)", fps
         )
     else:
-        select_expr = "+".join(f"eq(t,{t})" for t in timestamps_s)
-        logger.debug("Screenshot mode: timestamp-based")
+        select_expr = "+".join(
+            f"gte(t,{t})*not(gte(prev_selected_t,{t}))" for t in timestamps_s
+        )
+        logger.debug("Screenshot mode: timestamp-based (first-frame-at-or-after)")
 
     # Build filter chain: select [+ crop] + setpts
     filter_parts: list[str] = [f"select='{select_expr}'"]
@@ -863,19 +881,38 @@ async def run_measure(
         logger.info("Captured %d/%d source screenshots", len(source_screenshots), len(shared_timestamps))
 
     # ------------------------------------------------------------------
-    # 10.5 — Per-target loop: metrics, sidecar, screenshots
+    # 10.5 — All screenshots first (source + all targets), then metrics
     # ------------------------------------------------------------------
 
     target_results: list[TargetMeasureResult] = []
     total_target_screenshots = 0
 
+    # Capture target screenshots for all targets before running any metrics
+    target_screenshots_map: dict[Path, list[Path]] = {}
     for target_video, target_meta in zip(target_videos, target_metas):
+        if shared_timestamps:
+            t_fps    = target_meta.fps
+            t_has_ts = target_durations[target_video] is not None
+            shots = await _capture_screenshots(
+                video_path      = target_video,
+                timestamps_s    = shared_timestamps,
+                screenshots_dir = target_screenshots_dirs[target_video],
+                crop_params     = None,
+                fps             = t_fps,
+                has_timestamps  = t_has_ts,
+            )
+            target_screenshots_map[target_video] = shots
+            total_target_screenshots += len(shots)
+        else:
+            target_screenshots_map[target_video] = []
+
+    # Now run metrics for each target
+    for idx, (target_video, target_meta) in enumerate(zip(target_videos, target_metas), start=1):
         logger.info("Processing target: %s", target_video.name)
 
         eff_dur = effective_durations[target_video]
 
-        # Run metrics
-        metrics = _run_metrics(
+        metrics = await _run_metrics(
             source_video     = source_video,
             target_video     = target_video,
             crop_params      = resolved_crop,
@@ -883,17 +920,15 @@ async def run_measure(
             metrics_dir      = metrics_dirs[target_video],
             graph_path       = graph_paths[target_video],
             subsample_factor = metrics_sampling,
+            bar_title        = f"target {idx}",
         )
 
         # Log per-target metric summary
         for metric_type, stats in metrics.items():
             median = stats.get("median")
             if median is not None:
-                logger.info(
-                    "  %s median: %.3f", metric_type.value, median
-                )
+                logger.info("  %s median: %.3f", metric_type.value, median)
 
-        # Write sidecar
         _write_sidecar(
             path                       = sidecar_paths[target_video],
             source_video               = source_video,
@@ -905,21 +940,6 @@ async def run_measure(
             target_duration_seconds    = target_durations[target_video],
             effective_duration_seconds = eff_dur,
         )
-
-        # Capture target screenshots
-        target_screenshots: list[Path] = []
-        if shared_timestamps:
-            t_fps    = target_meta.fps
-            t_has_ts = target_durations[target_video] is not None
-            target_screenshots = await _capture_screenshots(
-                video_path      = target_video,
-                timestamps_s    = shared_timestamps,
-                screenshots_dir = target_screenshots_dirs[target_video],
-                crop_params     = None,   # no crop on target
-                fps             = t_fps,
-                has_timestamps  = t_has_ts,
-            )
-            total_target_screenshots += len(target_screenshots)
 
         target_results.append(TargetMeasureResult(
             target_video    = target_video,

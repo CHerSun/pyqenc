@@ -35,7 +35,7 @@ from pyqenc.quality import (
     normalize_metric,
     run_metric,
 )
-from pyqenc.utils.alive import ProgressBar
+from pyqenc.utils.alive import AdvanceState, ProgressBar
 
 matplotlib.use("Agg")  # non-interactive backend — safe to call from any thread
 import matplotlib.colors as mcolors
@@ -118,12 +118,12 @@ _GRID_ALPHA_MINOR: float = 0.1
 _LEGEND_ALPHA:     float = 0.9
 _MARKER_SIZE:      int   = 10
 _MARKER_ALPHA:     float = 0.9
-_TIGHT_LAYOUT_PAD: float = 0.2   # outer padding for tight_layout (default ~1.08 is too large)
+_TIGHT_LAYOUT_PAD: float = 0.0   # outer padding for tight_layout (default ~1.08 is too large)
 
 # CRF plot
 _CRF_COLOR:       str   = "#8B0000"   # dark red
 _CRF_Y_MIN:       float = 0.0
-_CRF_Y_MAX:       float = 63.0        # x265 CRF range upper bound
+_CRF_Y_MAX:       float = 42.0        # assuming 40 is max sane CRF for the plot + a little spacing
 _CRF_Y_MAJOR_TICK: float = 5.0
 _CRF_Y_MINOR_TICK: float = 1.0
 
@@ -1121,14 +1121,15 @@ class QualityEvaluator:
     ) -> tuple[Path, Path, Path]:
         """Generate metric log files for quality comparison.
 
-        ffmpeg is run in the encoded file's parent directory using a UUID-based
-        temporary filename prefix so that no special characters appear in the
-        filter-graph string.  Each metric is written to a ``.tmp``-suffixed file
+        ffmpeg is run in the output directory (derived from ``output_prefix``) using
+        a UUID-based temporary filename prefix so that no special characters appear in
+        the filter-graph string.  Each metric is written to a ``.tmp``-suffixed file
         while ffmpeg is running; on success the file is atomically renamed to its
         final canonical path derived from ``output_prefix``.
 
-        This ensures the standard ``.tmp`` cleanup routine removes any leftover
-        files from interrupted runs.
+        The working directory is always the metrics output directory — never the
+        encoded file's parent — so tmp files never appear in the source/target video
+        directories.
 
         When ``bar_advance`` is provided, each ffmpeg process reports progress
         via ``ProgressCallback`` which advances the bar based on ``out_time_seconds``.
@@ -1152,7 +1153,11 @@ class QualityEvaluator:
         # UUID prefix keeps special characters out of the ffmpeg filter graph;
         # the .tmp extension ensures cleanup on interrupted runs.
         uuid_hex = uuid.uuid4().hex
-        cwd = encoded.parent
+        # tmp files are written into the same directory as the final metric files
+        # (derived from output_prefix), NOT encoded.parent — the target video may
+        # live anywhere and we must not litter there.
+        cwd = Path(output_prefix).parent
+        cwd.mkdir(parents=True, exist_ok=True)
 
         logger.debug(
             "Generating metrics for %s vs %s (tmp prefix: %s)",
@@ -1225,6 +1230,89 @@ class QualityEvaluator:
                 logger.warning("Expected metric tmp file not found: %s", tmp_path)
 
         return final_psnr, final_ssim, final_vmaf
+
+    async def evaluate_chunk_async(
+        self,
+        encoded:             Path,
+        reference:           Path,
+        ref_crop:            CropParams,
+        targets:             list[QualityTarget],
+        output_dir:          Path,
+        subsample_factor:    int               = 10,
+        show_progress:       bool              = False,
+        plot_path:           Path | None       = None,
+        chunk_start_seconds: float             = 0.0,
+        width:               int               = 0,
+        bar_title:           str | None        = None,
+    ) -> QualityEvaluation:
+        """Async variant of ``evaluate_chunk`` for use inside a running event loop.
+
+        Identical behaviour to ``evaluate_chunk`` but ``await``s ``_generate_metrics``
+        directly instead of calling ``asyncio.run()``.  Use this when already inside
+        an ``async`` context (e.g. ``run_measure``).
+
+        Args:
+            bar_title: Override the progress bar title. When ``None``, defaults to
+                       the encoded file stem (same as ``evaluate_chunk``).
+            (all other args same as ``evaluate_chunk``)
+
+        Returns:
+            QualityEvaluation with metrics and target evaluation results
+        """
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_prefix = str(output_dir / f"{encoded.stem}.")
+
+        _NUM_METRIC_PASSES = 3
+        duration_seconds: float | None = None
+        fps_value:        float | None = None
+        try:
+            from pyqenc.models import VideoMetadata
+            vm = VideoMetadata(path=encoded)
+            duration_seconds = vm.duration_seconds
+            fps_value        = vm.fps
+        except Exception:
+            pass
+
+        resolved_title = bar_title if bar_title is not None \
+            else encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
+
+        if show_progress:
+            with ProgressBar(_NUM_METRIC_PASSES * (duration_seconds or 0.0), title=f"Metrics: {resolved_title}", show_counters=False) as advance:
+                psnr_log, ssim_log, vmaf_json = await self._generate_metrics(
+                    encoded,
+                    reference,
+                    ref_crop,
+                    output_prefix,
+                    subsample_factor,
+                    bar_advance=advance,
+                    duration_seconds=duration_seconds or 0.0,
+                    width=width,
+                )
+                advance(0, AdvanceState.COMPLETE)
+        else:
+            psnr_log, ssim_log, vmaf_json = await self._generate_metrics(
+                encoded,
+                reference,
+                ref_crop,
+                output_prefix,
+                subsample_factor,
+                bar_advance=None,
+                duration_seconds=duration_seconds or 0.0,
+                width=width,
+            )
+
+        return self._finish_evaluation(
+            encoded=encoded,
+            psnr_log=psnr_log,
+            ssim_log=ssim_log,
+            vmaf_json=vmaf_json,
+            output_dir=output_dir,
+            targets=targets,
+            subsample_factor=subsample_factor,
+            plot_path=plot_path,
+            fps_value=fps_value,
+            chunk_start_seconds=chunk_start_seconds,
+        )
 
     def evaluate_chunk(
         self,
@@ -1384,4 +1472,77 @@ class QualityEvaluator:
             targets_met=targets_met,
             failed_targets=failed_targets,
             artifacts=artifacts
+        )
+
+    def _finish_evaluation(
+        self,
+        encoded:             Path,
+        psnr_log:            Path,
+        ssim_log:            Path,
+        vmaf_json:           Path,
+        output_dir:          Path,
+        targets:             list[QualityTarget],
+        subsample_factor:    int,
+        plot_path:           Path | None,
+        fps_value:           float | None,
+        chunk_start_seconds: float,
+    ) -> QualityEvaluation:
+        """Parse metric files, generate plot, and evaluate targets.
+
+        Shared post-processing used by both ``evaluate_chunk`` and
+        ``evaluate_chunk_async`` after metric files have been produced.
+        """
+        logger.debug("Parsing metrics and generating plots")
+        resolved_plot_path = plot_path if plot_path is not None else output_dir / f"{encoded.stem}.png"
+        metrics = analyze_chunk_quality(
+            psnr_log=psnr_log if psnr_log.exists() else None,
+            ssim_log=ssim_log if ssim_log.exists() else None,
+            vmaf_json=vmaf_json if vmaf_json.exists() else None,
+            factor=subsample_factor,
+            output_path=resolved_plot_path,
+            title=f"Quality metrics\n{encoded.stem.replace(TIME_SEPARATOR_MS, '.').replace(TIME_SEPARATOR_SAFE, ':')}",
+            generate_plot=True,
+            fps=fps_value,
+            chunk_start_seconds=chunk_start_seconds,
+        )
+
+        artifacts = QualityArtifacts(
+            psnr_log=psnr_log if psnr_log.exists() else None,
+            ssim_log=ssim_log if ssim_log.exists() else None,
+            vmaf_json=vmaf_json if vmaf_json.exists() else None,
+            plot=resolved_plot_path,
+            stats_files=[]
+        )
+        for metric_file in [psnr_log, ssim_log, vmaf_json]:
+            if metric_file and metric_file.exists():
+                stats_file = metric_file.with_suffix('.stats')
+                if stats_file.exists():
+                    artifacts.stats_files.append(stats_file)
+
+        failed_targets: list[QualityTarget] = []
+        for target in targets:
+            metric_stats = metrics.get(MetricType(target.metric))
+            if metric_stats is None:
+                logger.warning("Target metric '%s' not available in results", target.metric)
+                failed_targets.append(target)
+                continue
+            actual_value = metric_stats.get(target.statistic)
+            if actual_value is None:
+                logger.warning(
+                    "Target statistic '%s' not available for metric '%s'",
+                    target.statistic, target.metric,
+                )
+                failed_targets.append(target)
+                continue
+            if actual_value < target.value:
+                logger.debug("Target not met: %s-%s:%s (actual: %.2f)", target.metric, target.statistic, target.value, actual_value)
+                failed_targets.append(target)
+            else:
+                logger.debug("Target met: %s-%s:%s (actual: %.2f)", target.metric, target.statistic, target.value, actual_value)
+
+        return QualityEvaluation(
+            metrics=metrics,
+            targets_met=len(failed_targets) == 0,
+            failed_targets=failed_targets,
+            artifacts=artifacts,
         )
