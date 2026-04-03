@@ -4,7 +4,9 @@
 
 pyqenc (**PY**thon **Q**uality-based **ENC**oder) - an encoding pipeline that achieves user-specified quality targets while optimizing file size through intelligent CRF adjustment, automatic crop detection, and scene-based chunking.
 
-> This project was inspired by [Av1an](https://github.com/rust-av/Av1an).
+Current state: β (beta) — already working & giving proper results, but not widely tested and not bug-free.
+
+> This project was inspired by [Av1an](https://github.com/rust-av/Av1an) and [Handbrake](https://handbrake.fr/).
 
 > AWS and Kiro IDE team - thank you for the agentic IDE and welcome credits. This allowed me to prototype this project incredibly fast. Truly a new approach to development.
 
@@ -12,12 +14,16 @@ pyqenc (**PY**thon **Q**uality-based **ENC**oder) - an encoding pipeline that ac
 
 ## Problem & Solution
 
+### Purpose
+
+To give automatic encoding pipeline to prepare video for archiving (storage) - i.e. to achieve the required quality while keeping the resulting size as low as possible.
+
 ### The Problem
 
 Traditional video encoding approaches face several challenges:
 
 - **Fixed CRF encoding** produces unpredictable quality across different scenes
-- **Target bitrate encoding** doesn't guarantee consistent quality
+- **Target bitrate encoding** also doesn't guarantee consistent quality
 - **Manual quality verification** is time-consuming and subjective
 - **Interrupted encoding** requires starting over from scratch
 
@@ -27,27 +33,16 @@ pyqenc provides a quality-first encoding pipeline that:
 
 - **Adjusts CRF iteratively** until quality targets are met for each scene
 - **Guarantees quality targets** using objective metrics (VMAF, SSIM, PSNR)
-- **Automatically detects and removes black borders** to optimize encoding efficiency
+- **Automatically detects cropping** to remove black borders and optimize encoding efficiency
 - **Supports multiple codecs** (h.264 8-bit, h.265 10-bit) with custom profiles
 - **Resumes seamlessly** from interruptions using artifact-based detection
 - **Processes in parallel** to maximize CPU utilization
 - **Provides detailed progress** with visual feedback and logging
+- **Supports multiple strategies** search for the best suited combination via optimization phase
+- **Provides simple CLI** usable without ethoteric knowledge
+- **Applies multiple audio strategies** to give consistent normalized and downmixed streams to pick from
 
-## Features
-
-- ✅ Quality-targeted encoding with VMAF, SSIM, and PSNR metrics
-- ✅ Automatic black border detection and cropping
-- ✅ Scene-based chunking with frame-perfect splits
-- ✅ Target CRF search
-- ✅ Multiple codec support (h.264 8-bit, h.265 10-bit)
-- ✅ Custom encoding strategies via configuration
-- ✅ Optimization phase to choose the best encoding strategy (optional)
-- ✅ Parallel chunk encoding (configurable concurrency)
-- ✅ Audio processing with day/night normalization modes and dialogs boosting
-- ✅ Artifact-based resumption (no explicit resume needed)
-- ✅ Dry-run mode to preview operations
-- ✅ Comprehensive logging and progress reporting
-- Currently targeting only MKV sources. You should remux other containers into MKV beforehand.
+> NOTE: pyqenc currently targets only `.mkv` containers. You can try using other containers directly. In case of any problems - remux into `.mkv` via MKVmerge GUI.
 
 ## Installation
 
@@ -71,10 +66,10 @@ sudo apt install ffmpeg mkvtoolnix
 
 ### Run pyqenc directly using `uv`
 
-This is the recommended way. It has no external python dependencies, `uv` will create a local `.venv` with everything required.
+[uv](https://docs.astral.sh/uv/) is a new fast Python package manager. Using `uv` is the recommended way to run pyqenc directly from source code. `uv` will create a local `.venv` with everything required.
 
 ```sh
-git clone <repository-url>
+git clone https://github.com/CHerSun/pyqenc.git
 cd pyqenc
 
 uv run pyqenc <your_arguments>
@@ -88,13 +83,21 @@ git pull
 
 ### Install pyqenc
 
-This needs global python of version >=3.13. Install using `uv`:
+Either using `uv` (local, self-contained):
 
 ```sh
-git clone <repository-url>
+uv tool install .
+```
+
+> NOTE: you might need to update your PATH manually or using uv, see the `uv` output for details.
+
+Or using `pip` for global tool installation (needs installed Python>=3.13):
+
+```sh
+git clone https://github.com/CHerSun/pyqenc.git
 cd pyqenc
 
-uv pip install .
+pip install .
 ```
 
 After installation, the `pyqenc` command will be available in your terminal. To run then:
@@ -103,12 +106,7 @@ After installation, the `pyqenc` command will be available in your terminal. To 
 pyqenc <your_arguments>
 ```
 
-To update later:
-
-```sh
-git pull
-uv pip install .
-```
+To update later - repeat the steps above after `git pull`'ing.
 
 ## Quick Start
 
@@ -118,7 +116,7 @@ See installation section on how to run depending on the way you installed. See `
 
 ```sh
 # Dry-run mode - preview what's to be done (1 phase ahead) with default settings
-pyqenc auto movie.mkv
+pyqenc auto movie.mkv --work-dir ./work
 
 # Execute (`-y`) the automatic pipeline using the specified work dir with default settings.
 pyqenc auto movie.mkv --work-dir ./work -y
@@ -127,26 +125,76 @@ pyqenc auto movie.mkv --work-dir ./work -y
 pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq --work-dir ./work -y
 ```
 
-> NOTE: It is highly recommended to use separate `--work-dir` per encode.
+> NOTE: It is highly recommended to use separate `--work-dir` per encode job. I.e. if you change source file - change the dir, don't reuse.
+
+pyqenc pipeline gives final results in form of individual processed audio files (per strategy) and video files (per strategy). It is up to you to choose what you like and package that into a single container afterwards. The simplest way is the MKVmerge GUI - just drag wanted video stream and wanted audio streams there, add metadata (cover, descriptions, chapters, etc) and mux that.
+
+For audios - `audio` subfolder - it takes all filtered streams (see `include`/`exclude` arguments) and applies all strategies - downmixing (different modes, including night and dialogs boosting), normalization, dynamic normalization and converts to your wanted format (default = AAC CBR 96kbps per channel).
+
+For videos - `final` subfolder - the number of results depends on selected strategies and optimization phase results. You will get 1 video stream per selected processing strategy.
 
 Default settings:
 
-- target VMAF min >=93, VMAF med >=96;
-- use all strategies defined in the config;
-- enable optimization phase to search for the best variant.
+- target quality `vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94` - a balanced set of metrics for very good visual quality and rather small size;
+- strategies selector `veryslow+h264*,slow+h265*` - use all defined h264 profiles with veryslow preset and all h265 profiles with slow preset - focus on quality and resulting size, rather then encoding speed;
+- optimization phase enabled - allow pyqenc to test & choose the optimal strategies.
+
+### Get CLI help
+
+For top-level help use:
+
+```sh
+pyqenc --help
+```
+
+To get command-specific help use `--help` after the command, like:
+
+```sh
+pyqenc auto --help
+```
+
+### Manual inspection
+
+At any point you can go into the work dir and inspect created artifacts. Unless you use `--cleanup` - all the artifacts are preserved.
+
+### Resume the process
+
+pyqenc is made so that it can be stopped and resumed at any point with minimal progress loss possible. If your encoding stopped for whatever reason - just repeat the same command to continue.
+
+### Change parameters when you want
+
+Unless you use `--cleanup` pyqenc can dynamically adjust the flow to most of the changes with as minimal re-work overhead as possible.
+
+For example, if you did a full encode with default settings, but the resulting quality didn't suit you. Just rerun with the same source and work dir, and new quality targets - pyqenc will recover using all of the available intermediate steps and will do only the minimum possible work to reach new targets.
+
+### Measure against other variants
+
+One of the purpose of the pyqenc is to provide ability to compare results. You might want to do different encodes using different tools. As long as they stay synced - you can consistently measure those using pyqenc built-in mechanics (same as used for pipeline):
+
+```sh
+pyqenc measure <source_video> <target_video> [<target_video> ...] --work_dir <work_dir_for_source_video>
+```
+
+This will give under the `measure` subfolder:
+
+- supported metrics measured stats (mind the `--metrics-subsampling` tradeoff between speed and accuracy)
+- metrics plot over the video duration
+- screenshots of each supplied video (by default - 20 screenshot, distributed over the duration; controllable by arguments)
+
+You should be able to measure even incomplete encodings.
 
 ### Command line basic examples
 
 Slow h265 strategy tuned to better encode dark scenes and for crisper look with higher quality targets:
 
 ```sh
-pyqenc auto movie.mkv --quality-target vmaf-min:95,vmaf-med:98 --strategies slow+h265-aq --work-dir ./work -y
+pyqenc auto movie.mkv --work-dir ./movie --quality-target vmaf-min:95,vmaf-med:98 --strategies slow+h265-aq -y
 ```
 
 Fast basic h.264 encoding strategy targeting only the VMAF min score:
 
 ```sh
-pyqenc auto movie.mkv --quality-target vmaf-min:93 --strategies fast+h264-default --work-dir ./work -y
+pyqenc auto movie.mkv --work-dir ./movie --quality-target vmaf-min:93 --strategies fast+h264 -y
 ```
 
 Search through multiple strategies for the best one (or a few) and encode to it:
@@ -155,7 +203,7 @@ Search through multiple strategies for the best one (or a few) and encode to it:
 pyqenc auto movie.mkv --strategies slow+h265-aq,veryslow+h265-anime --work-dir ./work -y
 ```
 
-Encode using all strategies chosen with NO optimization phase:
+Encode using all specified strategies chosen with NO optimization phase:
 
 ```sh
 pyqenc auto movie.mkv --strategies slow+h265-aq,veryslow+h265-anime --all-strategies --work-dir ./work -y
@@ -165,6 +213,12 @@ Wildcard strategy selection (slow preset + all h265 profiles):
 
 ```sh
 pyqenc auto movie.mkv --strategies slow+h265* --work-dir ./work -y
+```
+
+Encode using all presets of specified profile (ultrafast...placebo of h265 basic profile):
+
+```sh
+pyqenc auto movie.mkv --strategies +h265 --work-dir ./work -y
 ```
 
 > NOTE: Some shells might need to escape the `*` character. The easiest is to just enclose full `slow+h265*` in quotes `"slow+h265*"` - this normally helps.
@@ -203,12 +257,12 @@ pyqenc auto <source_video> [options]
 
 ### Quality & Strategy Options
 
-| Option                     | Description                                             | Default                        |
-| -------------------------- | ------------------------------------------------------- | ------------------------------ |
-| `--quality-target TARGETS` | Quality targets (see format below)                      | `vmaf-min:93,vmaf-med:96`      |
-| `--strategies STRATEGIES`  | Encoding strategies (see format below)                  | `veryslow+h264*,slow+h265*`    |
-| `--all-strategies`         | Disable optimization, produce output for all strategies | `False` (optimization enabled) |
-| `--max-parallel N`         | Maximum concurrent encoding processes                   | `2`                            |
+| Option                     | Description                                             | Default                                           |
+| -------------------------- | ------------------------------------------------------- | ------------------------------------------------- |
+| `--quality-target TARGETS` | Quality targets (see format below)                      | `vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94` |
+| `--strategies STRATEGIES`  | Encoding strategies (see format below)                  | `veryslow+h264*,slow+h265*`                       |
+| `--all-strategies`         | Disable optimization, produce output for all strategies | `False` (optimization enabled)                    |
+| `--max-parallel N`         | Maximum concurrent encoding processes                   | `2`                                               |
 
 ### Chunking Options
 
@@ -252,7 +306,7 @@ Quality targets specify minimum acceptable quality using metrics and statistics:
 - `min` - Minimum score across all frames
 - `med` or `median` - Median score across all frames
 
-**Default:** If not specified, defaults to `vmaf-min:93,vmaf-med:96`
+**Default:** If not specified, defaults to `vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94`
 
 #### Examples:
 

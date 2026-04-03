@@ -297,6 +297,8 @@ def split_chunks(
             collector.step(TimeKey.CHUNKING_SPLIT)
             advance(end_ts - start_ts)
 
+        advance(0, AdvanceState.COMPLETE)
+
     return result_chunks
 
 

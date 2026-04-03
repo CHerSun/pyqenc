@@ -35,6 +35,8 @@ uv sync --group test
 ### Run All Tests
 
 ```sh
+uv run pytest
+# OR
 pytest
 ```
 

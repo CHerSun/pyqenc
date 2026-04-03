@@ -165,10 +165,6 @@ class PipelineOrchestrator:
             logger.info("Pipeline execution completed")
             logger.info("Phases executed: %d", len(phases_executed))
             logger.info("Phases reused:   %d", len(phases_reused))
-            if output_files:
-                logger.info("Output files: %d", len(output_files))
-                for f in output_files:
-                    logger.info("  - %s", f)
         logger.info(THICK_LINE)
 
         # Final metrics flush on successful completion (Req 5.4, 5.5, 8.3)

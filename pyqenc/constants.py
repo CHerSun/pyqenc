@@ -75,16 +75,18 @@ CRF_INITIAL_DEFAULT = 20.0
 # Symbols for log messages
 SUCCESS_SYMBOL_MINOR = "✔"
 """Symbol to indicate successful completion of a minor step, such as an individual chunk attempt."""
-SUCCESS_SYMBOL_MAJOR = "✅"
-"""Symbol to indicate successful completion of a major step, such as an entire strategy or optimization phase."""
 FAILURE_SYMBOL_MINOR = "✘"
 """Symbol to indicate failure of a minor step, such as an individual chunk attempt."""
+SUCCESS_SYMBOL_MAJOR = "✅"
+"""Symbol to indicate successful completion of a major step, such as an entire strategy or optimization phase."""
 FAILURE_SYMBOL_MAJOR = "❌"
 """Symbol to indicate failure of a major step, such as an entire strategy or optimization phase."""
 SKIPPED_SYMBOL = "⏭"
 """Symbol to indicate a skipped item (reused artifact) in progress bar text."""
 WARNING_SYMBOL = "⚠"
 """Symbol to indicate a warning condition, such as excessive encoding attempts or potential issues with disk space."""
+NEUTRAL_INDICATOR_SYMBOL = "•"
+"""Symbol to mark the metric with the least surplus on a passing attempt — the bottleneck constraining CRF search."""
 RANGE_SEPARATOR = "-"
 """Separator used in filename patterns to indicate ranges, such as frame ranges or chunk ranges."""
 TIME_SEPARATOR_SAFE = "꞉"
@@ -113,6 +115,26 @@ AUDIO_OUTPUT_DIR       = "audio"
 """Output directory for processed audio files (AudioPhase)."""
 FINAL_OUTPUT_DIR       = "final"
 """Output directory for merged final outputs (MergePhase)."""
+MEASURE_DIR            = "measure"
+"""Output subdirectory name for standalone measure artifacts."""
+
+# Measure artifact naming
+METRICS_SUBDIR_SUFFIX     = ".metrics"
+"""Suffix appended to target stem to form the raw metric logs subdirectory."""
+SCREENSHOTS_SUBDIR_SUFFIX = ".screenshots"
+"""Suffix appended to target stem to form the screenshots subdirectory."""
+SCREENSHOT_TIMESTAMP_FMT  = "{h:02d}{sep}{m:02d}{sep}{s:02d}{ms_sep}{ms:03d}"
+"""Zero-padded timestamp format for screenshot filenames.
+
+Uses TIME_SEPARATOR_SAFE and TIME_SEPARATOR_MS from constants — the same
+separators used in chunk filenames — producing e.g. ``01꞉02꞉03․456``.
+"""
+
+# Measure defaults
+DEFAULT_SCREENSHOT_COUNT  = 20
+"""Default number of screenshots captured from each video."""
+DEFAULT_METRICS_SAMPLING  = 1
+"""Default frame subsampling factor for metric computation."""
 
 # Artifact discovery patterns
 CHUNK_GLOB_PATTERN = "*.mkv"
@@ -183,12 +205,12 @@ VISUAL_HASH_EMOJIS_WIDE: list[str] = [
     "\U0001F42C","\U0001F433","\U0001F40B","\U0001F40A","\U0001F405","\U0001F406",
     "\U0001F418","\U0001F98A","\U0001F99D","\U0001F9A8","\U0001F9A1","\U0001F9A5",
     "\U0001F994","\U0001F43E","\U0001F983","\U0001F99A","\U0001F99C","\U0001F9A2",
-    "\U0001F9A9","\U0001F407","\U0001F98C","\U0001F999","\U0001F998","\U0001F9AC",
+    "\U0001F9A9","\U0001F407","\U0001F98C","\U0001F999","\U0001F998",# "\U0001F9AC" - bison "🦬" doesn't render properly often
     "\U0001F402","\U0001F403","\U0001F404","\U0001F40E","\U0001F40F","\U0001F411",
     "\U0001F410","\U0001F415","\U0001F429","\U0001F9AE","\U0001F408","\U0001F413",
     "\U0001F9A4","\U0001F985","\U0001F986","\U0001F989","\U0001F987","\U0001F417",
     "\U0001F98B","\U0001F41C","\U0001F99F","\U0001F997","\U0001F982","\U0001F98E",
-    "\U0001F996","\U0001F995","\U0001F993","\U0001F9A7","\U0001F9A3","\U0001F99B",
+    "\U0001F996","\U0001F995","\U0001F993","\U0001F9A7","\U0001F99B", # "\U0001F9A3" - mammoth "🦣" doesn't render properly often
     "\U0001F98F","\U0001F42A","\U0001F42B","\U0001F992","\U0001F416",
     # Food & drink
     "\U0001F34E","\U0001F34A","\U0001F34B","\U0001F347","\U0001F353","\U0001F352",

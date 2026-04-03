@@ -839,6 +839,7 @@ class SynchronousRunner:
                         count_failed += 1
                         logger.error("FAILURE [%s]: %s", task.strategy.name, str(exc)[:70])
                         advance(state=AdvanceState.FAILED)
+                advance(0, AdvanceState.COMPLETE)
         finally:
             return PlanExecutionResult(count_success, count_failed, count_skipped)
 
@@ -876,6 +877,7 @@ class AsyncRunner:
         with ProgressBar(len(self.tasks), title="Audio Pipeline", total_count=len(self.tasks)) as advance:
             self._advance = advance
             await asyncio.gather(*(self._get_or_execute(t, dry_run) for t in terminal_tasks))
+            advance(0, AdvanceState.COMPLETE)
             self._advance = None
 
         succeeded = sum(1 for t in self.tasks if not t.failed)

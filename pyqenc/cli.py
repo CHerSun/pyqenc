@@ -10,7 +10,13 @@ from pathlib import Path
 import psutil
 
 import pyqenc
-from pyqenc.constants import CRF_GRANULARITY, FAILURE_SYMBOL_MAJOR, SUCCESS_SYMBOL_MAJOR
+from pyqenc.constants import (
+    CRF_GRANULARITY,
+    DEFAULT_METRICS_SAMPLING,
+    DEFAULT_SCREENSHOT_COUNT,
+    FAILURE_SYMBOL_MAJOR,
+    SUCCESS_SYMBOL_MAJOR,
+)
 from pyqenc.models import (
     ChunkingMode,
     CleanupLevel,
@@ -67,10 +73,14 @@ def _parse_cleanup_level(cleanup_value: str | None) -> CleanupLevel:
     )
 
 
-def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add common arguments shared across subcommands to the given parser."""
+def _add_base_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments universal to ALL subcommands (including measure)."""
     parser.add_argument("--work-dir", type=Path, default=Path("./pyqenc"), help="Working directory for intermediate files and state (default: ./pyqenc)")
     parser.add_argument("--log-level", choices=["debug", "info", "warning", "critical"], default="info", help="Logging level (default: info)")
+
+
+def _add_pipeline_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add arguments specific to pipeline phases (NOT used by measure)."""
     parser.add_argument("-y", "--execute", action="store_true", default=False, help="Execute phases (default: dry-run). Without this flag only a dry-run is performed.")
     parser.add_argument("--cleanup", nargs="?", const="intermediate", metavar="all", help=(
             "Cleanup level for intermediate files. "
@@ -101,8 +111,8 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--quality-target",
         type=str,
-        default="vmaf-min:93,vmaf-med:96",
-        help="Quality targets (e.g., 'vmaf-min:95,ssim-med:98') (default: vmaf-min:93,vmaf-med:96). NOTE: all metrics are scaled to 0-100 range, so targets should be specified accordingly (e.g., ssim-med:98 means 0.98 raw SSIM)."
+        default="vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94",
+        help="Quality targets (e.g., 'vmaf-min:95,ssim-med:98') (default: vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94). NOTE: all metrics are scaled to 0-100 range, so targets should be specified accordingly (e.g., ssim-med:98 means 0.98 raw SSIM)."
     )
     parser.add_argument(
         "--strategies",
@@ -126,12 +136,12 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--metrics-sampling",
         type=int,
-        default=None,
+        default=DEFAULT_METRICS_SAMPLING,
         metavar="N",
         help=(
             "Metrics sampling factor: measure every N-th frame. "
-            "Min: 1 (every frame measured). Default: 10 (recommended balance of speed and precision). "
-            "Values above 30 are not recommended due to measurement volatility."
+            f"Min: 1 (every frame measured). Default: {DEFAULT_METRICS_SAMPLING}. Directly affects reliability of metrics. A tradeoff between precision and speed. "
+            "Values above 30 are not recommended due to measurement volatility. 1 gives the highest precision but lowest speed. 2-4 are a good compromise. 5-10 start to become unreliable.."
         ),
     )
     parser.add_argument(
@@ -213,6 +223,24 @@ def _add_crop_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _resolve_crop_params(args: argparse.Namespace) -> CropParams | None:
+    """Parse crop parameters from CLI args into a CropParams instance.
+
+    Returns:
+        An explicit ``CropParams`` (including empty/no-op) if ``--crop`` or ``--no-crop`` given.
+        ``None`` as a sentinel meaning "auto-resolve from job.yaml" (handled by the phase layer).
+
+    Raises:
+        ValueError: On bad ``--crop`` format. Caller should catch and log critical.
+    """
+    if getattr(args, "no_crop", False):
+        return CropParams(top=0, bottom=0, left=0, right=0)
+    crop_str = getattr(args, "crop", None)
+    if crop_str:
+        return CropParams.parse(crop_str)
+    return None
+
+
 def _create_auto_subcommand(subparsers) -> None:
     """Create the 'auto' subcommand for full pipeline execution.
 
@@ -228,7 +256,8 @@ def _create_auto_subcommand(subparsers) -> None:
         type=Path,
         help="Source MKV video file"
     )
-    _add_common_arguments(auto_parser)
+    _add_base_arguments(auto_parser)
+    _add_pipeline_arguments(auto_parser)
     _add_quality_arguments(auto_parser)
     _add_filter_arguments(auto_parser)
     _add_crop_arguments(auto_parser)
@@ -248,7 +277,8 @@ def _create_extract_subcommand(subparsers) -> None:
     """Create the 'extract' subcommand for stream extraction."""
     p = subparsers.add_parser("extract", help="Extract video and audio streams from source MKV")
     p.add_argument("source", type=Path, help="Source MKV video file")
-    _add_common_arguments(p)
+    _add_base_arguments(p)
+    _add_pipeline_arguments(p)
     _add_filter_arguments(p)
     _add_crop_arguments(p)
     p.set_defaults(func=_cmd_extract)
@@ -258,7 +288,8 @@ def _create_chunk_subcommand(subparsers) -> None:
     """Create the 'chunk' subcommand for video chunking."""
     p = subparsers.add_parser("chunk", help="Split extracted video into scene-based chunks")
     p.add_argument("source", type=Path, help="Source MKV video file")
-    _add_common_arguments(p)
+    _add_base_arguments(p)
+    _add_pipeline_arguments(p)
     p.add_argument("--scene-threshold", type=float, default=0.3,
                    help="Scene detection sensitivity 0.0-1.0 (default: 0.3)")
     p.add_argument("--min-scene-length", type=int, default=24,
@@ -272,7 +303,8 @@ def _create_encode_subcommand(subparsers) -> None:
     """Create the 'encode' subcommand for chunk encoding."""
     p = subparsers.add_parser("encode", help="Encode chunks to meet quality targets")
     p.add_argument("source", type=Path, help="Source MKV video file")
-    _add_common_arguments(p)
+    _add_base_arguments(p)
+    _add_pipeline_arguments(p)
     _add_quality_arguments(p)
     p.set_defaults(func=_cmd_encode)
 
@@ -281,7 +313,8 @@ def _create_audio_subcommand(subparsers) -> None:
     """Create the 'audio' subcommand for audio processing."""
     p = subparsers.add_parser("audio", help="Process audio streams with normalization")
     p.add_argument("source", type=Path, help="Source MKV video file")
-    _add_common_arguments(p)
+    _add_base_arguments(p)
+    _add_pipeline_arguments(p)
     _add_audio_convert_arguments(p)
     p.set_defaults(func=_cmd_audio)
 
@@ -290,7 +323,8 @@ def _create_merge_subcommand(subparsers) -> None:
     """Create the 'merge' subcommand for final video merging."""
     p = subparsers.add_parser("merge", help="Merge encoded chunks and audio into final MKV files")
     p.add_argument("source", type=Path, help="Source MKV video file")
-    _add_common_arguments(p)
+    _add_base_arguments(p)
+    _add_pipeline_arguments(p)
     p.set_defaults(func=_cmd_merge)
 
 
@@ -321,13 +355,11 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         logger.critical(f"Invalid quality target: {e}")
         return 1
     # Parse crop parameters
-    crop_params: CropParams | None = None
-    if hasattr(args, "crop") and args.crop:
-        try:
-            crop_params = CropParams.parse(args.crop)
-        except ValueError as e:
-            logger.critical(f"Invalid crop parameters: {e}")
-            return 1
+    try:
+        crop_params = _resolve_crop_params(args)
+    except ValueError as e:
+        logger.critical(f"Invalid crop parameters: {e}")
+        return 1
 
     # Resolve metrics sampling: CLI arg takes precedence over config file
     config_manager = ConfigManager()
@@ -393,6 +425,12 @@ def _cmd_extract(args: argparse.Namespace) -> int:
 
     logger.info("Starting stream extraction")
     logger.info(f"Source: {args.source}")
+
+    try:
+        _resolve_crop_params(args)  # validate format early; crop is stored in job.yaml by the job phase
+    except ValueError as e:
+        logger.critical(f"Invalid crop parameters: {e}")
+        return 1
 
     try:
         result = extract_streams(
@@ -528,6 +566,103 @@ def _cmd_merge(args: argparse.Namespace) -> int:
         return 1
 
 
+def _create_measure_subcommand(subparsers) -> None:
+    """Create the 'measure' subcommand for standalone quality measurement."""
+    p = subparsers.add_parser("measure", help="Measure quality metrics between source and encoded video(s)")
+    p.add_argument(
+        "source",
+        type=Path,
+        help=(
+            "Reference (original/lossless) video file. "
+            "ORDER MATTERS: swapping source and target produces incorrect metrics (VMAF is not symmetric)."
+        ),
+    )
+    p.add_argument(
+        "targets",
+        type=Path,
+        nargs="*",
+        default=[],
+        help=(
+            "Zero or more encoded/distorted video files to evaluate against the source. "
+            "Omit all to run in screenshots-only mode (no metric computation)."
+        ),
+    )
+    _add_base_arguments(p)
+    _add_crop_arguments(p)
+    p.add_argument(
+        "--metrics-sampling",
+        type=int,
+        default=DEFAULT_METRICS_SAMPLING,
+        metavar="N",
+        help=(
+            "Metrics sampling factor: measure every N-th frame. "
+            f"Min: 1 (every frame measured). Default: {DEFAULT_METRICS_SAMPLING}. Directly affects reliability of metrics. A tradeoff between precision and speed. "
+            "Values above 30 are not recommended due to measurement volatility. 1 gives the highest precision but lowest speed. 2-4 are a good compromise. 5-10 start to become unreliable.."
+        ),
+    )
+    p.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        metavar="W",
+        help=(
+            "Scale both source and target to width W (preserving aspect ratio) during metric "
+            "computation. Crop is applied first. Does not affect screenshots."
+        ),
+    )
+    p.add_argument(
+        "--screenshots",
+        type=int,
+        default=DEFAULT_SCREENSHOT_COUNT,
+        metavar="N",
+        help=f"Screenshots to capture from each video (default: {DEFAULT_SCREENSHOT_COUNT}, min 1)",
+    )
+    p.add_argument(
+        "--every",
+        type=str,
+        default=None,
+        metavar="DURATION",
+        help=(
+            "Capture one screenshot per interval (e.g. 30, 30s, 5m, 1h30m). "
+            "Can be combined with --screenshots to cap the total count."
+        ),
+    )
+    p.set_defaults(func=_cmd_measure)
+
+
+def _cmd_measure(args: argparse.Namespace) -> int:
+    """Execute the 'measure' subcommand."""
+    from pyqenc.api import measure_quality
+
+    try:
+        crop_params = _resolve_crop_params(args)
+    except ValueError as e:
+        logger.critical(f"Invalid crop parameters: {e}")
+        return 1
+
+    try:
+        measure_quality(
+            source_video         = args.source,
+            target_videos        = args.targets,
+            work_dir             = args.work_dir,
+            crop_params          = crop_params,
+            metrics_sampling     = args.metrics_sampling,
+            screenshot_count     = args.screenshots,
+            screenshot_interval  = args.every,
+            width                = args.width,
+        )
+        return 0
+    except FileNotFoundError as e:
+        logger.critical("%s", e)
+        return 1
+    except ValueError as e:
+        logger.critical("Invalid arguments: %s", e)
+        return 1
+    except Exception as e:
+        logger.critical("Measure failed: %s", e, exc_info=True)
+        return 1
+
+
 def main() -> int:
     """Main CLI entry point.
 
@@ -598,6 +733,7 @@ Examples:
     _create_encode_subcommand(subparsers)
     _create_audio_subcommand(subparsers)
     _create_merge_subcommand(subparsers)
+    _create_measure_subcommand(subparsers)
 
     # Parse arguments
     args = parser.parse_args()

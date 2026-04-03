@@ -259,19 +259,16 @@ class StrategyTestResult(BaseModel):
     Attributes:
         strategy_name: Display name of the strategy that was tested (e.g. ``'slow+h265-aq'``).
         total_size:    Total encoded size across all test chunks in bytes.
-        avg_crf:       Average CRF value used across test chunks.
     """
 
     strategy_name: str
     total_size:    int
-    avg_crf:       float
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
         return {
             "strategy":   self.strategy_name,
             "total_size": self.total_size,
-            "avg_crf":    self.avg_crf,
         }
 
     @classmethod
@@ -280,7 +277,6 @@ class StrategyTestResult(BaseModel):
         return cls(
             strategy_name = str(data["strategy"]),
             total_size    = int(data["total_size"]),
-            avg_crf       = float(data["avg_crf"]),
         )
 
 
@@ -438,27 +434,37 @@ class MetricsSidecar(BaseModel):
     Stores ALL measured metric values — not filtered to current targets.
     ``targets_met`` is for human inspection only; the algorithm always
     re-evaluates pass/fail from ``metrics`` against current quality targets.
+
+    ``metrics_sampling`` records the frame subsampling factor used when the
+    metrics were measured.  On recovery, if this differs from the current
+    config the sidecar is treated as stale and the attempt is re-measured
+    (without re-encoding).  ``None`` for legacy sidecars written before this
+    field was added — treated as unknown, no staleness check triggered.
     """
 
-    crf:         float
-    targets_met: bool                # for human inspection only
-    metrics:     dict[str, float]    # all measured values, e.g. vmaf_min, ssim_median
+    crf:              float
+    targets_met:      bool                # for human inspection only
+    metrics_sampling: int | None = None   # subsampling factor used when metrics were measured
+    metrics:          dict[str, float]    # all measured values, e.g. vmaf_min, ssim_median
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
         return {
-            "crf":         self.crf,
-            "targets_met": self.targets_met,
-            "metrics":     self.metrics,
+            "crf":              self.crf,
+            "targets_met":      self.targets_met,
+            "metrics_sampling": self.metrics_sampling,
+            "metrics":          self.metrics,
         }
 
     @classmethod
     def from_yaml_dict(cls, data: dict) -> "MetricsSidecar":
         """Restore from a dict loaded from an attempt sidecar YAML."""
+        raw_sampling = data.get("metrics_sampling")
         return cls(
-            crf=float(data["crf"]),
-            targets_met=bool(data["targets_met"]),
-            metrics={k: float(v) for k, v in data.get("metrics", {}).items()},
+            crf              = float(data["crf"]),
+            targets_met      = bool(data["targets_met"]),
+            metrics_sampling = int(raw_sampling) if raw_sampling is not None else None,
+            metrics          = {k: float(v) for k, v in data.get("metrics", {}).items()},
         )
 
 
@@ -555,6 +561,48 @@ class AudioParams(BaseModel):
         logger.debug("Saved %s", path.name)
 
 
+class MergeStrategySummary(BaseModel):
+    """Per-strategy summary row persisted in ``merge.yaml``.
+
+    Mirrors the data ``_log_merge_summary`` needs for each output file so the
+    summary can be replayed on rerun without re-reading every per-output sidecar.
+
+    Attributes:
+        strategy_name:   Display name of the encoding strategy.
+        output_path:     Absolute path to the merged output file.
+        file_size_bytes: Size of the output file in bytes at time of merge.
+        metrics:         Measured quality metrics keyed by ``"{metric}_{statistic}"``.
+        targets_met:     Whether all quality targets were met.
+    """
+
+    strategy_name:   str
+    output_path:     Path
+    file_size_bytes: int
+    metrics:         dict[str, float] = Field(default_factory=dict)
+    targets_met:     bool             = False
+
+    def to_yaml_dict(self) -> dict:
+        """Serialise to a YAML-friendly dict."""
+        return {
+            "strategy_name":   self.strategy_name,
+            "output_path":     str(self.output_path),
+            "file_size_bytes": self.file_size_bytes,
+            "metrics":         self.metrics,
+            "targets_met":     self.targets_met,
+        }
+
+    @classmethod
+    def from_yaml_dict(cls, data: dict) -> "MergeStrategySummary":
+        """Restore from a dict loaded from ``merge.yaml``."""
+        return cls(
+            strategy_name   = data["strategy_name"],
+            output_path     = Path(data["output_path"]),
+            file_size_bytes = int(data.get("file_size_bytes", 0)),
+            metrics         = {k: float(v) for k, v in data.get("metrics", {}).items()},
+            targets_met     = bool(data.get("targets_met", False)),
+        )
+
+
 class MergeParams(BaseModel):
     """Phase parameter file model for merging (``merge.yaml``).
 
@@ -563,31 +611,50 @@ class MergeParams(BaseModel):
     runs and delete stale merge artifacts (sidecar + output) so the merge
     phase re-runs with the new parameters.
 
+    Also stores per-strategy summary rows so the merge summary table can be
+    replayed on rerun without re-reading every per-output sidecar.
+
     Attributes:
-        quality_targets:  Quality targets serialised as ``"metric-statistic:value"``
-                          strings.  ``None`` / empty means no targets were configured.
-        metrics_sampling: Frame subsampling factor used during quality measurement.
-                          ``None`` for files written before this field was added
-                          (treated as unknown — no mismatch triggered).
+        quality_targets:    Quality targets serialised as ``"metric-statistic:value"``
+                            strings.  ``None`` / empty means no targets were configured.
+        metrics_sampling:   Frame subsampling factor used during quality measurement.
+                            ``None`` for files written before this field was added
+                            (treated as unknown — no mismatch triggered).
+        source_stem:        Source video filename stem (without extension).
+        source_size_bytes:  Size of the source video file in bytes; ``0`` if unknown.
+        strategy_summaries: Per-strategy summary rows for summary replay on rerun.
     """
 
-    quality_targets:  list[str]  = Field(default_factory=list)
-    metrics_sampling: int | None = None
+    quality_targets:    list[str]                = Field(default_factory=list)
+    metrics_sampling:   int | None               = None
+    source_stem:        str                      = ""
+    source_size_bytes:  int                      = 0
+    strategy_summaries: list[MergeStrategySummary] = Field(default_factory=list)
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
         return {
-            "quality_targets":  self.quality_targets,
-            "metrics_sampling": self.metrics_sampling,
+            "quality_targets":    self.quality_targets,
+            "metrics_sampling":   self.metrics_sampling,
+            "source_stem":        self.source_stem,
+            "source_size_bytes":  self.source_size_bytes,
+            "strategy_summaries": [s.to_yaml_dict() for s in self.strategy_summaries],
         }
 
     @classmethod
     def from_yaml_dict(cls, data: dict) -> "MergeParams":
         """Restore from a dict loaded from ``merge.yaml``."""
         raw_sampling = data.get("metrics_sampling")
+        summaries = [
+            MergeStrategySummary.from_yaml_dict(s)
+            for s in data.get("strategy_summaries", [])
+        ]
         return cls(
-            quality_targets  = data.get("quality_targets", []),
-            metrics_sampling = int(raw_sampling) if raw_sampling is not None else None,
+            quality_targets    = data.get("quality_targets", []),
+            metrics_sampling   = int(raw_sampling) if raw_sampling is not None else None,
+            source_stem        = data.get("source_stem", ""),
+            source_size_bytes  = int(data.get("source_size_bytes", 0)),
+            strategy_summaries = summaries,
         )
 
     @classmethod

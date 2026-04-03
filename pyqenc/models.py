@@ -26,6 +26,7 @@ from pydantic import (  # noqa: F401 (ConfigDict used in PipelineConfig)
 )
 
 from pyqenc.constants import (
+    DEFAULT_METRICS_SAMPLING,
     DOWN_ARROW,
     LEFT_ARROW,
     RIGHT_ARROW,
@@ -773,7 +774,7 @@ class PipelineConfig(BaseModel):
     """Whether to search for optimal strategy (optimization phase)."""
     max_parallel:       int               = 2
     """Maximum concurrent encoding processes."""
-    metrics_sampling:   int               = 10
+    metrics_sampling:   int               = DEFAULT_METRICS_SAMPLING
     """Frame subsampling for metric calculation. 10 is the default - good tradeoff between speed and accuracy."""
     log_level:          str               = "info"
     crop_params:        CropParams | None = None

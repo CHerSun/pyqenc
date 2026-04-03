@@ -18,7 +18,11 @@ from typing import Callable, Literal
 
 import matplotlib
 
-from pyqenc.constants import TIME_SEPARATOR_MS, TIME_SEPARATOR_SAFE
+from pyqenc.constants import (
+    DEFAULT_METRICS_SAMPLING,
+    TIME_SEPARATOR_MS,
+    TIME_SEPARATOR_SAFE,
+)
 from pyqenc.models import CropParams, QualityTarget
 from pyqenc.quality import (
     ChunkQualityStats,
@@ -283,8 +287,11 @@ def compute_statistics(
 ) -> _MetricStatistics:
     """Compute quantile-based statistics for any numeric metric series.
 
+    Values are expected to already be on the display scale (normalized).
+    No additional clipping is applied here.
+
     Args:
-        values:         Series of metric values.
+        values:         Series of metric values (already normalized).
         std_cutoff_max: Exclude values above this threshold from std calculation.
         std_cutoff_min: Exclude values below this threshold from std calculation.
 
@@ -294,11 +301,10 @@ def compute_statistics(
     levels = [0.00, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
     keys   = ["min", "p5", "p10", "p25", "p50", "p75", "p90", "p95", "max", "std"]
 
-    clipped = values.clip(upper=100.0)
-    stats: list[float] = list(clipped.quantile(levels))
-    stats.append(clipped.max())
+    stats: list[float] = list(values.quantile(levels))
+    stats.append(values.max())
 
-    std_values = clipped
+    std_values = values
     if std_cutoff_max is not None:
         std_values = std_values[std_values <= std_cutoff_max]
     if std_cutoff_min is not None:
@@ -330,32 +336,32 @@ DEFAULT_METRIC_STYLES: dict[MetricType, MetricVisualStyle] = {
     MetricType.PSNR: MetricVisualStyle(
         label="PSNR",
         color="blue",
-        unit=" dB",
+        unit=MetricType.PSNR.info.display_unit,
         y_axis="left",
         linestyle="-",
         linewidth=_LINE_WIDTH_DEFAULT,
-        lossless_threshold=None,
-        lossless_label="∞ dB",
+        lossless_threshold=MetricType.PSNR.info.clip_upper,
+        lossless_label=MetricType.PSNR.info.lossless_raw_repr,
     ),
     MetricType.SSIM: MetricVisualStyle(
         label="SSIM",
         color="green",
-        unit="%",
+        unit=MetricType.SSIM.info.display_unit,
         y_axis="right",
         linestyle="-",
         linewidth=_LINE_WIDTH_DEFAULT,
-        lossless_threshold=100.0,
-        lossless_label="100.0",
+        lossless_threshold=MetricType.SSIM.info.lossless_value,
+        lossless_label=MetricType.SSIM.info.lossless_raw_repr,
     ),
     MetricType.VMAF: MetricVisualStyle(
         label="VMAF",
         color="#CC6600",
-        unit="%",
+        unit=MetricType.VMAF.info.display_unit,
         y_axis="right",
         linestyle="-",
         linewidth=_LINE_WIDTH_DEFAULT,
-        lossless_threshold=100.0,
-        lossless_label="100.0",
+        lossless_threshold=MetricType.VMAF.info.lossless_value,
+        lossless_label=MetricType.VMAF.info.lossless_raw_repr,
     ),
 }
 
@@ -435,8 +441,9 @@ def create_unified_plot(
 
     def _configure_psnr_axis(ax: plt.Axes) -> None:
         style = effective_styles[MetricType.PSNR]
-        ax.set_ylabel("PSNR (dB)", color=style.color, fontsize=_FONT_AXIS_LABEL, fontweight="bold")
-        ax.set_ylim(_PSNR_Y_MIN, _PSNR_Y_MAX)
+        info  = MetricType.PSNR.info
+        ax.set_ylabel(f"PSNR ({info.display_unit.strip()})", color=style.color, fontsize=_FONT_AXIS_LABEL, fontweight="bold")
+        ax.set_ylim(info.plot_y_min, info.plot_y_max)
         ax.tick_params(axis="y", labelcolor=style.color, labelsize=_FONT_AXIS_TICKS)
         ax.yaxis.set_major_locator(plt.MultipleLocator(_PSNR_Y_MAJOR_TICK))
         ax.yaxis.set_minor_locator(plt.MultipleLocator(_PSNR_Y_MINOR_TICK))
@@ -446,7 +453,9 @@ def create_unified_plot(
 
     def _configure_pct_axis(ax: plt.Axes, color: str) -> None:
         ax.set_ylabel("SSIM / VMAF (%)", color=color, fontsize=_FONT_AXIS_LABEL, fontweight="bold")
-        ax.set_ylim(_PCT_Y_MIN, _PCT_Y_MAX)
+        # Use the plot range from the first percentage metric present
+        pct_metric = MetricType.SSIM if has_ssim else MetricType.VMAF
+        ax.set_ylim(pct_metric.info.plot_y_min, pct_metric.info.plot_y_max)
         ax.tick_params(axis="y", labelcolor=color, labelsize=_FONT_AXIS_TICKS)
         ax.yaxis.set_major_locator(plt.MultipleLocator(_PCT_Y_MAJOR_TICK))
         ax.yaxis.set_minor_locator(plt.MultipleLocator(_PCT_Y_MINOR_TICK))
@@ -478,20 +487,13 @@ def create_unified_plot(
     # Compute frame offset from chunk start so x-axis reflects source timestamps
     frame_offset: float = chunk_start_seconds * fps if (fps is not None and fps > 0) else 0.0
 
-    # Scale metrics to display range once:
-    #   SSIM: raw 0–1 → multiply by 100
-    #   PSNR: clip inf → 100.0
-    #   VMAF: unchanged (already 0–100)
-    # All subsequent code uses scaled_values exclusively — no raw metrics access after this point.
+    # Scale metrics to display range using each metric's MetricInfo descriptor.
+    # All subsequent code uses scaled_values exclusively.
     scaled_values: dict[MetricType, pd.Series] = {}
     frame_index:   dict[MetricType, pd.Index]  = {}
     for metric_type, metric_data in metrics.items():
         vals = metric_data.df[metric_data.column].copy()
-        if metric_type == MetricType.SSIM:
-            vals = vals * 100.0
-        elif metric_type == MetricType.PSNR:
-            vals = vals.clip(upper=100.0)
-        scaled_values[metric_type] = vals
+        scaled_values[metric_type] = metric_type.info.normalize(vals)
         frame_index[metric_type]   = metric_data.df.index
 
     if fps is not None and fps > 0:
@@ -1108,13 +1110,14 @@ class QualityEvaluator:
 
     async def _generate_metrics(
         self,
-        encoded: Path,
-        reference: Path,
-        ref_crop: CropParams,
-        output_prefix: str,
-        metrics_sampling: int = 10,
-        bar_advance: Callable[[float], None] | None = None,
-        duration_seconds: float = 0.0,
+        encoded:          Path,
+        reference:        Path,
+        ref_crop:         CropParams,
+        output_prefix:    str,
+        metrics_sampling: int                          = DEFAULT_METRICS_SAMPLING,
+        bar_advance:      Callable[[float], None] | None = None,
+        duration_seconds: float                        = 0.0,
+        width:            int                          = 0,
     ) -> tuple[Path, Path, Path]:
         """Generate metric log files for quality comparison.
 
@@ -1141,6 +1144,7 @@ class QualityEvaluator:
                               by the given number of seconds.
             duration_seconds: Duration of the encoded clip in seconds; used to
                               cap per-process bar advances.
+            width:            Scale both inputs to this width (0 = no scaling).
 
         Returns:
             Tuple of (psnr_log, ssim_log, vmaf_json) final paths
@@ -1181,7 +1185,7 @@ class QualityEvaluator:
                 crop_distorted=CropParams(),
                 crop_reference=ref_crop,
                 duration=0,
-                width=0,
+                width=width,
                 use_gpu=False,
                 subsample=metrics_sampling,
                 output_prefix=tmp_prefix,
@@ -1224,15 +1228,16 @@ class QualityEvaluator:
 
     def evaluate_chunk(
         self,
-        encoded: Path,
-        reference: Path,
-        ref_crop: CropParams,
-        targets: list[QualityTarget],
-        output_dir: Path,
-        subsample_factor: int = 10,
-        show_progress: bool = False,
-        plot_path: Path | None = None,
-        chunk_start_seconds: float = 0.0,
+        encoded:             Path,
+        reference:           Path,
+        ref_crop:            CropParams,
+        targets:             list[QualityTarget],
+        output_dir:          Path,
+        subsample_factor:    int               = 10,
+        show_progress:       bool              = False,
+        plot_path:           Path | None       = None,
+        chunk_start_seconds: float             = 0.0,
+        width:               int               = 0,
     ) -> QualityEvaluation:
         """Evaluate encoded chunk against reference and quality targets.
 
@@ -1252,6 +1257,8 @@ class QualityEvaluator:
             chunk_start_seconds: Start timestamp of the chunk in seconds.  Used to
                                  offset the x-axis so the graph reflects the actual
                                  position in the source video.
+            width:               Scale both inputs to this width during metric
+                                 computation (0 = no scaling).
 
         Returns:
             QualityEvaluation with metrics and target evaluation results
@@ -1287,8 +1294,10 @@ class QualityEvaluator:
                         subsample_factor,
                         bar_advance=advance,
                         duration_seconds=duration_seconds or 0.0,
+                        width=width,
                     )
                 )
+                advance(0, AdvanceState.COMPLETE)
         else:
             psnr_log, ssim_log, vmaf_json = asyncio.run(
                 self._generate_metrics(
@@ -1299,6 +1308,7 @@ class QualityEvaluator:
                     subsample_factor,
                     bar_advance=None,
                     duration_seconds=duration_seconds or 0.0,
+                    width=width,
                 )
             )
 

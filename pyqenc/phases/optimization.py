@@ -21,21 +21,17 @@ import asyncio
 import logging
 import random
 import shutil
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from alive_progress import config_handler
+
 from pyqenc.constants import (
     CHUNKS_DIR,
-    CRF_GRANULARITY,
-    CRF_INITIAL_DEFAULT,
+    DEFAULT_METRICS_SAMPLING,
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
-    TEMP_SUFFIX,
-    THICK_LINE,
-    THIN_LINE,
 )
 from pyqenc.metrics import TimeKey
 from pyqenc.models import (
@@ -44,14 +40,12 @@ from pyqenc.models import (
     PhaseOutcome,
     QualityTarget,
     Strategy,
-    VideoMetadata,
 )
 from pyqenc.phase import Artifact, Phase, PhaseResult
 from pyqenc.state import ArtifactState, OptimizationParams, StrategyTestResult
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.log_format import (
     emit_phase_banner,
-    fmt_strategy_result_block,
     log_recovery_line,
 )
 from pyqenc.utils.visualization import QualityEvaluator
@@ -59,8 +53,6 @@ from pyqenc.utils.visualization import QualityEvaluator
 if TYPE_CHECKING:
     from pyqenc.metrics import MetricsCollector
     from pyqenc.models import PipelineConfig
-    from pyqenc.phases.chunking import ChunkingPhase, ChunkingPhaseResult
-    from pyqenc.phases.job import JobPhase, JobPhaseResult
 
 config_handler.set_global(enrich_print=False)  # type: ignore
 logger = logging.getLogger(__name__)
@@ -254,12 +246,12 @@ class OptimizationPhase:
         if params_changed and persisted is not None and persisted.strategy_results:
             if sampling_changed:
                 logger.debug(
-                    "metrics_sampling changed (%d → %d) — deleting encoded/ result sidecars",
+                    "metrics_sampling changed (%d → %d) — wiping encoded/ dirs",
                     persisted.metrics_sampling, current_sampling,
                 )
-            # Delete all result sidecars from encoded/ for every strategy so
-            # EncodingPhase sees ARTIFACT_ONLY pairs and re-evaluates them.
-            _delete_encoded_result_sidecars(work_dir, self._config.strategies)
+            # Wipe encoded/ for every strategy — contents are hard-linked attempts
+            # and result sidecars; EncodingPhase will re-discover from encoding/.
+            _wipe_encoded_dir(work_dir, self._config.strategies)
             # Treat all cached strategy results as stale — force re-encoding
             persisted = OptimizationParams(
                 crop             = persisted.crop,
@@ -437,62 +429,61 @@ class OptimizationPhase:
             metrics_sampling = current_sampling,
         ).save(opt_yaml)
 
-        # Step 10: run test encodes for pending strategies
-        encoder       = _make_encoder(work_dir, crop, self._config.visual_hash)
+        # Step 10: run test encodes for all pending strategies in parallel (unified pool)
+        encoder       = _make_encoder(work_dir, crop, self._config.visual_hash, self._config.metrics_sampling)
         reference_dir = work_dir / CHUNKS_DIR
 
-        all_results: list[StrategyTestResult] = list(cached_results.values())
+        from pyqenc.phases.encoding import (
+            _encode_chunks_parallel,
+            _recover_encoding_attempts,
+        )
 
-        for strategy in strategies_to_test:
-            logger.info("Testing strategy: %s", strategy.name)
+        test_chunk_seconds = sum(c.end_timestamp - c.start_timestamp for c in test_chunks)
+        total_seconds      = test_chunk_seconds * len(strategies_to_test)
+        total_count        = len(test_chunks) * len(strategies_to_test)
 
-            # Seed initial CRF from the last persisted result for this strategy (moving average),
-            # falling back to the codec default_crf when no prior result exists.
-            persisted_for_strategy = cached_results.get(strategy.name)
-            if persisted_for_strategy is not None and persisted_for_strategy.avg_crf > 0.0:
-                strategy_initial_crf = persisted_for_strategy.avg_crf
-            else:
-                strategy_initial_crf = strategy.codec.default_crf
+        test_chunk_ids = [c.chunk_id for c in test_chunks]
+        strategy_names = [s.name for s in strategies_to_test]
+        phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, strategy_names)
 
-            strategy_result = asyncio.run(
-                _encode_strategy_test_chunks(
-                    encoder        = encoder,
-                    test_chunks    = test_chunks,
-                    reference_dir  = reference_dir,
-                    strategy       = strategy,
-                    quality_targets= self._config.quality_targets,
-                    max_parallel   = self._config.max_parallel,
-                    work_dir       = work_dir,
-                    collector      = self._collector,
-                    initial_crf    = strategy_initial_crf,
+        with self._collector.time(TimeKey.ENCODING_OPTIMIZATION), ProgressBar(total_seconds, title="Optimization", total_count=total_count) as advance:
+            # Pre-advance bar for already-complete pairs
+            chunks_by_id = {c.chunk_id: c for c in test_chunks}
+            for r in phase_recovery.pairs.values():
+                if r.state == ArtifactState.COMPLETE:
+                    advance((chunks_by_id[r.chunk_id].end_timestamp - chunks_by_id[r.chunk_id].start_timestamp), AdvanceState.SKIPPED)
+
+            enc_result = asyncio.run(
+                _encode_chunks_parallel(
+                    encoder         = encoder,
+                    chunks          = test_chunks,
+                    reference_dir   = reference_dir,
+                    strategies      = strategies_to_test,
+                    quality_targets = self._config.quality_targets,
+                    max_parallel    = self._config.max_parallel,
+                    force           = False,
+                    collector       = self._collector,
+                    phase_recovery  = phase_recovery,
+                    advance         = advance,
                 )
             )
+            advance(0, AdvanceState.COMPLETE)
 
-            all_results.append(strategy_result)
+        # Derive per-strategy results from encoded output
+        import yaml as _yaml
+        new_results: list[StrategyTestResult] = []
+        for strategy in strategies_to_test:
+            file_sizes: list[float] = []
+            for chunk in test_chunks:
+                encoded_path = enc_result.encoded_chunks.get(chunk.chunk_id, {}).get(strategy.name)
+                if encoded_path is not None and encoded_path.exists():
+                    file_sizes.append(encoded_path.stat().st_size)
+            new_results.append(StrategyTestResult(
+                strategy_name = strategy.name,
+                total_size    = int(sum(file_sizes)),
+            ))
 
-            # Persist after each strategy completes (ordered by size ascending)
-            sorted_results = sorted(all_results, key=lambda r: r.total_size)
-            OptimizationParams(
-                crop             = crop,
-                test_chunks      = [c.chunk_id for c in test_chunks],
-                strategy_results = sorted_results,
-                tolerance_pct    = tolerance,
-                selected         = [],
-                quality_targets  = current_targets,
-                metrics_sampling = current_sampling,
-            ).save(opt_yaml)
-
-            # Log per-strategy result block
-            total_size_mb = strategy_result.total_size / (1024 * 1024)
-            passed = strategy_result.total_size > 0
-            for line in fmt_strategy_result_block(
-                strategy      = strategy.name,
-                avg_crf       = strategy_result.avg_crf,
-                total_size_mb = total_size_mb,
-                num_chunks    = len(test_chunks),
-                passed        = passed,
-            ):
-                logger.info(line)
+        all_results: list[StrategyTestResult] = list(cached_results.values()) + new_results
 
         # Step 11: sort final results by size and select strategies
         final_results = sorted(all_results, key=lambda r: r.total_size)
@@ -580,11 +571,16 @@ class OptimizationPhase:
                 )
             )
             if params_stale:
-                logger.debug(
+                logger.info(
                     "All-strategies mode: quality targets or metrics_sampling changed"
-                    " — deleting encoded/ result sidecars"
+                    " — wiping encoded/ dirs"
                 )
-                _delete_encoded_result_sidecars(work_dir, self._config.strategies)
+                _wipe_encoded_dir(work_dir, self._config.strategies)
+            elif persisted is not None:
+                logger.debug(
+                    "All-strategies mode: params unchanged (sampling=%s, targets=%s) — encoded/ kept",
+                    persisted.metrics_sampling, persisted.quality_targets,
+                )
 
             # Always write optimization.yaml with current targets and sampling
             work_dir.mkdir(parents=True, exist_ok=True)
@@ -705,12 +701,12 @@ class OptimizationPhase:
 
         logger.info("")
         logger.info(
-            "  %-30s  %8s  %12s  %8s",
-            "Strategy", "Avg CRF", "Size (MB)", "Status",
+            "  %-30s  %12s  %8s",
+            "Strategy", "Size (MB)", "Status",
         )
         logger.info(
-            "  %-30s  %8s  %12s  %8s",
-            "-" * 30, "-" * 8, "-" * 12, "-" * 8,
+            "  %-30s  %12s  %8s",
+            "-" * 30, "-" * 12, "-" * 8,
         )
 
         for res in results:
@@ -719,13 +715,13 @@ class OptimizationPhase:
             marker   = " ◀ selected" if res.strategy_name in selected_names else ""
             status   = "passed" if res.total_size > 0 else "failed"
             logger.info(
-                "  %-30s  %8.2f  %12s  %8s%s",
-                res.strategy_name[:30], res.avg_crf, size_str, status, marker,
+                "  %-30s  %12s  %8s%s",
+                res.strategy_name[:30], size_str, status, marker,
             )
 
         logger.info("")
         if selected:
-            logger.info("Selected strategies: %s", ", ".join(s.name for s in selected))
+            logger.info("Selected strategies: %s", ", ".join(selected))
         else:
             logger.critical("NO strategies selected (all failed).")
 
@@ -747,12 +743,19 @@ def _targets_as_strings(quality_targets: "list[QualityTarget]") -> list[str]:
     return sorted(f"{t.metric}-{t.statistic}:{t.value}" for t in quality_targets)
 
 
-def _delete_encoded_result_sidecars(work_dir: Path, strategies: "list[Strategy]") -> None:
-    """Delete all ``<chunk_id>.<res>.yaml`` result sidecars from ``encoded/<strategy>/``.
+def _wipe_encoded_dir(work_dir: Path, strategies: "list[Strategy]") -> None:
+    """Delete the entire ``encoded/<strategy>/`` directory for each strategy.
 
-    Leaves attempt files in ``encoding/`` intact so CRF history can be replayed.
-    After this call ``EncodingPhase._recover()`` will see ``ARTIFACT_ONLY`` pairs
-    (attempt files present, result sidecar absent) and resume from CRF history.
+    All contents are hard-linked winning attempts and result sidecars — no
+    unique data lives here.  ``EncodingPhase._recover()`` will re-discover
+    attempts from ``encoding/`` and re-evaluate them from scratch.
+
+    Called when quality targets or ``metrics_sampling`` change, since both
+    invalidate the previously selected winners and their recorded metrics.
+
+    If the strategy list does not cover all subdirs present (e.g. strategies
+    were renamed), wipes the entire ``encoded/`` base directory as a fallback
+    to guarantee no stale data remains.
 
     Args:
         work_dir:   Pipeline working directory.
@@ -762,20 +765,33 @@ def _delete_encoded_result_sidecars(work_dir: Path, strategies: "list[Strategy]"
     if not encoded_base.exists():
         return
 
+    # Collect all existing strategy subdirs
+    existing_dirs = [d for d in encoded_base.iterdir() if d.is_dir()]
+    expected_names = {s.safe_name for s in strategies}
+    unexpected = [d for d in existing_dirs if d.name not in expected_names]
+
+    if unexpected:
+        # Stale dirs from old/renamed strategies present — wipe the whole base
+        logger.debug(
+            "Wiping entire encoded/ base dir (unexpected subdirs: %s)",
+            ", ".join(d.name for d in unexpected),
+        )
+        try:
+            shutil.rmtree(encoded_base)
+            logger.debug("Wiped encoded/ base dir: %s", encoded_base)
+        except OSError as exc:
+            logger.warning("Could not wipe encoded/ base dir %s: %s", encoded_base, exc)
+        return
+
     for strategy in strategies:
         strategy_dir = encoded_base / strategy.safe_name
         if not strategy_dir.exists():
             continue
-        for sidecar in list(strategy_dir.glob("*.yaml")):
-            # Result sidecars match <chunk_id>.<resolution>.yaml — they do NOT
-            # match the attempt pattern (which includes .crf<N>. in the stem).
-            # We delete all .yaml files here; attempt .yaml sidecars live in
-            # encoding/<strategy>/, not encoded/<strategy>/.
-            try:
-                sidecar.unlink()
-                logger.debug("Deleted stale result sidecar: %s", sidecar)
-            except OSError as exc:
-                logger.warning("Could not delete result sidecar %s: %s", sidecar, exc)
+        try:
+            shutil.rmtree(strategy_dir)
+            logger.debug("Wiped stale encoded dir: %s", strategy_dir)
+        except OSError as exc:
+            logger.warning("Could not wipe encoded dir %s: %s", strategy_dir, exc)
 
 
 def _failed(error: str) -> "OptimizationPhaseResult":
@@ -831,16 +847,18 @@ def _select_test_chunks(
 
 
 def _make_encoder(
-    work_dir:    Path,
-    crop_params: CropParams | None,
-    visual_hash: bool = True,
+    work_dir:         Path,
+    crop_params:      CropParams | None,
+    visual_hash:      bool = True,
+    metrics_sampling: int  = DEFAULT_METRICS_SAMPLING,
 ) -> "ChunkEncoder":
     """Construct a ``ChunkEncoder`` for test encodes.
 
     Args:
-        work_dir:    Pipeline working directory.
-        crop_params: Crop parameters to apply.
-        visual_hash: Whether to prepend emoji hash to chunk log lines.
+        work_dir:         Pipeline working directory.
+        crop_params:      Crop parameters to apply.
+        visual_hash:      Whether to prepend emoji hash to chunk log lines.
+        metrics_sampling: Frame subsampling factor for quality metric generation.
 
     Returns:
         Configured ``ChunkEncoder`` instance.
@@ -851,128 +869,8 @@ def _make_encoder(
         work_dir          = work_dir,
         crop_params       = crop_params,
         visual_hash       = visual_hash,
+        metrics_sampling  = metrics_sampling,
     )
 
 
-async def _encode_strategy_test_chunks(
-    encoder:         "ChunkEncoder",
-    test_chunks:     list[ChunkMetadata],
-    reference_dir:   Path,
-    strategy:        Strategy,
-    quality_targets: list[QualityTarget],
-    max_parallel:    int,
-    work_dir:        Path,
-    collector:       "MetricsCollector",
-    initial_crf:     float = CRF_INITIAL_DEFAULT,
-) -> StrategyTestResult:
-    """Encode all test chunks for a single strategy in parallel.
 
-    Args:
-        encoder:         Configured ``ChunkEncoder``.
-        test_chunks:     Representative chunks to encode.
-        reference_dir:   Directory containing reference chunks.
-        strategy:        Strategy being tested.
-        quality_targets: Quality targets to meet.
-        max_parallel:    Maximum concurrent encoding workers.
-        work_dir:        Pipeline working directory (for recovery).
-        collector:       Metrics collector for timing and convergence tracking.
-        initial_crf:     Starting CRF for the first test chunk (moving average
-                         from the last persisted result for this strategy).
-
-    Returns:
-        ``StrategyTestResult`` populated with totals and averages.
-    """
-    from pyqenc.metrics import ConvergenceUpdate, TimeKey
-    from pyqenc.phases.encoding import (
-        ArtifactState,
-        _encode_chunk_async,
-        _recover_encoding_attempts,
-    )
-
-    semaphore = asyncio.Semaphore(max_parallel)
-
-    # Recover existing attempt state for this strategy
-    test_chunk_ids = [c.chunk_id for c in test_chunks]
-    phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, [strategy.name])
-
-    file_sizes: list[float] = []
-    crfs:       list[float] = []
-
-    # Moving-average CRF seed: start from the provided initial_crf (rounded to granularity),
-    # then update after each winning test chunk so later chunks start closer to the optimum.
-    moving_crf: float = round(initial_crf / CRF_GRANULARITY) * CRF_GRANULARITY
-    total_seconds = sum(c.end_timestamp - c.start_timestamp for c in test_chunks)
-    with (
-        collector.time(TimeKey.ENCODING_OPTIMIZATION),
-        ProgressBar(total_seconds, title=f"Optimization [{strategy.name}]", total_count=len(test_chunks)) as advance,
-    ):
-        async def _encode_one(chunk: ChunkMetadata) -> None:
-            nonlocal moving_crf
-            pair_rec = phase_recovery.pairs.get((chunk.chunk_id, strategy.name))
-
-            # Skip COMPLETE pairs — use the winning file size and CRF from the result sidecar
-            if pair_rec is not None and pair_rec.state == ArtifactState.COMPLETE:
-                if pair_rec.winning_file is not None and pair_rec.winning_file.exists():
-                    file_sizes.append(pair_rec.winning_file.stat().st_size)
-                    # Load CRF from the result sidecar (lazy, only for COMPLETE pairs here)
-                    import yaml as _yaml
-                    yaml_sidecar = pair_rec.winning_file.with_suffix(".yaml")
-                    try:
-                        with yaml_sidecar.open("r", encoding="utf-8") as fh:
-                            sidecar_data = _yaml.safe_load(fh)
-                        crf_val = sidecar_data.get("crf") if sidecar_data else None
-                        if crf_val is not None:
-                            crfs.append(float(crf_val))
-                    except Exception:
-                        pass
-                advance(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.SKIPPED)
-                return
-
-            reference_path = reference_dir / chunk.path.name
-            if not reference_path.exists():
-                logger.error("Reference chunk not found: %s", reference_path)
-                advance(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.FAILED)
-                return
-
-            reference = VideoMetadata(path=reference_path)
-
-            async with semaphore:
-                chunk_initial_crf = round(moving_crf / CRF_GRANULARITY) * CRF_GRANULARITY
-                chunk_result = await _encode_chunk_async(
-                    encoder,
-                    chunk,
-                    reference,
-                    strategy,
-                    quality_targets,
-                    chunk_initial_crf,
-                    force=False,
-                )
-
-            if chunk_result.success and chunk_result.encoded_file and chunk_result.encoded_file.path.exists():
-                file_sizes.append(chunk_result.encoded_file.path.stat().st_size)
-                if chunk_result.final_crf is not None:
-                    crfs.append(chunk_result.final_crf)
-                    # Update moving average: blend last stored seed with this winning CRF.
-                    moving_crf = (moving_crf + chunk_result.final_crf) / 2.0
-                collector.step(
-                    TimeKey.ENCODING_OPTIMIZATION,
-                    convergence_update=ConvergenceUpdate(
-                        strategy      = strategy.name,
-                        attempt_count = chunk_result.attempts,
-                    ),
-                )
-                advance(chunk.end_timestamp - chunk.start_timestamp)
-            else:
-                logger.error("Test encode failed for chunk %s / %s", chunk.chunk_id, strategy.name)
-                advance(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.FAILED)
-
-        await asyncio.gather(*(_encode_one(c) for c in test_chunks))
-
-    total_size = int(sum(file_sizes))
-    avg_crf    = sum(crfs) / len(crfs) if crfs else 0.0
-
-    return StrategyTestResult(
-        strategy_name = strategy.name,
-        total_size    = total_size,
-        avg_crf       = avg_crf,
-    )

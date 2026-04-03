@@ -28,15 +28,186 @@ from .models import CropParams, QualityTarget
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Metric descriptor
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class MetricInfo:
+    """Descriptor carrying all metric-specific properties.
+
+    Single source of truth for normalization, display, and CRF search behaviour.
+    Accessed via ``MetricType.PSNR.info``, etc.
+
+    Attributes:
+        name:              Human-readable display name (e.g. ``"PSNR"``).
+        id:                Lowercase string key matching ``MetricType.value``
+                           (e.g. ``"psnr"``).  Used for dict keys and filenames.
+        higher_is_better:  ``True`` when a higher normalized value is better
+                           (VMAF, SSIM, PSNR).  ``False`` for metrics like VIF
+                           where 0 is lossless and higher means worse.
+        scale_factor:      Multiply the raw value by this before clipping.
+                           SSIM raw range is 0–1, so ``scale_factor=100.0``.
+                           All others use ``1.0``.
+        clip_upper:        After scaling, clip values above this threshold.
+                           ``None`` means no upper clipping.
+                           PSNR: ``100.0`` (caps ∞ dB).
+        clip_lower:        After scaling, clip values below this threshold.
+                           ``None`` means no lower clipping.
+        lossless_value:    Normalized value that represents lossless quality
+                           (e.g. ``100.0`` for VMAF/SSIM/PSNR, ``0.0`` for VIF).
+        lossless_raw_repr: Human-readable string for the raw lossless value
+                           (e.g. ``"∞ dB"`` for PSNR, ``"100.0"`` for SSIM/VMAF).
+        display_unit:      Unit suffix for display (e.g. ``" dB"``, ``"%"``).
+        plot_y_min:        Lower bound for the Y-axis in plots (normalized scale).
+        plot_y_max:        Upper bound for the Y-axis in plots (normalized scale).
+                           Slightly above ``lossless_value`` to leave headroom.
+    """
+
+    name:              str
+    id:                str
+    higher_is_better:  bool
+    scale_factor:      float
+    clip_upper:        float | None
+    clip_lower:        float | None
+    lossless_value:    float
+    lossless_raw_repr: str
+    display_unit:      str
+    plot_y_min:        float
+    plot_y_max:        float
+
+    def normalize(self, value: float | pd.Series) -> float | pd.Series:
+        """Normalize a raw metric value (or Series) to the display scale.
+
+        Applies ``scale_factor``, then ``clip_lower``, then ``clip_upper``
+        in that order.  Handles ``float("inf")`` by treating it as
+        ``clip_upper`` (or ``lossless_value`` when no upper clip is set).
+
+        Args:
+            value: Raw scalar or ``pd.Series`` from the metric log file.
+
+        Returns:
+            Normalized scalar or ``pd.Series`` on the display scale.
+        """
+        if isinstance(value, pd.Series):
+            result = value * self.scale_factor
+            if self.clip_lower is not None:
+                result = result.clip(lower=self.clip_lower)
+            if self.clip_upper is not None:
+                result = result.clip(upper=self.clip_upper)
+            return result
+        else:
+            # scalar path — handle inf explicitly
+            result_f = value * self.scale_factor
+            if self.clip_lower is not None:
+                result_f = max(result_f, self.clip_lower)
+            if self.clip_upper is not None:
+                result_f = min(result_f, self.clip_upper)
+            return result_f
+
+    def passes(self, actual: float, target: float) -> bool:
+        """Return ``True`` when *actual* satisfies *target* for this metric.
+
+        For ``higher_is_better`` metrics: ``actual >= target``.
+        For inverted metrics (e.g. VIF): ``actual <= target``.
+
+        Args:
+            actual: Normalized measured value.
+            target: Normalized target threshold.
+        """
+        return actual >= target if self.higher_is_better else actual <= target
+
+    def deficit(self, actual: float, target: float) -> float:
+        """Signed distance from target; negative means the target is not met.
+
+        For ``higher_is_better``: ``actual - target`` (positive = surplus).
+        For inverted: ``target - actual`` (positive = surplus, i.e. actual is
+        lower than target which is good).
+
+        Args:
+            actual: Normalized measured value.
+            target: Normalized target threshold.
+        """
+        return (actual - target) if self.higher_is_better else (target - actual)
+
+
+# ---------------------------------------------------------------------------
 # Metric types
 # ---------------------------------------------------------------------------
 
 class MetricType(Enum):
-    """Supported video quality metrics."""
+    """Supported video quality metrics.
+
+    Each member's ``.value`` is the lowercase string id used in filenames,
+    dict keys, and ffmpeg filter names.  Use ``.info`` to access the full
+    ``MetricInfo`` descriptor for normalization, display, and CRF search.
+    """
 
     VMAF = "vmaf"
     SSIM = "ssim"
     PSNR = "psnr"
+
+    @property
+    def info(self) -> MetricInfo:
+        """Return the ``MetricInfo`` descriptor for this metric type."""
+        return _METRIC_INFO[self]
+
+
+_METRIC_INFO: dict[MetricType, MetricInfo] = {
+    MetricType.VMAF: MetricInfo(
+        name              = "VMAF",
+        id                = "vmaf",
+        higher_is_better  = True,
+        scale_factor      = 1.0,
+        clip_upper        = None,
+        clip_lower        = None,
+        lossless_value    = 100.0,
+        lossless_raw_repr = "100.0",
+        display_unit      = "%",
+        plot_y_min        = 0.0,
+        plot_y_max        = 103.0,
+    ),
+    MetricType.SSIM: MetricInfo(
+        name              = "SSIM",
+        id                = "ssim",
+        higher_is_better  = True,
+        scale_factor      = 100.0,
+        clip_upper        = None,
+        clip_lower        = None,
+        lossless_value    = 100.0,
+        lossless_raw_repr = "100.0",
+        display_unit      = "%",
+        plot_y_min        = 0.0,
+        plot_y_max        = 103.0,
+    ),
+    MetricType.PSNR: MetricInfo(
+        name              = "PSNR",
+        id                = "psnr",
+        higher_is_better  = True,
+        scale_factor      = 1.0,
+        clip_upper        = 100.0,
+        clip_lower        = None,
+        lossless_value    = 100.0,
+        lossless_raw_repr = "∞ dB",
+        display_unit      = " dB",
+        plot_y_min        = 0.0,
+        plot_y_max        = 103.0,
+    ),
+    # VIF placeholder (not yet active and not checked for correctness):
+    # MetricType.VIF: MetricInfo(
+    #     name              = "VIF",
+    #     id                = "vif",
+    #     higher_is_better  = False,
+    #     scale_factor      = 1.0,
+    #     clip_upper        = None,
+    #     clip_lower        = 0.0,
+    #     lossless_value    = 0.0,
+    #     lossless_raw_repr = "0.0",
+    #     display_unit      = "",
+    #     plot_y_min        = -0.1,
+    #     plot_y_max        = 2.0,
+    # ),
+}
+
 
 class MetricStats(TypedDict):
     """Key statistics for a single metric."""
@@ -219,70 +390,127 @@ class QualityEvaluation:
 
 @dataclass
 class CRFHistory:
-    """Track the tightest known pass/fail CRF bracket and attempt count.
+    """Track the tightest known pass/fail CRF bracket, attempt count, and observed
+    metric values at the bracket boundaries.
 
     ``fail_crf`` and ``pass_crf`` are initialized to the codec limits as
-    sentinels, then narrowed on each attempt.  ``get_bounds`` therefore always
-    returns valid floats — no ``None`` checks needed downstream.
+    sentinels, then narrowed on each attempt.
+
+    ``fail_metrics`` and ``pass_metrics`` store the full measured quality dict
+    (keyed as ``"<metric>_<stat>"``) observed at the current ``fail_crf`` and
+    ``pass_crf`` respectively.  They are ``None`` until the corresponding
+    boundary has been observed at least once with a real encoding result.
+
+    Storing the full dict (rather than a single scalar) is essential: the
+    worst-performing target can change between attempts, so Phase 2
+    interpolation must look up the *current* worst target's key in both
+    boundary dicts to get two real observations of that specific metric.
 
     Attributes:
         fail_crf:      Lowest CRF that still failed (upper bracket bound).
                        Initialized to ``crf_max``; narrows downward on misses.
         pass_crf:      Highest CRF that still passed (lower bracket bound).
                        Initialized to ``crf_min``; narrows upward on passes.
-        attempt_count: Number of encoding attempts recorded.
+        fail_metrics:  Full quality_results dict observed at ``fail_crf``.
+                       ``None`` until a real fail result is recorded.
+        pass_metrics:  Full quality_results dict observed at ``pass_crf``.
+                       ``None`` until a real pass result is recorded.
+        attempts:      Number of encoding attempts recorded.
     """
 
-    fail_crf:      float
-    pass_crf:      float
-    attempts: int = 0
+    fail_crf:     float
+    pass_crf:     float
+    fail_metrics: dict[str, float] | None = None
+    pass_metrics: dict[str, float] | None = None
+    attempts:     int                     = 0
 
-    def add(self, crf: float, passed: bool) -> None:
+    def add(
+        self,
+        crf:     float,
+        passed:  bool,
+        metrics: dict[str, float] | None = None,
+    ) -> None:
         """Record an encoding attempt and update the pass/fail bracket.
 
+        When *metrics* is provided it is stored at the updated boundary so
+        Phase 2 proportional interpolation can look up any target key later.
+
         Args:
-            crf:    CRF value used.
-            passed: Whether all quality targets were met.
+            crf:     CRF value used.
+            passed:  Whether all quality targets were met.
+            metrics: Full measured quality dict (``"<metric>_<stat>"`` keys).
+                     Pass ``None`` when metrics are unavailable (history
+                     pre-population from sidecars without full metric data).
         """
         self.attempts += 1
         if not passed:
             if crf < self.fail_crf:
-                self.fail_crf = crf
+                self.fail_crf     = crf
+                self.fail_metrics = metrics
         else:
             if crf > self.pass_crf:
-                self.pass_crf = crf
+                self.pass_crf     = crf
+                self.pass_metrics = metrics
 
 def normalize_metric(metric_type: MetricType, value: float) -> float:
-    """Normalize a raw metric value to the 0–100 scale.
+    """Normalize a raw scalar metric value using the metric's ``MetricInfo`` descriptor.
 
-    Applies the canonical normalization for each metric type:
-    - SSIM: multiply by 100 (raw 0–1 → 0–100)
-    - PSNR: cap at 100.0 (unbounded dB → 0–100)
-    - VMAF: unchanged (already 0–100)
-
-    After normalization is applied at the parsing boundary (in
-    ``analyze_chunk_quality``), all downstream code works with values already
-    on the 0–100 scale and should NOT call this function again.
+    Delegates to ``metric_type.info.normalize(value)``.  Kept as a module-level
+    function for call-site compatibility; prefer ``metric_type.info.normalize``
+    for new code.
 
     Args:
-        metric_type: Type of the metric (VMAF, SSIM, PSNR).
-        value: The raw metric value to normalize.
+        metric_type: Type of the metric.
+        value:       Raw scalar value from the metric log file.
 
     Returns:
-        The normalized metric value on the 0–100 scale.
+        Normalized scalar on the metric's display scale.
     """
-    if metric_type == MetricType.SSIM:
-        return value * 100
-    elif metric_type == MetricType.PSNR:
-        return min(value, 100.0)
-    elif metric_type == MetricType.VMAF:
-        return value
-    else:
-        assert_never(metric_type)
+    result = metric_type.info.normalize(value)
+    assert isinstance(result, float)
+    return result
 
 
-_MAX_METRIC = 100.0
-"""Upper bound of the normalized metric scale. All metrics are normalized to 0–100."""
+def _find_worst_target(
+    quality_results: dict[str, float],
+    quality_targets: list[QualityTarget],
+) -> tuple[QualityTarget, float, float] | None:
+    """Find the worst-performing target and return it with its deficit and actual value.
+
+    "Worst" means the smallest ``MetricInfo.deficit(actual, target)`` — i.e. the
+    target with the least surplus (or largest deficit).  Uses ``MetricInfo.deficit``
+    so the comparison is direction-aware for both higher-is-better and inverted metrics.
+
+    Args:
+        quality_results: Measured quality metrics keyed as ``"<metric>_<stat>"``.
+        quality_targets: Quality targets to evaluate.
+
+    Returns:
+        ``(worst_target, worst_deficit, worst_actual)`` or ``None`` when no
+        target has a valid result in *quality_results*.
+    """
+    worst_deficit: float              = float("inf")
+    worst_target:  QualityTarget | None = None
+    worst_actual:  float              = 0.0
+
+    for target in quality_targets:
+        metric_key = f"{target.metric}_{target.statistic}"
+        actual     = quality_results.get(metric_key)
+        if actual is None:
+            continue
+        info    = MetricType(target.metric).info
+        # Normalize inf (e.g. PSNR lossless) to the metric's lossless_value
+        if math.isinf(actual):
+            actual = info.lossless_value
+        deficit = info.deficit(actual, target.value)
+        if deficit < worst_deficit:
+            worst_deficit = deficit
+            worst_target  = target
+            worst_actual  = actual
+
+    if worst_target is None:
+        return None
+    return worst_target, worst_deficit, worst_actual
 
 
 def adjust_crf(
@@ -291,108 +519,155 @@ def adjust_crf(
     quality_targets: list[QualityTarget],
     history:         CRFHistory,
 ) -> float | None:
-    """Calculate the next CRF to try using linear interpolation between known bounds.
+    """Calculate the next CRF to try, updating *history* with the current result.
 
-    Uses a unified two-axis proportional model:
-    - CRF axis:    [pass_crf, fail_crf]  (initialized to codec limits as sentinels)
-    - Metric axis: asymmetric range depending on pass/miss
+    ## Algorithm
 
-    The worst-performing target determines the metric position.  Its signed
-    distance from the target (positive = surplus, negative = deficit) is
-    normalized against an asymmetric metric range, then mapped onto the CRF
-    range to produce a proportional estimate of the next CRF:
-    - Surplus: range = MAX - target  (headroom above the target)
-    - Deficit: range = MAX - actual  (headroom above the measured value)
+    Builds a candidate list of interpolation fractions ``t ∈ [0, 1]`` along
+    ``[pass_crf, fail_crf]`` and takes the first valid one:
 
-    The deficit range scales naturally with how far the actual value is from
-    the ceiling — a small miss near the top of the scale is treated as more
-    significant than the same absolute miss at a lower value.
+    1. **Primary**: interpolate from the current worst target's metric curve
+       between the two boundary dicts.  Valid when the metric actually straddles
+       the target inside the bracket (``t ∈ [0, 1]``).
+    2. **Reverse**: re-find the worst target from the *opposite* boundary's
+       metrics (the boundary not just updated), then interpolate.  Catches the
+       case where the current worst metric passes at both boundaries.
+    3. **Binary**: ``t = 0.5`` (midpoint) — always valid, always last.
 
-    When the bracket narrows to ≤ CRF_GRANULARITY the search is exhausted and
-    ``None`` is returned so the caller keeps the last passing result.
+    When boundary metrics are absent (early attempts), interpolation candidates
+    return ``None`` and binary is used automatically.
 
-    Additionally, if all targets are met and the least-proficient metric surplus
-    is within ``CRF_METRIC_POSITIVE_DELTA``, the result is accepted immediately
-    without attempting to squeeze to a higher CRF — saving an extra encoding pass.
+    **Early acceptance**: when all targets pass and the tightest surplus is
+    within ``CRF_METRIC_POSITIVE_DELTA``, the current CRF is accepted without
+    trying to squeeze further — saves one encoding pass.
+
+    **Exhaustion**: when ``fail_crf - pass_crf ≤ CRF_GRANULARITY`` the bracket
+    is too tight to improve; return ``None`` so the caller keeps the last pass.
 
     Args:
         current_crf:     CRF used in the most recent attempt.
-        quality_results: Measured quality metrics (e.g. ``{'vmaf_min': 88.4}``).
+        quality_results: Measured quality metrics keyed as ``"<metric>_<stat>"``.
         quality_targets: Quality targets to meet.
-        history:         CRF attempt history; carries codec CRF limits as sentinels.
+        history:         CRF bracket history; updated in-place with this result.
 
     Returns:
-        Next CRF to try, or ``None`` when the search space is exhausted
-        (caller should keep the last passing result).
+        Next CRF to try, or ``None`` when the search is exhausted or the
+        current result is accepted as final.
     """
     fail_crf, pass_crf = history.fail_crf, history.pass_crf
 
-    # Exhaustion check: bracket tight enough, we're done.
+    # Exhaustion check first — bracket too tight to improve.
     if fail_crf - pass_crf <= CRF_GRANULARITY:
         return None
 
-    # --- Find the worst-performing target (smallest surplus or largest deficit) ---
-    worst_delta:  float             = float("inf")   # actual - target; lower = worse
-    worst_target: QualityTarget | None = None
-    worst_actual: float             = 0.0
-
-    for target in quality_targets:
-        metric_key = f"{target.metric}_{target.statistic}"
-        actual = quality_results.get(metric_key)
-        if actual is None:
-            continue
-        # Treat PSNR=inf as a capped value so arithmetic stays finite
-        if MetricType(target.metric) == MetricType.PSNR and actual == float("inf"):
-            actual = _MAX_METRIC
-        delta = actual - target.value
-        if delta < worst_delta:
-            worst_delta  = delta
-            worst_target = target
-            worst_actual = actual
-
-    if worst_target is None:
+    found = _find_worst_target(quality_results, quality_targets)
+    if found is None:
         logger.warning("No valid metric results found, cannot adjust CRF")
         return None
 
-    # --- Early acceptance: all metrics pass and the tightest surplus is within delta ---
-    if worst_delta >= 0 and worst_delta <= CRF_METRIC_POSITIVE_DELTA:
+    worst_target, worst_deficit, worst_actual = found
+    current_passed = worst_deficit >= 0
+
+    # Update history with this attempt's full metrics dict.
+    history.add(current_crf, current_passed, quality_results)
+
+    # Re-read bounds after update (they may have narrowed).
+    fail_crf, pass_crf = history.fail_crf, history.pass_crf
+    if fail_crf - pass_crf <= CRF_GRANULARITY:
+        return None
+
+    # --- Early acceptance ---
+    if current_passed and worst_deficit <= CRF_METRIC_POSITIVE_DELTA:
         logger.debug(
-            f"Least-proficient metric surplus {worst_delta:.3f} ≤ CRF_METRIC_POSITIVE_DELTA "
-            f"({CRF_METRIC_POSITIVE_DELTA}), accepting CRF {current_crf:{PADDING_CRF}} as final."
+            "Least-proficient metric surplus %.3f ≤ CRF_METRIC_POSITIVE_DELTA (%.3f), "
+            "accepting CRF %s as final.",
+            worst_deficit, CRF_METRIC_POSITIVE_DELTA, f"{current_crf:{PADDING_CRF}}",
         )
         return None
 
-    # --- Interpolate next CRF ---
-    # Signed ratio: worst_delta / range, clamped to [-1, +1]
-    #   positive → surplus (pass), negative → deficit (miss)
-    #   Surplus range = MAX - target  (headroom above target)
-    #   Deficit range = MAX - actual  (headroom above actual)
-    #   min(target, actual) selects the correct denominator without branching.
-    #
-    # Interpolation from the anchor on the same side as the current result:
-    #   pass (ratio ≥ 0): next = pass_crf + ratio * (fail_crf - pass_crf)
-    #     ratio=0 → pass_crf (on target), ratio=1 → fail_crf (max surplus)
-    #   miss (ratio < 0): next = fail_crf + ratio * (fail_crf - pass_crf)
-    #     ratio=0 → fail_crf (on target), ratio=-1 → pass_crf (max deficit)
-    target_val   = worst_target.value
-    metric_range = _MAX_METRIC - min(target_val, worst_actual)
-    ratio        = worst_delta / metric_range if metric_range > 0 else 0.0
-    ratio        = max(-1.0, min(1.0, ratio))
+    crf_span = fail_crf - pass_crf
 
-    current_passed = ratio >= 0
-    crf_span       = fail_crf - pass_crf
+    def _clamp_interior(crf: float) -> float | None:
+        """Clamp *crf* to strictly inside ``(pass_crf, fail_crf)``.
+
+        Returns ``None`` when there is no interior point at least one
+        ``CRF_GRANULARITY`` step away from both boundaries.
+        """
+        lo = pass_crf + CRF_GRANULARITY
+        hi = fail_crf - CRF_GRANULARITY
+        if lo > hi:
+            return None
+        return max(lo, min(hi, crf))
+
+    # --- CRF estimate: candidate list, first t ∈ [0, 1] wins ---
+    # Candidates (in priority order):
+    #   1. Primary:   interpolate from current worst target's metric curve.
+    #   2. Reverse:   re-find worst target from the *opposite* boundary's metrics
+    #                 (the boundary we did NOT just update), then interpolate.
+    #                 If we just passed, the opposite is the fail boundary — its
+    #                 worst metric is what actually caused the prior failure.
+    #   3. Binary:    t = 0.5 (midpoint), always valid.
+    #
+    # When boundary metrics are absent (early attempts), interpolation candidates
+    # return None and binary (t=0.5) is used automatically — no separate phase
+    # needed.
+    #
+    # We work in deficit space: deficit_at_pass > 0, deficit_at_fail < 0.
+    # Linear interpolation finds t where deficit == 0:
+    #   t = deficit_at_pass / (deficit_at_pass - deficit_at_fail)
+    # t ∈ [0, 1] means the metric straddles the target inside the bracket.
+    # t outside [0, 1] means the metric never crosses the target here — skip.
+
+    def _t_for_target(
+        target:    QualityTarget,
+        p_metrics: dict[str, float] | None,
+        f_metrics: dict[str, float] | None,
+    ) -> float | None:
+        """Return interpolation t for *target*, or ``None`` if outside [0, 1]."""
+        if p_metrics is None or f_metrics is None:
+            return None
+        key      = f"{target.metric}_{target.statistic}"
+        p_val    = p_metrics.get(key)
+        f_val    = f_metrics.get(key)
+        if p_val is None or f_val is None:
+            return None
+        tgt_info = MetricType(target.metric).info
+        d_pass   = tgt_info.deficit(p_val, target.value)
+        d_fail   = tgt_info.deficit(f_val, target.value)
+        span     = d_pass - d_fail
+        if abs(span) < 1e-9:
+            return None
+        t = d_pass / span
+        return t if 0.0 <= t <= 1.0 else None
+
+    opposite_metrics = history.fail_metrics if current_passed else history.pass_metrics
+    opp_worst        = _find_worst_target(opposite_metrics, quality_targets) if opposite_metrics else None
+    opp_target       = opp_worst[0] if opp_worst is not None else None
+
+    candidates: list[tuple[float, str]] = []
+
+    t_primary = _t_for_target(worst_target, history.pass_metrics, history.fail_metrics)
+    if t_primary is not None:
+        candidates.append((t_primary, f"primary worst={worst_target.metric}_{worst_target.statistic}"))
+
+    if opp_target is not None:
+        t_reverse = _t_for_target(opp_target, history.pass_metrics, history.fail_metrics)
+        if t_reverse is not None:
+            candidates.append((t_reverse, f"reverse worst={opp_target.metric}_{opp_target.statistic}"))
+
+    candidates.append((0.5, "binary"))
+
+    t_chosen, label = candidates[0]
+    raw_crf = pass_crf + t_chosen * crf_span
     if current_passed:
-        next_crf = pass_crf + ratio * crf_span
-        next_crf = math.ceil(next_crf / CRF_GRANULARITY) * CRF_GRANULARITY
+        next_crf = math.ceil(raw_crf / CRF_GRANULARITY) * CRF_GRANULARITY
     else:
-        next_crf = fail_crf + ratio * crf_span
-        next_crf = math.floor(next_crf / CRF_GRANULARITY) * CRF_GRANULARITY
-    next_crf = max(history.pass_crf, min(history.fail_crf, next_crf))
+        next_crf = math.floor(raw_crf / CRF_GRANULARITY) * CRF_GRANULARITY
+    result = _clamp_interior(next_crf)
 
     logger.debug(
-        f"CRF interpolation: pass={pass_crf}, fail={fail_crf} "
-        f"metric target={target_val:.1f} actual={worst_actual:.2f} ratio={ratio:+.3f} "
-        f"→ CRF {next_crf:{PADDING_CRF}}"
+        "CRF [%s]: pass=%.1f fail=%.1f t=%.3f raw=%.2f → CRF %s",
+        label, pass_crf, fail_crf, t_chosen, raw_crf,
+        f"{result:{PADDING_CRF}}" if result is not None else "None (exhausted)",
     )
-
-    return next_crf
+    return result
