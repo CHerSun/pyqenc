@@ -320,7 +320,6 @@ Before adding a new dependency:
 
 #### Core:
 
-- `ffmpeg-normalize`: a wrapper for ffmpeg for audio normalization
 - `alive-progress`: Progress bars (chosen for aesthetics and printing support over more functional `tqdm`).
 - `matplotlib`: Plotting for quality metrics
 - `pandas`: Data analysis for metrics
