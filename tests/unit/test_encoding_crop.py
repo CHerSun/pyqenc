@@ -23,11 +23,18 @@ def _make_encoder(crop_params: CropParams | None = None) -> ChunkEncoder:
 
 def _make_strategy() -> Strategy:
     codec = CodecConfig(
-        name="h265-8bit",
-        encoder="libx265",
-        pixel_format="yuv420p",
-        default_crf=28.0,
-        crf_range=(0.0, 51.0),
+        name            = "h265-8bit",
+        default_quality = 28.0,
+        quality_range   = (0.0, 51.0),
+        encoder_args    = [
+            "-i", "{input}",
+            "-c:v", "libx265",
+            "-preset", "{preset}",
+            "-crf", "{quality}",
+            "-vf", "{vf}",
+            "-pix_fmt", "yuv420p",
+            "{profile_args}",
+        ],
     )
     return Strategy(preset="fast", profile="h265", codec=codec, profile_args=[])
 

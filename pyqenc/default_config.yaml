@@ -87,17 +87,38 @@ default_strategies:
 # -----------------
 # Defines available video codecs with their FFmpeg encoder settings.
 # Each codec specifies:
-#   - encoder: FFmpeg encoder name (e.g., libx264, libx265)
+#   - encoder: FFmpeg encoder name (e.g., libx264, libx265, hevc_nvenc)
 #   - pixel_format: Pixel format for encoding
-#   - default_crf: Starting CRF value for quality-based encoding
-#   - crf_range: Valid CRF range [min, max] for this codec
+#   - default_quality: Starting quality parameter value
+#   - quality_range: Valid quality range [min, max] for this codec
+#   - quality_label: Human-readable label for logs and plots (default: CRF)
+#   - encoder_args: Full ffmpeg argument template. Must contain:
+#       -i {input}        — two consecutive items; {input} is replaced with the
+#                           actual input path at runtime. Args before -i are
+#                           injected before the input (e.g. -hwaccel options).
+#       {quality}         — replaced with the quality value; may appear multiple
+#                           times (e.g. -cq:v {quality} -qmin {quality} -qmax {quality})
+#       {preset}          — replaced with the strategy preset name
+#       {profile_args}    — replaced with the profile's extra_args list in-place
 #   - presets: List of encoding presets supported by this encoder
 codecs:
   h264-8bit:
-    encoder: libx264
-    pixel_format: yuv420p
-    default_crf: 25
-    crf_range: [0, 51]
+    default_quality: 25
+    quality_range: [0, 51]
+    encoder_args:
+      - "-i"
+      - "{input}"
+      - "-c:v"
+      - "libx264"
+      - "-preset"
+      - "{preset}"
+      - "-crf"
+      - "{quality}"
+      - "-vf"
+      - "{vf}"
+      - "-pix_fmt"
+      - "yuv420p"
+      - "{profile_args}"
     presets:
       - ultrafast
       - superfast
@@ -111,10 +132,22 @@ codecs:
       - placebo
 
   h265-10bit:
-    encoder: libx265
-    pixel_format: yuv420p10le
-    default_crf: 25
-    crf_range: [0, 51]
+    default_quality: 25
+    quality_range: [0, 51]
+    encoder_args:
+      - "-i"
+      - "{input}"
+      - "-c:v"
+      - "libx265"
+      - "-preset"
+      - "{preset}"
+      - "-crf"
+      - "{quality}"
+      - "-vf"
+      - "{vf}"
+      - "-pix_fmt"
+      - "yuv420p10le"
+      - "{profile_args}"
     presets:
       - ultrafast
       - superfast
@@ -126,6 +159,43 @@ codecs:
       - slower
       - veryslow
       - placebo
+
+  nvenc-h265-10bit:
+    default_quality: 25
+    quality_range: [1, 51]
+    quality_label: "CQ"
+    encoder_args:
+      - "-hwaccel"
+      - "cuda"
+      - "-hwaccel_output_format"
+      - "cuda"
+      - "-i"
+      - "{input}"
+      - "-c:v"
+      - "hevc_nvenc"
+      - "-preset"
+      - "{preset}"
+      - "-rc:v"
+      - "vbr"
+      - "-b:v"
+      - "0"
+      - "-cq:v"
+      - "{quality}"
+      - "-qmin"
+      - "{quality}"
+      - "-qmax"
+      - "{quality}"
+      - "-vf"
+      - "scale_cuda=format=p010le:{vf}"
+      - "{profile_args}"
+    presets:
+      - p1
+      - p2
+      - p3
+      - p4
+      - p5
+      - p6
+      - p7
 
 # Encoding Profiles
 # -----------------
@@ -165,6 +235,15 @@ profiles:
     extra_args:
       - "-x265-params"
       - "aq-mode=2:psy-rd=1.0:deblock=-1,-1"
+
+  # HEVC NVENC (GPU) Profiles
+  # --------------------------
+  nvenc-h265-10bit-hq:
+    codec: hevc-nvenc-10bit
+    description: "HEVC NVENC GPU encoding — 10-bit, VBR quality mode with high-quality tuning. Requires NVIDIA GPU with NVENC support."
+    extra_args:
+      - "-tune:v"
+      - "hq"
 
 # Audio Output Configuration
 # --------------------------

@@ -582,7 +582,7 @@ class ChunkEncoder:
         import yaml as _yaml
 
         output_dir = self._get_output_dir(strategy)
-        crf_min, crf_max = strategy.codec.crf_range if strategy.codec else (0.0, 63.0)
+        crf_min, crf_max = strategy.codec.quality_range if strategy.codec else (0.0, 63.0)
         history    = CRFHistory(fail_crf=crf_max, pass_crf=crf_min)
         seed_crf:  float | None = None
 
@@ -766,17 +766,23 @@ class ChunkEncoder:
         """
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        ffmpeg_args = strategy.to_ffmpeg_args(crf)
+        vf_filter = (
+            self._crop_params.to_ffmpeg_filter()
+            if self._crop_params and not self._crop_params.is_empty()
+            else None
+        )
+        ffmpeg_args = strategy.to_ffmpeg_args(crf, vf_filter=vf_filter)
 
-        # Inject crop filter when crop params are set and non-empty
-        if self._crop_params and not self._crop_params.is_empty():
-            ffmpeg_args = ["-vf", self._crop_params.to_ffmpeg_filter(), *ffmpeg_args]
-
+        # Replace the {input} sentinel with the actual input path.
+        # The preceding "-i" flag is already in the template; everything before
+        # "-i" is pre-input args (e.g. -hwaccel), everything after is output-side.
+        i_pos = ffmpeg_args.index("{input}")
         cmd: list[str | os.PathLike] = [
             "ffmpeg",
             "-y",
-            "-i", chunk.path,
-            *ffmpeg_args,
+            *ffmpeg_args[:i_pos],
+            chunk.path,
+            *ffmpeg_args[i_pos + 1:],
             "-f", "matroska",
             output_file,
         ]
@@ -835,12 +841,12 @@ class ChunkEncoder:
             current_crf = seed_crf
             logger.info(
                 fmt_chunk(strategy.name, chunk.chunk_id,
-                f"Restored {history.attempts} attempt(s) from sidecars; resuming from best-passing CRF {current_crf:{PADDING_CRF}}",
+                f"Restored {history.attempts} attempt(s) from sidecars; resuming from best-passing {strategy.codec.quality_label} {current_crf:{PADDING_CRF}}",
                 self._visual_hash)
             )
         else:
             current_crf = initial_crf
-            logger.debug(f"No prior sidecars found; starting from CRF {current_crf:{PADDING_CRF}}")
+            logger.debug(f"No prior sidecars found; starting from {strategy.codec.quality_label} {current_crf:{PADDING_CRF}}")
 
         attempt_number    = history.attempts
         final_attempt:    AttemptMetadata | None = None
@@ -858,7 +864,7 @@ class ChunkEncoder:
                               self._visual_hash)
                 )
 
-            logger.debug(fmt_chunk_attempt_start(strategy.name, chunk.chunk_id, attempt_number, current_crf, self._visual_hash))
+            logger.debug(fmt_chunk_attempt_start(strategy.name, chunk.chunk_id, attempt_number, current_crf, strategy.codec.quality_label, self._visual_hash))
 
             # Determine the final output path for this CRF (resolution unknown yet)
             # We'll encode to a temp file, probe resolution, then rename to final path.
@@ -926,7 +932,7 @@ class ChunkEncoder:
                         logger.info(
                             fmt_chunk_attempt_result(
                                 strategy.name, chunk.chunk_id, attempt_number,
-                                f"{pass_fail} with CRF {existing.crf:{PADDING_CRF}} ({metric_summary}){best_string} [reused]",
+                                f"{pass_fail} with {strategy.codec.quality_label} {existing.crf:{PADDING_CRF}} ({metric_summary}){best_string} [reused]",
                                 self._visual_hash,
                             )
                         )
@@ -935,7 +941,7 @@ class ChunkEncoder:
                         )
                         if next_crf is None:
                             if final_attempt is not None:
-                                logger.info(fmt_chunk_final(strategy.name, chunk.chunk_id, best_crf, attempt_number, self._visual_hash))
+                                logger.info(fmt_chunk_final(strategy.name, chunk.chunk_id, best_crf, attempt_number, strategy.codec.quality_label, self._visual_hash))
                                 # Hard-link winning attempt into encoded/ and write result sidecar
                                 self._finalize_winning_attempt(
                                     strategy=strategy,
@@ -947,8 +953,8 @@ class ChunkEncoder:
                                 )
                             else:
                                 logger.warning(
-                                    "CRF search space exhausted for chunk %s strategy %s after %d attempts",
-                                    chunk.chunk_id, strategy.name, attempt_number,
+                                    "%s search space exhausted for chunk %s strategy %s after %d attempts",
+                                    strategy.codec.quality_label, chunk.chunk_id, strategy.name, attempt_number,
                                 )
                             break
                         current_crf = next_crf
@@ -962,7 +968,7 @@ class ChunkEncoder:
                         )
                         logger.info(
                             fmt_chunk(strategy.name, chunk.chunk_id,
-                            f"existing attempt (crf={existing.crf:.2f}) — re-evaluating metrics ({reason})",
+                            f"existing attempt ({strategy.codec.quality_label.lower()}={existing.crf:.2f}) — re-evaluating metrics ({reason})",
                             self._visual_hash),
                         )
                         output_file = existing.path
@@ -1066,7 +1072,7 @@ class ChunkEncoder:
             logger.info(
                 fmt_chunk_attempt_result(
                     strategy.name, chunk.chunk_id, attempt_number,
-                    f"{pass_fail} with CRF {current_crf:{PADDING_CRF}} ({metric_summary}){best_string}",
+                    f"{pass_fail} with {strategy.codec.quality_label} {current_crf:{PADDING_CRF}} ({metric_summary}){best_string}",
                     self._visual_hash,
                 )
             )
@@ -1077,7 +1083,7 @@ class ChunkEncoder:
 
             if next_crf is None:
                 if final_attempt is not None:
-                    logger.info(fmt_chunk_final(strategy.name, chunk.chunk_id, best_crf, attempt_number, self._visual_hash))
+                    logger.info(fmt_chunk_final(strategy.name, chunk.chunk_id, best_crf, attempt_number, strategy.codec.quality_label, self._visual_hash))
                     # Hard-link winning attempt into encoded/ and write result sidecar
                     self._finalize_winning_attempt(
                         strategy=strategy,
@@ -1089,8 +1095,8 @@ class ChunkEncoder:
                     )
                 else:
                     logger.warning(
-                        "CRF search space exhausted for chunk %s strategy %s after %d attempts",
-                        chunk.chunk_id, strategy.name, attempt_number,
+                        "%s search space exhausted for chunk %s strategy %s after %d attempts",
+                        strategy.codec.quality_label, chunk.chunk_id, strategy.name, attempt_number,
                     )
                 break
 
@@ -1332,9 +1338,9 @@ async def _encode_chunks_parallel(
                         advance(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.FAILED)
                     continue
 
-                # Encode chunk using the codec's default CRF as the fixed starting point.
-                # Predictable initial CRF = predictable recovery path when parameters change.
-                chunk_initial_crf = round(strategy.codec.default_crf / CRF_GRANULARITY) * CRF_GRANULARITY
+                # Encode chunk using the codec's default quality as the fixed starting point.
+                # Predictable initial quality = predictable recovery path when parameters change.
+                chunk_initial_crf = round(strategy.codec.default_quality / CRF_GRANULARITY) * CRF_GRANULARITY
 
                 # Encode chunk
                 chunk_result = await _encode_chunk_async(
@@ -1623,6 +1629,10 @@ class EncodingPhase:
         self._optimization: "_OptimizationPhase | None" = cast("_OptimizationPhase", phases[_OptimizationPhase]) if phases else None
         self.params:        "EncodingParams | None"     = None
         self.result:        "EncodingPhaseResult | None" = None
+        self.quality_labels: dict[str, str]             = {}
+        """Maps strategy name → quality_label (e.g. ``'CRF'``, ``'CQ'``) for all
+        strategies resolved during the last ``run()`` call.  Empty until ``run()``
+        completes.  Used by downstream phases (e.g. ``MergePhase``) to label plots."""
         self.dependencies:  "list[Phase]"               = [d for d in [self._job, self._chunking, self._optimization] if d is not None]
 
     # ------------------------------------------------------------------
@@ -1942,6 +1952,9 @@ class EncodingPhase:
             return _enc_failed(err)
 
         strategy_names = [s.name for s in strategies]
+
+        # Cache quality labels for downstream phases (e.g. MergePhase CRF plot)
+        self.quality_labels = {s.name: s.codec.quality_label for s in strategies}
 
         # Persist encoding.yaml with current crop params
         encoding_yaml = work_dir / _ENCODING_YAML

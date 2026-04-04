@@ -11,10 +11,22 @@ default_strategies:
 
 codecs:
   h264-8bit:
-    encoder: libx264
-    pixel_format: yuv420p
-    default_crf: 23
-    crf_range: [0, 51]
+    default_quality: 23
+    quality_range: [0, 51]
+    encoder_args:
+      - "-i"
+      - "{input}"
+      - "-c:v"
+      - "libx264"
+      - "-preset"
+      - "{preset}"
+      - "-crf"
+      - "{quality}"
+      - "-vf"
+      - "{vf}"
+      - "-pix_fmt"
+      - "yuv420p"
+      - "{profile_args}"
     presets:
       - ultrafast
       - superfast
@@ -28,10 +40,22 @@ codecs:
       - placebo
     
   h265-10bit:
-    encoder: libx265
-    pixel_format: yuv420p10le
-    default_crf: 20
-    crf_range: [0, 51]
+    default_quality: 20
+    quality_range: [0, 51]
+    encoder_args:
+      - "-i"
+      - "{input}"
+      - "-c:v"
+      - "libx265"
+      - "-preset"
+      - "{preset}"
+      - "-crf"
+      - "{quality}"
+      - "-vf"
+      - "{vf}"
+      - "-pix_fmt"
+      - "yuv420p10le"
+      - "{profile_args}"
     presets:
       - ultrafast
       - superfast

@@ -1018,10 +1018,16 @@ class MergePhase:
                 if crf_data:
                     crf_plot_path = final_dir / f"{output_file.stem}.crf.png"
                     try:
+                        qlabel = (
+                            self._encoding.quality_labels.get(strategy_name, "CRF")
+                            if self._encoding is not None
+                            else "CRF"
+                        )
                         create_crf_plot(
-                            chunks      = crf_data,
-                            output_path = crf_plot_path,
-                            title       = f"CRF\n{output_file.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")}",
+                            chunks        = crf_data,
+                            output_path   = crf_plot_path,
+                            title         = f"{qlabel}\n{output_file.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")}",
+                            quality_label = qlabel,
                         )
                         logger.debug("  CRF plot saved: %s", crf_plot_path.name)
                     except Exception as exc:

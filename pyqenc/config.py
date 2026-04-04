@@ -129,12 +129,12 @@ class ConfigManager:
         codecs_data = self._config.get("codecs", {})
         for name, codec_data in codecs_data.items():
             self._codecs[name] = CodecConfig(
-                name=name,
-                encoder=codec_data["encoder"],
-                pixel_format=codec_data["pixel_format"],
-                default_crf=codec_data["default_crf"],
-                crf_range=tuple(codec_data["crf_range"]),
-                presets=codec_data.get("presets", [])
+                name            = name,
+                default_quality = codec_data["default_quality"],
+                quality_range   = tuple(codec_data["quality_range"]),
+                quality_label   = codec_data.get("quality_label", "CRF"),
+                encoder_args    = codec_data.get("encoder_args", []),
+                presets         = codec_data.get("presets", [])
             )
 
         # Parse profiles
@@ -194,6 +194,28 @@ class ConfigManager:
             )
         return self._profiles[name]
 
+
+    def list_codecs(self) -> list[str]:
+        """List all available codec names.
+
+        Returns:
+            List of codec names (e.g. ``['h264-8bit', 'h265-10bit']``).
+        """
+        return list(self._codecs.keys())
+
+    def list_presets(self, codec: str) -> list[str]:
+        """List all presets supported by a codec.
+
+        Args:
+            codec: Codec name (e.g. ``'h264-8bit'``).
+
+        Returns:
+            List of preset names.
+
+        Raises:
+            ValueError: If codec not found.
+        """
+        return list(self.get_codec(codec).presets)
 
     def list_profiles(self, codec: str | None = None) -> list[str]:
         """List all available profile names.

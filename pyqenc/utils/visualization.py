@@ -932,28 +932,31 @@ def analyze_chunk_quality(
 # ---------------------------------------------------------------------------
 
 def create_crf_plot(
-    chunks:      list[tuple[float, float, float]],
-    output_path: Path,
-    title:       str = "CRF Distribution",
+    chunks:        list[tuple[float, float, float]],
+    output_path:   Path,
+    title:         str = "CRF Distribution",
+    quality_label: str = "CRF",
 ) -> None:
-    """Create a CRF-over-time plot and save it to disk.
+    """Create a quality-parameter-over-time plot and save it to disk.
 
     Layout mirrors ``create_unified_plot`` exactly for side-by-side comparison:
     same figure size, same gridspec (main + stats row), dual Y-axes both
-    labeled "CRF", same x-axis formatter (``HH:MM:SS`` / seconds, two lines),
-    same summary box, same DPI.
+    labeled with *quality_label*, same x-axis formatter (``HH:MM:SS`` / seconds,
+    two lines), same summary box, same DPI.
 
     Args:
-        chunks:      List of ``(start_seconds, end_seconds, crf)`` tuples,
-                     one per winning chunk, in timeline order.
-        output_path: Destination path for the saved PNG.
-        title:       Plot title.
+        chunks:        List of ``(start_seconds, end_seconds, quality_value)`` tuples,
+                       one per winning chunk, in timeline order.
+        output_path:   Destination path for the saved PNG.
+        title:         Plot title.
+        quality_label: Human-readable label for the quality axis (e.g. ``"CRF"``,
+                       ``"CQ"``).  Defaults to ``"CRF"``.
 
     Raises:
         ValueError: If ``chunks`` is empty.
     """
     if not chunks:
-        raise ValueError("No CRF data provided for visualization")
+        raise ValueError(f"No {quality_label} data provided for visualization")
 
     starts = np.array([c[0] for c in chunks])
     ends   = np.array([c[1] for c in chunks])
@@ -979,7 +982,7 @@ def create_crf_plot(
     ax_right.set_axisbelow(True)
 
     def _configure_crf_axis(ax: plt.Axes) -> None:
-        ax.set_ylabel("CRF", color=_CRF_COLOR, fontsize=_FONT_AXIS_LABEL, fontweight="bold")
+        ax.set_ylabel(quality_label, color=_CRF_COLOR, fontsize=_FONT_AXIS_LABEL, fontweight="bold")
         ax.set_ylim(_CRF_Y_MIN, _CRF_Y_MAX)
         ax.tick_params(axis="y", labelcolor=_CRF_COLOR, labelsize=_FONT_AXIS_TICKS)
         ax.yaxis.set_major_locator(plt.MultipleLocator(_CRF_Y_MAJOR_TICK))
@@ -1024,10 +1027,10 @@ def create_crf_plot(
         color     = _CRF_COLOR,
         linewidth = _LINE_WIDTH_DEFAULT,
         alpha     = _LINE_ALPHA,
-        label     = "CRF",
+        label     = quality_label,
         zorder    = 3,
     )
-    ax_left.legend([line], ["CRF"], loc="lower right", fontsize=_FONT_LEGEND, framealpha=_LEGEND_ALPHA)
+    ax_left.legend([line], [quality_label], loc="lower right", fontsize=_FONT_LEGEND, framealpha=_LEGEND_ALPHA)
 
     # Stats subplot — same structure as metric subplots in create_unified_plot
     crf_series  = pd.Series(crfs)
@@ -1053,8 +1056,8 @@ def create_crf_plot(
 
     ax_stats.set_yticks(y_positions)
     ax_stats.set_yticklabels(bar_labels, fontsize=_FONT_AXIS_TICKS)
-    ax_stats.set_xlabel("CRF", fontsize=_FONT_SUBPLOT_XLABEL, fontweight="bold", color=_CRF_COLOR)
-    ax_stats.set_title("CRF Distribution", fontsize=_FONT_SUBPLOT_TITLE, fontweight="bold", color=_CRF_COLOR)
+    ax_stats.set_xlabel(quality_label, fontsize=_FONT_SUBPLOT_XLABEL, fontweight="bold", color=_CRF_COLOR)
+    ax_stats.set_title(f"{quality_label} Distribution", fontsize=_FONT_SUBPLOT_TITLE, fontweight="bold", color=_CRF_COLOR)
     ax_stats.tick_params(axis="x", labelcolor=_CRF_COLOR, labelsize=_FONT_AXIS_TICKS_X)
     ax_stats.tick_params(axis="y", labelsize=_FONT_AXIS_TICKS)
     ax_stats.set_xlim(_CRF_Y_MIN, _CRF_Y_MAX)
@@ -1063,7 +1066,7 @@ def create_crf_plot(
 
     # Summary box — same pattern as create_unified_plot (fig.text after tight_layout)
     summary_text = (
-        f"CRF:\n"
+        f"{quality_label}:\n"
         f"  Chunks: {len(chunks)}\n"
         f"  Min: {crf_stats['min']:>5.1f}\n"
         f"  Med: {crf_stats['p50']:>5.1f}\n"

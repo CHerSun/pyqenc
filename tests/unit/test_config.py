@@ -51,10 +51,8 @@ class TestConfigManager:
 
         codec = config.get_codec("h265-10bit")
         assert codec.name == "h265-10bit"
-        assert codec.encoder == "libx265"
-        assert codec.pixel_format == "yuv420p10le"
-        assert codec.default_crf == 20.0
-        assert codec.crf_range == (0.0, 51.0)
+        assert codec.default_quality == 25.0
+        assert codec.quality_range == (0.0, 51.0)
         assert len(codec.presets) > 0
         assert "slow" in codec.presets
         assert "veryslow" in codec.presets
