@@ -67,6 +67,12 @@ class MetricInfo:
                            (e.g. VMAF) contribute proportionally more to the reported
                            duration.  SSIM and PSNR are 1.0; VMAF is ~10.0 (empirical
                            estimate — actual ratio varies by content and hardware).
+        comparison_range:  Practical value span used *only* for normalizing
+                           cross-metric deficit comparisons (``_score_failing_attempt``).
+                           Not the theoretical lossless ceiling — the realistic range
+                           where quality targets are set and misses occur.
+                           VMAF ≈ 20 (targets typically 80–100), SSIM ≈ 10 (90–100),
+                           PSNR ≈ 30 (40–70 dB), VIF ≈ 5 (empirical; limited data).
     """
 
     name:              str
@@ -81,6 +87,7 @@ class MetricInfo:
     plot_y_min:        float
     plot_y_max:        float
     complexity:        float
+    comparison_range:  float
 
     def normalize(self, value: float | pd.Series) -> float | pd.Series:
         """Normalize a raw metric value (or Series) to the display scale.
@@ -173,6 +180,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
         complexity        = 10.0,  # empirical estimate; VMAF is significantly slower than PSNR/SSIM
+        comparison_range  = 20.0,  # practical target range ~80–100
     ),
     MetricType.SSIM: MetricInfo(
         name              = "SSIM",
@@ -187,6 +195,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
         complexity        = 1.0,
+        comparison_range  = 10.0,  # practical target range ~90–100
     ),
     MetricType.PSNR: MetricInfo(
         name              = "PSNR",
@@ -201,6 +210,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
         complexity        = 1.0,
+        comparison_range  = 30.0,  # practical target range ~40–70 dB
     ),
     # VIF placeholder (not yet active and not checked for correctness):
     # MetricType.VIF: MetricInfo(
@@ -531,6 +541,69 @@ def _find_worst_target(
     if worst_target is None:
         return None
     return worst_target, worst_deficit, worst_actual
+
+
+def _score_failing_attempt(
+    metrics:         dict[str, float],
+    quality_targets: list[QualityTarget],
+) -> float:
+    """Compute a composite score for a failing attempt based on failing targets only.
+
+    Sums the normalized deficit for each target that is *not* met.  Only failing
+    targets contribute — passing ones are ignored so that a metric with a large
+    surplus (e.g. PSNR at 70 dB against a 45 dB target) cannot mask failures on
+    other metrics.
+
+    Each deficit is divided by ``MetricInfo.comparison_range`` — the practical
+    value span where targets are set — to make deficits comparable across metrics
+    with different scales (VMAF %, SSIM %, PSNR dB, VIF).
+
+    Higher score = closer to satisfying all targets = better fallback choice.
+    All values are ≤ 0 (only failing targets contribute negative deficits).
+
+    Args:
+        metrics:         Measured quality metrics keyed as ``"<metric>_<stat>"``.
+        quality_targets: Quality targets to evaluate against.
+
+    Returns:
+        Sum of normalized deficits for failing targets (≤ 0.0).
+        Returns ``-float("inf")`` when no target has a valid result in *metrics*.
+    """
+    total = 0.0
+    found = False
+    for target in quality_targets:
+        key    = f"{target.metric}_{target.statistic}"
+        actual = metrics.get(key)
+        if actual is None:
+            continue
+        found  = True
+        info   = MetricType(target.metric).info
+        deficit = info.deficit(actual, target.value)
+        if deficit < 0.0:
+            total += deficit / info.comparison_range
+    return total if found else -float("inf")
+
+
+def _score_failing_attempt_by_crf(
+    metrics:         dict[str, float],
+    quality_targets: list[QualityTarget],
+) -> float:
+    """Placeholder that always returns 0.0; CRF comparison is done externally.
+
+    This function exists solely to provide a drop-in-compatible footprint with
+    ``_score_failing_attempt`` so callers can switch strategies without changing
+    call sites.  The actual CRF-based comparison (lower CRF = better) is handled
+    by the caller using the attempt's ``crf`` attribute directly.
+
+    Args:
+        metrics:         Unused.
+        quality_targets: Unused.
+
+    Returns:
+        Always ``0.0``.
+    """
+    _ = metrics, quality_targets
+    return 0.0
 
 
 def adjust_crf(
