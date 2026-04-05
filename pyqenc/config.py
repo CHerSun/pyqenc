@@ -90,6 +90,7 @@ class ConfigManager:
         self._codecs: dict[str, CodecConfig] = {}
         self._profiles: dict[str, EncodingProfile] = {}
         self._default_strategies: list[str] = []
+        self._default_targets: list[str] = []
 
         self._load_config(config_path)
         self._parse_config()
@@ -137,6 +138,9 @@ class ConfigManager:
         # Parse default strategies
         self._default_strategies = self._config.get("default_strategies", [])
 
+        # Parse default targets
+        self._default_targets = self._config.get("default_targets", [])
+
     def get_default_strategies(self) -> list[str]:
         """Get default strategy patterns from configuration.
 
@@ -144,6 +148,14 @@ class ConfigManager:
             List of default strategy patterns (e.g., ["veryslow+h264*", "slow+h265*"])
         """
         return self._default_strategies.copy()
+
+    def get_default_targets(self) -> list[str]:
+        """Get default quality target strings from configuration.
+
+        Returns:
+            List of default target strings (e.g., ["vmaf-min:94", "psnr-min:42"])
+        """
+        return self._default_targets.copy()
 
     def get_codec(self, name: str) -> CodecConfig:
         """Retrieve codec configuration by name.

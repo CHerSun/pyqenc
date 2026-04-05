@@ -74,6 +74,19 @@
 #   - x264: https://trac.ffmpeg.org/wiki/Encode/H.264
 #   - x265: https://trac.ffmpeg.org/wiki/Encode/H.265
 
+# Default Targets
+# ---------------
+# These quality targets are used when --quality-target is not specified on the command line.
+# Each target is a string in "metric-stat:value" format (e.g. "vmaf-min:94").
+# All metrics are scaled to 0-100 range (e.g. ssim-min:94 means raw SSIM ≥ 0.94).
+# Supported metrics: vmaf, ssim, psnr
+# Supported statistics: min, med, max, p05, p25, p75, p95
+default_targets:
+  - "vmaf-min:94"   # VMAF minimum per-chunk score
+  - "vmaf-med:97"   # VMAF median per-chunk score
+  - "psnr-min:42"   # PSNR minimum per-chunk score
+  - "ssim-min:94"   # SSIM minimum per-chunk score (raw ≥ 0.94)
+
 # Default Strategies
 # ------------------
 # These strategies are used when --strategies is not specified on the command line.

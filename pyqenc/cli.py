@@ -110,8 +110,10 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--quality-target",
         type=str,
-        default="vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94",
-        help="Quality targets (e.g., 'vmaf-min:95,ssim-med:98') (default: vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94). NOTE: all metrics are scaled to 0-100 range, so targets should be specified accordingly (e.g., ssim-med:98 means 0.98 raw SSIM)."
+        default=None,
+        help="Quality targets (e.g., 'vmaf-min:95,ssim-med:98'). "
+             "If not specified, uses default from config file. "
+             "NOTE: all metrics are scaled to 0-100 range (e.g. ssim-med:98 means raw SSIM ≥ 0.98)."
     )
     parser.add_argument(
         "--strategies",
@@ -347,9 +349,12 @@ def _cmd_auto(args: argparse.Namespace) -> int:
     cleanup = _parse_cleanup_level(args.cleanup)
     # Parse strategies
     strategies = _parse_strategies(args.strategies)
-    # Parse quality targets and strategies
+    # Parse quality targets — fall back to config defaults when not specified on CLI
+    config_manager = ConfigManager()
+    raw_targets = _parse_quality_targets(args.quality_target) if args.quality_target \
+                  else config_manager.get_default_targets()
     try:
-        quality_targets = [QualityTarget.parse(t) for t in _parse_quality_targets(args.quality_target)]
+        quality_targets = [QualityTarget.parse(t) for t in raw_targets]
     except ValueError as e:
         logger.critical(f"Invalid quality target: {e}")
         return 1
@@ -361,7 +366,6 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         return 1
 
     # Resolve metrics sampling: CLI arg takes precedence over config file
-    config_manager = ConfigManager()
     metrics_sampling = args.metrics_sampling if args.metrics_sampling is not None \
                        else config_manager.get_metrics_sampling()
 
@@ -485,11 +489,13 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
 def _cmd_encode(args: argparse.Namespace) -> int:
     """Execute the 'encode' subcommand."""
     from pyqenc.api import encode_chunks
+    from pyqenc.config import ConfigManager
 
     logger.info("Starting chunk encoding")
     logger.info(f"Source: {args.source}")
 
-    _quality_target_strs = _parse_quality_targets(args.quality_target)
+    _quality_target_strs = _parse_quality_targets(args.quality_target) if args.quality_target \
+                           else ConfigManager().get_default_targets()
     strategies = _parse_strategies(args.strategies)
 
     try:
