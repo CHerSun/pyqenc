@@ -97,7 +97,7 @@ def _add_pipeline_arguments(parser: argparse.ArgumentParser) -> None:
         "--no-metrics",
         action="store_true",
         default=False,
-        help="Suppress metrics.yaml output (metrics are still collected internally but not written to disk)",
+        help="Suppress process metrics.yaml output (pipeline run stats). Does not affect quality metrics measurements.",
     )
 
 
@@ -108,9 +108,11 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         parser: Argument parser to add arguments to
     """
     parser.add_argument(
-        "--quality-target",
+        "--targets",
         type=str,
         default=None,
+        metavar="QUALITY_TARGETS",
+        dest="quality_target",
         help="Quality targets (e.g., 'vmaf-min:95,ssim-med:98'). "
              "If not specified, uses default from config file. "
              "NOTE: all metrics are scaled to 0-100 range (e.g. ssim-med:98 means raw SSIM ≥ 0.98)."
@@ -135,12 +137,13 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         help="Maximum concurrent encoding processes (default: 2). Don't set this high, ffmpeg knows how to scale too."
     )
     parser.add_argument(
-        "--metrics-sampling",
+        "--sampling",
         type=int,
         default=DEFAULT_METRICS_SAMPLING,
         metavar="N",
+        dest="metrics_sampling",
         help=(
-            "Metrics sampling factor: measure every N-th frame. "
+            "Frame sampling factor for quality metrics measurement: measure every N-th frame. "
             f"Min: 1 (every frame measured). Default: {DEFAULT_METRICS_SAMPLING}. Directly affects reliability of metrics. A tradeoff between precision and speed. "
             "Values above 30 are not recommended due to measurement volatility. 1 gives the highest precision but lowest speed. 2-4 are a good compromise. 5-10 start to become unreliable.."
         ),
@@ -210,17 +213,14 @@ def _add_crop_arguments(parser: argparse.ArgumentParser) -> None:
     Args:
         parser: Argument parser to add arguments to
     """
-    crop_group = parser.add_mutually_exclusive_group()
-    crop_group.add_argument(
-        "--no-crop",
-        action="store_true",
-        help="Disable automatic black border detection and cropping"
-    )
-    crop_group.add_argument(
+    parser.add_argument(
         "--crop",
         type=str,
         metavar="PARAMS",
-        help="Manual crop parameters: 'top bottom' or 'top bottom left right'"
+        help=(
+            "Manual crop parameters: 'top bottom' or 'top bottom left right'. "
+            "Use '0 0' to disable automatic black border detection and cropping."
+        ),
     )
 
 
@@ -228,14 +228,12 @@ def _resolve_crop_params(args: argparse.Namespace) -> CropParams | None:
     """Parse crop parameters from CLI args into a CropParams instance.
 
     Returns:
-        An explicit ``CropParams`` (including empty/no-op) if ``--crop`` or ``--no-crop`` given.
+        An explicit ``CropParams`` (including empty/no-op) if ``--crop`` was given.
         ``None`` as a sentinel meaning "auto-resolve from job.yaml" (handled by the phase layer).
 
     Raises:
         ValueError: On bad ``--crop`` format. Caller should catch and log critical.
     """
-    if getattr(args, "no_crop", False):
-        return CropParams(top=0, bottom=0, left=0, right=0)
     crop_str = getattr(args, "crop", None)
     if crop_str:
         return CropParams.parse(crop_str)
@@ -264,11 +262,13 @@ def _create_auto_subcommand(subparsers) -> None:
     _add_crop_arguments(auto_parser)
     _add_audio_convert_arguments(auto_parser)
     auto_parser.add_argument(
-        "--remux-chunking",
-        action="store_true",
+        "--chunking",
+        choices=["ffv1", "remux"],
+        default="ffv1",
+        metavar="CHUNKING_METHOD",
         help=(
-            "Use stream-copy (remux) for chunking instead of the default FFV1 lossless re-encode. "
-            "Trades frame-perfect chunk boundaries for faster chunking and smaller intermediate files."
+            "Chunking method: 'ffv1' (default) re-encodes chunks to FFV1 lossless for frame-perfect boundaries; "
+            "'remux' uses stream-copy for faster chunking and smaller intermediate files but boundaries snap to the nearest I-frame."
         ),
     )
     auto_parser.set_defaults(func=_cmd_auto)
@@ -295,8 +295,16 @@ def _create_chunk_subcommand(subparsers) -> None:
                    help="Scene detection sensitivity 0.0-1.0 (default: 0.3)")
     p.add_argument("--min-scene-length", type=int, default=24,
                    help="Minimum frames per chunk (default: 24)")
-    p.add_argument("--remux-chunking", action="store_true",
-                   help="Use stream-copy (remux) instead of FFV1 lossless re-encode.")
+    p.add_argument(
+        "--chunking",
+        choices=["ffv1", "remux"],
+        default="ffv1",
+        metavar="CHUNKING_METHOD",
+        help=(
+            "Chunking method: 'ffv1' (default) re-encodes chunks to FFV1 lossless for frame-perfect boundaries; "
+            "'remux' uses stream-copy for faster chunking and smaller intermediate files but boundaries snap to the nearest I-frame."
+        ),
+    )
     p.set_defaults(func=_cmd_chunk)
 
 
@@ -381,7 +389,7 @@ def _cmd_auto(args: argparse.Namespace) -> int:
     kv_to_show = {
         "Source:":        args.source,
         "Work directory:": args.work_dir,
-        "Cropping:":      "disabled" if args.no_crop else f"manual ({crop_params})" if crop_params else "automatic",
+        "Cropping:":      f"manual ({crop_params})" if crop_params else "automatic",
         "Strategies:":    strategy_display,
         "Targets:":       ", ".join(str(t) for t in quality_targets),
         "Work mode:":     "DRY-RUN (no changes will be made)" if not execute else "EXECUTE",
@@ -402,7 +410,7 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         exclude=args.exclude,
         crop_params=crop_params,
         cleanup=cleanup,
-        chunking_mode=ChunkingMode.REMUX if args.remux_chunking else ChunkingMode.LOSSLESS,
+        chunking_mode=ChunkingMode.REMUX if args.chunking == ChunkingMode.REMUX.value else ChunkingMode.LOSSLESS,
         force=args.force if hasattr(args, "force") else False,
         audio_convert=args.audio_convert,
         audio_codec=args.audio_codec,
@@ -464,7 +472,7 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
     logger.info("Starting video chunking")
     logger.info(f"Source: {args.source}")
 
-    chunking_mode = ChunkingMode.REMUX if args.remux_chunking else ChunkingMode.LOSSLESS
+    chunking_mode = ChunkingMode.REMUX if args.chunking == ChunkingMode.REMUX.value else ChunkingMode.LOSSLESS
 
     try:
         result = chunk_video(
@@ -701,12 +709,13 @@ def _create_measure_subcommand(subparsers) -> None:
     _add_base_arguments(p)
     _add_crop_arguments(p)
     p.add_argument(
-        "--metrics-sampling",
+        "--sampling",
         type=int,
         default=DEFAULT_METRICS_SAMPLING,
         metavar="N",
+        dest="metrics_sampling",
         help=(
-            "Metrics sampling factor: measure every N-th frame. "
+            "Frame sampling factor for quality metrics measurement: measure every N-th frame. "
             f"Min: 1 (every frame measured). Default: {DEFAULT_METRICS_SAMPLING}. Directly affects reliability of metrics. A tradeoff between precision and speed. "
             "Values above 30 are not recommended due to measurement volatility. 1 gives the highest precision but lowest speed. 2-4 are a good compromise. 5-10 start to become unreliable.."
         ),
@@ -794,7 +803,7 @@ Examples:
   pyqenc auto source.mkv -y
 
   # Custom quality target and strategies
-  pyqenc auto source.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq -y
+  pyqenc auto source.mkv --targets vmaf-min:95 --strategies slow+h265-aq -y
 
   # Use all strategy combinations
   pyqenc auto source.mkv --strategies "" -y
@@ -803,7 +812,7 @@ Examples:
   pyqenc auto source.mkv --all-strategies -y
 
   # Disable automatic cropping
-  pyqenc auto source.mkv --no-crop -y
+  pyqenc auto source.mkv --crop "0 0" -y
 
   # Manual crop specification
   pyqenc auto source.mkv --crop "140 140" -y
