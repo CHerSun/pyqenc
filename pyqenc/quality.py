@@ -591,8 +591,9 @@ def adjust_crf(
     """
     fail_crf, pass_crf = history.fail_crf, history.pass_crf
 
-    # Exhaustion check first — bracket too tight to improve.
-    if fail_crf - pass_crf <= granularity:
+    # Preemptive exhaustion check — bracket too tight to improve.
+    # Skip when no pass_metrics or no fail_metrics - no true bracket yet, allow inclusive boundaries.
+    if history.pass_metrics and history.fail_metrics and (fail_crf - pass_crf <= granularity):
         return None
 
     found = _find_worst_target(quality_results, quality_targets)
