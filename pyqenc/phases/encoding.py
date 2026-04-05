@@ -203,6 +203,7 @@ def _write_encoding_result_sidecar(
     winning_attempt: Path,
     crf:             Decimal,
     metrics:         dict[str, float],
+    targets_met:     bool = True,
 ) -> None:
     """Atomically write an encoding result sidecar when CRF search converges.
 
@@ -217,17 +218,21 @@ def _write_encoding_result_sidecar(
         winning_attempt: Path to the winning encoded attempt ``.mkv``.
         crf:             Winning CRF value.
         metrics:         All measured metric values for the winning attempt.
+        targets_met:     Whether quality targets were met; ``False`` when the
+                         search was exhausted without a passing attempt.
     """
     sidecar_path = output_dir / f"{chunk_id}.{resolution}.yaml"
     data = EncodingResultSidecar(
-        winning_attempt=winning_attempt.name,
-        crf=crf,
-        metrics=metrics,
+        winning_attempt = winning_attempt.name,
+        crf             = crf,
+        metrics         = metrics,
+        targets_met     = targets_met,
     )
     try:
         write_yaml_atomic(sidecar_path, data.to_yaml_dict())
         logger.debug(
-            "Wrote encoding result sidecar: %s (crf=%s)", sidecar_path.name, crf
+            "Wrote encoding result sidecar: %s (crf=%s, targets_met=%s)",
+            sidecar_path.name, crf, targets_met,
         )
     except Exception as e:
         logger.warning(
@@ -358,6 +363,8 @@ class ChunkEncodingResult:
         chunk_id:     Chunk identifier.
         strategy:     Strategy used.
         success:      Whether encoding succeeded.
+        targets_met:  Whether quality targets were met; ``False`` when the search
+                      was exhausted and the best non-passing attempt was accepted.
         final_crf:    Final CRF value used.
         attempts:     Number of encoding attempts.
         encoded_file: Metadata for the final encoded attempt artifact.
@@ -368,6 +375,7 @@ class ChunkEncodingResult:
     chunk_id:     str
     strategy:     str
     success:      bool
+    targets_met:  bool                  = True
     final_crf:    Decimal        | None = None
     attempts:     int                   = 0
     encoded_file: AttemptMetadata | None = None
@@ -665,6 +673,7 @@ class ChunkEncoder:
         winning_attempt: Path,
         crf:             Decimal,
         metrics:         dict[str, float],
+        targets_met:     bool = True,
     ) -> None:
         """Hard-link the winning attempt into ``encoded/`` and write the result sidecar.
 
@@ -682,6 +691,8 @@ class ChunkEncoder:
             winning_attempt: Path to the winning attempt ``.mkv`` in ``encoding/``.
             crf:             Winning CRF value.
             metrics:         All measured metric values for the winning attempt.
+            targets_met:     Whether quality targets were met; ``False`` when the
+                             search was exhausted without a passing attempt.
         """
         encoded_dir = self._get_encoded_dir(strategy)
         encoded_dir.mkdir(parents=True, exist_ok=True)
@@ -700,12 +711,13 @@ class ChunkEncoder:
 
         # 3. Write the encoding result sidecar into encoded/
         _write_encoding_result_sidecar(
-            output_dir=encoded_dir,
-            chunk_id=chunk_id,
-            resolution=resolution,
-            winning_attempt=dst_mkv,
-            crf=crf,
-            metrics=metrics,
+            output_dir  = encoded_dir,
+            chunk_id    = chunk_id,
+            resolution  = resolution,
+            winning_attempt = dst_mkv,
+            crf         = crf,
+            metrics     = metrics,
+            targets_met = targets_met,
         )
 
         # 4. Intermediate cleanup: delete all attempt files for this pair from encoding/
@@ -848,10 +860,13 @@ class ChunkEncoder:
             current_crf = initial_crf
             logger.debug(f"No prior sidecars found; starting from {strategy.codec.quality_label} {str(current_crf).rjust(PADDING_QUALITY_NUMBER)}")
 
-        attempt_number    = history.attempts
-        final_attempt:    AttemptMetadata | None = None
-        best_crf:         Decimal | None           = None
-        best_metrics:     dict[str, float]       = {}
+        attempt_number       = history.attempts
+        final_attempt:       AttemptMetadata | None = None
+        best_crf:            Decimal | None           = None
+        best_metrics:        dict[str, float]       = {}
+        best_failing_attempt: AttemptMetadata | None = None
+        best_failing_crf:    Decimal | None           = None
+        best_failing_metrics: dict[str, float]      = {}
 
         while True:
             attempt_number += 1
@@ -929,6 +944,11 @@ class ChunkEncoder:
                                 final_attempt = existing
                                 best_metrics  = metrics_dict
                                 best_string   = " NEW BEST"
+                        else:
+                            if best_failing_attempt is None or existing.crf < (best_failing_crf if best_failing_crf is not None else Decimal("Inf")):
+                                best_failing_crf     = existing.crf
+                                best_failing_attempt = existing
+                                best_failing_metrics = metrics_dict
                         logger.info(
                             fmt_chunk_attempt_result(
                                 strategy.name, chunk.chunk_id, attempt_number,
@@ -945,13 +965,32 @@ class ChunkEncoder:
                                 logger.info(fmt_chunk_final(strategy.name, chunk.chunk_id, best_crf, attempt_number, strategy.codec.quality_label, self._visual_hash))
                                 # Hard-link winning attempt into encoded/ and write result sidecar
                                 self._finalize_winning_attempt(
-                                    strategy=strategy,
-                                    chunk_id=chunk.chunk_id,
-                                    resolution=existing.resolution,
-                                    winning_attempt=final_attempt.path,
-                                    crf=best_crf if best_crf is not None else existing.crf,
-                                    metrics=best_metrics,
+                                    strategy        = strategy,
+                                    chunk_id        = chunk.chunk_id,
+                                    resolution      = existing.resolution,
+                                    winning_attempt = final_attempt.path,
+                                    crf             = best_crf if best_crf is not None else existing.crf,
+                                    metrics         = best_metrics,
+                                    targets_met     = True,
                                 )
+                            elif best_failing_attempt is not None:
+                                logger.warning(
+                                    "%s search space exhausted for chunk %s strategy %s after %d attempts — accepting best attempt (crf=%s)",
+                                    strategy.codec.quality_label, chunk.chunk_id, strategy.name, attempt_number,
+                                    best_failing_crf,
+                                )
+                                self._finalize_winning_attempt(
+                                    strategy        = strategy,
+                                    chunk_id        = chunk.chunk_id,
+                                    resolution      = existing.resolution,
+                                    winning_attempt = best_failing_attempt.path,
+                                    crf             = best_failing_crf if best_failing_crf is not None else existing.crf,
+                                    metrics         = best_failing_metrics,
+                                    targets_met     = False,
+                                )
+                                final_attempt = best_failing_attempt
+                                best_crf      = best_failing_crf
+                                best_metrics  = best_failing_metrics
                             else:
                                 logger.warning(
                                     "%s search space exhausted for chunk %s strategy %s after %d attempts",
@@ -995,11 +1034,12 @@ class ChunkEncoder:
                     error_msg = f"Encoding failed for chunk {chunk.chunk_id}"
                     logger.error(error_msg)
                     return ChunkEncodingResult(
-                        chunk_id=chunk.chunk_id,
-                        strategy=strategy.name,
-                        success=False,
-                        attempts=attempt_number,
-                        error=error_msg,
+                        chunk_id    = chunk.chunk_id,
+                        strategy    = strategy.name,
+                        success     = False,
+                        targets_met = False,
+                        attempts    = attempt_number,
+                        error       = error_msg,
                     )
 
                 # Update resolution from actual output (crop may change dimensions)
@@ -1063,6 +1103,11 @@ class ChunkEncoder:
                     final_attempt = attempt_meta
                     best_metrics  = all_metrics
                     best_string   = " NEW BEST"
+            else:
+                if best_failing_attempt is None or current_crf < (best_failing_crf if best_failing_crf is not None else Decimal("Inf")):
+                    best_failing_crf     = current_crf
+                    best_failing_attempt = attempt_meta
+                    best_failing_metrics = all_metrics
 
             metric_summary = fmt_metric_summary(metrics_dict, quality_targets)
             pass_fail = (
@@ -1088,13 +1133,32 @@ class ChunkEncoder:
                     logger.info(fmt_chunk_final(strategy.name, chunk.chunk_id, best_crf, attempt_number, strategy.codec.quality_label, self._visual_hash))
                     # Hard-link winning attempt into encoded/ and write result sidecar
                     self._finalize_winning_attempt(
-                        strategy=strategy,
-                        chunk_id=chunk.chunk_id,
-                        resolution=resolution or "",
-                        winning_attempt=final_attempt.path,
-                        crf=best_crf if best_crf is not None else current_crf,
-                        metrics=best_metrics,
+                        strategy        = strategy,
+                        chunk_id        = chunk.chunk_id,
+                        resolution      = resolution or "",
+                        winning_attempt = final_attempt.path,
+                        crf             = best_crf if best_crf is not None else current_crf,
+                        metrics         = best_metrics,
+                        targets_met     = True,
                     )
+                elif best_failing_attempt is not None:
+                    logger.warning(
+                        "%s search space exhausted for chunk %s strategy %s after %d attempts — accepting best attempt (crf=%s)",
+                        strategy.codec.quality_label, chunk.chunk_id, strategy.name, attempt_number,
+                        best_failing_crf,
+                    )
+                    self._finalize_winning_attempt(
+                        strategy        = strategy,
+                        chunk_id        = chunk.chunk_id,
+                        resolution      = resolution or "",
+                        winning_attempt = best_failing_attempt.path,
+                        crf             = best_failing_crf if best_failing_crf is not None else current_crf,
+                        metrics         = best_failing_metrics,
+                        targets_met     = False,
+                    )
+                    final_attempt = best_failing_attempt
+                    best_crf      = best_failing_crf
+                    best_metrics  = best_failing_metrics
                 else:
                     logger.warning(
                         "%s search space exhausted for chunk %s strategy %s after %d attempts",
@@ -1106,24 +1170,28 @@ class ChunkEncoder:
             current_crf = next_crf
 
         if final_attempt is not None:
+            # targets_met is True unless we fell back to the best failing attempt
+            _targets_met = best_failing_attempt is None or final_attempt is not best_failing_attempt
             return ChunkEncodingResult(
-                chunk_id=chunk.chunk_id,
-                strategy=strategy.name,
-                success=True,
-                final_crf=best_crf,
-                attempts=attempt_number,
-                encoded_file=final_attempt,
-                reused=False,
+                chunk_id     = chunk.chunk_id,
+                strategy     = strategy.name,
+                success      = True,
+                targets_met  = _targets_met,
+                final_crf    = best_crf,
+                attempts     = attempt_number,
+                encoded_file = final_attempt,
+                reused       = False,
             )
         else:
             error_msg = f"Failed to meet quality targets after {attempt_number} attempts"
             logger.error("Chunk %s: %s", chunk.chunk_id, error_msg)
             return ChunkEncodingResult(
-                chunk_id=chunk.chunk_id,
-                strategy=strategy.name,
-                success=False,
-                attempts=attempt_number,
-                error=error_msg,
+                chunk_id    = chunk.chunk_id,
+                strategy    = strategy.name,
+                success     = False,
+                targets_met = False,
+                attempts    = attempt_number,
+                error       = error_msg,
             )
 
 

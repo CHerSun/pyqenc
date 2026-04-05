@@ -490,6 +490,7 @@ class EncodingResultSidecar(BaseModel):
     winning_attempt: str              # filename of the winning attempt .mkv
     crf:             Decimal
     metrics:         dict[str, float] # only the targeted metric values
+    targets_met:     bool = True      # False when search exhausted without a passing attempt
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
@@ -497,6 +498,7 @@ class EncodingResultSidecar(BaseModel):
             "winning_attempt": self.winning_attempt,
             "crf":             str(self.crf),
             "metrics":         self.metrics,
+            "targets_met":     self.targets_met,
         }
 
     @classmethod
@@ -506,6 +508,7 @@ class EncodingResultSidecar(BaseModel):
             winning_attempt = data["winning_attempt"],
             crf             = Decimal(str(data["crf"])),
             metrics         = {k: float(v) for k, v in data.get("metrics", {}).items()},
+            targets_met     = bool(data.get("targets_met", True)),
         )
 
 
