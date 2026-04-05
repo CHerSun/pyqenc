@@ -62,6 +62,11 @@ class MetricInfo:
         plot_y_min:        Lower bound for the Y-axis in plots (normalized scale).
         plot_y_max:        Upper bound for the Y-axis in plots (normalized scale).
                            Slightly above ``lossless_value`` to leave headroom.
+        complexity:        Relative computational cost compared to SSIM/PSNR (baseline 1.0).
+                           Used to weight progress bar totals so that slower metrics
+                           (e.g. VMAF) contribute proportionally more to the reported
+                           duration.  SSIM and PSNR are 1.0; VMAF is ~10.0 (empirical
+                           estimate — actual ratio varies by content and hardware).
     """
 
     name:              str
@@ -75,6 +80,7 @@ class MetricInfo:
     display_unit:      str
     plot_y_min:        float
     plot_y_max:        float
+    complexity:        float
 
     def normalize(self, value: float | pd.Series) -> float | pd.Series:
         """Normalize a raw metric value (or Series) to the display scale.
@@ -166,6 +172,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = "%",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
+        complexity        = 10.0,  # empirical estimate; VMAF is significantly slower than PSNR/SSIM
     ),
     MetricType.SSIM: MetricInfo(
         name              = "SSIM",
@@ -179,6 +186,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = "%",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
+        complexity        = 1.0,
     ),
     MetricType.PSNR: MetricInfo(
         name              = "PSNR",
@@ -192,6 +200,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = " dB",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
+        complexity        = 1.0,
     ),
     # VIF placeholder (not yet active and not checked for correctness):
     # MetricType.VIF: MetricInfo(

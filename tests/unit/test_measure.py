@@ -437,13 +437,14 @@ class TestWriteSidecar:
         assert "source_duration_seconds" in data
         assert "target_duration_seconds" in data
         assert "effective_duration_seconds" in data
-        assert "subsample_factor" in data
+        assert "sampling" in data
         assert "crop_params" in data
         assert "metrics" in data
-        assert data["subsample_factor"] == 5
+        assert data["sampling"] == 5
         assert data["target_duration_seconds"] is None
         assert data["crop_params"] == {"top": 10, "bottom": 20, "left": 0, "right": 0}
-        assert MetricType.VMAF.value in data["metrics"]
+        # metrics are flat: vmaf_min, vmaf_median, etc.
+        assert f"{MetricType.VMAF.value}_min" in data["metrics"]
 
 
 # ---------------------------------------------------------------------------

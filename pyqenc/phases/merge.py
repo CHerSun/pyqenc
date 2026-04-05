@@ -794,7 +794,7 @@ class MergePhase:
                 if targets_changed or sampling_changed:
                     logger.info(
                         "Merge params changed (%s) — deleting merge sidecars to re-measure quality",
-                        "quality targets" if targets_changed else "metrics_sampling",
+                        "quality targets" if targets_changed else "sampling",
                     )
                     for sidecar in final_dir.glob("*.yaml"):
                         try:

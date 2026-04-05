@@ -21,7 +21,7 @@ from pyqenc.constants import (
 )
 from pyqenc.models import CropParams, VideoMetadata
 from pyqenc.quality import ChunkQualityStats, MetricType
-from pyqenc.state import JobState
+from pyqenc.state import JobState, MeasureSidecar
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg_async
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
@@ -428,9 +428,11 @@ def _write_sidecar(
 ) -> None:
     """Write a metrics sidecar YAML file using the ``.tmp``-then-rename protocol.
 
-    Records source/target paths, durations, subsample factor, crop parameters,
-    and all computed metric statistics.  On write failure logs a warning and
-    returns without raising so that the graph and screenshots are not lost.
+    Records source/target paths, durations, sampling factor, crop parameters,
+    and all computed metric statistics in the flat ``{metric_stat: value}``
+    format consistent with ``MetricsSidecar`` (e.g. ``vmaf_min``, ``ssim_median``).
+    On write failure logs a warning and returns without raising so that the
+    graph and screenshots are not lost.
 
     Args:
         path:                       Destination path for the sidecar YAML.
@@ -450,25 +452,26 @@ def _write_sidecar(
         "right":  crop_params.right,
     }
 
-    # Serialise metrics: {metric_name: {stat_name: value}}
-    metrics_dict: dict[str, dict[str, float]] = {
-        metric_type.value: dict(stats)
+    # Flatten ChunkQualityStats → {metric_stat: value}, e.g. vmaf_min, ssim_median
+    flat_metrics: dict[str, float] = {
+        f"{metric_type.value}_{stat}": value
         for metric_type, stats in metrics.items()
+        for stat, value in stats.items()
     }
 
-    data: dict = {
-        "source_video":               str(source_video),
-        "target_video":               str(target_video),
-        "source_duration_seconds":    source_duration_seconds,
-        "target_duration_seconds":    target_duration_seconds,
-        "effective_duration_seconds": effective_duration_seconds,
-        "subsample_factor":           subsample_factor,
-        "crop_params":                crop_dict,
-        "metrics":                    metrics_dict,
-    }
+    sidecar = MeasureSidecar(
+        source_video               = source_video,
+        target_video               = target_video,
+        source_duration_seconds    = source_duration_seconds,
+        target_duration_seconds    = target_duration_seconds,
+        effective_duration_seconds = effective_duration_seconds,
+        sampling                   = subsample_factor,
+        crop_params                = crop_dict,
+        metrics                    = flat_metrics,
+    )
 
     try:
-        write_yaml_atomic(path, data)
+        write_yaml_atomic(path, sidecar.to_yaml_dict())
         logger.debug("Wrote metrics sidecar: %s", path)
     except Exception as exc:
         logger.warning("Failed to write metrics sidecar %s: %s", path, exc)

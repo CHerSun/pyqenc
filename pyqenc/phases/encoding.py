@@ -624,14 +624,14 @@ class ChunkEncoder:
             try:
                 crf              = Decimal(str(sidecar_data["crf"])).quantize(gran)
                 metrics          = {k: float(v) for k, v in sidecar_data.get("metrics", {}).items()}
-                raw_sampling     = sidecar_data.get("metrics_sampling")
+                raw_sampling     = sidecar_data.get("sampling")
                 sidecar_sampling = int(raw_sampling) if raw_sampling is not None else None
 
                 # Stale metrics — measured at a different sampling rate; skip for history
                 # so the attempt is re-measured (without re-encoding) on the next run.
                 if sidecar_sampling is not None and sidecar_sampling != self._metrics_sampling:
                     logger.debug(
-                        "Skipping stale sidecar %s: metrics_sampling %d != current %d",
+                        "Skipping stale sidecar %s: sampling %d != current %d",
                         candidate.name, sidecar_sampling, self._metrics_sampling,
                     )
                     continue
@@ -892,7 +892,7 @@ class ChunkEncoder:
                     sidecar = _read_metrics_sidecar(existing.path)
                     # Validate sidecar contains all required metric keys (Req 10.4)
                     required_keys = {f"{t.metric}_{t.statistic}" for t in quality_targets}
-                    raw_sidecar_sampling = sidecar.get("metrics_sampling") if sidecar is not None else None
+                    raw_sidecar_sampling = sidecar.get("sampling") if sidecar is not None else None
                     sidecar_sampling     = int(raw_sidecar_sampling) if raw_sidecar_sampling is not None else None
                     sampling_stale       = (
                         sidecar_sampling is not None
@@ -963,7 +963,7 @@ class ChunkEncoder:
                     else:
                         # File exists but sidecar is missing, incomplete, or stale (sampling changed)
                         reason = (
-                            f"metrics_sampling changed ({sidecar_sampling} → {self._metrics_sampling})"
+                            f"sampling changed ({sidecar_sampling} → {self._metrics_sampling})"
                             if sampling_stale
                             else "sidecar missing or incomplete"
                         )

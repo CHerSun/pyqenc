@@ -1212,16 +1212,18 @@ class QualityEvaluator:
             encoded.name, reference.name, uuid_hex,
         )
 
-        def _make_progress_callback(last_time: list[float]) -> Callable[[int, float], None] | None:
-            """Build a ProgressCallback that converts absolute out_time_s to bar deltas."""
+        def _make_progress_callback(metric: MetricType, last_time: list[float]) -> Callable[[int, float], None] | None:
+            """Build a ProgressCallback that converts absolute out_time_s to complexity-weighted bar deltas."""
             if bar_advance is None or duration_seconds <= 0:
                 return None
+
+            weight = metric.info.complexity
 
             def _callback(frame: int, out_time_s: float) -> None:
                 delta = max(0.0, out_time_s - last_time[0])
                 delta = min(delta, duration_seconds - last_time[0])
                 if delta > 0:
-                    bar_advance(delta)
+                    bar_advance(delta * weight)
                     last_time[0] = out_time_s
 
             return _callback
@@ -1243,7 +1245,7 @@ class QualityEvaluator:
                 subsample=metrics_sampling,
                 output_prefix=tmp_prefix,
                 cwd=cwd,
-                progress_callback=_make_progress_callback([0.0]),
+                progress_callback=_make_progress_callback(metric, [0.0]),
                 output_extension=".tmp",
             )
             if not result.success:
@@ -1310,7 +1312,6 @@ class QualityEvaluator:
         output_dir.mkdir(parents=True, exist_ok=True)
         output_prefix = str(output_dir / f"{encoded.stem}.")
 
-        _NUM_METRIC_PASSES = 3
         duration_seconds: float | None = None
         fps_value:        float | None = None
         try:
@@ -1324,8 +1325,10 @@ class QualityEvaluator:
         resolved_title = bar_title if bar_title is not None \
             else encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
 
+        _total_complexity = sum(m.info.complexity for m in MetricType)
+
         if show_progress:
-            with ProgressBar(_NUM_METRIC_PASSES * (duration_seconds or 0.0), title=f"Metrics: {resolved_title}", show_counters=False) as advance:
+            with ProgressBar(_total_complexity * (duration_seconds or 0.0), title=f"Metrics: {resolved_title}", show_counters=False) as advance:
                 psnr_log, ssim_log, vmaf_json = await self._generate_metrics(
                     encoded,
                     reference,
@@ -1405,8 +1408,7 @@ class QualityEvaluator:
         # Generate output prefix for metric files
         output_prefix = str(output_dir / f"{encoded.stem}.")
 
-        # Probe duration for progress bar total (3 metric passes)
-        _NUM_METRIC_PASSES = 3
+        # Probe duration for progress bar total (weighted by metric complexity)
         duration_seconds: float | None = None
         fps_value:        float | None = None
         try:
@@ -1418,9 +1420,10 @@ class QualityEvaluator:
             pass
 
         bar_title = encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
+        _total_complexity = sum(m.info.complexity for m in MetricType)
 
         if show_progress:
-            with ProgressBar(_NUM_METRIC_PASSES * (duration_seconds or 0.0), title=f"Metrics: {bar_title}", show_counters=False) as advance:
+            with ProgressBar(_total_complexity * (duration_seconds or 0.0), title=f"Metrics: {bar_title}", show_counters=False) as advance:
                 psnr_log, ssim_log, vmaf_json = asyncio.run(
                     self._generate_metrics(
                         encoded,
