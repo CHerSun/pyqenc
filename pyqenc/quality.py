@@ -546,6 +546,7 @@ def _find_worst_target(
 def _score_failing_attempt(
     metrics:         dict[str, float],
     quality_targets: list[QualityTarget],
+    crf:             Decimal | None = None,
 ) -> float:
     """Compute a composite score for a failing attempt based on failing targets only.
 
@@ -564,11 +565,14 @@ def _score_failing_attempt(
     Args:
         metrics:         Measured quality metrics keyed as ``"<metric>_<stat>"``.
         quality_targets: Quality targets to evaluate against.
+        crf:             Unused; present for drop-in compatibility with
+                         ``_score_failing_attempt_by_crf``.
 
     Returns:
         Sum of normalized deficits for failing targets (≤ 0.0).
         Returns ``-float("inf")`` when no target has a valid result in *metrics*.
     """
+    _ = crf
     total = 0.0
     found = False
     for target in quality_targets:
@@ -587,23 +591,30 @@ def _score_failing_attempt(
 def _score_failing_attempt_by_crf(
     metrics:         dict[str, float],
     quality_targets: list[QualityTarget],
+    crf:             Decimal | None = None,
 ) -> float:
-    """Placeholder that always returns 0.0; CRF comparison is done externally.
+    """Score a failing attempt by CRF: lower CRF → higher score.
 
-    This function exists solely to provide a drop-in-compatible footprint with
-    ``_score_failing_attempt`` so callers can switch strategies without changing
-    call sites.  The actual CRF-based comparison (lower CRF = better) is handled
-    by the caller using the attempt's ``crf`` attribute directly.
+    Drop-in alternative to ``_score_failing_attempt`` that restores the original
+    behaviour of preferring the attempt with the lowest CRF value (i.e. highest
+    quality setting).  Useful as a fallback when metric-based scoring is
+    unavailable or undesirable.
+
+    Score is ``-float(crf)`` so that lower CRF values produce a higher (less
+    negative) score, matching the "higher = better" convention used by
+    ``_score_failing_attempt``.
 
     Args:
-        metrics:         Unused.
-        quality_targets: Unused.
+        metrics:         Unused; present for drop-in compatibility.
+        quality_targets: Unused; present for drop-in compatibility.
+        crf:             CRF value of the attempt.  When ``None``, returns
+                         ``-float("inf")`` (worst possible score).
 
     Returns:
-        Always ``0.0``.
+        ``-float(crf)`` or ``-float("inf")`` when *crf* is ``None``.
     """
     _ = metrics, quality_targets
-    return 0.0
+    return -float(crf) if crf is not None else -float("inf")
 
 
 def adjust_crf(

@@ -945,7 +945,7 @@ class ChunkEncoder:
                                 best_metrics  = metrics_dict
                                 best_string   = " NEW BEST"
                         else:
-                            if best_failing_attempt is None or _score_failing_attempt(metrics_dict, quality_targets) > _score_failing_attempt(best_failing_metrics, quality_targets):
+                            if best_failing_attempt is None or _score_failing_attempt(metrics_dict, quality_targets, existing.crf) > _score_failing_attempt(best_failing_metrics, quality_targets, best_failing_crf):
                                 best_failing_crf     = existing.crf
                                 best_failing_attempt = existing
                                 best_failing_metrics = metrics_dict
@@ -1104,7 +1104,7 @@ class ChunkEncoder:
                     best_metrics  = all_metrics
                     best_string   = " NEW BEST"
             else:
-                if best_failing_attempt is None or _score_failing_attempt(all_metrics, quality_targets) > _score_failing_attempt(best_failing_metrics, quality_targets):
+                if best_failing_attempt is None or _score_failing_attempt(all_metrics, quality_targets, current_crf) > _score_failing_attempt(best_failing_metrics, quality_targets, best_failing_crf):
                     best_failing_crf     = current_crf
                     best_failing_attempt = attempt_meta
                     best_failing_metrics = all_metrics
