@@ -14,6 +14,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from unittest.mock import MagicMock
+
 import pytest
 import yaml
 
@@ -74,7 +76,7 @@ def _make_phase(
     crop_params: CropParams | None = None,
 ) -> JobPhase:
     config = _make_config(tmp_path, source, force=force, crop_params=crop_params)
-    return JobPhase(config)
+    return JobPhase(config, collector=MagicMock())
 
 
 def _persist_job(work_dir: Path, source: Path, file_size: int | None = None) -> None:

@@ -40,10 +40,9 @@ def test_auto_subcommand_help():
     )
 
     assert result.returncode == 0
-    assert "--quality-target" in result.stdout
+    assert "--targets" in result.stdout
     assert "--strategies" in result.stdout
-    assert "--keep-all" in result.stdout
-    assert "--no-crop" in result.stdout
+    assert "--all-strategies" in result.stdout
     assert "--crop" in result.stdout
 
 

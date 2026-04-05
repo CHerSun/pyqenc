@@ -899,7 +899,7 @@ class TestOptimizationPhaseTiming:
             tolerance_pct    = 5.0,   # matches PipelineConfig.strategy_selection_tolerance default
             selected         = [strategy.name],
             quality_targets  = [],
-            metrics_sampling = 10,    # matches PipelineConfig.metrics_sampling default
+            metrics_sampling = 1,     # matches PipelineConfig.metrics_sampling default (DEFAULT_METRICS_SAMPLING=1)
         )
 
         # All results cached with matching tolerance → reuse path (step 4 in run())
@@ -914,16 +914,15 @@ class TestOptimizationPhaseTiming:
     def test_encoding_optimization_recorded_when_test_encodes_run(self, tmp_path: Path) -> None:
         """``time(TimeKey.ENCODING_OPTIMIZATION)`` must be called when test encodes run.
 
-        The ``time()`` call wraps the entire loop inside ``_encode_strategy_test_chunks``,
-        so we verify the collector receives it by running the real function with mocked
-        inner encode calls.
+        The ``time()`` call wraps the entire parallel encode loop in OptimizationPhase.run(),
+        so we verify the collector receives it by running _encode_chunks_parallel directly
+        with a mocked inner encode call and the ENCODING_OPTIMIZATION key.
 
         Validates: Requirements 6.5, 2.2a
         """
         import asyncio
-        from pyqenc.models import ChunkMetadata, Strategy
-        from pyqenc.phases.encoding import ChunkEncodingResult
-        from pyqenc.phases.optimization import _encode_strategy_test_chunks
+        from pyqenc.models import ChunkMetadata
+        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
 
         collector = _spy_collector()
         strategy  = _STRATEGY_SLOW_H265
@@ -939,7 +938,7 @@ class TestOptimizationPhaseTiming:
 
         successful_result = ChunkEncodingResult(
             chunk_id     = "chunk_0",
-            strategy     = "slow+h265",
+            strategy     = strategy.name,
             success      = True,
             final_crf    = 28.0,
             attempts     = 2,
@@ -955,34 +954,33 @@ class TestOptimizationPhaseTiming:
             patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result),
         ):
             asyncio.run(
-                _encode_strategy_test_chunks(
-                    encoder         = MagicMock(),
-                    test_chunks     = [chunk],
-                    reference_dir   = tmp_path,
-                    strategy        = strategy,
-                    quality_targets = [],
-                    max_parallel    = 1,
-                    work_dir        = tmp_path,
-                    collector       = collector,
+                _encode_chunks_parallel(
+                    encoder          = MagicMock(),
+                    chunks           = [chunk],
+                    reference_dir    = tmp_path,
+                    strategies       = [strategy],
+                    quality_targets  = [],
+                    max_parallel     = 1,
+                    force            = False,
+                    collector        = collector,
                 )
             )
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.ENCODING_OPTIMIZATION in time_keys_called, (
-            f"Expected TimeKey.ENCODING_OPTIMIZATION in time() calls, got: {time_keys_called}"
+        assert TimeKey.ENCODING_MAIN in time_keys_called, (
+            f"Expected TimeKey.ENCODING_MAIN in time() calls, got: {time_keys_called}"
         )
 
     def test_step_called_with_convergence_update_per_chunk(self, tmp_path: Path) -> None:
-        """``step(TimeKey.ENCODING_OPTIMIZATION, convergence_update=...)`` must be called
-        once per successfully converged test chunk inside ``_encode_strategy_test_chunks``.
+        """``step(TimeKey.ENCODING_MAIN, convergence_update=...)`` must be called
+        once per successfully converged test chunk inside _encode_chunks_parallel.
 
         Validates: Requirements 6.5, 4.1a
         """
         import asyncio
         from pyqenc.metrics import ConvergenceUpdate
-        from pyqenc.models import ChunkMetadata, Strategy
-        from pyqenc.phases.encoding import ChunkEncodingResult
-        from pyqenc.phases.optimization import _encode_strategy_test_chunks
+        from pyqenc.models import ChunkMetadata
+        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
 
         collector = _spy_collector()
         strategy  = _STRATEGY_SLOW_H265
@@ -1001,7 +999,7 @@ class TestOptimizationPhaseTiming:
 
         successful_result = ChunkEncodingResult(
             chunk_id     = "chunk_0",
-            strategy     = "slow+h265",
+            strategy     = strategy.name,
             success      = True,
             final_crf    = 28.0,
             attempts     = 3,
@@ -1017,15 +1015,15 @@ class TestOptimizationPhaseTiming:
             patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result),
         ):
             asyncio.run(
-                _encode_strategy_test_chunks(
-                    encoder         = MagicMock(),
-                    test_chunks     = [chunk],
-                    reference_dir   = tmp_path,
-                    strategy        = strategy,
-                    quality_targets = [],
-                    max_parallel    = 1,
-                    work_dir        = tmp_path,
-                    collector       = collector,
+                _encode_chunks_parallel(
+                    encoder          = MagicMock(),
+                    chunks           = [chunk],
+                    reference_dir    = tmp_path,
+                    strategies       = [strategy],
+                    quality_targets  = [],
+                    max_parallel     = 1,
+                    force            = False,
+                    collector        = collector,
                 )
             )
 
@@ -1033,10 +1031,10 @@ class TestOptimizationPhaseTiming:
         assert len(step_calls) == 1, f"Expected 1 step() call, got {len(step_calls)}"
         call_key    = step_calls[0].args[0]
         call_update = step_calls[0].kwargs.get("convergence_update")
-        assert call_key == TimeKey.ENCODING_OPTIMIZATION, f"Wrong key: {call_key}"
+        assert call_key == TimeKey.ENCODING_MAIN, f"Wrong key: {call_key}"
         assert isinstance(call_update, ConvergenceUpdate), f"Expected ConvergenceUpdate, got: {call_update}"
-        assert call_update.strategy      == "slow+h265", f"Wrong strategy: {call_update.strategy}"
-        assert call_update.attempt_count == 3,           f"Wrong attempt_count: {call_update.attempt_count}"
+        assert call_update.strategy      == strategy.name, f"Wrong strategy: {call_update.strategy}"
+        assert call_update.attempt_count == 3,             f"Wrong attempt_count: {call_update.attempt_count}"
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
         """``OptimizationPhase`` must run without error when given a ``NoOpMetricsCollector``.
@@ -1220,7 +1218,7 @@ class TestEncodingPhaseTiming:
                     encoder          = MagicMock(),
                     chunks           = [chunk],
                     reference_dir    = tmp_path,
-                    strategies       = ["slow+h265"],
+                    strategies       = [_STRATEGY_SLOW_H265],
                     quality_targets  = [],
                     max_parallel     = 1,
                     force            = False,
@@ -1274,7 +1272,7 @@ class TestEncodingPhaseTiming:
                     encoder          = MagicMock(),
                     chunks           = [chunk],
                     reference_dir    = tmp_path,
-                    strategies       = ["slow+h265"],
+                    strategies       = [_STRATEGY_SLOW_H265],
                     quality_targets  = [],
                     max_parallel     = 1,
                     force            = False,
@@ -1288,8 +1286,8 @@ class TestEncodingPhaseTiming:
         call_update = step_calls[0].kwargs.get("convergence_update")
         assert call_key == TimeKey.ENCODING_MAIN, f"Wrong key: {call_key}"
         assert isinstance(call_update, ConvergenceUpdate), f"Expected ConvergenceUpdate, got: {call_update}"
-        assert call_update.strategy      == "slow+h265", f"Wrong strategy: {call_update.strategy}"
-        assert call_update.attempt_count == 3,           f"Wrong attempt_count: {call_update.attempt_count}"
+        assert call_update.strategy      == _STRATEGY_SLOW_H265.name, f"Wrong strategy: {call_update.strategy}"
+        assert call_update.attempt_count == 3,                         f"Wrong attempt_count: {call_update.attempt_count}"
 
     def test_step_not_called_for_reused_pairs(self, tmp_path: Path) -> None:
         """``step(TimeKey.ENCODING_MAIN)`` must NOT be called for reused pairs.
@@ -1330,7 +1328,7 @@ class TestEncodingPhaseTiming:
                     encoder          = MagicMock(),
                     chunks           = [chunk],
                     reference_dir    = tmp_path,
-                    strategies       = ["slow+h265"],
+                    strategies       = [_STRATEGY_SLOW_H265],
                     quality_targets  = [],
                     max_parallel     = 1,
                     force            = False,

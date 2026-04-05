@@ -190,7 +190,7 @@ class TestResolveTmpPathsOutputValidation:
         from pyqenc.utils.ffmpeg_runner import _resolve_tmp_paths
 
         out = Path("/tmp/output.mkv")
-        cmd: list = ["ffmpeg", "-i", "input.mkv", str(out)]
+        cmd: list = ["ffmpeg", "-i", "input.mkv", out]
         modified_cmd, mapping = _resolve_tmp_paths(cmd, out)
         assert len(mapping) == 1
         assert out in mapping.values()

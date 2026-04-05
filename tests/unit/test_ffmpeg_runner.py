@@ -177,22 +177,21 @@ class TestRunFfmpegEventLoopGuard:
 class TestResolveTmpPaths:
     def test_single_output_substituted_with_tmp(self) -> None:
         out = Path("/tmp/output.mkv")
-        cmd: list = ["ffmpeg", "-i", "input.mkv", str(out)]
+        cmd: list = ["ffmpeg", "-i", "input.mkv", out]
         modified_cmd, tmp_to_final = _resolve_tmp_paths(cmd, out)
         # Final path replaced with .tmp sibling
-        assert str(out) not in [str(a) for a in modified_cmd]
+        assert out not in modified_cmd
         tmp_path = out.parent / f"{out.stem}.tmp"
-        assert str(tmp_path) in [str(a) for a in modified_cmd]
+        assert tmp_path in modified_cmd
         assert tmp_to_final[tmp_path] == out
 
     def test_multiple_outputs_all_substituted(self) -> None:
         out1 = Path("/tmp/video.mkv")
         out2 = Path("/tmp/audio.mka")
-        cmd: list = ["ffmpeg", "-i", "in.mkv", str(out1), str(out2)]
+        cmd: list = ["ffmpeg", "-i", "in.mkv", out1, out2]
         modified_cmd, tmp_to_final = _resolve_tmp_paths(cmd, [out1, out2])
-        cmd_strs = [str(a) for a in modified_cmd]
-        assert str(out1) not in cmd_strs
-        assert str(out2) not in cmd_strs
+        assert out1 not in modified_cmd
+        assert out2 not in modified_cmd
         assert len(tmp_to_final) == 2
 
     def test_raises_value_error_when_path_not_in_cmd(self) -> None:
@@ -204,7 +203,7 @@ class TestResolveTmpPaths:
     def test_tmp_stem_has_no_original_suffix(self) -> None:
         """Req 7.3: tmp file is <stem>.tmp, not <stem><original_suffix>.tmp."""
         out = Path("/tmp/chunk.1920x800.crf22.0.mkv")
-        cmd: list = ["ffmpeg", "-i", "in.mkv", str(out)]
+        cmd: list = ["ffmpeg", "-i", "in.mkv", out]
         _, tmp_to_final = _resolve_tmp_paths(cmd, out)
         tmp_path = list(tmp_to_final.keys())[0]
         assert tmp_path.name == "chunk.1920x800.crf22.0.tmp"
