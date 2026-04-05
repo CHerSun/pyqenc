@@ -11,6 +11,7 @@ Covers:
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,7 @@ _CHUNK_ID   = "00꞉00꞉00․000-00꞉00꞉13․330"
 _STRATEGY   = "slow+h265-aq"
 _SAFE_STRAT = "slow_h265-aq"
 _RESOLUTION = "1920x800"
-_CRF        = 20.0
+_CRF        = Decimal("20.5")
 
 
 def _encoded_dir(work_dir: Path) -> Path:
@@ -33,8 +34,8 @@ def _encoded_dir(work_dir: Path) -> Path:
 
 def _make_complete_pair(
     encoded_dir: Path,
-    chunk_id:    str   = _CHUNK_ID,
-    crf:         float = _CRF,
+    chunk_id:    str     = _CHUNK_ID,
+    crf:         Decimal = _CRF,
 ) -> Path:
     """Write a winning .mkv + result sidecar into encoded_dir.
 
@@ -47,7 +48,7 @@ def _make_complete_pair(
     sidecar = encoded_dir / f"{chunk_id}.{_RESOLUTION}.yaml"
     mkv.write_bytes(b"\x00" * 64)
     sidecar.write_text(
-        yaml.dump({"crf": crf, "targets_met": True, "metrics": {"vmaf_min": 95.0}}),
+        yaml.dump({"crf": str(crf), "targets_met": True, "metrics": {"vmaf_min": 95.0}}),
         encoding="utf-8",
     )
     return mkv

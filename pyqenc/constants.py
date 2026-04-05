@@ -134,6 +134,14 @@ DEFAULT_SCREENSHOT_COUNT  = 20
 DEFAULT_METRICS_SAMPLING  = 1
 """Default frame subsampling factor for metric computation."""
 
+# Config file locations (used by ConfigManager and the `config` subcommand)
+CONFIG_FILENAME_CWD  = "pyqenc.yaml"
+"""Config filename searched in the current working directory."""
+CONFIG_FILENAME_HOME = "config.yaml"
+"""Config filename stored under the user-level config directory."""
+CONFIG_DIR_HOME      = ".config/pyqenc"
+"""Relative path under the user home directory for the user-level config."""
+
 # Artifact discovery patterns
 CHUNK_GLOB_PATTERN = "*.mkv"
 """Glob mask used to discover chunk files in a chunk output directory."""

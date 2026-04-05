@@ -567,6 +567,110 @@ def _cmd_merge(args: argparse.Namespace) -> int:
         return 1
 
 
+def _create_config_subcommand(subparsers) -> None:
+    """Create the 'config' subcommand for copying configuration files."""
+    p = subparsers.add_parser(
+        "config",
+        help="Copy the active config to a target location for customisation",
+        description=(
+            "Finds the active config (current dir > user home > built-in default) "
+            "and copies it to the target location. "
+            "Without -y only announces what would be done."
+        ),
+    )
+    p.add_argument(
+        "target_dir",
+        nargs="?",
+        type=Path,
+        default=None,
+        help=(
+            "Target directory for the config copy. "
+            "Omit to target user home (~/.config/pyqenc/config.yaml). "
+            "Use '.' for the current working directory (pyqenc.yaml)."
+        ),
+    )
+    p.add_argument(
+        "-y", "--execute",
+        action="store_true",
+        default=False,
+        help="Execute the copy (default: dry-run, only announce).",
+    )
+    p.add_argument(
+        "--log-level",
+        choices=["debug", "info", "warning", "critical"],
+        default="info",
+        help="Logging level (default: info)",
+    )
+    p.set_defaults(func=_cmd_config)
+
+
+def _cmd_config(args: argparse.Namespace) -> int:
+    """Execute the 'config' subcommand."""
+    import shutil
+
+    from pyqenc.config import find_config_source
+    from pyqenc.constants import (
+        CONFIG_DIR_HOME,
+        CONFIG_FILENAME_CWD,
+        CONFIG_FILENAME_HOME,
+    )
+
+    # Resolve target path
+    if args.target_dir is None:
+        target = Path.home() / CONFIG_DIR_HOME / CONFIG_FILENAME_HOME
+    else:
+        target_dir = args.target_dir.resolve()
+        if target_dir == Path.cwd().resolve():
+            target = Path.cwd() / CONFIG_FILENAME_CWD
+        else:
+            target = target_dir / CONFIG_FILENAME_HOME
+
+    # Find source
+    try:
+        source = find_config_source()
+    except FileNotFoundError as e:
+        logger.critical("Cannot locate any config file: %s", e)
+        return 1
+
+    source = source.resolve()
+    target = target.resolve()
+
+    logger.debug("Config source resolved to: %s", source)
+    logger.debug("Config target resolved to: %s", target)
+
+    # Guard: source == target
+    if source == target:
+        logger.error(
+            "Source and target are the same file (%s) — nothing to do.", source
+        )
+        return 1
+
+    execute: bool = args.execute
+
+    if not execute:
+        logger.info("DRY-RUN: would copy config")
+        logger.info("  from: %s", source)
+        logger.info("    to: %s", target)
+        logger.info("Run with -y / --execute to apply.")
+        return 0
+
+    # Execute copy (.tmp-then-rename for atomicity)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, tmp)
+        tmp.rename(target)
+    except Exception as e:
+        logger.critical("Failed to copy config: %s", e)
+        tmp.unlink(missing_ok=True)
+        return 1
+
+    logger.info("Config copied")
+    logger.info("  from: %s", source)
+    logger.info("    to: %s", target)
+    return 0
+
+
 def _create_measure_subcommand(subparsers) -> None:
     """Create the 'measure' subcommand for standalone quality measurement."""
     p = subparsers.add_parser("measure", help="Measure quality metrics between source and encoded video(s)")
@@ -734,6 +838,7 @@ Examples:
     _create_encode_subcommand(subparsers)
     _create_audio_subcommand(subparsers)
     _create_merge_subcommand(subparsers)
+    _create_config_subcommand(subparsers)
     _create_measure_subcommand(subparsers)
 
     # Parse arguments

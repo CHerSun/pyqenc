@@ -14,7 +14,12 @@ from typing import Any
 
 import yaml
 
-from pyqenc.constants import DEFAULT_METRICS_SAMPLING
+from pyqenc.constants import (
+    CONFIG_DIR_HOME,
+    CONFIG_FILENAME_CWD,
+    CONFIG_FILENAME_HOME,
+    DEFAULT_METRICS_SAMPLING,
+)
 from pyqenc.models import CodecConfig, Strategy
 
 
@@ -96,33 +101,13 @@ class ConfigManager:
             config_path: Optional path to configuration file
         """
         if config_path and config_path.exists():
-            # Load from specified path
             with open(config_path, 'r', encoding='utf-8') as f:
                 self._config = yaml.safe_load(f)
             return
 
-        # Search default locations
-        search_paths = [
-            Path.cwd() / "pyqenc.yaml",
-            Path.home() / ".config" / "pyqenc" / "config.yaml",
-        ]
-
-        for path in search_paths:
-            if path.exists():
-                with open(path, 'r', encoding='utf-8') as f:
-                    self._config = yaml.safe_load(f)
-                return
-
-        # Fall back to built-in default_config.yaml
-        default_config_path = Path(__file__).parent / "default_config.yaml"
-        if default_config_path.exists():
-            with open(default_config_path, 'r', encoding='utf-8') as f:
-                self._config = yaml.safe_load(f)
-        else:
-            raise FileNotFoundError(
-                f"Could not find default configuration at {default_config_path}. "
-                f"Searched paths: {search_paths}"
-            )
+        source = find_config_source()
+        with open(source, 'r', encoding='utf-8') as f:
+            self._config = yaml.safe_load(f)
 
     def _parse_config(self) -> None:
         """Parse loaded configuration into structured objects."""
@@ -470,4 +455,31 @@ class ConfigManager:
             Metrics sampling factor (minimum 1, default 10).
         """
         return int(self._config.get("metrics", {}).get("sampling", DEFAULT_METRICS_SAMPLING))
+
+
+def find_config_source() -> Path:
+    """Return the config file that would be loaded by :class:`ConfigManager`.
+
+    Searches in priority order:
+    1. ``pyqenc.yaml`` in the current working directory
+    2. ``~/.config/pyqenc/config.yaml`` (user home)
+    3. Built-in ``default_config.yaml`` bundled with the package
+
+    Returns:
+        Path to the first config file found.
+
+    Raises:
+        FileNotFoundError: If even the built-in default is missing (should never happen).
+    """
+    candidates: list[Path] = [
+        Path.cwd() / CONFIG_FILENAME_CWD,
+        Path.home() / CONFIG_DIR_HOME / CONFIG_FILENAME_HOME,
+        Path(__file__).parent / "default_config.yaml",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    raise FileNotFoundError(
+        f"No config found. Searched: {candidates}"
+    )
 
