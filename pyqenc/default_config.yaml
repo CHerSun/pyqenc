@@ -81,11 +81,12 @@
 # All metrics are scaled to 0-100 range (e.g. ssim-min:94 means raw SSIM ≥ 0.94).
 # Supported metrics: vmaf, ssim, psnr
 # Supported statistics: min, med, max, p05, p25, p75, p95
+# NOTE: avoid using min or max statistics unless you know what you're doing. Use p05 instead of min.
 default_targets:
-  - "vmaf-min:94"   # VMAF minimum per-chunk score
-  - "vmaf-med:97"   # VMAF median per-chunk score
-  - "psnr-min:42"   # PSNR minimum per-chunk score
-  - "ssim-min:94"   # SSIM minimum per-chunk score (raw ≥ 0.94)
+  - "vmaf-p05:95"   # VMAF p05 (min) per-chunk score
+  - "vmaf-med:97.5" # VMAF median per-chunk score
+  - "psnr-p05:45"   # PSNR p05 (min) per-chunk score
+  - "ssim-p05:98"   # SSIM p05 (min) per-chunk score (raw ≥ 0.98)
 
 # Default Strategies
 # ------------------
