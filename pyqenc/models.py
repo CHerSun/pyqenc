@@ -266,7 +266,7 @@ class QualityTarget(BaseModel):
 
     Attributes:
         metric:    Metric type (vmaf, ssim, psnr).
-        statistic: Statistical measure (min, median, max).
+        statistic: Statistical measure (min, median, max, p05, p25, p75, p95).
         value:     Target value for the metric.
     """
 
@@ -279,7 +279,8 @@ class QualityTarget(BaseModel):
         """Parse quality target from string format.
 
         Args:
-            target_str: Target string like ``'vmaf-min:95'`` or ``'ssim-med:98'``.
+            target_str: Target string like ``'vmaf-min:95'``, ``'ssim-med:98'``,
+                        or ``'vmaf-p25:90'``.
 
         Returns:
             QualityTarget instance.
@@ -296,7 +297,7 @@ class QualityTarget(BaseModel):
             if metric.lower() not in valid_metrics:
                 raise ValueError(f"Invalid metric '{metric}'. Must be one of: {valid_metrics}")
 
-            valid_stats = {"min", "med", "median", "max"}
+            valid_stats = {"min", "med", "median", "max", "p05", "p25", "p75", "p95"}
             if statistic.lower() not in valid_stats:
                 raise ValueError(f"Invalid statistic '{statistic}'. Must be one of: {valid_stats}")
 

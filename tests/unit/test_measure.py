@@ -369,7 +369,7 @@ class TestWriteSidecar:
     """Tests for _write_sidecar failure handling."""
 
     def _make_metrics(self) -> dict:
-        stats: MetricStats = {"min": 90.0, "median": 95.0, "max": 99.0, "std": 1.5}
+        stats: MetricStats = {"min": 90.0, "p05": 91.0, "p25": 93.0, "median": 95.0, "p75": 97.0, "p95": 98.5, "max": 99.0, "std": 1.5}
         return {MetricType.VMAF: stats}
 
     def test_write_failure_logs_warning_and_does_not_raise(

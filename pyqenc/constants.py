@@ -133,6 +133,13 @@ DEFAULT_SCREENSHOT_COUNT  = 20
 """Default number of screenshots captured from each video."""
 DEFAULT_METRICS_SAMPLING  = 1
 """Default frame subsampling factor for metric computation."""
+KEEP_RAW_METRICS_FILES    = False
+"""When ``False`` (default), raw metric log files (``.psnr.log``, ``.ssim.log``,
+``.vmaf.json``), their ``.stats`` sidecars, and the containing metrics subdirectory
+are deleted after the graph PNG is generated.  Set to ``True`` to retain them for
+debugging.  This is an internal mechanics flag — separate from user-facing cleanup
+settings — because artifact recovery is based on the sidecar YAML (which stores the
+full ``MetricStats`` snapshot) rather than the raw logs."""
 
 # Config file locations (used by ConfigManager and the `config` subcommand)
 CONFIG_FILENAME_CWD  = "pyqenc.yaml"

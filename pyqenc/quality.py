@@ -211,10 +211,19 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
 
 
 class MetricStats(TypedDict):
-    """Key statistics for a single metric."""
+    """Key statistics for a single metric.
+
+    Subset of ``_MetricStatistics`` stored in sidecars and used for targeting.
+    Includes the same percentile selection used by the visualization plots:
+    min, p05, p25, median (p50), p75, p95, max, std.
+    """
 
     min:    float
+    p05:    float
+    p25:    float
     median: float
+    p75:    float
+    p95:    float
     max:    float
     std:    float
 

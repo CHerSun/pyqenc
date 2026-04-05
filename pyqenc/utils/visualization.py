@@ -21,6 +21,7 @@ import matplotlib
 
 from pyqenc.constants import (
     DEFAULT_METRICS_SAMPLING,
+    KEEP_RAW_METRICS_FILES,
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
@@ -617,10 +618,10 @@ def create_unified_plot(
 
         summary_text = (
             f"{metric_type.value.upper()}:\n"
-            f"  Min: {display_stats['min']:>5.1f}{style.unit}\n"
-            f"  Med: {display_stats['p50']:>5.1f}{style.unit}\n"
-            f"  {max_label}: {max_value:>5.1f}{style.unit}\n"
-            f"  Std: {display_stats['std']:>5.1f}{style.unit}\n"
+            f"  Min: {display_stats['min']:>6.2f}{style.unit}\n"
+            f"  Med: {display_stats['p50']:>6.2f}{style.unit}\n"
+            f"  {max_label}: {max_value:>6.2f}{style.unit}\n"
+            f"  Std: {display_stats['std']:>6.2f}{style.unit}\n"
             f"  Lossless: {lossless_count} ({style.lossless_label})"
         )
         _summary_boxes.append((
@@ -656,7 +657,7 @@ def create_unified_plot(
         for i, (pos, val, label) in enumerate(zip(y_positions, stat_values, bar_labels)):
             if not (np.isnan(val) or np.isinf(val)):
                 ax_stats.barh(pos, val, color=colors[i], alpha=_BAR_ALPHA, height=_BAR_HEIGHT)
-                ax_stats.text(val, pos, f" {val:.1f}{style.unit}",
+                ax_stats.text(val, pos, f" {val:.2f}{style.unit}",
                               va="center", ha="left", fontsize=_FONT_BAR_LABEL, color=style.color)
 
         ax_stats.set_yticks(y_positions)
@@ -726,7 +727,7 @@ def create_unified_plot(
 # ---------------------------------------------------------------------------
 
 def _extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -> MetricStats:
-    """Extract the four key statistics from a full statistics dict.
+    """Extract the key statistics subset from a full statistics dict.
 
     For PSNR, substitutes the highest non-inf percentile for ``max`` when the
     true maximum is infinite.
@@ -736,7 +737,8 @@ def _extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -
         metric_type: Metric type (affects PSNR max handling).
 
     Returns:
-        ``MetricStats`` with ``min``, ``median``, ``max``, and ``std``.
+        ``MetricStats`` with ``min``, ``p05``, ``p25``, ``median``, ``p75``,
+        ``p95``, ``max``, and ``std``.
     """
     max_value = full_stats["max"]
     if metric_type == MetricType.PSNR and np.isinf(max_value):
@@ -747,7 +749,11 @@ def _extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -
                 break
     return {
         "min":    full_stats["min"],
+        "p05":    full_stats["p5"],
+        "p25":    full_stats["p25"],
         "median": full_stats["p50"],
+        "p75":    full_stats["p75"],
+        "p95":    full_stats["p95"],
         "max":    max_value,
         "std":    full_stats["std"],
     }
@@ -791,6 +797,38 @@ def _save_stats_file(
     logger.debug("Saved %s statistics to %s", metric_type.value.upper(), stats_path)
 
 
+def _cleanup_raw_metric_files(metric_files: dict[MetricType, Path]) -> None:
+    """Delete raw metric log files, their ``.stats`` sidecars, and the metrics subdir.
+
+    Called after the graph PNG has been generated when ``KEEP_RAW_METRICS_FILES``
+    is ``False``.  Failures are logged as warnings and never raised — the graph
+    and sidecar YAML are already written and must not be lost.
+
+    The metrics subdirectory is removed only when it is empty after the files
+    are deleted (i.e. it contained only the raw logs for this run).
+
+    Args:
+        metric_files: Mapping of metric type to raw log file path.
+    """
+    dirs_to_try: set[Path] = set()
+    for metric_file in metric_files.values():
+        for path in (metric_file, metric_file.with_suffix(".stats")):
+            try:
+                path.unlink(missing_ok=True)
+                logger.debug("Deleted raw metric file: %s", path)
+            except Exception as exc:
+                logger.warning("Could not delete %s: %s", path, exc)
+        dirs_to_try.add(metric_file.parent)
+
+    for directory in dirs_to_try:
+        try:
+            if directory.is_dir() and not any(directory.iterdir()):
+                directory.rmdir()
+                logger.debug("Removed empty metrics directory: %s", directory)
+        except Exception as exc:
+            logger.warning("Could not remove metrics directory %s: %s", directory, exc)
+
+
 def analyze_chunk_quality(
     psnr_log:            Path | None = None,
     ssim_log:            Path | None = None,
@@ -823,15 +861,18 @@ def analyze_chunk_quality(
                              position in the source video.
 
     Returns:
-        ``ChunkQualityStats`` with ``min``, ``median``, ``max``, and ``std``
-        for each available metric; unavailable metrics are ``None``.
+        ``ChunkQualityStats`` with ``min``, ``p05``, ``p25``, ``median``,
+        ``p75``, ``p95``, ``max``, and ``std`` for each available metric.
 
     Raises:
         ValueError: If no valid metric file could be parsed.
 
     Side Effects:
         - Saves plot PNG to ``output_path`` (when ``generate_plot`` is ``True``).
-        - Saves ``.stats`` text files alongside each metric log file.
+        - Saves ``.stats`` text files alongside each metric log file, then
+          deletes the raw log files, ``.stats`` files, and the metrics
+          subdirectory when ``KEEP_RAW_METRICS_FILES`` is ``False`` (default)
+          and ``generate_plot`` is ``True``.
     """
     result = ChunkQualityStats()
 
@@ -890,7 +931,7 @@ def analyze_chunk_quality(
     # Normalize all stat values to 0–100 scale immediately after extraction (Req 5.1)
     for metric_type, stats in result.items():
         if stats is not None:
-            for stat_key in ("min", "median", "max", "std"):
+            for stat_key in ("min", "p05", "p25", "median", "p75", "p95", "max", "std"):
                 raw = stats.get(stat_key)
                 if raw is not None:
                     stats[stat_key] = normalize_metric(metric_type, raw)  # type: ignore[literal-required]
@@ -924,6 +965,9 @@ def analyze_chunk_quality(
     for metric_type, metric_file in metric_files.items():
         if metric_type in full_stats:
             _save_stats_file(metric_type, full_stats[metric_type], metric_file)
+
+    if not KEEP_RAW_METRICS_FILES and generate_plot:
+        _cleanup_raw_metric_files(metric_files)
 
     return result
 
@@ -1425,15 +1469,8 @@ class QualityEvaluator:
             ssim_log=ssim_log if ssim_log.exists() else None,
             vmaf_json=vmaf_json if vmaf_json.exists() else None,
             plot=resolved_plot_path,
-            stats_files=[]
+            stats_files=[],
         )
-
-        # Collect stats files
-        for metric_file in [psnr_log, ssim_log, vmaf_json]:
-            if metric_file and metric_file.exists():
-                stats_file = metric_file.with_suffix('.stats')
-                if stats_file.exists():
-                    artifacts.stats_files.append(stats_file)
 
         # Evaluate against targets
         failed_targets: list[QualityTarget] = []
@@ -1515,13 +1552,8 @@ class QualityEvaluator:
             ssim_log=ssim_log if ssim_log.exists() else None,
             vmaf_json=vmaf_json if vmaf_json.exists() else None,
             plot=resolved_plot_path,
-            stats_files=[]
+            stats_files=[],
         )
-        for metric_file in [psnr_log, ssim_log, vmaf_json]:
-            if metric_file and metric_file.exists():
-                stats_file = metric_file.with_suffix('.stats')
-                if stats_file.exists():
-                    artifacts.stats_files.append(stats_file)
 
         failed_targets: list[QualityTarget] = []
         for target in targets:
