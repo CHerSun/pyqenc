@@ -8,6 +8,7 @@ profiles and codec configurations.
 
 import fnmatch
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -129,12 +130,13 @@ class ConfigManager:
         codecs_data = self._config.get("codecs", {})
         for name, codec_data in codecs_data.items():
             self._codecs[name] = CodecConfig(
-                name            = name,
-                default_quality = codec_data["default_quality"],
-                quality_range   = tuple(codec_data["quality_range"]),
-                quality_label   = codec_data.get("quality_label", "CRF"),
-                encoder_args    = codec_data.get("encoder_args", []),
-                presets         = codec_data.get("presets", [])
+                name                = name,
+                default_quality     = Decimal(str(codec_data["default_quality"])),
+                quality_range       = tuple(codec_data["quality_range"]),
+                quality_label       = codec_data.get("quality_label", "CRF"),
+                quality_granularity = Decimal(str(codec_data.get("quality_granularity", "0.5"))),
+                encoder_args        = codec_data.get("encoder_args", []),
+                presets             = codec_data.get("presets", [])
             )
 
         # Parse profiles

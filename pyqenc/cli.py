@@ -11,7 +11,6 @@ import psutil
 
 import pyqenc
 from pyqenc.constants import (
-    CRF_GRANULARITY,
     DEFAULT_METRICS_SAMPLING,
     DEFAULT_SCREENSHOT_COUNT,
     FAILURE_SYMBOL_MAJOR,
@@ -370,16 +369,18 @@ def _cmd_auto(args: argparse.Namespace) -> int:
     resolved_strategies = config_manager.resolve_strategies(strategies)
 
     # Aggregate into a key/value table and print it
+    strategy_display = (
+        "using defaults from config file" if strategies is None
+        else "all combinations" if strategies == [""]
+        else ", ".join(s.name for s in resolved_strategies)
+    )
     kv_to_show = {
-        "Source:": args.source,
+        "Source:":        args.source,
         "Work directory:": args.work_dir,
-        "CRF granularity:": CRF_GRANULARITY,
-        "Cropping:": "disabled" if args.no_crop else f"manual ({crop_params})" if crop_params else "automatic",
-        "Strategies:": "using defaults from config file" if strategies is None \
-                      else "all combinations" if strategies == [""] \
-                      else ", ".join(s.name for s in resolved_strategies),
-        "Targets:": ", ".join(str(t) for t in quality_targets),
-        "Work mode:": "DRY-RUN (no changes will be made)" if not execute else "EXECUTE",
+        "Cropping:":      "disabled" if args.no_crop else f"manual ({crop_params})" if crop_params else "automatic",
+        "Strategies:":    strategy_display,
+        "Targets:":       ", ".join(str(t) for t in quality_targets),
+        "Work mode:":     "DRY-RUN (no changes will be made)" if not execute else "EXECUTE",
     }
     fmt_key_value_table(kv_to_show)
     logger.info("")

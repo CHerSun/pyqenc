@@ -14,6 +14,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from dataclasses import dataclass as _dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -22,15 +23,13 @@ from alive_progress import config_handler
 from pyqenc.config import ConfigManager
 from pyqenc.constants import (
     CHUNKS_DIR,
-    CRF_GRANULARITY,
-    CRF_INITIAL_DEFAULT,
     DEFAULT_METRICS_SAMPLING,
     ENCODED_ATTEMPT_GLOB_PATTERN,
     ENCODED_ATTEMPT_NAME_PATTERN,
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
     FAILURE_SYMBOL_MINOR,
-    PADDING_CRF,
+    PADDING_QUALITY_NUMBER,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
     THICK_LINE,
@@ -145,7 +144,7 @@ def _read_metrics_sidecar(attempt_path: Path) -> dict | None:
 def _write_metrics_sidecar(
     attempt_path:     Path,
     targets_met:      bool,
-    crf:              float,
+    crf:              Decimal,
     metrics:          dict[str, float],
     metrics_sampling: int,
 ) -> None:
@@ -202,7 +201,7 @@ def _write_encoding_result_sidecar(
     chunk_id:        str,
     resolution:      str,
     winning_attempt: Path,
-    crf:             float,
+    crf:             Decimal,
     metrics:         dict[str, float],
 ) -> None:
     """Atomically write an encoding result sidecar when CRF search converges.
@@ -228,7 +227,7 @@ def _write_encoding_result_sidecar(
     try:
         write_yaml_atomic(sidecar_path, data.to_yaml_dict())
         logger.debug(
-            "Wrote encoding result sidecar: %s (crf=%.1f)", sidecar_path.name, crf
+            "Wrote encoding result sidecar: %s (crf=%s)", sidecar_path.name, crf
         )
     except Exception as e:
         logger.warning(
@@ -369,7 +368,7 @@ class ChunkEncodingResult:
     chunk_id:     str
     strategy:     str
     success:      bool
-    final_crf:    float          | None = None
+    final_crf:    Decimal        | None = None
     attempts:     int                   = 0
     encoded_file: AttemptMetadata | None = None
     reused:       bool                  = False
@@ -466,7 +465,7 @@ class ChunkEncoder:
         chunk_id:   str,
         strategy:   Strategy,
         resolution: str | None = None,
-        crf:        float | None = None,
+        crf:        Decimal | None = None,
     ) -> Path:
         """Get the final path for a CRF-only encoded attempt.
 
@@ -485,7 +484,7 @@ class ChunkEncoder:
         """
         output_dir = self._get_output_dir(strategy)
         if resolution and crf is not None:
-            filename = f"{chunk_id}.{resolution}.crf{crf:{PADDING_CRF}}.mkv"
+            filename = f"{chunk_id}.{resolution}.crf{crf}.mkv"
         else:
             filename = f"{chunk_id}.mkv"
         return output_dir / filename
@@ -495,7 +494,7 @@ class ChunkEncoder:
         chunk_id:   str,
         strategy:   Strategy,
         resolution: str | None,
-        crf:        float,
+        crf:        Decimal,
     ) -> AttemptMetadata | None:
         """Check if a complete encoded attempt already exists on disk.
 
@@ -524,10 +523,10 @@ class ChunkEncoder:
             if m.group("chunk_id") != chunk_id:
                 continue
             try:
-                file_crf = float(m.group("crf"))
+                file_crf = Decimal(str(m.group("crf"))).quantize(strategy.codec.quality_granularity)
             except ValueError:
                 continue
-            if abs(file_crf - crf) > 0.05:
+            if abs(file_crf - crf) > Decimal("0.05"):
                 continue
             file_resolution = m.group("resolution")
             if resolution is not None and file_resolution != resolution:
@@ -554,7 +553,7 @@ class ChunkEncoder:
         chunk_id:        str,
         strategy:        Strategy,
         quality_targets: list[QualityTarget],
-    ) -> tuple[CRFHistory, float | None]:
+    ) -> tuple[CRFHistory, Decimal | None]:
         """Pre-populate a ``CRFHistory`` from all existing per-attempt sidecar files.
 
         Scans ``<chunk_id>.*.crf*.yaml`` in the strategy output directory so the
@@ -582,9 +581,10 @@ class ChunkEncoder:
         import yaml as _yaml
 
         output_dir = self._get_output_dir(strategy)
-        crf_min, crf_max = strategy.codec.quality_range if strategy.codec else (0.0, 63.0)
+        gran       = strategy.codec.quality_granularity
+        crf_min, crf_max = strategy.codec.quality_range if strategy.codec else (Decimal("0"), Decimal("63"))
         history    = CRFHistory(fail_crf=crf_max, pass_crf=crf_min)
-        seed_crf:  float | None = None
+        seed_crf:  Decimal | None = None
 
         if not output_dir.exists():
             return history, seed_crf
@@ -622,7 +622,7 @@ class ChunkEncoder:
                 continue
 
             try:
-                crf              = float(sidecar_data["crf"])
+                crf              = Decimal(str(sidecar_data["crf"])).quantize(gran)
                 metrics          = {k: float(v) for k, v in sidecar_data.get("metrics", {}).items()}
                 raw_sampling     = sidecar_data.get("metrics_sampling")
                 sidecar_sampling = int(raw_sampling) if raw_sampling is not None else None
@@ -663,7 +663,7 @@ class ChunkEncoder:
         chunk_id:        str,
         resolution:      str,
         winning_attempt: Path,
-        crf:             float,
+        crf:             Decimal,
         metrics:         dict[str, float],
     ) -> None:
         """Hard-link the winning attempt into ``encoded/`` and write the result sidecar.
@@ -750,7 +750,7 @@ class ChunkEncoder:
         self,
         chunk:       ChunkMetadata,
         strategy:    Strategy,
-        crf:         float,
+        crf:         Decimal,
         output_file: Path,
     ) -> bool:
         """Encode chunk with FFmpeg using the runner's ``.tmp``-then-rename protocol.
@@ -811,7 +811,7 @@ class ChunkEncoder:
         reference:        VideoMetadata,
         strategy:         Strategy,
         quality_targets:  list[QualityTarget],
-        initial_crf:      float = CRF_INITIAL_DEFAULT,
+        initial_crf:      Decimal,
         force:            bool  = False,
         max_attempts:     int   = 10,
     ) -> ChunkEncodingResult:
@@ -841,16 +841,16 @@ class ChunkEncoder:
             current_crf = seed_crf
             logger.info(
                 fmt_chunk(strategy.name, chunk.chunk_id,
-                f"Restored {history.attempts} attempt(s) from sidecars; resuming from best-passing {strategy.codec.quality_label} {current_crf:{PADDING_CRF}}",
+                f"Restored {history.attempts} attempt(s) from sidecars; resuming from best-passing {strategy.codec.quality_label} {str(current_crf).rjust(PADDING_QUALITY_NUMBER)}",
                 self._visual_hash)
             )
         else:
             current_crf = initial_crf
-            logger.debug(f"No prior sidecars found; starting from {strategy.codec.quality_label} {current_crf:{PADDING_CRF}}")
+            logger.debug(f"No prior sidecars found; starting from {strategy.codec.quality_label} {str(current_crf).rjust(PADDING_QUALITY_NUMBER)}")
 
         attempt_number    = history.attempts
         final_attempt:    AttemptMetadata | None = None
-        best_crf:         float | None           = None
+        best_crf:         Decimal | None           = None
         best_metrics:     dict[str, float]       = {}
 
         while True:
@@ -924,7 +924,7 @@ class ChunkEncoder:
                         )
                         best_string = ""
                         if targets_met:
-                            if final_attempt is None or existing.crf > (best_crf or 0):
+                            if final_attempt is None or existing.crf > (best_crf if best_crf is not None else Decimal("-Inf")):
                                 best_crf      = existing.crf
                                 final_attempt = existing
                                 best_metrics  = metrics_dict
@@ -932,12 +932,13 @@ class ChunkEncoder:
                         logger.info(
                             fmt_chunk_attempt_result(
                                 strategy.name, chunk.chunk_id, attempt_number,
-                                f"{pass_fail} with {strategy.codec.quality_label} {existing.crf:{PADDING_CRF}} ({metric_summary}){best_string} [reused]",
+                            f"{pass_fail} with {strategy.codec.quality_label} {str(existing.crf).rjust(PADDING_QUALITY_NUMBER)} ({metric_summary}){best_string} [reused]",
                                 self._visual_hash,
                             )
                         )
                         next_crf = adjust_crf(
                             existing.crf, metrics_dict, quality_targets, history,
+                            granularity=strategy.codec.quality_granularity,
                         )
                         if next_crf is None:
                             if final_attempt is not None:
@@ -948,7 +949,7 @@ class ChunkEncoder:
                                     chunk_id=chunk.chunk_id,
                                     resolution=existing.resolution,
                                     winning_attempt=final_attempt.path,
-                                    crf=best_crf or existing.crf,
+                                    crf=best_crf if best_crf is not None else existing.crf,
                                     metrics=best_metrics,
                                 )
                             else:
@@ -968,7 +969,7 @@ class ChunkEncoder:
                         )
                         logger.info(
                             fmt_chunk(strategy.name, chunk.chunk_id,
-                            f"existing attempt ({strategy.codec.quality_label.lower()}={existing.crf:.2f}) — re-evaluating metrics ({reason})",
+                            f"existing attempt ({strategy.codec.quality_label.lower()}={str(existing.crf).rjust(PADDING_QUALITY_NUMBER)}) — re-evaluating metrics ({reason})",
                             self._visual_hash),
                         )
                         output_file = existing.path
@@ -1057,7 +1058,7 @@ class ChunkEncoder:
 
             best_string = ""
             if evaluation.targets_met:
-                if final_attempt is None or current_crf > (best_crf or 0):
+                if final_attempt is None or current_crf > (best_crf if best_crf is not None else Decimal("-Inf")):
                     best_crf      = current_crf
                     final_attempt = attempt_meta
                     best_metrics  = all_metrics
@@ -1072,13 +1073,14 @@ class ChunkEncoder:
             logger.info(
                 fmt_chunk_attempt_result(
                     strategy.name, chunk.chunk_id, attempt_number,
-                    f"{pass_fail} with {strategy.codec.quality_label} {current_crf:{PADDING_CRF}} ({metric_summary}){best_string}",
+                    f"{pass_fail} with {strategy.codec.quality_label} {str(current_crf).rjust(PADDING_QUALITY_NUMBER)} ({metric_summary}){best_string}",
                     self._visual_hash,
                 )
             )
 
             next_crf = adjust_crf(
                 current_crf, metrics_dict, quality_targets, history,
+                granularity=strategy.codec.quality_granularity,
             )
 
             if next_crf is None:
@@ -1090,7 +1092,7 @@ class ChunkEncoder:
                         chunk_id=chunk.chunk_id,
                         resolution=resolution or "",
                         winning_attempt=final_attempt.path,
-                        crf=best_crf or current_crf,
+                        crf=best_crf if best_crf is not None else current_crf,
                         metrics=best_metrics,
                     )
                 else:
@@ -1100,7 +1102,7 @@ class ChunkEncoder:
                     )
                 break
 
-            logger.debug("Adjusting CRF from %.2f to %.2f", current_crf, next_crf)
+            logger.debug("Adjusting %s from %s to %s", strategy.codec.quality_label, current_crf, next_crf)
             current_crf = next_crf
 
         if final_attempt is not None:
@@ -1218,7 +1220,7 @@ async def _encode_chunk_async(
     reference:       VideoMetadata,
     strategy:        Strategy,
     quality_targets: list[QualityTarget],
-    initial_crf:     float,
+    initial_crf:     Decimal,
     force:           bool,
 ) -> ChunkEncodingResult:
     """Async wrapper for chunk encoding.
@@ -1340,7 +1342,8 @@ async def _encode_chunks_parallel(
 
                 # Encode chunk using the codec's default quality as the fixed starting point.
                 # Predictable initial quality = predictable recovery path when parameters change.
-                chunk_initial_crf = round(strategy.codec.default_quality / CRF_GRANULARITY) * CRF_GRANULARITY
+                gran = strategy.codec.quality_granularity
+                chunk_initial_crf = strategy.codec.default_quality.quantize(gran)
 
                 # Encode chunk
                 chunk_result = await _encode_chunk_async(
@@ -1580,7 +1583,7 @@ class EncodedArtifact(Artifact):
 
     chunk_id: str = ""
     strategy: str = ""
-    crf:      float | None = None
+    crf:      Decimal | None = None
 
 
 @_dataclass
@@ -2009,13 +2012,13 @@ class EncodingPhase:
                 encoded_strategy_dir = _enc_encoded_strategy_dir(work_dir, strategy_name)
                 artifact_path = encoded_strategy_dir / f"{chunk_id}.mkv"
 
-                crf: float | None = None
+                crf: Decimal | None = None
                 if state == ArtifactState.COMPLETE and pair_rec and pair_rec.winning_file:
                     artifact_path = pair_rec.winning_file
                     m = ENCODED_ATTEMPT_NAME_PATTERN.match(pair_rec.winning_file.name)
                     if m:
                         try:
-                            crf = float(m.group("crf"))
+                            crf = Decimal(str(m.group("crf")))
                         except (ValueError, TypeError):
                             pass
 

@@ -13,6 +13,7 @@ import os
 import uuid
 import warnings
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -932,7 +933,7 @@ def analyze_chunk_quality(
 # ---------------------------------------------------------------------------
 
 def create_crf_plot(
-    chunks:        list[tuple[float, float, float]],
+    chunks:        list[tuple[float, float, Decimal]],
     output_path:   Path,
     title:         str = "CRF Distribution",
     quality_label: str = "CRF",
@@ -960,7 +961,7 @@ def create_crf_plot(
 
     starts = np.array([c[0] for c in chunks])
     ends   = np.array([c[1] for c in chunks])
-    crfs   = np.array([c[2] for c in chunks])
+    crfs   = np.array([float(c[2]) for c in chunks])
 
     plt.style.use("seaborn-v0_8")
     plt.rcParams["axes.grid"] = False

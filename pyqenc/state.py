@@ -16,6 +16,7 @@ file and ``instance.save(path)`` to persist atomically.
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 from typing import Self
@@ -442,7 +443,7 @@ class MetricsSidecar(BaseModel):
     field was added — treated as unknown, no staleness check triggered.
     """
 
-    crf:              float
+    crf:              Decimal
     targets_met:      bool                # for human inspection only
     metrics_sampling: int | None = None   # subsampling factor used when metrics were measured
     metrics:          dict[str, float]    # all measured values, e.g. vmaf_min, ssim_median
@@ -450,7 +451,7 @@ class MetricsSidecar(BaseModel):
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
         return {
-            "crf":              self.crf,
+            "crf":              str(self.crf),
             "targets_met":      self.targets_met,
             "metrics_sampling": self.metrics_sampling,
             "metrics":          self.metrics,
@@ -461,7 +462,7 @@ class MetricsSidecar(BaseModel):
         """Restore from a dict loaded from an attempt sidecar YAML."""
         raw_sampling = data.get("metrics_sampling")
         return cls(
-            crf              = float(data["crf"]),
+            crf              = Decimal(str(data["crf"])),
             targets_met      = bool(data["targets_met"]),
             metrics_sampling = int(raw_sampling) if raw_sampling is not None else None,
             metrics          = {k: float(v) for k, v in data.get("metrics", {}).items()},
@@ -482,14 +483,14 @@ class EncodingResultSidecar(BaseModel):
     """
 
     winning_attempt: str              # filename of the winning attempt .mkv
-    crf:             float
+    crf:             Decimal
     metrics:         dict[str, float] # only the targeted metric values
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
         return {
             "winning_attempt": self.winning_attempt,
-            "crf":             self.crf,
+            "crf":             str(self.crf),
             "metrics":         self.metrics,
         }
 
@@ -497,9 +498,9 @@ class EncodingResultSidecar(BaseModel):
     def from_yaml_dict(cls, data: dict) -> "EncodingResultSidecar":
         """Restore from a dict loaded from an encoding result sidecar YAML."""
         return cls(
-            winning_attempt=data["winning_attempt"],
-            crf=float(data["crf"]),
-            metrics={k: float(v) for k, v in data.get("metrics", {}).items()},
+            winning_attempt = data["winning_attempt"],
+            crf             = Decimal(str(data["crf"])),
+            metrics         = {k: float(v) for k, v in data.get("metrics", {}).items()},
         )
 
 

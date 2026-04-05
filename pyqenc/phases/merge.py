@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -460,7 +461,7 @@ def _log_merge_summary_from_params(
 def _collect_crf_data(
     encoded:     "list[EncodedArtifact]",
     strategy:    str,
-) -> list[tuple[float, float, float]]:
+) -> list[tuple[float, float, Decimal]]:
     """Extract ``(start_seconds, end_seconds, crf)`` tuples for winning chunks of *strategy*.
 
     Timestamps are parsed from the ``chunk_id`` stem, which encodes the range
@@ -494,7 +495,7 @@ def _collect_crf_data(
             m = ENCODED_ATTEMPT_NAME_PATTERN.match(artifact.path.name)
             if m:
                 try:
-                    crf = float(m.group("crf"))
+                    crf = Decimal(str(m.group("crf")))
                 except (ValueError, IndexError):
                     pass
 
