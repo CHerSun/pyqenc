@@ -609,7 +609,7 @@ def adjust_crf(
 
     # Re-read bounds after update (they may have narrowed).
     fail_crf, pass_crf = history.fail_crf, history.pass_crf
-    if fail_crf - pass_crf <= granularity:
+    if history.pass_metrics is not None and fail_crf - pass_crf <= granularity:
         return None
 
     # --- Early acceptance ---
