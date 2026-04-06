@@ -105,7 +105,8 @@ default_strategies:
 #   - pixel_format: Pixel format for encoding
 #   - default_quality: Starting quality parameter value
 #   - quality_range: Valid quality range [min, max] for this codec
-#   - quality_label: Human-readable label for logs and plots (default: CRF)
+#   - quality_granularity: Minimal step size for the quality search algorithm
+#   - quality_label: Human-readable label for logs and plots (default: CRF; file names will still use crf for ease of parsing)
 #   - encoder_args: Full ffmpeg argument template. Must contain:
 #       -i {input}        — two consecutive items; {input} is replaced with the
 #                           actual input path at runtime. Args before -i are
