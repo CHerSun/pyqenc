@@ -2,8 +2,18 @@
 
 <!-- markdownlint-disable MD024 -->
 
-- Created: 2025-07-17
+- Created: 2026-04-06
 - Completed:
+
+> **Note (2026-04-06 — pre-implementation changes to superseded code):**
+> Before this refactor was implemented, the following changes were made to `CRFHistory` / `adjust_crf` and `CodecConfig`:
+> - `CodecConfig.quality_range` order preserved as-is; `quality_better`, `quality_worse`, `quality_higher_is_better` properties added.
+> - `CodecConfig.quality_max_step` field added.
+> - `CRFHistory.add()` made unconditional; fields renamed to `pass_crf` (better boundary) / `fail_crf` (worse boundary).
+> - `adjust_crf` made direction-agnostic; `quality_max_step` parameter added.
+> - `_load_history_from_sidecars` removed — recovery handled by artifact-check-per-step in the encoding loop.
+>
+> These changes are superseded by this refactor. The direction-agnostic concepts and `quality_max_step` carry forward.
 
 ## Introduction
 
@@ -40,7 +50,7 @@ This refactor introduces a unified `CRFSearchProtocol` that encapsulates the ful
 
 1. THE `CRFSearchProtocol` SHALL be defined as a `typing.Protocol` (or ABC) in `pyqenc/quality.py`.
 2. THE `CRFSearchProtocol` SHALL declare an `attempts` property returning `int` — the total number of encoding attempts recorded so far.
-3. THE `CRFSearchProtocol` SHALL declare a `record(crf, quality_results) -> Decimal | None` method that records one attempt result, updates internal state, and returns the next CRF to try or `None` when the search is exhausted or the current result is accepted. `quality_targets` and `granularity` SHALL be supplied at construction time, not per-call.
+3. THE `CRFSearchProtocol` SHALL declare a `record(crf, quality_results) -> Decimal | None` method that records one attempt result, updates internal state, and returns the next CRF to try or `None` when the search is exhausted or the current result is accepted. `quality_targets`, `granularity`, `quality_better`, `quality_worse`, and `quality_max_step` SHALL be supplied at construction time, not per-call.
 4. THE `CRFSearchProtocol` SHALL declare a `best_crf` property returning `Decimal | None` — the best CRF found so far (highest passing CRF if any pass exists, otherwise the best-fail CRF).
 5. THE `CRFSearchProtocol` SHALL declare a `best_metrics` property returning `dict[str, float] | None` — the full metrics dict associated with `best_crf`.
 6. THE `CRFSearchProtocol` SHALL declare a `best_targets_met` property returning `bool` — `True` if and only if `best_crf` corresponds to a passing attempt.
@@ -55,7 +65,7 @@ This refactor introduces a unified `CRFSearchProtocol` that encapsulates the ful
 #### Acceptance Criteria
 
 1. THE `CRFSearch` class SHALL implement `CRFSearchProtocol`.
-2. THE `CRFSearch` class SHALL encapsulate the state currently held by `CRFHistory` (`fail_crf`, `pass_crf`, `fail_metrics`, `pass_metrics`, `attempts`) and SHALL be initialised with `crf_min`, `crf_max`, `quality_targets`, and `granularity`.
+2. THE `CRFSearch` class SHALL encapsulate the state currently held by `CRFHistory` (`fail_crf`, `pass_crf`, `fail_metrics`, `pass_metrics`, `attempts`) and SHALL be initialised with `quality_better`, `quality_worse`, `quality_targets`, `granularity`, and optional `quality_max_step`.
 3. WHEN `CRFSearch.record()` is called, THE `CRFSearch` SHALL update its internal bracket state and return the same next-CRF value that the standalone `adjust_crf()` function would return for identical inputs.
 4. THE `adjust_crf()` standalone function SHALL be retained in `pyqenc/quality.py` with its existing signature `adjust_crf(current_crf, quality_results, quality_targets, history, granularity) -> Decimal | None`, accepting a `CRFHistory` dataclass instance.
 5. THE `CRFHistory` dataclass SHALL be retained in `pyqenc/quality.py` for use by `adjust_crf()`.
@@ -71,7 +81,7 @@ This refactor introduces a unified `CRFSearchProtocol` that encapsulates the ful
 #### Acceptance Criteria
 
 1. THE `CRFSearchV2` class SHALL implement `CRFSearchProtocol`.
-2. THE `CRFSearchV2` SHALL be initialised with `crf_min`, `crf_max` (the codec's quality range as `Decimal` values), `quality_targets`, and `granularity`.
+2. THE `CRFSearchV2` SHALL be initialised with `quality_better`, `quality_worse` (the codec's quality range as `Decimal` values), `quality_targets`, `granularity`, and optional `quality_max_step`.
 3. WHEN `CRFSearchV2` is initialised, THE `CRFSearchV2` SHALL set internal state: `pass_crf = crf_min` (sentinel), `best_fail_crf = crf_max` (sentinel), `fail_crf = crf_max` (sentinel), with `best_fail_crf == fail_crf` indicating 2-point mode until a real fail is observed.
 4. WHEN `record()` is called with a passing result, THE `CRFSearchV2` SHALL update `pass_crf = current_crf` and continue searching the `[pass_crf ... best_fail_crf]` range using proportional interpolation (same as `CRFSearch`).
 5. WHEN `record()` is called with a failing result whose score (per `_score_failing_attempt()`) is greater than the current `best_fail` score AND the attempt was drawn from range B `[best_fail_crf ... fail_crf]`, THE `CRFSearchV2` SHALL promote `pass_crf = old best_fail_crf`, set `best_fail_crf = current_crf`, and keep `fail_crf` unchanged.
@@ -87,12 +97,12 @@ This refactor introduces a unified `CRFSearchProtocol` that encapsulates the ful
 
 ### Requirement 4: Convergence Guarantee (Both Algorithms)
 
-**User Story:** As a developer, I want both search algorithms to always terminate within a bounded number of attempts, so that the encoding pipeline cannot loop indefinitely.
+**User Story:** As a developer, I want both search algorithms to always terminate within a logarithmic number of attempts, so that the encoding pipeline cannot loop indefinitely or degrade to a linear scan of every possible quality value.
 
 #### Acceptance Criteria
 
-1. FOR ALL valid inputs `(crf_min, crf_max, granularity)` where `crf_max > crf_min` and `granularity > 0`, THE `CRFSearch` SHALL terminate (return `None` from `record()`) within `ceil(log2((crf_max - crf_min) / granularity)) + 2` attempts.
-2. FOR ALL valid inputs `(crf_min, crf_max, granularity)` where `crf_max > crf_min` and `granularity > 0`, THE `CRFSearchV2` SHALL terminate (return `None` from `record()`) within `2 * ceil(log2((crf_max - crf_min) / granularity)) + 4` attempts.
+1. FOR ALL valid inputs, THE `CRFSearch` SHALL terminate (return `None` from `record()`) in O(log N) attempts where N is the number of distinct quality values in the range -- i.e. each attempt must halve at least one active search interval.
+2. FOR ALL valid inputs, THE `CRFSearchV2` SHALL terminate (return `None` from `record()`) in O(log N) attempts -- each attempt must halve at least one of the two active ranges.
 3. WHEN `record()` returns `None`, THE search object SHALL NOT return a non-`None` value from any subsequent `record()` call.
 
 ---
@@ -125,16 +135,18 @@ This refactor introduces a unified `CRFSearchProtocol` that encapsulates the ful
 
 ---
 
-### Requirement 7: _load_history_from_sidecars Accepts CRFSearchProtocol
+### Requirement 7: _load_history_from_sidecars Removed
 
-**User Story:** As a developer, I want `_load_history_from_sidecars` to accept a pre-instantiated `CRFSearchProtocol` and populate it from sidecars, so that the caller controls which algorithm is used and the function is not coupled to a specific implementation.
+**User Story:** As a developer, I want the encoding loop to handle recovery via artifact-check-per-step, so that pre-scanning sidecars in filesystem order (which produced inconsistent bracket state) is eliminated.
 
 #### Acceptance Criteria
 
-1. THE `ChunkEncoder._load_history_from_sidecars()` SHALL accept a `search: CRFSearchProtocol` parameter (pre-instantiated by the caller) and populate it by calling `search.record()` for each valid sidecar entry found on disk.
-2. THE `ChunkEncoder._load_history_from_sidecars()` SHALL return only `Decimal | None` (the seed CRF — highest passing CRF found, or `None` if no passing attempt exists in sidecars).
-3. THE caller (`encode_chunk`) SHALL instantiate the search object (e.g. `CRFSearchV2`) before calling `_load_history_from_sidecars`, and SHALL pass it in for population.
-4. THE return value of each `search.record()` call during sidecar replay SHALL be discarded — replay populates history state only; next-CRF computation happens after all sidecars are loaded.
+1. THE `ChunkEncoder._load_history_from_sidecars()` method SHALL be removed.
+2. THE encoding loop SHALL recover by calling `_check_existing_encoding()` on each quality step before encoding — reusing cached artifacts naturally until it reaches an un-encoded value.
+3. THE `CRFSearch` and `CRFSearchV2` constructors SHALL NOT require pre-population from sidecars.
+4. THE encoding loop SHALL track whether any attempt in the search loop required actual encoding or metric measurement work (i.e. was not a pure cache hit).
+5. WHEN all attempts for a chunk were cache hits (no encoding or measurement performed), THE `ChunkEncodingResult` SHALL set `reused=True` and the progress bar SHALL advance with `AdvanceState.SKIPPED` for that chunk.
+6. WHEN at least one attempt required real work, THE progress bar SHALL advance normally (not skipped), so ETA reflects actual encode time.
 
 ---
 
@@ -156,8 +168,24 @@ This refactor introduces a unified `CRFSearchProtocol` that encapsulates the ful
 
 #### Acceptance Criteria
 
-1. THE test suite SHALL include a property-based test verifying that `CRFSearch` always terminates within the bound defined in Requirement 4.1 for any valid `(crf_min, crf_max, granularity, quality_results_sequence)`.
-2. THE test suite SHALL include a property-based test verifying that `CRFSearchV2` always terminates within the bound defined in Requirement 4.2 for any valid `(crf_min, crf_max, granularity, quality_results_sequence)`.
+1. THE test suite SHALL include a property-based test verifying that `CRFSearch` always terminates within the bound defined in Requirement 4.1 for any valid `(quality_better, quality_worse, granularity, quality_results_sequence)`.
+2. THE test suite SHALL include a property-based test verifying that `CRFSearchV2` always terminates within the bound defined in Requirement 4.2 for any valid `(quality_better, quality_worse, granularity, quality_results_sequence)`.
 3. THE test suite SHALL include a property-based test verifying the state invariants in Requirement 5 for both algorithms.
-4. THE test suite SHALL include example-based tests verifying that `CRFSearch.record()` and `adjust_crf()` produce the same next-CRF for identical inputs.
-5. THE test suite SHALL include example-based tests for each of the 4 state-transition cases in `CRFSearchV2` (Requirement 3.5 through 3.8).
+4. THE test suite SHALL include example-based tests for each of the state-transition cases in `CRFSearchV2` (Requirement 3.5 through 3.8).
+5. THE test suite SHALL include a property-based test verifying the `_score_attempt` sign contract: positive for pass, negative for fail, `0.0` for early acceptance, raises for missing keys.
+
+---
+
+### Requirement 10: Attempt Filename Rename (.crf → .q)
+
+**User Story:** As a developer, I want attempt filenames to use `.q<value>` instead of `.crf<value>`, so that the naming is accurate for all quality control mechanics (CRF, CQ, QP, bitrate).
+
+#### Acceptance Criteria
+
+1. THE `ENCODED_ATTEMPT_GLOB_PATTERN` constant SHALL be updated from `"*.crf*.mkv"` to `"*.q*.mkv"`.
+2. THE `ENCODED_ATTEMPT_NAME_PATTERN` regex SHALL be updated to match `.q<value>` instead of `.crf<value>`, with the capture group renamed from `crf` to `quality`.
+3. THE `ChunkEncoder._get_attempt_path()` SHALL produce filenames using `.q{value}` instead of `.crf{value}`.
+4. THE `ChunkEncoder._check_existing_encoding()` SHALL use the updated glob and regex.
+5. ALL callers of `m.group("crf")` SHALL be updated to `m.group("quality")`.
+6. THE global `CRF_METRIC_POSITIVE_DELTA` constant SHALL be removed; per-metric `acceptance_delta` on `MetricInfo` replaces it.
+7. THE global `PADDING_QUALITY_NUMBER` constant SHALL be removed; a computed `quality_log_padding: int` property on `CodecConfig` replaces it. The padding width SHALL be derived from `max(abs(quality_better), abs(quality_worse))` quantized to `quality_granularity` — specifically `len(str(Decimal(str(max_val)).quantize(quality_granularity)))`. This ensures log columns align correctly for any codec range (e.g. CRF 0–51 with gran 0.5 → 4 chars; VBR 0–100 with gran 0.1 → 5 chars; QP 0–63 with gran 1 → 2 chars). File naming does NOT use this padding — filenames sort correctly without it.
