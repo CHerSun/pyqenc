@@ -9,7 +9,7 @@ algorithms for iterative encoding optimization.
 import logging
 import math
 from dataclasses import dataclass, field
-from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 from os import PathLike
 from pathlib import Path
@@ -422,9 +422,15 @@ class CRFHistory:
     """Track the tightest known pass/fail quality bracket, attempt count, and observed
     metric values at the bracket boundaries.
 
-    ``fail_crf`` and ``pass_crf`` are initialized to the codec limits as
-    sentinels, then narrowed on each attempt.  All quality values are ``Decimal``
+    ``fail_crf`` and ``pass_crf`` are initialized to the codec quality range endpoints
+    as sentinels, then narrowed on each attempt.  All quality values are ``Decimal``
     so arithmetic and string formatting are exact.
+
+    Semantics are direction-agnostic: ``pass_crf`` is always the *better-quality*
+    boundary (where targets were met) and ``fail_crf`` is always the *worse-quality*
+    boundary (where targets were not met).  For CRF ``[0, 51]``: ``pass_crf=0``
+    (better), ``fail_crf=51`` (worse).  For VBR ``[99, 0]``: ``pass_crf=99``
+    (better), ``fail_crf=0`` (worse).
 
     ``fail_metrics`` and ``pass_metrics`` store the full measured quality dict
     (keyed as ``"<metric>_<stat>"``) observed at the current ``fail_crf`` and
@@ -437,22 +443,22 @@ class CRFHistory:
     boundary dicts to get two real observations of that specific metric.
 
     Attributes:
-        fail_crf:      Lowest quality that still failed (upper bracket bound).
-                       Initialized to ``crf_max``; narrows downward on misses.
-        pass_crf:      Highest quality that still passed (lower bracket bound).
-                       Initialized to ``crf_min``; narrows upward on passes.
-        fail_metrics:  Full quality_results dict observed at ``fail_crf``.
-                       ``None`` until a real fail result is recorded.
-        pass_metrics:  Full quality_results dict observed at ``pass_crf``.
-                       ``None`` until a real pass result is recorded.
-        attempts:      Number of encoding attempts recorded.
+        pass_crf:     Better-quality boundary sentinel (targets met here).
+                      Initialized to ``quality_range[0]`` (the better end).
+        fail_crf:     Worse-quality boundary sentinel (targets not met here).
+                      Initialized to ``quality_range[1]`` (the worse end).
+        fail_metrics: Full quality_results dict observed at ``fail_crf``.
+                      ``None`` until a real fail result is recorded.
+        pass_metrics: Full quality_results dict observed at ``pass_crf``.
+                      ``None`` until a real pass result is recorded.
+        attempts:     Number of encoding attempts recorded.
     """
 
-    fail_crf:     Decimal
-    pass_crf:     Decimal
-    fail_metrics: dict[str, float] | None = None
-    pass_metrics: dict[str, float] | None = None
-    attempts:     int                     = 0
+    pass_crf:         Decimal
+    fail_crf:         Decimal
+    fail_metrics:     dict[str, float] | None = None
+    pass_metrics:     dict[str, float] | None = None
+    attempts:         int                     = 0
 
     def add(
         self,
@@ -473,14 +479,12 @@ class CRFHistory:
                      pre-population from sidecars without full metric data).
         """
         self.attempts += 1
-        if not passed:
-            if crf < self.fail_crf:
-                self.fail_crf     = crf
-                self.fail_metrics = metrics
+        if passed:
+            self.pass_crf     = crf
+            self.pass_metrics = metrics
         else:
-            if crf > self.pass_crf:
-                self.pass_crf     = crf
-                self.pass_metrics = metrics
+            self.fail_crf     = crf
+            self.fail_metrics = metrics
 
 def normalize_metric(metric_type: MetricType, value: float) -> float:
     """Normalize a raw scalar metric value using the metric's ``MetricInfo`` descriptor.
@@ -618,11 +622,12 @@ def _score_failing_attempt_by_crf(
 
 
 def adjust_crf(
-    current_crf:     Decimal,
-    quality_results: dict[str, float],
-    quality_targets: list[QualityTarget],
-    history:         CRFHistory,
-    granularity:     Decimal = Decimal("0.5"),
+    current_crf:      Decimal,
+    quality_results:  dict[str, float],
+    quality_targets:  list[QualityTarget],
+    history:          CRFHistory,
+    granularity:      Decimal        = Decimal("0.5"),
+    quality_max_step: Decimal | None = None,
 ) -> Decimal | None:
     """Calculate the next quality value to try, updating *history* with the current result.
 
@@ -642,11 +647,23 @@ def adjust_crf(
     When boundary metrics are absent (early attempts), interpolation candidates
     return ``None`` and binary is used automatically.
 
+    **Direction-agnostic**: ``pass_crf`` is always the better-quality boundary and
+    ``fail_crf`` is always the worse-quality boundary.  The interpolation
+    ``pass_crf + t * (fail_crf - pass_crf)`` works for both lower-is-better
+    (CRF ``[0, 51]``) and higher-is-better (VBR ``[99, 0]``) codecs because
+    ``t ∈ [0, 1]`` always moves from better toward worse.  Span comparisons use
+    ``abs()`` so they are sign-independent.
+
+    **Step clamping**: when *quality_max_step* is set, the absolute step from
+    *current_crf* is clamped to that value before quantization.  This prevents
+    large jumps on the first few attempts for codecs with wide quality ranges
+    (e.g. VBR bitrate).
+
     **Early acceptance**: when all targets pass and the tightest surplus is
     within ``CRF_METRIC_POSITIVE_DELTA``, the current value is accepted without
     trying to squeeze further — saves one encoding pass.
 
-    **Exhaustion**: when ``fail_crf - pass_crf ≤ granularity`` the bracket
+    **Exhaustion**: when ``abs(fail_crf - pass_crf) ≤ granularity`` the bracket
     is too tight to improve; return ``None`` so the caller keeps the last pass.
 
     **Boundary inclusivity**: when a boundary sentinel has no real metrics yet
@@ -656,28 +673,33 @@ def adjust_crf(
 
     **Quantization**: the raw interpolated value is quantized to *granularity*
     using ``Decimal.quantize``.  When the current attempt passed, rounding is
-    biased upward (``ROUND_CEILING``); when it failed, rounding is biased
-    downward (``ROUND_FLOOR``) — keeping the result on the correct side.
-    The returned ``Decimal`` is already quantized, so ``str()`` produces the
-    correct display string for both logs and ffmpeg args.
+    biased toward the *worse* end (to find the efficiency sweet spot); when it
+    failed, rounding is biased toward the *better* end.  For lower-is-better
+    codecs: pass → ``ROUND_CEILING``, fail → ``ROUND_FLOOR``.  For
+    higher-is-better codecs: pass → ``ROUND_FLOOR``, fail → ``ROUND_CEILING``.
 
     Args:
-        current_crf:     Quality value used in the most recent attempt.
-        quality_results: Measured quality metrics keyed as ``"<metric>_<stat>"``.
-        quality_targets: Quality targets to meet.
-        history:         Quality bracket history; updated in-place with this result.
-        granularity:     Step size as a ``Decimal``.  Comes from
-                         ``strategy.codec.quality_granularity``.
+        current_crf:      Quality value used in the most recent attempt.
+        quality_results:  Measured quality metrics keyed as ``"<metric>_<stat>"``.
+        quality_targets:  Quality targets to meet.
+        history:          Quality bracket history; updated in-place with this result.
+        granularity:      Step size as a ``Decimal``.  Comes from
+                          ``strategy.codec.quality_granularity``.
+        quality_max_step: Optional maximum absolute step size per iteration.
+                          When set, the proposed next value is clamped so that
+                          ``abs(next - current_crf) ≤ quality_max_step``.
+                          Comes from ``strategy.codec.quality_max_step``.
 
     Returns:
         Next quality value to try (quantized ``Decimal``), or ``None`` when the
         search is exhausted or the current result is accepted as final.
     """
-    fail_crf, pass_crf = history.fail_crf, history.pass_crf
+    pass_crf = history.pass_crf
+    fail_crf = history.fail_crf
 
     # Preemptive exhaustion check — bracket too tight to improve.
-    # Skip when no pass_metrics or no fail_metrics - no true bracket yet, allow inclusive boundaries.
-    if history.pass_metrics and history.fail_metrics and (fail_crf - pass_crf <= granularity):
+    # Skip when no pass_metrics or no fail_metrics — no true bracket yet, allow inclusive boundaries.
+    if history.pass_metrics and history.fail_metrics and (abs(fail_crf - pass_crf) <= granularity):
         return None
 
     found = _find_worst_target(quality_results, quality_targets)
@@ -692,8 +714,9 @@ def adjust_crf(
     history.add(current_crf, current_passed, quality_results)
 
     # Re-read bounds after update (they may have narrowed).
-    fail_crf, pass_crf = history.fail_crf, history.pass_crf
-    if history.pass_metrics is not None and fail_crf - pass_crf <= granularity:
+    pass_crf = history.pass_crf
+    fail_crf = history.fail_crf
+    if (history.pass_metrics is not None or history.fail_metrics is not None) and abs(fail_crf - pass_crf) <= granularity:
         return None
 
     # --- Early acceptance ---
@@ -705,20 +728,30 @@ def adjust_crf(
         )
         return None
 
+    # crf_span is signed: positive for lower-is-better (pass_crf < fail_crf),
+    # negative for higher-is-better (pass_crf > fail_crf).
+    # Interpolation pass_crf + t * crf_span is direction-agnostic: t=0 → pass (better), t=1 → fail (worse).
     crf_span = fail_crf - pass_crf
 
     def _clamp_interior(crf: Decimal) -> Decimal | None:
-        """Clamp *crf* to the valid search range.
+        """Clamp *crf* to the valid interior of the search range.
 
         When a boundary sentinel has no real metrics yet, the boundary value
         itself is valid — the algorithm hasn't tested it yet.  Once a real
         result is recorded at a boundary, that value is excluded (already tested).
 
+        Direction-agnostic: uses min/max of the two boundaries so the interior
+        is always ``[lower_bound + granularity, upper_bound - granularity]``
+        regardless of which end is pass or fail.
+
         Returns ``None`` when there is no valid point at least one *granularity*
         step away from both boundaries.
         """
-        lo = pass_crf if history.pass_metrics is None else pass_crf + granularity
-        hi = fail_crf if history.fail_metrics is None else fail_crf - granularity
+        lower = min(pass_crf, fail_crf)
+        upper = max(pass_crf, fail_crf)
+        # Exclude a boundary only once a real result has been recorded there.
+        lo = lower if (history.pass_metrics is None and lower == pass_crf) or (history.fail_metrics is None and lower == fail_crf) else lower + granularity
+        hi = upper if (history.pass_metrics is None and upper == pass_crf) or (history.fail_metrics is None and upper == fail_crf) else upper - granularity
         if lo > hi:
             return None
         return max(lo, min(hi, crf))
@@ -764,10 +797,16 @@ def adjust_crf(
 
     t_chosen, label = candidates[0]
     # Compute raw value in Decimal to avoid float drift, then quantize.
-    raw_crf  = pass_crf + Decimal(str(t_chosen)) * crf_span
-    rounding = ROUND_CEILING if current_passed else ROUND_FLOOR
-    next_crf = (raw_crf / granularity).to_integral_value(rounding=rounding) * granularity
-    # Ensure the result carries the same exponent as granularity (e.g. "18.5" not "18.50")
+    raw_crf = pass_crf + Decimal(str(t_chosen)) * crf_span
+
+    # Apply max-step clamping before quantization.
+    if quality_max_step is not None:
+        step = raw_crf - current_crf
+        if abs(step) > quality_max_step:
+            raw_crf = current_crf + (quality_max_step if step > 0 else -quality_max_step)
+
+    # Snap to nearest granularity step.
+    next_crf = (raw_crf / granularity).to_integral_value(ROUND_HALF_EVEN) * granularity
     next_crf = next_crf.quantize(granularity)
 
     result = _clamp_interior(next_crf)

@@ -121,6 +121,7 @@ class ConfigManager:
                 quality_range       = tuple(codec_data["quality_range"]),
                 quality_label       = codec_data.get("quality_label", "CRF"),
                 quality_granularity = Decimal(str(codec_data.get("quality_granularity", "0.5"))),
+                quality_max_step    = Decimal(str(codec_data["quality_max_step"])) if "quality_max_step" in codec_data else None,
                 encoder_args        = codec_data.get("encoder_args", []),
                 presets             = codec_data.get("presets", [])
             )

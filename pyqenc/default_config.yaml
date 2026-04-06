@@ -96,6 +96,8 @@ default_targets:
 default_strategies:
   - "veryslow+h264*"  # All h264 profiles with veryslow preset
   - "slow+h265*"      # All h265 profiles with slow preset
+  # - "p7+nvenc*"       # All NVENC (Nvidia GPU) profiles with highest quality preset
+  # - "any+vulkan*"     # All Vulkan profiles. Needs GPU to support Vulkan and Vulkan SDK installed and ffmpeg built with vulkan support (default since recently).
 
 # Codec Definitions
 # -----------------
@@ -104,8 +106,16 @@ default_strategies:
 #   - encoder: FFmpeg encoder name (e.g., libx264, libx265, hevc_nvenc)
 #   - pixel_format: Pixel format for encoding
 #   - default_quality: Starting quality parameter value
-#   - quality_range: Valid quality range [min, max] for this codec
+#   - quality_range: Valid quality range [better, worse] — order matters.
+#       The first value is always the *better* end, the second is the *worse* end.
+#       For CRF/CQ/QP codecs: [0, 51] (lower = better quality).
+#       For VBR bitrate codecs: [99, 0] (higher Mbit/s = better quality).
+#       The search algorithm moves toward the first value to increase quality
+#       and toward the second value to reduce quality (find efficiency).
 #   - quality_granularity: Minimal step size for the quality search algorithm
+#   - quality_max_step: Optional. Maximum absolute step per search iteration.
+#       Useful for codecs with wide ranges (e.g. VBR bitrate) to avoid large
+#       jumps on early attempts. Omit to allow unrestricted steps.
 #   - quality_label: Human-readable label for logs and plots (default: CRF; file names will still use crf for ease of parsing)
 #   - encoder_args: Full ffmpeg argument template. Must contain:
 #       -i {input}        — two consecutive items; {input} is replaced with the
@@ -177,7 +187,7 @@ codecs:
       - veryslow
       - placebo
 
-  nvenc-h265-10bit:
+  nvenc-h265-10bit-vbr-cq:  # CQ = Constant Quality. It is perception-based quality, controlled by the codec. Codec decides how many bits to use. Similar to CRF, but for NVidia.
     default_quality: 25
     quality_range: [0, 51]
     quality_granularity: 0.5
@@ -191,6 +201,8 @@ codecs:
       - "hevc_nvenc"
       - "-preset"
       - "{preset}"
+      - "-tune:v"
+      - "hq"
       - "-rc:v"
       - "vbr"
       - "-b:v"
@@ -198,9 +210,79 @@ codecs:
       - "-cq:v"
       - "{quality}"
       - "-qmin"
-      - "{quality}"
+      - "{quality}" # TODO: make a percentage of quality, like 50%, 120% for the qmin/qmax
       - "-qmax"
       - "{quality}"
+      - "{profile_args}"
+    presets:
+      - p1
+      - p2
+      - p3
+      - p4
+      - p5
+      - p6
+      - p7
+
+
+  nvenc-h265-10bit-qp:  # QP = Quantization Parameter. Directly controls how many bits to use, straightforward and dumb. But we control he quality via metrics.
+    default_quality: 25
+    quality_range: [0, 51]
+    quality_granularity: 1 # <int>
+    quality_label: "QP"
+    encoder_args:
+      - "-i"
+      - "{input}"
+      - "-vf"
+      - "{vf},format=p010le,hwupload_cuda"
+      - "-c:v"
+      - "hevc_nvenc"
+      - "-preset"
+      - "{preset}"
+      - "-tune:v"
+      - "hq"
+      - "-rc:v"
+      - "constqp"
+      - "-qp:v"
+      - "{quality}"
+      - "{profile_args}"
+    presets:
+      - p1
+      - p2
+      - p3
+      - p4
+      - p5
+      - p6
+      - p7
+
+  nvenc-h265-10bit-vbr-multipass:  # Multipass VBR
+    default_quality: 20            # 20Mbit/s as a starting point
+    quality_range: [99, 0]         # Limit to 99Mbit/s, reversed (higher=better)
+    quality_granularity: 0.1
+    quality_max_step: 10.0
+    quality_label: "Mbit/s"
+    encoder_args:
+      - "-i"
+      - "{input}"
+      - "-vf"
+      - "{vf},format=yuv420p10le"
+      - "-c:v"
+      - "hevc_nvenc"
+      - "-preset"
+      - "{preset}"
+      - "-tune:v"
+      - "hq"
+      - "-rc:v"
+      - "vbr"
+      - "-multipass"
+      - "fullres"
+      - "-b:v"
+      - "{quality}M"
+      # - "-maxrate"
+      # - "12M"
+      # - "-bufsize"
+      # - "16M"
+      - "-profile"
+      - "main10"
       - "{profile_args}"
     presets:
       - p1
@@ -286,10 +368,20 @@ profiles:
 
   # HEVC NVENC (GPU) Profiles
   # --------------------------
-  nvenc-h265-10bit-hq:
-    codec: nvenc-h265-10bit
-    description: "HEVC NVENC GPU encoding — 10-bit, VBR quality mode with high-quality tuning. Requires NVIDIA GPU with NVENC support."
-    extra_args: ["-tune:v", "hq"]
+  nvenc-h265-10bit-vbr-cq:
+    codec: nvenc-h265-10bit-vbr-cq
+    description: "HEVC NVENC GPU encoding — 10-bit, VBR+CQ quality mode with constrained qmin and qmax. Requires NVIDIA GPU with NVENC support."
+    extra_args: []
+
+  nvenc-h265-10bit-qp:
+    codec: nvenc-h265-10bit-qp
+    description: "HEVC NVENC GPU encoding — 10-bit, constant QP mode. Requires NVIDIA GPU with NVENC support."
+    extra_args: []
+
+  nvenc-h265-10bit-vbr-multipass:
+    codec: nvenc-h265-10bit-vbr-multipass
+    description: "HEVC NVENC GPU encoding — 10-bit, multipass-vbr mode. Requires NVIDIA GPU with NVENC support."
+    extra_args: []
 
   vulkan_hevc-10bit:
     codec: vulkan_hevc-10bit
