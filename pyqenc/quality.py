@@ -9,6 +9,7 @@ algorithms for iterative encoding optimization.
 import logging
 import math
 from dataclasses import dataclass, field
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import Enum
 from os import PathLike
 from pathlib import Path
@@ -16,7 +17,7 @@ from typing import TypedDict, assert_never
 
 import pandas as pd
 
-from pyqenc.constants import CRF_GRANULARITY, CRF_METRIC_POSITIVE_DELTA, PADDING_CRF
+from pyqenc.constants import CRF_METRIC_POSITIVE_DELTA, PADDING_QUALITY_NUMBER
 from pyqenc.utils.ffmpeg_runner import (
     FFmpegRunResult,
     ProgressCallback,
@@ -61,6 +62,17 @@ class MetricInfo:
         plot_y_min:        Lower bound for the Y-axis in plots (normalized scale).
         plot_y_max:        Upper bound for the Y-axis in plots (normalized scale).
                            Slightly above ``lossless_value`` to leave headroom.
+        complexity:        Relative computational cost compared to SSIM/PSNR (baseline 1.0).
+                           Used to weight progress bar totals so that slower metrics
+                           (e.g. VMAF) contribute proportionally more to the reported
+                           duration.  SSIM and PSNR are 1.0; VMAF is ~10.0 (empirical
+                           estimate — actual ratio varies by content and hardware).
+        comparison_range:  Practical value span used *only* for normalizing
+                           cross-metric deficit comparisons (``_score_failing_attempt``).
+                           Not the theoretical lossless ceiling — the realistic range
+                           where quality targets are set and misses occur.
+                           VMAF ≈ 20 (targets typically 80–100), SSIM ≈ 10 (90–100),
+                           PSNR ≈ 30 (40–70 dB), VIF ≈ 5 (empirical; limited data).
     """
 
     name:              str
@@ -74,6 +86,8 @@ class MetricInfo:
     display_unit:      str
     plot_y_min:        float
     plot_y_max:        float
+    complexity:        float
+    comparison_range:  float
 
     def normalize(self, value: float | pd.Series) -> float | pd.Series:
         """Normalize a raw metric value (or Series) to the display scale.
@@ -165,6 +179,8 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = "%",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
+        complexity        = 10.0,  # empirical estimate; VMAF is significantly slower than PSNR/SSIM
+        comparison_range  = 20.0,  # practical target range ~80–100
     ),
     MetricType.SSIM: MetricInfo(
         name              = "SSIM",
@@ -178,6 +194,8 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = "%",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
+        complexity        = 1.0,
+        comparison_range  = 10.0,  # practical target range ~90–100
     ),
     MetricType.PSNR: MetricInfo(
         name              = "PSNR",
@@ -191,6 +209,8 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = " dB",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
+        complexity        = 1.0,
+        comparison_range  = 30.0,  # practical target range ~40–70 dB
     ),
     # VIF placeholder (not yet active and not checked for correctness):
     # MetricType.VIF: MetricInfo(
@@ -210,10 +230,19 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
 
 
 class MetricStats(TypedDict):
-    """Key statistics for a single metric."""
+    """Key statistics for a single metric.
+
+    Subset of ``_MetricStatistics`` stored in sidecars and used for targeting.
+    Includes the same percentile selection used by the visualization plots:
+    min, p05, p25, median (p50), p75, p95, max, std.
+    """
 
     min:    float
+    p05:    float
+    p25:    float
     median: float
+    p75:    float
+    p95:    float
     max:    float
     std:    float
 
@@ -390,11 +419,12 @@ class QualityEvaluation:
 
 @dataclass
 class CRFHistory:
-    """Track the tightest known pass/fail CRF bracket, attempt count, and observed
+    """Track the tightest known pass/fail quality bracket, attempt count, and observed
     metric values at the bracket boundaries.
 
     ``fail_crf`` and ``pass_crf`` are initialized to the codec limits as
-    sentinels, then narrowed on each attempt.
+    sentinels, then narrowed on each attempt.  All quality values are ``Decimal``
+    so arithmetic and string formatting are exact.
 
     ``fail_metrics`` and ``pass_metrics`` store the full measured quality dict
     (keyed as ``"<metric>_<stat>"``) observed at the current ``fail_crf`` and
@@ -407,9 +437,9 @@ class CRFHistory:
     boundary dicts to get two real observations of that specific metric.
 
     Attributes:
-        fail_crf:      Lowest CRF that still failed (upper bracket bound).
+        fail_crf:      Lowest quality that still failed (upper bracket bound).
                        Initialized to ``crf_max``; narrows downward on misses.
-        pass_crf:      Highest CRF that still passed (lower bracket bound).
+        pass_crf:      Highest quality that still passed (lower bracket bound).
                        Initialized to ``crf_min``; narrows upward on passes.
         fail_metrics:  Full quality_results dict observed at ``fail_crf``.
                        ``None`` until a real fail result is recorded.
@@ -418,15 +448,15 @@ class CRFHistory:
         attempts:      Number of encoding attempts recorded.
     """
 
-    fail_crf:     float
-    pass_crf:     float
+    fail_crf:     Decimal
+    pass_crf:     Decimal
     fail_metrics: dict[str, float] | None = None
     pass_metrics: dict[str, float] | None = None
     attempts:     int                     = 0
 
     def add(
         self,
-        crf:     float,
+        crf:     Decimal,
         passed:  bool,
         metrics: dict[str, float] | None = None,
     ) -> None:
@@ -436,7 +466,7 @@ class CRFHistory:
         Phase 2 proportional interpolation can look up any target key later.
 
         Args:
-            crf:     CRF value used.
+            crf:     Quality value used.
             passed:  Whether all quality targets were met.
             metrics: Full measured quality dict (``"<metric>_<stat>"`` keys).
                      Pass ``None`` when metrics are unavailable (history
@@ -513,13 +543,88 @@ def _find_worst_target(
     return worst_target, worst_deficit, worst_actual
 
 
+def _score_failing_attempt(
+    metrics:         dict[str, float],
+    quality_targets: list[QualityTarget],
+    crf:             Decimal | None = None,
+) -> float:
+    """Compute a composite score for a failing attempt based on failing targets only.
+
+    Sums the normalized deficit for each target that is *not* met.  Only failing
+    targets contribute — passing ones are ignored so that a metric with a large
+    surplus (e.g. PSNR at 70 dB against a 45 dB target) cannot mask failures on
+    other metrics.
+
+    Each deficit is divided by ``MetricInfo.comparison_range`` — the practical
+    value span where targets are set — to make deficits comparable across metrics
+    with different scales (VMAF %, SSIM %, PSNR dB, VIF).
+
+    Higher score = closer to satisfying all targets = better fallback choice.
+    All values are ≤ 0 (only failing targets contribute negative deficits).
+
+    Args:
+        metrics:         Measured quality metrics keyed as ``"<metric>_<stat>"``.
+        quality_targets: Quality targets to evaluate against.
+        crf:             Unused; present for drop-in compatibility with
+                         ``_score_failing_attempt_by_crf``.
+
+    Returns:
+        Sum of normalized deficits for failing targets (≤ 0.0).
+        Returns ``-float("inf")`` when no target has a valid result in *metrics*.
+    """
+    _ = crf
+    total = 0.0
+    found = False
+    for target in quality_targets:
+        key    = f"{target.metric}_{target.statistic}"
+        actual = metrics.get(key)
+        if actual is None:
+            continue
+        found  = True
+        info   = MetricType(target.metric).info
+        deficit = info.deficit(actual, target.value)
+        if deficit < 0.0:
+            total += deficit / info.comparison_range
+    return total if found else -float("inf")
+
+
+def _score_failing_attempt_by_crf(
+    metrics:         dict[str, float],
+    quality_targets: list[QualityTarget],
+    crf:             Decimal | None = None,
+) -> float:
+    """Score a failing attempt by CRF: lower CRF → higher score.
+
+    Drop-in alternative to ``_score_failing_attempt`` that restores the original
+    behaviour of preferring the attempt with the lowest CRF value (i.e. highest
+    quality setting).  Useful as a fallback when metric-based scoring is
+    unavailable or undesirable.
+
+    Score is ``-float(crf)`` so that lower CRF values produce a higher (less
+    negative) score, matching the "higher = better" convention used by
+    ``_score_failing_attempt``.
+
+    Args:
+        metrics:         Unused; present for drop-in compatibility.
+        quality_targets: Unused; present for drop-in compatibility.
+        crf:             CRF value of the attempt.  When ``None``, returns
+                         ``-float("inf")`` (worst possible score).
+
+    Returns:
+        ``-float(crf)`` or ``-float("inf")`` when *crf* is ``None``.
+    """
+    _ = metrics, quality_targets
+    return -float(crf) if crf is not None else -float("inf")
+
+
 def adjust_crf(
-    current_crf:     float,
+    current_crf:     Decimal,
     quality_results: dict[str, float],
     quality_targets: list[QualityTarget],
     history:         CRFHistory,
-) -> float | None:
-    """Calculate the next CRF to try, updating *history* with the current result.
+    granularity:     Decimal = Decimal("0.5"),
+) -> Decimal | None:
+    """Calculate the next quality value to try, updating *history* with the current result.
 
     ## Algorithm
 
@@ -538,26 +643,41 @@ def adjust_crf(
     return ``None`` and binary is used automatically.
 
     **Early acceptance**: when all targets pass and the tightest surplus is
-    within ``CRF_METRIC_POSITIVE_DELTA``, the current CRF is accepted without
+    within ``CRF_METRIC_POSITIVE_DELTA``, the current value is accepted without
     trying to squeeze further — saves one encoding pass.
 
-    **Exhaustion**: when ``fail_crf - pass_crf ≤ CRF_GRANULARITY`` the bracket
+    **Exhaustion**: when ``fail_crf - pass_crf ≤ granularity`` the bracket
     is too tight to improve; return ``None`` so the caller keeps the last pass.
 
+    **Boundary inclusivity**: when a boundary sentinel has no real metrics yet
+    (``fail_metrics`` or ``pass_metrics`` is ``None``), the boundary value itself
+    is a valid candidate — the algorithm hasn't tested it yet.  Once a real
+    result is recorded at a boundary, that value is excluded (already tested).
+
+    **Quantization**: the raw interpolated value is quantized to *granularity*
+    using ``Decimal.quantize``.  When the current attempt passed, rounding is
+    biased upward (``ROUND_CEILING``); when it failed, rounding is biased
+    downward (``ROUND_FLOOR``) — keeping the result on the correct side.
+    The returned ``Decimal`` is already quantized, so ``str()`` produces the
+    correct display string for both logs and ffmpeg args.
+
     Args:
-        current_crf:     CRF used in the most recent attempt.
+        current_crf:     Quality value used in the most recent attempt.
         quality_results: Measured quality metrics keyed as ``"<metric>_<stat>"``.
         quality_targets: Quality targets to meet.
-        history:         CRF bracket history; updated in-place with this result.
+        history:         Quality bracket history; updated in-place with this result.
+        granularity:     Step size as a ``Decimal``.  Comes from
+                         ``strategy.codec.quality_granularity``.
 
     Returns:
-        Next CRF to try, or ``None`` when the search is exhausted or the
-        current result is accepted as final.
+        Next quality value to try (quantized ``Decimal``), or ``None`` when the
+        search is exhausted or the current result is accepted as final.
     """
     fail_crf, pass_crf = history.fail_crf, history.pass_crf
 
-    # Exhaustion check first — bracket too tight to improve.
-    if fail_crf - pass_crf <= CRF_GRANULARITY:
+    # Preemptive exhaustion check — bracket too tight to improve.
+    # Skip when no pass_metrics or no fail_metrics - no true bracket yet, allow inclusive boundaries.
+    if history.pass_metrics and history.fail_metrics and (fail_crf - pass_crf <= granularity):
         return None
 
     found = _find_worst_target(quality_results, quality_targets)
@@ -573,50 +693,35 @@ def adjust_crf(
 
     # Re-read bounds after update (they may have narrowed).
     fail_crf, pass_crf = history.fail_crf, history.pass_crf
-    if fail_crf - pass_crf <= CRF_GRANULARITY:
+    if history.pass_metrics is not None and fail_crf - pass_crf <= granularity:
         return None
 
     # --- Early acceptance ---
     if current_passed and worst_deficit <= CRF_METRIC_POSITIVE_DELTA:
         logger.debug(
             "Least-proficient metric surplus %.3f ≤ CRF_METRIC_POSITIVE_DELTA (%.3f), "
-            "accepting CRF %s as final.",
-            worst_deficit, CRF_METRIC_POSITIVE_DELTA, f"{current_crf:{PADDING_CRF}}",
+            "accepting %s as final.",
+            worst_deficit, CRF_METRIC_POSITIVE_DELTA, str(current_crf).rjust(PADDING_QUALITY_NUMBER),
         )
         return None
 
     crf_span = fail_crf - pass_crf
 
-    def _clamp_interior(crf: float) -> float | None:
-        """Clamp *crf* to strictly inside ``(pass_crf, fail_crf)``.
+    def _clamp_interior(crf: Decimal) -> Decimal | None:
+        """Clamp *crf* to the valid search range.
 
-        Returns ``None`` when there is no interior point at least one
-        ``CRF_GRANULARITY`` step away from both boundaries.
+        When a boundary sentinel has no real metrics yet, the boundary value
+        itself is valid — the algorithm hasn't tested it yet.  Once a real
+        result is recorded at a boundary, that value is excluded (already tested).
+
+        Returns ``None`` when there is no valid point at least one *granularity*
+        step away from both boundaries.
         """
-        lo = pass_crf + CRF_GRANULARITY
-        hi = fail_crf - CRF_GRANULARITY
+        lo = pass_crf if history.pass_metrics is None else pass_crf + granularity
+        hi = fail_crf if history.fail_metrics is None else fail_crf - granularity
         if lo > hi:
             return None
         return max(lo, min(hi, crf))
-
-    # --- CRF estimate: candidate list, first t ∈ [0, 1] wins ---
-    # Candidates (in priority order):
-    #   1. Primary:   interpolate from current worst target's metric curve.
-    #   2. Reverse:   re-find worst target from the *opposite* boundary's metrics
-    #                 (the boundary we did NOT just update), then interpolate.
-    #                 If we just passed, the opposite is the fail boundary — its
-    #                 worst metric is what actually caused the prior failure.
-    #   3. Binary:    t = 0.5 (midpoint), always valid.
-    #
-    # When boundary metrics are absent (early attempts), interpolation candidates
-    # return None and binary (t=0.5) is used automatically — no separate phase
-    # needed.
-    #
-    # We work in deficit space: deficit_at_pass > 0, deficit_at_fail < 0.
-    # Linear interpolation finds t where deficit == 0:
-    #   t = deficit_at_pass / (deficit_at_pass - deficit_at_fail)
-    # t ∈ [0, 1] means the metric straddles the target inside the bracket.
-    # t outside [0, 1] means the metric never crosses the target here — skip.
 
     def _t_for_target(
         target:    QualityTarget,
@@ -658,16 +763,24 @@ def adjust_crf(
     candidates.append((0.5, "binary"))
 
     t_chosen, label = candidates[0]
-    raw_crf = pass_crf + t_chosen * crf_span
-    if current_passed:
-        next_crf = math.ceil(raw_crf / CRF_GRANULARITY) * CRF_GRANULARITY
-    else:
-        next_crf = math.floor(raw_crf / CRF_GRANULARITY) * CRF_GRANULARITY
+    # Compute raw value in Decimal to avoid float drift, then quantize.
+    raw_crf  = pass_crf + Decimal(str(t_chosen)) * crf_span
+    rounding = ROUND_CEILING if current_passed else ROUND_FLOOR
+    next_crf = (raw_crf / granularity).to_integral_value(rounding=rounding) * granularity
+    # Ensure the result carries the same exponent as granularity (e.g. "18.5" not "18.50")
+    next_crf = next_crf.quantize(granularity)
+
     result = _clamp_interior(next_crf)
 
     logger.debug(
-        "CRF [%s]: pass=%.1f fail=%.1f t=%.3f raw=%.2f → CRF %s",
-        label, pass_crf, fail_crf, t_chosen, raw_crf,
-        f"{result:{PADDING_CRF}}" if result is not None else "None (exhausted)",
+        "CRF [%s]: pass=%s fail=%s t=%.3f raw=%s → %s",
+        label,
+        str(pass_crf).rjust(PADDING_QUALITY_NUMBER),
+        str(fail_crf).rjust(PADDING_QUALITY_NUMBER),
+        t_chosen,
+        str(raw_crf.quantize(granularity)).rjust(PADDING_QUALITY_NUMBER),
+        str(result).rjust(PADDING_QUALITY_NUMBER) if result is not None else "None (exhausted)",
     )
     return result
+
+

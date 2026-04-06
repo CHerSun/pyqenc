@@ -8,12 +8,18 @@ profiles and codec configurations.
 
 import fnmatch
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from pyqenc.constants import DEFAULT_METRICS_SAMPLING
+from pyqenc.constants import (
+    CONFIG_DIR_HOME,
+    CONFIG_FILENAME_CWD,
+    CONFIG_FILENAME_HOME,
+    DEFAULT_METRICS_SAMPLING,
+)
 from pyqenc.models import CodecConfig, Strategy
 
 
@@ -84,6 +90,7 @@ class ConfigManager:
         self._codecs: dict[str, CodecConfig] = {}
         self._profiles: dict[str, EncodingProfile] = {}
         self._default_strategies: list[str] = []
+        self._default_targets: list[str] = []
 
         self._load_config(config_path)
         self._parse_config()
@@ -95,33 +102,13 @@ class ConfigManager:
             config_path: Optional path to configuration file
         """
         if config_path and config_path.exists():
-            # Load from specified path
             with open(config_path, 'r', encoding='utf-8') as f:
                 self._config = yaml.safe_load(f)
             return
 
-        # Search default locations
-        search_paths = [
-            Path.cwd() / "pyqenc.yaml",
-            Path.home() / ".config" / "pyqenc" / "config.yaml",
-        ]
-
-        for path in search_paths:
-            if path.exists():
-                with open(path, 'r', encoding='utf-8') as f:
-                    self._config = yaml.safe_load(f)
-                return
-
-        # Fall back to built-in default_config.yaml
-        default_config_path = Path(__file__).parent / "default_config.yaml"
-        if default_config_path.exists():
-            with open(default_config_path, 'r', encoding='utf-8') as f:
-                self._config = yaml.safe_load(f)
-        else:
-            raise FileNotFoundError(
-                f"Could not find default configuration at {default_config_path}. "
-                f"Searched paths: {search_paths}"
-            )
+        source = find_config_source()
+        with open(source, 'r', encoding='utf-8') as f:
+            self._config = yaml.safe_load(f)
 
     def _parse_config(self) -> None:
         """Parse loaded configuration into structured objects."""
@@ -129,12 +116,13 @@ class ConfigManager:
         codecs_data = self._config.get("codecs", {})
         for name, codec_data in codecs_data.items():
             self._codecs[name] = CodecConfig(
-                name=name,
-                encoder=codec_data["encoder"],
-                pixel_format=codec_data["pixel_format"],
-                default_crf=codec_data["default_crf"],
-                crf_range=tuple(codec_data["crf_range"]),
-                presets=codec_data.get("presets", [])
+                name                = name,
+                default_quality     = Decimal(str(codec_data["default_quality"])),
+                quality_range       = tuple(codec_data["quality_range"]),
+                quality_label       = codec_data.get("quality_label", "CRF"),
+                quality_granularity = Decimal(str(codec_data.get("quality_granularity", "0.5"))),
+                encoder_args        = codec_data.get("encoder_args", []),
+                presets             = codec_data.get("presets", [])
             )
 
         # Parse profiles
@@ -150,6 +138,9 @@ class ConfigManager:
         # Parse default strategies
         self._default_strategies = self._config.get("default_strategies", [])
 
+        # Parse default targets
+        self._default_targets = self._config.get("default_targets", [])
+
     def get_default_strategies(self) -> list[str]:
         """Get default strategy patterns from configuration.
 
@@ -157,6 +148,14 @@ class ConfigManager:
             List of default strategy patterns (e.g., ["veryslow+h264*", "slow+h265*"])
         """
         return self._default_strategies.copy()
+
+    def get_default_targets(self) -> list[str]:
+        """Get default quality target strings from configuration.
+
+        Returns:
+            List of default target strings (e.g., ["vmaf-min:94", "psnr-min:42"])
+        """
+        return self._default_targets.copy()
 
     def get_codec(self, name: str) -> CodecConfig:
         """Retrieve codec configuration by name.
@@ -194,6 +193,28 @@ class ConfigManager:
             )
         return self._profiles[name]
 
+
+    def list_codecs(self) -> list[str]:
+        """List all available codec names.
+
+        Returns:
+            List of codec names (e.g. ``['h264-8bit', 'h265-10bit']``).
+        """
+        return list(self._codecs.keys())
+
+    def list_presets(self, codec: str) -> list[str]:
+        """List all presets supported by a codec.
+
+        Args:
+            codec: Codec name (e.g. ``'h264-8bit'``).
+
+        Returns:
+            List of preset names.
+
+        Raises:
+            ValueError: If codec not found.
+        """
+        return list(self.get_codec(codec).presets)
 
     def list_profiles(self, codec: str | None = None) -> list[str]:
         """List all available profile names.
@@ -446,4 +467,31 @@ class ConfigManager:
             Metrics sampling factor (minimum 1, default 10).
         """
         return int(self._config.get("metrics", {}).get("sampling", DEFAULT_METRICS_SAMPLING))
+
+
+def find_config_source() -> Path:
+    """Return the config file that would be loaded by :class:`ConfigManager`.
+
+    Searches in priority order:
+    1. ``pyqenc.yaml`` in the current working directory
+    2. ``~/.config/pyqenc/config.yaml`` (user home)
+    3. Built-in ``default_config.yaml`` bundled with the package
+
+    Returns:
+        Path to the first config file found.
+
+    Raises:
+        FileNotFoundError: If even the built-in default is missing (should never happen).
+    """
+    candidates: list[Path] = [
+        Path.cwd() / CONFIG_FILENAME_CWD,
+        Path.home() / CONFIG_DIR_HOME / CONFIG_FILENAME_HOME,
+        Path(__file__).parent / "default_config.yaml",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    raise FileNotFoundError(
+        f"No config found. Searched: {candidates}"
+    )
 

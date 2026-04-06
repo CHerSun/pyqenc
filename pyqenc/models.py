@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import Enum, IntEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -180,22 +181,64 @@ class Strategy(BaseModel):
         """Filesystem-safe name for directory paths (e.g. ``'slow_h265-aq'``)."""
         return self.name.replace("+", "_").replace(":", "_")
 
-    def to_ffmpeg_args(self, crf: float) -> list[str]:
-        """Generate FFmpeg video encoding arguments for this strategy.
+    def to_ffmpeg_args(self, quality: Decimal, vf_filter: str | None = None) -> list[str]:
+        """Expand the codec's ``encoder_args`` template into a concrete ffmpeg argument list.
+
+        Substitution rules applied to every element of ``codec.encoder_args``:
+
+        - ``'{input}'``       → kept as-is for the caller to replace with the
+          actual input ``Path``.  The preceding ``'-i'`` flag is a separate
+          element in the template.  Everything before ``'-i'`` is pre-input
+          (e.g. ``-hwaccel`` options).
+        - ``'{quality}'``     → replaced with ``str(quality)``.  The ``Decimal``
+          value is already quantized to the codec's granularity, so ``str()``
+          produces the correct representation (e.g. ``'18.5'``, ``'19'``).
+          May appear multiple times (e.g. ``-cq:v {quality} -qmin {quality}``).
+        - ``'{preset}'``      → replaced with ``self.preset``.
+        - ``'{profile_args}'``→ expanded to ``self.profile_args`` in-place.
+        - ``'{vf}'``          → replaced with the vf filter expression string
+          (e.g. ``'crop=1920:800:0:140'``).  When ``{vf}`` is the entire
+          element and *vf_filter* is empty/``None``, the element is silently
+          dropped.  When ``{vf}`` is embedded inside a larger filter chain
+          (e.g. ``'scale_cuda=format=p010le:{vf}'``), it is replaced with the
+          filter string or with an empty string — a trailing ``:`` is left in
+          place, which ffmpeg tolerates.
 
         Args:
-            crf: CRF value to use.
+            quality:   Quality parameter value as a ``Decimal`` already quantized
+                       to the codec's granularity (CRF for x264/x265, CQ for nvenc, …).
+            vf_filter: Optional ffmpeg video filter expression (e.g. ``'crop=1920:800:0:140'``).
 
         Returns:
-            List of FFmpeg command-line arguments.
+            Expanded argument list with ``'{input}'`` still present as a string
+            sentinel for the caller to substitute with the actual ``Path``.
+
+        Raises:
+            ValueError: If ``codec.encoder_args`` contains no ``'{input}'`` sentinel.
         """
-        return [
-            "-c:v",     self.codec.encoder,
-            "-preset",  self.preset,
-            "-crf",     str(crf),
-            "-pix_fmt", self.codec.pixel_format,
-            *self.profile_args,
-        ]
+        quality_str = str(quality)
+        result: list[str] = []
+        for arg in self.codec.encoder_args:
+            if arg == "{profile_args}":
+                result.extend(self.profile_args)
+            elif arg == "{vf}":
+                if vf_filter:
+                    result.append(vf_filter)
+                else:
+                    # Standalone {vf} with no filter — also drop the preceding -vf flag
+                    if result and result[-1] == "-vf":
+                        result.pop()
+            else:
+                expanded = arg.replace("{quality}", quality_str).replace("{preset}", self.preset)
+                # {vf} embedded inside a larger filter chain string
+                if "{vf}" in expanded:
+                    expanded = expanded.replace("{vf}", vf_filter or "")
+                result.append(expanded)
+        if "{input}" not in result:
+            raise ValueError(
+                f"Codec '{self.codec.name}' encoder_args must contain a '{{input}}' sentinel"
+            )
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +266,7 @@ class QualityTarget(BaseModel):
 
     Attributes:
         metric:    Metric type (vmaf, ssim, psnr).
-        statistic: Statistical measure (min, median, max).
+        statistic: Statistical measure (min, median, max, p05, p25, p75, p95).
         value:     Target value for the metric.
     """
 
@@ -236,7 +279,8 @@ class QualityTarget(BaseModel):
         """Parse quality target from string format.
 
         Args:
-            target_str: Target string like ``'vmaf-min:95'`` or ``'ssim-med:98'``.
+            target_str: Target string like ``'vmaf-min:95'``, ``'ssim-med:98'``,
+                        or ``'vmaf-p25:90'``.
 
         Returns:
             QualityTarget instance.
@@ -253,7 +297,7 @@ class QualityTarget(BaseModel):
             if metric.lower() not in valid_metrics:
                 raise ValueError(f"Invalid metric '{metric}'. Must be one of: {valid_metrics}")
 
-            valid_stats = {"min", "med", "median", "max"}
+            valid_stats = {"min", "med", "median", "max", "p05", "p25", "p75", "p95"}
             if statistic.lower() not in valid_stats:
                 raise ValueError(f"Invalid statistic '{statistic}'. Must be one of: {valid_stats}")
 
@@ -278,28 +322,54 @@ class CodecConfig(BaseModel):
     """Configuration for a video codec.
 
     Attributes:
-        name:          Codec identifier (e.g., ``'h264-8bit'``, ``'h265-10bit'``).
-        encoder:       FFmpeg encoder name (e.g., ``'libx264'``, ``'libx265'``).
-        pixel_format:  Pixel format (e.g., ``'yuv420p'``, ``'yuv420p10le'``).
-        default_crf:   Default CRF value for this codec.
-        crf_range:     Valid CRF range as ``(min, max)`` tuple; order is normalised
-                       on construction so ``crf_range[0] <= crf_range[1]`` always holds.
-        presets:       List of presets supported by this encoder.
+        name:            Codec identifier (e.g., ``'h264-8bit'``, ``'h265-10bit'``).
+        default_quality: Default quality parameter value for this codec.
+        quality_range:   Valid quality range as ``(min, max)`` tuple; order is normalised
+                         on construction so ``quality_range[0] <= quality_range[1]`` always holds.
+        quality_label:       Human-readable label for the quality parameter used in logs
+                             and plots (e.g. ``'CRF'``, ``'CQ'``).
+        quality_granularity: Step size for the quality search algorithm.  CRF/CQ codecs
+                             typically use ``0.5``; QP-based codecs prefer ``1.0`` (integer
+                             steps).  The search result is rounded to the nearest multiple
+                             of this value.
+        encoder_args:        Full ffmpeg argument template for this codec.  Sentinels:
+
+                         - ``'-i'`` + ``'{input}'`` — two consecutive items; ``{input}``
+                           is replaced with the actual input ``Path`` at runtime.
+                           Args before ``'-i'`` are pre-input (e.g. ``-hwaccel``).
+                         - ``'{quality}'`` — replaced with the quality value; may appear
+                           multiple times (e.g. ``-cq:v {quality} -qmin {quality}``).
+                         - ``'{preset}'`` — replaced with the strategy preset name.
+                         - ``'{profile_args}'`` — expanded to the profile's extra args.
+                         - ``'{vf}'`` — replaced with the vf filter expression when
+                           active (e.g. crop), or silently dropped when standalone
+                           and no filter is set.  Can be embedded inside a larger
+                           filter chain: ``'scale_cuda=format=p010le:{vf}'``.
+        presets:         List of presets supported by this encoder.
     """
 
-    name:         str
-    encoder:      str
-    pixel_format: str
-    default_crf:  float
-    crf_range:    tuple[float, float]
-    presets:      list[str] = Field(default_factory=list)
+    name:                str
+    default_quality:     Decimal
+    quality_range:       tuple[Decimal, Decimal]
+    quality_label:       str            = "CRF"
+    quality_granularity: Decimal        = Decimal("0.5")
+    encoder_args:        list[str]      = Field(default_factory=list)
+    presets:             list[str]      = Field(default_factory=list)
 
-    @field_validator("crf_range", mode="before")
+    @field_validator("quality_range", mode="before")
     @classmethod
-    def _normalise_crf_range(cls, v: tuple[float, float] | list[float]) -> tuple[float, float]:
-        """Ensure ``crf_range`` is always ``(min, max)`` regardless of input order."""
-        a, b = v
-        return (min(float(a), float(b)), max(float(a), float(b)))
+    def _normalise_quality_range(
+        cls, v: tuple[Decimal | float | str, Decimal | float | str] | list,
+    ) -> tuple[Decimal, Decimal]:
+        """Ensure ``quality_range`` is always ``(min, max)`` as ``Decimal`` regardless of input order."""
+        a, b = Decimal(str(v[0])), Decimal(str(v[1]))
+        return (min(a, b), max(a, b))
+
+    @field_validator("default_quality", "quality_granularity", mode="before")
+    @classmethod
+    def _to_decimal(cls, v: Decimal | float | int | str) -> Decimal:
+        """Coerce numeric config values to ``Decimal`` for exact arithmetic."""
+        return Decimal(str(v))
 
 
 
@@ -646,7 +716,7 @@ class AttemptMetadata(BaseModel):
     path:            Path
     chunk_id:        str
     strategy:        str
-    crf:             float
+    crf:             Decimal
     resolution:      str
     file_size_bytes: int
 

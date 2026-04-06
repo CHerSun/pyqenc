@@ -101,28 +101,77 @@ class TestStrategy:
     """Tests for Strategy FFmpeg argument generation."""
 
     def test_to_ffmpeg_args(self):
-        """Test FFmpeg argument generation."""
+        """Test FFmpeg argument generation via encoder_args template."""
         codec = CodecConfig(
-            name="h265-10bit",
-            encoder="libx265",
-            pixel_format="yuv420p10le",
-            default_crf=20.0,
-            crf_range=(0.0, 51.0)
+            name            = "h265-10bit",
+            default_quality = 20.0,
+            quality_range   = (0.0, 51.0),
+            encoder_args    = [
+                "-i", "{input}",
+                "-c:v", "libx265",
+                "-preset", "{preset}",
+                "-crf", "{quality}",
+                "-vf", "{vf}",
+                "-pix_fmt", "yuv420p10le",
+                "{profile_args}",
+            ],
         )
 
         strategy = Strategy(
-            preset="slow",
-            profile="h265-aq",
-            codec=codec,
-            profile_args=["-x265-params", "aq-mode=3:aq-strength=0.8"]
+            preset       = "slow",
+            profile      = "h265-aq",
+            codec        = codec,
+            profile_args = ["-x265-params", "aq-mode=3:aq-strength=0.8"],
         )
 
-        args = strategy.to_ffmpeg_args(crf=18.5)
-
+        # Without crop — -vf and {vf} both dropped
+        args = strategy.to_ffmpeg_args(18.5)
         assert args == [
+            "-i", "{input}",
             "-c:v", "libx265",
             "-preset", "slow",
             "-crf", "18.5",
             "-pix_fmt", "yuv420p10le",
-            "-x265-params", "aq-mode=3:aq-strength=0.8"
+            "-x265-params", "aq-mode=3:aq-strength=0.8",
         ]
+
+        # With crop — -vf kept, {vf} replaced with filter
+        args_crop = strategy.to_ffmpeg_args(18.5, vf_filter="crop=1920:800:0:140")
+        assert args_crop == [
+            "-i", "{input}",
+            "-c:v", "libx265",
+            "-preset", "slow",
+            "-crf", "18.5",
+            "-vf", "crop=1920:800:0:140",
+            "-pix_fmt", "yuv420p10le",
+            "-x265-params", "aq-mode=3:aq-strength=0.8",
+        ]
+
+    def test_to_ffmpeg_args_embedded_vf(self):
+        """Test {vf} embedded inside a larger filter chain (nvenc-style)."""
+        codec = CodecConfig(
+            name            = "hevc-nvenc-10bit",
+            default_quality = 28.0,
+            quality_range   = (1.0, 51.0),
+            quality_label   = "CQ",
+            encoder_args    = [
+                "-hwaccel", "cuda",
+                "-i", "{input}",
+                "-c:v", "hevc_nvenc",
+                "-cq:v", "{quality}",
+                "-vf", "scale_cuda=format=p010le:{vf}",
+                "-pix_fmt", "p010le",
+                "{profile_args}",
+            ],
+        )
+        strategy = Strategy(preset="p7", profile="hevc-nvenc-hq", codec=codec, profile_args=["-tune:v", "hq"])
+
+        # Without crop — trailing : left in place (ffmpeg tolerates it)
+        args = strategy.to_ffmpeg_args(28.0)
+        vf_idx = args.index("-vf")
+        assert args[vf_idx + 1] == "scale_cuda=format=p010le:"
+
+        # With crop — filter appended after the colon
+        args_crop = strategy.to_ffmpeg_args(28.0, vf_filter="crop=1920:800:0:140")
+        vf_idx = args_crop.index("-vf")
+        assert args_crop[vf_idx + 1] == "scale_cuda=format=p010le:crop=1920:800:0:140"

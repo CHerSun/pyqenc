@@ -74,6 +74,20 @@
 #   - x264: https://trac.ffmpeg.org/wiki/Encode/H.264
 #   - x265: https://trac.ffmpeg.org/wiki/Encode/H.265
 
+# Default Targets
+# ---------------
+# These quality targets are used when --quality-target is not specified on the command line.
+# Each target is a string in "metric-stat:value" format (e.g. "vmaf-min:94").
+# All metrics are scaled to 0-100 range (e.g. ssim-min:94 means raw SSIM ≥ 0.94).
+# Supported metrics: vmaf, ssim, psnr
+# Supported statistics: min, med, max, p05, p25, p75, p95
+# NOTE: avoid using min or max statistics unless you know what you're doing. Use p05 instead of min.
+default_targets:
+  - "vmaf-p05:95"   # VMAF p05 (min) per-chunk score
+  - "vmaf-med:97"   # VMAF median per-chunk score - higher than 97% is often unreachable by GPU codecs
+  - "psnr-p05:45"   # PSNR p05 (min) per-chunk score
+  - "ssim-p05:98"   # SSIM p05 (min) per-chunk score (raw ≥ 0.98)
+
 # Default Strategies
 # ------------------
 # These strategies are used when --strategies is not specified on the command line.
@@ -87,17 +101,39 @@ default_strategies:
 # -----------------
 # Defines available video codecs with their FFmpeg encoder settings.
 # Each codec specifies:
-#   - encoder: FFmpeg encoder name (e.g., libx264, libx265)
+#   - encoder: FFmpeg encoder name (e.g., libx264, libx265, hevc_nvenc)
 #   - pixel_format: Pixel format for encoding
-#   - default_crf: Starting CRF value for quality-based encoding
-#   - crf_range: Valid CRF range [min, max] for this codec
+#   - default_quality: Starting quality parameter value
+#   - quality_range: Valid quality range [min, max] for this codec
+#   - quality_label: Human-readable label for logs and plots (default: CRF)
+#   - encoder_args: Full ffmpeg argument template. Must contain:
+#       -i {input}        — two consecutive items; {input} is replaced with the
+#                           actual input path at runtime. Args before -i are
+#                           injected before the input (e.g. -hwaccel options).
+#       {quality}         — replaced with the quality value; may appear multiple
+#                           times (e.g. -cq:v {quality} -qmin {quality} -qmax {quality})
+#       {preset}          — replaced with the strategy preset name
+#       {profile_args}    — replaced with the profile's extra_args list in-place
 #   - presets: List of encoding presets supported by this encoder
 codecs:
   h264-8bit:
-    encoder: libx264
-    pixel_format: yuv420p
-    default_crf: 25
-    crf_range: [0, 51]
+    default_quality: 25
+    quality_range: [0, 51]
+    quality_granularity: 0.5
+    encoder_args:
+      - "-i"
+      - "{input}"
+      - "-c:v"
+      - "libx264"
+      - "-preset"
+      - "{preset}"
+      - "-crf"
+      - "{quality}"
+      - "-vf"
+      - "{vf}"
+      - "-pix_fmt"
+      - "yuv420p"
+      - "{profile_args}"
     presets:
       - ultrafast
       - superfast
@@ -111,10 +147,23 @@ codecs:
       - placebo
 
   h265-10bit:
-    encoder: libx265
-    pixel_format: yuv420p10le
-    default_crf: 25
-    crf_range: [0, 51]
+    default_quality: 25
+    quality_range: [0, 51]
+    quality_granularity: 0.5
+    encoder_args:
+      - "-i"
+      - "{input}"
+      - "-c:v"
+      - "libx265"
+      - "-preset"
+      - "{preset}"
+      - "-crf"
+      - "{quality}"
+      - "-vf"
+      - "{vf}"
+      - "-pix_fmt"
+      - "yuv420p10le"
+      - "{profile_args}"
     presets:
       - ultrafast
       - superfast
@@ -126,6 +175,78 @@ codecs:
       - slower
       - veryslow
       - placebo
+
+  nvenc-h265-10bit:
+    default_quality: 25
+    quality_range: [0, 51]
+    quality_granularity: 0.5
+    quality_label: "CQ"
+    encoder_args:
+      - "-i"
+      - "{input}"
+      - "-vf"
+      - "{vf},format=p010le,hwupload_cuda"
+      - "-c:v"
+      - "hevc_nvenc"
+      - "-preset"
+      - "{preset}"
+      - "-rc:v"
+      - "vbr"
+      - "-b:v"
+      - "0"
+      - "-cq:v"
+      - "{quality}"
+      - "-qmin"
+      - "{quality}"
+      - "-qmax"
+      - "{quality}"
+      - "{profile_args}"
+    presets:
+      - p1
+      - p2
+      - p3
+      - p4
+      - p5
+      - p6
+      - p7
+
+  vulkan_hevc-10bit:
+    default_quality: 25
+    quality_range: [0, 51] # [-1, 255] actually, but -1 = auto and values above 50 produce ugly quality, so capping to the same range
+    quality_granularity: 1 # in docs it is marked as <int>, unlike CRF and CQ, which are float
+    quality_label: "QP"
+    encoder_args:
+      - "-hwaccel"
+      - "vulkan"
+      - "-init_hw_device"
+      - "vulkan=vkdev:0"
+      - "-filter_hw_device"
+      - "vkdev"
+      - "-i"
+      - "{input}"
+      - "-vf"
+      - "format=p010le,{vf},hwupload=derive_device=vulkan"
+      - "-c:v"
+      - "hevc_vulkan"
+      - "-rc_mode"
+      - "cqp"
+      - "-tune"
+      - "hq"
+      - "-profile:v"
+      - "main10"
+      - "-usage"
+      - "transcode"
+      - "-quality"
+      - "0"
+      - "-qp"
+      - "{quality}"
+      - "-b_depth"
+      - "3"
+      - "-tier"
+      - "high"
+      - "{profile_args}"
+    presets:
+      - any
 
 # Encoding Profiles
 # -----------------
@@ -155,16 +276,24 @@ profiles:
   h265-aq:
     codec: h265-10bit
     description: "h.265 10-bit with adaptive quantization tuning for better quality distribution"
-    extra_args:
-      - "-x265-params"
-      - "aq-mode=3:aq-strength=0.8"
+    extra_args: ["-x265-params", "aq-mode=3:aq-strength=0.8"]
 
   h265-anime:
     codec: h265-10bit
     description: "h.265 10-bit optimized for anime content with reduced blocking and enhanced detail"
-    extra_args:
-      - "-x265-params"
-      - "aq-mode=2:psy-rd=1.0:deblock=-1,-1"
+    extra_args: ["-x265-params", "aq-mode=2:psy-rd=1.0:deblock=-1,-1"]
+
+  # HEVC NVENC (GPU) Profiles
+  # --------------------------
+  nvenc-h265-10bit-hq:
+    codec: nvenc-h265-10bit
+    description: "HEVC NVENC GPU encoding — 10-bit, VBR quality mode with high-quality tuning. Requires NVIDIA GPU with NVENC support."
+    extra_args: ["-tune:v", "hq"]
+
+  vulkan_hevc-10bit:
+    codec: vulkan_hevc-10bit
+    description: "HEVC Vulkan encoding — 10-bit, QP mode. Requires Vulkan support."
+    extra_args: []
 
 # Audio Output Configuration
 # --------------------------

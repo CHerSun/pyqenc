@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from unittest.mock import MagicMock
+
 import pytest
 import yaml
 
@@ -62,7 +64,7 @@ def _make_config(
 
 
 def _make_phase(config: PipelineConfig) -> OptimizationPhase:
-    return OptimizationPhase(config, phases=None)
+    return OptimizationPhase(config, phases=None, collector=MagicMock())
 
 
 def _persist_optimization(
@@ -297,7 +299,7 @@ class TestAllStrategiesMode:
         result = phase.run(dry_run=False)
 
         assert result.is_complete is True
-        assert set(result.selected_strategies) == set(strategies)
+        assert sorted(s.name for s in result.selected_strategies) == sorted(s.name for s in strategies)
 
     def test_no_strategy_results_in_all_strategies_mode(self, tmp_path: Path) -> None:
         config = _make_config(tmp_path, [_S1, _S2], optimize=False)
@@ -313,4 +315,4 @@ class TestAllStrategiesMode:
         result = phase.scan()
 
         assert result.is_complete is True
-        assert set(result.selected_strategies) == set(strategies)
+        assert sorted(s.name for s in result.selected_strategies) == sorted(s.name for s in strategies)

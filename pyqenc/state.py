@@ -6,7 +6,7 @@ This module provides:
   state (``ABSENT`` / ``ARTIFACT_ONLY`` / ``STALE`` / ``COMPLETE``).
 - Data models: ``JobState``, ``ExtractionParams``, ``ChunkingParams``,
   ``OptimizationParams``, ``EncodingParams``, ``MetricsSidecar``,
-  ``EncodingResultSidecar``, ``ChunkSidecar``.
+  ``EncodingResultSidecar``, ``MeasureSidecar``, ``ChunkSidecar``.
 
 Each model is self-sufficient: call ``Model.load(path)`` to load from a YAML
 file and ``instance.save(path)`` to persist atomically.
@@ -16,6 +16,7 @@ file and ``instance.save(path)`` to persist atomically.
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 from typing import Self
@@ -29,6 +30,7 @@ from pyqenc.models import (
     SceneBoundary,
     VideoMetadata,
 )
+from pyqenc.quality import ChunkQualityStats, MetricType
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 logger = logging.getLogger(__name__)
@@ -322,7 +324,7 @@ class OptimizationParams(BaseModel):
             "strategy_results": [r.to_yaml_dict() for r in self.strategy_results],
             "selected":         self.selected,
             "quality_targets":  self.quality_targets,
-            "metrics_sampling": self.metrics_sampling,
+            "sampling":         self.metrics_sampling,
         }
         if self.crop is not None:
             d["crop"] = {
@@ -341,7 +343,7 @@ class OptimizationParams(BaseModel):
             StrategyTestResult.from_yaml_dict(r)
             for r in data.get("strategy_results", [])
         ]
-        raw_sampling = data.get("metrics_sampling")
+        raw_sampling = data.get("sampling")
         return cls(
             crop             = crop,
             test_chunks      = data.get("test_chunks", []),
@@ -440,9 +442,13 @@ class MetricsSidecar(BaseModel):
     config the sidecar is treated as stale and the attempt is re-measured
     (without re-encoding).  ``None`` for legacy sidecars written before this
     field was added — treated as unknown, no staleness check triggered.
+
+    The ``metrics`` field uses the flat ``{metric_stat: value}`` format
+    (e.g. ``vmaf_min``, ``ssim_median``) consistent with ``ChunkQualityStats``
+    serialisation.  The YAML key for the sampling factor is ``sampling``.
     """
 
-    crf:              float
+    crf:              Decimal
     targets_met:      bool                # for human inspection only
     metrics_sampling: int | None = None   # subsampling factor used when metrics were measured
     metrics:          dict[str, float]    # all measured values, e.g. vmaf_min, ssim_median
@@ -450,18 +456,18 @@ class MetricsSidecar(BaseModel):
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
         return {
-            "crf":              self.crf,
-            "targets_met":      self.targets_met,
-            "metrics_sampling": self.metrics_sampling,
-            "metrics":          self.metrics,
+            "crf":        str(self.crf),
+            "targets_met": self.targets_met,
+            "sampling":   self.metrics_sampling,
+            "metrics":    self.metrics,
         }
 
     @classmethod
     def from_yaml_dict(cls, data: dict) -> "MetricsSidecar":
         """Restore from a dict loaded from an attempt sidecar YAML."""
-        raw_sampling = data.get("metrics_sampling")
+        raw_sampling = data.get("sampling")
         return cls(
-            crf              = float(data["crf"]),
+            crf              = Decimal(str(data["crf"])),
             targets_met      = bool(data["targets_met"]),
             metrics_sampling = int(raw_sampling) if raw_sampling is not None else None,
             metrics          = {k: float(v) for k, v in data.get("metrics", {}).items()},
@@ -482,24 +488,77 @@ class EncodingResultSidecar(BaseModel):
     """
 
     winning_attempt: str              # filename of the winning attempt .mkv
-    crf:             float
+    crf:             Decimal
     metrics:         dict[str, float] # only the targeted metric values
+    targets_met:     bool = True      # False when search exhausted without a passing attempt
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
         return {
             "winning_attempt": self.winning_attempt,
-            "crf":             self.crf,
+            "crf":             str(self.crf),
             "metrics":         self.metrics,
+            "targets_met":     self.targets_met,
         }
 
     @classmethod
     def from_yaml_dict(cls, data: dict) -> "EncodingResultSidecar":
         """Restore from a dict loaded from an encoding result sidecar YAML."""
         return cls(
-            winning_attempt=data["winning_attempt"],
-            crf=float(data["crf"]),
-            metrics={k: float(v) for k, v in data.get("metrics", {}).items()},
+            winning_attempt = data["winning_attempt"],
+            crf             = Decimal(str(data["crf"])),
+            metrics         = {k: float(v) for k, v in data.get("metrics", {}).items()},
+            targets_met     = bool(data.get("targets_met", True)),
+        )
+
+
+class MeasureSidecar(BaseModel):
+    """Standalone measure sidecar (``<target_stem>.yaml``).
+
+    Written by the ``measure`` command alongside the quality graph and
+    screenshots.  Records source/target paths, durations, crop parameters,
+    the frame subsampling factor, and per-metric statistics.
+
+    The ``metrics`` field uses the same flat ``{metric_stat: value}`` format
+    as ``MetricsSidecar`` (e.g. ``vmaf_min``, ``ssim_median``), with all
+    eight statistics: min, p05, p25, median, p75, p95, max, std.
+    The YAML key for the sampling factor is ``sampling``.
+    """
+
+    source_video:               Path
+    target_video:               Path
+    source_duration_seconds:    float | None
+    target_duration_seconds:    float | None
+    effective_duration_seconds: float | None
+    sampling:                   int
+    crop_params:                dict[str, int] | None
+    metrics:                    dict[str, float]  # flat: vmaf_min, ssim_median, …
+
+    def to_yaml_dict(self) -> dict:
+        """Serialise to a YAML-friendly dict."""
+        return {
+            "source_video":               str(self.source_video),
+            "target_video":               str(self.target_video),
+            "source_duration_seconds":    self.source_duration_seconds,
+            "target_duration_seconds":    self.target_duration_seconds,
+            "effective_duration_seconds": self.effective_duration_seconds,
+            "sampling":                   self.sampling,
+            "crop_params":                self.crop_params,
+            "metrics":                    self.metrics,
+        }
+
+    @classmethod
+    def from_yaml_dict(cls, data: dict) -> "MeasureSidecar":
+        """Restore from a dict loaded from a measure sidecar YAML."""
+        return cls(
+            source_video               = Path(data["source_video"]),
+            target_video               = Path(data["target_video"]),
+            source_duration_seconds    = data.get("source_duration_seconds"),
+            target_duration_seconds    = data.get("target_duration_seconds"),
+            effective_duration_seconds = data.get("effective_duration_seconds"),
+            sampling                   = int(data["sampling"]),
+            crop_params                = data.get("crop_params"),
+            metrics                    = {k: float(v) for k, v in data.get("metrics", {}).items()},
         )
 
 
@@ -635,7 +694,7 @@ class MergeParams(BaseModel):
         """Serialise to a YAML-friendly dict."""
         return {
             "quality_targets":    self.quality_targets,
-            "metrics_sampling":   self.metrics_sampling,
+            "sampling":           self.metrics_sampling,
             "source_stem":        self.source_stem,
             "source_size_bytes":  self.source_size_bytes,
             "strategy_summaries": [s.to_yaml_dict() for s in self.strategy_summaries],
@@ -644,7 +703,7 @@ class MergeParams(BaseModel):
     @classmethod
     def from_yaml_dict(cls, data: dict) -> "MergeParams":
         """Restore from a dict loaded from ``merge.yaml``."""
-        raw_sampling = data.get("metrics_sampling")
+        raw_sampling = data.get("sampling")
         summaries = [
             MergeStrategySummary.from_yaml_dict(s)
             for s in data.get("strategy_summaries", [])

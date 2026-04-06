@@ -11,7 +11,6 @@ import psutil
 
 import pyqenc
 from pyqenc.constants import (
-    CRF_GRANULARITY,
     DEFAULT_METRICS_SAMPLING,
     DEFAULT_SCREENSHOT_COUNT,
     FAILURE_SYMBOL_MAJOR,
@@ -98,7 +97,7 @@ def _add_pipeline_arguments(parser: argparse.ArgumentParser) -> None:
         "--no-metrics",
         action="store_true",
         default=False,
-        help="Suppress metrics.yaml output (metrics are still collected internally but not written to disk)",
+        help="Suppress process metrics.yaml output (pipeline run stats). Does not affect quality metrics measurements.",
     )
 
 
@@ -109,10 +108,14 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         parser: Argument parser to add arguments to
     """
     parser.add_argument(
-        "--quality-target",
+        "--targets",
         type=str,
-        default="vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94",
-        help="Quality targets (e.g., 'vmaf-min:95,ssim-med:98') (default: vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94). NOTE: all metrics are scaled to 0-100 range, so targets should be specified accordingly (e.g., ssim-med:98 means 0.98 raw SSIM)."
+        default=None,
+        metavar="QUALITY_TARGETS",
+        dest="quality_target",
+        help="Quality targets (e.g., 'vmaf-min:95,ssim-med:98'). "
+             "If not specified, uses default from config file. "
+             "NOTE: all metrics are scaled to 0-100 range (e.g. ssim-med:98 means raw SSIM ≥ 0.98)."
     )
     parser.add_argument(
         "--strategies",
@@ -134,12 +137,13 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         help="Maximum concurrent encoding processes (default: 2). Don't set this high, ffmpeg knows how to scale too."
     )
     parser.add_argument(
-        "--metrics-sampling",
+        "--sampling",
         type=int,
         default=DEFAULT_METRICS_SAMPLING,
         metavar="N",
+        dest="metrics_sampling",
         help=(
-            "Metrics sampling factor: measure every N-th frame. "
+            "Frame sampling factor for quality metrics measurement: measure every N-th frame. "
             f"Min: 1 (every frame measured). Default: {DEFAULT_METRICS_SAMPLING}. Directly affects reliability of metrics. A tradeoff between precision and speed. "
             "Values above 30 are not recommended due to measurement volatility. 1 gives the highest precision but lowest speed. 2-4 are a good compromise. 5-10 start to become unreliable.."
         ),
@@ -209,17 +213,14 @@ def _add_crop_arguments(parser: argparse.ArgumentParser) -> None:
     Args:
         parser: Argument parser to add arguments to
     """
-    crop_group = parser.add_mutually_exclusive_group()
-    crop_group.add_argument(
-        "--no-crop",
-        action="store_true",
-        help="Disable automatic black border detection and cropping"
-    )
-    crop_group.add_argument(
+    parser.add_argument(
         "--crop",
         type=str,
         metavar="PARAMS",
-        help="Manual crop parameters: 'top bottom' or 'top bottom left right'"
+        help=(
+            "Manual crop parameters: 'top bottom' or 'top bottom left right'. "
+            "Use '0 0' to disable automatic black border detection and cropping."
+        ),
     )
 
 
@@ -227,14 +228,12 @@ def _resolve_crop_params(args: argparse.Namespace) -> CropParams | None:
     """Parse crop parameters from CLI args into a CropParams instance.
 
     Returns:
-        An explicit ``CropParams`` (including empty/no-op) if ``--crop`` or ``--no-crop`` given.
+        An explicit ``CropParams`` (including empty/no-op) if ``--crop`` was given.
         ``None`` as a sentinel meaning "auto-resolve from job.yaml" (handled by the phase layer).
 
     Raises:
         ValueError: On bad ``--crop`` format. Caller should catch and log critical.
     """
-    if getattr(args, "no_crop", False):
-        return CropParams(top=0, bottom=0, left=0, right=0)
     crop_str = getattr(args, "crop", None)
     if crop_str:
         return CropParams.parse(crop_str)
@@ -263,11 +262,13 @@ def _create_auto_subcommand(subparsers) -> None:
     _add_crop_arguments(auto_parser)
     _add_audio_convert_arguments(auto_parser)
     auto_parser.add_argument(
-        "--remux-chunking",
-        action="store_true",
+        "--chunking",
+        choices=["ffv1", "remux"],
+        default="ffv1",
+        metavar="CHUNKING_METHOD",
         help=(
-            "Use stream-copy (remux) for chunking instead of the default FFV1 lossless re-encode. "
-            "Trades frame-perfect chunk boundaries for faster chunking and smaller intermediate files."
+            "Chunking method: 'ffv1' (default) re-encodes chunks to FFV1 lossless for frame-perfect boundaries; "
+            "'remux' uses stream-copy for faster chunking and smaller intermediate files but boundaries snap to the nearest I-frame."
         ),
     )
     auto_parser.set_defaults(func=_cmd_auto)
@@ -294,8 +295,16 @@ def _create_chunk_subcommand(subparsers) -> None:
                    help="Scene detection sensitivity 0.0-1.0 (default: 0.3)")
     p.add_argument("--min-scene-length", type=int, default=24,
                    help="Minimum frames per chunk (default: 24)")
-    p.add_argument("--remux-chunking", action="store_true",
-                   help="Use stream-copy (remux) instead of FFV1 lossless re-encode.")
+    p.add_argument(
+        "--chunking",
+        choices=["ffv1", "remux"],
+        default="ffv1",
+        metavar="CHUNKING_METHOD",
+        help=(
+            "Chunking method: 'ffv1' (default) re-encodes chunks to FFV1 lossless for frame-perfect boundaries; "
+            "'remux' uses stream-copy for faster chunking and smaller intermediate files but boundaries snap to the nearest I-frame."
+        ),
+    )
     p.set_defaults(func=_cmd_chunk)
 
 
@@ -348,9 +357,12 @@ def _cmd_auto(args: argparse.Namespace) -> int:
     cleanup = _parse_cleanup_level(args.cleanup)
     # Parse strategies
     strategies = _parse_strategies(args.strategies)
-    # Parse quality targets and strategies
+    # Parse quality targets — fall back to config defaults when not specified on CLI
+    config_manager = ConfigManager()
+    raw_targets = _parse_quality_targets(args.quality_target) if args.quality_target \
+                  else config_manager.get_default_targets()
     try:
-        quality_targets = [QualityTarget.parse(t) for t in _parse_quality_targets(args.quality_target)]
+        quality_targets = [QualityTarget.parse(t) for t in raw_targets]
     except ValueError as e:
         logger.critical(f"Invalid quality target: {e}")
         return 1
@@ -362,7 +374,6 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         return 1
 
     # Resolve metrics sampling: CLI arg takes precedence over config file
-    config_manager = ConfigManager()
     metrics_sampling = args.metrics_sampling if args.metrics_sampling is not None \
                        else config_manager.get_metrics_sampling()
 
@@ -370,16 +381,18 @@ def _cmd_auto(args: argparse.Namespace) -> int:
     resolved_strategies = config_manager.resolve_strategies(strategies)
 
     # Aggregate into a key/value table and print it
+    strategy_display = (
+        "using defaults from config file" if strategies is None
+        else "all combinations" if strategies == [""]
+        else ", ".join(s.name for s in resolved_strategies)
+    )
     kv_to_show = {
-        "Source:": args.source,
+        "Source:":        args.source,
         "Work directory:": args.work_dir,
-        "CRF granularity:": CRF_GRANULARITY,
-        "Cropping:": "disabled" if args.no_crop else f"manual ({crop_params})" if crop_params else "automatic",
-        "Strategies:": "using defaults from config file" if strategies is None \
-                      else "all combinations" if strategies == [""] \
-                      else ", ".join(s.name for s in resolved_strategies),
-        "Targets:": ", ".join(str(t) for t in quality_targets),
-        "Work mode:": "DRY-RUN (no changes will be made)" if not execute else "EXECUTE",
+        "Cropping:":      f"manual ({crop_params})" if crop_params else "automatic",
+        "Strategies:":    strategy_display,
+        "Targets:":       ", ".join(str(t) for t in quality_targets),
+        "Work mode:":     "DRY-RUN (no changes will be made)" if not execute else "EXECUTE",
     }
     fmt_key_value_table(kv_to_show)
     logger.info("")
@@ -397,7 +410,7 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         exclude=args.exclude,
         crop_params=crop_params,
         cleanup=cleanup,
-        chunking_mode=ChunkingMode.REMUX if args.remux_chunking else ChunkingMode.LOSSLESS,
+        chunking_mode=ChunkingMode.REMUX if args.chunking == ChunkingMode.REMUX.value else ChunkingMode.LOSSLESS,
         force=args.force if hasattr(args, "force") else False,
         audio_convert=args.audio_convert,
         audio_codec=args.audio_codec,
@@ -459,7 +472,7 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
     logger.info("Starting video chunking")
     logger.info(f"Source: {args.source}")
 
-    chunking_mode = ChunkingMode.REMUX if args.remux_chunking else ChunkingMode.LOSSLESS
+    chunking_mode = ChunkingMode.REMUX if args.chunking == ChunkingMode.REMUX.value else ChunkingMode.LOSSLESS
 
     try:
         result = chunk_video(
@@ -484,11 +497,13 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
 def _cmd_encode(args: argparse.Namespace) -> int:
     """Execute the 'encode' subcommand."""
     from pyqenc.api import encode_chunks
+    from pyqenc.config import ConfigManager
 
     logger.info("Starting chunk encoding")
     logger.info(f"Source: {args.source}")
 
-    _quality_target_strs = _parse_quality_targets(args.quality_target)
+    _quality_target_strs = _parse_quality_targets(args.quality_target) if args.quality_target \
+                           else ConfigManager().get_default_targets()
     strategies = _parse_strategies(args.strategies)
 
     try:
@@ -566,6 +581,110 @@ def _cmd_merge(args: argparse.Namespace) -> int:
         return 1
 
 
+def _create_config_subcommand(subparsers) -> None:
+    """Create the 'config' subcommand for copying configuration files."""
+    p = subparsers.add_parser(
+        "config",
+        help="Copy the active config to a target location for customisation",
+        description=(
+            "Finds the active config (current dir > user home > built-in default) "
+            "and copies it to the target location. "
+            "Without -y only announces what would be done."
+        ),
+    )
+    p.add_argument(
+        "target_dir",
+        nargs="?",
+        type=Path,
+        default=None,
+        help=(
+            "Target directory for the config copy. "
+            "Omit to target user home (~/.config/pyqenc/config.yaml). "
+            "Use '.' for the current working directory (pyqenc.yaml)."
+        ),
+    )
+    p.add_argument(
+        "-y", "--execute",
+        action="store_true",
+        default=False,
+        help="Execute the copy (default: dry-run, only announce).",
+    )
+    p.add_argument(
+        "--log-level",
+        choices=["debug", "info", "warning", "critical"],
+        default="info",
+        help="Logging level (default: info)",
+    )
+    p.set_defaults(func=_cmd_config)
+
+
+def _cmd_config(args: argparse.Namespace) -> int:
+    """Execute the 'config' subcommand."""
+    import shutil
+
+    from pyqenc.config import find_config_source
+    from pyqenc.constants import (
+        CONFIG_DIR_HOME,
+        CONFIG_FILENAME_CWD,
+        CONFIG_FILENAME_HOME,
+    )
+
+    # Resolve target path
+    if args.target_dir is None:
+        target = Path.home() / CONFIG_DIR_HOME / CONFIG_FILENAME_HOME
+    else:
+        target_dir = args.target_dir.resolve()
+        if target_dir == Path.cwd().resolve():
+            target = Path.cwd() / CONFIG_FILENAME_CWD
+        else:
+            target = target_dir / CONFIG_FILENAME_HOME
+
+    # Find source
+    try:
+        source = find_config_source()
+    except FileNotFoundError as e:
+        logger.critical("Cannot locate any config file: %s", e)
+        return 1
+
+    source = source.resolve()
+    target = target.resolve()
+
+    logger.debug("Config source resolved to: %s", source)
+    logger.debug("Config target resolved to: %s", target)
+
+    # Guard: source == target
+    if source == target:
+        logger.error(
+            "Source and target are the same file (%s) — nothing to do.", source
+        )
+        return 1
+
+    execute: bool = args.execute
+
+    if not execute:
+        logger.info("DRY-RUN: would copy config")
+        logger.info("  from: %s", source)
+        logger.info("    to: %s", target)
+        logger.info("Run with -y / --execute to apply.")
+        return 0
+
+    # Execute copy (.tmp-then-rename for atomicity)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, tmp)
+        tmp.rename(target)
+    except Exception as e:
+        logger.critical("Failed to copy config: %s", e)
+        tmp.unlink(missing_ok=True)
+        return 1
+
+    logger.info("Config copied")
+    logger.info("  from: %s", source)
+    logger.info("    to: %s", target)
+    return 0
+
+
 def _create_measure_subcommand(subparsers) -> None:
     """Create the 'measure' subcommand for standalone quality measurement."""
     p = subparsers.add_parser("measure", help="Measure quality metrics between source and encoded video(s)")
@@ -590,12 +709,13 @@ def _create_measure_subcommand(subparsers) -> None:
     _add_base_arguments(p)
     _add_crop_arguments(p)
     p.add_argument(
-        "--metrics-sampling",
+        "--sampling",
         type=int,
         default=DEFAULT_METRICS_SAMPLING,
         metavar="N",
+        dest="metrics_sampling",
         help=(
-            "Metrics sampling factor: measure every N-th frame. "
+            "Frame sampling factor for quality metrics measurement: measure every N-th frame. "
             f"Min: 1 (every frame measured). Default: {DEFAULT_METRICS_SAMPLING}. Directly affects reliability of metrics. A tradeoff between precision and speed. "
             "Values above 30 are not recommended due to measurement volatility. 1 gives the highest precision but lowest speed. 2-4 are a good compromise. 5-10 start to become unreliable.."
         ),
@@ -683,7 +803,7 @@ Examples:
   pyqenc auto source.mkv -y
 
   # Custom quality target and strategies
-  pyqenc auto source.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq -y
+  pyqenc auto source.mkv --targets vmaf-min:95 --strategies slow+h265-aq -y
 
   # Use all strategy combinations
   pyqenc auto source.mkv --strategies "" -y
@@ -692,7 +812,7 @@ Examples:
   pyqenc auto source.mkv --all-strategies -y
 
   # Disable automatic cropping
-  pyqenc auto source.mkv --no-crop -y
+  pyqenc auto source.mkv --crop "0 0" -y
 
   # Manual crop specification
   pyqenc auto source.mkv --crop "140 140" -y
@@ -733,6 +853,7 @@ Examples:
     _create_encode_subcommand(subparsers)
     _create_audio_subcommand(subparsers)
     _create_merge_subcommand(subparsers)
+    _create_config_subcommand(subparsers)
     _create_measure_subcommand(subparsers)
 
     # Parse arguments

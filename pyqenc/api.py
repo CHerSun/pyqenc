@@ -11,9 +11,11 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pyqenc.constants import DEFAULT_METRICS_SAMPLING, DEFAULT_SCREENSHOT_COUNT
 from pyqenc.models import (
     ChunkingMode,
     CleanupLevel,
+    CropParams,
     PipelineConfig,
     QualityTarget,
     Strategy,
@@ -29,6 +31,7 @@ if TYPE_CHECKING:
     from pyqenc.phases.chunking import ChunkingPhaseResult
     from pyqenc.phases.encoding import EncodingPhaseResult
     from pyqenc.phases.extraction import ExtractionPhaseResult
+    from pyqenc.phases.measure import MeasureResult
     from pyqenc.phases.merge import MergePhaseResult
 
 
@@ -322,6 +325,72 @@ def merge_final(
     return phase.run(dry_run=dry_run)  # type: ignore[return-value]
 
 
+def measure_quality(
+    source_video:        Path,
+    target_videos:       list[Path]   = [],
+    work_dir:            Path         = Path("."),
+    crop_params:         CropParams | None = None,
+    metrics_sampling:    int          = DEFAULT_METRICS_SAMPLING,
+    screenshot_count:    int | None   = DEFAULT_SCREENSHOT_COUNT,
+    screenshot_interval: str | None   = None,
+    width:               int | None   = None,
+) -> "MeasureResult":
+    """Measure quality metrics between a source and one or more encoded videos.
+
+    Computes VMAF, SSIM, and PSNR metrics for each target, writes a metrics
+    sidecar YAML per target, generates a quality graph per target, and captures
+    screenshots from the source (once, shared timestamps) and each target.
+
+    All outputs are written under ``work_dir/measure/``.
+
+    Args:
+        source_video:        Path to the reference (original) video file.
+        target_videos:       Paths to encoded/distorted videos to evaluate. Pass an
+                             empty list to run in screenshots-only mode.
+        work_dir:            Working directory. Outputs go under ``work_dir/measure/``.
+        crop_params:         Crop parameters applied to the source during metric
+                             computation. Pass ``None`` to auto-load from
+                             ``job.yaml`` in ``work_dir`` if present; pass an
+                             empty ``CropParams`` to explicitly disable cropping.
+        metrics_sampling:    Frame subsampling factor (≥1, default 10).
+        screenshot_count:    Screenshots to capture from each video (≥1, default 20).
+        screenshot_interval: Interval string between screenshots in interval mode
+                             (e.g. ``"30s"``, ``"5m"``). ``None`` = count mode.
+        width:               Scale both inputs to this width during metric computation
+                             (after cropping). ``None`` = no scaling.
+
+    Returns:
+        ``MeasureResult`` containing source screenshots directory and per-target results.
+
+    Raises:
+        FileNotFoundError: If ``source_video`` or any path in ``target_videos`` does not exist.
+        ValueError:        If ``metrics_sampling`` < 1 or ``screenshot_count`` < 1.
+    """
+    import asyncio
+
+    from pyqenc.phases.measure import MeasureResult, _parse_duration, run_measure
+
+    if not source_video.exists():
+        raise FileNotFoundError(f"Source video not found: {source_video}")
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    parsed_interval: float | None = None
+    if screenshot_interval is not None:
+        parsed_interval = _parse_duration(screenshot_interval)
+
+    return asyncio.run(run_measure(
+        source_video        = source_video,
+        target_videos       = target_videos,
+        work_dir            = work_dir,
+        crop_params         = crop_params,
+        metrics_sampling    = metrics_sampling,
+        width               = width,
+        screenshot_count    = screenshot_count,
+        screenshot_interval = parsed_interval,
+    ))
+
+
 __all__ = [
     "run_pipeline",
     "extract_streams",
@@ -329,4 +398,5 @@ __all__ = [
     "encode_chunks",
     "process_audio",
     "merge_final",
+    "measure_quality",
 ]

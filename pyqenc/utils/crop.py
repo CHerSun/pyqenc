@@ -57,9 +57,9 @@ def detect_crop_parameters(
             "ffmpeg",
             "-ss", str(start_time),
             "-i", video_file.path,
-            "-vf", f"select='not(mod(n\\,{step_frames}))',cropdetect=24:16:0",
-            "-vframes", str(sample_count),
-            "-f", "null",
+            "-vf", f"select='not(mod(n\\,{step_frames}))',cropdetect=24:2:0", # cropdetect takes cropdetect=limit:round:skip:reset
+            "-vframes", str(sample_count),                             # default round is 16 (safe). minimum round=2 (for crhoma colors)
+            "-f", "null",                                                     # lowered rounding to 2 to reach the same cropping as handbrake
             "-",
         ]
 

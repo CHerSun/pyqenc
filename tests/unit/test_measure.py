@@ -369,7 +369,7 @@ class TestWriteSidecar:
     """Tests for _write_sidecar failure handling."""
 
     def _make_metrics(self) -> dict:
-        stats: MetricStats = {"min": 90.0, "median": 95.0, "max": 99.0, "std": 1.5}
+        stats: MetricStats = {"min": 90.0, "p05": 91.0, "p25": 93.0, "median": 95.0, "p75": 97.0, "p95": 98.5, "max": 99.0, "std": 1.5}
         return {MetricType.VMAF: stats}
 
     def test_write_failure_logs_warning_and_does_not_raise(
@@ -437,13 +437,14 @@ class TestWriteSidecar:
         assert "source_duration_seconds" in data
         assert "target_duration_seconds" in data
         assert "effective_duration_seconds" in data
-        assert "subsample_factor" in data
+        assert "sampling" in data
         assert "crop_params" in data
         assert "metrics" in data
-        assert data["subsample_factor"] == 5
+        assert data["sampling"] == 5
         assert data["target_duration_seconds"] is None
         assert data["crop_params"] == {"top": 10, "bottom": 20, "left": 0, "right": 0}
-        assert MetricType.VMAF.value in data["metrics"]
+        # metrics are flat: vmaf_min, vmaf_median, etc.
+        assert f"{MetricType.VMAF.value}_min" in data["metrics"]
 
 
 # ---------------------------------------------------------------------------
@@ -502,8 +503,9 @@ class TestCaptureScreenshots:
             )
 
         vf_arg = next(str(a) for a in captured_cmd if "select=" in str(a))
-        assert "eq(t," in vf_arg
-        assert "eq(n," not in vf_arg
+        assert "gte(t," in vf_arg
+        assert "not(gte(prev_selected_t," in vf_arg
+        assert "gte(n," not in vf_arg
 
     def test_frame_number_mode_used_when_no_timestamps_and_fps_known(self, tmp_path: Path) -> None:
         """When has_timestamps=False and fps known, select filter uses eq(n,...)."""
@@ -528,8 +530,9 @@ class TestCaptureScreenshots:
             )
 
         vf_arg = next(str(a) for a in captured_cmd if "select=" in str(a))
-        assert "eq(n," in vf_arg
-        assert "eq(t," not in vf_arg
+        assert "gte(n," in vf_arg
+        assert "not(gte(prev_selected_n," in vf_arg
+        assert "gte(t," not in vf_arg
 
     def test_timestamp_mode_fallback_when_fps_unknown(self, tmp_path: Path) -> None:
         """When has_timestamps=False but fps is None, falls back to timestamp mode."""
@@ -554,7 +557,8 @@ class TestCaptureScreenshots:
             )
 
         vf_arg = next(str(a) for a in captured_cmd if "select=" in str(a))
-        assert "eq(t," in vf_arg
+        assert "gte(t," in vf_arg
+        assert "not(gte(prev_selected_t," in vf_arg
 
     def test_crop_included_in_filter_when_non_empty(self, tmp_path: Path) -> None:
         """Non-empty crop params are included in the vf filter chain."""
@@ -759,4 +763,5 @@ class TestCaptureScreenshots:
             )
 
         vf_arg = next(str(a) for a in captured_cmd if "select=" in str(a))
-        assert "eq(n,24)" in vf_arg
+        assert "gte(n,24)" in vf_arg
+        assert "not(gte(prev_selected_n,24))" in vf_arg

@@ -59,18 +59,16 @@ THICK_LINE  = "═" * LINE_WIDTH
 # Padding control
 PADDING_FRAME_NUMBER = 6
 """Padding for frame numbers in chunk filenames for consistent sorting and readability. For example, with a padding of 6, frame 42 would be represented as '000042' in filenames."""
-PADDING_CRF = "4.1f"
-"""Padding for CRF values in log messages for consistent formatting."""
 
-# CRF optimization controls
-CRF_GRANULARITY   = 0.5  # 0.5 might be too coarse; consider 0.2 or even 0.1 for finer search. Modifying this could require PADDING_CRF adjustment for log formatting. See PADDING_CRF too.
-"""Granularity for CRF adjustments during optimization. This determines the step size when adjusting CRF values to find the optimal quality/size balance."""
+# Quality optimization controls
 CRF_METRIC_POSITIVE_DELTA = 0.15
 """Acceptable positive metric surplus above target during the CRF search to indicate early success. When the least-proficient metric is within this delta above its target, the current CRF is accepted as final without attempting to squeeze further. Saves an extra encoding pass when the result is already close enough."""
 METRIC_LOG_DECIMAL_PLACES = 1
 """Decimal places used when formatting metric values in log messages. Values are always truncated (floored), never rounded, to prevent a miss from displaying as a pass due to rounding."""
-CRF_INITIAL_DEFAULT = 20.0
-"""Default starting CRF when no prior history or optimization result is available."""
+PADDING_QUALITY_NUMBER = 4
+"""Minimum character width for quality parameter values (CRF/CQ/QP) in log messages.
+Values are left-padded with spaces via ``str(quality).rjust(PADDING_QUALITY_NUMBER)``
+so columns align regardless of granularity (e.g. ``'  18'``, ``'18.5'``, ``'  50'``)."""
 
 # Symbols for log messages
 SUCCESS_SYMBOL_MINOR = "✔"
@@ -135,6 +133,21 @@ DEFAULT_SCREENSHOT_COUNT  = 20
 """Default number of screenshots captured from each video."""
 DEFAULT_METRICS_SAMPLING  = 1
 """Default frame subsampling factor for metric computation."""
+KEEP_RAW_METRICS_FILES    = False
+"""When ``False`` (default), raw metric log files (``.psnr.log``, ``.ssim.log``,
+``.vmaf.json``), their ``.stats`` sidecars, and the containing metrics subdirectory
+are deleted after the graph PNG is generated.  Set to ``True`` to retain them for
+debugging.  This is an internal mechanics flag — separate from user-facing cleanup
+settings — because artifact recovery is based on the sidecar YAML (which stores the
+full ``MetricStats`` snapshot) rather than the raw logs."""
+
+# Config file locations (used by ConfigManager and the `config` subcommand)
+CONFIG_FILENAME_CWD  = "pyqenc.yaml"
+"""Config filename searched in the current working directory."""
+CONFIG_FILENAME_HOME = "config.yaml"
+"""Config filename stored under the user-level config directory."""
+CONFIG_DIR_HOME      = ".config/pyqenc"
+"""Relative path under the user home directory for the user-level config."""
 
 # Artifact discovery patterns
 CHUNK_GLOB_PATTERN = "*.mkv"

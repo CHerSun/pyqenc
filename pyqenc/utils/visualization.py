@@ -13,6 +13,7 @@ import os
 import uuid
 import warnings
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -20,6 +21,7 @@ import matplotlib
 
 from pyqenc.constants import (
     DEFAULT_METRICS_SAMPLING,
+    KEEP_RAW_METRICS_FILES,
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
@@ -35,7 +37,7 @@ from pyqenc.quality import (
     normalize_metric,
     run_metric,
 )
-from pyqenc.utils.alive import ProgressBar
+from pyqenc.utils.alive import AdvanceState, ProgressBar
 
 matplotlib.use("Agg")  # non-interactive backend — safe to call from any thread
 import matplotlib.colors as mcolors
@@ -118,12 +120,12 @@ _GRID_ALPHA_MINOR: float = 0.1
 _LEGEND_ALPHA:     float = 0.9
 _MARKER_SIZE:      int   = 10
 _MARKER_ALPHA:     float = 0.9
-_TIGHT_LAYOUT_PAD: float = 0.2   # outer padding for tight_layout (default ~1.08 is too large)
+_TIGHT_LAYOUT_PAD: float = 0.0   # outer padding for tight_layout (default ~1.08 is too large)
 
 # CRF plot
 _CRF_COLOR:       str   = "#8B0000"   # dark red
 _CRF_Y_MIN:       float = 0.0
-_CRF_Y_MAX:       float = 63.0        # x265 CRF range upper bound
+_CRF_Y_MAX:       float = 42.0        # assuming 40 is max sane CRF for the plot + a little spacing
 _CRF_Y_MAJOR_TICK: float = 5.0
 _CRF_Y_MINOR_TICK: float = 1.0
 
@@ -301,15 +303,15 @@ def compute_statistics(
     levels = [0.00, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
     keys   = ["min", "p5", "p10", "p25", "p50", "p75", "p90", "p95", "max", "std"]
 
-    stats: list[float] = list(values.quantile(levels))
-    stats.append(values.max())
+    stats: list[float] = [float(v) for v in values.quantile(levels)]
+    stats.append(float(values.max()))
 
     std_values = values
     if std_cutoff_max is not None:
         std_values = std_values[std_values <= std_cutoff_max]
     if std_cutoff_min is not None:
         std_values = std_values[std_values >= std_cutoff_min]
-    stats.append(std_values.std())
+    stats.append(float(std_values.std()))
 
     return dict(zip(keys, stats))  # type: ignore[return-value]
 
@@ -616,10 +618,10 @@ def create_unified_plot(
 
         summary_text = (
             f"{metric_type.value.upper()}:\n"
-            f"  Min: {display_stats['min']:>5.1f}{style.unit}\n"
-            f"  Med: {display_stats['p50']:>5.1f}{style.unit}\n"
-            f"  {max_label}: {max_value:>5.1f}{style.unit}\n"
-            f"  Std: {display_stats['std']:>5.1f}{style.unit}\n"
+            f"  Min: {display_stats['min']:>6.2f}{style.unit}\n"
+            f"  Med: {display_stats['p50']:>6.2f}{style.unit}\n"
+            f"  {max_label}: {max_value:>6.2f}{style.unit}\n"
+            f"  Std: {display_stats['std']:>6.2f}{style.unit}\n"
             f"  Lossless: {lossless_count} ({style.lossless_label})"
         )
         _summary_boxes.append((
@@ -655,7 +657,7 @@ def create_unified_plot(
         for i, (pos, val, label) in enumerate(zip(y_positions, stat_values, bar_labels)):
             if not (np.isnan(val) or np.isinf(val)):
                 ax_stats.barh(pos, val, color=colors[i], alpha=_BAR_ALPHA, height=_BAR_HEIGHT)
-                ax_stats.text(val, pos, f" {val:.1f}{style.unit}",
+                ax_stats.text(val, pos, f" {val:.2f}{style.unit}",
                               va="center", ha="left", fontsize=_FONT_BAR_LABEL, color=style.color)
 
         ax_stats.set_yticks(y_positions)
@@ -725,7 +727,7 @@ def create_unified_plot(
 # ---------------------------------------------------------------------------
 
 def _extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -> MetricStats:
-    """Extract the four key statistics from a full statistics dict.
+    """Extract the key statistics subset from a full statistics dict.
 
     For PSNR, substitutes the highest non-inf percentile for ``max`` when the
     true maximum is infinite.
@@ -735,7 +737,8 @@ def _extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -
         metric_type: Metric type (affects PSNR max handling).
 
     Returns:
-        ``MetricStats`` with ``min``, ``median``, ``max``, and ``std``.
+        ``MetricStats`` with ``min``, ``p05``, ``p25``, ``median``, ``p75``,
+        ``p95``, ``max``, and ``std``.
     """
     max_value = full_stats["max"]
     if metric_type == MetricType.PSNR and np.isinf(max_value):
@@ -746,7 +749,11 @@ def _extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -
                 break
     return {
         "min":    full_stats["min"],
+        "p05":    full_stats["p5"],
+        "p25":    full_stats["p25"],
         "median": full_stats["p50"],
+        "p75":    full_stats["p75"],
+        "p95":    full_stats["p95"],
         "max":    max_value,
         "std":    full_stats["std"],
     }
@@ -790,6 +797,38 @@ def _save_stats_file(
     logger.debug("Saved %s statistics to %s", metric_type.value.upper(), stats_path)
 
 
+def _cleanup_raw_metric_files(metric_files: dict[MetricType, Path]) -> None:
+    """Delete raw metric log files, their ``.stats`` sidecars, and the metrics subdir.
+
+    Called after the graph PNG has been generated when ``KEEP_RAW_METRICS_FILES``
+    is ``False``.  Failures are logged as warnings and never raised — the graph
+    and sidecar YAML are already written and must not be lost.
+
+    The metrics subdirectory is removed only when it is empty after the files
+    are deleted (i.e. it contained only the raw logs for this run).
+
+    Args:
+        metric_files: Mapping of metric type to raw log file path.
+    """
+    dirs_to_try: set[Path] = set()
+    for metric_file in metric_files.values():
+        for path in (metric_file, metric_file.with_suffix(".stats")):
+            try:
+                path.unlink(missing_ok=True)
+                logger.debug("Deleted raw metric file: %s", path)
+            except Exception as exc:
+                logger.warning("Could not delete %s: %s", path, exc)
+        dirs_to_try.add(metric_file.parent)
+
+    for directory in dirs_to_try:
+        try:
+            if directory.is_dir() and not any(directory.iterdir()):
+                directory.rmdir()
+                logger.debug("Removed empty metrics directory: %s", directory)
+        except Exception as exc:
+            logger.warning("Could not remove metrics directory %s: %s", directory, exc)
+
+
 def analyze_chunk_quality(
     psnr_log:            Path | None = None,
     ssim_log:            Path | None = None,
@@ -822,15 +861,18 @@ def analyze_chunk_quality(
                              position in the source video.
 
     Returns:
-        ``ChunkQualityStats`` with ``min``, ``median``, ``max``, and ``std``
-        for each available metric; unavailable metrics are ``None``.
+        ``ChunkQualityStats`` with ``min``, ``p05``, ``p25``, ``median``,
+        ``p75``, ``p95``, ``max``, and ``std`` for each available metric.
 
     Raises:
         ValueError: If no valid metric file could be parsed.
 
     Side Effects:
         - Saves plot PNG to ``output_path`` (when ``generate_plot`` is ``True``).
-        - Saves ``.stats`` text files alongside each metric log file.
+        - Saves ``.stats`` text files alongside each metric log file, then
+          deletes the raw log files, ``.stats`` files, and the metrics
+          subdirectory when ``KEEP_RAW_METRICS_FILES`` is ``False`` (default)
+          and ``generate_plot`` is ``True``.
     """
     result = ChunkQualityStats()
 
@@ -889,7 +931,7 @@ def analyze_chunk_quality(
     # Normalize all stat values to 0–100 scale immediately after extraction (Req 5.1)
     for metric_type, stats in result.items():
         if stats is not None:
-            for stat_key in ("min", "median", "max", "std"):
+            for stat_key in ("min", "p05", "p25", "median", "p75", "p95", "max", "std"):
                 raw = stats.get(stat_key)
                 if raw is not None:
                     stats[stat_key] = normalize_metric(metric_type, raw)  # type: ignore[literal-required]
@@ -924,6 +966,9 @@ def analyze_chunk_quality(
         if metric_type in full_stats:
             _save_stats_file(metric_type, full_stats[metric_type], metric_file)
 
+    if not KEEP_RAW_METRICS_FILES and generate_plot:
+        _cleanup_raw_metric_files(metric_files)
+
     return result
 
 
@@ -932,32 +977,35 @@ def analyze_chunk_quality(
 # ---------------------------------------------------------------------------
 
 def create_crf_plot(
-    chunks:      list[tuple[float, float, float]],
-    output_path: Path,
-    title:       str = "CRF Distribution",
+    chunks:        list[tuple[float, float, Decimal]],
+    output_path:   Path,
+    title:         str = "CRF Distribution",
+    quality_label: str = "CRF",
 ) -> None:
-    """Create a CRF-over-time plot and save it to disk.
+    """Create a quality-parameter-over-time plot and save it to disk.
 
     Layout mirrors ``create_unified_plot`` exactly for side-by-side comparison:
     same figure size, same gridspec (main + stats row), dual Y-axes both
-    labeled "CRF", same x-axis formatter (``HH:MM:SS`` / seconds, two lines),
-    same summary box, same DPI.
+    labeled with *quality_label*, same x-axis formatter (``HH:MM:SS`` / seconds,
+    two lines), same summary box, same DPI.
 
     Args:
-        chunks:      List of ``(start_seconds, end_seconds, crf)`` tuples,
-                     one per winning chunk, in timeline order.
-        output_path: Destination path for the saved PNG.
-        title:       Plot title.
+        chunks:        List of ``(start_seconds, end_seconds, quality_value)`` tuples,
+                       one per winning chunk, in timeline order.
+        output_path:   Destination path for the saved PNG.
+        title:         Plot title.
+        quality_label: Human-readable label for the quality axis (e.g. ``"CRF"``,
+                       ``"CQ"``).  Defaults to ``"CRF"``.
 
     Raises:
         ValueError: If ``chunks`` is empty.
     """
     if not chunks:
-        raise ValueError("No CRF data provided for visualization")
+        raise ValueError(f"No {quality_label} data provided for visualization")
 
     starts = np.array([c[0] for c in chunks])
     ends   = np.array([c[1] for c in chunks])
-    crfs   = np.array([c[2] for c in chunks])
+    crfs   = np.array([float(c[2]) for c in chunks])
 
     plt.style.use("seaborn-v0_8")
     plt.rcParams["axes.grid"] = False
@@ -979,7 +1027,7 @@ def create_crf_plot(
     ax_right.set_axisbelow(True)
 
     def _configure_crf_axis(ax: plt.Axes) -> None:
-        ax.set_ylabel("CRF", color=_CRF_COLOR, fontsize=_FONT_AXIS_LABEL, fontweight="bold")
+        ax.set_ylabel(quality_label, color=_CRF_COLOR, fontsize=_FONT_AXIS_LABEL, fontweight="bold")
         ax.set_ylim(_CRF_Y_MIN, _CRF_Y_MAX)
         ax.tick_params(axis="y", labelcolor=_CRF_COLOR, labelsize=_FONT_AXIS_TICKS)
         ax.yaxis.set_major_locator(plt.MultipleLocator(_CRF_Y_MAJOR_TICK))
@@ -1024,10 +1072,10 @@ def create_crf_plot(
         color     = _CRF_COLOR,
         linewidth = _LINE_WIDTH_DEFAULT,
         alpha     = _LINE_ALPHA,
-        label     = "CRF",
+        label     = quality_label,
         zorder    = 3,
     )
-    ax_left.legend([line], ["CRF"], loc="lower right", fontsize=_FONT_LEGEND, framealpha=_LEGEND_ALPHA)
+    ax_left.legend([line], [quality_label], loc="lower right", fontsize=_FONT_LEGEND, framealpha=_LEGEND_ALPHA)
 
     # Stats subplot — same structure as metric subplots in create_unified_plot
     crf_series  = pd.Series(crfs)
@@ -1053,8 +1101,8 @@ def create_crf_plot(
 
     ax_stats.set_yticks(y_positions)
     ax_stats.set_yticklabels(bar_labels, fontsize=_FONT_AXIS_TICKS)
-    ax_stats.set_xlabel("CRF", fontsize=_FONT_SUBPLOT_XLABEL, fontweight="bold", color=_CRF_COLOR)
-    ax_stats.set_title("CRF Distribution", fontsize=_FONT_SUBPLOT_TITLE, fontweight="bold", color=_CRF_COLOR)
+    ax_stats.set_xlabel(quality_label, fontsize=_FONT_SUBPLOT_XLABEL, fontweight="bold", color=_CRF_COLOR)
+    ax_stats.set_title(f"{quality_label} Distribution", fontsize=_FONT_SUBPLOT_TITLE, fontweight="bold", color=_CRF_COLOR)
     ax_stats.tick_params(axis="x", labelcolor=_CRF_COLOR, labelsize=_FONT_AXIS_TICKS_X)
     ax_stats.tick_params(axis="y", labelsize=_FONT_AXIS_TICKS)
     ax_stats.set_xlim(_CRF_Y_MIN, _CRF_Y_MAX)
@@ -1063,7 +1111,7 @@ def create_crf_plot(
 
     # Summary box — same pattern as create_unified_plot (fig.text after tight_layout)
     summary_text = (
-        f"CRF:\n"
+        f"{quality_label}:\n"
         f"  Chunks: {len(chunks)}\n"
         f"  Min: {crf_stats['min']:>5.1f}\n"
         f"  Med: {crf_stats['p50']:>5.1f}\n"
@@ -1121,14 +1169,15 @@ class QualityEvaluator:
     ) -> tuple[Path, Path, Path]:
         """Generate metric log files for quality comparison.
 
-        ffmpeg is run in the encoded file's parent directory using a UUID-based
-        temporary filename prefix so that no special characters appear in the
-        filter-graph string.  Each metric is written to a ``.tmp``-suffixed file
+        ffmpeg is run in the output directory (derived from ``output_prefix``) using
+        a UUID-based temporary filename prefix so that no special characters appear in
+        the filter-graph string.  Each metric is written to a ``.tmp``-suffixed file
         while ffmpeg is running; on success the file is atomically renamed to its
         final canonical path derived from ``output_prefix``.
 
-        This ensures the standard ``.tmp`` cleanup routine removes any leftover
-        files from interrupted runs.
+        The working directory is always the metrics output directory — never the
+        encoded file's parent — so tmp files never appear in the source/target video
+        directories.
 
         When ``bar_advance`` is provided, each ffmpeg process reports progress
         via ``ProgressCallback`` which advances the bar based on ``out_time_seconds``.
@@ -1152,23 +1201,29 @@ class QualityEvaluator:
         # UUID prefix keeps special characters out of the ffmpeg filter graph;
         # the .tmp extension ensures cleanup on interrupted runs.
         uuid_hex = uuid.uuid4().hex
-        cwd = encoded.parent
+        # tmp files are written into the same directory as the final metric files
+        # (derived from output_prefix), NOT encoded.parent — the target video may
+        # live anywhere and we must not litter there.
+        cwd = Path(output_prefix).parent
+        cwd.mkdir(parents=True, exist_ok=True)
 
         logger.debug(
             "Generating metrics for %s vs %s (tmp prefix: %s)",
             encoded.name, reference.name, uuid_hex,
         )
 
-        def _make_progress_callback(last_time: list[float]) -> Callable[[int, float], None] | None:
-            """Build a ProgressCallback that converts absolute out_time_s to bar deltas."""
+        def _make_progress_callback(metric: MetricType, last_time: list[float]) -> Callable[[int, float], None] | None:
+            """Build a ProgressCallback that converts absolute out_time_s to complexity-weighted bar deltas."""
             if bar_advance is None or duration_seconds <= 0:
                 return None
+
+            weight = metric.info.complexity
 
             def _callback(frame: int, out_time_s: float) -> None:
                 delta = max(0.0, out_time_s - last_time[0])
                 delta = min(delta, duration_seconds - last_time[0])
                 if delta > 0:
-                    bar_advance(delta)
+                    bar_advance(delta * weight)
                     last_time[0] = out_time_s
 
             return _callback
@@ -1190,7 +1245,7 @@ class QualityEvaluator:
                 subsample=metrics_sampling,
                 output_prefix=tmp_prefix,
                 cwd=cwd,
-                progress_callback=_make_progress_callback([0.0]),
+                progress_callback=_make_progress_callback(metric, [0.0]),
                 output_extension=".tmp",
             )
             if not result.success:
@@ -1225,6 +1280,90 @@ class QualityEvaluator:
                 logger.warning("Expected metric tmp file not found: %s", tmp_path)
 
         return final_psnr, final_ssim, final_vmaf
+
+    async def evaluate_chunk_async(
+        self,
+        encoded:             Path,
+        reference:           Path,
+        ref_crop:            CropParams,
+        targets:             list[QualityTarget],
+        output_dir:          Path,
+        subsample_factor:    int               = 10,
+        show_progress:       bool              = False,
+        plot_path:           Path | None       = None,
+        chunk_start_seconds: float             = 0.0,
+        width:               int               = 0,
+        bar_title:           str | None        = None,
+    ) -> QualityEvaluation:
+        """Async variant of ``evaluate_chunk`` for use inside a running event loop.
+
+        Identical behaviour to ``evaluate_chunk`` but ``await``s ``_generate_metrics``
+        directly instead of calling ``asyncio.run()``.  Use this when already inside
+        an ``async`` context (e.g. ``run_measure``).
+
+        Args:
+            bar_title: Override the progress bar title. When ``None``, defaults to
+                       the encoded file stem (same as ``evaluate_chunk``).
+            (all other args same as ``evaluate_chunk``)
+
+        Returns:
+            QualityEvaluation with metrics and target evaluation results
+        """
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_prefix = str(output_dir / f"{encoded.stem}.")
+
+        duration_seconds: float | None = None
+        fps_value:        float | None = None
+        try:
+            from pyqenc.models import VideoMetadata
+            vm = VideoMetadata(path=encoded)
+            duration_seconds = vm.duration_seconds
+            fps_value        = vm.fps
+        except Exception:
+            pass
+
+        resolved_title = bar_title if bar_title is not None \
+            else encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
+
+        _total_complexity = sum(m.info.complexity for m in MetricType)
+
+        if show_progress:
+            with ProgressBar(_total_complexity * (duration_seconds or 0.0), title=f"Metrics: {resolved_title}", show_counters=False) as advance:
+                psnr_log, ssim_log, vmaf_json = await self._generate_metrics(
+                    encoded,
+                    reference,
+                    ref_crop,
+                    output_prefix,
+                    subsample_factor,
+                    bar_advance=advance,
+                    duration_seconds=duration_seconds or 0.0,
+                    width=width,
+                )
+                advance(0, AdvanceState.COMPLETE)
+        else:
+            psnr_log, ssim_log, vmaf_json = await self._generate_metrics(
+                encoded,
+                reference,
+                ref_crop,
+                output_prefix,
+                subsample_factor,
+                bar_advance=None,
+                duration_seconds=duration_seconds or 0.0,
+                width=width,
+            )
+
+        return self._finish_evaluation(
+            encoded=encoded,
+            psnr_log=psnr_log,
+            ssim_log=ssim_log,
+            vmaf_json=vmaf_json,
+            output_dir=output_dir,
+            targets=targets,
+            subsample_factor=subsample_factor,
+            plot_path=plot_path,
+            fps_value=fps_value,
+            chunk_start_seconds=chunk_start_seconds,
+        )
 
     def evaluate_chunk(
         self,
@@ -1269,8 +1408,7 @@ class QualityEvaluator:
         # Generate output prefix for metric files
         output_prefix = str(output_dir / f"{encoded.stem}.")
 
-        # Probe duration for progress bar total (3 metric passes)
-        _NUM_METRIC_PASSES = 3
+        # Probe duration for progress bar total (weighted by metric complexity)
         duration_seconds: float | None = None
         fps_value:        float | None = None
         try:
@@ -1282,9 +1420,10 @@ class QualityEvaluator:
             pass
 
         bar_title = encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
+        _total_complexity = sum(m.info.complexity for m in MetricType)
 
         if show_progress:
-            with ProgressBar(_NUM_METRIC_PASSES * (duration_seconds or 0.0), title=f"Metrics: {bar_title}", show_counters=False) as advance:
+            with ProgressBar(_total_complexity * (duration_seconds or 0.0), title=f"Metrics: {bar_title}", show_counters=False) as advance:
                 psnr_log, ssim_log, vmaf_json = asyncio.run(
                     self._generate_metrics(
                         encoded,
@@ -1333,15 +1472,8 @@ class QualityEvaluator:
             ssim_log=ssim_log if ssim_log.exists() else None,
             vmaf_json=vmaf_json if vmaf_json.exists() else None,
             plot=resolved_plot_path,
-            stats_files=[]
+            stats_files=[],
         )
-
-        # Collect stats files
-        for metric_file in [psnr_log, ssim_log, vmaf_json]:
-            if metric_file and metric_file.exists():
-                stats_file = metric_file.with_suffix('.stats')
-                if stats_file.exists():
-                    artifacts.stats_files.append(stats_file)
 
         # Evaluate against targets
         failed_targets: list[QualityTarget] = []
@@ -1384,4 +1516,72 @@ class QualityEvaluator:
             targets_met=targets_met,
             failed_targets=failed_targets,
             artifacts=artifacts
+        )
+
+    def _finish_evaluation(
+        self,
+        encoded:             Path,
+        psnr_log:            Path,
+        ssim_log:            Path,
+        vmaf_json:           Path,
+        output_dir:          Path,
+        targets:             list[QualityTarget],
+        subsample_factor:    int,
+        plot_path:           Path | None,
+        fps_value:           float | None,
+        chunk_start_seconds: float,
+    ) -> QualityEvaluation:
+        """Parse metric files, generate plot, and evaluate targets.
+
+        Shared post-processing used by both ``evaluate_chunk`` and
+        ``evaluate_chunk_async`` after metric files have been produced.
+        """
+        logger.debug("Parsing metrics and generating plots")
+        resolved_plot_path = plot_path if plot_path is not None else output_dir / f"{encoded.stem}.png"
+        metrics = analyze_chunk_quality(
+            psnr_log=psnr_log if psnr_log.exists() else None,
+            ssim_log=ssim_log if ssim_log.exists() else None,
+            vmaf_json=vmaf_json if vmaf_json.exists() else None,
+            factor=subsample_factor,
+            output_path=resolved_plot_path,
+            title=f"Quality metrics\n{encoded.stem.replace(TIME_SEPARATOR_MS, '.').replace(TIME_SEPARATOR_SAFE, ':')}",
+            generate_plot=True,
+            fps=fps_value,
+            chunk_start_seconds=chunk_start_seconds,
+        )
+
+        artifacts = QualityArtifacts(
+            psnr_log=psnr_log if psnr_log.exists() else None,
+            ssim_log=ssim_log if ssim_log.exists() else None,
+            vmaf_json=vmaf_json if vmaf_json.exists() else None,
+            plot=resolved_plot_path,
+            stats_files=[],
+        )
+
+        failed_targets: list[QualityTarget] = []
+        for target in targets:
+            metric_stats = metrics.get(MetricType(target.metric))
+            if metric_stats is None:
+                logger.warning("Target metric '%s' not available in results", target.metric)
+                failed_targets.append(target)
+                continue
+            actual_value = metric_stats.get(target.statistic)
+            if actual_value is None:
+                logger.warning(
+                    "Target statistic '%s' not available for metric '%s'",
+                    target.statistic, target.metric,
+                )
+                failed_targets.append(target)
+                continue
+            if actual_value < target.value:
+                logger.debug("Target not met: %s-%s:%s (actual: %.2f)", target.metric, target.statistic, target.value, actual_value)
+                failed_targets.append(target)
+            else:
+                logger.debug("Target met: %s-%s:%s (actual: %.2f)", target.metric, target.statistic, target.value, actual_value)
+
+        return QualityEvaluation(
+            metrics=metrics,
+            targets_met=len(failed_targets) == 0,
+            failed_targets=failed_targets,
+            artifacts=artifacts,
         )
