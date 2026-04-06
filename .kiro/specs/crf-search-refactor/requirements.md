@@ -19,14 +19,14 @@
 
 The current CRF (quality) search implementation in `pyqenc/quality.py` is split across two loosely coupled objects: `CRFHistory` (a passive dataclass) and `adjust_crf()` (a standalone function that reads `CRFHistory` internals and returns the next CRF to try). The caller in `encoding.py` additionally maintains `best_failing_attempt`, `best_failing_crf`, and `best_failing_metrics` as separate local variables alongside the history object.
 
-This refactor introduces a unified `CRFSearchProtocol` that encapsulates the full search state — bracket tracking, best-result tracking, and next-CRF computation — behind a single `record()` call. The existing algorithm is preserved as `CRFSearch` (implementing the protocol). A new `CRFSearchV2` implementing a 3-point sweet-spot search algorithm is added and becomes the default. The encoding caller is simplified to use the protocol interface exclusively.
+This refactor introduces a unified `QualitySearchProtocol` that encapsulates the full search state — bracket tracking, best-result tracking, and next-quality computation — behind a single `record()` call. The existing algorithm is preserved as `QualitySearch` (implementing the protocol). A new `QualitySearchV2` implementing a 3-point sweet-spot search algorithm is added and becomes the default. The encoding caller is simplified to use the protocol interface exclusively.
 
 ## Glossary
 
 - **Quality parameter**: The encoder-specific quality control value passed to the video encoder. Referred to generically as "quality" or "CRF" in code for brevity; the actual parameter name and direction depends on the codec (CRF for x264/x265/SVT-AV1 where lower = better quality; CQ for NVENC where lower = better quality; QP for some hardware encoders). The search algorithms treat it uniformly as a `Decimal` value with a defined `[min, max]` range and granularity.
-- **CRFSearchProtocol**: The `Protocol` (structural interface) that all CRF search implementations must satisfy.
-- **CRFSearch**: The refactored implementation of the existing binary-bracket search algorithm, implementing `CRFSearchProtocol`.
-- **CRFSearchV2**: The new 3-point sweet-spot search algorithm, implementing `CRFSearchProtocol`.
+- **QualitySearchProtocol**: The `Protocol` (structural interface) that all quality search implementations must satisfy.
+- **QualitySearch**: The refactored implementation of the existing binary-bracket search algorithm, implementing `QualitySearchProtocol`.
+- **QualitySearchV2**: The new 3-point sweet-spot search algorithm, implementing `QualitySearchProtocol`.
 - **Granularity**: The minimum step size between CRF values, expressed as a `Decimal` (e.g. `Decimal("0.5")` for CRF, `Decimal("1")` for QP).
 - **Pass**: An encoding attempt where all quality targets are met.
 - **Fail**: An encoding attempt where at least one quality target is not met.
@@ -42,56 +42,55 @@ This refactor introduces a unified `CRFSearchProtocol` that encapsulates the ful
 
 ## Requirements
 
-### Requirement 1: CRFSearchProtocol Interface
+### Requirement 1: QualitySearchProtocol Interface
 
-**User Story:** As a developer, I want a well-defined protocol for CRF search objects, so that search algorithms are interchangeable and the encoding loop depends only on the interface.
+**User Story:** As a developer, I want a well-defined protocol for quality search objects, so that search algorithms are interchangeable and the encoding loop depends only on the interface.
 
 #### Acceptance Criteria
 
-1. THE `CRFSearchProtocol` SHALL be defined as a `typing.Protocol` (or ABC) in `pyqenc/quality.py`.
-2. THE `CRFSearchProtocol` SHALL declare an `attempts` property returning `int` — the total number of encoding attempts recorded so far.
-3. THE `CRFSearchProtocol` SHALL declare a `record(crf, quality_results) -> Decimal | None` method that records one attempt result, updates internal state, and returns the next CRF to try or `None` when the search is exhausted or the current result is accepted. `quality_targets`, `granularity`, `quality_better`, `quality_worse`, and `quality_max_step` SHALL be supplied at construction time, not per-call.
-4. THE `CRFSearchProtocol` SHALL declare a `best_crf` property returning `Decimal | None` — the best CRF found so far (highest passing CRF if any pass exists, otherwise the best-fail CRF).
-5. THE `CRFSearchProtocol` SHALL declare a `best_metrics` property returning `dict[str, float] | None` — the full metrics dict associated with `best_crf`.
-6. THE `CRFSearchProtocol` SHALL declare a `best_targets_met` property returning `bool` — `True` if and only if `best_crf` corresponds to a passing attempt.
-7. WHEN `record()` has never been called, THE `CRFSearchProtocol` implementation SHALL return `None` for `best_crf` and `best_metrics`, and `False` for `best_targets_met`.
+1. THE `QualitySearchProtocol` SHALL be defined as a `typing.Protocol` (or ABC) in `pyqenc/quality.py`.
+2. THE `QualitySearchProtocol` SHALL declare an `attempts` property returning `int` — the total number of encoding attempts recorded so far.
+3. THE `QualitySearchProtocol` SHALL declare a `record(quality, quality_results) -> Decimal | None` method that records one attempt result, updates internal state, and returns the next quality value to try or `None` when the search is exhausted or the current result is accepted. `quality_targets`, `granularity`, `quality_better`, `quality_worse`, and `quality_max_step` SHALL be supplied at construction time, not per-call.
+4. THE `QualitySearchProtocol` SHALL declare a `best_quality` property returning `Decimal | None` — the best quality value found so far (best-efficiency passing value if any pass exists, otherwise the best-fail value).
+5. THE `QualitySearchProtocol` SHALL declare a `best_metrics` property returning `dict[str, float] | None` — the full metrics dict associated with `best_quality`.
+6. THE `QualitySearchProtocol` SHALL declare a `best_targets_met` property returning `bool` — `True` if and only if `best_quality` corresponds to a passing attempt.
+7. WHEN `record()` has never been called, THE `QualitySearchProtocol` implementation SHALL return `None` for `best_quality` and `best_metrics`, and `False` for `best_targets_met`.
 
 ---
 
-### Requirement 2: CRFSearch — Preserved Legacy Algorithm
+### Requirement 2: QualitySearch — Preserved Legacy Algorithm
 
-**User Story:** As a developer, I want the existing CRF search logic preserved as `CRFSearch`, so that existing tests remain valid and the old algorithm is available as a named alternative.
+**User Story:** As a developer, I want the existing quality search logic preserved as `QualitySearch`, so that existing tests remain valid and the old algorithm is available as a named alternative.
 
 #### Acceptance Criteria
 
-1. THE `CRFSearch` class SHALL implement `CRFSearchProtocol`.
-2. THE `CRFSearch` class SHALL encapsulate the state currently held by `CRFHistory` (`fail_crf`, `pass_crf`, `fail_metrics`, `pass_metrics`, `attempts`) and SHALL be initialised with `quality_better`, `quality_worse`, `quality_targets`, `granularity`, and optional `quality_max_step`.
-3. WHEN `CRFSearch.record()` is called, THE `CRFSearch` SHALL update its internal bracket state and return the same next-CRF value that the standalone `adjust_crf()` function would return for identical inputs.
-4. THE `adjust_crf()` standalone function SHALL be retained in `pyqenc/quality.py` with its existing signature `adjust_crf(current_crf, quality_results, quality_targets, history, granularity) -> Decimal | None`, accepting a `CRFHistory` dataclass instance.
-5. THE `CRFHistory` dataclass SHALL be retained in `pyqenc/quality.py` for use by `adjust_crf()`.
-6. WHEN `CRFSearch.record()` returns `None` (exhausted or accepted), THE `CRFSearch.best_crf` SHALL equal the highest passing CRF observed, or the best-fail CRF if no pass was ever found.
-7. THE `CRFSearch.best_targets_met` SHALL be `True` if and only if at least one passing attempt was recorded.
+1. THE `QualitySearch` class SHALL implement `QualitySearchProtocol`.
+2. THE `QualitySearch` class SHALL encapsulate the state currently held by `CRFHistory` (`fail_q`, `pass_q`, `fail_metrics`, `pass_metrics`, `attempts`) and SHALL be initialised with `quality_better`, `quality_worse`, `quality_targets`, `granularity`, and optional `quality_max_step`.
+3. WHEN `QualitySearch.record()` is called, THE `QualitySearch` SHALL update its internal bracket state and return the same next-quality value that the standalone `adjust_crf()` function would return for identical inputs.
+4. THE `adjust_crf()` standalone function and `CRFHistory` dataclass SHALL be removed from `pyqenc/quality.py`.
+5. WHEN `QualitySearch.record()` returns `None` (exhausted or accepted), THE `QualitySearch.best_quality` SHALL equal the best-efficiency passing quality value observed, or the best-fail value if no pass was ever found.
+6. THE `QualitySearch.best_targets_met` SHALL be `True` if and only if at least one passing attempt was recorded.
 
 ---
 
-### Requirement 3: CRFSearchV2 — 3-Point Sweet-Spot Algorithm
+### Requirement 3: QualitySearchV2 — 3-Point Sweet-Spot Algorithm
 
-**User Story:** As a developer, I want a new `CRFSearchV2` algorithm that tracks a 3-point state (pass / best-fail / outer-fail), so that the search can exploit quality score information to converge faster on the sweet spot.
+**User Story:** As a developer, I want a new `QualitySearchV2` algorithm that tracks a 3-point state (pass / best / outer), so that the search can exploit quality score information to converge faster on the sweet spot.
 
 #### Acceptance Criteria
 
-1. THE `CRFSearchV2` class SHALL implement `CRFSearchProtocol`.
-2. THE `CRFSearchV2` SHALL be initialised with `quality_better`, `quality_worse` (the codec's quality range as `Decimal` values), `quality_targets`, `granularity`, and optional `quality_max_step`.
-3. WHEN `CRFSearchV2` is initialised, THE `CRFSearchV2` SHALL set internal state: `pass_crf = crf_min` (sentinel), `best_fail_crf = crf_max` (sentinel), `fail_crf = crf_max` (sentinel), with `best_fail_crf == fail_crf` indicating 2-point mode until a real fail is observed.
-4. WHEN `record()` is called with a passing result, THE `CRFSearchV2` SHALL update `pass_crf = current_crf` and continue searching the `[pass_crf ... best_fail_crf]` range using proportional interpolation (same as `CRFSearch`).
-5. WHEN `record()` is called with a failing result whose score (per `_score_failing_attempt()`) is greater than the current `best_fail` score AND the attempt was drawn from range B `[best_fail_crf ... fail_crf]`, THE `CRFSearchV2` SHALL promote `pass_crf = old best_fail_crf`, set `best_fail_crf = current_crf`, and keep `fail_crf` unchanged.
-6. WHEN `record()` is called with a failing result whose score is greater than the current `best_fail` score AND the attempt was drawn from range A `[pass_crf ... best_fail_crf]`, THE `CRFSearchV2` SHALL set `fail_crf = old best_fail_crf`, set `best_fail_crf = current_crf`, and keep `pass_crf` unchanged.
-7. WHEN `record()` is called with a failing result whose score is less than or equal to the current `best_fail` score AND the attempt was drawn from range B, THE `CRFSearchV2` SHALL tighten `fail_crf = current_crf`.
-8. WHEN `record()` is called with a failing result whose score is less than or equal to the current `best_fail` score AND the attempt was drawn from range A, THE `CRFSearchV2` SHALL tighten `pass_crf = current_crf`.
-9. WHEN computing the next CRF, THE `CRFSearchV2` SHALL select the midpoint of the larger of the two ranges `[pass_crf ... best_fail_crf]` and `[best_fail_crf ... fail_crf]`.
-10. WHEN both `[pass_crf ... best_fail_crf]` and `[best_fail_crf ... fail_crf]` are ≤ `granularity`, THE `CRFSearchV2.record()` SHALL return `None` and accept `best_fail_crf` as the final result.
-11. WHEN `CRFSearchV2.record()` returns `None` due to exhaustion, THE `CRFSearchV2.best_crf` SHALL equal the highest passing CRF if any pass was found, otherwise `best_fail_crf`.
-12. THE `CRFSearchV2.best_targets_met` SHALL be `True` if and only if at least one passing attempt was recorded.
+1. THE `QualitySearchV2` class SHALL implement `QualitySearchProtocol`.
+2. THE `QualitySearchV2` SHALL be initialised with `quality_better`, `quality_worse` (the codec's quality range as `Decimal` values), `quality_targets`, `granularity`, and optional `quality_max_step`.
+3. WHEN `QualitySearchV2` is initialised, THE `QualitySearchV2` SHALL set internal state: `_pass_q = quality_better` (sentinel), `_best_q = quality_worse` (sentinel), `_fail_q = quality_worse` (sentinel), with `_best_q == _fail_q` indicating 2-point mode until a real fail is observed.
+4. WHEN `record()` is called with a passing result, THE `QualitySearchV2` SHALL update `_pass_q = current_quality` and continue searching the `[_pass_q ... _best_q]` range using proportional interpolation (same as `QualitySearch`).
+5. WHEN `record()` is called with a failing result whose score (per `_score_attempt()`) is greater than the current `_best_score` AND the attempt was drawn from range B `[_best_q ... _fail_q]`, THE `QualitySearchV2` SHALL promote `_pass_q = old _best_q`, set `_best_q = current_quality`, and keep `_fail_q` unchanged.
+6. WHEN `record()` is called with a failing result whose score is greater than the current `_best_score` AND the attempt was drawn from range A `[_pass_q ... _best_q]`, THE `QualitySearchV2` SHALL set `_fail_q = old _best_q`, set `_best_q = current_quality`, and keep `_pass_q` unchanged.
+7. WHEN `record()` is called with a failing result whose score is less than or equal to the current `_best_score` AND the attempt was drawn from range B, THE `QualitySearchV2` SHALL tighten `_fail_q = current_quality`.
+8. WHEN `record()` is called with a failing result whose score is less than or equal to the current `_best_score` AND the attempt was drawn from range A, THE `QualitySearchV2` SHALL tighten `_pass_q = current_quality`.
+9. WHEN computing the next quality value, THE `QualitySearchV2` SHALL select the midpoint of the larger of the two ranges `[_pass_q ... _best_q]` and `[_best_q ... _fail_q]`.
+10. WHEN both `[_pass_q ... _best_q]` and `[_best_q ... _fail_q]` are ≤ `granularity`, THE `QualitySearchV2.record()` SHALL return `None` and accept `_best_q` as the final result.
+11. WHEN `QualitySearchV2.record()` returns `None` due to exhaustion, THE `QualitySearchV2.best_quality` SHALL equal the best-efficiency passing quality value if any pass was found, otherwise `_best_q`.
+12. THE `QualitySearchV2.best_targets_met` SHALL be `True` if and only if at least one passing attempt was recorded.
 
 ---
 
@@ -101,8 +100,8 @@ This refactor introduces a unified `CRFSearchProtocol` that encapsulates the ful
 
 #### Acceptance Criteria
 
-1. FOR ALL valid inputs, THE `CRFSearch` SHALL terminate (return `None` from `record()`) in O(log N) attempts where N is the number of distinct quality values in the range -- i.e. each attempt must halve at least one active search interval.
-2. FOR ALL valid inputs, THE `CRFSearchV2` SHALL terminate (return `None` from `record()`) in O(log N) attempts -- each attempt must halve at least one of the two active ranges.
+1. FOR ALL valid inputs, THE `QualitySearch` SHALL terminate (return `None` from `record()`) in O(log N) attempts where N is the number of distinct quality values in the range -- i.e. each attempt must halve at least one active search interval.
+2. FOR ALL valid inputs, THE `QualitySearchV2` SHALL terminate (return `None` from `record()`) in O(log N) attempts -- each attempt must halve at least one of the two active ranges.
 3. WHEN `record()` returns `None`, THE search object SHALL NOT return a non-`None` value from any subsequent `record()` call.
 
 ---
@@ -113,25 +112,25 @@ This refactor introduces a unified `CRFSearchProtocol` that encapsulates the ful
 
 #### Acceptance Criteria
 
-1. FOR ALL sequences of `record()` calls on any `CRFSearchProtocol` implementation, THE `best_targets_met` SHALL be `True` if and only if `best_crf` corresponds to a passing attempt.
-2. WHEN at least one `record()` call has been made, THE `best_crf` SHALL NOT be `None`.
-3. WHEN `best_targets_met` is `True`, THE `best_crf` SHALL be the highest CRF value among all passing attempts recorded so far.
-4. WHEN `best_targets_met` is `False`, THE `best_crf` SHALL be the CRF of the attempt with the highest `_score_failing_attempt()` score among all failing attempts recorded so far.
+1. FOR ALL sequences of `record()` calls on any `QualitySearchProtocol` implementation, THE `best_targets_met` SHALL be `True` if and only if `best_quality` corresponds to a passing attempt.
+2. WHEN at least one `record()` call has been made, THE `best_quality` SHALL NOT be `None`.
+3. WHEN `best_targets_met` is `True`, THE `best_quality` SHALL be the best-efficiency passing quality value among all passing attempts recorded so far.
+4. WHEN `best_targets_met` is `False`, THE `best_quality` SHALL be the quality value of the attempt with the highest `_score_attempt()` score (closest to zero) among all failing attempts recorded so far.
 5. THE `attempts` property SHALL equal the total number of `record()` calls made, regardless of pass/fail outcome.
 
 ---
 
 ### Requirement 6: ChunkEncoder Caller Refactoring
 
-**User Story:** As a developer, I want `ChunkEncoder.encode_chunk()` to use the `CRFSearchProtocol` interface exclusively, so that the manual best-failing tracking variables are eliminated and the loop is simplified.
+**User Story:** As a developer, I want `ChunkEncoder.encode_chunk()` to use the `QualitySearchProtocol` interface exclusively, so that the manual best-failing tracking variables are eliminated and the loop is simplified.
 
 #### Acceptance Criteria
 
-1. WHEN `encode_chunk()` runs its encoding loop, THE `ChunkEncoder` SHALL call `history.record(crf, metrics, quality_targets, granularity)` instead of `adjust_crf(crf, metrics, quality_targets, history, granularity)`.
-2. THE `ChunkEncoder` SHALL use `history.best_crf`, `history.best_metrics`, and `history.best_targets_met` instead of the local variables `best_failing_crf`, `best_failing_metrics`, and `best_failing_attempt`.
-3. WHEN `history.record()` returns `None`, THE `ChunkEncoder` SHALL finalize the winning attempt using `history.best_crf` and `history.best_metrics`.
+1. WHEN `encode_chunk()` runs its encoding loop, THE `ChunkEncoder` SHALL call `search.record(quality, metrics)` instead of `adjust_crf(crf, metrics, quality_targets, history, granularity)`.
+2. THE `ChunkEncoder` SHALL use `search.best_quality`, `search.best_metrics`, and `search.best_targets_met` instead of the local variables `best_failing_crf`, `best_failing_metrics`, and `best_failing_attempt`.
+3. WHEN `search.record()` returns `None`, THE `ChunkEncoder` SHALL finalize the winning attempt using `search.best_quality` and `search.best_metrics`.
 4. THE `ChunkEncoder` SHALL NOT maintain `best_failing_crf`, `best_failing_metrics`, or `best_failing_attempt` as separate local variables.
-5. THE `ChunkEncoder` SHALL continue to track `best_crf` (highest passing CRF) and `final_attempt` (the `AttemptMetadata` for the winning file) as local variables for file-path resolution, since these are not part of the protocol.
+5. THE `ChunkEncoder` SHALL continue to track `best_quality` (best-efficiency passing value) and `final_attempt` (the `AttemptMetadata` for the winning file) as local variables for file-path resolution, since these are not part of the protocol.
 
 ---
 
@@ -143,7 +142,7 @@ This refactor introduces a unified `CRFSearchProtocol` that encapsulates the ful
 
 1. THE `ChunkEncoder._load_history_from_sidecars()` method SHALL be removed.
 2. THE encoding loop SHALL recover by calling `_check_existing_encoding()` on each quality step before encoding — reusing cached artifacts naturally until it reaches an un-encoded value.
-3. THE `CRFSearch` and `CRFSearchV2` constructors SHALL NOT require pre-population from sidecars.
+3. THE `QualitySearch` and `QualitySearchV2` constructors SHALL NOT require pre-population from sidecars.
 4. THE encoding loop SHALL track whether any attempt in the search loop required actual encoding or metric measurement work (i.e. was not a pure cache hit).
 5. WHEN all attempts for a chunk were cache hits (no encoding or measurement performed), THE `ChunkEncodingResult` SHALL set `reused=True` and the progress bar SHALL advance with `AdvanceState.SKIPPED` for that chunk.
 6. WHEN at least one attempt required real work, THE progress bar SHALL advance normally (not skipped), so ETA reflects actual encode time.
@@ -152,13 +151,13 @@ This refactor introduces a unified `CRFSearchProtocol` that encapsulates the ful
 
 ### Requirement 8: Default Algorithm Selection
 
-**User Story:** As a developer, I want `CRFSearchV2` to be the default algorithm used by the encoding phase, so that new encodes benefit from the improved search strategy.
+**User Story:** As a developer, I want `QualitySearchV2` to be the default algorithm used by the encoding phase, so that new encodes benefit from the improved search strategy.
 
 #### Acceptance Criteria
 
-1. WHEN `ChunkEncoder.encode_chunk()` initialises a new search (no prior sidecars), THE `ChunkEncoder` SHALL instantiate `CRFSearchV2` with the codec's `crf_min` and `crf_max`.
-2. THE `CRFSearch` (old algorithm) SHALL remain instantiable and usable as a drop-in alternative by passing it where a `CRFSearchProtocol` is expected.
-3. THE encoding phase SHALL NOT hard-code `CRFSearch` as the default; `CRFSearchV2` SHALL be the default.
+1. WHEN `ChunkEncoder.encode_chunk()` initialises a new search, THE `ChunkEncoder` SHALL instantiate `QualitySearchV2` with the codec's `quality_better` and `quality_worse`.
+2. THE `QualitySearch` (legacy algorithm) SHALL remain instantiable and usable as a drop-in alternative by passing it where a `QualitySearchProtocol` is expected.
+3. THE encoding phase SHALL NOT hard-code `QualitySearch` as the default; `QualitySearchV2` SHALL be the default.
 
 ---
 
@@ -168,10 +167,10 @@ This refactor introduces a unified `CRFSearchProtocol` that encapsulates the ful
 
 #### Acceptance Criteria
 
-1. THE test suite SHALL include a property-based test verifying that `CRFSearch` always terminates within the bound defined in Requirement 4.1 for any valid `(quality_better, quality_worse, granularity, quality_results_sequence)`.
-2. THE test suite SHALL include a property-based test verifying that `CRFSearchV2` always terminates within the bound defined in Requirement 4.2 for any valid `(quality_better, quality_worse, granularity, quality_results_sequence)`.
+1. THE test suite SHALL include a property-based test verifying that `QualitySearch` always terminates within the bound defined in Requirement 4.1 for any valid `(quality_better, quality_worse, granularity, quality_results_sequence)`.
+2. THE test suite SHALL include a property-based test verifying that `QualitySearchV2` always terminates within the bound defined in Requirement 4.2 for any valid `(quality_better, quality_worse, granularity, quality_results_sequence)`.
 3. THE test suite SHALL include a property-based test verifying the state invariants in Requirement 5 for both algorithms.
-4. THE test suite SHALL include example-based tests for each of the state-transition cases in `CRFSearchV2` (Requirement 3.5 through 3.8).
+4. THE test suite SHALL include example-based tests for each of the state-transition cases in `QualitySearchV2` (Requirement 3.5 through 3.8).
 5. THE test suite SHALL include a property-based test verifying the `_score_attempt` sign contract: positive for pass, negative for fail, `0.0` for early acceptance, raises for missing keys.
 
 ---
