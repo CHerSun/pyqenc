@@ -35,11 +35,11 @@ def _make_complete_pair(encoded_dir: Path, chunk_id: str = _CHUNK_ID, crf: Decim
     """Write a winning .mkv and its result sidecar into encoded_dir.
 
     Layout mirrors the real encoded/ directory:
-      <chunk_id>.<res>.crf<N>.mkv   — winning attempt
-      <chunk_id>.<res>.yaml          — result sidecar (no crf in name)
+      <chunk_id>.<res>.q<N>.mkv   — winning attempt
+      <chunk_id>.<res>.yaml        — result sidecar (no quality in name)
     """
     encoded_dir.mkdir(parents=True, exist_ok=True)
-    mkv     = encoded_dir / f"{chunk_id}.{_RESOLUTION}.crf{crf}.mkv"
+    mkv     = encoded_dir / f"{chunk_id}.{_RESOLUTION}.q{crf}.mkv"
     sidecar = encoded_dir / f"{chunk_id}.{_RESOLUTION}.yaml"
     mkv.write_bytes(b"\x00" * 512)
     write_yaml_atomic(sidecar, {"crf": str(crf), "targets_met": True, "metrics": {"vmaf_min": 94.5}})
@@ -84,7 +84,7 @@ class TestRecoverEncodingAttempts:
         """A .mkv without a .yaml sidecar is not COMPLETE — pair is ABSENT."""
         encoded_dir = tmp_path / "encoded" / _SAFE_STRAT
         encoded_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"{_CHUNK_ID}.{_RESOLUTION}.crf{_CRF:4.1f}"
+        stem = f"{_CHUNK_ID}.{_RESOLUTION}.q{_CRF:4.1f}"
         (encoded_dir / f"{stem}.mkv").write_bytes(b"\x00" * 512)
         # no .yaml written
 

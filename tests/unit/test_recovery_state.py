@@ -40,11 +40,11 @@ def _make_complete_pair(
     """Write a winning .mkv + result sidecar into encoded_dir.
 
     Layout mirrors the real encoded/ directory:
-      <chunk_id>.<res>.crf<N>.mkv   — winning attempt
-      <chunk_id>.<res>.yaml          — result sidecar (no crf in name)
+      <chunk_id>.<res>.q<N>.mkv   — winning attempt
+      <chunk_id>.<res>.yaml        — result sidecar (no quality in name)
     """
     encoded_dir.mkdir(parents=True, exist_ok=True)
-    mkv     = encoded_dir / f"{chunk_id}.{_RESOLUTION}.crf{crf}.mkv"
+    mkv     = encoded_dir / f"{chunk_id}.{_RESOLUTION}.q{crf}.mkv"
     sidecar = encoded_dir / f"{chunk_id}.{_RESOLUTION}.yaml"
     mkv.write_bytes(b"\x00" * 64)
     sidecar.write_text(
@@ -74,7 +74,7 @@ class TestRecoverAttemptsAbsent:
         """A .mkv without a .yaml sidecar is not COMPLETE."""
         out_dir = _encoded_dir(tmp_path)
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / f"{_CHUNK_ID}.{_RESOLUTION}.crf{_CRF}.mkv").write_bytes(b"\x00" * 64)
+        (out_dir / f"{_CHUNK_ID}.{_RESOLUTION}.q{_CRF}.mkv").write_bytes(b"\x00" * 64)
 
         result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY])
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
@@ -84,7 +84,7 @@ class TestRecoverAttemptsAbsent:
         """Attempt files in encoding/ (no result sidecar in encoded/) → ABSENT."""
         enc_dir = tmp_path / "encoding" / _SAFE_STRAT
         enc_dir.mkdir(parents=True, exist_ok=True)
-        (enc_dir / f"{_CHUNK_ID}.{_RESOLUTION}.crf{_CRF}.mkv").write_bytes(b"\x00" * 64)
+        (enc_dir / f"{_CHUNK_ID}.{_RESOLUTION}.q{_CRF}.mkv").write_bytes(b"\x00" * 64)
 
         result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY])
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]

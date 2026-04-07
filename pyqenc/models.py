@@ -413,6 +413,17 @@ class CodecConfig(BaseModel):
         a, b = Decimal(str(v[0])), Decimal(str(v[1]))
         return a, b
 
+    @property
+    def quality_log_padding(self) -> int:
+        """Computed column width for quality parameter log formatting.
+
+        Derives the correct padding width from the codec's own range and granularity
+        so log columns align correctly for any codec (e.g. CRF 0–51 with gran 0.5 → 4 chars;
+        VBR 0–100 with gran 0.1 → 5 chars; QP 0–63 with gran 1 → 2 chars).
+        """
+        max_val = max(abs(self.quality_better), abs(self.quality_worse))
+        return len(str(Decimal(str(max_val)).quantize(self.quality_granularity)))
+
     @field_validator("default_quality", "quality_granularity", "quality_max_step", mode="before")
     @classmethod
     def _to_decimal(cls, v: Decimal | float | int | str | None) -> Decimal | None:

@@ -13,11 +13,10 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 from os import PathLike
 from pathlib import Path
-from typing import TypedDict, assert_never
+from typing import Protocol, TypedDict, assert_never, runtime_checkable
 
 import pandas as pd
 
-from pyqenc.constants import CRF_METRIC_POSITIVE_DELTA, PADDING_QUALITY_NUMBER
 from pyqenc.utils.ffmpeg_runner import (
     FFmpegRunResult,
     ProgressCallback,
@@ -73,6 +72,12 @@ class MetricInfo:
                            where quality targets are set and misses occur.
                            VMAF ≈ 20 (targets typically 80–100), SSIM ≈ 10 (90–100),
                            PSNR ≈ 30 (40–70 dB), VIF ≈ 5 (empirical; limited data).
+        acceptance_delta:  Per-metric threshold for early acceptance during CRF search.
+                           When all targets pass and every surplus is within this delta,
+                           the current quality value is accepted as final without further
+                           search — saves an extra encoding pass when the result is
+                           already close enough.  Values are in normalized metric units
+                           (post-scale_factor).
     """
 
     name:              str
@@ -88,6 +93,7 @@ class MetricInfo:
     plot_y_max:        float
     complexity:        float
     comparison_range:  float
+    acceptance_delta:  float
 
     def normalize(self, value: float | pd.Series) -> float | pd.Series:
         """Normalize a raw metric value (or Series) to the display scale.
@@ -181,6 +187,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         plot_y_max        = 103.0,
         complexity        = 10.0,  # empirical estimate; VMAF is significantly slower than PSNR/SSIM
         comparison_range  = 20.0,  # practical target range ~80–100
+        acceptance_delta  = 0.15,  # 0.15% surplus should be negligible
     ),
     MetricType.SSIM: MetricInfo(
         name              = "SSIM",
@@ -196,6 +203,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         plot_y_max        = 103.0,
         complexity        = 1.0,
         comparison_range  = 10.0,  # practical target range ~90–100
+        acceptance_delta  = 0.05,  # 0.05% after scaling (0.0005 raw)
     ),
     MetricType.PSNR: MetricInfo(
         name              = "PSNR",
@@ -211,6 +219,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         plot_y_max        = 103.0,
         complexity        = 1.0,
         comparison_range  = 30.0,  # practical target range ~40–70 dB
+        acceptance_delta  = 0.5,   # 0.5 dB surplus is negligible
     ),
     # VIF placeholder (not yet active and not checked for correctness):
     # MetricType.VIF: MetricInfo(
@@ -225,6 +234,9 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
     #     display_unit      = "",
     #     plot_y_min        = -0.1,
     #     plot_y_max        = 2.0,
+    #     complexity        = 1.0,
+    #     comparison_range  = 10.0,
+    #     acceptance_delta  = 0.2,
     # ),
 }
 
@@ -417,74 +429,6 @@ class QualityEvaluation:
     artifacts: QualityArtifacts
 
 
-@dataclass
-class CRFHistory:
-    """Track the tightest known pass/fail quality bracket, attempt count, and observed
-    metric values at the bracket boundaries.
-
-    ``fail_crf`` and ``pass_crf`` are initialized to the codec quality range endpoints
-    as sentinels, then narrowed on each attempt.  All quality values are ``Decimal``
-    so arithmetic and string formatting are exact.
-
-    Semantics are direction-agnostic: ``pass_crf`` is always the *better-quality*
-    boundary (where targets were met) and ``fail_crf`` is always the *worse-quality*
-    boundary (where targets were not met).  For CRF ``[0, 51]``: ``pass_crf=0``
-    (better), ``fail_crf=51`` (worse).  For VBR ``[99, 0]``: ``pass_crf=99``
-    (better), ``fail_crf=0`` (worse).
-
-    ``fail_metrics`` and ``pass_metrics`` store the full measured quality dict
-    (keyed as ``"<metric>_<stat>"``) observed at the current ``fail_crf`` and
-    ``pass_crf`` respectively.  They are ``None`` until the corresponding
-    boundary has been observed at least once with a real encoding result.
-
-    Storing the full dict (rather than a single scalar) is essential: the
-    worst-performing target can change between attempts, so Phase 2
-    interpolation must look up the *current* worst target's key in both
-    boundary dicts to get two real observations of that specific metric.
-
-    Attributes:
-        pass_crf:     Better-quality boundary sentinel (targets met here).
-                      Initialized to ``quality_range[0]`` (the better end).
-        fail_crf:     Worse-quality boundary sentinel (targets not met here).
-                      Initialized to ``quality_range[1]`` (the worse end).
-        fail_metrics: Full quality_results dict observed at ``fail_crf``.
-                      ``None`` until a real fail result is recorded.
-        pass_metrics: Full quality_results dict observed at ``pass_crf``.
-                      ``None`` until a real pass result is recorded.
-        attempts:     Number of encoding attempts recorded.
-    """
-
-    pass_crf:         Decimal
-    fail_crf:         Decimal
-    fail_metrics:     dict[str, float] | None = None
-    pass_metrics:     dict[str, float] | None = None
-    attempts:         int                     = 0
-
-    def add(
-        self,
-        crf:     Decimal,
-        passed:  bool,
-        metrics: dict[str, float] | None = None,
-    ) -> None:
-        """Record an encoding attempt and update the pass/fail bracket.
-
-        When *metrics* is provided it is stored at the updated boundary so
-        Phase 2 proportional interpolation can look up any target key later.
-
-        Args:
-            crf:     Quality value used.
-            passed:  Whether all quality targets were met.
-            metrics: Full measured quality dict (``"<metric>_<stat>"`` keys).
-                     Pass ``None`` when metrics are unavailable (history
-                     pre-population from sidecars without full metric data).
-        """
-        self.attempts += 1
-        if passed:
-            self.pass_crf     = crf
-            self.pass_metrics = metrics
-        else:
-            self.fail_crf     = crf
-            self.fail_metrics = metrics
 
 def normalize_metric(metric_type: MetricType, value: float) -> float:
     """Normalize a raw scalar metric value using the metric's ``MetricInfo`` descriptor.
@@ -515,6 +459,9 @@ def _find_worst_target(
     target with the least surplus (or largest deficit).  Uses ``MetricInfo.deficit``
     so the comparison is direction-aware for both higher-is-better and inverted metrics.
 
+    Metrics are expected to be already normalized (post ``MetricInfo.normalize``),
+    as stored in sidecars.
+
     Args:
         quality_results: Measured quality metrics keyed as ``"<metric>_<stat>"``.
         quality_targets: Quality targets to evaluate.
@@ -533,9 +480,6 @@ def _find_worst_target(
         if actual is None:
             continue
         info    = MetricType(target.metric).info
-        # Normalize inf (e.g. PSNR lossless) to the metric's lossless_value
-        if math.isinf(actual):
-            actual = info.lossless_value
         deficit = info.deficit(actual, target.value)
         if deficit < worst_deficit:
             worst_deficit = deficit
@@ -547,279 +491,797 @@ def _find_worst_target(
     return worst_target, worst_deficit, worst_actual
 
 
-def _score_failing_attempt(
+def _score_attempt(
     metrics:         dict[str, float],
     quality_targets: list[QualityTarget],
-    crf:             Decimal | None = None,
 ) -> float:
-    """Compute a composite score for a failing attempt based on failing targets only.
+    """Compute a signed composite score for an encoding attempt.
 
-    Sums the normalized deficit for each target that is *not* met.  Only failing
-    targets contribute — passing ones are ignored so that a metric with a large
-    surplus (e.g. PSNR at 70 dB against a 45 dB target) cannot mask failures on
-    other metrics.
+    Metrics must be already normalized (post ``MetricInfo.normalize``), as stored
+    in sidecars.  No normalization is performed here.
 
-    Each deficit is divided by ``MetricInfo.comparison_range`` — the practical
-    value span where targets are set — to make deficits comparable across metrics
-    with different scales (VMAF %, SSIM %, PSNR dB, VIF).
+    Returns a float encoding both pass/fail and distance from the sweet spot:
+    - ``0.0``: all targets pass and every surplus ≤ ``acceptance_delta`` (early acceptance).
+    - Positive: all targets pass, at least one surplus > ``acceptance_delta``.
+      Value is ``sum(surplus / comparison_range)`` for all targets.
+    - Negative: at least one target fails.
+      Value is ``sum(deficit / comparison_range)`` for failing targets only.
 
-    Higher score = closer to satisfying all targets = better fallback choice.
-    All values are ≤ 0 (only failing targets contribute negative deficits).
+    ``abs(score)`` measures distance from the sweet spot — closest to zero = best attempt.
 
     Args:
-        metrics:         Measured quality metrics keyed as ``"<metric>_<stat>"``.
+        metrics:         Measured quality metrics keyed as ``"<metric>_<stat>"``,
+                         already normalized.
         quality_targets: Quality targets to evaluate against.
-        crf:             Unused; present for drop-in compatibility with
-                         ``_score_failing_attempt_by_crf``.
 
     Returns:
-        Sum of normalized deficits for failing targets (≤ 0.0).
-        Returns ``-float("inf")`` when no target has a valid result in *metrics*.
+        Signed float score.
+
+    Raises:
+        ValueError: If any target key is absent from ``metrics``.
     """
-    _ = crf
-    total = 0.0
-    found = False
+    # Validate all keys are present up front.
+    for target in quality_targets:
+        key = f"{target.metric}_{target.statistic}"
+        if key not in metrics:
+            raise ValueError(
+                f"Missing metric key '{key}' in metrics dict. "
+                f"Available keys: {list(metrics.keys())}"
+            )
+
+    all_pass     = True
+    fail_score   = 0.0
+    pass_score   = 0.0
+    early_accept = True
+
     for target in quality_targets:
         key    = f"{target.metric}_{target.statistic}"
-        actual = metrics.get(key)
-        if actual is None:
-            continue
-        found  = True
+        actual = metrics[key]
         info   = MetricType(target.metric).info
-        deficit = info.deficit(actual, target.value)
-        if deficit < 0.0:
-            total += deficit / info.comparison_range
-    return total if found else -float("inf")
 
+        deficit    = info.deficit(actual, target.value)
+        normalized = deficit / info.comparison_range
 
-def _score_failing_attempt_by_crf(
-    metrics:         dict[str, float],
-    quality_targets: list[QualityTarget],
-    crf:             Decimal | None = None,
-) -> float:
-    """Score a failing attempt by CRF: lower CRF → higher score.
-
-    Drop-in alternative to ``_score_failing_attempt`` that restores the original
-    behaviour of preferring the attempt with the lowest CRF value (i.e. highest
-    quality setting).  Useful as a fallback when metric-based scoring is
-    unavailable or undesirable.
-
-    Score is ``-float(crf)`` so that lower CRF values produce a higher (less
-    negative) score, matching the "higher = better" convention used by
-    ``_score_failing_attempt``.
-
-    Args:
-        metrics:         Unused; present for drop-in compatibility.
-        quality_targets: Unused; present for drop-in compatibility.
-        crf:             CRF value of the attempt.  When ``None``, returns
-                         ``-float("inf")`` (worst possible score).
-
-    Returns:
-        ``-float(crf)`` or ``-float("inf")`` when *crf* is ``None``.
-    """
-    _ = metrics, quality_targets
-    return -float(crf) if crf is not None else -float("inf")
-
-
-def adjust_crf(
-    current_crf:      Decimal,
-    quality_results:  dict[str, float],
-    quality_targets:  list[QualityTarget],
-    history:          CRFHistory,
-    granularity:      Decimal        = Decimal("0.5"),
-    quality_max_step: Decimal | None = None,
-) -> Decimal | None:
-    """Calculate the next quality value to try, updating *history* with the current result.
-
-    ## Algorithm
-
-    Builds a candidate list of interpolation fractions ``t ∈ [0, 1]`` along
-    ``[pass_crf, fail_crf]`` and takes the first valid one:
-
-    1. **Primary**: interpolate from the current worst target's metric curve
-       between the two boundary dicts.  Valid when the metric actually straddles
-       the target inside the bracket (``t ∈ [0, 1]``).
-    2. **Reverse**: re-find the worst target from the *opposite* boundary's
-       metrics (the boundary not just updated), then interpolate.  Catches the
-       case where the current worst metric passes at both boundaries.
-    3. **Binary**: ``t = 0.5`` (midpoint) — always valid, always last.
-
-    When boundary metrics are absent (early attempts), interpolation candidates
-    return ``None`` and binary is used automatically.
-
-    **Direction-agnostic**: ``pass_crf`` is always the better-quality boundary and
-    ``fail_crf`` is always the worse-quality boundary.  The interpolation
-    ``pass_crf + t * (fail_crf - pass_crf)`` works for both lower-is-better
-    (CRF ``[0, 51]``) and higher-is-better (VBR ``[99, 0]``) codecs because
-    ``t ∈ [0, 1]`` always moves from better toward worse.  Span comparisons use
-    ``abs()`` so they are sign-independent.
-
-    **Step clamping**: when *quality_max_step* is set, the absolute step from
-    *current_crf* is clamped to that value before quantization.  This prevents
-    large jumps on the first few attempts for codecs with wide quality ranges
-    (e.g. VBR bitrate).
-
-    **Early acceptance**: when all targets pass and the tightest surplus is
-    within ``CRF_METRIC_POSITIVE_DELTA``, the current value is accepted without
-    trying to squeeze further — saves one encoding pass.
-
-    **Exhaustion**: when ``abs(fail_crf - pass_crf) ≤ granularity`` the bracket
-    is too tight to improve; return ``None`` so the caller keeps the last pass.
-
-    **Boundary inclusivity**: when a boundary sentinel has no real metrics yet
-    (``fail_metrics`` or ``pass_metrics`` is ``None``), the boundary value itself
-    is a valid candidate — the algorithm hasn't tested it yet.  Once a real
-    result is recorded at a boundary, that value is excluded (already tested).
-
-    **Quantization**: the raw interpolated value is quantized to *granularity*
-    using ``Decimal.quantize``.  When the current attempt passed, rounding is
-    biased toward the *worse* end (to find the efficiency sweet spot); when it
-    failed, rounding is biased toward the *better* end.  For lower-is-better
-    codecs: pass → ``ROUND_CEILING``, fail → ``ROUND_FLOOR``.  For
-    higher-is-better codecs: pass → ``ROUND_FLOOR``, fail → ``ROUND_CEILING``.
-
-    Args:
-        current_crf:      Quality value used in the most recent attempt.
-        quality_results:  Measured quality metrics keyed as ``"<metric>_<stat>"``.
-        quality_targets:  Quality targets to meet.
-        history:          Quality bracket history; updated in-place with this result.
-        granularity:      Step size as a ``Decimal``.  Comes from
-                          ``strategy.codec.quality_granularity``.
-        quality_max_step: Optional maximum absolute step size per iteration.
-                          When set, the proposed next value is clamped so that
-                          ``abs(next - current_crf) ≤ quality_max_step``.
-                          Comes from ``strategy.codec.quality_max_step``.
-
-    Returns:
-        Next quality value to try (quantized ``Decimal``), or ``None`` when the
-        search is exhausted or the current result is accepted as final.
-    """
-    pass_crf = history.pass_crf
-    fail_crf = history.fail_crf
-
-    # Preemptive exhaustion check — bracket too tight to improve.
-    # Skip when no pass_metrics or no fail_metrics — no true bracket yet, allow inclusive boundaries.
-    if history.pass_metrics and history.fail_metrics and (abs(fail_crf - pass_crf) <= granularity):
-        return None
-
-    found = _find_worst_target(quality_results, quality_targets)
-    if found is None:
-        logger.warning("No valid metric results found, cannot adjust CRF")
-        return None
-
-    worst_target, worst_deficit, worst_actual = found
-    current_passed = worst_deficit >= 0
-
-    # Update history with this attempt's full metrics dict.
-    history.add(current_crf, current_passed, quality_results)
-
-    # Re-read bounds after update (they may have narrowed).
-    pass_crf = history.pass_crf
-    fail_crf = history.fail_crf
-    if (history.pass_metrics is not None or history.fail_metrics is not None) and abs(fail_crf - pass_crf) <= granularity:
-        return None
-
-    # --- Early acceptance ---
-    if current_passed and worst_deficit <= CRF_METRIC_POSITIVE_DELTA:
         logger.debug(
-            "Least-proficient metric surplus %.3f ≤ CRF_METRIC_POSITIVE_DELTA (%.3f), "
-            "accepting %s as final.",
-            worst_deficit, CRF_METRIC_POSITIVE_DELTA, str(current_crf).rjust(PADDING_QUALITY_NUMBER),
+            "_score_attempt: %s_%s actual=%.4f target=%.4f deficit=%.4f normalized=%.6f",
+            target.metric, target.statistic, actual, target.value, deficit, normalized,
         )
+
+        if deficit < 0.0:
+            all_pass     = False
+            early_accept = False
+            fail_score  += normalized
+        else:
+            pass_score += normalized
+            if deficit > info.acceptance_delta:
+                early_accept = False
+
+    if not all_pass:
+        return fail_score
+
+    if early_accept:
+        return 0.0
+
+    return pass_score
+
+
+@runtime_checkable
+class QualitySearchProtocol(Protocol):
+    """Structural interface for quality search algorithms.
+
+    All quality search implementations must satisfy this protocol.
+    Constructor arguments (``quality_better``, ``quality_worse``,
+    ``quality_targets``, ``granularity``, ``quality_max_step``) are
+    supplied at construction time, not per-call.
+    """
+
+    @property
+    def attempts(self) -> int:
+        """Total number of ``record()`` calls made so far."""
+        ...
+
+    @property
+    def best_quality(self) -> Decimal | None:
+        """Best quality value found so far.
+
+        Best-efficiency passing value if any pass exists, otherwise the
+        best-fail value (highest ``_score_attempt`` score).
+        ``None`` before any ``record()`` call.
+        """
+        ...
+
+    @property
+    def best_metrics(self) -> dict[str, float] | None:
+        """Full metrics dict associated with ``best_quality``.
+        ``None`` before any ``record()`` call.
+        """
+        ...
+
+    @property
+    def best_targets_met(self) -> bool:
+        """``True`` iff ``best_quality`` corresponds to a passing attempt."""
+        ...
+
+    def record(self, quality: Decimal, quality_results: dict[str, float]) -> Decimal | None:
+        """Record one attempt result and return the next quality value to try.
+
+        Updates internal state with the result of encoding at *quality*.
+        Returns the next quality value to try, or ``None`` when the search
+        is exhausted or the current result is accepted as final.
+
+        Once ``None`` is returned, all subsequent calls must also return ``None``
+        without mutating state.
+
+        Args:
+            quality:         Quality value used for this attempt.
+            quality_results: Measured quality metrics keyed as ``"<metric>_<stat>"``.
+
+        Returns:
+            Next quality value (quantized ``Decimal``), or ``None``.
+        """
+        ...
+
+
+class QualitySearch:
+    """Quality search using proportional interpolation (legacy algorithm).
+
+    Encapsulates the binary-bracket search previously split across
+    ``CRFHistory`` and ``adjust_crf()``.  Direction-agnostic: uses
+    ``quality_better``/``quality_worse`` instead of assuming lower=better.
+
+    Args:
+        quality_better:   Better-quality boundary (codec range start).
+        quality_worse:    Worse-quality boundary (codec range end).
+        quality_targets:  Quality targets to meet.
+        granularity:      Step size as a ``Decimal``.
+        quality_max_step: Optional maximum absolute step size per iteration.
+
+    Raises:
+        ValueError: If ``quality_better == quality_worse`` or ``granularity <= 0``.
+    """
+
+    def __init__(
+        self,
+        quality_better:   Decimal,
+        quality_worse:    Decimal,
+        quality_targets:  list[QualityTarget],
+        granularity:      Decimal,
+        quality_max_step: Decimal | None = None,
+    ) -> None:
+        if quality_better == quality_worse:
+            raise ValueError(
+                f"quality_better ({quality_better}) must differ from quality_worse ({quality_worse})"
+            )
+        if granularity <= 0:
+            raise ValueError(f"granularity must be > 0, got {granularity}")
+
+        self._better_q:       Decimal                = quality_better
+        self._worse_q:        Decimal                = quality_worse
+        self._better_metrics: dict[str, float] | None = None
+        self._worse_metrics:  dict[str, float] | None = None
+        self._attempts:       int                    = 0
+        self._exhausted:      bool                   = False
+        self._quality_targets  = quality_targets
+        self._granularity      = granularity
+        self._quality_max_step = quality_max_step
+
+    # ------------------------------------------------------------------
+    # Protocol properties
+    # ------------------------------------------------------------------
+
+    @property
+    def attempts(self) -> int:
+        """Total number of ``record()`` calls made so far."""
+        return self._attempts
+
+    @property
+    def best_quality(self) -> Decimal | None:
+        """Best quality found: passing value if any pass, else best-fail value."""
+        if self._better_metrics is not None:
+            return self._better_q
+        if self._worse_metrics is not None:
+            return self._worse_q
         return None
 
-    # crf_span is signed: positive for lower-is-better (pass_crf < fail_crf),
-    # negative for higher-is-better (pass_crf > fail_crf).
-    # Interpolation pass_crf + t * crf_span is direction-agnostic: t=0 → pass (better), t=1 → fail (worse).
-    crf_span = fail_crf - pass_crf
+    @property
+    def best_metrics(self) -> dict[str, float] | None:
+        """Metrics dict associated with ``best_quality``."""
+        if self._better_metrics is not None:
+            return self._better_metrics
+        return self._worse_metrics
 
-    def _clamp_interior(crf: Decimal) -> Decimal | None:
-        """Clamp *crf* to the valid interior of the search range.
+    @property
+    def best_targets_met(self) -> bool:
+        """``True`` iff at least one passing attempt was recorded."""
+        return self._better_metrics is not None
 
-        When a boundary sentinel has no real metrics yet, the boundary value
-        itself is valid — the algorithm hasn't tested it yet.  Once a real
-        result is recorded at a boundary, that value is excluded (already tested).
+    # ------------------------------------------------------------------
+    # record()
+    # ------------------------------------------------------------------
 
-        Direction-agnostic: uses min/max of the two boundaries so the interior
-        is always ``[lower_bound + granularity, upper_bound - granularity]``
-        regardless of which end is pass or fail.
+    def record(self, quality: Decimal, quality_results: dict[str, float]) -> Decimal | None:
+        """Record one attempt and return the next quality value to try.
 
-        Returns ``None`` when there is no valid point at least one *granularity*
-        step away from both boundaries.
+        Mirrors the logic of the former ``adjust_crf()`` function using
+        instance state instead of a ``CRFHistory`` object.
+
+        Args:
+            quality:         Quality value used for this attempt.
+            quality_results: Measured quality metrics keyed as ``"<metric>_<stat>"``.
+
+        Returns:
+            Next quality value (quantized ``Decimal``), or ``None`` when exhausted.
         """
-        lower = min(pass_crf, fail_crf)
-        upper = max(pass_crf, fail_crf)
-        # Exclude a boundary only once a real result has been recorded there.
-        lo = lower if (history.pass_metrics is None and lower == pass_crf) or (history.fail_metrics is None and lower == fail_crf) else lower + granularity
-        hi = upper if (history.pass_metrics is None and upper == pass_crf) or (history.fail_metrics is None and upper == fail_crf) else upper - granularity
+        if self._exhausted:
+            return None
+
+        self._attempts += 1
+
+        # Score the attempt — catch missing-key errors and treat as hard fail.
+        try:
+            score = _score_attempt(quality_results, self._quality_targets)
+        except ValueError:
+            logger.warning(
+                "QualitySearch: missing metric key for quality=%s — treating as fail, using binary step",
+                quality,
+            )
+            # Fall through with score = -inf; do NOT update bracket metrics.
+            score = -float("inf")
+            # Use binary interpolation toward better quality.
+            raw = self._better_q + Decimal("0.5") * (self._worse_q - self._better_q)
+            if self._quality_max_step is not None:
+                step = raw - quality
+                if abs(step) > self._quality_max_step:
+                    raw = quality + (self._quality_max_step if step > 0 else -self._quality_max_step)
+            next_q = (raw / self._granularity).to_integral_value(ROUND_HALF_EVEN) * self._granularity
+            next_q = next_q.quantize(self._granularity)
+            result = self._clamp_interior(next_q)
+            if result is None:
+                self._exhausted = True
+                return None
+            return result
+
+        if score >= 0.0:
+            # Pass (or early acceptance).
+            self._better_q       = quality
+            self._better_metrics = quality_results
+            if score == 0.0:
+                # Early acceptance — sweet spot found.
+                self._exhausted = True
+                return None
+        else:
+            # Fail.
+            self._worse_q       = quality
+            self._worse_metrics = quality_results
+
+        # Exhaustion check: bracket collapsed to ≤ granularity.
+        if (
+            (self._better_metrics is not None or self._worse_metrics is not None)
+            and abs(self._worse_q - self._better_q) <= self._granularity
+        ):
+            self._exhausted = True
+            return None
+
+        # Compute next quality via proportional interpolation.
+        q_span = self._worse_q - self._better_q
+
+        def _t_for_target(
+            target:    QualityTarget,
+            p_metrics: dict[str, float] | None,
+            f_metrics: dict[str, float] | None,
+        ) -> float | None:
+            """Return interpolation fraction t ∈ [0, 1] for *target*, or ``None``."""
+            if p_metrics is None or f_metrics is None:
+                return None
+            key   = f"{target.metric}_{target.statistic}"
+            p_val = p_metrics.get(key)
+            f_val = f_metrics.get(key)
+            if p_val is None or f_val is None:
+                return None
+            info   = MetricType(target.metric).info
+            d_pass = info.deficit(p_val, target.value)
+            d_fail = info.deficit(f_val, target.value)
+            span   = d_pass - d_fail
+            if abs(span) < 1e-9:
+                return None
+            t = d_pass / span
+            return t if 0.0 <= t <= 1.0 else None
+
+        # Determine worst target from current result and from opposite boundary.
+        current_passed   = score >= 0.0
+        opposite_metrics = self._worse_metrics if current_passed else self._better_metrics
+        opp_worst        = _find_worst_target(opposite_metrics, self._quality_targets) if opposite_metrics else None
+        opp_target       = opp_worst[0] if opp_worst is not None else None
+
+        found_worst = _find_worst_target(quality_results, self._quality_targets)
+        worst_target = found_worst[0] if found_worst is not None else None
+
+        candidates: list[tuple[float, str]] = []
+
+        if worst_target is not None:
+            t_primary = _t_for_target(worst_target, self._better_metrics, self._worse_metrics)
+            if t_primary is not None:
+                candidates.append((t_primary, f"primary worst={worst_target.metric}_{worst_target.statistic}"))
+
+        if opp_target is not None:
+            t_reverse = _t_for_target(opp_target, self._better_metrics, self._worse_metrics)
+            if t_reverse is not None:
+                candidates.append((t_reverse, f"reverse worst={opp_target.metric}_{opp_target.statistic}"))
+
+        candidates.append((0.5, "binary"))
+
+        t_chosen, label = candidates[0]
+        raw = self._better_q + Decimal(str(t_chosen)) * q_span
+
+        # Apply max-step clamping before quantization.
+        if self._quality_max_step is not None:
+            step = raw - quality
+            if abs(step) > self._quality_max_step:
+                raw = quality + (self._quality_max_step if step > 0 else -self._quality_max_step)
+
+        # Snap to nearest granularity step.
+        next_q = (raw / self._granularity).to_integral_value(ROUND_HALF_EVEN) * self._granularity
+        next_q = next_q.quantize(self._granularity)
+
+        result = self._clamp_interior(next_q)
+
+        _pad = len(str(max(abs(self._better_q), abs(self._worse_q)).quantize(self._granularity)))
+        logger.debug(
+            "QualitySearch [%s]: better=%s worse=%s t=%.3f raw=%s → %s",
+            label,
+            str(self._better_q).rjust(_pad),
+            str(self._worse_q).rjust(_pad),
+            t_chosen,
+            str(raw.quantize(self._granularity)).rjust(_pad),
+            str(result).rjust(_pad) if result is not None else "None (exhausted)",
+        )
+
+        if result is None:
+            self._exhausted = True
+            return None
+        return result
+
+    def _clamp_interior(self, q: Decimal) -> Decimal | None:
+        """Clamp *q* to the valid interior of the current search bracket.
+
+        Excludes a boundary only once a real result has been recorded there.
+        Returns ``None`` when no interior point exists.
+        """
+        lower = min(self._better_q, self._worse_q)
+        upper = max(self._better_q, self._worse_q)
+        lo = (
+            lower
+            if (self._better_metrics is None and lower == self._better_q)
+            or (self._worse_metrics is None and lower == self._worse_q)
+            else lower + self._granularity
+        )
+        hi = (
+            upper
+            if (self._better_metrics is None and upper == self._better_q)
+            or (self._worse_metrics is None and upper == self._worse_q)
+            else upper - self._granularity
+        )
         if lo > hi:
             return None
-        return max(lo, min(hi, crf))
+        return max(lo, min(hi, q))
 
-    def _t_for_target(
-        target:    QualityTarget,
-        p_metrics: dict[str, float] | None,
-        f_metrics: dict[str, float] | None,
-    ) -> float | None:
-        """Return interpolation t for *target*, or ``None`` if outside [0, 1]."""
-        if p_metrics is None or f_metrics is None:
+
+
+
+class QualitySearchV2:
+    """Quality search using the 3-point sweet-spot algorithm.
+
+    Tracks three anchor points — pass sentinel, best, and fail sentinel — and
+    converges by repeatedly halving the larger of the two active ranges:
+
+    - Range A: ``[_pass_q ... _best_q]``  (between pass sentinel and best)
+    - Range B: ``[_best_q ... _fail_q]``  (between best and fail sentinel)
+
+    **Phase 1 — all-failing** (``_pass_metrics is None``):
+    Searches toward ``quality_better`` until a result scores *worse* than the
+    current best, at which point that result becomes the pass sentinel and the
+    algorithm transitions to 3-point mode.
+
+    **Phase 1 — all-passing** (``_fail_metrics is None``):
+    Searches toward ``quality_worse`` until a result scores *worse* than the
+    current best, at which point that result becomes the fail sentinel and the
+    algorithm transitions to 3-point mode.
+
+    **Phase 2 — 3-point mode** (both sentinels have real metrics):
+    Picks the midpoint of the larger range each iteration.  A new best
+    promotes/demotes the surrounding sentinels; a non-best tightens the
+    appropriate sentinel.  Terminates when both ranges collapse to ≤ granularity.
+
+    Direction-agnostic: works for CRF (lower=better) and VBR (higher=better)
+    by using ``abs()`` for range sizes and ``min/max`` for boundary checks.
+
+    Args:
+        quality_better:   Better-quality boundary (codec range start).
+        quality_worse:    Worse-quality boundary (codec range end).
+        quality_targets:  Quality targets to meet.
+        granularity:      Step size as a ``Decimal``.
+        quality_max_step: Optional maximum absolute step size per iteration.
+
+    Raises:
+        ValueError: If ``quality_better == quality_worse`` or ``granularity <= 0``.
+    """
+
+    def __init__(
+        self,
+        quality_better:   Decimal,
+        quality_worse:    Decimal,
+        quality_targets:  list[QualityTarget],
+        granularity:      Decimal,
+        quality_max_step: Decimal | None = None,
+    ) -> None:
+        if quality_better == quality_worse:
+            raise ValueError(
+                f"quality_better ({quality_better}) must differ from quality_worse ({quality_worse})"
+            )
+        if granularity <= 0:
+            raise ValueError(f"granularity must be > 0, got {granularity}")
+
+        self._pass_q:       Decimal                  = quality_better   # sentinel
+        self._pass_metrics: dict[str, float] | None  = None
+        self._best_q:       Decimal                  = quality_worse    # sentinel (updated to first real attempt)
+        self._best_metrics: dict[str, float] | None  = None
+        self._best_score:   float                    = -math.inf
+        self._fail_q:       Decimal                  = quality_worse    # sentinel (lags behind _best_q in all-failing phase)
+        self._fail_metrics: dict[str, float] | None  = None
+        self._attempts:     int                      = 0
+        self._exhausted:    bool                     = False
+        # Phase tracking: True once the first passing result is seen (all-passing phase).
+        # False means all-failing phase (or not yet started).
+        self._seen_pass:    bool                     = False
+        self._quality_targets:  list[QualityTarget]  = quality_targets
+        self._granularity:      Decimal              = granularity
+        self._quality_max_step: Decimal | None       = quality_max_step
+
+    # ------------------------------------------------------------------
+    # Protocol properties
+    # ------------------------------------------------------------------
+
+    @property
+    def attempts(self) -> int:
+        """Total number of ``record()`` calls made so far."""
+        return self._attempts
+
+    @property
+    def best_quality(self) -> Decimal | None:
+        """Best quality found: best-efficiency passing value if any pass, else best-fail value."""
+        if self._best_metrics is None:
             return None
-        key      = f"{target.metric}_{target.statistic}"
-        p_val    = p_metrics.get(key)
-        f_val    = f_metrics.get(key)
-        if p_val is None or f_val is None:
+        # When any pass has been seen, _best_q always holds the best-efficiency passing value.
+        # This is true in all-passing phase and in 3-point mode (both entry paths).
+        if self._seen_pass:
+            return self._best_q
+        # All-failing phase: _best_q is the best-fail value.
+        return self._best_q
+
+    @property
+    def best_metrics(self) -> dict[str, float] | None:
+        """Metrics dict associated with ``best_quality``."""
+        if self._best_metrics is None:
             return None
-        tgt_info = MetricType(target.metric).info
-        d_pass   = tgt_info.deficit(p_val, target.value)
-        d_fail   = tgt_info.deficit(f_val, target.value)
-        span     = d_pass - d_fail
-        if abs(span) < 1e-9:
+        # _best_metrics always corresponds to _best_q.
+        return self._best_metrics
+
+    @property
+    def best_targets_met(self) -> bool:
+        """``True`` iff at least one passing attempt was recorded."""
+        return self._seen_pass
+
+    # ------------------------------------------------------------------
+    # record()
+    # ------------------------------------------------------------------
+
+    def record(self, quality: Decimal, quality_results: dict[str, float]) -> Decimal | None:
+        """Record one attempt and return the next quality value to try.
+
+        Implements the 3-point sweet-spot state machine.  Returns ``None``
+        when the search is exhausted or the current result is accepted as final.
+
+        Args:
+            quality:         Quality value used for this attempt.
+            quality_results: Measured quality metrics keyed as ``"<metric>_<stat>"``.
+
+        Returns:
+            Next quality value (quantized ``Decimal``), or ``None`` when exhausted.
+        """
+        if self._exhausted:
             return None
-        t = d_pass / span
-        return t if 0.0 <= t <= 1.0 else None
 
-    opposite_metrics = history.fail_metrics if current_passed else history.pass_metrics
-    opp_worst        = _find_worst_target(opposite_metrics, quality_targets) if opposite_metrics else None
-    opp_target       = opp_worst[0] if opp_worst is not None else None
+        self._attempts += 1
 
-    candidates: list[tuple[float, str]] = []
+        # Score the attempt — catch missing-key errors and treat as worst fail.
+        try:
+            score = _score_attempt(quality_results, self._quality_targets)
+        except ValueError:
+            logger.warning(
+                "QualitySearchV2: missing metric key for quality=%s — treating as worst fail",
+                quality,
+            )
+            score = -math.inf
 
-    t_primary = _t_for_target(worst_target, history.pass_metrics, history.fail_metrics)
-    if t_primary is not None:
-        candidates.append((t_primary, f"primary worst={worst_target.metric}_{worst_target.statistic}"))
+        # Early acceptance: score == 0.0 means sweet spot found.
+        if score == 0.0:
+            self._best_q       = quality
+            self._best_metrics = quality_results
+            self._best_score   = 0.0
+            self._pass_q       = quality
+            self._pass_metrics = quality_results
+            self._seen_pass    = True
+            self._exhausted    = True
+            logger.debug("QualitySearchV2: early acceptance at quality=%s", quality)
+            return None
 
-    if opp_target is not None:
-        t_reverse = _t_for_target(opp_target, history.pass_metrics, history.fail_metrics)
-        if t_reverse is not None:
-            candidates.append((t_reverse, f"reverse worst={opp_target.metric}_{opp_target.statistic}"))
+        # Determine current phase.
+        # _seen_pass tracks whether any passing result has been recorded.
+        # Phase priority: 3-point > all-failing (has real fails) > all-passing > first-call routing.
+        in_3point_mode = self._pass_metrics is not None and self._fail_metrics is not None
 
-    candidates.append((0.5, "binary"))
+        if in_3point_mode:
+            is_new_best = abs(score) < abs(self._best_score)
+            self._update_3point(quality, quality_results, score, is_new_best)
+        elif self._fail_metrics is not None:
+            # Has real fails (lagged), no passes yet → all-failing phase.
+            is_new_best = abs(score) < abs(self._best_score) or self._best_metrics is None
+            self._update_all_failing(quality, quality_results, score, is_new_best)
+        elif self._seen_pass or score >= 0.0:
+            # All-passing phase: first pass seen or continuing all-passing.
+            self._seen_pass = True
+            is_new_best = abs(score) < abs(self._best_score) or self._best_metrics is None
+            self._update_all_passing(quality, quality_results, score, is_new_best)
+        else:
+            # All-failing phase.
+            is_new_best = abs(score) < abs(self._best_score) or self._best_metrics is None
+            self._update_all_failing(quality, quality_results, score, is_new_best)
 
-    t_chosen, label = candidates[0]
-    # Compute raw value in Decimal to avoid float drift, then quantize.
-    raw_crf = pass_crf + Decimal(str(t_chosen)) * crf_span
+        return self._compute_next(quality)
 
-    # Apply max-step clamping before quantization.
-    if quality_max_step is not None:
-        step = raw_crf - current_crf
-        if abs(step) > quality_max_step:
-            raw_crf = current_crf + (quality_max_step if step > 0 else -quality_max_step)
+    # ------------------------------------------------------------------
+    # Phase update helpers
+    # ------------------------------------------------------------------
 
-    # Snap to nearest granularity step.
-    next_crf = (raw_crf / granularity).to_integral_value(ROUND_HALF_EVEN) * granularity
-    next_crf = next_crf.quantize(granularity)
+    def _update_all_failing(
+        self,
+        quality:         Decimal,
+        quality_results: dict[str, float],
+        score:           float,
+        is_new_best:     bool,
+    ) -> None:
+        """Update state during the all-failing phase (``_pass_metrics is None``)."""
+        if is_new_best:
+            # New best: lag _fail_q one step behind, advance _best_q.
+            self._fail_q       = self._best_q
+            self._fail_metrics = self._best_metrics
+            self._best_q       = quality
+            self._best_metrics = quality_results
+            self._best_score   = score
+            logger.debug(
+                "QualitySearchV2 all-failing new-best: best_q=%s fail_q=%s score=%.4f",
+                quality, self._fail_q, score,
+            )
+        else:
+            # Worse than current best — sweet spot passed; transition to 3-point mode.
+            self._pass_q       = quality
+            self._pass_metrics = quality_results
+            logger.debug(
+                "QualitySearchV2 all-failing transition→3pt: pass_q=%s best_q=%s fail_q=%s",
+                quality, self._best_q, self._fail_q,
+            )
 
-    result = _clamp_interior(next_crf)
+    def _update_all_passing(
+        self,
+        quality:         Decimal,
+        quality_results: dict[str, float],
+        score:           float,
+        is_new_best:     bool,
+    ) -> None:
+        """Update state during the all-passing phase (``_fail_metrics is None``)."""
+        if is_new_best:
+            # New best: lag _pass_q one step behind (only when there's a real prior best).
+            if self._best_metrics is not None:
+                self._pass_q       = self._best_q
+                self._pass_metrics = self._best_metrics
+            self._best_q       = quality
+            self._best_metrics = quality_results
+            self._best_score   = score
+            logger.debug(
+                "QualitySearchV2 all-passing new-best: best_q=%s pass_q=%s score=%.4f",
+                quality, self._pass_q, score,
+            )
+        else:
+            # Worse than current best — sweet spot passed; transition to 3-point mode.
+            self._fail_q       = quality
+            self._fail_metrics = quality_results
+            logger.debug(
+                "QualitySearchV2 all-passing transition→3pt: pass_q=%s best_q=%s fail_q=%s",
+                self._pass_q, self._best_q, quality,
+            )
 
-    logger.debug(
-        "CRF [%s]: pass=%s fail=%s t=%.3f raw=%s → %s",
-        label,
-        str(pass_crf).rjust(PADDING_QUALITY_NUMBER),
-        str(fail_crf).rjust(PADDING_QUALITY_NUMBER),
-        t_chosen,
-        str(raw_crf.quantize(granularity)).rjust(PADDING_QUALITY_NUMBER),
-        str(result).rjust(PADDING_QUALITY_NUMBER) if result is not None else "None (exhausted)",
-    )
-    return result
+    def _update_3point(
+        self,
+        quality:         Decimal,
+        quality_results: dict[str, float],
+        score:           float,
+        is_new_best:     bool,
+    ) -> None:
+        """Update state in 3-point mode (both sentinels have real metrics)."""
+        in_range_b = self._in_range_b(quality)
 
+        if is_new_best:
+            if in_range_b:
+                # Promote: _pass_q = old _best_q, _best_q = quality.
+                self._pass_q       = self._best_q
+                self._pass_metrics = self._best_metrics
+                self._best_q       = quality
+                self._best_metrics = quality_results
+                self._best_score   = score
+                logger.debug(
+                    "QualitySearchV2 3pt Range-B new-best promote: best_q=%s pass_q=%s score=%.4f",
+                    quality, self._pass_q, score,
+                )
+            else:
+                # Demote: _fail_q = old _best_q, _best_q = quality.
+                self._fail_q       = self._best_q
+                self._fail_metrics = self._best_metrics
+                self._best_q       = quality
+                self._best_metrics = quality_results
+                self._best_score   = score
+                logger.debug(
+                    "QualitySearchV2 3pt Range-A new-best demote: best_q=%s fail_q=%s score=%.4f",
+                    quality, self._fail_q, score,
+                )
+        else:
+            if in_range_b:
+                # Tighten fail boundary.
+                self._fail_q       = quality
+                self._fail_metrics = quality_results
+                logger.debug(
+                    "QualitySearchV2 3pt Range-B tighten: fail_q=%s", quality,
+                )
+            else:
+                # Tighten pass boundary.
+                self._pass_q       = quality
+                self._pass_metrics = quality_results
+                logger.debug(
+                    "QualitySearchV2 3pt Range-A tighten: pass_q=%s", quality,
+                )
 
+    def _in_range_b(self, quality: Decimal) -> bool:
+        """Return ``True`` if *quality* is in Range B ``[_best_q ... _fail_q]`` (exclusive of _best_q).
+
+        Uses ``min/max`` to handle both CRF (lower=better) and VBR (higher=better) directions.
+        Edge case: ``quality == _best_q`` is treated as Range B.
+        """
+        lo = min(self._best_q, self._fail_q)
+        hi = max(self._best_q, self._fail_q)
+        # Range A is (pass_q, best_q) exclusive of best_q.
+        # Range B is [best_q, fail_q] — includes best_q as edge case.
+        lo_a = min(self._pass_q, self._best_q)
+        hi_a = max(self._pass_q, self._best_q)
+        in_range_a = lo_a <= quality < hi_a if self._pass_q < self._best_q else lo_a < quality <= hi_a
+        # Anything not in Range A (exclusive of best_q) is Range B.
+        _ = lo, hi  # suppress unused warning
+        return not in_range_a
+
+    # ------------------------------------------------------------------
+    # Next quality computation
+    # ------------------------------------------------------------------
+
+    def _compute_next(self, current_quality: Decimal) -> Decimal | None:
+        """Compute the next quality value to try, or ``None`` if exhausted.
+
+        Picks the midpoint of the larger active range, quantizes to granularity,
+        and exhausts when no untested interior point remains.
+        """
+        range_a = abs(self._best_q - self._pass_q)
+        range_b = abs(self._fail_q - self._best_q)
+
+        # Exhaustion: both ranges collapsed to ≤ granularity.
+        if range_a <= self._granularity and range_b <= self._granularity:
+            self._exhausted = True
+            logger.debug(
+                "QualitySearchV2: exhausted — range_a=%s range_b=%s gran=%s",
+                range_a, range_b, self._granularity,
+            )
+            return None
+
+        # Determine phase after update — mirrors the phase detection in record().
+        in_3point_mode    = self._pass_metrics is not None and self._fail_metrics is not None
+        still_all_failing = not in_3point_mode and not self._seen_pass
+        still_all_passing = not in_3point_mode and self._seen_pass
+
+        if still_all_failing:
+            # Interpolate toward _pass_q (better quality): midpoint of [_pass_q, _best_q].
+            span  = self._best_q - self._pass_q
+            raw_q = self._pass_q + Decimal("0.5") * span
+        elif still_all_passing:
+            # Interpolate toward _fail_q (worse quality): midpoint of [_best_q, _fail_q].
+            span  = self._fail_q - self._best_q
+            raw_q = self._best_q + Decimal("0.5") * span
+        else:
+            # 3-point mode: pick midpoint of larger range.
+            if range_a >= range_b:
+                span  = self._best_q - self._pass_q
+                raw_q = self._pass_q + Decimal("0.5") * span
+            else:
+                span  = self._fail_q - self._best_q
+                raw_q = self._best_q + Decimal("0.5") * span
+
+        # Apply max-step clamping.
+        if self._quality_max_step is not None:
+            step = raw_q - current_quality
+            if abs(step) > self._quality_max_step:
+                raw_q = current_quality + (
+                    self._quality_max_step if step > 0 else -self._quality_max_step
+                )
+
+        # Quantize to granularity.
+        next_q = (raw_q / self._granularity).to_integral_value(ROUND_HALF_EVEN) * self._granularity
+        next_q = next_q.quantize(self._granularity)
+
+        # Clamp to the full active range spanning all three anchors.
+        lower = min(self._pass_q, self._best_q, self._fail_q)
+        upper = max(self._pass_q, self._best_q, self._fail_q)
+        next_q = max(lower, min(upper, next_q))
+
+        # Already-tested set: all three anchors have been recorded.
+        already_tested = {self._best_q}
+        if self._pass_metrics is not None:
+            already_tested.add(self._pass_q)
+        if self._fail_metrics is not None:
+            already_tested.add(self._fail_q)
+
+        if next_q in already_tested:
+            # Try the other range's interior point.
+            if range_a >= range_b:
+                # Was picking from Range A — try Range B instead.
+                if range_b > self._granularity:
+                    alt_span = self._fail_q - self._best_q
+                    alt_raw  = self._best_q + Decimal("0.5") * alt_span
+                    alt_q    = (alt_raw / self._granularity).to_integral_value(ROUND_HALF_EVEN) * self._granularity
+                    alt_q    = alt_q.quantize(self._granularity)
+                    alt_q    = max(lower, min(upper, alt_q))
+                    if alt_q not in already_tested and lower <= alt_q <= upper:
+                        next_q = alt_q
+                    else:
+                        self._exhausted = True
+                        return None
+                else:
+                    self._exhausted = True
+                    return None
+            else:
+                # Was picking from Range B — try Range A instead.
+                if range_a > self._granularity:
+                    alt_span = self._best_q - self._pass_q
+                    alt_raw  = self._pass_q + Decimal("0.5") * alt_span
+                    alt_q    = (alt_raw / self._granularity).to_integral_value(ROUND_HALF_EVEN) * self._granularity
+                    alt_q    = alt_q.quantize(self._granularity)
+                    alt_q    = max(lower, min(upper, alt_q))
+                    if alt_q not in already_tested and lower <= alt_q <= upper:
+                        next_q = alt_q
+                    else:
+                        self._exhausted = True
+                        return None
+                else:
+                    self._exhausted = True
+                    return None
+
+        # Final safety: must be strictly inside [lower, upper] and untested.
+        if next_q in already_tested or not (lower <= next_q <= upper):
+            self._exhausted = True
+            return None
+
+        _pad = len(str(max(abs(self._pass_q), abs(self._fail_q)).quantize(self._granularity)))
+        logger.debug(
+            "QualitySearchV2: pass_q=%s best_q=%s fail_q=%s → next=%s (range_a=%s range_b=%s)",
+            str(self._pass_q).rjust(_pad),
+            str(self._best_q).rjust(_pad),
+            str(self._fail_q).rjust(_pad),
+            str(next_q).rjust(_pad),
+            range_a,
+            range_b,
+        )
+        return next_q
