@@ -187,7 +187,7 @@ codecs:
       - veryslow
       - placebo
 
-  nvenc-h265-10bit-vbr-cq:  # CQ = Constant Quality. It is perception-based quality, controlled by the codec. Codec decides how many bits to use. Similar to CRF, but for NVidia.
+  nvenc-h265-10bit-cq:  # CQ = Constant Quality - a perception-based quality, controlled by the codec. Codec decides how many bits to use. Similar to CRF.
     default_quality: 25
     quality_range: [0, 51]
     quality_granularity: 0.5
@@ -224,7 +224,7 @@ codecs:
       - p7
 
 
-  nvenc-h265-10bit-qp:  # QP = Quantization Parameter. Directly controls how many bits to use, straightforward and dumb. But we control he quality via metrics.
+  nvenc-h265-10bit-qp:  # QP = Quantization Parameter - it directly controls how many bits to use, straightforward and dumb. Often wastes bandwidth, NOT RECOMMENDED.
     default_quality: 25
     quality_range: [0, 51]
     quality_granularity: 1 # <int>
@@ -254,7 +254,7 @@ codecs:
       - p6
       - p7
 
-  nvenc-h265-10bit-vbr-multipass:  # Multipass VBR
+  nvenc-h265-10bit-vbr:            # NVenc multipass VBR
     default_quality: 20            # 20Mbit/s as a starting point
     quality_range: [99, 0]         # Limit to 99Mbit/s, reversed (higher=better)
     quality_granularity: 0.1
@@ -277,9 +277,9 @@ codecs:
       - "fullres"
       - "-b:v"
       - "{quality}M"
-      # - "-maxrate"
+      # - "-maxrate"    # can't control this dynamically yet
       # - "12M"
-      # - "-bufsize"
+      # - "-bufsize"    # can't control this dynamically yet
       # - "16M"
       - "-profile"
       - "main10"
@@ -293,9 +293,10 @@ codecs:
       - p6
       - p7
 
-  vulkan_hevc-10bit:
+  # TODO: better vulkan codec profiles. Multipass vbr?
+  vulkan-h265-10bit-qp:    # QP = Quantization Parameter - it directly controls how many bits to use, straightforward and dumb. Often wastes bandwidth, NOT RECOMMENDED.
     default_quality: 25
-    quality_range: [0, 51] # [-1, 255] actually, but -1 = auto and values above 50 produce ugly quality, so capping to the same range
+    quality_range: [0, 51] # [-1, 255] actually, but -1=auto and values above 50 produce ugly quality, so capping to the same range
     quality_granularity: 1 # in docs it is marked as <int>, unlike CRF and CQ, which are float
     quality_label: "QP"
     encoder_args:
@@ -368,23 +369,23 @@ profiles:
 
   # HEVC NVENC (GPU) Profiles
   # --------------------------
-  nvenc-h265-10bit-vbr-cq:
-    codec: nvenc-h265-10bit-vbr-cq
+  nvenc-h265-10bit-cq:
+    codec: nvenc-h265-10bit-cq
     description: "HEVC NVENC GPU encoding — 10-bit, VBR+CQ quality mode with constrained qmin and qmax. Requires NVIDIA GPU with NVENC support."
     extra_args: []
 
-  nvenc-h265-10bit-qp:
-    codec: nvenc-h265-10bit-qp
-    description: "HEVC NVENC GPU encoding — 10-bit, constant QP mode. Requires NVIDIA GPU with NVENC support."
-    extra_args: []
+  # nvenc-h265-10bit-qp:  # NOT RECOMMENDED
+  #   codec: nvenc-h265-10bit-qp
+  #   description: "HEVC NVENC GPU encoding — 10-bit, constant QP mode. Requires NVIDIA GPU with NVENC support."
+  #   extra_args: []
 
-  nvenc-h265-10bit-vbr-multipass:
-    codec: nvenc-h265-10bit-vbr-multipass
+  nvenc-h265-10bit-vbr:
+    codec: nvenc-h265-10bit-vbr
     description: "HEVC NVENC GPU encoding — 10-bit, multipass-vbr mode. Requires NVIDIA GPU with NVENC support."
     extra_args: []
 
-  vulkan_hevc-10bit:
-    codec: vulkan_hevc-10bit
+  vulkan-h265-10bit-qp: # NOT RECOMMENDED, but I don't have other codec profiles for vulkan yet. single-pass VBR and CBR look to be bad choices for transcoding.
+    codec: vulkan-h265-10bit-qp
     description: "HEVC Vulkan encoding — 10-bit, QP mode. Requires Vulkan support."
     extra_args: []
 
