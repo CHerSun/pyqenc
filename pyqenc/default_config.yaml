@@ -424,10 +424,10 @@ audio_output:
 #
 # sampling: Metrics sampling factor — measure every N-th frame.
 #   Min: 1 (every frame measured, slowest but most precise).
-#   Default: 10 (recommended balance of speed and precision).
-#   Values above 30 are not recommended due to measurement volatility.
+#   Default: 3 (recommended balance of speed and precision).
+#   Values above 20 are not recommended due to measurement volatility.
 metrics:
-  sampling: 10
+  sampling: 3
 
 # Stream Filter Configuration
 # ---------------------------

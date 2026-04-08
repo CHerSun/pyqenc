@@ -419,9 +419,9 @@ class TestQualitySearchV2:
     def test_initial_sentinel_state(self) -> None:
         """_pass_q == quality_better, _best_q == quality_worse, _fail_q == quality_worse."""
         s = self._make()
-        assert s._pass_q == self._BETTER
-        assert s._best_q == self._WORSE
-        assert s._fail_q == self._WORSE
+        assert s._better_q == self._BETTER
+        assert s._worse_q == self._WORSE
+        assert s._middle_q == self._WORSE
         assert s.best_quality is None
         assert s.best_metrics is None
         assert s.best_targets_met is False
@@ -435,8 +435,8 @@ class TestQualitySearchV2:
         """First fail: _best_q = quality, _fail_q = quality_worse (unchanged sentinel)."""
         s = self._make()
         s.record(Decimal("25"), self._FAIL_M)
-        assert s._best_q == Decimal("25")
-        assert s._fail_q == self._WORSE   # sentinel unchanged
+        assert s._worse_q == Decimal("25")
+        assert s._middle_q == self._WORSE   # sentinel unchanged
         assert s.best_quality == Decimal("25")
         assert s.best_targets_met is False
 
@@ -447,8 +447,8 @@ class TestQualitySearchV2:
         s.record(Decimal("25"), {"vmaf_min": 80.0})
         # Second fail at 15 (vmaf=88, score≈-0.35 — closer to sweet spot)
         s.record(Decimal("15"), {"vmaf_min": 88.0})
-        assert s._best_q == Decimal("15")
-        assert s._fail_q == Decimal("25")   # old _best_q lagged here
+        assert s._worse_q == Decimal("15")
+        assert s._middle_q == Decimal("25")   # old _best_q lagged here
         assert s.best_quality == Decimal("15")
 
     def test_all_failing_sweet_spot_passed_transitions_to_3point(self) -> None:
@@ -459,11 +459,11 @@ class TestQualitySearchV2:
         # Second fail at 25 (vmaf=80, worse) → sweet spot passed → _pass_q = 25
         s.record(Decimal("25"), {"vmaf_min": 80.0})
         # _pass_q should now be 25 (the worse attempt triggers transition)
-        assert s._pass_q == Decimal("25")
-        assert s._pass_metrics == {"vmaf_min": 80.0}
-        assert s._best_q == Decimal("15")
+        assert s._better_q == Decimal("25")
+        assert s._better_stats == {"vmaf_min": 80.0}
+        assert s._worse_q == Decimal("15")
         # _pass_metrics is set; _fail_metrics may still be None (only one new-best seen)
-        assert s._pass_metrics is not None
+        assert s._better_stats is not None
 
     # ------------------------------------------------------------------
     # All-passing phase
@@ -473,8 +473,8 @@ class TestQualitySearchV2:
         """First pass: _best_q = quality, _pass_q = quality_better (unchanged sentinel)."""
         s = self._make()
         s.record(Decimal("18"), self._PASS_M)
-        assert s._best_q == Decimal("18")
-        assert s._pass_q == self._BETTER   # sentinel unchanged
+        assert s._worse_q == Decimal("18")
+        assert s._better_q == self._BETTER   # sentinel unchanged
         assert s.best_quality == Decimal("18")
         assert s.best_targets_met is True
 
@@ -485,8 +485,8 @@ class TestQualitySearchV2:
         s.record(Decimal("18"), {"vmaf_min": 96.0})
         # Second pass at 22 (vmaf=95.6, score≈0.03 — closer to sweet spot)
         s.record(Decimal("22"), {"vmaf_min": 95.6})
-        assert s._best_q == Decimal("22")
-        assert s._pass_q == Decimal("18")   # old _best_q lagged here
+        assert s._worse_q == Decimal("22")
+        assert s._better_q == Decimal("18")   # old _best_q lagged here
         assert s.best_quality == Decimal("22")
         assert s.best_targets_met is True
 
@@ -498,11 +498,11 @@ class TestQualitySearchV2:
         # Second pass at 18 (vmaf=96.0, worse — further from sweet spot)
         s.record(Decimal("18"), {"vmaf_min": 96.0})
         # _fail_q should now be 18 (the worse attempt triggers transition)
-        assert s._fail_q == Decimal("18")
-        assert s._fail_metrics == {"vmaf_min": 96.0}
-        assert s._best_q == Decimal("22")
+        assert s._middle_q == Decimal("18")
+        assert s._middle_stats == {"vmaf_min": 96.0}
+        assert s._worse_q == Decimal("22")
         # _fail_metrics is set; _pass_metrics may still be None (only one new-best seen)
-        assert s._fail_metrics is not None
+        assert s._middle_stats is not None
 
     # ------------------------------------------------------------------
     # 3-point mode helpers
@@ -523,11 +523,11 @@ class TestQualitySearchV2:
         s.record(Decimal("15"), {"vmaf_min": 88.0})   # new best → _fail_q=25
         s.record(Decimal("20"), {"vmaf_min": 82.0})   # worse → _pass_q=20
         # Verify 3-point mode is active.
-        assert s._pass_metrics is not None, "Expected _pass_metrics to be set"
-        assert s._fail_metrics is not None, "Expected _fail_metrics to be set"
-        assert s._pass_q == Decimal("20")
-        assert s._best_q == Decimal("15")
-        assert s._fail_q == Decimal("25")
+        assert s._better_stats is not None, "Expected _pass_metrics to be set"
+        assert s._middle_stats is not None, "Expected _fail_metrics to be set"
+        assert s._better_q == Decimal("20")
+        assert s._worse_q == Decimal("15")
+        assert s._middle_q == Decimal("25")
         return s
 
     # ------------------------------------------------------------------
@@ -540,10 +540,10 @@ class TestQualitySearchV2:
         # State: _pass_q=20, _best_q=15, _fail_q=25
         # Range B is [_best_q=15 ... _fail_q=25]; quality=22 is in Range B.
         # vmaf=92 → score closer to 0 than vmaf=88 (current best) → new best
-        old_best_q = s._best_q   # 15
+        old_best_q = s._worse_q   # 15
         s.record(Decimal("22"), {"vmaf_min": 92.0})
-        assert s._pass_q == old_best_q   # old _best_q promoted to _pass_q
-        assert s._best_q == Decimal("22")
+        assert s._better_q == old_best_q   # old _best_q promoted to _pass_q
+        assert s._worse_q == Decimal("22")
 
     def test_phase2_range_a_new_best_demotes(self) -> None:
         """In 3-point mode, Range A attempt with better score: _fail_q = old _best_q."""
@@ -551,10 +551,10 @@ class TestQualitySearchV2:
         # State: _pass_q=20, _best_q=15, _fail_q=25
         # Range A is (_best_q=15 ... _pass_q=20) exclusive of _best_q; quality=18 is in Range A.
         # vmaf=92 → score closer to 0 than vmaf=88 → new best
-        old_best_q = s._best_q   # 15
+        old_best_q = s._worse_q   # 15
         s.record(Decimal("18"), {"vmaf_min": 92.0})
-        assert s._fail_q == old_best_q   # old _best_q demoted to _fail_q
-        assert s._best_q == Decimal("18")
+        assert s._middle_q == old_best_q   # old _best_q demoted to _fail_q
+        assert s._worse_q == Decimal("18")
 
     def test_phase2_range_b_tighten(self) -> None:
         """In 3-point mode, Range B attempt with worse score: _fail_q = quality."""
@@ -562,8 +562,8 @@ class TestQualitySearchV2:
         # State: _pass_q=20, _best_q=15, _fail_q=25
         # Range B: quality=23 (vmaf=79, worse than vmaf=88) → tighten _fail_q
         s.record(Decimal("23"), {"vmaf_min": 79.0})
-        assert s._fail_q == Decimal("23")
-        assert s._best_q == Decimal("15")   # unchanged
+        assert s._middle_q == Decimal("23")
+        assert s._worse_q == Decimal("15")   # unchanged
 
     def test_phase2_range_a_tighten(self) -> None:
         """In 3-point mode, Range A attempt with worse score: _pass_q = quality."""
@@ -571,8 +571,8 @@ class TestQualitySearchV2:
         # State: _pass_q=20, _best_q=15, _fail_q=25
         # Range A: quality=18 (vmaf=79, worse than vmaf=88) → tighten _pass_q
         s.record(Decimal("18"), {"vmaf_min": 79.0})
-        assert s._pass_q == Decimal("18")
-        assert s._best_q == Decimal("15")   # unchanged
+        assert s._better_q == Decimal("18")
+        assert s._worse_q == Decimal("15")   # unchanged
 
     # ------------------------------------------------------------------
     # Early acceptance and exhaustion
@@ -646,7 +646,9 @@ class TestEncodeChunkIntegration:
     def test_qualitysearchv2_imported_in_encoding(self) -> None:
         """QualitySearchV2 is importable from pyqenc.phases.encoding (verifies the import exists)."""
         import importlib
+
         import pyqenc.phases.encoding as enc_mod
+
         # Verify QualitySearchV2 is accessible via the module's quality import
         from pyqenc.quality import QualitySearchV2
         assert QualitySearchV2 is not None
@@ -657,8 +659,8 @@ class TestEncodeChunkIntegration:
 
     def test_qualitysearch_usable_as_drop_in(self) -> None:
         """QualitySearch satisfies QualitySearchProtocol and can be used where V2 is expected."""
-        from pyqenc.quality import QualitySearch, QualitySearchProtocol
         from pyqenc.models import QualityTarget
+        from pyqenc.quality import QualitySearch, QualitySearchProtocol
 
         target = QualityTarget(metric="vmaf", statistic="min", value=95.0)
         s = QualitySearch(
@@ -680,8 +682,8 @@ class TestEncodeChunkIntegration:
 
     def test_qualitysearch_protocol_structural_compatibility(self) -> None:
         """QualitySearch is structurally compatible with QualitySearchProtocol (runtime check)."""
-        from pyqenc.quality import QualitySearch, QualitySearchProtocol
         from pyqenc.models import QualityTarget
+        from pyqenc.quality import QualitySearch, QualitySearchProtocol
 
         target = QualityTarget(metric="vmaf", statistic="min", value=95.0)
         s = QualitySearch(
@@ -695,8 +697,8 @@ class TestEncodeChunkIntegration:
 
     def test_qualitysearchv2_protocol_structural_compatibility(self) -> None:
         """QualitySearchV2 is structurally compatible with QualitySearchProtocol."""
-        from pyqenc.quality import QualitySearchV2, QualitySearchProtocol
         from pyqenc.models import QualityTarget
+        from pyqenc.quality import QualitySearchProtocol, QualitySearchV2
 
         target = QualityTarget(metric="vmaf", statistic="min", value=95.0)
         s = QualitySearchV2(
