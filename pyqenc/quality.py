@@ -13,7 +13,7 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 from os import PathLike
 from pathlib import Path
-from typing import Protocol, TypedDict, assert_never, runtime_checkable
+from typing import Protocol, TypedDict, TypeVar, assert_never, runtime_checkable
 
 import pandas as pd
 
@@ -529,10 +529,9 @@ def _score_attempt(
                 f"Available keys: {list(metrics.keys())}"
             )
 
-    all_pass     = True
     fail_score   = 0.0
     pass_score   = 0.0
-    early_accept = True
+    early_accept = False
 
     for target in quality_targets:
         key    = f"{target.metric}_{target.statistic}"
@@ -542,27 +541,95 @@ def _score_attempt(
         deficit    = info.deficit(actual, target.value)
         normalized = deficit / info.comparison_range
 
-        logger.debug(
-            "_score_attempt: %s_%s actual=%.4f target=%.4f deficit=%.4f normalized=%.6f",
-            target.metric, target.statistic, actual, target.value, deficit, normalized,
-        )
+        logger.debug("_score_attempt: %s_%s actual=%.4f target=%.4f deficit=%.4f normalized=%.6f",
+                     target.metric, target.statistic, actual, target.value, deficit, normalized)
 
         if deficit < 0.0:
-            all_pass     = False
-            early_accept = False
             fail_score  += normalized
         else:
             pass_score += normalized
-            if deficit > info.acceptance_delta:
-                early_accept = False
+            if abs(deficit) <= info.acceptance_delta:
+                early_accept = True
 
-    if not all_pass:
-        return fail_score
+    return fail_score or (0.0 if early_accept else pass_score)
 
-    if early_accept:
-        return 0.0
+@dataclass
+class QualityPoint:
+    q: Decimal
+    '''Quality value of this point'''
+    score: float
+    '''Composite score of this point. 0 = either missing (initial) or matched targets (final). Otherwise always >0 or <0'''
+    metrics: dict[str, float]|None
+    '''Metrics of this point'''
 
-    return pass_score
+    @property
+    def is_sentinel(self) -> bool:
+        return self.metrics is None
+
+    @property
+    def is_pass(self) -> bool:
+        return self.score >= 0 and not self.is_sentinel
+
+    @property
+    def is_fail(self) -> bool:
+        return self.score < 0 and not self.is_sentinel
+
+    @property
+    def is_winner(self) -> bool:
+        return self.score == 0 and not self.is_sentinel
+
+T_numeric = TypeVar('T_numeric', int, float, Decimal)
+
+def _in_range(value: T_numeric, start: T_numeric, end: T_numeric) -> bool:
+    """Check if a value belongs to a given range, handling inverted ranges too."""
+    low = min(start, end)
+    high = max(start, end)
+    return low <= value <= high
+
+def _clamp_to_range(q: Decimal, granularity: Decimal, worse_point: QualityPoint, better_point: QualityPoint) -> Decimal | None:
+    """Clamp *q* to the given range. Respects granularity and sentinels. Returns ``None`` when no interior point exists.
+    """
+    lower = min(better_point.q, worse_point.q)
+    upper = max(better_point.q, worse_point.q)
+    lo = (
+        lower
+        if (better_point.is_sentinel and lower == better_point.q)
+        or (worse_point.is_sentinel and lower == worse_point.q)
+        else lower + granularity
+    )
+    hi = (
+        upper
+        if (better_point.is_sentinel and upper == better_point.q)
+        or (worse_point.is_sentinel and upper == worse_point.q)
+        else upper - granularity
+    )
+    if lo > hi:
+        return None
+    return max(lo, min(hi, q))
+
+def _compute_proportional_candidate(target: QualityTarget|None, pass_point: QualityPoint, fail_point: QualityPoint) -> float | None:
+    """Return interpolation fraction t ∈ [0, 1] for *target* metric value, or ``None`` for fallback."""
+    # No metrics? Fallback via None for other options - externally managed.
+    if target is None or pass_point.is_sentinel or fail_point.is_sentinel:
+        return None
+
+    # Get actual metric values.
+    key   = f"{target.metric}_{target.statistic}"
+    pass_val = pass_point.metrics.get(key) # ty:ignore[unresolved-attribute] # we've checked for this via is_sentinel
+    fail_val = fail_point.metrics.get(key) # ty:ignore[unresolved-attribute] # we've checked for this via is_sentinel
+    if pass_val is None or fail_val is None:
+        logger.warning(f"QualitySearch: missing metric {key} for pass={pass_point.q} fail={fail_point.q}.")
+        return None
+
+    # Compute interpolation fraction.
+    info   = MetricType(target.metric).info
+    d_pass = info.deficit(pass_val, target.value)
+    d_fail = info.deficit(fail_val, target.value)
+    span   = d_pass - d_fail
+    if abs(span) < 1e-9: # Avoid division by zero
+        return None
+    t = d_pass / span
+    return t if 0.0 <= t <= 1.0 else None
 
 
 @runtime_checkable
@@ -649,21 +716,21 @@ class QualitySearch:
         quality_max_step: Decimal | None = None,
     ) -> None:
         if quality_better == quality_worse:
-            raise ValueError(
-                f"quality_better ({quality_better}) must differ from quality_worse ({quality_worse})"
-            )
+            raise ValueError(f"quality_better ({quality_better}) must differ from quality_worse ({quality_worse})")
         if granularity <= 0:
             raise ValueError(f"granularity must be > 0, got {granularity}")
 
-        self._better_q:       Decimal                = quality_better
-        self._worse_q:        Decimal                = quality_worse
-        self._better_metrics: dict[str, float] | None = None
-        self._worse_metrics:  dict[str, float] | None = None
-        self._attempts:       int                    = 0
-        self._exhausted:      bool                   = False
-        self._quality_targets  = quality_targets
-        self._granularity      = granularity
-        self._quality_max_step = quality_max_step
+        self._quality_targets:  list[QualityTarget]  = quality_targets
+        self._granularity:      Decimal              = granularity
+        self._quality_max_step: Decimal | None       = quality_max_step
+        self._attempts:     int                      = 0
+        self._exhausted:    bool                     = False
+
+        # Higher-quality point (lower CRF, higher VBR)
+        self._better_point = QualityPoint(quality_better, 0, None)
+
+        # Lower-quality point (higher CRF, lower VBR)
+        self._worse_point = QualityPoint(quality_worse, 0, None)
 
     # ------------------------------------------------------------------
     # Protocol properties
@@ -677,23 +744,21 @@ class QualitySearch:
     @property
     def best_quality(self) -> Decimal | None:
         """Best quality found: passing value if any pass, else best-fail value."""
-        if self._better_metrics is not None:
-            return self._better_q
-        if self._worse_metrics is not None:
-            return self._worse_q
-        return None
+        if self._better_point.is_sentinel:
+            return None
+        return self._better_point.q
 
     @property
     def best_metrics(self) -> dict[str, float] | None:
         """Metrics dict associated with ``best_quality``."""
-        if self._better_metrics is not None:
-            return self._better_metrics
-        return self._worse_metrics
+        if self._better_point.is_sentinel:
+            return None
+        return self._better_point.metrics
 
     @property
     def best_targets_met(self) -> bool:
-        """``True`` iff at least one passing attempt was recorded."""
-        return self._better_metrics is not None
+        """``True`` if at least one passing attempt was recorded."""
+        return not self._better_point.is_sentinel
 
     # ------------------------------------------------------------------
     # record()
@@ -717,122 +782,84 @@ class QualitySearch:
 
         self._attempts += 1
 
-        # Score the attempt — catch missing-key errors and treat as hard fail.
+        # Score the attempt — catch missing-key errors and treat as worst fail.
         try:
-            score = _score_attempt(quality_results, self._quality_targets)
+            new_point = QualityPoint(quality, _score_attempt(quality_results, self._quality_targets), quality_results)
         except ValueError:
-            logger.warning(
-                "QualitySearch: missing metric key for quality=%s — treating as fail, using binary step",
-                quality,
-            )
-            # Fall through with score = -inf; do NOT update bracket metrics.
-            score = -float("inf")
-            # Use binary interpolation toward better quality.
-            raw = self._better_q + Decimal("0.5") * (self._worse_q - self._better_q)
-            if self._quality_max_step is not None:
-                step = raw - quality
-                if abs(step) > self._quality_max_step:
-                    raw = quality + (self._quality_max_step if step > 0 else -self._quality_max_step)
-            next_q = (raw / self._granularity).to_integral_value(ROUND_HALF_EVEN) * self._granularity
-            next_q = next_q.quantize(self._granularity)
-            result = self._clamp_interior(next_q)
-            if result is None:
-                self._exhausted = True
-                return None
-            return result
+            raise ValueError("QualitySearch: missing metric key for quality=%s" % quality)
 
-        if score >= 0.0:
-            # Pass (or early acceptance).
-            self._better_q       = quality
-            self._better_metrics = quality_results
-            if score == 0.0:
-                # Early acceptance — sweet spot found.
-                self._exhausted = True
-                return None
+        # Early acceptance if score is zero (or None) - meaning we reach acceptable quality within delta.
+        if new_point.is_winner:
+            self._middle_point = new_point
+            self._exhausted    = True
+            logger.debug("QualitySearch: early acceptance at quality=%s", quality)
+            return None
+
+        # Update the bracket
+        if new_point.is_pass:
+            self._better_point = new_point
         else:
-            # Fail.
-            self._worse_q       = quality
-            self._worse_metrics = quality_results
+            self._worse_point = new_point
 
         # Exhaustion check: bracket collapsed to ≤ granularity.
         if (
-            (self._better_metrics is not None or self._worse_metrics is not None)
-            and abs(self._worse_q - self._better_q) <= self._granularity
+            not (self._better_point.is_sentinel or self._worse_point.is_sentinel)
+            and abs(self._better_point.q - self._worse_point.q) <= self._granularity
         ):
             self._exhausted = True
             return None
 
-        # Compute next quality via proportional interpolation.
-        q_span = self._worse_q - self._better_q
+        return self._compute_next(new_point, self._worse_point, self._better_point)
 
-        def _t_for_target(
-            target:    QualityTarget,
-            p_metrics: dict[str, float] | None,
-            f_metrics: dict[str, float] | None,
-        ) -> float | None:
-            """Return interpolation fraction t ∈ [0, 1] for *target*, or ``None``."""
-            if p_metrics is None or f_metrics is None:
-                return None
-            key   = f"{target.metric}_{target.statistic}"
-            p_val = p_metrics.get(key)
-            f_val = f_metrics.get(key)
-            if p_val is None or f_val is None:
-                return None
-            info   = MetricType(target.metric).info
-            d_pass = info.deficit(p_val, target.value)
-            d_fail = info.deficit(f_val, target.value)
-            span   = d_pass - d_fail
-            if abs(span) < 1e-9:
-                return None
-            t = d_pass / span
-            return t if 0.0 <= t <= 1.0 else None
+    def _compute_next(self, new_point: QualityPoint, worse_point: QualityPoint, better_point: QualityPoint) -> Decimal|None:
+        """Compute the next quality value to try. Returns ``None`` if exhausted."""
+        # Compute next quality via proportional interpolation.
+        q_span = worse_point.q - better_point.q
 
         # Determine worst target from current result and from opposite boundary.
-        current_passed   = score >= 0.0
-        opposite_metrics = self._worse_metrics if current_passed else self._better_metrics
+        opposite_metrics = worse_point.metrics if new_point.is_pass else better_point.metrics
         opp_worst        = _find_worst_target(opposite_metrics, self._quality_targets) if opposite_metrics else None
         opp_target       = opp_worst[0] if opp_worst is not None else None
 
-        found_worst = _find_worst_target(quality_results, self._quality_targets)
+        found_worst = _find_worst_target(new_point.metrics, self._quality_targets) # ty: ignore
         worst_target = found_worst[0] if found_worst is not None else None
 
-        candidates: list[tuple[float, str]] = []
+        # Make candidates list - direct proportional, reversed proportional, true binary.
+        candidates: list[tuple[float|None, str]] = []
 
         if worst_target is not None:
-            t_primary = _t_for_target(worst_target, self._better_metrics, self._worse_metrics)
-            if t_primary is not None:
-                candidates.append((t_primary, f"primary worst={worst_target.metric}_{worst_target.statistic}"))
-
+            candidates.append((_compute_proportional_candidate(worst_target, better_point, worse_point),
+                               f"primary worst={worst_target.metric}_{worst_target.statistic}"))
         if opp_target is not None:
-            t_reverse = _t_for_target(opp_target, self._better_metrics, self._worse_metrics)
-            if t_reverse is not None:
-                candidates.append((t_reverse, f"reverse worst={opp_target.metric}_{opp_target.statistic}"))
-
+            candidates.append((_compute_proportional_candidate(opp_target, better_point, worse_point),
+                               f"reverse worst={opp_target.metric}_{opp_target.statistic}"))
         candidates.append((0.5, "binary"))
 
-        t_chosen, label = candidates[0]
-        raw = self._better_q + Decimal(str(t_chosen)) * q_span
+        # Get first non-None candidate.
+        # TODO: No fallback to reversed if direct is too close to boundary?
+        t_chosen, label = next((c for c in candidates if c[0]))
+        raw_q = better_point.q + Decimal(str(t_chosen)) * q_span
 
         # Apply max-step clamping before quantization.
         if self._quality_max_step is not None:
-            step = raw - quality
+            step = raw_q - new_point.q
             if abs(step) > self._quality_max_step:
-                raw = quality + (self._quality_max_step if step > 0 else -self._quality_max_step)
+                raw_q = new_point.q + (self._quality_max_step if step > 0 else -self._quality_max_step)
 
         # Snap to nearest granularity step.
-        next_q = (raw / self._granularity).to_integral_value(ROUND_HALF_EVEN) * self._granularity
+        next_q = (raw_q / self._granularity).to_integral_value(ROUND_HALF_EVEN) * self._granularity
         next_q = next_q.quantize(self._granularity)
 
-        result = self._clamp_interior(next_q)
+        result = _clamp_to_range(next_q, self._granularity, worse_point, better_point)
 
-        _pad = len(str(max(abs(self._better_q), abs(self._worse_q)).quantize(self._granularity)))
+        _pad = len(str(max(abs(better_point.q), abs(worse_point.q)).quantize(self._granularity)))
         logger.debug(
             "QualitySearch [%s]: better=%s worse=%s t=%.3f raw=%s → %s",
             label,
-            str(self._better_q).rjust(_pad),
-            str(self._worse_q).rjust(_pad),
+            str(better_point.q).rjust(_pad),
+            str(worse_point.q).rjust(_pad),
             t_chosen,
-            str(raw.quantize(self._granularity)).rjust(_pad),
+            str(raw_q.quantize(self._granularity)).rjust(_pad),
             str(result).rjust(_pad) if result is not None else "None (exhausted)",
         )
 
@@ -840,33 +867,6 @@ class QualitySearch:
             self._exhausted = True
             return None
         return result
-
-    def _clamp_interior(self, q: Decimal) -> Decimal | None:
-        """Clamp *q* to the valid interior of the current search bracket.
-
-        Excludes a boundary only once a real result has been recorded there.
-        Returns ``None`` when no interior point exists.
-        """
-        lower = min(self._better_q, self._worse_q)
-        upper = max(self._better_q, self._worse_q)
-        lo = (
-            lower
-            if (self._better_metrics is None and lower == self._better_q)
-            or (self._worse_metrics is None and lower == self._worse_q)
-            else lower + self._granularity
-        )
-        hi = (
-            upper
-            if (self._better_metrics is None and upper == self._better_q)
-            or (self._worse_metrics is None and upper == self._worse_q)
-            else upper - self._granularity
-        )
-        if lo > hi:
-            return None
-        return max(lo, min(hi, q))
-
-
-
 
 class QualitySearchV2:
     """Quality search using the 3-point sweet-spot algorithm.
@@ -921,21 +921,21 @@ class QualitySearchV2:
         if granularity <= 0:
             raise ValueError(f"granularity must be > 0, got {granularity}")
 
-        self._pass_q:       Decimal                  = quality_better   # sentinel
-        self._pass_metrics: dict[str, float] | None  = None
-        self._best_q:       Decimal                  = quality_worse    # sentinel (updated to first real attempt)
-        self._best_metrics: dict[str, float] | None  = None
-        self._best_score:   float                    = -math.inf
-        self._fail_q:       Decimal                  = quality_worse    # sentinel (lags behind _best_q in all-failing phase)
-        self._fail_metrics: dict[str, float] | None  = None
-        self._attempts:     int                      = 0
-        self._exhausted:    bool                     = False
-        # Phase tracking: True once the first passing result is seen (all-passing phase).
-        # False means all-failing phase (or not yet started).
-        self._seen_pass:    bool                     = False
         self._quality_targets:  list[QualityTarget]  = quality_targets
         self._granularity:      Decimal              = granularity
         self._quality_max_step: Decimal | None       = quality_max_step
+        self._attempts:     int                      = 0
+        self._exhausted:    bool                     = False
+        self._best_score_point: QualityPoint | None  = None
+
+        # Higher-quality point (lower CRF, higher VBR)
+        self._better_point = QualityPoint(quality_better, 0, None)
+
+        # Lower-quality point (higher CRF, lower VBR)
+        self._worse_point = QualityPoint(quality_worse, 0, None)
+
+        # Middle-point. In 3 point - allows higher/worse to lag 1 step behind. In 2 point - marks actual range boundary.
+        self._middle_point = QualityPoint(Decimal("inf"), 0, None)
 
     # ------------------------------------------------------------------
     # Protocol properties
@@ -949,27 +949,21 @@ class QualitySearchV2:
     @property
     def best_quality(self) -> Decimal | None:
         """Best quality found: best-efficiency passing value if any pass, else best-fail value."""
-        if self._best_metrics is None:
-            return None
-        # When any pass has been seen, _best_q always holds the best-efficiency passing value.
-        # This is true in all-passing phase and in 3-point mode (both entry paths).
-        if self._seen_pass:
-            return self._best_q
-        # All-failing phase: _best_q is the best-fail value.
-        return self._best_q
+        if self._best_score_point:
+            return self._best_score_point.q
+        return None
 
     @property
     def best_metrics(self) -> dict[str, float] | None:
         """Metrics dict associated with ``best_quality``."""
-        if self._best_metrics is None:
-            return None
-        # _best_metrics always corresponds to _best_q.
-        return self._best_metrics
+        if self._best_score_point:
+            return self._best_score_point.metrics
+        return None
 
     @property
     def best_targets_met(self) -> bool:
-        """``True`` iff at least one passing attempt was recorded."""
-        return self._seen_pass
+        """``True`` if at least one passing attempt was recorded."""
+        return self._best_score_point is not None
 
     # ------------------------------------------------------------------
     # record()
@@ -995,293 +989,101 @@ class QualitySearchV2:
 
         # Score the attempt — catch missing-key errors and treat as worst fail.
         try:
-            score = _score_attempt(quality_results, self._quality_targets)
+            new_point = QualityPoint(quality, _score_attempt(quality_results, self._quality_targets), quality_results)
         except ValueError:
-            logger.warning(
-                "QualitySearchV2: missing metric key for quality=%s — treating as worst fail",
-                quality,
-            )
-            score = -math.inf
+            raise ValueError("QualitySearchV2: missing metric key for quality=%s" % quality)
 
-        # Early acceptance: score == 0.0 means sweet spot found.
-        if score == 0.0:
-            self._best_q       = quality
-            self._best_metrics = quality_results
-            self._best_score   = 0.0
-            self._pass_q       = quality
-            self._pass_metrics = quality_results
-            self._seen_pass    = True
+        if new_point.is_pass and (not self._best_score_point or self._best_score_point.score > new_point.score):
+            self._best_score_point = new_point
+
+        # Early acceptance if score is zero (or None) - meaning we reach acceptable quality within delta.
+        if new_point.is_winner:
+            self._middle_point = new_point
             self._exhausted    = True
             logger.debug("QualitySearchV2: early acceptance at quality=%s", quality)
             return None
 
-        # Determine current phase.
-        # _seen_pass tracks whether any passing result has been recorded.
-        # Phase priority: 3-point > all-failing (has real fails) > all-passing > first-call routing.
-        in_3point_mode = self._pass_metrics is not None and self._fail_metrics is not None
+        # Determine current phase - 2-point or 3 point.
+        # 3 point is when:
+        # - both better and worse points are failing or both passing
+        # - middle point score is > both worse and better scores
+        # 3 points is for non-monotonic quality functions, when we see a curve with sweet spot.
+        in_3point_mode = ((self._better_point.is_fail and self._worse_point.is_fail) or \
+                     (self._better_point.is_pass and self._worse_point.is_pass)) and \
+                     (abs(self._middle_point.score) < abs(self._worse_point.score)) and \
+                     (abs(self._middle_point.score) < abs(self._better_point.score))
 
-        if in_3point_mode:
-            is_new_best = abs(score) < abs(self._best_score)
-            self._update_3point(quality, quality_results, score, is_new_best)
-        elif self._fail_metrics is not None:
-            # Has real fails (lagged), no passes yet → all-failing phase.
-            is_new_best = abs(score) < abs(self._best_score) or self._best_metrics is None
-            self._update_all_failing(quality, quality_results, score, is_new_best)
-        elif self._seen_pass or score >= 0.0:
-            # All-passing phase: first pass seen or continuing all-passing.
-            self._seen_pass = True
-            is_new_best = abs(score) < abs(self._best_score) or self._best_metrics is None
-            self._update_all_passing(quality, quality_results, score, is_new_best)
-        else:
-            # All-failing phase.
-            is_new_best = abs(score) < abs(self._best_score) or self._best_metrics is None
-            self._update_all_failing(quality, quality_results, score, is_new_best)
+        if self.attempts == 1:
+            # The first attempt. Just update middle point.
+            self._middle_point = new_point
+            if new_point.is_pass:
+                # find new attempt placement between current result and the WORSE result
+                return self._compute_next(new_point, self._worse_point, self._middle_point)
+            # find new attempt placement between current result and the BETTER result
+            return self._compute_next(new_point, self._middle_point, self._better_point)
 
-        return self._compute_next(quality)
-
-    # ------------------------------------------------------------------
-    # Phase update helpers
-    # ------------------------------------------------------------------
-
-    def _update_all_failing(
-        self,
-        quality:         Decimal,
-        quality_results: dict[str, float],
-        score:           float,
-        is_new_best:     bool,
-    ) -> None:
-        """Update state during the all-failing phase (``_pass_metrics is None``)."""
-        if is_new_best:
-            # New best: lag _fail_q one step behind, advance _best_q.
-            self._fail_q       = self._best_q
-            self._fail_metrics = self._best_metrics
-            self._best_q       = quality
-            self._best_metrics = quality_results
-            self._best_score   = score
-            logger.debug(
-                "QualitySearchV2 all-failing new-best: best_q=%s fail_q=%s score=%.4f",
-                quality, self._fail_q, score,
-            )
-        else:
-            # Worse than current best — sweet spot passed; transition to 3-point mode.
-            self._pass_q       = quality
-            self._pass_metrics = quality_results
-            logger.debug(
-                "QualitySearchV2 all-failing transition→3pt: pass_q=%s best_q=%s fail_q=%s",
-                quality, self._best_q, self._fail_q,
-            )
-
-    def _update_all_passing(
-        self,
-        quality:         Decimal,
-        quality_results: dict[str, float],
-        score:           float,
-        is_new_best:     bool,
-    ) -> None:
-        """Update state during the all-passing phase (``_fail_metrics is None``)."""
-        if is_new_best:
-            # New best: lag _pass_q one step behind (only when there's a real prior best).
-            if self._best_metrics is not None:
-                self._pass_q       = self._best_q
-                self._pass_metrics = self._best_metrics
-            self._best_q       = quality
-            self._best_metrics = quality_results
-            self._best_score   = score
-            logger.debug(
-                "QualitySearchV2 all-passing new-best: best_q=%s pass_q=%s score=%.4f",
-                quality, self._pass_q, score,
-            )
-        else:
-            # Worse than current best — sweet spot passed; transition to 3-point mode.
-            self._fail_q       = quality
-            self._fail_metrics = quality_results
-            logger.debug(
-                "QualitySearchV2 all-passing transition→3pt: pass_q=%s best_q=%s fail_q=%s",
-                self._pass_q, self._best_q, quality,
-            )
-
-    def _update_3point(
-        self,
-        quality:         Decimal,
-        quality_results: dict[str, float],
-        score:           float,
-        is_new_best:     bool,
-    ) -> None:
-        """Update state in 3-point mode (both sentinels have real metrics)."""
-        in_range_b = self._in_range_b(quality)
-
-        if is_new_best:
-            if in_range_b:
-                # Promote: _pass_q = old _best_q, _best_q = quality.
-                self._pass_q       = self._best_q
-                self._pass_metrics = self._best_metrics
-                self._best_q       = quality
-                self._best_metrics = quality_results
-                self._best_score   = score
-                logger.debug(
-                    "QualitySearchV2 3pt Range-B new-best promote: best_q=%s pass_q=%s score=%.4f",
-                    quality, self._pass_q, score,
-                )
+        # 2-POINT MODE
+        # or exit condition of 3-point (worse/fail and better/pass)
+        new_in_better_range = _in_range(new_point.q, self._middle_point.q, self._better_point.q)
+        if new_point.is_pass and (not in_3point_mode or self._worse_point.is_fail):
+            if new_in_better_range:
+                self._better_point = new_point
+                return self._compute_next(new_point, self._middle_point, self._better_point)
             else:
-                # Demote: _fail_q = old _best_q, _best_q = quality.
-                self._fail_q       = self._best_q
-                self._fail_metrics = self._best_metrics
-                self._best_q       = quality
-                self._best_metrics = quality_results
-                self._best_score   = score
-                logger.debug(
-                    "QualitySearchV2 3pt Range-A new-best demote: best_q=%s fail_q=%s score=%.4f",
-                    quality, self._fail_q, score,
-                )
-        else:
-            if in_range_b:
-                # Tighten fail boundary.
-                self._fail_q       = quality
-                self._fail_metrics = quality_results
-                logger.debug(
-                    "QualitySearchV2 3pt Range-B tighten: fail_q=%s", quality,
-                )
+                self._better_point = self._middle_point
+                self._middle_point = new_point
+                return self._compute_next(new_point, self._worse_point, self._middle_point)
+        if new_point.is_fail and (not in_3point_mode or self._worse_point.is_pass):
+            # we got a fail on the current attempt - update middle and WORSE points. Lag 1 step behind
+            if new_in_better_range:
+                self._worse_point = self._middle_point
+                self._middle_point = new_point
+                return self._compute_next(new_point, self._middle_point, self._better_point)
             else:
-                # Tighten pass boundary.
-                self._pass_q       = quality
-                self._pass_metrics = quality_results
-                logger.debug(
-                    "QualitySearchV2 3pt Range-A tighten: pass_q=%s", quality,
-                )
+                self._worse_point = new_point
+                return self._compute_next(new_point, self._worse_point, self._middle_point)
 
-    def _in_range_b(self, quality: Decimal) -> bool:
-        """Return ``True`` if *quality* is in Range B ``[_best_q ... _fail_q]`` (exclusive of _best_q).
+        # 3-POINT MODE
+        # We are still in the full 3-point mode.
+        # Check in which range the tested quality point is
+        if new_in_better_range:
+            # We are in the middle_point ... better_point
+            # We need to decide what to do - we can either drop the other range or narrow current range
+            # Decision is based on the score of new point we got.
+            if abs(new_point.score) < abs(self._middle_point.score):
+                # New point got better score then middle - drop the other range
+                self._worse_point = self._middle_point
+                self._middle_point = new_point
+            else:
+                # New point got worse score then middle - narrow the current range
+                self._better_point = self._middle_point
+                self._middle_point = new_point
+        else:
+            # We are in the middle_point ... worse_point
+            # We need to decide what to do - we can either drop the other range or narrow current range
+            # Decision is based on the score of new point we got.
+            if abs(new_point.score) < abs(self._middle_point.score):
+                # New point got better score then middle - drop the other range
+                self._better_point = self._middle_point
+                self._middle_point = new_point
+            else:
+                # New point got worse score then middle - narrow the current range
+                self._worse_point = self._middle_point
+                self._middle_point = new_point
 
-        Uses ``min/max`` to handle both CRF (lower=better) and VBR (higher=better) directions.
-        Edge case: ``quality == _best_q`` is treated as Range B.
-        """
-        lo = min(self._best_q, self._fail_q)
-        hi = max(self._best_q, self._fail_q)
-        # Range A is (pass_q, best_q) exclusive of best_q.
-        # Range B is [best_q, fail_q] — includes best_q as edge case.
-        lo_a = min(self._pass_q, self._best_q)
-        hi_a = max(self._pass_q, self._best_q)
-        in_range_a = lo_a <= quality < hi_a if self._pass_q < self._best_q else lo_a < quality <= hi_a
-        # Anything not in Range A (exclusive of best_q) is Range B.
-        _ = lo, hi  # suppress unused warning
-        return not in_range_a
+        # compute the next range from the larger range
+        range_a = abs(self._better_point.q - self._middle_point.q)
+        range_b = abs(self._worse_point.q - self._middle_point.q)
+        if range_a > range_b:
+            return self._compute_next(new_point, self._middle_point, self._better_point)
+        return self._compute_next(new_point, self._worse_point, self._middle_point)
 
     # ------------------------------------------------------------------
     # Next quality computation
     # ------------------------------------------------------------------
 
-    def _compute_next(self, current_quality: Decimal) -> Decimal | None:
-        """Compute the next quality value to try, or ``None`` if exhausted.
-
-        Picks the midpoint of the larger active range, quantizes to granularity,
-        and exhausts when no untested interior point remains.
-        """
-        range_a = abs(self._best_q - self._pass_q)
-        range_b = abs(self._fail_q - self._best_q)
-
-        # Exhaustion: both ranges collapsed to ≤ granularity.
-        if range_a <= self._granularity and range_b <= self._granularity:
-            self._exhausted = True
-            logger.debug(
-                "QualitySearchV2: exhausted — range_a=%s range_b=%s gran=%s",
-                range_a, range_b, self._granularity,
-            )
-            return None
-
-        # Determine phase after update — mirrors the phase detection in record().
-        in_3point_mode    = self._pass_metrics is not None and self._fail_metrics is not None
-        still_all_failing = not in_3point_mode and not self._seen_pass
-        still_all_passing = not in_3point_mode and self._seen_pass
-
-        if still_all_failing:
-            # Interpolate toward _pass_q (better quality): midpoint of [_pass_q, _best_q].
-            span  = self._best_q - self._pass_q
-            raw_q = self._pass_q + Decimal("0.5") * span
-        elif still_all_passing:
-            # Interpolate toward _fail_q (worse quality): midpoint of [_best_q, _fail_q].
-            span  = self._fail_q - self._best_q
-            raw_q = self._best_q + Decimal("0.5") * span
-        else:
-            # 3-point mode: pick midpoint of larger range.
-            if range_a >= range_b:
-                span  = self._best_q - self._pass_q
-                raw_q = self._pass_q + Decimal("0.5") * span
-            else:
-                span  = self._fail_q - self._best_q
-                raw_q = self._best_q + Decimal("0.5") * span
-
-        # Apply max-step clamping.
-        if self._quality_max_step is not None:
-            step = raw_q - current_quality
-            if abs(step) > self._quality_max_step:
-                raw_q = current_quality + (
-                    self._quality_max_step if step > 0 else -self._quality_max_step
-                )
-
-        # Quantize to granularity.
-        next_q = (raw_q / self._granularity).to_integral_value(ROUND_HALF_EVEN) * self._granularity
-        next_q = next_q.quantize(self._granularity)
-
-        # Clamp to the full active range spanning all three anchors.
-        lower = min(self._pass_q, self._best_q, self._fail_q)
-        upper = max(self._pass_q, self._best_q, self._fail_q)
-        next_q = max(lower, min(upper, next_q))
-
-        # Already-tested set: all three anchors have been recorded.
-        already_tested = {self._best_q}
-        if self._pass_metrics is not None:
-            already_tested.add(self._pass_q)
-        if self._fail_metrics is not None:
-            already_tested.add(self._fail_q)
-
-        if next_q in already_tested:
-            # Try the other range's interior point.
-            if range_a >= range_b:
-                # Was picking from Range A — try Range B instead.
-                if range_b > self._granularity:
-                    alt_span = self._fail_q - self._best_q
-                    alt_raw  = self._best_q + Decimal("0.5") * alt_span
-                    alt_q    = (alt_raw / self._granularity).to_integral_value(ROUND_HALF_EVEN) * self._granularity
-                    alt_q    = alt_q.quantize(self._granularity)
-                    alt_q    = max(lower, min(upper, alt_q))
-                    if alt_q not in already_tested and lower <= alt_q <= upper:
-                        next_q = alt_q
-                    else:
-                        self._exhausted = True
-                        return None
-                else:
-                    self._exhausted = True
-                    return None
-            else:
-                # Was picking from Range B — try Range A instead.
-                if range_a > self._granularity:
-                    alt_span = self._best_q - self._pass_q
-                    alt_raw  = self._pass_q + Decimal("0.5") * alt_span
-                    alt_q    = (alt_raw / self._granularity).to_integral_value(ROUND_HALF_EVEN) * self._granularity
-                    alt_q    = alt_q.quantize(self._granularity)
-                    alt_q    = max(lower, min(upper, alt_q))
-                    if alt_q not in already_tested and lower <= alt_q <= upper:
-                        next_q = alt_q
-                    else:
-                        self._exhausted = True
-                        return None
-                else:
-                    self._exhausted = True
-                    return None
-
-        # Final safety: must be strictly inside [lower, upper] and untested.
-        if next_q in already_tested or not (lower <= next_q <= upper):
-            self._exhausted = True
-            return None
-
-        _pad = len(str(max(abs(self._pass_q), abs(self._fail_q)).quantize(self._granularity)))
-        logger.debug(
-            "QualitySearchV2: pass_q=%s best_q=%s fail_q=%s → next=%s (range_a=%s range_b=%s)",
-            str(self._pass_q).rjust(_pad),
-            str(self._best_q).rjust(_pad),
-            str(self._fail_q).rjust(_pad),
-            str(next_q).rjust(_pad),
-            range_a,
-            range_b,
-        )
-        return next_q
+    def _compute_next(self, new_point: QualityPoint, worse_point: QualityPoint, better_point: QualityPoint) -> Decimal | None:
+        """Compute the next quality value to try, or ``None`` if exhausted."""
+        # HACK: Use the same logic as the legacy algorithm. Hackish, fragile.
+        # TODO: Make standalone reusable function
+        return QualitySearch._compute_next(self, new_point, worse_point, better_point)
