@@ -136,8 +136,11 @@ class OptimizationPhase:
         if self.result is not None:
             return self.result
 
-        # All-strategies mode: no artifacts, just return all strategies
-        if not self._config.optimize:
+        if not self._config.strategies:
+            raise RuntimeError("no strategies configured")
+
+        # All-strategies mode: no artifacts, just return all strategies. Triggered by either flag or single strategy given (noting to optimize)
+        if not self._config.optimize or len(self._config.strategies) == 1:
             self.result = self._all_strategies_result()
             return self.result
 
@@ -214,8 +217,11 @@ class OptimizationPhase:
         Returns:
             ``OptimizationPhaseResult`` with ``selected_strategies`` set.
         """
-        # All-strategies mode: silent, no logging, no test encodes
-        if not self._config.optimize:
+        if not self._config.strategies:
+            raise RuntimeError("no strategies configured")
+
+        # All-strategies mode: no artifacts, just return all strategies. Triggered by either flag or single strategy given (noting to optimize)
+        if not self._config.optimize or len(self._config.strategies) == 1:
             self.result = self._run_all_strategies(dry_run=dry_run)
             return self.result
 
