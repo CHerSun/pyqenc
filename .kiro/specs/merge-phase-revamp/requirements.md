@@ -47,7 +47,7 @@ This spec covers a set of targeted improvements to the merge phase and the metri
 2. THE Default Config SHALL define a `metrics` section with `sampling: 10` so that the pipeline behaves identically to the current hardcoded default when no custom config is present.
 3. WHEN the user provides `--metrics-sampling N` on the CLI for the `auto`, `optimize`, `encode`, or `merge` subcommands, THE Pipeline SHALL use `N` as the metrics sampling factor for that run, overriding the config-file value.
 4. THE Pipeline SHALL accept any integer greater than or equal to 1 as a valid `--metrics-sampling` value, where 1 means every frame is measured (no sampling), and SHALL NOT validate the value against any previously used value from prior runs.
-5. THE CLI argument `--metrics-sampling` SHALL display a help string stating that the minimum value is 1 (every frame measured), the default is 10 (recommended balance of speed and precision), and values above 30 are not recommended due to measurement volatility.
+5. THE CLI argument `--metrics-sampling` SHALL display a help string stating that the minimum value is 1 (every frame measured), the default is 10 (recommended balance of speed and precision), and values above 20 are not recommended due to measurement volatility.
 
 ---
 

@@ -252,7 +252,7 @@ Add `--metrics-sampling` argument to the `_add_quality_arguments` helper in `cli
 - type: `int`
 - default: `None` (meaning "use config value")
 - metavar: `N`
-- help: `"Metrics sampling factor: measure every N-th frame. Min: 1 (every frame). Default: 10. Values above 30 are not recommended (increases measurement volatility)."`
+- help: `"Metrics sampling factor: measure every N-th frame. Min: 1 (every frame). Default: 10. Values above 20 are not recommended (increases measurement volatility)."`
 
 In `_cmd_auto` (and any other command handlers that build `PipelineConfig`), resolve the final value:
 

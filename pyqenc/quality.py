@@ -607,7 +607,7 @@ def _clamp_to_range(q: Decimal, granularity: Decimal, worse_point: QualityPoint,
         return None
     return max(lo, min(hi, q))
 
-def _compute_proportional_candidate(target: QualityTarget|None, pass_point: QualityPoint, fail_point: QualityPoint) -> float | None:
+def _compute_proportional_candidate(target: QualityTarget|None, pass_point: QualityPoint, fail_point: QualityPoint, clamp_range: bool = True) -> float | None:
     """Return interpolation fraction t ∈ [0, 1] for *target* metric value, or ``None`` for fallback."""
     # No metrics? Fallback via None for other options - externally managed.
     if target is None or pass_point.is_sentinel or fail_point.is_sentinel:
@@ -629,7 +629,9 @@ def _compute_proportional_candidate(target: QualityTarget|None, pass_point: Qual
     if abs(span) < 1e-9: # Avoid division by zero
         return None
     t = d_pass / span
-    return t if 0.0 <= t <= 1.0 else None
+
+    return t if not clamp_range or 0.0 <= t <= 1.0 else None
+
 
 
 @runtime_checkable
@@ -924,18 +926,15 @@ class QualitySearchV2:
         self._quality_targets:  list[QualityTarget]  = quality_targets
         self._granularity:      Decimal              = granularity
         self._quality_max_step: Decimal | None       = quality_max_step
-        self._attempts:     int                      = 0
-        self._exhausted:    bool                     = False
         self._best_score_point: QualityPoint | None  = None
 
-        # Higher-quality point (lower CRF, higher VBR)
-        self._better_point = QualityPoint(quality_better, 0, None)
+        # Inclusive limits
+        self._upper : QualityPoint = QualityPoint(quality_better, 0, None)
+        self._lower : QualityPoint = QualityPoint(quality_worse, 0, None)
 
-        # Lower-quality point (higher CRF, lower VBR)
-        self._worse_point = QualityPoint(quality_worse, 0, None)
+        # Real attempts made
+        self._attempted_points : dict[Decimal, QualityPoint] = {}
 
-        # Middle-point. In 3 point - allows higher/worse to lag 1 step behind. In 2 point - marks actual range boundary.
-        self._middle_point = QualityPoint(Decimal("inf"), 0, None)
 
     # ------------------------------------------------------------------
     # Protocol properties
@@ -944,7 +943,7 @@ class QualitySearchV2:
     @property
     def attempts(self) -> int:
         """Total number of ``record()`` calls made so far."""
-        return self._attempts
+        return len(self._attempted_points)
 
     @property
     def best_quality(self) -> Decimal | None:
@@ -963,7 +962,7 @@ class QualitySearchV2:
     @property
     def best_targets_met(self) -> bool:
         """``True`` if at least one passing attempt was recorded."""
-        return self._best_score_point is not None
+        return self._best_score_point is not None and self._best_score_point.score>=0
 
     # ------------------------------------------------------------------
     # record()
@@ -982,101 +981,94 @@ class QualitySearchV2:
         Returns:
             Next quality value (quantized ``Decimal``), or ``None`` when exhausted.
         """
-        if self._exhausted:
-            return None
-
-        self._attempts += 1
-
         # Score the attempt — catch missing-key errors and treat as worst fail.
         try:
             new_point = QualityPoint(quality, _score_attempt(quality_results, self._quality_targets), quality_results)
         except ValueError:
             raise ValueError("QualitySearchV2: missing metric key for quality=%s" % quality)
 
-        if new_point.is_pass and (not self._best_score_point or self._best_score_point.score > new_point.score):
-            self._best_score_point = new_point
+        # Save the new point
+        self._attempted_points[quality] = new_point
 
-        # Early acceptance if score is zero (or None) - meaning we reach acceptable quality within delta.
+        # Do we have a winner?
         if new_point.is_winner:
-            self._middle_point = new_point
-            self._exhausted    = True
-            logger.debug("QualitySearchV2: early acceptance at quality=%s", quality)
+            self._best_score_point = new_point
             return None
+        # Update best score point if:
+        # - no best score point is present yet
+        # - if we have better pass score (lower positive value - closer to 0)
+        # - if we have better fail score (higher negative value - closer to 0)
+        if not self._best_score_point or \
+            (new_point.is_pass and self._best_score_point.is_fail) or \
+            (new_point.is_pass and new_point.score < self._best_score_point.score) or \
+            (new_point.is_fail and new_point.score > self._best_score_point.score):
+                self._best_score_point = new_point
 
-        # Determine current phase - 2-point or 3 point.
-        # 3 point is when:
-        # - both better and worse points are failing or both passing
-        # - middle point score is > both worse and better scores
-        # 3 points is for non-monotonic quality functions, when we see a curve with sweet spot.
-        in_3point_mode = ((self._better_point.is_fail and self._worse_point.is_fail) or \
-                     (self._better_point.is_pass and self._worse_point.is_pass)) and \
-                     (abs(self._middle_point.score) < abs(self._worse_point.score)) and \
-                     (abs(self._middle_point.score) < abs(self._better_point.score))
-
+        # On the first attempt - we won't have 2 points, so shortcut is to go true binary into direction of pass/fail of new point
         if self.attempts == 1:
-            # The first attempt. Just update middle point.
-            self._middle_point = new_point
             if new_point.is_pass:
                 # find new attempt placement between current result and the WORSE result
-                return self._compute_next(new_point, self._worse_point, self._middle_point)
+                return self._compute_next(new_point, self._lower, new_point)
             # find new attempt placement between current result and the BETTER result
-            return self._compute_next(new_point, self._middle_point, self._better_point)
+            return self._compute_next(new_point, new_point, self._upper)
 
-        # 2-POINT MODE
-        # or exit condition of 3-point (worse/fail and better/pass)
-        new_in_better_range = _in_range(new_point.q, self._middle_point.q, self._better_point.q)
-        if new_point.is_pass and (not in_3point_mode or self._worse_point.is_fail):
-            if new_in_better_range:
-                self._better_point = new_point
-                return self._compute_next(new_point, self._middle_point, self._better_point)
-            else:
-                self._better_point = self._middle_point
-                self._middle_point = new_point
-                return self._compute_next(new_point, self._worse_point, self._middle_point)
-        if new_point.is_fail and (not in_3point_mode or self._worse_point.is_pass):
-            # we got a fail on the current attempt - update middle and WORSE points. Lag 1 step behind
-            if new_in_better_range:
-                self._worse_point = self._middle_point
-                self._middle_point = new_point
-                return self._compute_next(new_point, self._middle_point, self._better_point)
-            else:
-                self._worse_point = new_point
-                return self._compute_next(new_point, self._worse_point, self._middle_point)
+        #! NO `NEW_POINT` BELOW THIS POINT, only the best point and its adjacent points
 
-        # 3-POINT MODE
-        # We are still in the full 3-point mode.
-        # Check in which range the tested quality point is
-        if new_in_better_range:
-            # We are in the middle_point ... better_point
-            # We need to decide what to do - we can either drop the other range or narrow current range
-            # Decision is based on the score of new point we got.
-            if abs(new_point.score) < abs(self._middle_point.score):
-                # New point got better score then middle - drop the other range
-                self._worse_point = self._middle_point
-                self._middle_point = new_point
-            else:
-                # New point got worse score then middle - narrow the current range
-                self._better_point = self._middle_point
-                self._middle_point = new_point
-        else:
-            # We are in the middle_point ... worse_point
-            # We need to decide what to do - we can either drop the other range or narrow current range
-            # Decision is based on the score of new point we got.
-            if abs(new_point.score) < abs(self._middle_point.score):
-                # New point got better score then middle - drop the other range
-                self._better_point = self._middle_point
-                self._middle_point = new_point
-            else:
-                # New point got worse score then middle - narrow the current range
-                self._worse_point = self._middle_point
-                self._middle_point = new_point
+        # Get quality values sorted so that higher quality comes first. Actual q values could be reversed, depends on codec configuration / quality units
+        sorted_q = sorted(self._attempted_points.keys(), reverse=self._upper.q > self._lower.q)
 
-        # compute the next range from the larger range
-        range_a = abs(self._better_point.q - self._middle_point.q)
-        range_b = abs(self._worse_point.q - self._middle_point.q)
-        if range_a > range_b:
-            return self._compute_next(new_point, self._middle_point, self._better_point)
-        return self._compute_next(new_point, self._worse_point, self._middle_point)
+        # Check for the dumbest case - there's a passing attempt and a failing attempt - just narrow them down.
+        first_failing_q = next((q for q in sorted_q if self._attempted_points[q].is_fail), None)
+        last_passing_q = next((q for q in reversed(sorted_q) if self._attempted_points[q].is_pass), None)
+        if first_failing_q is not None and last_passing_q is not None:
+            return self._compute_next(self._attempted_points[first_failing_q], self._attempted_points[first_failing_q], self._attempted_points[last_passing_q])
+
+
+
+        # Find adjacent points to the best scoring point. Best scoring point is always present, regardless of if there were passing attempts
+        best_p = self._best_score_point
+        best_q_index = sorted_q.index(best_p.q)
+
+        # HERE: still doing outwards search - go in true binary steps between bounds and last attempt
+        # ATTENTION: Proportional search could work here, but it often looses sweet-point curve shape, thus never reaching 3-point mode. Keep it at binary.
+        if best_p.is_fail and best_q_index == 0:
+            # we are still searching into higher-quality direction (i.e. not exhausted). Continue with a safeguard against endless upper-bound (sentinel) reuse
+            return self._compute_next(best_p, best_p, self._attempted_points.get(self._upper.q, self._upper))
+        if best_p.is_pass and best_q_index == len(sorted_q) - 1:
+            # we are still searching into lower-quality direction (i.e. not exhausted). Continue with a safeguard against endless lower-bound (sentinel) reuse
+            return self._compute_next(best_p, self._attempted_points.get(self._lower.q, self._lower), best_p)
+
+        # HERE: we've exhausted outwards search, but didn't reach 3-point yet - proportional search between 2 points.
+        # Shouldn't be triggered ever (dumb-preliminary 2-point search already did it).
+        if best_p.is_pass and best_q_index == 0:
+            return self._compute_next(best_p, self._attempted_points[sorted_q[1]], best_p)
+        if best_p.is_fail and best_q_index == len(sorted_q) - 1:
+            return self._compute_next(best_p, best_p, self._attempted_points[sorted_q[-2]])
+
+        # HERE: make 3-point decision
+        # Algorithm:
+        # - if there's a pass/fail available - pick this range and do proportional search next
+        # - if there all points are a fail or a pass - search for sweet spot - take larger range and do binary steps next
+        adjacent_points = [self._attempted_points[q] for q in sorted_q[best_q_index-1:best_q_index+2]]
+        any_adjacent_pass = any(p.is_pass for p in adjacent_points)
+        any_adjacent_fail = any(p.is_fail for p in adjacent_points)
+        if any_adjacent_pass and any_adjacent_fail:
+            # we do have both pass and failing points in our 3 point range. Pick the range (current_point ... either -1 or +1)
+            # first go towards lower quality in this case - to reduce the size of resulting video
+            if adjacent_points[0].is_fail != adjacent_points[1].is_fail:
+                return self._compute_next(best_p, adjacent_points[1], adjacent_points[0])
+            # if not - go towards higher quality in this case - to increase the size of resulting video
+            return self._compute_next(best_p, adjacent_points[2], adjacent_points[1])
+
+        # HERE: we have 3 points, all are passing or all are failing. We need to search for sweet spot.
+        # Problem - the curve isn't monotonic (otherwise we would've been at 2-point decision point)
+        # The only thing we could do here is true binary search of both adjanced intervals. So just take the larger one
+        range_1_len = adjacent_points[1].q - adjacent_points[0].q
+        range_2_len = adjacent_points[2].q - adjacent_points[1].q
+        if abs(range_1_len) > abs(range_2_len):
+            return self._compute_next(best_p, adjacent_points[1], adjacent_points[0])
+        return self._compute_next(best_p, adjacent_points[2], adjacent_points[1])
+
 
     # ------------------------------------------------------------------
     # Next quality computation
