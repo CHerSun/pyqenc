@@ -63,18 +63,19 @@ def run_pipeline(
 
 
 def _minimal_config(
-    source_video:    Path,
-    work_dir:        Path,
-    quality_targets: list[QualityTarget] | None = None,
-    strategies:      list[Strategy] | None = None,
-    include:         str | None = None,
-    exclude:         str | None = None,
-    chunking_mode:   ChunkingMode = ChunkingMode.LOSSLESS,
-    max_parallel:    int = 2,
-    force:           bool = False,
+    source_video:       Path,
+    work_dir:           Path,
+    quality_targets:    list[QualityTarget] | None = None,
+    strategies:         list[Strategy] | None = None,
+    include:            str | None = None,
+    exclude:            str | None = None,
+    chunking_mode:      ChunkingMode = ChunkingMode.LOSSLESS,
+    max_parallel:       int = 2,
+    force:              bool = False,
     audio_convert:      str | None = None,
     audio_codec:        str | None = None,
     audio_base_bitrate: str | None = None,
+    metrics_sampling:   int | None = None,
 ) -> PipelineConfig:
     """Build a ``PipelineConfig`` for standalone phase invocations.
 
@@ -85,7 +86,9 @@ def _minimal_config(
     strategy count is not yet known.
     """
     from pyqenc.config import ConfigManager
-    resolved_strategies = strategies if strategies is not None else ConfigManager().resolve_strategies(None)
+    cm = ConfigManager()
+    resolved_strategies  = strategies if strategies is not None else cm.resolve_strategies(None)
+    resolved_sampling    = metrics_sampling if metrics_sampling is not None else cm.get_metrics_sampling()
     return PipelineConfig(
         source_video       = source_video,
         work_dir           = work_dir,
@@ -101,6 +104,7 @@ def _minimal_config(
         audio_convert      = audio_convert,
         audio_codec        = audio_codec,
         audio_base_bitrate = audio_base_bitrate,
+        metrics_sampling   = resolved_sampling,
     )
 
 
@@ -192,13 +196,14 @@ def chunk_video(
 
 
 def encode_chunks(
-    source_video:    Path,
-    work_dir:        Path,
-    strategies:      list[str],
-    quality_targets: list[str],
-    max_parallel:    int = 2,
-    force:           bool = False,
-    dry_run:         bool = False,
+    source_video:     Path,
+    work_dir:         Path,
+    strategies:       list[str],
+    quality_targets:  list[str],
+    max_parallel:     int = 2,
+    force:            bool = False,
+    dry_run:          bool = False,
+    metrics_sampling: int | None = None,
 ) -> "EncodingPhaseResult":
     """Encode all chunks to meet quality targets.
 
@@ -206,13 +211,15 @@ def encode_chunks(
     then runs ``EncodingPhase``.
 
     Args:
-        source_video:    Path to original source MKV file.
-        work_dir:        Working directory (same as used by ``auto``).
-        strategies:      List of encoding strategy name strings.
-        quality_targets: List of quality target strings (e.g. ``["vmaf-min:95"]``).
-        max_parallel:    Maximum concurrent encoding processes (default: 2).
-        force:           Wipe existing artifacts on source mismatch when ``True``.
-        dry_run:         Report only, no files written.
+        source_video:     Path to original source MKV file.
+        work_dir:         Working directory (same as used by ``auto``).
+        strategies:       List of encoding strategy name strings.
+        quality_targets:  List of quality target strings (e.g. ``["vmaf-min:95"]``).
+        max_parallel:     Maximum concurrent encoding processes (default: 2).
+        force:            Wipe existing artifacts on source mismatch when ``True``.
+        dry_run:          Report only, no files written.
+        metrics_sampling: Frame subsampling factor for quality metric generation.
+                          ``None`` falls back to config file value or the default constant.
 
     Returns:
         ``EncodingPhaseResult`` from the phase.
@@ -237,12 +244,13 @@ def encode_chunks(
 
     work_dir.mkdir(parents=True, exist_ok=True)
     config   = _minimal_config(
-        source_video    = source_video,
-        work_dir        = work_dir,
-        quality_targets = parsed_targets,
-        strategies      = parsed_strategies,
-        max_parallel    = max_parallel,
-        force           = force,
+        source_video     = source_video,
+        work_dir         = work_dir,
+        quality_targets  = parsed_targets,
+        strategies       = parsed_strategies,
+        max_parallel     = max_parallel,
+        force            = force,
+        metrics_sampling = metrics_sampling,
     )
     registry = _build_registry(config, NoOpMetricsCollector())
     phase    = registry[EncodingPhase]
@@ -294,18 +302,21 @@ def process_audio(
 
 
 def merge_final(
-    source_video: Path,
-    work_dir:     Path,
-    dry_run:      bool = False,
+    source_video:     Path,
+    work_dir:         Path,
+    dry_run:          bool = False,
+    metrics_sampling: int | None = None,
 ) -> "MergePhaseResult":
     """Merge encoded chunks and audio into final MKV files.
 
     Runs ``JobPhase``, scans all prerequisite phases, then runs ``MergePhase``.
 
     Args:
-        source_video: Path to original source MKV file.
-        work_dir:     Working directory (same as used by ``auto``).
-        dry_run:      Report only, no files written.
+        source_video:     Path to original source MKV file.
+        work_dir:         Working directory (same as used by ``auto``).
+        dry_run:          Report only, no files written.
+        metrics_sampling: Frame subsampling factor for final quality measurement.
+                          ``None`` falls back to config file value or the default constant.
 
     Returns:
         ``MergePhaseResult`` from the phase.
@@ -319,7 +330,7 @@ def merge_final(
         raise FileNotFoundError(f"Source video not found: {source_video}")
 
     work_dir.mkdir(parents=True, exist_ok=True)
-    config   = _minimal_config(source_video=source_video, work_dir=work_dir)
+    config   = _minimal_config(source_video=source_video, work_dir=work_dir, metrics_sampling=metrics_sampling)
     registry = _build_registry(config, NoOpMetricsCollector())
     phase    = registry[MergePhase]
     return phase.run(dry_run=dry_run)  # type: ignore[return-value]

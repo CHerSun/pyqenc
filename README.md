@@ -44,9 +44,57 @@ pyqenc provides a quality-first encoding pipeline that:
 
 > NOTE: pyqenc currently targets only `.mkv` containers. You can try using other containers directly. In case of any problems - remux into `.mkv` via MKVmerge GUI.
 
+### Sample comparison
+
+I've given the same sample to BSEncode and pyqenc.
+
+Here's the BSEncode measured metrics plot:
+
+![BSEncode measured metrics plot](samples/bsencode_encode_plot.png)
+
+Here's the pyqenc plot:
+
+![pyqenc measured metrics plot](samples/pyqenc_encode_plot.png)
+
+They don't really look different at first glance, but pyqenc plot is more uniform in terms of lower quality.
+
+If we look at stats distribution:
+
+| Metric | Stat    | pyqenc      | BSEncode |
+| ------ | ------- | ----------- | -------- |
+| CRF    | range   | 17.5...24.0 | 19.2     |
+| VMAF   | median  | 97.4        | 97.8     |
+| VMAF   | min     | 94.0        | 91.8     |
+| SSIM   | median  | 98.5        | 98.7     |
+| SSIM   | min     | 95.6        | 96.1     |
+| PSNR   | median  | 45.8        | 46.5     |
+| PSNR   | min     | 42.0        | 41.4     |
+| Size   | total   | 56 MB       | 80 MB    |
+
+> NOTE: I tried my best to reach as similar as possible median values - what BSEncode targets, but it uses not too precise measuring by default.
+
+As you can see most of the metrics are very close, for min values pyqenc usually outperforms full encode with BSEncode - as per given targets for min values too - this could be easily controlled separately and made higher.
+
+And the main result is the total size of the result (measured for video stream alone) - 56 MB vs 80 MB
+
+This is achieved thanks to variable CRF selection per scene with scene frames being rather uniform inside the scene, so a single CRF value there provides consistent quality.
+
+![pyqenc crf plot](samples/pyqenc_encode_crf.png)
+
 ## Installation
 
 ### Prerequisites
+
+### `scoop` & `uv` on Windows
+
+`scoop` & `uv` are my personal preferences. You can use different tooling, if you wish, but instructions below use those 2. To install them:
+
+- See [scoop.sh](https://scoop.sh) for scoop installation. It is a Windows package manager that doesn't need admin permissions and makes installation of a lot of tools really simple.
+- [uv](https://docs.astral.sh/uv/) is a new fast Python package manager. It can be installed in multiple ways. Using `scoop`:
+
+  ```sh
+  scoop install uv
+  ```
 
 #### External Dependencies:
 
@@ -66,7 +114,7 @@ sudo apt install ffmpeg mkvtoolnix
 
 ### Run pyqenc directly using `uv`
 
-[uv](https://docs.astral.sh/uv/) is a new fast Python package manager. Using `uv` is the recommended way to run pyqenc directly from source code. `uv` will create a local `.venv` with everything required.
+ Using `uv` is the recommended way to run pyqenc directly from source code. `uv` will create a local `.venv` with everything required. No Python head-aches, no dependencies problems. Straight-forward and simple.
 
 ```sh
 git clone https://github.com/CHerSun/pyqenc.git
@@ -81,7 +129,7 @@ To update the pyqenc later:
 git pull
 ```
 
-### Install pyqenc
+### Install pyqenc using `uv`
 
 Either using `uv` (local, self-contained):
 
@@ -91,7 +139,11 @@ uv tool install .
 
 > NOTE: you might need to update your PATH manually or using uv, see the `uv` output for details.
 
-Or using `pip` for global tool installation (needs installed Python>=3.13):
+> NOTE: sometimes `uv` needs `--reinstall` flag to cleanly update from previously installed version.
+
+### Install pyqenc globally using Python `pip`
+
+You need to have Python installed with >=3.13 version and pip for this. This will also install all pyqenc requirements globally too. Not recommended.
 
 ```sh
 git clone https://github.com/CHerSun/pyqenc.git
@@ -100,32 +152,40 @@ cd pyqenc
 pip install .
 ```
 
-After the installation, the `pyqenc` command will be available in your terminal. To run:
+### Running installed `pyqenc`
+
+After the installation, the `pyqenc` command will be available in your terminal. To run you can directly:
 
 ```sh
 pyqenc <your_arguments>
 ```
 
-To update later - repeat the steps above after `git pull`'ing.
+To update later - repeat the installation steps above after `git pull`'ing fresh version.
 
 ## Quick Start
 
 ### Basic Usage
 
-See installation section on how to run depending on the way you installed. See `--help` for full help.
+See installation section on how to run `pyqenc` depending on the way you've installed it. See `--help` for full help.
+
+Here's the base of the base - to preview & run using all default settings (work dir = `pyqenc` in the current folder):
 
 ```sh
 # Dry-run mode - preview what's to be done (1 phase ahead) with default settings
-pyqenc auto movie.mkv --work-dir ./work
+pyqenc auto movie.mkv
 
 # Execute (`-y`) the automatic pipeline using the specified work dir with default settings.
-pyqenc auto movie.mkv --work-dir ./work -y
-
-# Execute with custom quality targets and strategies selection
-pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq --work-dir ./work -y
+pyqenc auto movie.mkv -y
 ```
 
-> NOTE: It is highly recommended to use separate `--work-dir` per encode job. I.e. if you change source file - change the dir, don't reuse.
+> NOTE: It is highly recommended to explicitly specify `--work-dir` and use different ones per encode job (i.e. if you change source file - change the work dir). Don't run multiple encodings in parallel onto the same `--work-dir` - this will cause conflicts.
+
+Let's be a bit more specific on our target quality, strategy and work dir:
+
+```sh
+# Execute with custom quality targets and strategies selection
+pyqenc auto movie.mkv --work-dir ./movie --quality-target vmaf-min:95 --strategies slow+h265-aq -y
+```
 
 pyqenc pipeline gives final results in form of individual processed audio files (per strategy) and video files (per strategy). It is up to you to choose what you like and package that into a single container afterwards. The simplest way is the MKVmerge GUI - just drag wanted video stream and wanted audio streams there, add metadata (cover, descriptions, chapters, etc) and mux that.
 
@@ -228,25 +288,25 @@ pyqenc auto movie.mkv --work-dir ./movie --quality-target vmaf-min:93 --strategi
 Search through multiple strategies for the best one (or a few) and encode to it:
 
 ```sh
-pyqenc auto movie.mkv --strategies slow+h265-aq,veryslow+h265-anime --work-dir ./work -y
+pyqenc auto movie.mkv --work-dir ./movie --strategies slow+h265-aq,veryslow+h265-anime -y
 ```
 
 Encode using all specified strategies chosen with NO optimization phase:
 
 ```sh
-pyqenc auto movie.mkv --strategies slow+h265-aq,veryslow+h265-anime --all-strategies --work-dir ./work -y
+pyqenc auto movie.mkv --work-dir ./movie --strategies slow+h265-aq,veryslow+h265-anime --all-strategies -y
 ```
 
 Wildcard strategy selection (slow preset + all h265 profiles):
 
 ```sh
-pyqenc auto movie.mkv --strategies slow+h265* --work-dir ./work -y
+pyqenc auto movie.mkv --work-dir ./movie --strategies slow+h265* -y
 ```
 
 Encode using all presets of specified profile (ultrafast...placebo of h265 basic profile):
 
 ```sh
-pyqenc auto movie.mkv --strategies +h265 --work-dir ./work -y
+pyqenc auto movie.mkv --work-dir ./movie --strategies +h265 -y
 ```
 
 > NOTE: Some shells might need to escape the `*` character. The easiest is to just enclose full `slow+h265*` in quotes `"slow+h265*"` - this normally helps.
@@ -254,7 +314,7 @@ pyqenc auto movie.mkv --strategies +h265 --work-dir ./work -y
 Disable automatic cropping:
 
 ```sh
-pyqenc auto movie.mkv --no-crop --work-dir ./work -y
+pyqenc auto movie.mkv --work-dir ./movie --no-crop -y
 ```
 
 Manual crop specification:
@@ -314,7 +374,7 @@ pyqenc auto <source_video> [options]
 | Option                  | Description                                                          | Example            | Default                            |
 | ----------------------- | -------------------------------------------------------------------- | ------------------ | ---------------------------------- |
 | `--include REGEX`       | Regex pattern to filter streams                                      | `"\b(RUS\|ENG)\b"` | Include all                        |
-| `--exclude REGEX`       | Regex pattern to filter streams away                                 | `"\bJPN\b"`        | Exclude none                       |
+| `--exclude REGEX`       | Regex pattern to filter streams away                                 | `"comment"`        | Exclude none                       |
 | `--audio-convert REGEX` | Regex pattern to tell which audio streams to convert to final format | `"5\.1"`           | All normalized and all 2.0 results |
 
 ### Quality Target Format

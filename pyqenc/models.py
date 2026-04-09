@@ -234,6 +234,26 @@ class Strategy(BaseModel):
                 if "{vf}" in expanded:
                     expanded = expanded.replace("{vf}", vf_filter or "")
                 result.append(expanded)
+        # repeat templating for profile args
+        expanded_args = result
+        result = []
+        for arg in expanded_args:
+            if arg == "{profile_args}":
+                result.extend(self.profile_args)
+            elif arg == "{vf}":
+                if vf_filter:
+                    result.append(vf_filter)
+                else:
+                    # Standalone {vf} with no filter — also drop the preceding -vf flag
+                    if result and result[-1] == "-vf":
+                        result.pop()
+            else:
+                expanded = arg.replace("{quality}", quality_str).replace("{preset}", self.preset)
+                # {vf} embedded inside a larger filter chain string
+                if "{vf}" in expanded:
+                    expanded = expanded.replace("{vf}", vf_filter or "")
+                result.append(expanded)
+
         if "{input}" not in result:
             raise ValueError(
                 f"Codec '{self.codec.name}' encoder_args must contain a '{{input}}' sentinel"
@@ -324,8 +344,11 @@ class CodecConfig(BaseModel):
     Attributes:
         name:            Codec identifier (e.g., ``'h264-8bit'``, ``'h265-10bit'``).
         default_quality: Default quality parameter value for this codec.
-        quality_range:   Valid quality range as ``(min, max)`` tuple; order is normalised
-                         on construction so ``quality_range[0] <= quality_range[1]`` always holds.
+        quality_range:   Valid quality range as ``(first, last)`` tuple stored in config order.
+                         ``quality_range[0]`` is always the *better* end (lower CRF = better quality,
+                         higher bitrate = better quality).  For CRF/CQ/QP codecs use ``[0, 51]``
+                         (0 = lossless, 51 = worst).  For VBR bitrate codecs use ``[99, 0]``
+                         (99 Mbit/s = best, 0 = worst).  Order is preserved as-is from config.
         quality_label:       Human-readable label for the quality parameter used in logs
                              and plots (e.g. ``'CRF'``, ``'CQ'``).
         quality_granularity: Step size for the quality search algorithm.  CRF/CQ codecs
@@ -353,22 +376,60 @@ class CodecConfig(BaseModel):
     quality_range:       tuple[Decimal, Decimal]
     quality_label:       str            = "CRF"
     quality_granularity: Decimal        = Decimal("0.5")
+    quality_max_step:    Decimal|None   = None
     encoder_args:        list[str]      = Field(default_factory=list)
     presets:             list[str]      = Field(default_factory=list)
+
+    @property
+    def quality_better(self) -> Decimal:
+        """The quality value representing the *better* end of the range (``quality_range[0]``)."""
+        return self.quality_range[0]
+
+    @property
+    def quality_worse(self) -> Decimal:
+        """The quality value representing the *worse* end of the range (``quality_range[1]``)."""
+        return self.quality_range[1]
+
+    @property
+    def quality_higher_is_better(self) -> bool:
+        """``True`` when a higher quality value means better quality (e.g. VBR bitrate).
+
+        Derived from ``quality_range``: when ``quality_range[0] > quality_range[1]``,
+        higher values are better (e.g. ``[99, 0]`` for Mbit/s).
+        When ``quality_range[0] < quality_range[1]``, lower values are better
+        (e.g. ``[0, 51]`` for CRF/CQ/QP).
+        """
+        return self.quality_range[0] > self.quality_range[1]
 
     @field_validator("quality_range", mode="before")
     @classmethod
     def _normalise_quality_range(
         cls, v: tuple[Decimal | float | str, Decimal | float | str] | list,
     ) -> tuple[Decimal, Decimal]:
-        """Ensure ``quality_range`` is always ``(min, max)`` as ``Decimal`` regardless of input order."""
-        a, b = Decimal(str(v[0])), Decimal(str(v[1]))
-        return (min(a, b), max(a, b))
+        """Convert ``quality_range`` elements to ``Decimal``, preserving config order.
 
-    @field_validator("default_quality", "quality_granularity", mode="before")
+        ``quality_range[0]`` is always the *better* end as specified in config.
+        """
+        a, b = Decimal(str(v[0])), Decimal(str(v[1]))
+        return a, b
+
+    @property
+    def quality_log_padding(self) -> int:
+        """Computed column width for quality parameter log formatting.
+
+        Derives the correct padding width from the codec's own range and granularity
+        so log columns align correctly for any codec (e.g. CRF 0–51 with gran 0.5 → 4 chars;
+        VBR 0–100 with gran 0.1 → 5 chars; QP 0–63 with gran 1 → 2 chars).
+        """
+        max_val = max(abs(self.quality_better), abs(self.quality_worse))
+        return len(str(Decimal(str(max_val)).quantize(self.quality_granularity)))
+
+    @field_validator("default_quality", "quality_granularity", "quality_max_step", mode="before")
     @classmethod
-    def _to_decimal(cls, v: Decimal | float | int | str) -> Decimal:
+    def _to_decimal(cls, v: Decimal | float | int | str | None) -> Decimal | None:
         """Coerce numeric config values to ``Decimal`` for exact arithmetic."""
+        if v is None:
+            return None
         return Decimal(str(v))
 
 

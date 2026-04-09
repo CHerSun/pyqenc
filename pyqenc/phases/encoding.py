@@ -29,7 +29,6 @@ from pyqenc.constants import (
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
     FAILURE_SYMBOL_MINOR,
-    PADDING_QUALITY_NUMBER,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
     THICK_LINE,
@@ -46,7 +45,7 @@ from pyqenc.models import (
     VideoMetadata,
 )
 from pyqenc.phase import Artifact, Phase, PhaseResult
-from pyqenc.quality import CRFHistory, _find_worst_target, _score_failing_attempt, adjust_crf
+from pyqenc.quality import QualitySearchV2
 from pyqenc.state import (
     ArtifactState,
     EncodingParams,
@@ -302,9 +301,9 @@ def _recover_encoding_attempts(
 
         # Build index: chunk_id -> winning .mkv path, from a single directory listing.
         # Layout in encoded/<strategy>/:
-        #   <chunk_id>.<res>.crf<N>.mkv   — winning attempt file
-        #   <chunk_id>.<res>.yaml          — result sidecar (NO crf in name)
-        #   <chunk_id>.<res>.crf<N>.png    — quality graph (optional)
+        #   <chunk_id>.<res>.q<N>.mkv   — winning attempt file
+        #   <chunk_id>.<res>.yaml        — result sidecar (NO quality in name)
+        #   <chunk_id>.<res>.q<N>.png    — quality graph (optional)
         # A pair is COMPLETE when both the winning .mkv and its result sidecar exist.
         complete_index: dict[str, Path] = {}
         if encoded_dir.exists():
@@ -477,7 +476,7 @@ class ChunkEncoder:
     ) -> Path:
         """Get the final path for a CRF-only encoded attempt.
 
-        Naming pattern: ``<chunk_id>.<width>x<height>.crf<CRF>.mkv``
+        Naming pattern: ``<chunk_id>.<width>x<height>.q{CRF}.mkv``
 
         Falls back to a simpler name when resolution or CRF are not yet known.
 
@@ -492,7 +491,7 @@ class ChunkEncoder:
         """
         output_dir = self._get_output_dir(strategy)
         if resolution and crf is not None:
-            filename = f"{chunk_id}.{resolution}.crf{crf}.mkv"
+            filename = f"{chunk_id}.{resolution}.q{crf}.mkv"
         else:
             filename = f"{chunk_id}.mkv"
         return output_dir / filename
@@ -524,14 +523,14 @@ class ChunkEncoder:
         if not output_dir.exists():
             return None
 
-        for candidate in output_dir.glob(f"{chunk_id}.*.crf*.mkv"):
+        for candidate in output_dir.glob(f"{chunk_id}.*.q*.mkv"):
             m = ENCODED_ATTEMPT_NAME_PATTERN.match(candidate.name)
             if m is None:
                 continue
             if m.group("chunk_id") != chunk_id:
                 continue
             try:
-                file_crf = Decimal(str(m.group("crf"))).quantize(strategy.codec.quality_granularity)
+                file_crf = Decimal(str(m.group("quality"))).quantize(strategy.codec.quality_granularity)
             except ValueError:
                 continue
             if abs(file_crf - crf) > Decimal("0.05"):
@@ -555,115 +554,6 @@ class ChunkEncoder:
                 file_size_bytes=size,
             )
         return None
-
-    def _load_history_from_sidecars(
-        self,
-        chunk_id:        str,
-        strategy:        Strategy,
-        quality_targets: list[QualityTarget],
-    ) -> tuple[CRFHistory, Decimal | None]:
-        """Pre-populate a ``CRFHistory`` from all existing per-attempt sidecar files.
-
-        Scans ``<chunk_id>.*.crf*.yaml`` in the strategy output directory so the
-        filesystem does the chunk filtering rather than Python.  Also returns the
-        highest-passing CRF as the recommended starting point for the next search
-        iteration.
-
-        Per-attempt sidecars store ALL measured metrics; pass/fail is always
-        re-evaluated from ``metrics`` against the current quality targets
-        (Req 6a.2, 6a.3).
-
-        Falls back to legacy ``.metrics.json`` sidecars when no YAML sidecar
-        exists for an attempt (Req 8.2).
-
-        Args:
-            chunk_id:        Chunk identifier to filter sidecars.
-            strategy:        Encoding strategy (provides CRF range and safe_name).
-            quality_targets: Current quality targets for pass/fail re-evaluation.
-
-        Returns:
-            Tuple of ``(history, seed_crf)`` where ``seed_crf`` is the highest
-            CRF that met targets (best efficiency found so far), or ``None`` if
-            no passing attempt exists yet.
-        """
-        import yaml as _yaml
-
-        output_dir = self._get_output_dir(strategy)
-        gran       = strategy.codec.quality_granularity
-        crf_min, crf_max = strategy.codec.quality_range if strategy.codec else (Decimal("0"), Decimal("63"))
-        history    = CRFHistory(fail_crf=crf_max, pass_crf=crf_min)
-        seed_crf:  Decimal | None = None
-
-        if not output_dir.exists():
-            return history, seed_crf
-
-        required_keys = {f"{t.metric}_{t.statistic}" for t in quality_targets}
-
-        # Use chunk_id in the glob so the filesystem filters — avoids scanning all files
-        for candidate in output_dir.glob(f"{chunk_id}.*.crf*.mkv"):
-            m = ENCODED_ATTEMPT_NAME_PATTERN.match(candidate.name)
-            if m is None:
-                continue
-
-            # Try YAML sidecar first, then legacy JSON
-            sidecar_data: dict | None = None
-            yaml_sidecar = candidate.with_suffix(".yaml")
-            if yaml_sidecar.exists():
-                try:
-                    with yaml_sidecar.open("r", encoding="utf-8") as fh:
-                        sidecar_data = _yaml.safe_load(fh)
-                except Exception:
-                    pass
-
-            if sidecar_data is None:
-                import json as _json
-                json_sidecar = candidate.with_suffix(".metrics.json")
-                if json_sidecar.exists():
-                    try:
-                        with json_sidecar.open("r", encoding="utf-8") as fh:
-                            sidecar_data = _json.load(fh)
-                    except Exception:
-                        pass
-
-            if sidecar_data is None:
-                # ARTIFACT_ONLY — attempt file exists but no sidecar; skip for history
-                continue
-
-            try:
-                crf              = Decimal(str(sidecar_data["crf"])).quantize(gran)
-                metrics          = {k: float(v) for k, v in sidecar_data.get("metrics", {}).items()}
-                raw_sampling     = sidecar_data.get("sampling")
-                sidecar_sampling = int(raw_sampling) if raw_sampling is not None else None
-
-                # Stale metrics — measured at a different sampling rate; skip for history
-                # so the attempt is re-measured (without re-encoding) on the next run.
-                if sidecar_sampling is not None and sidecar_sampling != self._metrics_sampling:
-                    logger.debug(
-                        "Skipping stale sidecar %s: sampling %d != current %d",
-                        candidate.name, sidecar_sampling, self._metrics_sampling,
-                    )
-                    continue
-
-                # Re-evaluate pass/fail from metrics against current targets (Req 6a.2)
-                targets_met = (
-                    required_keys.issubset(metrics.keys()) and
-                    all(
-                        MetricType(t.metric).info.passes(
-                            metrics.get(f"{t.metric}_{t.statistic}", 0.0), t.value
-                        )
-                        for t in quality_targets
-                    )
-                ) if required_keys else False
-
-                history.add(crf, targets_met, metrics if required_keys.issubset(metrics.keys()) else None)
-
-                if targets_met:
-                    if seed_crf is None or crf > seed_crf:
-                        seed_crf = crf
-            except Exception:
-                continue
-
-        return history, seed_crf
 
     def _finalize_winning_attempt(
         self,
@@ -725,7 +615,7 @@ class ChunkEncoder:
         if self._cleanup_level >= CleanupLevel.INTERMEDIATE:
             encoding_dir = self._get_output_dir(strategy)
             if encoding_dir.exists():
-                for attempt_file in list(encoding_dir.glob(f"{chunk_id}.*.crf*.mkv")):
+                for attempt_file in list(encoding_dir.glob(f"{chunk_id}.*.q*.mkv")):
                     m = ENCODED_ATTEMPT_NAME_PATTERN.match(attempt_file.name)
                     if m and m.group("chunk_id") == chunk_id:
                         # Delete the attempt .mkv, its per-attempt sidecar, and its graph
@@ -843,30 +733,18 @@ class ChunkEncoder:
         """
         logger.debug(fmt_chunk_start(strategy.name, chunk.chunk_id, self._visual_hash))
 
-        # Pre-populate CRF history from sidecar files so adjust_crf has complete
-        # bounds from the very first call and the search resumes correctly.
-        history, seed_crf = self._load_history_from_sidecars(
-            chunk.chunk_id, strategy, quality_targets,
+        search = QualitySearchV2(
+            quality_better   = strategy.codec.quality_better,
+            quality_worse    = strategy.codec.quality_worse,
+            quality_targets  = quality_targets,
+            granularity      = strategy.codec.quality_granularity,
+            quality_max_step = strategy.codec.quality_max_step,
         )
-
-        if seed_crf is not None:
-            current_crf = seed_crf
-            logger.info(
-                fmt_chunk(strategy.name, chunk.chunk_id,
-                f"Restored {history.attempts} attempt(s) from sidecars; resuming from best-passing {strategy.codec.quality_label} {str(current_crf).rjust(PADDING_QUALITY_NUMBER)}",
-                self._visual_hash)
-            )
-        else:
-            current_crf = initial_crf
-            logger.debug(f"No prior sidecars found; starting from {strategy.codec.quality_label} {str(current_crf).rjust(PADDING_QUALITY_NUMBER)}")
-
-        attempt_number       = history.attempts
-        final_attempt:       AttemptMetadata | None = None
-        best_crf:            Decimal | None           = None
-        best_metrics:        dict[str, float]       = {}
-        best_failing_attempt: AttemptMetadata | None = None
-        best_failing_crf:    Decimal | None           = None
-        best_failing_metrics: dict[str, float]      = {}
+        current_q      = initial_crf
+        attempt_number = 0
+        final_attempt:      AttemptMetadata | None = None
+        best_fail_attempt:  AttemptMetadata | None = None
+        _any_real_work: bool                       = False
 
         while True:
             attempt_number += 1
@@ -879,7 +757,7 @@ class ChunkEncoder:
                               self._visual_hash)
                 )
 
-            logger.debug(fmt_chunk_attempt_start(strategy.name, chunk.chunk_id, attempt_number, current_crf, strategy.codec.quality_label, self._visual_hash))
+            logger.debug(fmt_chunk_attempt_start(strategy.name, chunk.chunk_id, attempt_number, current_q, strategy.codec.quality_label, self._visual_hash, strategy.codec.quality_log_padding))
 
             # Determine the final output path for this CRF (resolution unknown yet)
             # We'll encode to a temp file, probe resolution, then rename to final path.
@@ -898,15 +776,17 @@ class ChunkEncoder:
             # Pass None to accept any resolution for the given chunk_id + crf.
             check_resolution = None if (self._crop_params and not self._crop_params.is_empty()) else resolution
 
-            # Check for existing encoding at this CRF (filesystem scan, no tracker)
+            # Check for existing encoding at this quality value (filesystem scan, no tracker).
+            goto_eval   = False
+            output_file: Path | None = None
             if not force:
                 existing = self._check_existing_encoding(
-                    chunk.chunk_id, strategy, check_resolution, current_crf
+                    chunk.chunk_id, strategy, check_resolution, current_q
                 )
                 if existing is not None:
                     sidecar = _read_metrics_sidecar(existing.path)
-                    # Validate sidecar contains all required metric keys (Req 10.4)
-                    required_keys = {f"{t.metric}_{t.statistic}" for t in quality_targets}
+                    # Validate sidecar contains all required metric keys.
+                    required_keys        = {f"{t.metric}_{t.statistic}" for t in quality_targets}
                     raw_sidecar_sampling = sidecar.get("sampling") if sidecar is not None else None
                     sidecar_sampling     = int(raw_sidecar_sampling) if raw_sidecar_sampling is not None else None
                     sampling_stale       = (
@@ -919,88 +799,48 @@ class ChunkEncoder:
                         and required_keys.issubset(sidecar.get("metrics", {}).keys())
                     )
                     if sidecar_valid and sidecar is not None:
-                        # Re-evaluate pass/fail from metrics against current targets (Req 6a.2)
+                        # Full cache hit — no real work performed.
                         all_sidecar_metrics: dict[str, float] = {
                             k: float(v) for k, v in sidecar.get("metrics", {}).items()
+                        }
+                        targets_set_reused = {f"{t.metric}_{t.statistic}" for t in quality_targets}
+                        metrics_dict: dict[str, float] = {
+                            k: v for k, v in all_sidecar_metrics.items() if k in targets_set_reused
                         }
                         targets_met: bool = all(
                             all_sidecar_metrics.get(f"{t.metric}_{t.statistic}", 0.0) >= t.value
                             for t in quality_targets
                         )
-                        targets_set_reused = {f"{t.metric}_{t.statistic}" for t in quality_targets}
-                        metrics_dict: dict[str, float] = {
-                            k: v for k, v in all_sidecar_metrics.items() if k in targets_set_reused
-                        }
                         metric_summary = fmt_metric_summary(metrics_dict, quality_targets)
-                        pass_fail = (
+                        pass_fail      = (
                             f"{SUCCESS_SYMBOL_MINOR} pass"
                             if targets_met
                             else f"{FAILURE_SYMBOL_MINOR} miss"
                         )
+                        prev_best = search.best_quality
+                        next_q    = search.record(existing.crf, metrics_dict)
+
                         best_string = ""
-                        if targets_met:
-                            if final_attempt is None or existing.crf > (best_crf if best_crf is not None else Decimal("-Inf")):
-                                best_crf      = existing.crf
-                                final_attempt = existing
-                                best_metrics  = metrics_dict
-                                best_string   = " NEW BEST"
-                        else:
-                            if best_failing_attempt is None or _score_failing_attempt(metrics_dict, quality_targets, existing.crf) > _score_failing_attempt(best_failing_metrics, quality_targets, best_failing_crf):
-                                best_failing_crf     = existing.crf
-                                best_failing_attempt = existing
-                                best_failing_metrics = metrics_dict
+                        if search.best_targets_met and (prev_best is None or search.best_quality != prev_best):
+                            best_string   = " NEW BEST"
+                            final_attempt = existing
+                        elif not search.best_targets_met and search.best_quality == existing.crf:
+                            best_fail_attempt = existing
+
                         logger.info(
                             fmt_chunk_attempt_result(
                                 strategy.name, chunk.chunk_id, attempt_number,
-                            f"{pass_fail} with {strategy.codec.quality_label} {str(existing.crf).rjust(PADDING_QUALITY_NUMBER)} ({metric_summary}){best_string} [reused]",
+                                f"{pass_fail} with {strategy.codec.quality_label} {str(existing.crf).rjust(strategy.codec.quality_log_padding)} ({metric_summary}){best_string} [reused]",
                                 self._visual_hash,
                             )
                         )
-                        next_crf = adjust_crf(
-                            existing.crf, metrics_dict, quality_targets, history,
-                            granularity=strategy.codec.quality_granularity,
-                        )
-                        if next_crf is None:
-                            if final_attempt is not None:
-                                logger.info(fmt_chunk_final(strategy.name, chunk.chunk_id, best_crf, attempt_number, strategy.codec.quality_label, self._visual_hash))
-                                # Hard-link winning attempt into encoded/ and write result sidecar
-                                self._finalize_winning_attempt(
-                                    strategy        = strategy,
-                                    chunk_id        = chunk.chunk_id,
-                                    resolution      = existing.resolution,
-                                    winning_attempt = final_attempt.path,
-                                    crf             = best_crf if best_crf is not None else existing.crf,
-                                    metrics         = best_metrics,
-                                    targets_met     = True,
-                                )
-                            elif best_failing_attempt is not None:
-                                logger.warning(
-                                    "%s search space exhausted for chunk %s strategy %s after %d attempts — accepting best attempt (crf=%s)",
-                                    strategy.codec.quality_label, chunk.chunk_id, strategy.name, attempt_number,
-                                    best_failing_crf,
-                                )
-                                self._finalize_winning_attempt(
-                                    strategy        = strategy,
-                                    chunk_id        = chunk.chunk_id,
-                                    resolution      = existing.resolution,
-                                    winning_attempt = best_failing_attempt.path,
-                                    crf             = best_failing_crf if best_failing_crf is not None else existing.crf,
-                                    metrics         = best_failing_metrics,
-                                    targets_met     = False,
-                                )
-                                final_attempt = best_failing_attempt
-                                best_crf      = best_failing_crf
-                                best_metrics  = best_failing_metrics
-                            else:
-                                logger.warning(
-                                    "%s search space exhausted for chunk %s strategy %s after %d attempts",
-                                    strategy.codec.quality_label, chunk.chunk_id, strategy.name, attempt_number,
-                                )
+
+                        if next_q is None:
                             break
-                        current_crf = next_crf
+                        current_q = next_q
                         continue
                     else:
-                        # File exists but sidecar is missing, incomplete, or stale (sampling changed)
+                        # File exists but sidecar is missing, incomplete, or stale — re-measure.
                         reason = (
                             f"sampling changed ({sidecar_sampling} → {self._metrics_sampling})"
                             if sampling_stale
@@ -1008,26 +848,21 @@ class ChunkEncoder:
                         )
                         logger.info(
                             fmt_chunk(strategy.name, chunk.chunk_id,
-                            f"existing attempt ({strategy.codec.quality_label.lower()}={str(existing.crf).rjust(PADDING_QUALITY_NUMBER)}) — re-evaluating metrics ({reason})",
-                            self._visual_hash),
+                                f"existing attempt ({strategy.codec.quality_label.lower()}={str(existing.crf).rjust(strategy.codec.quality_log_padding)}) — re-evaluating metrics ({reason})",
+                                self._visual_hash),
                         )
-                        output_file = existing.path
-                        # Skip encoding, jump straight to quality evaluation below
-                        encode_success = True
-                        # Build a placeholder so the code below can use output_file
-                        goto_eval = True
-                else:
-                    goto_eval = False
-            else:
-                goto_eval = False
+                        _any_real_work = True
+                        output_file    = existing.path
+                        goto_eval      = True
 
             if not goto_eval:
-                # Build final output path (resolution known from chunk metadata)
-                output_file = self._get_attempt_path(
-                    chunk.chunk_id, strategy, resolution=resolution, crf=current_crf
+                # Encode — real work.
+                _any_real_work = True
+                output_file    = self._get_attempt_path(
+                    chunk.chunk_id, strategy, resolution=resolution, crf=current_q
                 )
                 encode_success = self._encode_with_ffmpeg(
-                    chunk, strategy, current_crf, output_file
+                    chunk, strategy, current_q, output_file
                 )
 
                 if not encode_success:
@@ -1042,12 +877,11 @@ class ChunkEncoder:
                         error       = error_msg,
                     )
 
-                # Update resolution from actual output (crop may change dimensions)
+                # Update resolution from actual output (crop may change dimensions).
                 actual_resolution = _probe_resolution(output_file)
                 if actual_resolution and actual_resolution != resolution:
-                    # Rename to correct resolution-based path
                     correct_path = self._get_attempt_path(
-                        chunk.chunk_id, strategy, resolution=actual_resolution, crf=current_crf
+                        chunk.chunk_id, strategy, resolution=actual_resolution, crf=current_q
                     )
                     try:
                         output_file.replace(correct_path)
@@ -1056,61 +890,60 @@ class ChunkEncoder:
                     output_file = correct_path
                     resolution  = actual_resolution
 
+            assert output_file is not None
+
             # Evaluate quality — raw metric logs/stats go into a per-attempt subfolder;
-            # the plot and YAML sidecar stay next to the .mkv (Req 8.1)
+            # the plot and YAML sidecar stay next to the .mkv.
             attempt_metrics_dir = output_file.parent / output_file.stem
             attempt_plot_path   = output_file.parent / f"{output_file.stem}.png"
-            evaluation  = self.quality_evaluator.evaluate_chunk(
-                encoded=output_file,
-                reference=reference.path,
-                ref_crop=self._crop_params or CropParams(),
-                targets=quality_targets,
-                output_dir=attempt_metrics_dir,
-                subsample_factor=self._metrics_sampling,
-                plot_path=attempt_plot_path,
-                chunk_start_seconds=chunk.start_timestamp,
+            evaluation = self.quality_evaluator.evaluate_chunk(
+                encoded              = output_file,
+                reference            = reference.path,
+                ref_crop             = self._crop_params or CropParams(),
+                targets              = quality_targets,
+                output_dir           = attempt_metrics_dir,
+                subsample_factor     = self._metrics_sampling,
+                plot_path            = attempt_plot_path,
+                chunk_start_seconds  = chunk.start_timestamp,
             )
 
             # Collect ALL measured metrics (not filtered to current targets) for the sidecar
-            # so the CRF history is reusable when quality targets change (Req 6a.1)
+            # so the quality history is reusable when quality targets change.
             all_metrics: dict[str, float] = {
                 f"{metric.value}_{stat}": float(value)
                 for metric, stats in evaluation.metrics.items()
                 for stat, value in stats.items()
             }
 
-            # Targeted metrics subset (for history and convergence decisions)
+            # Targeted metrics subset (for search and convergence decisions).
             targets_set  = {f"{t.metric}_{t.statistic}" for t in quality_targets}
             metrics_dict = {k: v for k, v in all_metrics.items() if k in targets_set}
 
-            # Write per-attempt metrics sidecar atomically (Req 6a.1)
-            _write_metrics_sidecar(output_file, evaluation.targets_met, current_crf, all_metrics, self._metrics_sampling)
+            # Write per-attempt metrics sidecar atomically.
+            _write_metrics_sidecar(output_file, evaluation.targets_met, current_q, all_metrics, self._metrics_sampling)
 
-            # Build AttemptMetadata for this attempt
+            # Build AttemptMetadata for this attempt.
             attempt_meta = AttemptMetadata(
-                path=output_file,
-                chunk_id=chunk.chunk_id,
-                strategy=strategy.name,
-                crf=current_crf,
-                resolution=resolution or "",
-                file_size_bytes=output_file.stat().st_size,
+                path            = output_file,
+                chunk_id        = chunk.chunk_id,
+                strategy        = strategy.name,
+                crf             = current_q,
+                resolution      = resolution or "",
+                file_size_bytes = output_file.stat().st_size,
             )
 
+            prev_best = search.best_quality
+            next_q    = search.record(current_q, metrics_dict)
+
             best_string = ""
-            if evaluation.targets_met:
-                if final_attempt is None or current_crf > (best_crf if best_crf is not None else Decimal("-Inf")):
-                    best_crf      = current_crf
-                    final_attempt = attempt_meta
-                    best_metrics  = all_metrics
-                    best_string   = " NEW BEST"
-            else:
-                if best_failing_attempt is None or _score_failing_attempt(all_metrics, quality_targets, current_crf) > _score_failing_attempt(best_failing_metrics, quality_targets, best_failing_crf):
-                    best_failing_crf     = current_crf
-                    best_failing_attempt = attempt_meta
-                    best_failing_metrics = all_metrics
+            if search.best_targets_met and (prev_best is None or search.best_quality != prev_best):
+                best_string   = " NEW BEST"
+                final_attempt = attempt_meta
+            elif not search.best_targets_met and search.best_quality == current_q:
+                best_fail_attempt = attempt_meta
 
             metric_summary = fmt_metric_summary(metrics_dict, quality_targets)
-            pass_fail = (
+            pass_fail      = (
                 f"{SUCCESS_SYMBOL_MINOR} pass"
                 if evaluation.targets_met
                 else f"{FAILURE_SYMBOL_MINOR} miss"
@@ -1118,68 +951,79 @@ class ChunkEncoder:
             logger.info(
                 fmt_chunk_attempt_result(
                     strategy.name, chunk.chunk_id, attempt_number,
-                    f"{pass_fail} with {strategy.codec.quality_label} {str(current_crf).rjust(PADDING_QUALITY_NUMBER)} ({metric_summary}){best_string}",
+                    f"{pass_fail} with {strategy.codec.quality_label} {str(current_q).rjust(strategy.codec.quality_log_padding)} ({metric_summary}){best_string}",
                     self._visual_hash,
                 )
             )
 
-            next_crf = adjust_crf(
-                current_crf, metrics_dict, quality_targets, history,
-                granularity=strategy.codec.quality_granularity,
-            )
-
-            if next_crf is None:
-                if final_attempt is not None:
-                    logger.info(fmt_chunk_final(strategy.name, chunk.chunk_id, best_crf, attempt_number, strategy.codec.quality_label, self._visual_hash))
-                    # Hard-link winning attempt into encoded/ and write result sidecar
-                    self._finalize_winning_attempt(
-                        strategy        = strategy,
-                        chunk_id        = chunk.chunk_id,
-                        resolution      = resolution or "",
-                        winning_attempt = final_attempt.path,
-                        crf             = best_crf if best_crf is not None else current_crf,
-                        metrics         = best_metrics,
-                        targets_met     = True,
-                    )
-                elif best_failing_attempt is not None:
-                    logger.warning(
-                        "%s search space exhausted for chunk %s strategy %s after %d attempts — accepting best attempt (crf=%s)",
-                        strategy.codec.quality_label, chunk.chunk_id, strategy.name, attempt_number,
-                        best_failing_crf,
-                    )
-                    self._finalize_winning_attempt(
-                        strategy        = strategy,
-                        chunk_id        = chunk.chunk_id,
-                        resolution      = resolution or "",
-                        winning_attempt = best_failing_attempt.path,
-                        crf             = best_failing_crf if best_failing_crf is not None else current_crf,
-                        metrics         = best_failing_metrics,
-                        targets_met     = False,
-                    )
-                    final_attempt = best_failing_attempt
-                    best_crf      = best_failing_crf
-                    best_metrics  = best_failing_metrics
-                else:
-                    logger.warning(
-                        "%s search space exhausted for chunk %s strategy %s after %d attempts",
-                        strategy.codec.quality_label, chunk.chunk_id, strategy.name, attempt_number,
-                    )
+            if next_q is None:
                 break
 
-            logger.debug("Adjusting %s from %s to %s", strategy.codec.quality_label, current_crf, next_crf)
-            current_crf = next_crf
+            logger.debug("Adjusting %s from %s to %s", strategy.codec.quality_label, current_q, next_q)
+            current_q = next_q
 
-        if final_attempt is not None:
-            # targets_met is True unless we fell back to the best failing attempt
-            _targets_met = best_failing_attempt is None or final_attempt is not best_failing_attempt
+        # --- Post-loop: finalize ---
+
+        if search.best_targets_met and final_attempt is not None:
+            logger.info(fmt_chunk_final(
+                strategy.name, chunk.chunk_id, search.best_quality, attempt_number,
+                strategy.codec.quality_label, self._visual_hash, strategy.codec.quality_log_padding,
+            ))
+            self._finalize_winning_attempt(
+                strategy        = strategy,
+                chunk_id        = chunk.chunk_id,
+                resolution      = final_attempt.resolution,
+                winning_attempt = final_attempt.path,
+                crf             = search.best_quality,  # type: ignore[arg-type]
+                metrics         = search.best_metrics or {},
+                targets_met     = True,
+            )
+        elif not search.best_targets_met and best_fail_attempt is not None:
+            logger.warning(
+                "%s search space exhausted for chunk %s strategy %s after %d attempts — accepting best attempt (%s=%s)",
+                strategy.codec.quality_label, chunk.chunk_id, strategy.name, attempt_number,
+                strategy.codec.quality_label, search.best_quality,
+            )
+            self._finalize_winning_attempt(
+                strategy        = strategy,
+                chunk_id        = chunk.chunk_id,
+                resolution      = best_fail_attempt.resolution,
+                winning_attempt = best_fail_attempt.path,
+                crf             = search.best_quality,  # type: ignore[arg-type]
+                metrics         = search.best_metrics or {},
+                targets_met     = False,
+            )
+            final_attempt = best_fail_attempt
+        elif search.best_quality is None:
+            logger.warning(
+                "%s search space exhausted for chunk %s strategy %s after %d attempts",
+                strategy.codec.quality_label, chunk.chunk_id, strategy.name, attempt_number,
+            )
+
+        # Progress bar advance — after the loop so ETA reflects actual encode time.
+        if not _any_real_work:
+            # All cache hits — chunk was fully recovered from existing artifacts.
             return ChunkEncodingResult(
                 chunk_id     = chunk.chunk_id,
                 strategy     = strategy.name,
                 success      = True,
-                targets_met  = _targets_met,
-                final_crf    = best_crf,
+                targets_met  = search.best_targets_met,
+                final_crf    = search.best_quality,
                 attempts     = attempt_number,
                 encoded_file = final_attempt,
+                reused       = True,
+            )
+
+        if final_attempt is not None or best_fail_attempt is not None:
+            winning = final_attempt if final_attempt is not None else best_fail_attempt
+            return ChunkEncodingResult(
+                chunk_id     = chunk.chunk_id,
+                strategy     = strategy.name,
+                success      = True,
+                targets_met  = search.best_targets_met,
+                final_crf    = search.best_quality,
+                attempts     = attempt_number,
+                encoded_file = winning,
                 reused       = False,
             )
         else:
@@ -1343,7 +1187,7 @@ async def _encode_chunks_parallel(
         force:          Whether to force re-encoding.
         phase_recovery: Optional recovery state from ``recover_attempts``; when
                         provided, ``COMPLETE`` pairs are skipped and ``ARTIFACT_ONLY``
-                        pairs resume from their recovered ``CRFHistory``.
+                        pairs resume from their recovered ``QualitySearch`` state.
         advance:        Optional advance callable from ``ProgressBar``; called with
                         chunk duration in seconds and an ``AdvanceState`` on each
                         chunk completion.
@@ -2086,7 +1930,7 @@ class EncodingPhase:
                     m = ENCODED_ATTEMPT_NAME_PATTERN.match(pair_rec.winning_file.name)
                     if m:
                         try:
-                            crf = Decimal(str(m.group("crf")))
+                            crf = Decimal(str(m.group("quality")))
                         except (ValueError, TypeError):
                             pass
 

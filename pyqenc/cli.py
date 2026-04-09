@@ -139,13 +139,13 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--sampling",
         type=int,
-        default=DEFAULT_METRICS_SAMPLING,
+        default=None, # None will get replaced with config value, if its present
         metavar="N",
         dest="metrics_sampling",
         help=(
             "Frame sampling factor for quality metrics measurement: measure every N-th frame. "
-            f"Min: 1 (every frame measured). Default: {DEFAULT_METRICS_SAMPLING}. Directly affects reliability of metrics. A tradeoff between precision and speed. "
-            "Values above 30 are not recommended due to measurement volatility. 1 gives the highest precision but lowest speed. 2-4 are a good compromise. 5-10 start to become unreliable.."
+            f"Min: 1 (every frame measured). Default: None (use config value or {DEFAULT_METRICS_SAMPLING}). Directly affects reliability of metrics. A tradeoff between precision and speed. "
+            "Values above 20 are not recommended due to measurement volatility. 1 gives the highest precision but lowest speed. 2-4 are a good compromise. 5-10 start to become unreliable.."
         ),
     )
     parser.add_argument(
@@ -334,6 +334,17 @@ def _create_merge_subcommand(subparsers) -> None:
     p.add_argument("source", type=Path, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
+    p.add_argument(
+        "--sampling",
+        type=int,
+        default=None,
+        metavar="N",
+        dest="metrics_sampling",
+        help=(
+            "Frame sampling factor for quality metrics measurement: measure every N-th frame. "
+            f"Min: 1 (every frame measured). Default: None (use config value or {DEFAULT_METRICS_SAMPLING})."
+        ),
+    )
     p.set_defaults(func=_cmd_merge)
 
 
@@ -506,15 +517,20 @@ def _cmd_encode(args: argparse.Namespace) -> int:
                            else ConfigManager().get_default_targets()
     strategies = _parse_strategies(args.strategies)
 
+    # Resolve metrics sampling: CLI arg takes precedence over config file
+    metrics_sampling = args.metrics_sampling if args.metrics_sampling is not None \
+                       else ConfigManager().get_metrics_sampling()
+
     try:
         result = encode_chunks(
-            source_video    = args.source,
-            work_dir        = args.work_dir,
-            strategies      = strategies or [],
-            quality_targets = _quality_target_strs,
-            max_parallel    = args.max_parallel,
-            force           = args.force,
-            dry_run         = not args.execute,
+            source_video     = args.source,
+            work_dir         = args.work_dir,
+            strategies       = strategies or [],
+            quality_targets  = _quality_target_strs,
+            max_parallel     = args.max_parallel,
+            force            = args.force,
+            dry_run          = not args.execute,
+            metrics_sampling = metrics_sampling,
         )
         if result.is_complete:
             logger.info("Encoding completed successfully")
@@ -555,15 +571,21 @@ def _cmd_audio(args: argparse.Namespace) -> int:
 def _cmd_merge(args: argparse.Namespace) -> int:
     """Execute the 'merge' subcommand."""
     from pyqenc.api import merge_final
+    from pyqenc.config import ConfigManager
 
     logger.info("Starting final merge")
     logger.info(f"Source: {args.source}")
 
+    # Resolve metrics sampling: CLI arg takes precedence over config file
+    metrics_sampling = args.metrics_sampling if args.metrics_sampling is not None \
+                       else ConfigManager().get_metrics_sampling()
+
     try:
         result = merge_final(
-            source_video = args.source,
-            work_dir     = args.work_dir,
-            dry_run      = not args.execute,
+            source_video     = args.source,
+            work_dir         = args.work_dir,
+            dry_run          = not args.execute,
+            metrics_sampling = metrics_sampling,
         )
         if result.is_complete:
             completed = [a for a in result.merged if a.state == ArtifactState.COMPLETE]
@@ -711,13 +733,13 @@ def _create_measure_subcommand(subparsers) -> None:
     p.add_argument(
         "--sampling",
         type=int,
-        default=DEFAULT_METRICS_SAMPLING,
+        default=None, # None will get replaced with config value, if its present
         metavar="N",
         dest="metrics_sampling",
         help=(
             "Frame sampling factor for quality metrics measurement: measure every N-th frame. "
-            f"Min: 1 (every frame measured). Default: {DEFAULT_METRICS_SAMPLING}. Directly affects reliability of metrics. A tradeoff between precision and speed. "
-            "Values above 30 are not recommended due to measurement volatility. 1 gives the highest precision but lowest speed. 2-4 are a good compromise. 5-10 start to become unreliable.."
+            f"Min: 1 (every frame measured). Default: None (use config value or {DEFAULT_METRICS_SAMPLING}). Directly affects reliability of metrics. A tradeoff between precision and speed. "
+            "Values above 20 are not recommended due to measurement volatility. 1 gives the highest precision but lowest speed. 2-4 are a good compromise. 5-10 start to become unreliable.."
         ),
     )
     p.add_argument(
@@ -760,13 +782,17 @@ def _cmd_measure(args: argparse.Namespace) -> int:
         logger.critical(f"Invalid crop parameters: {e}")
         return 1
 
+    # Resolve metrics sampling: CLI arg takes precedence over config file
+    metrics_sampling = args.metrics_sampling if args.metrics_sampling is not None \
+                       else config_manager.get_metrics_sampling()
+
     try:
         measure_quality(
             source_video         = args.source,
             target_videos        = args.targets,
             work_dir             = args.work_dir,
             crop_params          = crop_params,
-            metrics_sampling     = args.metrics_sampling,
+            metrics_sampling     = metrics_sampling,
             screenshot_count     = args.screenshots,
             screenshot_interval  = args.every,
             width                = args.width,
