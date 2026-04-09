@@ -302,18 +302,21 @@ def process_audio(
 
 
 def merge_final(
-    source_video: Path,
-    work_dir:     Path,
-    dry_run:      bool = False,
+    source_video:     Path,
+    work_dir:         Path,
+    dry_run:          bool = False,
+    metrics_sampling: int | None = None,
 ) -> "MergePhaseResult":
     """Merge encoded chunks and audio into final MKV files.
 
     Runs ``JobPhase``, scans all prerequisite phases, then runs ``MergePhase``.
 
     Args:
-        source_video: Path to original source MKV file.
-        work_dir:     Working directory (same as used by ``auto``).
-        dry_run:      Report only, no files written.
+        source_video:     Path to original source MKV file.
+        work_dir:         Working directory (same as used by ``auto``).
+        dry_run:          Report only, no files written.
+        metrics_sampling: Frame subsampling factor for final quality measurement.
+                          ``None`` falls back to config file value or the default constant.
 
     Returns:
         ``MergePhaseResult`` from the phase.
@@ -327,7 +330,7 @@ def merge_final(
         raise FileNotFoundError(f"Source video not found: {source_video}")
 
     work_dir.mkdir(parents=True, exist_ok=True)
-    config   = _minimal_config(source_video=source_video, work_dir=work_dir)
+    config   = _minimal_config(source_video=source_video, work_dir=work_dir, metrics_sampling=metrics_sampling)
     registry = _build_registry(config, NoOpMetricsCollector())
     phase    = registry[MergePhase]
     return phase.run(dry_run=dry_run)  # type: ignore[return-value]

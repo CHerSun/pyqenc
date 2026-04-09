@@ -334,6 +334,17 @@ def _create_merge_subcommand(subparsers) -> None:
     p.add_argument("source", type=Path, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
+    p.add_argument(
+        "--sampling",
+        type=int,
+        default=None,
+        metavar="N",
+        dest="metrics_sampling",
+        help=(
+            "Frame sampling factor for quality metrics measurement: measure every N-th frame. "
+            f"Min: 1 (every frame measured). Default: None (use config value or {DEFAULT_METRICS_SAMPLING})."
+        ),
+    )
     p.set_defaults(func=_cmd_merge)
 
 
@@ -560,15 +571,21 @@ def _cmd_audio(args: argparse.Namespace) -> int:
 def _cmd_merge(args: argparse.Namespace) -> int:
     """Execute the 'merge' subcommand."""
     from pyqenc.api import merge_final
+    from pyqenc.config import ConfigManager
 
     logger.info("Starting final merge")
     logger.info(f"Source: {args.source}")
 
+    # Resolve metrics sampling: CLI arg takes precedence over config file
+    metrics_sampling = args.metrics_sampling if args.metrics_sampling is not None \
+                       else ConfigManager().get_metrics_sampling()
+
     try:
         result = merge_final(
-            source_video = args.source,
-            work_dir     = args.work_dir,
-            dry_run      = not args.execute,
+            source_video     = args.source,
+            work_dir         = args.work_dir,
+            dry_run          = not args.execute,
+            metrics_sampling = metrics_sampling,
         )
         if result.is_complete:
             completed = [a for a in result.merged if a.state == ArtifactState.COMPLETE]
