@@ -342,7 +342,7 @@ DEFAULT_METRIC_STYLES: dict[MetricType, MetricVisualStyle] = {
         y_axis="left",
         linestyle="-",
         linewidth=_LINE_WIDTH_DEFAULT,
-        lossless_threshold=MetricType.PSNR.info.clip_upper,
+        lossless_threshold=MetricType.PSNR.info._clip_upper,
         lossless_label=MetricType.PSNR.info.lossless_raw_repr,
     ),
     MetricType.SSIM: MetricVisualStyle(

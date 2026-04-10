@@ -83,9 +83,10 @@ class MetricInfo:
     name:              str
     id:                str
     higher_is_better:  bool
-    scale_factor:      float
-    clip_upper:        float | None
-    clip_lower:        float | None
+    _offset:           float
+    _scale_factor:     float
+    _clip_upper:       float | None
+    _clip_lower:       float | None
     lossless_value:    float
     lossless_raw_repr: str
     display_unit:      str
@@ -109,19 +110,19 @@ class MetricInfo:
             Normalized scalar or ``pd.Series`` on the display scale.
         """
         if isinstance(value, pd.Series):
-            result = value * self.scale_factor
-            if self.clip_lower is not None:
-                result = result.clip(lower=self.clip_lower)
-            if self.clip_upper is not None:
-                result = result.clip(upper=self.clip_upper)
+            result = self._offset + value * self._scale_factor
+            if self._clip_lower is not None:
+                result = result.clip(lower=self._clip_lower)
+            if self._clip_upper is not None:
+                result = result.clip(upper=self._clip_upper)
             return result
         else:
             # scalar path — handle inf explicitly
-            result_f = value * self.scale_factor
-            if self.clip_lower is not None:
-                result_f = max(result_f, self.clip_lower)
-            if self.clip_upper is not None:
-                result_f = min(result_f, self.clip_upper)
+            result_f = self._offset + value * self._scale_factor
+            if self._clip_lower is not None:
+                result_f = max(result_f, self._clip_lower)
+            if self._clip_upper is not None:
+                result_f = min(result_f, self._clip_upper)
             return result_f
 
     def passes(self, actual: float, target: float) -> bool:
@@ -165,6 +166,7 @@ class MetricType(Enum):
     VMAF = "vmaf"
     SSIM = "ssim"
     PSNR = "psnr"
+    VIF  = "vif"
 
     @property
     def info(self) -> MetricInfo:
@@ -177,12 +179,13 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         name              = "VMAF",
         id                = "vmaf",
         higher_is_better  = True,
-        scale_factor      = 1.0,
-        clip_upper        = None,
-        clip_lower        = None,
+        _offset           = 0.0,
+        _scale_factor     = 1.0,
+        _clip_upper       = None,
+        _clip_lower       = None,
         lossless_value    = 100.0,
         lossless_raw_repr = "100.0",
-        display_unit      = "%",
+        display_unit      = "",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
         complexity        = 10.0,  # empirical estimate; VMAF is significantly slower than PSNR/SSIM
@@ -193,12 +196,13 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         name              = "SSIM",
         id                = "ssim",
         higher_is_better  = True,
-        scale_factor      = 100.0,
-        clip_upper        = None,
-        clip_lower        = None,
+        _offset           = 0.0,
+        _scale_factor     = 100.0,
+        _clip_upper       = None,
+        _clip_lower       = None,
         lossless_value    = 100.0,
         lossless_raw_repr = "100.0",
-        display_unit      = "%",
+        display_unit      = "",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
         complexity        = 1.0,
@@ -209,9 +213,10 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         name              = "PSNR",
         id                = "psnr",
         higher_is_better  = True,
-        scale_factor      = 1.0,
-        clip_upper        = 100.0,
-        clip_lower        = None,
+        _offset           = 0.0,
+        _scale_factor     = 1.0,
+        _clip_upper       = 100.0,
+        _clip_lower       = None,
         lossless_value    = 100.0,
         lossless_raw_repr = "∞ dB",
         display_unit      = " dB",
@@ -221,23 +226,24 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         comparison_range  = 30.0,  # practical target range ~40–70 dB
         acceptance_delta  = 0.5,   # 0.5 dB surplus is negligible
     ),
-    # VIF placeholder (not yet active and not checked for correctness):
-    # MetricType.VIF: MetricInfo(
-    #     name              = "VIF",
-    #     id                = "vif",
-    #     higher_is_better  = False,
-    #     scale_factor      = 1.0,
-    #     clip_upper        = None,
-    #     clip_lower        = 0.0,
-    #     lossless_value    = 0.0,
-    #     lossless_raw_repr = "0.0",
-    #     display_unit      = "",
-    #     plot_y_min        = -0.1,
-    #     plot_y_max        = 2.0,
-    #     complexity        = 1.0,
-    #     comparison_range  = 10.0,
-    #     acceptance_delta  = 0.2,
-    # ),
+    # VIF
+    MetricType.VIF: MetricInfo(
+        name              = "VIF",
+        id                = "vif",
+        higher_is_better  = True,
+        _offset           = 100.0,
+        _scale_factor     = -1.0,
+        _clip_upper       = None,
+        _clip_lower       = 0.0,
+        lossless_value    = 100.0,
+        lossless_raw_repr = "100.0",
+        display_unit      = "",
+        plot_y_min        = 0.0,
+        plot_y_max        = 103.0,
+        complexity        = 1.0,
+        comparison_range  = 10.0,
+        acceptance_delta  = 0.2,
+    ),
 }
 
 
