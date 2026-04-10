@@ -775,6 +775,7 @@ def _create_measure_subcommand(subparsers) -> None:
 def _cmd_measure(args: argparse.Namespace) -> int:
     """Execute the 'measure' subcommand."""
     from pyqenc.api import measure_quality
+    from pyqenc.config import ConfigManager
 
     try:
         crop_params = _resolve_crop_params(args)
@@ -784,7 +785,7 @@ def _cmd_measure(args: argparse.Namespace) -> int:
 
     # Resolve metrics sampling: CLI arg takes precedence over config file
     metrics_sampling = args.metrics_sampling if args.metrics_sampling is not None \
-                       else config_manager.get_metrics_sampling()
+                       else ConfigManager().get_metrics_sampling()
 
     try:
         measure_quality(
