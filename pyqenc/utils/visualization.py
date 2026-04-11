@@ -33,7 +33,7 @@ from pyqenc.quality import (
     QualityEvaluation,
     _MetricStatistics,
     normalize_metric,
-    run_metric,
+    run_metrics,
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 
@@ -1204,10 +1204,10 @@ class QualityEvaluator:
     ) -> QualityArtifacts:
         """Generate metric log files for quality comparison.
 
-        Runs all four metrics (PSNR, SSIM, VMAF, VIF) concurrently via
-        ``asyncio.gather``.  Each metric is written to a ``.tmp``-suffixed file
-        while ffmpeg is running; the ``.tmp`` paths are returned directly in a
-        ``QualityArtifacts`` instance — no rename is performed.
+        Runs all four metrics (PSNR, SSIM, VMAF, VIF) in a single ffmpeg pass
+        via ``run_metrics``.  Each metric is written to a ``.tmp``-suffixed file;
+        the ``.tmp`` paths are returned directly in a ``QualityArtifacts`` instance
+        — no rename is performed.
 
         Args:
             encoded:          Path to encoded video file.
@@ -1215,7 +1215,8 @@ class QualityEvaluator:
             ref_crop:         Crop parameters for the reference input.
             output_prefix:    Full path prefix for metric files (unused for path
                               derivation — ``cwd`` and a UUID prefix are used instead).
-            metrics_sampling: Frame subsampling factor.
+            metrics_sampling: Frame subsampling factor (applied to VMAF via
+                              ``n_subsample`` and to PSNR/SSIM via ``select``).
             bar_advance:      Optional callable that advances the progress bar.
             duration_seconds: Duration of the encoded clip in seconds.
             width:            Scale both inputs to this width (0 = no scaling).
@@ -1235,47 +1236,39 @@ class QualityEvaluator:
             encoded.name, reference.name, uuid_hex,
         )
 
-        def _make_progress_callback(metric: MetricType, last_time: list[float]) -> Callable[[int, float], None] | None:
+        # Single ffmpeg pass — progress is linear: total = duration_seconds, weight = 1.0.
+        _weight = 1.0
+
+        def _progress_callback(frame: int, out_time_s: float) -> None:
             if bar_advance is None or duration_seconds <= 0:
-                return None
-            # Weight = decode (1.0) + measurement (complexity/factor).
-            # Matches the _total_complexity formula used for the bar total.
-            weight = 1.0 + metric.info.complexity / metrics_sampling
+                return
+            nonlocal _last_time
+            delta = max(0.0, out_time_s - _last_time)
+            delta = min(delta, duration_seconds - _last_time)
+            if delta > 0:
+                bar_advance(delta * _weight)
+                _last_time = out_time_s
 
-            def _callback(frame: int, out_time_s: float) -> None:
-                delta = max(0.0, out_time_s - last_time[0])
-                delta = min(delta, duration_seconds - last_time[0])
-                if delta > 0:
-                    bar_advance(delta * weight)
-                    last_time[0] = out_time_s
+        _last_time: float = 0.0
+        tmp_prefix        = f"{uuid_hex}."
 
-            return _callback
-
-        tmp_prefix = f"{uuid_hex}."
-
-        async def _run_one(metric: MetricType) -> None:
-            result = await run_metric(
-                metric             = metric,
-                distorted          = encoded,
-                reference          = reference,
-                crop_distorted     = CropParams(),
-                crop_reference     = ref_crop,
-                duration           = 0,
-                width              = width,
-                use_gpu            = False,
-                subsample          = metrics_sampling,
-                output_prefix      = tmp_prefix,
-                cwd                = output_cwd,
-                progress_callback  = _make_progress_callback(metric, [0.0]),
-                output_extension   = ".tmp",
-            )
-            if not result.success:
-                logger.warning(
-                    "Metric %s calculation had non-zero exit code: %d",
-                    metric.value, result.returncode,
-                )
-
-        await asyncio.gather(*[_run_one(metric) for metric in [MetricType.PSNR, MetricType.SSIM, MetricType.VMAF]])
+        result = await run_metrics(
+            metrics          = _metrics_all,
+            distorted        = encoded,
+            reference        = reference,
+            crop_distorted   = CropParams(),
+            crop_reference   = ref_crop,
+            duration         = 0,
+            width            = width,
+            use_gpu          = False,
+            subsample        = metrics_sampling,
+            output_prefix    = tmp_prefix,
+            cwd              = output_cwd,
+            progress_callback = _progress_callback if bar_advance is not None else None,
+            output_extension = ".tmp",
+        )
+        if not result.success:
+            logger.warning("Metrics run had non-zero exit code: %d", result.returncode)
 
         # Build artifact paths — .tmp files stay as-is, no rename.
         # VIF data is embedded in the VMAF JSON (via feature=name=vif), so
@@ -1350,11 +1343,10 @@ class QualityEvaluator:
 
         resolved_title    = bar_title if bar_title is not None \
             else encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
-        _metrics_run      = [m for m in MetricType if m.info.complexity > 0]
-        _total_complexity = sum(1.0 + m.info.complexity / subsample_factor for m in _metrics_run)
+        _total_complexity = duration_seconds or 0.0  # single ffmpeg run, linear time
 
         if show_progress:
-            with ProgressBar(_total_complexity * (duration_seconds or 0.0), title=f"Metrics: {resolved_title}", show_counters=False) as advance:
+            with ProgressBar(_total_complexity, title=f"Metrics: {resolved_title}", show_counters=False) as advance:
                 artifacts = await self._generate_metrics(
                     encoded, reference, ref_crop,
                     output_prefix    = str(cwd / f"{encoded.stem}."),
@@ -1435,11 +1427,10 @@ class QualityEvaluator:
             pass
 
         bar_title         = encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
-        _metrics_run      = [m for m in MetricType if m.info.complexity > 0]
-        _total_complexity = sum(1.0 + m.info.complexity / subsample_factor for m in _metrics_run)
+        _total_complexity = duration_seconds or 0.0  # single ffmpeg run, linear time
 
         if show_progress:
-            with ProgressBar(_total_complexity * (duration_seconds or 0.0), title=f"Metrics: {bar_title}", show_counters=False) as advance:
+            with ProgressBar(_total_complexity, title=f"Metrics: {bar_title}", show_counters=False) as advance:
                 artifacts = asyncio.run(
                     self._generate_metrics(
                         encoded, reference, ref_crop,

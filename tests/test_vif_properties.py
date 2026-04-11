@@ -344,9 +344,9 @@ def test_normalize_formula_correctness(
         display_unit      = "",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        complexity        = 1.0,
         comparison_range  = 10.0,
         acceptance_delta  = 0.2,
+        subsample_via_filter = False,
     )
     result   = test_info.normalize(raw)
     expected = offset + raw * scale
