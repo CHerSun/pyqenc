@@ -101,6 +101,15 @@ def _add_pipeline_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+_QUALITY_TARGET_HELP: str = (
+    "Quality targets as comma-separated metric-stat:value pairs "
+    "(e.g. 'vmaf-min:95,ssim-med:98,vif-min:95'). "
+    "All metrics are normalized to 0–100 where 100 = lossless. "
+    "Landmarks: VMAF 95+ good, SSIM 98+ good, PSNR 40–60 typical, VIF 95+ good. "
+    "If not specified, uses default from config file."
+)
+
+
 def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
     """Add quality-related arguments.
 
@@ -113,9 +122,7 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="QUALITY_TARGETS",
         dest="quality_target",
-        help="Quality targets (e.g., 'vmaf-min:95,ssim-med:98'). "
-             "If not specified, uses default from config file. "
-             "NOTE: all metrics are scaled to 0-100 range (e.g. ssim-med:98 means raw SSIM ≥ 0.98)."
+        help=_QUALITY_TARGET_HELP,
     )
     parser.add_argument(
         "--strategies",

@@ -8,7 +8,7 @@ algorithms for iterative encoding optimization.
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 from os import PathLike
@@ -38,25 +38,35 @@ class MetricInfo:
     Single source of truth for normalization, display, and CRF search behaviour.
     Accessed via ``MetricType.PSNR.info``, etc.
 
+    Public fields: ``name``, ``id``, ``higher_is_better``, ``lossless_value``,
+    ``lossless_raw_repr``, ``display_unit``, ``plot_y_min``, ``plot_y_max``,
+    ``complexity``, ``comparison_range``, ``acceptance_delta``.
+
+    Internal fields (not part of public API — used only by ``normalize()``):
+    ``_offset``, ``_scale_factor``, ``_clip_lower``, ``_clip_upper``.
+
     Attributes:
         name:              Human-readable display name (e.g. ``"PSNR"``).
         id:                Lowercase string key matching ``MetricType.value``
                            (e.g. ``"psnr"``).  Used for dict keys and filenames.
         higher_is_better:  ``True`` when a higher normalized value is better
-                           (VMAF, SSIM, PSNR).  ``False`` for metrics like VIF
-                           where 0 is lossless and higher means worse.
-        scale_factor:      Multiply the raw value by this before clipping.
-                           SSIM raw range is 0–1, so ``scale_factor=100.0``.
-                           All others use ``1.0``.
-        clip_upper:        After scaling, clip values above this threshold.
+                           (VMAF, SSIM, PSNR, VIF after normalization).
+        _offset:           Additive offset applied before scaling in the
+                           normalization formula: ``normalized = _offset + raw * _scale_factor``.
+                           VIF uses ``100.0`` (inverts the scale); all others use ``0.0``.
+        _scale_factor:     Multiply the raw value by this after adding ``_offset``.
+                           SSIM raw range is 0–1, so ``_scale_factor=100.0``.
+                           VIF uses ``-1.0`` to invert. All others use ``1.0``.
+        _clip_upper:       After applying the formula, clip values above this threshold.
                            ``None`` means no upper clipping.
                            PSNR: ``100.0`` (caps ∞ dB).
-        clip_lower:        After scaling, clip values below this threshold.
+        _clip_lower:       After applying the formula, clip values below this threshold.
                            ``None`` means no lower clipping.
+                           VIF: ``0.0`` (prevents negative normalized values).
         lossless_value:    Normalized value that represents lossless quality
-                           (e.g. ``100.0`` for VMAF/SSIM/PSNR, ``0.0`` for VIF).
+                           (``100.0`` for all current metrics after normalization).
         lossless_raw_repr: Human-readable string for the raw lossless value
-                           (e.g. ``"∞ dB"`` for PSNR, ``"100.0"`` for SSIM/VMAF).
+                           (e.g. ``"∞ dB"`` for PSNR, ``"100.0"`` for SSIM/VMAF/VIF).
         display_unit:      Unit suffix for display (e.g. ``" dB"``, ``"%"``).
         plot_y_min:        Lower bound for the Y-axis in plots (normalized scale).
         plot_y_max:        Upper bound for the Y-axis in plots (normalized scale).
@@ -231,9 +241,9 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         name              = "VIF",
         id                = "vif",
         higher_is_better  = True,
-        _offset           = 100.0,
-        _scale_factor     = -1.0,
-        _clip_upper       = None,
+        _offset           = 0.0,
+        _scale_factor     = 100.0,
+        _clip_upper       = 100.0,
         _clip_lower       = 0.0,
         lossless_value    = 100.0,
         lossless_raw_repr = "100.0",
@@ -371,6 +381,7 @@ async def run_metric(
         vmaf_ext = output_extension if output_extension is not None else ".json"
         filter_metric = (
             f"{lib}={options}log_path={output_prefix}{metric.value}{vmaf_ext}:log_fmt=json"
+            f":feature=name=vif"
         )
     elif metric == MetricType.SSIM:
         ssim_ext = output_extension if output_extension is not None else ".log"
@@ -403,19 +414,23 @@ async def run_metric(
 class QualityArtifacts:
     """Artifacts generated during quality evaluation.
 
+    All log paths point to ``.tmp``-suffixed files during their lifetime —
+    they are never renamed to canonical names.  Each file is deleted
+    immediately after successful parsing by ``analyze_chunk_quality``.
+
     Attributes:
-        psnr_log: Path to PSNR log file
-        ssim_log: Path to SSIM log file
-        vmaf_json: Path to VMAF JSON file
-        plot: Path to unified metrics plot
-        stats_files: Paths to individual statistics files
+        psnr_log:  Path to PSNR ``.tmp`` log file, or ``None`` if not generated.
+        ssim_log:  Path to SSIM ``.tmp`` log file, or ``None`` if not generated.
+        vmaf_json: Path to VMAF ``.tmp`` JSON file, or ``None`` if not generated.
+        vif_log:   Path to VIF ``.tmp`` log file, or ``None`` if not generated.
+        plot:      Path to unified metrics PNG plot, or ``None`` before plotting.
     """
 
-    psnr_log: Path | None = None
-    ssim_log: Path | None = None
+    psnr_log:  Path | None = None
+    ssim_log:  Path | None = None
     vmaf_json: Path | None = None
-    plot: Path | None = None
-    stats_files: list[Path] = field(default_factory=list)
+    vif_log:   Path | None = None
+    plot:      Path | None = None
 
 
 @dataclass

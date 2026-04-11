@@ -313,9 +313,10 @@ class QualityTarget(BaseModel):
             metric, statistic = metric_stat.split("-")
             value = float(value_str)
 
-            valid_metrics = {"vmaf", "ssim", "psnr"}
+            from pyqenc.quality import MetricType  # deferred to avoid circular import
+            valid_metrics = {m.value for m in MetricType}
             if metric.lower() not in valid_metrics:
-                raise ValueError(f"Invalid metric '{metric}'. Must be one of: {valid_metrics}")
+                raise ValueError(f"Invalid metric '{metric}'. Must be one of: {sorted(valid_metrics)}")
 
             valid_stats = {"min", "med", "median", "max", "p05", "p25", "p75", "p95"}
             if statistic.lower() not in valid_stats:

@@ -695,7 +695,6 @@ async def run_measure(
     """
     from pyqenc.constants import (
         MEASURE_DIR,
-        METRICS_SUBDIR_SUFFIX,
         SCREENSHOTS_SUBDIR_SUFFIX,
     )
     from pyqenc.utils.log_format import fmt_key_value_table
@@ -766,23 +765,29 @@ async def run_measure(
     source_stem            = source_video.stem
     source_screenshots_dir = measure_dir / f"{source_stem}{SCREENSHOTS_SUBDIR_SUFFIX}"
 
-    metrics_dirs:             dict[Path, Path]  = {}
-    target_screenshots_dirs:  dict[Path, Path]  = {}
-    graph_paths:              dict[Path, Path]  = {}
-    sidecar_paths:            dict[Path, Path]  = {}
+    target_screenshots_dirs: dict[Path, Path] = {}
+    graph_paths:             dict[Path, Path] = {}
+    sidecar_paths:           dict[Path, Path] = {}
 
     for target_video in target_videos:
         stem = target_video.stem
-        metrics_dirs[target_video]            = measure_dir / f"{stem}{METRICS_SUBDIR_SUFFIX}"
         target_screenshots_dirs[target_video] = measure_dir / f"{stem}{SCREENSHOTS_SUBDIR_SUFFIX}"
         graph_paths[target_video]             = measure_dir / f"{stem}.png"
         sidecar_paths[target_video]           = measure_dir / f"{stem}.yaml"
 
     # Create all directories upfront
+    measure_dir.mkdir(parents=True, exist_ok=True)
     source_screenshots_dir.mkdir(parents=True, exist_ok=True)
     for target_video in target_videos:
-        metrics_dirs[target_video].mkdir(parents=True, exist_ok=True)
         target_screenshots_dirs[target_video].mkdir(parents=True, exist_ok=True)
+
+    # Startup cleanup: remove any stale .tmp metric files from interrupted runs
+    for tmp_file in measure_dir.glob("*.tmp"):
+        try:
+            tmp_file.unlink()
+            logger.debug("Cleaned up stale tmp file: %s", tmp_file.name)
+        except Exception as exc:
+            logger.warning("Could not delete stale tmp file %s: %s", tmp_file.name, exc)
 
     # Probe durations
     source_duration: float | None = source_meta.duration_seconds
@@ -920,7 +925,7 @@ async def run_measure(
             target_video     = target_video,
             crop_params      = resolved_crop,
             width            = width,
-            metrics_dir      = metrics_dirs[target_video],
+            metrics_dir      = measure_dir,
             graph_path       = graph_paths[target_video],
             subsample_factor = metrics_sampling,
             bar_title        = f"target {idx}",
