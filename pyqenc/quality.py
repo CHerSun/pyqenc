@@ -294,14 +294,6 @@ class _MetricStatistics(TypedDict):
     std: float
 
 
-@dataclass
-class MetricData:
-    """Pure data container for a single metric (DataFrame + column name)."""
-
-    df:     pd.DataFrame
-    column: str
-
-
 async def run_metrics(
     metrics:           Iterable[MetricType],
     distorted:         Path,

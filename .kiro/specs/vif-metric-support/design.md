@@ -11,6 +11,7 @@ Compared against related specs (by created/completed date order):
 - **unified-metrics-visualization** (2026-03-15): `_save_stats_file` and `_cleanup_raw_metric_files` referenced in that spec's design are removed by this spec. The bar subplot and summary box loops previously hardcoded to `[PSNR, SSIM, VMAF]` are now dynamic over the `metrics` dict.
 - **standalone-measure** (2025-07-17, updated 2026-04-03): The `Metrics_Subdir` (`<stem>.metrics/`) layout described in that spec's Req 3.4 is superseded — `run_measure` now writes `.tmp` files directly into `measure_dir`. The `METRICS_SUBDIR_SUFFIX` constant is no longer imported or used inside `run_measure`.
 - **pipeline-correctness-refactor** (2026-03-16): No conflicts. `QualityArtifacts` changes (removing `stats_files`, adding `vif_log`) are additive.
+- **all-in-one-metrics** (2026-04-11, supersedes parts of this spec): The `run_metric` + `asyncio.gather` pattern designed here is replaced by a single `run_metrics` call using `split[]`. The `vif` lavfi filter and its plain-text log format are superseded — VIF is now embedded in the VMAF pass via `feature=name=vif` and parsed from the VMAF JSON. `MetricData` is removed. `MetricInfo.complexity` is removed. `_extract_key_stats` is made public. `create_unified_plot` now accepts `pd.DataFrame`.
 
 ## Overview
 

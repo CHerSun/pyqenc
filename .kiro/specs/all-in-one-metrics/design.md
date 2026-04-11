@@ -2,6 +2,18 @@
 <!-- markdownlint-disable MD024 -->
 
 - Created: 2026-04-11
+- Completed: 2026-04-11
+
+## Cross-Spec Notes
+
+Compared against **vif-metric-support** (created 2025-07-22, completed 2026-04-10):
+
+- **`run_metric` → `run_metrics`**: `vif-metric-support` ran 4 separate ffmpeg processes via `asyncio.gather`. This spec replaces that with a single `run_metrics` call using `split[]` filter graph — ~40% wall-clock saving at factor=3.
+- **VIF filter changed**: `vif-metric-support` used the standalone `vif` lavfi filter (plain-text log, `n:0 vif_scale0:… vif:…` format). This spec embeds VIF inside the VMAF pass via `feature=name=vif`; `parse_vif_file` now reads from the VMAF JSON (`integer_vif_scale0`–`integer_vif_scale3`), not a separate log file.
+- **`MetricData` removed**: The `MetricData(df, column)` wrapper introduced in `vif-metric-support` is gone. All pipeline functions now work with `pd.DataFrame` directly.
+- **`complexity` field removed from `MetricInfo`**: Was used for progress bar weighting across N processes. With a single process, `_total_complexity = duration_seconds` and weight = `1.0`.
+- **`_extract_key_stats` → `extract_key_stats`**: Made public as part of the composable API: `parse_metrics` → `normalize_metrics` → `compute_metric_stats` → `create_unified_plot`.
+- **`create_unified_plot` signature**: Changed from `dict[MetricType, MetricData]` to `df_norm: pd.DataFrame`.
 
 ## Overview
 

@@ -26,13 +26,11 @@ from pyqenc.constants import (
 from pyqenc.models import CropParams, QualityTarget
 from pyqenc.quality import (
     ChunkQualityStats,
-    MetricData,
     MetricStats,
     MetricType,
     QualityArtifacts,
     QualityEvaluation,
     _MetricStatistics,
-    normalize_metric,
     run_metrics,
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
@@ -444,7 +442,7 @@ DEFAULT_METRIC_STYLES: dict[MetricType, MetricVisualStyle] = {
 # ---------------------------------------------------------------------------
 
 def create_unified_plot(
-    metrics:             dict[MetricType, MetricData],
+    df_norm:             pd.DataFrame,
     factor:              int,
     output_path:         Path,
     title:               str                                  = "Video Quality Metrics Analysis",
@@ -460,7 +458,9 @@ def create_unified_plot(
     - Per-metric statistics bar subplots below the main plot.
 
     Args:
-        metrics:             Mapping of ``MetricType`` to ``MetricData``.
+        df_norm:             Normalized DataFrame (output of ``normalize_metrics``),
+                             indexed by ``frameNum`` with one column per metric
+                             (column names are ``MetricType.value`` strings).
         factor:              Frame sampling factor used during metric generation.
         output_path:         Destination path for the saved PNG.
         title:               Plot title.
@@ -479,8 +479,17 @@ def create_unified_plot(
         Mapping of ``MetricType`` to full ``_MetricStatistics``.
 
     Raises:
-        ValueError: If ``metrics`` is empty.
+        ValueError: If ``df_norm`` contains no recognized metric columns.
     """
+    # Derive per-metric Series from DataFrame columns
+    metrics: dict[MetricType, pd.Series] = {}
+    for col in df_norm.columns:
+        try:
+            mt = MetricType(col)
+        except ValueError:
+            continue
+        metrics[mt] = df_norm[col]
+
     if not metrics:
         raise ValueError("No valid metrics provided for visualization")
 
@@ -508,7 +517,6 @@ def create_unified_plot(
     has_ssim:               bool = MetricType.SSIM in metrics
     has_vmaf:               bool = MetricType.VMAF in metrics
     has_percentage_metrics: bool = has_ssim or has_vmaf or (MetricType.VIF in metrics)
-
     ax_left:  plt.Axes | None = None
     ax_right: plt.Axes | None = None
 
@@ -560,14 +568,12 @@ def create_unified_plot(
     # Compute frame offset from chunk start so x-axis reflects source timestamps
     frame_offset: float = chunk_start_seconds * fps if (fps is not None and fps > 0) else 0.0
 
-    # Scale metrics to display range using each metric's MetricInfo descriptor.
-    # All subsequent code uses scaled_values exclusively.
+    # Values are already normalized (df_norm); build index map per metric.
     scaled_values: dict[MetricType, pd.Series] = {}
     frame_index:   dict[MetricType, pd.Index]  = {}
-    for metric_type, metric_data in metrics.items():
-        vals = metric_data.df[metric_data.column].copy()
-        scaled_values[metric_type] = metric_type.info.normalize(vals)
-        frame_index[metric_type]   = metric_data.df.index
+    for metric_type, series in metrics.items():
+        scaled_values[metric_type] = series
+        frame_index[metric_type]   = series.index
 
     if fps is not None and fps > 0:
         # Capture total_frames before converting index to seconds
@@ -797,6 +803,19 @@ def create_unified_plot(
 # High-level API
 # ---------------------------------------------------------------------------
 
+# All four metrics run together in a single ffmpeg pass.
+_metrics_all: list[MetricType] = list(MetricType)
+
+
+def _is_known_metric(col: str) -> bool:
+    """Return ``True`` if *col* is a recognized ``MetricType.value``."""
+    try:
+        MetricType(col)
+        return True
+    except ValueError:
+        return False
+
+
 def _extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -> MetricStats:
     """Extract the key statistics subset from a full statistics dict.
 
@@ -830,6 +849,135 @@ def _extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -
     }
 
 
+def parse_metrics(artifacts: QualityArtifacts, factor: int = 1) -> pd.DataFrame:
+    """Parse all available metric files from *artifacts* into a single DataFrame.
+
+    Dispatches to the individual parsers (``parse_psnr_file``, ``parse_ssim_file``,
+    ``parse_vmaf_file``, ``parse_vif_file``) for each non-``None``, existing path
+    in *artifacts*.  Results are joined via ``pd.concat(..., axis=1)`` on the shared
+    ``frameNum`` index.
+
+    Frame number alignment at factor *F*:
+    - PSNR/SSIM: raw ``n`` is 1-based sequential; parser maps to ``(n-1)*F`` → ``{0, F, 2F, …}``
+    - VMAF/VIF: raw ``frameNum`` is the true video frame number → ``{0, F, 2F, …}``
+
+    All four metrics produce the same index at the same factor, so the inner join
+    is lossless with no NaN.
+
+    Individual parse failures are caught, logged as warnings, and that metric is
+    omitted from the result.
+
+    Args:
+        artifacts: ``QualityArtifacts`` with paths to metric files.
+        factor:    Frame sampling factor used during metric generation.
+
+    Returns:
+        DataFrame indexed by ``frameNum`` with one column per successfully parsed
+        metric (column names are ``MetricType.value`` strings).
+
+    Raises:
+        ValueError: If no metric files could be parsed.
+    """
+    # Map each metric to its parser and the relevant artifact path.
+    _parsers: list[tuple[MetricType, Path | None, object]] = [
+        (MetricType.PSNR, artifacts.psnr_log,  parse_psnr_file),
+        (MetricType.SSIM, artifacts.ssim_log,  parse_ssim_file),
+        (MetricType.VMAF, artifacts.vmaf_json, parse_vmaf_file),
+        (MetricType.VIF,  artifacts.vif_log,   parse_vif_file),
+    ]
+
+    frames: list[pd.DataFrame] = []
+    for metric_type, path, parser in _parsers:
+        if path is None or not path.exists():
+            continue
+        try:
+            df = parser(path, factor)  # type: ignore[operator]
+            frames.append(df)
+            logger.debug("parse_metrics: parsed %s (%d frames)", metric_type.value, len(df))
+        except Exception as exc:
+            logger.warning("parse_metrics: failed to parse %s from %s: %s", metric_type.value, path, exc)
+
+    if not frames:
+        raise ValueError(
+            "parse_metrics: no metric files could be parsed from artifacts. "
+            "At least one valid metric file (PSNR, SSIM, VMAF, or VIF) is required."
+        )
+
+    return pd.concat(frames, axis=1)
+
+
+def normalize_metrics(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """Convert raw metric values to the 0–100 display scale.
+
+    For each column whose name matches a ``MetricType.value``, applies
+    ``MetricType(col).info.normalize(series)``.  Columns not matching any
+    ``MetricType.value`` are passed through unchanged (forward-compatible).
+
+    Args:
+        df_raw: DataFrame with raw metric values (``frameNum`` index,
+                column names are ``MetricType.value`` strings).
+
+    Returns:
+        New DataFrame with the same index and columns, values on the 0–100 scale.
+    """
+    result = df_raw.copy()
+    for col in result.columns:
+        try:
+            mt = MetricType(col)
+        except ValueError:
+            continue  # unknown column — pass through unchanged
+        result[col] = mt.info.normalize(result[col])
+    return result
+
+
+def extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -> MetricStats:
+    """Extract the key statistics subset from a full statistics dict.
+
+    Public alias for the internal ``_extract_key_stats`` implementation.
+    For PSNR, substitutes the highest non-inf percentile for ``max`` when the
+    true maximum is infinite.
+
+    Args:
+        full_stats:  Full statistics dictionary from ``compute_statistics``.
+        metric_type: Metric type (affects PSNR max handling).
+
+    Returns:
+        ``MetricStats`` with ``min``, ``p05``, ``p25``, ``median``, ``p75``,
+        ``p95``, ``max``, and ``std``.
+    """
+    return _extract_key_stats(full_stats, metric_type)
+
+
+def compute_metric_stats(df_norm: pd.DataFrame) -> ChunkQualityStats:
+    """Compute key statistics for each metric column in a normalized DataFrame.
+
+    For each column whose name matches a ``MetricType.value``, calls
+    ``compute_statistics`` then ``extract_key_stats`` and stores the result.
+    Columns not matching any ``MetricType.value`` are silently skipped.
+
+    Args:
+        df_norm: Normalized DataFrame (output of ``normalize_metrics``).
+
+    Returns:
+        ``ChunkQualityStats`` mapping each recognized ``MetricType`` to its
+        ``MetricStats``.
+    """
+    result: ChunkQualityStats = {}
+    for col in df_norm.columns:
+        try:
+            mt = MetricType(col)
+        except ValueError:
+            continue
+        std_cutoff = 100.0 if mt == MetricType.PSNR else None
+        full = compute_statistics(df_norm[col], std_cutoff_max=std_cutoff)
+        result[mt] = extract_key_stats(full, mt)
+        logger.debug(
+            "compute_metric_stats: %s min=%.2f med=%.2f max=%.2f",
+            mt.value, result[mt]["min"], result[mt]["median"], result[mt]["max"],
+        )
+    return result
+
+
 def _auto_output_path(artifacts: "QualityArtifacts") -> Path:
     """Derive an output plot path from the first available metric file in *artifacts*."""
     first = artifacts.psnr_log or artifacts.ssim_log or artifacts.vmaf_json or artifacts.vif_log
@@ -841,17 +989,17 @@ def _auto_output_path(artifacts: "QualityArtifacts") -> Path:
 
 
 def analyze_chunk_quality(
-    psnr_log:            Path | None = None,
-    ssim_log:            Path | None = None,
-    vmaf_json:           Path | None = None,
-    vif_log:             Path | None = None,
-    factor:              int         = 1,
-    output_path:         Path | None = None,
-    title:               str | None  = None,
-    generate_plot:       bool        = True,
+    psnr_log:            Path | None  = None,
+    ssim_log:            Path | None  = None,
+    vmaf_json:           Path | None  = None,
+    vif_log:             Path | None  = None,
+    factor:              int          = 1,
+    output_path:         Path | None  = None,
+    title:               str | None   = None,
+    generate_plot:       bool         = True,
     fps:                 float | None = None,
-    chunk_start_seconds: float       = 0.0,
-    delete_after_parse:  bool        = True,
+    chunk_start_seconds: float        = 0.0,
+    delete_after_parse:  bool         = True,
 ) -> ChunkQualityStats:
     """Analyze video chunk quality from metric log files.
 
@@ -859,6 +1007,10 @@ def analyze_chunk_quality(
     generates a unified visualization plot.  Each raw ``.tmp`` log file is
     deleted immediately after successful parsing when ``delete_after_parse``
     is ``True`` (best-effort; a warning is logged on failure).
+
+    Internally uses the composable pipeline:
+    ``parse_metrics`` → ``normalize_metrics`` → ``compute_metric_stats``
+    → ``create_unified_plot``.
 
     Args:
         psnr_log:            Path to PSNR log file (optional).
@@ -882,124 +1034,55 @@ def analyze_chunk_quality(
     """
     from pyqenc.quality import QualityArtifacts
 
-    result:         ChunkQualityStats                    = ChunkQualityStats()
-    parsed_metrics: dict[MetricType, MetricData]         = {}
-    full_stats:     dict[MetricType, _MetricStatistics]  = {}
-    # Files to delete after all parsing is done (deferred so shared paths like
-    # vmaf_json/vif_log are not deleted before the second parser reads them).
-    to_delete: set[Path] = set()
+    artifacts = QualityArtifacts(
+        psnr_log  = psnr_log,
+        ssim_log  = ssim_log,
+        vmaf_json = vmaf_json,
+        vif_log   = vif_log,
+    )
 
-    # --- PSNR ---
-    if psnr_log is not None:
-        try:
-            logger.debug("Parsing PSNR log: %s", psnr_log)
-            df = parse_psnr_file(psnr_log, factor)
-            parsed_metrics[MetricType.PSNR] = MetricData(df=df, column=MetricType.PSNR.value)
-            fs = compute_statistics(df[MetricType.PSNR.value], std_cutoff_max=100.0)
-            full_stats[MetricType.PSNR]     = fs
-            result[MetricType.PSNR]         = _extract_key_stats(fs, MetricType.PSNR)
-            logger.debug("Parsed PSNR: %d frames", len(df))
-            if delete_after_parse:
-                to_delete.add(psnr_log)
-        except Exception as exc:
-            logger.warning("Failed to parse PSNR from %s: %s", psnr_log, exc)
+    # parse_metrics handles per-metric failures internally (logs warning, skips).
+    df_raw  = parse_metrics(artifacts, factor)
+    df_norm = normalize_metrics(df_raw)
+    result  = compute_metric_stats(df_norm)
 
-    # --- SSIM ---
-    if ssim_log is not None:
-        try:
-            logger.debug("Parsing SSIM log: %s", ssim_log)
-            df = parse_ssim_file(ssim_log, factor)
-            parsed_metrics[MetricType.SSIM] = MetricData(df=df, column=MetricType.SSIM.value)
-            fs = compute_statistics(df[MetricType.SSIM.value])
-            full_stats[MetricType.SSIM]     = fs
-            result[MetricType.SSIM]         = _extract_key_stats(fs, MetricType.SSIM)
-            logger.debug("Parsed SSIM: %d frames", len(df))
-            if delete_after_parse:
-                to_delete.add(ssim_log)
-        except Exception as exc:
-            logger.warning("Failed to parse SSIM from %s: %s", ssim_log, exc)
-
-    # --- VMAF ---
-    if vmaf_json is not None:
-        try:
-            logger.debug("Parsing VMAF JSON: %s", vmaf_json)
-            df = parse_vmaf_file(vmaf_json, factor)
-            parsed_metrics[MetricType.VMAF] = MetricData(df=df, column=MetricType.VMAF.value)
-            fs = compute_statistics(df[MetricType.VMAF.value])
-            full_stats[MetricType.VMAF]     = fs
-            result[MetricType.VMAF]         = _extract_key_stats(fs, MetricType.VMAF)
-            logger.debug("Parsed VMAF: %d frames", len(df))
-            if delete_after_parse:
-                to_delete.add(vmaf_json)
-        except Exception as exc:
-            logger.warning("Failed to parse VMAF from %s: %s", vmaf_json, exc)
-
-    # --- VIF ---
-    # vif_log points to the same file as vmaf_json (VIF data is embedded in the
-    # VMAF JSON via feature=name=vif). Using a set for to_delete ensures the
-    # shared path is only deleted once, after both parsers have read it.
-    if vif_log is not None:
-        try:
-            logger.debug("Parsing VIF from VMAF JSON: %s", vif_log)
-            df = parse_vif_file(vif_log, factor)
-            parsed_metrics[MetricType.VIF] = MetricData(df=df, column=MetricType.VIF.value)
-            fs = compute_statistics(df[MetricType.VIF.value])
-            full_stats[MetricType.VIF]     = fs
-            result[MetricType.VIF]         = _extract_key_stats(fs, MetricType.VIF)
-            logger.debug("Parsed VIF: %d frames", len(df))
-            if delete_after_parse:
-                to_delete.add(vif_log)
-        except Exception as exc:
-            logger.warning("Failed to parse VIF from %s: %s", vif_log, exc)
-
-    # Deferred deletion — all parsers have finished, safe to remove files now
-    for path in to_delete:
-        try:
-            path.unlink(missing_ok=True)
-            logger.debug("Deleted raw metric tmp file: %s", path.name)
-        except Exception as exc:
-            logger.warning("Could not delete metric tmp file %s: %s", path.name, exc)
-
-    if not parsed_metrics:
-        raise ValueError(
-            "No valid metrics could be parsed. "
-            "At least one valid metric file (PSNR, SSIM, VMAF, or VIF) is required."
-        )
-
-    # Normalize all stat values to 0–100 scale
-    for metric_type, stats in result.items():
-        if stats is not None:
-            for stat_key in ("min", "p05", "p25", "median", "p75", "p95", "max", "std"):
-                raw = stats.get(stat_key)
-                if raw is not None:
-                    stats[stat_key] = normalize_metric(metric_type, raw)  # type: ignore[literal-required]
+    # Deferred deletion — all parsers have finished, safe to remove files now.
+    # vif_log and vmaf_json may point to the same file; use a set to delete once.
+    if delete_after_parse:
+        to_delete: set[Path] = set()
+        for path in (psnr_log, ssim_log, vmaf_json, vif_log):
+            if path is not None and path.exists():
+                to_delete.add(path)
+        for path in to_delete:
+            try:
+                path.unlink(missing_ok=True)
+                logger.debug("Deleted raw metric tmp file: %s", path.name)
+            except Exception as exc:
+                logger.warning("Could not delete metric tmp file %s: %s", path.name, exc)
 
     # Single concise info summary
-    parts = []
-    for mt in [MetricType.VMAF, MetricType.PSNR, MetricType.SSIM, MetricType.VIF]:
-        if mt in result and result[mt] is not None:
-            s = result[mt]
-            parts.append(f"{mt.value.upper()} min={s['min']:.1f} med={s['median']:.1f}")
+    parts = [
+        f"{mt.value.upper()} min={result[mt]['min']:.1f} med={result[mt]['median']:.1f}"
+        for mt in [MetricType.VMAF, MetricType.PSNR, MetricType.SSIM, MetricType.VIF]
+        if mt in result
+    ]
     if parts:
         logger.debug("Metrics (normalized): %s", " | ".join(parts))
 
     if generate_plot:
-        artifacts = QualityArtifacts(
-            psnr_log=psnr_log, ssim_log=ssim_log, vmaf_json=vmaf_json, vif_log=vif_log,
-        )
         if output_path is None:
             output_path = _auto_output_path(artifacts)
         if title is None:
-            names = [mt.value.upper() for mt in parsed_metrics]
+            names = [col.upper() for col in df_norm.columns if _is_known_metric(col)]
             title = f"Video Quality Metrics Analysis ({', '.join(names)})"
         logger.debug("Generating unified plot: %s", output_path)
         create_unified_plot(
-            metrics=parsed_metrics,
-            factor=factor,
-            output_path=output_path,
-            title=title,
-            fps=fps,
-            chunk_start_seconds=chunk_start_seconds,
+            df_norm             = df_norm,
+            factor              = factor,
+            output_path         = output_path,
+            title               = title,
+            fps                 = fps,
+            chunk_start_seconds = chunk_start_seconds,
         )
         logger.debug("Plot saved to %s", output_path)
 
@@ -1499,18 +1582,47 @@ class QualityEvaluator:
         logger.debug("Parsing metrics and generating plots")
         resolved_plot_path = plot_path if plot_path is not None else output_dir / f"{encoded.stem}.png"
 
-        metrics = analyze_chunk_quality(
+        artifacts_for_parse = QualityArtifacts(
             psnr_log  = artifacts.psnr_log  if artifacts.psnr_log  is not None and artifacts.psnr_log.exists()  else None,
             ssim_log  = artifacts.ssim_log  if artifacts.ssim_log  is not None and artifacts.ssim_log.exists()  else None,
             vmaf_json = artifacts.vmaf_json if artifacts.vmaf_json is not None and artifacts.vmaf_json.exists() else None,
             vif_log   = artifacts.vif_log   if artifacts.vif_log   is not None and artifacts.vif_log.exists()   else None,
-            factor               = subsample_factor,
-            output_path          = resolved_plot_path,
-            title                = f"Quality metrics\n{encoded.stem.replace(TIME_SEPARATOR_MS, '.').replace(TIME_SEPARATOR_SAFE, ':')}",
-            generate_plot        = True,
-            fps                  = fps_value,
-            chunk_start_seconds  = chunk_start_seconds,
         )
+
+        df_raw  = parse_metrics(artifacts_for_parse, subsample_factor)
+        df_norm = normalize_metrics(df_raw)
+        metrics = compute_metric_stats(df_norm)
+
+        plot_title = (
+            f"Quality metrics\n"
+            f"{encoded.stem.replace(TIME_SEPARATOR_MS, '.').replace(TIME_SEPARATOR_SAFE, ':')}"
+        )
+        create_unified_plot(
+            df_norm             = df_norm,
+            factor              = subsample_factor,
+            output_path         = resolved_plot_path,
+            title               = plot_title,
+            fps                 = fps_value,
+            chunk_start_seconds = chunk_start_seconds,
+        )
+
+        # Delete tmp files after both parse_metrics and create_unified_plot have consumed them.
+        # vif_log and vmaf_json may share the same path — use a set.
+        to_delete: set[Path] = set()
+        for path in (
+            artifacts_for_parse.psnr_log,
+            artifacts_for_parse.ssim_log,
+            artifacts_for_parse.vmaf_json,
+            artifacts_for_parse.vif_log,
+        ):
+            if path is not None:
+                to_delete.add(path)
+        for path in to_delete:
+            try:
+                path.unlink(missing_ok=True)
+                logger.debug("Deleted raw metric tmp file: %s", path.name)
+            except Exception as exc:
+                logger.warning("Could not delete metric tmp file %s: %s", path.name, exc)
 
         artifacts.plot = resolved_plot_path
 
