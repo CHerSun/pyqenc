@@ -7,7 +7,7 @@ Refactor `pyqenc/phases/measure.py` to use exact-integer frame arithmetic for sc
 
 ## Tasks
 
-- [ ] 1. Add `fps_fraction` property to `VideoMetadata` in `pyqenc/models.py`
+- [x] 1. Add `fps_fraction` property to `VideoMetadata` in `pyqenc/models.py`
   - Add `_fps_fraction: Fraction | None = PrivateAttr(default=None)` backing field
   - Add `fps_fraction` lazy property that calls `_probe_metadata()` on first access
   - Extend `populate_from_ffprobe` to parse `avg_frame_rate` (e.g. `"24000/1001"`) into `_fps_fraction` using `Fraction(num, den)` — exact integer arithmetic, no float conversion; guard against zero denominator
@@ -15,7 +15,7 @@ Refactor `pyqenc/phases/measure.py` to use exact-integer frame arithmetic for sc
   - Extend `model_dump_full` / `model_validate_full` to round-trip `_fps_fraction` (serialize as `[num, den]` pair or skip if `None`)
   - _Requirements: 3.1, 3.6, 6.6_
 
-- [ ] 2. Add `ScreenshotPositions` dataclass to `pyqenc/phases/measure.py`
+- [x] 2. Add `ScreenshotPositions` dataclass to `pyqenc/phases/measure.py`
   - Add `@dataclass(frozen=True) class ScreenshotPositions` with fields `frame_nums: list[int]`, `fps: Fraction`, `step: int`
   - Implement `seek_ts(frame_num: int) -> str`: `(frame_num * 4 - 1) / (4 * fps)` serialized to 9 decimal places (guarantees seek lands before target frame)
   - Implement `filename_ts(frame_num: int) -> str`: `frame_num / fps` as `Fraction`, formatted to `HH꞉MM꞉SS․mmm` using `TIME_SEPARATOR_SAFE` and `TIME_SEPARATOR_MS`
@@ -32,7 +32,7 @@ Refactor `pyqenc/phases/measure.py` to use exact-integer frame arithmetic for sc
     - **Validates: Requirements 6.7**
     - Assert output matches `r'^\d{2}꞉\d{2}꞉\d{2}․\d{3}$'`
 
-- [ ] 3. Implement `compute_screenshot_positions` in `pyqenc/phases/measure.py`
+- [x] 3. Implement `compute_screenshot_positions` in `pyqenc/phases/measure.py`
   - Signature: `def compute_screenshot_positions(total_frames: int, fps: Fraction, count: int, include_edges: bool = False) -> ScreenshotPositions`
   - `step = total_frames // (count + 1)`; interior positions `[step, 2*step, ..., count*step]`
   - When `include_edges=True`: prepend `0`, append `total_frames - 1`
@@ -49,7 +49,7 @@ Refactor `pyqenc/phases/measure.py` to use exact-integer frame arithmetic for sc
     - **Validates: Requirements 3.6**
     - Call twice with same args, assert equal
 
-- [ ] 4. Implement `make_screenshots` public function in `pyqenc/phases/measure.py`
+- [x] 4. Implement `make_screenshots` public function in `pyqenc/phases/measure.py`
   - Signature: `async def make_screenshots(video_path: Path, positions: ScreenshotPositions, screenshots_dir: Path, crop_params: CropParams | None = None) -> list[Path]`
   - **Strategy C (primary)**: for each `frame_num` in `positions.frame_nums`, run `ffmpeg -ss <seek_ts> -i <video> [-vf crop] -frames:v 1 <filename_ts>_<stem>.png` via `run_ffmpeg_async`; collect output paths; use `.tmp`-then-rename protocol for each file
   - **Strategy A2 (fallback)**: if Strategy C yields zero files, log WARNING and run single-pass `ffmpeg -i <video> -vf select='eq(n,F1)+eq(n,F2)+...'[-,crop] -vsync 0 %04d.png` into a temp dir, then rename using `filename_ts`
@@ -66,7 +66,7 @@ Refactor `pyqenc/phases/measure.py` to use exact-integer frame arithmetic for sc
     - **Validates: Requirements 5.1, 5.4**
     - Assert `screenshots_dir.name == video_path.stem` (no suffix) for any video path
 
-- [ ] 5. Refactor `run_measure` orchestration in `pyqenc/phases/measure.py`
+- [x] 5. Refactor `run_measure` orchestration in `pyqenc/phases/measure.py`
   - Add `screenshot_include_edges: bool = False` parameter to `run_measure`
   - Replace `SCREENSHOTS_SUBDIR_SUFFIX`-based dir naming with `{stem}` directly (no suffix)
   - Execution order: (1) `compute_screenshot_positions(source_meta.frame_count, source_meta.fps_fraction, count, include_edges)`, (2) `logger.info("Taking %d screenshots of %s...", N, source.stem)` → `make_screenshots(source, positions, source_dir, crop)`, (3) for each target: `logger.info(...)` → `make_screenshots(target, positions, target_dir)`, (4) `logger.info("Screenshots taken: %d out of %d %s", taken, expected, symbol)`, (5) for each target: ProgressBar `Measuring target N <stem>` → `_run_metrics(...)`
@@ -75,7 +75,7 @@ Refactor `pyqenc/phases/measure.py` to use exact-integer frame arithmetic for sc
   - Update `TargetMeasureResult.screenshots_dir` and `MeasureResult.source_screenshots_dir` to use the new `{stem}` naming
   - _Requirements: 1.1, 1.2, 1.3, 3.1, 3.4, 5.1, 7.1, 7.2_
 
-- [ ] 6. Implement `_log_measure_summary` in `pyqenc/phases/measure.py`
+- [x] 6. Implement `_log_measure_summary` in `pyqenc/phases/measure.py`
   - Signature: `def _log_measure_summary(targets: list[TargetMeasureResult]) -> None`
   - Emit header + separator + one data row per target via `logger.info`
   - Columns: target stem (truncated to 30 chars), file size via `_fmt_size_mb`, per-metric median via `fmt_metric_value` for each `MetricType` that appears in any target's `metrics`; `N/A` for absent metrics
@@ -94,19 +94,19 @@ Refactor `pyqenc/phases/measure.py` to use exact-integer frame arithmetic for sc
     - **Validates: Requirements 1.5**
     - Run `run_measure` with mocked sub-operations; assert no INFO record matches `r'\w+ median: \d'`
 
-- [ ] 7. Remove `SCREENSHOTS_SUBDIR_SUFFIX` from `constants.py` and all usages
+- [x] 7. Remove `SCREENSHOTS_SUBDIR_SUFFIX` from `constants.py` and all usages
   - Delete the `SCREENSHOTS_SUBDIR_SUFFIX = ".screenshots"` line from `pyqenc/constants.py`
   - Search and remove all remaining imports and usages across the codebase (`pyqenc/phases/measure.py`, any other files)
   - Verify no references remain with a grep pass
   - _Requirements: 5.2, 5.3_
 
-- [ ] 8. Update `measure_quality` in `pyqenc/api.py`
+- [x] 8. Update `measure_quality` in `pyqenc/api.py`
   - Add `screenshot_include_edges: bool = False` parameter to `measure_quality`
   - Pass `screenshot_include_edges` through to `run_measure`
   - Update the docstring to document the new parameter
   - _Requirements: 9.1, 9.2, 9.4_
 
-- [ ] 9. Checkpoint — ensure all tests pass
+- [x] 9. Checkpoint — ensure all tests pass
   - Run `uv run python -m pytest tests/` and fix any failures before continuing.
 
 - [ ] 10. Write property-based tests in `tests/test_measure_properties.py`
@@ -115,7 +115,7 @@ Refactor `pyqenc/phases/measure.py` to use exact-integer frame arithmetic for sc
     - **Validates: Requirements 1.1, 1.2**
     - Mock `make_screenshots`; assert `"Taking N screenshots of"` INFO line emitted before capture and `"Screenshots taken:"` INFO line emitted after all videos
 
-- [ ] 11. Cross-spec review
+- [x] 11. Cross-spec review
   - Compare this spec against `all-in-one-metrics` and `vif-metric-support` specs (check created/completed dates and file timestamps to establish timeline)
   - Note any interfaces changed by those specs that affect `run_measure`, `_run_metrics`, `QualityArtifacts`, or `analyze_chunk_quality`
   - Add a brief summary comment at the top of this spec's `requirements.md` and `design.md` noting differences

@@ -2,6 +2,23 @@
 <!-- markdownlint-disable MD024 -->
 
 - Created: 2026-05-01
+- Completed: 2026-05-01
+
+## Cross-Spec Notes
+
+Timeline (by created/completed dates):
+- **standalone-measure** (2025-07-17, updated 2026-04-03) — predecessor spec
+- **vif-metric-support** (2025-07-22, completed 2026-04-10) — added VIF metric
+- **all-in-one-metrics** (2026-04-11, completed 2026-04-11) — single-pass metrics
+- **measure-phase-ux-overhaul** (2026-05-01, this spec) — screenshot + UX overhaul
+
+Compared against **all-in-one-metrics** (completed 2026-04-11) and **vif-metric-support** (completed 2026-04-10):
+
+- **`_run_metrics` bar_title**: `all-in-one-metrics` changed `_generate_metrics` to use a single ffmpeg pass. This spec passes `bar_title = f"Measuring target {idx} {target_video.stem}"` to `_run_metrics` → `evaluate_chunk_async` `bar_title` parameter — compatible with the new single-pass runner.
+- **`METRICS_SUBDIR_SUFFIX` already removed**: `vif-metric-support` Req 12.7 removed per-target `<stem>.metrics/` subdirectories — raw `.tmp` files go directly into `measure_dir`. This spec's `run_measure` already writes to `measure_dir` directly, consistent with that change.
+- **`QualityArtifacts.stats_files` removed**: `vif-metric-support` Req 12.6 removed this field. This spec does not reference it.
+- **VIF in summary table**: `_log_measure_summary` iterates `t.metrics` dynamically — VIF rows appear automatically when VIF is measured, no special-casing needed.
+- **`screenshot_interval` removed**: The old `run_measure` accepted `screenshot_interval: float | None` for interval-based capture. This spec replaces that with frame-count-based `ScreenshotPositions` — the `--every` CLI flag and `screenshot_interval` API parameter are removed. Count-based capture is now the only mode.
 
 ## Glossary
 

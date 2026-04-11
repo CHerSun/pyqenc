@@ -766,7 +766,7 @@ def _create_measure_subcommand(subparsers) -> None:
         type=int,
         default=DEFAULT_SCREENSHOT_COUNT,
         metavar="N",
-        help=f"Screenshots to capture from each video (default: {DEFAULT_SCREENSHOT_COUNT}, min 1)",
+        help=f"Screenshots to capture from each video (default: {DEFAULT_SCREENSHOT_COUNT}, min 1). In interval mode (--every), acts as a cap.",
     )
     p.add_argument(
         "--every",
@@ -777,6 +777,13 @@ def _create_measure_subcommand(subparsers) -> None:
             "Capture one screenshot per interval (e.g. 30, 30s, 5m, 1h30m). "
             "Can be combined with --screenshots to cap the total count."
         ),
+    )
+    p.add_argument(
+        "--include-edges",
+        action="store_true",
+        default=False,
+        dest="screenshot_include_edges",
+        help="Include frame 0 and the last frame in screenshot positions (count mode only, default: off).",
     )
     p.set_defaults(func=_cmd_measure)
 
@@ -798,14 +805,15 @@ def _cmd_measure(args: argparse.Namespace) -> int:
 
     try:
         measure_quality(
-            source_video         = args.source,
-            target_videos        = args.targets,
-            work_dir             = args.work_dir,
-            crop_params          = crop_params,
-            metrics_sampling     = metrics_sampling,
-            screenshot_count     = args.screenshots,
-            screenshot_interval  = args.every,
-            width                = args.width,
+            source_video             = args.source,
+            target_videos            = args.targets,
+            work_dir                 = args.work_dir,
+            crop_params              = crop_params,
+            metrics_sampling         = metrics_sampling,
+            screenshot_count         = args.screenshots,
+            screenshot_interval      = args.every,
+            screenshot_include_edges = args.screenshot_include_edges,
+            width                    = args.width,
         )
         return 0
     except FileNotFoundError as e:

@@ -15,6 +15,11 @@ Compared against **vif-metric-support** (created 2025-07-22, completed 2026-04-1
 - **`_extract_key_stats` made public**: Renamed to `extract_key_stats` and exposed as part of the clean metrics API alongside `parse_metrics`, `normalize_metrics`, and `compute_metric_stats`.
 - **`create_unified_plot` signature changed**: Now accepts `df_norm: pd.DataFrame` instead of `dict[MetricType, MetricData]`.
 
+Compared against **measure-phase-ux-overhaul** (created 2026-05-01, completed 2026-05-01):
+
+- **`bar_title` parameter**: This spec's single-pass `_generate_metrics` receives `bar_title` from `run_measure`. The UX overhaul spec passes `f"Measuring target {idx} {target_video.stem}"` — compatible with no changes needed here.
+- **`measure_dir` as metrics output**: `vif-metric-support` Req 12.7 already removed `<stem>.metrics/` subdirs. The UX overhaul spec confirms `run_measure` writes directly to `measure_dir` — no conflict.
+
 ## Overview
 
 Two goals in one spec:

@@ -15,6 +15,7 @@ import subprocess
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum, IntEnum
+from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -54,7 +55,7 @@ def _run_ffprobe_streams(path: Path) -> dict | None:
         "ffprobe",
         "-v", "error",
         "-select_streams", "v:0",
-        "-show_entries", "stream=duration,r_frame_rate,width,height,pix_fmt:format=duration",
+        "-show_entries", "stream=duration,r_frame_rate,avg_frame_rate,width,height,pix_fmt:format=duration",
         "-of", "json",
         str(path),
     ]
@@ -471,12 +472,13 @@ class VideoMetadata(BaseModel):
     path: Path
 
     # Backing fields — populated lazily or via populate_from_* helpers.
-    _duration_seconds: float | None = PrivateAttr(default=None)
-    _frame_count:      int   | None = PrivateAttr(default=None)
-    _fps:              float | None = PrivateAttr(default=None)
-    _resolution:       str   | None = PrivateAttr(default=None)
-    _pix_fmt:          str   | None = PrivateAttr(default=None)
-    _file_size_bytes:  int   | None = PrivateAttr(default=None)
+    _duration_seconds: float    | None = PrivateAttr(default=None)
+    _frame_count:      int      | None = PrivateAttr(default=None)
+    _fps:              float    | None = PrivateAttr(default=None)
+    _fps_fraction:     Fraction | None = PrivateAttr(default=None)
+    _resolution:       str      | None = PrivateAttr(default=None)
+    _pix_fmt:          str      | None = PrivateAttr(default=None)
+    _file_size_bytes:  int      | None = PrivateAttr(default=None)
 
     # ------------------------------------------------------------------
     # Lazy properties
@@ -495,6 +497,13 @@ class VideoMetadata(BaseModel):
         if self._fps is None:
             self._probe_metadata()
         return self._fps
+
+    @property
+    def fps_fraction(self) -> Fraction | None:
+        """Exact rational FPS as a Fraction; probed on first access via avg_frame_rate."""
+        if self._fps_fraction is None:
+            self._probe_metadata()
+        return self._fps_fraction
 
     @property
     def resolution(self) -> str | None:
@@ -608,6 +617,17 @@ class VideoMetadata(BaseModel):
             if pix_fmt:
                 self._pix_fmt = str(pix_fmt)
 
+        if self._fps_fraction is None:
+            avg_fps_str = stream.get("avg_frame_rate", "")
+            if avg_fps_str and "/" in avg_fps_str:
+                try:
+                    num_s, den_s = avg_fps_str.split("/")
+                    num, den = int(num_s), int(den_s)
+                    if den != 0:
+                        self._fps_fraction = Fraction(num, den)
+                except (ValueError, TypeError):
+                    pass
+
     def populate_from_ffmpeg_output(self, stderr_lines: list[str]) -> None:
         """Fill backing fields by parsing ffmpeg stderr output.
 
@@ -688,6 +708,8 @@ class VideoMetadata(BaseModel):
         ]:
             if value is not None:
                 base[key] = value
+        if self._fps_fraction is not None:
+            base["fps_fraction"] = [self._fps_fraction.numerator, self._fps_fraction.denominator]
         return base
 
     @classmethod
@@ -702,6 +724,9 @@ class VideoMetadata(BaseModel):
         instance._resolution       = data.get("resolution")
         instance._pix_fmt          = data.get("pix_fmt")
         instance._file_size_bytes  = data.get("file_size_bytes")
+        fps_frac = data.get("fps_fraction")
+        if isinstance(fps_frac, list) and len(fps_frac) == 2:
+            instance._fps_fraction = Fraction(int(fps_frac[0]), int(fps_frac[1]))
         return instance
 
 
@@ -731,6 +756,9 @@ class ChunkMetadata(VideoMetadata):
         instance._resolution       = data.get("resolution")
         instance._pix_fmt          = data.get("pix_fmt")
         instance._file_size_bytes  = data.get("file_size_bytes")
+        fps_frac = data.get("fps_fraction")
+        if isinstance(fps_frac, list) and len(fps_frac) == 2:
+            instance._fps_fraction = Fraction(int(fps_frac[0]), int(fps_frac[1]))
         return instance
 
 

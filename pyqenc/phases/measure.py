@@ -10,8 +10,8 @@ from __future__ import annotations
 import logging
 import re
 import shutil
-import tempfile
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 from pyqenc.constants import (
@@ -49,6 +49,119 @@ class MeasureResult:
 
     source_screenshots_dir: Path                      # <source_stem>.screenshots/ in measure_dir
     targets:                list[TargetMeasureResult] # one entry per target video
+
+
+@dataclass(frozen=True)
+class ScreenshotPositions:
+    """Immutable set of screenshot positions computed from the source video.
+
+    frame_nums are 0-based frame indices from the source. fps and step are
+    shared across all positions in a run. Timestamp derivation uses exact
+    rational arithmetic via fractions.Fraction to avoid float drift.
+    """
+    frame_nums: list[int]   # canonical 0-based frame indices
+    fps:        Fraction    # from source VideoMetadata.fps_fraction
+    step:       int         # frame step used for A4 fallback
+
+    def seek_ts(self, frame_num: int) -> str:
+        """Seek timestamp for Strategy C: (frame_num - 0.25) / fps, 9 decimal places.
+
+        Guarantees the seek lands before the target frame so ffmpeg decodes
+        forward to exactly frame_num.
+        """
+        ts = Fraction(frame_num * 4 - 1, 4) / self.fps
+        return f"{float(ts):.9f}"
+
+    def filename_ts(self, frame_num: int) -> str:
+        """Filename timestamp prefix: frame_num / fps as HH꞉MM꞉SS․mmm."""
+        ts_frac  = Fraction(frame_num, 1) / self.fps
+        total_ms = int(ts_frac * 1000)
+        ms       = total_ms % 1000
+        total_s  = total_ms // 1000
+        h, rem   = divmod(total_s, 3600)
+        m, s     = divmod(rem, 60)
+        return (
+            f"{h:02d}{TIME_SEPARATOR_SAFE}{m:02d}{TIME_SEPARATOR_SAFE}"
+            f"{s:02d}{TIME_SEPARATOR_MS}{ms:03d}"
+        )
+
+
+def compute_screenshot_positions(
+    total_frames:  int,
+    fps:           Fraction,
+    count:         int,
+    include_edges: bool = False,
+) -> ScreenshotPositions:
+    """Compute evenly-spaced screenshot positions from source video metadata.
+
+    Positions are computed using exact integer frame arithmetic — no float
+    drift. The same (total_frames, fps, count) triple always produces
+    identical positions across reruns (deterministic).
+
+    Interior positions: step = total_frames // (count + 1), frames at
+    [step, 2*step, ..., count*step].
+
+    When include_edges=True, frame 0 and total_frames-1 are prepended/appended.
+
+    Args:
+        total_frames:  Total frame count of the source video.
+        fps:           Exact rational FPS from VideoMetadata.fps_fraction.
+        count:         Number of interior screenshot positions.
+        include_edges: When True, also include frame 0 and the last frame.
+
+    Returns:
+        ScreenshotPositions with frame_nums, fps, and step.
+    """
+    step       = total_frames // (count + 1)
+    frame_nums = [i * step for i in range(1, count + 1)]
+    if include_edges:
+        frame_nums = [0] + frame_nums + [total_frames - 1]
+    return ScreenshotPositions(frame_nums=frame_nums, fps=fps, step=step)
+
+
+def compute_screenshot_positions_interval(
+    fps:           Fraction,
+    interval_s:    float,
+    total_frames:  int | None = None,
+    cap:           int | None = None,
+) -> ScreenshotPositions:
+    """Compute screenshot positions at a fixed time interval.
+
+    Positions start at ``1 × interval`` (frame 0 is skipped), then
+    ``2 × interval``, etc.  Each interval is converted to the nearest
+    frame number using exact rational arithmetic: ``frame = int(i * interval_s * fps)``.
+
+    When ``total_frames`` is provided, positions beyond the last frame are
+    dropped.  When ``cap`` is provided, the list is truncated to at most
+    ``cap`` entries.  When ``total_frames`` is ``None``, a generous upper
+    bound of 24 hours is used so ffmpeg naturally stops at EOF.
+
+    Args:
+        fps:          Exact rational FPS from VideoMetadata.fps_fraction.
+        interval_s:   Interval between screenshots in seconds (> 0).
+        total_frames: Total frame count of the source video, or None if unknown.
+        cap:          Maximum number of positions to return, or None for no cap.
+
+    Returns:
+        ScreenshotPositions with frame_nums, fps, and step=0 (no mod-select step).
+    """
+    _FALLBACK_HOURS   = 24
+    _FALLBACK_SECONDS = _FALLBACK_HOURS * 3600
+    max_frames = total_frames if total_frames is not None else int(_FALLBACK_SECONDS * float(fps))
+
+    frame_nums: list[int] = []
+    i = 1
+    while True:
+        frame = int(Fraction(i) * Fraction(interval_s) * fps)
+        if frame >= max_frames:
+            break
+        frame_nums.append(frame)
+        if cap is not None and len(frame_nums) >= cap:
+            break
+        i += 1
+
+    # step=0 signals that A4 mod-select fallback is not applicable for interval mode
+    return ScreenshotPositions(frame_nums=frame_nums, fps=fps, step=0)
 
 
 # ---------------------------------------------------------------------------
@@ -482,167 +595,241 @@ def _write_sidecar(
 # ---------------------------------------------------------------------------
 
 
-async def _capture_screenshots(
-    video_path:      Path,
-    timestamps_s:    list[float],
-    screenshots_dir: Path,
-    crop_params:     CropParams | None,
-    fps:             float | None,
-    has_timestamps:  bool,
-) -> list[Path]:
-    """Capture all screenshots for one video in a single ffmpeg pass.
-
-    Uses the ``select`` filter for frame-perfect extraction (no fast-seek).
-    All screenshots are captured in one ffmpeg invocation and written as
-    ``%04d.png`` into a temporary subdirectory, then renamed to the final
-    ``<HH꞉MM꞉SS․mmm>_<stem>.png`` format using the known timestamp list.
-
-    Selection mode:
-
-    - **Primary** (default): timestamp-based ``select='eq(t,T1)+eq(t,T2)+...'``.
-      Works for normal and VFR content. Used when ``has_timestamps=True`` or
-      when ``fps`` is unknown.
-    - **Fallback**: frame-number-based ``select='eq(n,F1)+eq(n,F2)+...'``.
-      Used when ``has_timestamps=False`` AND ``fps`` is known.
-      Frame numbers derived from ``round(timestamp_s * fps)``.
-
-    Crop is applied in the filter chain. No scaling. Uses ``-vsync 0``.
-    The ``.tmp``-then-rename protocol applies to the final named files.
-
-    Args:
-        video_path:      Path to the video file to capture from.
-        timestamps_s:    List of timestamps in seconds to capture.
-        screenshots_dir: Directory where final named screenshots are written.
-        crop_params:     Crop to apply in the filter chain, or ``None`` for no crop.
-        fps:             Frames per second (used for fallback frame-number mode).
-        has_timestamps:  Whether the container has embedded timestamps.
-
-    Returns:
-        List of successfully written screenshot paths (may be shorter than
-        ``timestamps_s`` if individual frames failed).
-    """
-    if not timestamps_s:
-        return []
-
-    video_stem = video_path.stem
-
-    # Build the select expression.
-    #
-    # eq(t, X) requires exact float match — almost never hits in practice.
-    # eq(n, N) is reliable for CBR/CFR but wrong for VFR.
-    #
-    # The correct single-pass approach for both CBR and VFR:
-    #   gte(t,T)*not(gte(prev_selected_t,T))
-    # This fires exactly once: the first frame whose PTS >= T.
-    # prev_selected_t is -1 before any frame is selected, so the first term
-    # fires as soon as t >= T, and the second term prevents re-firing.
-    #
-    # Frame-number fallback (no embedded timestamps, fps known):
-    #   gte(n,N)*not(gte(prev_selected_n,N))
-    # Same logic using frame index instead of PTS.
-
-    use_frame_numbers = (not has_timestamps) and (fps is not None)
-
-    if use_frame_numbers:
-        assert fps is not None  # narrowing for type checker
-        frame_nums = [round(t * fps) for t in timestamps_s]
-        select_expr = "+".join(f"gte(n,{n})*not(gte(prev_selected_n,{n}))" for n in frame_nums)
-        logger.debug(
-            "Screenshot mode: frame-number-based (has_timestamps=False, fps=%.3f)", fps
-        )
-    else:
-        select_expr = "+".join(
-            f"gte(t,{t})*not(gte(prev_selected_t,{t}))" for t in timestamps_s
-        )
-        logger.debug("Screenshot mode: timestamp-based (first-frame-at-or-after)")
-
-    # Build filter chain: select [+ crop] + setpts
-    filter_parts: list[str] = [f"select='{select_expr}'"]
-
+async def _capture_single_frame(
+    video_path:  Path,
+    seek_ts:     str,
+    output_path: Path,
+    crop_params: CropParams | None,
+) -> bool:
+    """Capture a single frame via fast-seek. Returns True on success."""
+    cmd: list[str | Path] = ["ffmpeg", "-ss", seek_ts, "-i", video_path]
     if crop_params is not None and not crop_params.is_empty():
-        filter_parts.append(crop_params.to_ffmpeg_filter())
+        cmd += ["-vf", crop_params.to_ffmpeg_filter()]
+    cmd += ["-frames:v", "1", output_path]
+    try:
+        result = await run_ffmpeg_async(cmd, output_file=None)
+        return result.success and output_path.exists()
+    except Exception:
+        return False
 
-    filter_parts.append("setpts=N/FRAME_RATE/TB")
-    vf = ",".join(filter_parts)
 
-    # Use a temp subdir for raw %04d.png output
-    tmp_dir = screenshots_dir / f".tmp_capture_{video_stem}"
+async def _capture_single_pass(
+    video_path:  Path,
+    select_expr: str,
+    tmp_dir:     Path,
+    crop_params: CropParams | None,
+) -> list[Path]:
+    """Run a single-pass select-filter capture. Returns sorted list of output PNGs."""
     tmp_dir.mkdir(parents=True, exist_ok=True)
-
     output_pattern = tmp_dir / "%04d.png"
-
+    vf_parts = [f"select='{select_expr}'"]
+    if crop_params is not None and not crop_params.is_empty():
+        vf_parts.append(crop_params.to_ffmpeg_filter())
+    vf_parts.append("setpts=N/FRAME_RATE/TB")
     cmd: list[str | Path] = [
-        "ffmpeg",
-        "-i",     video_path,
-        "-vf",    vf,
+        "ffmpeg", "-i", video_path,
+        "-vf", ",".join(vf_parts),
         "-vsync", "0",
         str(output_pattern),
     ]
-
-    logger.debug(
-        "Capturing %d screenshots from %s into %s",
-        len(timestamps_s), video_path.name, tmp_dir,
-    )
-
     try:
         result = await run_ffmpeg_async(cmd, output_file=None)
-    except Exception as exc:
-        logger.warning("ffmpeg failed for screenshot capture of %s: %s", video_path.name, exc)
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if not result.success:
+            return []
+    except Exception:
         return []
+    return sorted(tmp_dir.glob("*.png"))
 
-    if not result.success:
-        logger.warning(
-            "ffmpeg exited with code %d during screenshot capture of %s",
-            result.returncode, video_path.name,
-        )
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        return []
 
-    # Collect raw output files in order: 0001.png, 0002.png, ...
-    raw_files = sorted(tmp_dir.glob("*.png"))
+def _rename_raw_screenshots(
+    raw_files:   list[Path],
+    frame_nums:  list[int],
+    positions:   ScreenshotPositions,
+    video_path:  Path,
+    output_dir:  Path,
+) -> list[Path]:
+    """Rename raw %04d.png files to final timestamped names using .tmp-then-rename.
 
-    if not raw_files:
-        logger.warning("No screenshot files produced for %s", video_path.name)
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        return []
-
-    if len(raw_files) != len(timestamps_s):
-        logger.warning(
-            "Expected %d screenshots for %s but got %d; some frames may have been missed",
-            len(timestamps_s), video_path.name, len(raw_files),
-        )
-
-    # Rename each raw file to its final timestamped name using .tmp-then-rename
+    Zips raw_files with frame_nums (up to min length). Returns list of
+    successfully written paths.
+    """
     written: list[Path] = []
-    for raw_file, timestamp in zip(raw_files, timestamps_s):
-        final_name = _screenshot_filename(timestamp, video_stem)
-        final_path = screenshots_dir / final_name
-        tmp_path   = screenshots_dir / f"{final_name}{TEMP_SUFFIX}"
-
+    video_stem = video_path.stem
+    for raw_file, frame_num in zip(raw_files, frame_nums):
+        filename_ts = positions.filename_ts(frame_num)
+        final_name  = f"{filename_ts}_{video_stem}.png"
+        final_path  = output_dir / final_name
+        tmp_path    = output_dir / f"{final_name}{TEMP_SUFFIX}"
         try:
             shutil.copy2(raw_file, tmp_path)
             tmp_path.replace(final_path)
             written.append(final_path)
             logger.debug("Screenshot written: %s", final_path.name)
         except Exception as exc:
-            logger.warning(
-                "Failed to write screenshot %s for %s: %s",
-                final_name, video_path.name, exc,
-            )
+            logger.warning("Failed to write screenshot %s: %s", final_name, exc)
             try:
                 tmp_path.unlink(missing_ok=True)
             except Exception:
                 pass
-
-    # Clean up temp capture dir
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    logger.debug(
-        "Captured %d/%d screenshots for %s",
-        len(written), len(timestamps_s), video_path.name,
-    )
     return written
+
+
+async def make_screenshots(
+    video_path:      Path,
+    positions:       ScreenshotPositions,
+    screenshots_dir: Path,
+    crop_params:     CropParams | None = None,
+) -> list[Path]:
+    """Capture screenshots for one video at the given positions.
+
+    Attempts Strategy C first (N sequential fast-seek ffmpeg calls), falling
+    back to Strategy A2 (single-pass frame-number select) and then Strategy A4
+    (single-pass mod select) if the primary strategy yields zero output.
+
+    Partial results (fewer screenshots than positions, e.g. target shorter than
+    source) are acceptable and do NOT trigger fallback — only total failure
+    (zero output) triggers the fallback chain.
+
+    Args:
+        video_path:      Path to the video file to capture from.
+        positions:       Pre-computed screenshot positions (frame numbers + fps).
+        screenshots_dir: Directory where final named screenshots are written.
+        crop_params:     Crop to apply in the filter chain, or None for no crop.
+
+    Returns:
+        List of successfully written screenshot paths (may be shorter than
+        len(positions.frame_nums) if the video is shorter than the source).
+    """
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+    video_stem = video_path.stem
+
+    # ------------------------------------------------------------------
+    # Strategy C: N sequential fast-seek calls
+    # ------------------------------------------------------------------
+    written: list[Path] = []
+    for frame_num in positions.frame_nums:
+        seek_ts     = positions.seek_ts(frame_num)
+        filename_ts = positions.filename_ts(frame_num)
+        final_name  = f"{filename_ts}_{video_stem}.png"
+        final_path  = screenshots_dir / final_name
+        tmp_path    = screenshots_dir / f"{final_name}{TEMP_SUFFIX}"
+
+        logger.debug("Strategy C: frame %d seek_ts=%s → %s", frame_num, seek_ts, final_name)
+        ok = await _capture_single_frame(video_path, seek_ts, tmp_path, crop_params)
+        if ok:
+            try:
+                tmp_path.replace(final_path)
+                written.append(final_path)
+            except Exception as exc:
+                logger.warning("Failed to rename screenshot %s: %s", final_name, exc)
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    if written:
+        return written
+
+    # ------------------------------------------------------------------
+    # Strategy A2 fallback: single-pass frame-number select
+    # ------------------------------------------------------------------
+    logger.warning(
+        "Screenshot strategy C failed for %s — falling back to A2 (single-pass frame-number select)",
+        video_stem,
+    )
+    select_expr_a2 = "+".join(f"eq(n,{n})" for n in positions.frame_nums)
+    tmp_dir_a2     = screenshots_dir / f".tmp_a2_{video_stem}"
+    raw_a2         = await _capture_single_pass(video_path, select_expr_a2, tmp_dir_a2, crop_params)
+
+    if raw_a2:
+        written = _rename_raw_screenshots(raw_a2, positions.frame_nums, positions, video_path, screenshots_dir)
+        shutil.rmtree(tmp_dir_a2, ignore_errors=True)
+        if written:
+            return written
+
+    shutil.rmtree(tmp_dir_a2, ignore_errors=True)
+
+    # ------------------------------------------------------------------
+    # Strategy A4 fallback: single-pass mod select
+    # ------------------------------------------------------------------
+    logger.warning(
+        "Screenshot strategy A2 failed for %s — falling back to A4 (single-pass mod select)",
+        video_stem,
+    )
+    select_expr_a4 = f"not(mod(n,{positions.step}))*gt(n,0)"
+    tmp_dir_a4     = screenshots_dir / f".tmp_a4_{video_stem}"
+    raw_a4         = await _capture_single_pass(video_path, select_expr_a4, tmp_dir_a4, crop_params)
+
+    if raw_a4:
+        written = _rename_raw_screenshots(raw_a4, positions.frame_nums, positions, video_path, screenshots_dir)
+        shutil.rmtree(tmp_dir_a4, ignore_errors=True)
+        if written:
+            return written
+
+    shutil.rmtree(tmp_dir_a4, ignore_errors=True)
+
+    # ------------------------------------------------------------------
+    # All strategies failed
+    # ------------------------------------------------------------------
+    logger.error("All screenshot strategies failed for %s — no screenshots captured", video_stem)
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Measure summary table
+# ---------------------------------------------------------------------------
+
+
+def _log_measure_summary(targets: list[TargetMeasureResult]) -> None:
+    """Emit a summary table at INFO level after all metric computations complete.
+
+    One row per target showing: stem (truncated to 30 chars), file size in MB,
+    and per-metric median for every MetricType that appears in any target's
+    metrics.  Missing metrics display as ``N/A``.
+
+    Args:
+        targets: List of completed target measure results.
+    """
+    from pyqenc.utils.log_format import _fmt_size_mb, fmt_metric_value
+
+    if not targets:
+        return
+
+    # Collect all metric types that appear across any target
+    all_metric_types: list[MetricType] = []
+    seen: set[MetricType] = set()
+    for t in targets:
+        for mt in t.metrics:
+            if mt not in seen:
+                all_metric_types.append(mt)
+                seen.add(mt)
+
+    # Column widths
+    STEM_WIDTH   = 30
+    SIZE_WIDTH   = 9
+    METRIC_WIDTH = 9
+
+    # Header
+    metric_headers = "   ".join(
+        f"{mt.value.upper()[:METRIC_WIDTH - 4]} med".rjust(METRIC_WIDTH)
+        for mt in all_metric_types
+    )
+    header = f"{'Target':<{STEM_WIDTH}}   {'Size (MB)':>{SIZE_WIDTH}}   {metric_headers}"
+    sep    = "─" * STEM_WIDTH + "   " + "─" * SIZE_WIDTH + "   " + ("─" * METRIC_WIDTH + "   ") * len(all_metric_types)
+
+    logger.info(header)
+    logger.info(sep.rstrip())
+
+    for t in targets:
+        stem      = t.target_video.stem[:STEM_WIDTH]
+        size_str  = _fmt_size_mb(t.target_video.stat().st_size) if t.target_video.exists() else "N/A"
+        row_parts = [f"{stem:<{STEM_WIDTH}}", f"{size_str:>{SIZE_WIDTH}}"]
+        for mt in all_metric_types:
+            stats  = t.metrics.get(mt, {})
+            median = stats.get("median")
+            cell   = fmt_metric_value(median) if median is not None else "N/A"
+            row_parts.append(f"{cell:>{METRIC_WIDTH}}")
+        logger.info("   ".join(row_parts))
 
 
 # ---------------------------------------------------------------------------
@@ -651,37 +838,47 @@ async def _capture_screenshots(
 
 
 async def run_measure(
-    source_video:        Path,
-    target_videos:       list[Path],
-    work_dir:            Path,
-    crop_params:         CropParams | None,
-    metrics_sampling:    int,
-    width:               int | None,
-    screenshot_count:    int | None,
-    screenshot_interval: float | None,
+    source_video:             Path,
+    target_videos:            list[Path],
+    work_dir:                 Path,
+    crop_params:              CropParams | None,
+    metrics_sampling:         int,
+    width:                    int | None,
+    screenshot_count:         int | None,
+    screenshot_interval:      float | None      = None,
+    screenshot_include_edges: bool              = False,
 ) -> MeasureResult:
     """Execute a standalone quality measurement run.
 
+    Execution order: (1) compute screenshot positions from source, (2) capture
+    source screenshots, (3) capture all target screenshots, (4) run metrics for
+    each target, (5) emit summary table.
+
     Args:
-        source_video:        Reference video path.
-        target_videos:       Encoded videos to evaluate.  Pass an empty list to
-                             run in screenshots-only mode (no metrics, graph, or
-                             sidecar).
-        work_dir:            Working directory; outputs go under
-                             ``work_dir/measure/``.
-        crop_params:         Explicit crop (or empty ``CropParams`` for no-crop).
-                             Pass ``None`` to auto-load from ``job.yaml`` if
-                             present.
-        metrics_sampling:    Frame subsampling factor (≥1).  Ignored in
-                             screenshots-only mode.
-        width:               Scale both inputs to this width during metric
-                             computation (after cropping).  ``None`` = no
-                             scaling.  Does not affect screenshots.  Ignored in
-                             screenshots-only mode.
-        screenshot_count:    Screenshots per video in count mode (≥1), or cap
-                             in interval mode.  ``None`` uses the default.
-        screenshot_interval: Interval in seconds between screenshots in interval
-                             mode (>0).  ``None`` = count mode.
+        source_video:             Reference video path.
+        target_videos:            Encoded videos to evaluate.  Pass an empty list to
+                                  run in screenshots-only mode (no metrics, graph, or
+                                  sidecar).
+        work_dir:                 Working directory; outputs go under
+                                  ``work_dir/measure/``.
+        crop_params:              Explicit crop (or empty ``CropParams`` for no-crop).
+                                  Pass ``None`` to auto-load from ``job.yaml`` if
+                                  present.
+        metrics_sampling:         Frame subsampling factor (≥1).  Ignored in
+                                  screenshots-only mode.
+        width:                    Scale both inputs to this width during metric
+                                  computation (after cropping).  ``None`` = no
+                                  scaling.  Does not affect screenshots.  Ignored in
+                                  screenshots-only mode.
+        screenshot_count:         Screenshots per video in count mode (≥1), or cap
+                                  in interval mode.  ``None`` uses the default.
+        screenshot_interval:      Interval in seconds between screenshots (>0).
+                                  When provided, positions are spaced by this interval
+                                  rather than evenly across the full duration.
+                                  ``None`` = count mode (evenly spaced).
+        screenshot_include_edges: When True, include frame 0 and the last frame in
+                                  screenshot positions in addition to interior frames.
+                                  Only applies in count mode (ignored in interval mode).
 
     Returns:
         ``MeasureResult`` with source screenshots directory and per-target
@@ -693,14 +890,11 @@ async def run_measure(
         ValueError:        If ``metrics_sampling < 1``, ``screenshot_count < 1``,
                            or any resolution mismatch is detected.
     """
-    from pyqenc.constants import (
-        MEASURE_DIR,
-        SCREENSHOTS_SUBDIR_SUFFIX,
-    )
+    from pyqenc.constants import MEASURE_DIR
     from pyqenc.utils.log_format import fmt_key_value_table
 
     # ------------------------------------------------------------------
-    # 10.1 — Input validation and crop resolution
+    # Input validation and crop resolution
     # ------------------------------------------------------------------
 
     if not source_video.exists():
@@ -713,16 +907,16 @@ async def run_measure(
     if metrics_sampling < 1:
         raise ValueError(f"metrics_sampling must be ≥ 1, got {metrics_sampling}")
 
-    effective_screenshot_count = screenshot_count if screenshot_count is not None else 20
+    from pyqenc.constants import DEFAULT_SCREENSHOT_COUNT
+    effective_screenshot_count = screenshot_count if screenshot_count is not None else DEFAULT_SCREENSHOT_COUNT
     if effective_screenshot_count < 1:
         raise ValueError(f"screenshot_count must be ≥ 1, got {effective_screenshot_count}")
 
-    resolved_crop = _resolve_crop(crop_params, work_dir, source_video)
-
+    resolved_crop    = _resolve_crop(crop_params, work_dir, source_video)
     screenshots_only = len(target_videos) == 0
 
     # ------------------------------------------------------------------
-    # 10.2 — Resolution validation and parameter summary logging
+    # Resolution validation and parameter summary logging
     # ------------------------------------------------------------------
 
     source_meta = VideoMetadata(path=source_video)
@@ -740,30 +934,21 @@ async def run_measure(
     else:
         target_metas = []
 
-    # Build screenshot mode description for the summary table
-    if screenshot_interval is not None:
-        mode_str = f"every {screenshot_interval}s"
-        if screenshot_count is not None:
-            mode_str += f" (cap {effective_screenshot_count})"
-    else:
-        mode_str = f"count {effective_screenshot_count}"
-
     fmt_key_value_table({
-        "source":   str(source_video),
-        "targets":  [t.name for t in target_videos] if target_videos else ["(none — screenshots only)"],
-        "crop":     str(resolved_crop) if not resolved_crop.is_empty() else "none",
-        "width":    str(width) if width else "none",
-        "sampling": str(metrics_sampling),
-        "mode":     mode_str,
+        "source":      str(source_video),
+        "targets":     [t.name for t in target_videos] if target_videos else ["(none — screenshots only)"],
+        "crop":        str(resolved_crop) if not resolved_crop.is_empty() else "none",
+        "width":       str(width) if width else "none",
+        "sampling":    str(metrics_sampling),
+        "screenshots": f"every {screenshot_interval}s (cap {effective_screenshot_count})" if screenshot_interval else str(effective_screenshot_count),
     })
 
     # ------------------------------------------------------------------
-    # 10.3 — Directory creation and duration probing
+    # Directory creation
     # ------------------------------------------------------------------
 
     measure_dir            = work_dir / MEASURE_DIR
-    source_stem            = source_video.stem
-    source_screenshots_dir = measure_dir / f"{source_stem}{SCREENSHOTS_SUBDIR_SUFFIX}"
+    source_screenshots_dir = measure_dir / source_video.stem
 
     target_screenshots_dirs: dict[Path, Path] = {}
     graph_paths:             dict[Path, Path] = {}
@@ -771,15 +956,11 @@ async def run_measure(
 
     for target_video in target_videos:
         stem = target_video.stem
-        target_screenshots_dirs[target_video] = measure_dir / f"{stem}{SCREENSHOTS_SUBDIR_SUFFIX}"
+        target_screenshots_dirs[target_video] = measure_dir / stem
         graph_paths[target_video]             = measure_dir / f"{stem}.png"
         sidecar_paths[target_video]           = measure_dir / f"{stem}.yaml"
 
-    # Create all directories upfront
     measure_dir.mkdir(parents=True, exist_ok=True)
-    source_screenshots_dir.mkdir(parents=True, exist_ok=True)
-    for target_video in target_videos:
-        target_screenshots_dirs[target_video].mkdir(parents=True, exist_ok=True)
 
     # Startup cleanup: remove any stale .tmp metric files from interrupted runs
     for tmp_file in measure_dir.glob("*.tmp"):
@@ -789,7 +970,10 @@ async def run_measure(
         except Exception as exc:
             logger.warning("Could not delete stale tmp file %s: %s", tmp_file.name, exc)
 
-    # Probe durations
+    # ------------------------------------------------------------------
+    # Duration probing (needed for sidecar and duration-mismatch warnings)
+    # ------------------------------------------------------------------
+
     source_duration: float | None = source_meta.duration_seconds
     if source_duration is None:
         logger.warning("Duration unavailable for source video: %s", source_video.name)
@@ -801,7 +985,6 @@ async def run_measure(
             logger.warning("Duration unavailable for target video: %s", target_video.name)
         target_durations[target_video] = dur
 
-    # Compute effective duration per target and shared duration
     effective_durations: dict[Path, float | None] = {}
     for target_video in target_videos:
         t_dur = target_durations[target_video]
@@ -816,108 +999,111 @@ async def run_measure(
         else:
             effective_durations[target_video] = None
 
-    # Shared duration = min of all effective durations (for screenshot timestamps)
-    # In screenshots-only mode, use source duration directly.
-    if screenshots_only:
-        shared_duration: float | None = source_duration
-    else:
-        valid_effs = [d for d in effective_durations.values() if d is not None]
-        shared_duration = min(valid_effs) if valid_effs else None
-
     # ------------------------------------------------------------------
-    # 10.4 — Screenshot timestamp computation and source screenshot capture
+    # (1) Compute screenshot positions from source
     # ------------------------------------------------------------------
 
     if screenshots_only:
         logger.info("Running in screenshots-only mode (no target videos provided)")
 
-    source_fps         = source_meta.fps
-    source_has_ts      = source_duration is not None  # proxy: if duration known, timestamps embedded
+    positions: ScreenshotPositions | None = None
 
-    shared_timestamps: list[float] = []
+    source_frame_count = source_meta.frame_count
+    source_fps_frac    = source_meta.fps_fraction
 
-    if shared_duration is not None:
+    if source_frame_count is not None and source_fps_frac is not None:
         if screenshot_interval is not None:
-            raw_timestamps = _screenshot_timestamps_interval(shared_duration, screenshot_interval)
-            # Apply cap
-            raw_timestamps = raw_timestamps[:effective_screenshot_count]
-        else:
-            raw_timestamps = _screenshot_timestamps_count(shared_duration, effective_screenshot_count)
-
-        if not raw_timestamps:
-            logger.error(
-                "No screenshot timestamps fit within shared duration %.2fs — skipping all screenshots",
-                shared_duration,
+            positions = compute_screenshot_positions_interval(
+                fps          = source_fps_frac,
+                interval_s   = screenshot_interval,
+                total_frames = source_frame_count,
+                cap          = effective_screenshot_count,
+            )
+            logger.debug(
+                "Screenshot positions: %d frames, interval=%.3fs, fps=%s",
+                len(positions.frame_nums), screenshot_interval, positions.fps,
             )
         else:
-            if len(raw_timestamps) < effective_screenshot_count and screenshot_interval is None:
-                logger.warning(
-                    "Only %d screenshot(s) fit within %.2fs (requested %d)",
-                    len(raw_timestamps), shared_duration, effective_screenshot_count,
-                )
-            shared_timestamps = raw_timestamps
+            positions = compute_screenshot_positions(
+                total_frames  = source_frame_count,
+                fps           = source_fps_frac,
+                count         = effective_screenshot_count,
+                include_edges = screenshot_include_edges,
+            )
+            logger.debug(
+                "Screenshot positions: %d frames, step=%d, fps=%s",
+                len(positions.frame_nums), positions.step, positions.fps,
+            )
+    elif source_fps_frac is not None and screenshot_interval is not None:
+        # frame_count unknown but fps known — use interval mode with no upper bound
+        positions = compute_screenshot_positions_interval(
+            fps          = source_fps_frac,
+            interval_s   = screenshot_interval,
+            total_frames = None,
+            cap          = effective_screenshot_count,
+        )
+        logger.debug(
+            "Screenshot positions (no frame count): %d frames, interval=%.3fs",
+            len(positions.frame_nums), screenshot_interval,
+        )
     else:
-        # Duration unknown
-        if screenshot_interval is not None:
-            logger.info(
-                "Source duration unknown — screenshots will be captured until EOF using interval %.2fs",
-                screenshot_interval,
-            )
-            # Generate a large set; ffmpeg will stop at EOF naturally.
-            # Use a generous upper bound of 24 hours.
-            _FALLBACK_DURATION = 86400.0
-            raw_timestamps = _screenshot_timestamps_interval(_FALLBACK_DURATION, screenshot_interval)
-            shared_timestamps = raw_timestamps[:effective_screenshot_count]
-        else:
-            logger.error(
-                "Cannot compute equally-spaced screenshot timestamps: duration unknown for source. "
-                "Skipping screenshot capture. Use --every to capture by interval instead."
-            )
+        logger.error(
+            "Cannot compute screenshot positions: %s unavailable for source %s — skipping screenshots",
+            "frame count" if source_frame_count is None else "fps",
+            source_video.name,
+        )
 
-    # Capture source screenshots
+    # ------------------------------------------------------------------
+    # (2) Capture source screenshots
+    # ------------------------------------------------------------------
+
     source_screenshots: list[Path] = []
-    if shared_timestamps:
-        logger.info("Capturing %d source screenshots from %s", len(shared_timestamps), source_video.name)
-        source_screenshots = await _capture_screenshots(
+    if positions is not None:
+        logger.info("Taking %d screenshots of %s...", len(positions.frame_nums), source_video.stem)
+        source_screenshots = await make_screenshots(
             video_path      = source_video,
-            timestamps_s    = shared_timestamps,
+            positions       = positions,
             screenshots_dir = source_screenshots_dir,
             crop_params     = resolved_crop if not resolved_crop.is_empty() else None,
-            fps             = source_fps,
-            has_timestamps  = source_has_ts,
         )
-        logger.info("Captured %d/%d source screenshots", len(source_screenshots), len(shared_timestamps))
 
     # ------------------------------------------------------------------
-    # 10.5 — All screenshots first (source + all targets), then metrics
+    # (3) Capture all target screenshots
     # ------------------------------------------------------------------
 
-    target_results: list[TargetMeasureResult] = []
-    total_target_screenshots = 0
-
-    # Capture target screenshots for all targets before running any metrics
     target_screenshots_map: dict[Path, list[Path]] = {}
-    for target_video, target_meta in zip(target_videos, target_metas):
-        if shared_timestamps:
-            t_fps    = target_meta.fps
-            t_has_ts = target_durations[target_video] is not None
-            shots = await _capture_screenshots(
+    for target_video in target_videos:
+        if positions is not None:
+            logger.info("Taking %d screenshots of %s...", len(positions.frame_nums), target_video.stem)
+            shots = await make_screenshots(
                 video_path      = target_video,
-                timestamps_s    = shared_timestamps,
+                positions       = positions,
                 screenshots_dir = target_screenshots_dirs[target_video],
                 crop_params     = None,
-                fps             = t_fps,
-                has_timestamps  = t_has_ts,
             )
             target_screenshots_map[target_video] = shots
-            total_target_screenshots += len(shots)
         else:
             target_screenshots_map[target_video] = []
 
-    # Now run metrics for each target
-    for idx, (target_video, target_meta) in enumerate(zip(target_videos, target_metas), start=1):
-        logger.info("Processing target: %s", target_video.name)
+    # Summary log after all screenshot captures
+    if positions is not None:
+        expected_per_video = len(positions.frame_nums)
+        all_videos         = ([source_video] if not screenshots_only else [source_video]) + list(target_videos)
+        total_expected     = expected_per_video * len(all_videos)
+        total_taken        = len(source_screenshots) + sum(len(s) for s in target_screenshots_map.values())
+        symbol             = "✅" if total_taken == total_expected else "⚠"
+        logger.info(
+            "Screenshots taken: %d out of %d %s",
+            total_taken, total_expected, symbol,
+        )
 
+    # ------------------------------------------------------------------
+    # (4) Run metrics for each target
+    # ------------------------------------------------------------------
+
+    target_results: list[TargetMeasureResult] = []
+
+    for idx, (target_video, target_meta) in enumerate(zip(target_videos, target_metas), start=1):
         eff_dur = effective_durations[target_video]
 
         metrics = await _run_metrics(
@@ -928,14 +1114,8 @@ async def run_measure(
             metrics_dir      = measure_dir,
             graph_path       = graph_paths[target_video],
             subsample_factor = metrics_sampling,
-            bar_title        = f"target {idx}",
+            bar_title        = f"Measuring target {idx} {target_video.stem}",
         )
-
-        # Log per-target metric summary
-        for metric_type, stats in metrics.items():
-            median = stats.get("median")
-            if median is not None:
-                logger.info("  %s median: %.3f", metric_type.value, median)
 
         _write_sidecar(
             path                       = sidecar_paths[target_video],
@@ -957,12 +1137,12 @@ async def run_measure(
             metrics         = metrics,
         ))
 
-    # Final summary
-    total_screenshots = len(source_screenshots) + total_target_screenshots
-    logger.info(
-        "Measure complete: %d target(s) processed, %d total screenshots captured",
-        len(target_results), total_screenshots,
-    )
+    # ------------------------------------------------------------------
+    # (5) Summary table
+    # ------------------------------------------------------------------
+
+    if target_results:
+        _log_measure_summary(target_results)
 
     return MeasureResult(
         source_screenshots_dir = source_screenshots_dir,
