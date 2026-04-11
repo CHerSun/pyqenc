@@ -885,23 +885,9 @@ def analyze_chunk_quality(
     result:         ChunkQualityStats                    = ChunkQualityStats()
     parsed_metrics: dict[MetricType, MetricData]         = {}
     full_stats:     dict[MetricType, _MetricStatistics]  = {}
-
-    def _try_delete(metric_file: Path) -> None:
-        """Delete a raw metric file best-effort; log warning on failure."""
-        try:
-            metric_file.unlink(missing_ok=True)
-            logger.debug("Deleted raw metric tmp file: %s", metric_file.name)
-        except Exception as exc:
-            logger.warning("Could not delete metric tmp file %s: %s", metric_file.name, exc)
-
-    deleted: set[Path] = set()
-
-    def _try_delete_once(metric_file: Path) -> None:
-        """Delete a raw metric file at most once (guards against shared paths)."""
-        if metric_file in deleted:
-            return
-        deleted.add(metric_file)
-        _try_delete(metric_file)
+    # Files to delete after all parsing is done (deferred so shared paths like
+    # vmaf_json/vif_log are not deleted before the second parser reads them).
+    to_delete: set[Path] = set()
 
     # --- PSNR ---
     if psnr_log is not None:
@@ -914,7 +900,7 @@ def analyze_chunk_quality(
             result[MetricType.PSNR]         = _extract_key_stats(fs, MetricType.PSNR)
             logger.debug("Parsed PSNR: %d frames", len(df))
             if delete_after_parse:
-                _try_delete_once(psnr_log)
+                to_delete.add(psnr_log)
         except Exception as exc:
             logger.warning("Failed to parse PSNR from %s: %s", psnr_log, exc)
 
@@ -929,7 +915,7 @@ def analyze_chunk_quality(
             result[MetricType.SSIM]         = _extract_key_stats(fs, MetricType.SSIM)
             logger.debug("Parsed SSIM: %d frames", len(df))
             if delete_after_parse:
-                _try_delete_once(ssim_log)
+                to_delete.add(ssim_log)
         except Exception as exc:
             logger.warning("Failed to parse SSIM from %s: %s", ssim_log, exc)
 
@@ -944,14 +930,14 @@ def analyze_chunk_quality(
             result[MetricType.VMAF]         = _extract_key_stats(fs, MetricType.VMAF)
             logger.debug("Parsed VMAF: %d frames", len(df))
             if delete_after_parse:
-                _try_delete_once(vmaf_json)
+                to_delete.add(vmaf_json)
         except Exception as exc:
             logger.warning("Failed to parse VMAF from %s: %s", vmaf_json, exc)
 
     # --- VIF ---
     # vif_log points to the same file as vmaf_json (VIF data is embedded in the
-    # VMAF JSON via feature=name=vif). _try_delete_once ensures the file is only
-    # deleted once even when both vmaf_json and vif_log reference the same path.
+    # VMAF JSON via feature=name=vif). Using a set for to_delete ensures the
+    # shared path is only deleted once, after both parsers have read it.
     if vif_log is not None:
         try:
             logger.debug("Parsing VIF from VMAF JSON: %s", vif_log)
@@ -962,9 +948,17 @@ def analyze_chunk_quality(
             result[MetricType.VIF]         = _extract_key_stats(fs, MetricType.VIF)
             logger.debug("Parsed VIF: %d frames", len(df))
             if delete_after_parse:
-                _try_delete_once(vif_log)
+                to_delete.add(vif_log)
         except Exception as exc:
             logger.warning("Failed to parse VIF from %s: %s", vif_log, exc)
+
+    # Deferred deletion — all parsers have finished, safe to remove files now
+    for path in to_delete:
+        try:
+            path.unlink(missing_ok=True)
+            logger.debug("Deleted raw metric tmp file: %s", path.name)
+        except Exception as exc:
+            logger.warning("Could not delete metric tmp file %s: %s", path.name, exc)
 
     if not parsed_metrics:
         raise ValueError(
@@ -1244,7 +1238,9 @@ class QualityEvaluator:
         def _make_progress_callback(metric: MetricType, last_time: list[float]) -> Callable[[int, float], None] | None:
             if bar_advance is None or duration_seconds <= 0:
                 return None
-            weight = metric.info.complexity
+            # Weight = decode (1.0) + measurement (complexity/factor).
+            # Matches the _total_complexity formula used for the bar total.
+            weight = 1.0 + metric.info.complexity / metrics_sampling
 
             def _callback(frame: int, out_time_s: float) -> None:
                 delta = max(0.0, out_time_s - last_time[0])
@@ -1354,7 +1350,8 @@ class QualityEvaluator:
 
         resolved_title    = bar_title if bar_title is not None \
             else encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
-        _total_complexity = sum(m.info.complexity for m in MetricType)
+        _metrics_run      = [m for m in MetricType if m.info.complexity > 0]
+        _total_complexity = sum(1.0 + m.info.complexity / subsample_factor for m in _metrics_run)
 
         if show_progress:
             with ProgressBar(_total_complexity * (duration_seconds or 0.0), title=f"Metrics: {resolved_title}", show_counters=False) as advance:
@@ -1438,7 +1435,8 @@ class QualityEvaluator:
             pass
 
         bar_title         = encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
-        _total_complexity = sum(m.info.complexity for m in MetricType)
+        _metrics_run      = [m for m in MetricType if m.info.complexity > 0]
+        _total_complexity = sum(1.0 + m.info.complexity / subsample_factor for m in _metrics_run)
 
         if show_progress:
             with ProgressBar(_total_complexity * (duration_seconds or 0.0), title=f"Metrics: {bar_title}", show_counters=False) as advance:

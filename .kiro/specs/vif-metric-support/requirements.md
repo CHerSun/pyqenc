@@ -2,7 +2,15 @@
 <!-- markdownlint-disable MD024 -->
 
 - Created: 2025-07-22
-- Completed:
+- Completed: 2026-04-10
+
+## Cross-Spec Notes
+
+Compared against related specs (by created/completed date order):
+
+- **unified-metrics-visualization** (2026-03-15): Req 9.7 specified writing individual `.stats` text files alongside each metric log. This spec removes `_save_stats_file` entirely — no `.stats` files are written at any point. Req 4 hardcoded the bar subplot loop to `[PSNR, SSIM, VMAF]`; this spec replaces that with a dynamic loop over the `metrics` dict.
+- **standalone-measure** (2025-07-17, updated 2026-04-03): Req 3.4 specified raw metric log files written into `<target_stem>.metrics/` subdirectory. This spec removes that subdirectory entirely — raw `.tmp` files are written directly into `measure_dir`. Req 3.4 also referenced canonical log extensions (`.log`, `.json`); this spec keeps files as `.tmp` throughout their lifetime (no rename). The `METRICS_SUBDIR_SUFFIX` constant is no longer used by `run_measure`.
+- **pipeline-correctness-refactor** (2026-03-16): No conflicts — that spec focused on typed models and CRF naming. `QualityArtifacts` changes here (removing `stats_files`, adding `vif_log`) are additive and compatible.
 
 ## Introduction
 

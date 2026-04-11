@@ -2,7 +2,15 @@
 <!-- markdownlint-disable MD024 -->
 
 - Created: 2025-07-22
-- Completed:
+- Completed: 2026-04-10
+
+## Cross-Spec Notes
+
+Compared against related specs (by created/completed date order):
+
+- **unified-metrics-visualization** (2026-03-15): `_save_stats_file` and `_cleanup_raw_metric_files` referenced in that spec's design are removed by this spec. The bar subplot and summary box loops previously hardcoded to `[PSNR, SSIM, VMAF]` are now dynamic over the `metrics` dict.
+- **standalone-measure** (2025-07-17, updated 2026-04-03): The `Metrics_Subdir` (`<stem>.metrics/`) layout described in that spec's Req 3.4 is superseded — `run_measure` now writes `.tmp` files directly into `measure_dir`. The `METRICS_SUBDIR_SUFFIX` constant is no longer imported or used inside `run_measure`.
+- **pipeline-correctness-refactor** (2026-03-16): No conflicts. `QualityArtifacts` changes (removing `stats_files`, adding `vif_log`) are additive.
 
 ## Overview
 

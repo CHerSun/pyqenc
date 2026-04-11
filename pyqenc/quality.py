@@ -71,11 +71,17 @@ class MetricInfo:
         plot_y_min:        Lower bound for the Y-axis in plots (normalized scale).
         plot_y_max:        Upper bound for the Y-axis in plots (normalized scale).
                            Slightly above ``lossless_value`` to leave headroom.
-        complexity:        Relative computational cost compared to SSIM/PSNR (baseline 1.0).
-                           Used to weight progress bar totals so that slower metrics
-                           (e.g. VMAF) contribute proportionally more to the reported
-                           duration.  SSIM and PSNR are 1.0; VMAF is ~10.0 (empirical
-                           estimate — actual ratio varies by content and hardware).
+        complexity:        Measurement cost relative to one decode unit (D=1).
+                           Models total metric time as ``D × (1 + complexity/factor)``,
+                           where D is the fixed per-run decode cost and ``complexity``
+                           is the measurement-only cost at factor=1, normalized to D.
+                           For N metrics: total ≈ ``N×D × (1 + sum(M/factor))``.
+                           A value of ``0.0`` means the metric has no independent ffmpeg
+                           run (e.g. VIF is embedded in the VMAF pass) and is excluded
+                           from progress bar total calculations.
+                           Values measured at 1920×1036, 24 fps; see
+                           ``metric-complexity-benchmark.md`` for full data.
+                           PSNR≈0.14, SSIM≈0.23, VMAF≈4.1, VIF=0.0.
         comparison_range:  Practical value span used *only* for normalizing
                            cross-metric deficit comparisons (``_score_failing_attempt``).
                            Not the theoretical lossless ceiling — the realistic range
@@ -198,7 +204,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = "",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        complexity        = 10.0,  # empirical estimate; VMAF is significantly slower than PSNR/SSIM
+        complexity        = 4.1,   # M/D ratio: measure≈139s / decode≈34s; see metric-complexity-benchmark.md
         comparison_range  = 20.0,  # practical target range ~80–100
         acceptance_delta  = 0.15,  # 0.15% surplus should be negligible
     ),
@@ -215,7 +221,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = "",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        complexity        = 1.0,
+        complexity        = 0.23,  # M/D ratio: measure≈7.7s / decode≈34s; see metric-complexity-benchmark.md
         comparison_range  = 10.0,  # practical target range ~90–100
         acceptance_delta  = 0.05,  # 0.05% after scaling (0.0005 raw)
     ),
@@ -232,7 +238,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = " dB",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        complexity        = 1.0,
+        complexity        = 0.14,  # M/D ratio: measure≈4.8s / decode≈34s; see metric-complexity-benchmark.md
         comparison_range  = 30.0,  # practical target range ~40–70 dB
         acceptance_delta  = 0.5,   # 0.5 dB surplus is negligible
     ),
@@ -250,7 +256,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = "",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        complexity        = 1.0,
+        complexity        = 0.0,   # VIF is embedded in the VMAF pass — no separate run, zero additional cost
         comparison_range  = 10.0,
         acceptance_delta  = 0.2,
     ),
