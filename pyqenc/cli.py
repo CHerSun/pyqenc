@@ -106,6 +106,8 @@ _QUALITY_TARGET_HELP: str = (
     "(e.g. 'vmaf-min:95,ssim-med:98,vif-min:95'). "
     "All metrics are normalized to 0–100 where 100 = lossless. "
     "Landmarks: VMAF 95+ good, SSIM 98+ good, PSNR 40–60 typical, VIF 95+ good. "
+    "Note: 'min' targets are unreliable with subsampling (factor>1) — "
+    "worst frames may be missed. Prefer 'p05' or 'med' for reliable targeting. "
     "If not specified, uses default from config file."
 )
 

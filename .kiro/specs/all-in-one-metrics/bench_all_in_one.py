@@ -77,6 +77,56 @@ async def bench_all_in_one(factor: int) -> float:
     return elapsed
 
 
+async def bench_all_in_one_with_select(factor: int) -> float:
+    """Single ffmpeg pass: PSNR+SSIM with select filter (factor), VMAF with n_subsample=factor."""
+    crop_r   = CROP_REF.to_ffmpeg_filter()
+    vmaf_sub = f"n_subsample={factor}:" if factor > 1 else ""
+
+    if factor > 1:
+        sel = f"select='not(mod(n,{factor}))',setpts=PTS-STARTPTS"
+        fd = (
+            f"[0:v]split=3[d1][d2][d3];"
+            f"[d1]{sel}[main1];"
+            f"[d2]{sel}[main2];"
+            f"[d3]setpts=PTS-STARTPTS[main3]"
+        )
+        fr = (
+            f"[1:v]{crop_r},split=3[r1][r2][r3];"
+            f"[r1]{sel}[ref1];"
+            f"[r2]{sel}[ref2];"
+            f"[r3]setpts=PTS-STARTPTS[ref3]"
+        )
+    else:
+        fd = f"[0:v]setpts=PTS-STARTPTS,split=3[main1][main2][main3]"
+        fr = f"[1:v]{crop_r},setpts=PTS-STARTPTS,split=3[ref1][ref2][ref3]"
+
+    psnr = f"[main1][ref1]psnr=stats_file=bench_aio_sel_f{factor}_psnr.tmp"
+    ssim = f"[main2][ref2]ssim=stats_file=bench_aio_sel_f{factor}_ssim.tmp"
+    vmaf = (
+        f"[main3][ref3]libvmaf=n_threads=4:{vmaf_sub}"
+        f"log_path=bench_aio_sel_f{factor}_vmaf.tmp:log_fmt=json:feature=name=vif"
+    )
+    fc = f"{fd};{fr};{psnr};{ssim};{vmaf}"
+
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostats", "-progress", "pipe:1",
+        "-i", str(DIST.resolve()),
+        "-i", str(REF.resolve()),
+        "-filter_complex", fc,
+        "-f", "null", "-",
+    ]
+
+    t0     = time.perf_counter()
+    result = await run_ffmpeg_async(cmd, output_file=None, cwd=CWD)
+    elapsed = time.perf_counter() - t0
+
+    if not result.success:
+        print(f"  ALL-IN-ONE+SELECT f={factor} FAILED (rc={result.returncode})")
+        for ln in (result.stderr_lines or [])[-8:]:
+            print(f"    {ln}")
+    return elapsed
+
+
 async def main() -> None:
     print(f"{'Run':<26} {'Factor':>6} {'Elapsed(s)':>10}")
     print("-" * 46)
@@ -91,7 +141,14 @@ async def main() -> None:
         print(f"{'all-in-one (VMAF×factor)':<26} {factor:>6} {t_aio:>10.1f}")
 
         saving = (t_sep - t_aio) / t_sep * 100
-        print(f"  → saving: {t_sep - t_aio:.1f}s ({saving:.0f}%)")
+        print(f"  → saving vs separate: {t_sep - t_aio:.1f}s ({saving:.0f}%)")
+
+        print(f"  [all-in-one+select] f={factor} ...", flush=True)
+        t_sel = await bench_all_in_one_with_select(factor)
+        print(f"{'all-in-one+select':<26} {factor:>6} {t_sel:>10.1f}")
+
+        saving2 = (t_sep - t_sel) / t_sep * 100
+        print(f"  → saving vs separate: {t_sep - t_sel:.1f}s ({saving2:.0f}%)")
 
 
 asyncio.run(main())
