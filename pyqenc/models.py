@@ -566,6 +566,35 @@ class VideoMetadata(BaseModel):
         if self._duration_seconds is None or self._fps is None or self._resolution is None:
             self.populate_from_ffmpeg_output(stderr_lines)
 
+    async def _probe_frame_count_async(self) -> None:
+        """Async variant of ``_probe_frame_count`` — safe to call from a running event loop.
+
+        Uses ``run_ffmpeg_async`` directly to avoid the sync-in-async deadlock.
+        Also opportunistically fills duration/fps/resolution from stderr.
+        """
+        import os as _os
+
+        from pyqenc.utils.ffmpeg_runner import run_ffmpeg_async
+
+        cmd: list[str | _os.PathLike] = [
+            "ffmpeg",
+            "-i",   self.path,
+            "-map", "0:v:0",
+            "-c",   "copy",
+            "-f",   "null",
+            "-",
+        ]
+        try:
+            result = await run_ffmpeg_async(cmd, output_file=None)
+            if result.frame_count is None:
+                logger.warning("Could not determine frame count for %s", self.path)
+            else:
+                self._frame_count = result.frame_count
+            if self._duration_seconds is None or self._fps is None or self._resolution is None:
+                self.populate_from_ffmpeg_output(result.stderr_lines)
+        except Exception as exc:
+            logger.warning("Async frame count probe failed for %s: %s", self.path, exc)
+
 
     def populate_from_ffprobe(self, data: dict) -> None:
         """Fill backing fields from a pre-parsed ffprobe JSON dict.
