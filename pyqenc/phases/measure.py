@@ -605,7 +605,7 @@ async def _capture_single_frame(
     cmd: list[str | Path] = ["ffmpeg", "-ss", seek_ts, "-i", video_path]
     if crop_params is not None and not crop_params.is_empty():
         cmd += ["-vf", crop_params.to_ffmpeg_filter()]
-    cmd += ["-frames:v", "1", output_path]
+    cmd += ["-frames:v", "1", "-f", "image2", "-c:v", "png", output_path]
     try:
         result = await run_ffmpeg_async(cmd, output_file=None)
         return result.success and output_path.exists()
@@ -1008,8 +1008,15 @@ async def run_measure(
 
     positions: ScreenshotPositions | None = None
 
-    source_frame_count = source_meta.frame_count
-    source_fps_frac    = source_meta.fps_fraction
+    # Probe fps first (fast ffprobe call, already triggered by resolution check above)
+    source_fps_frac = source_meta.fps_fraction
+
+    # frame_count requires the slow null-encode probe — call async variant to avoid
+    # the sync-in-async deadlock that would occur via the lazy property path.
+    source_frame_count = source_meta._frame_count  # use cached value if already populated
+    if source_frame_count is None:
+        await source_meta._probe_frame_count_async()
+        source_frame_count = source_meta._frame_count
 
     if source_frame_count is not None and source_fps_frac is not None:
         if screenshot_interval is not None:
