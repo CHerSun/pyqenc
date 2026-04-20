@@ -15,6 +15,7 @@ import subprocess
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum, IntEnum
+from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -54,7 +55,7 @@ def _run_ffprobe_streams(path: Path) -> dict | None:
         "ffprobe",
         "-v", "error",
         "-select_streams", "v:0",
-        "-show_entries", "stream=duration,r_frame_rate,width,height,pix_fmt:format=duration",
+        "-show_entries", "stream=duration,r_frame_rate,avg_frame_rate,width,height,pix_fmt:format=duration",
         "-of", "json",
         str(path),
     ]
@@ -313,9 +314,10 @@ class QualityTarget(BaseModel):
             metric, statistic = metric_stat.split("-")
             value = float(value_str)
 
-            valid_metrics = {"vmaf", "ssim", "psnr"}
+            from pyqenc.quality import MetricType  # deferred to avoid circular import
+            valid_metrics = {m.value for m in MetricType}
             if metric.lower() not in valid_metrics:
-                raise ValueError(f"Invalid metric '{metric}'. Must be one of: {valid_metrics}")
+                raise ValueError(f"Invalid metric '{metric}'. Must be one of: {sorted(valid_metrics)}")
 
             valid_stats = {"min", "med", "median", "max", "p05", "p25", "p75", "p95"}
             if statistic.lower() not in valid_stats:
@@ -470,12 +472,13 @@ class VideoMetadata(BaseModel):
     path: Path
 
     # Backing fields — populated lazily or via populate_from_* helpers.
-    _duration_seconds: float | None = PrivateAttr(default=None)
-    _frame_count:      int   | None = PrivateAttr(default=None)
-    _fps:              float | None = PrivateAttr(default=None)
-    _resolution:       str   | None = PrivateAttr(default=None)
-    _pix_fmt:          str   | None = PrivateAttr(default=None)
-    _file_size_bytes:  int   | None = PrivateAttr(default=None)
+    _duration_seconds: float    | None = PrivateAttr(default=None)
+    _frame_count:      int      | None = PrivateAttr(default=None)
+    _fps:              float    | None = PrivateAttr(default=None)
+    _fps_fraction:     Fraction | None = PrivateAttr(default=None)
+    _resolution:       str      | None = PrivateAttr(default=None)
+    _pix_fmt:          str      | None = PrivateAttr(default=None)
+    _file_size_bytes:  int      | None = PrivateAttr(default=None)
 
     # ------------------------------------------------------------------
     # Lazy properties
@@ -494,6 +497,13 @@ class VideoMetadata(BaseModel):
         if self._fps is None:
             self._probe_metadata()
         return self._fps
+
+    @property
+    def fps_fraction(self) -> Fraction | None:
+        """Exact rational FPS as a Fraction; probed on first access via avg_frame_rate."""
+        if self._fps_fraction is None:
+            self._probe_metadata()
+        return self._fps_fraction
 
     @property
     def resolution(self) -> str | None:
@@ -556,6 +566,35 @@ class VideoMetadata(BaseModel):
         if self._duration_seconds is None or self._fps is None or self._resolution is None:
             self.populate_from_ffmpeg_output(stderr_lines)
 
+    async def _probe_frame_count_async(self) -> None:
+        """Async variant of ``_probe_frame_count`` — safe to call from a running event loop.
+
+        Uses ``run_ffmpeg_async`` directly to avoid the sync-in-async deadlock.
+        Also opportunistically fills duration/fps/resolution from stderr.
+        """
+        import os as _os
+
+        from pyqenc.utils.ffmpeg_runner import run_ffmpeg_async
+
+        cmd: list[str | _os.PathLike] = [
+            "ffmpeg",
+            "-i",   self.path,
+            "-map", "0:v:0",
+            "-c",   "copy",
+            "-f",   "null",
+            "-",
+        ]
+        try:
+            result = await run_ffmpeg_async(cmd, output_file=None)
+            if result.frame_count is None:
+                logger.warning("Could not determine frame count for %s", self.path)
+            else:
+                self._frame_count = result.frame_count
+            if self._duration_seconds is None or self._fps is None or self._resolution is None:
+                self.populate_from_ffmpeg_output(result.stderr_lines)
+        except Exception as exc:
+            logger.warning("Async frame count probe failed for %s: %s", self.path, exc)
+
 
     def populate_from_ffprobe(self, data: dict) -> None:
         """Fill backing fields from a pre-parsed ffprobe JSON dict.
@@ -606,6 +645,17 @@ class VideoMetadata(BaseModel):
             pix_fmt = stream.get("pix_fmt")
             if pix_fmt:
                 self._pix_fmt = str(pix_fmt)
+
+        if self._fps_fraction is None:
+            avg_fps_str = stream.get("avg_frame_rate", "")
+            if avg_fps_str and "/" in avg_fps_str:
+                try:
+                    num_s, den_s = avg_fps_str.split("/")
+                    num, den = int(num_s), int(den_s)
+                    if den != 0:
+                        self._fps_fraction = Fraction(num, den)
+                except (ValueError, TypeError):
+                    pass
 
     def populate_from_ffmpeg_output(self, stderr_lines: list[str]) -> None:
         """Fill backing fields by parsing ffmpeg stderr output.
@@ -687,6 +737,8 @@ class VideoMetadata(BaseModel):
         ]:
             if value is not None:
                 base[key] = value
+        if self._fps_fraction is not None:
+            base["fps_fraction"] = [self._fps_fraction.numerator, self._fps_fraction.denominator]
         return base
 
     @classmethod
@@ -701,6 +753,9 @@ class VideoMetadata(BaseModel):
         instance._resolution       = data.get("resolution")
         instance._pix_fmt          = data.get("pix_fmt")
         instance._file_size_bytes  = data.get("file_size_bytes")
+        fps_frac = data.get("fps_fraction")
+        if isinstance(fps_frac, list) and len(fps_frac) == 2:
+            instance._fps_fraction = Fraction(int(fps_frac[0]), int(fps_frac[1]))
         return instance
 
 
@@ -730,6 +785,9 @@ class ChunkMetadata(VideoMetadata):
         instance._resolution       = data.get("resolution")
         instance._pix_fmt          = data.get("pix_fmt")
         instance._file_size_bytes  = data.get("file_size_bytes")
+        fps_frac = data.get("fps_fraction")
+        if isinstance(fps_frac, list) and len(fps_frac) == 2:
+            instance._fps_fraction = Fraction(int(fps_frac[0]), int(fps_frac[1]))
         return instance
 
 

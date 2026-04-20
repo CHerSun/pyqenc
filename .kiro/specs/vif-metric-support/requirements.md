@@ -1,0 +1,232 @@
+# Requirements: VIF Metric Support
+<!-- markdownlint-disable MD024 -->
+
+- Created: 2025-07-22
+- Completed: 2026-04-10
+
+## Cross-Spec Notes
+
+Compared against related specs (by created/completed date order):
+
+- **unified-metrics-visualization** (2026-03-15): Req 9.7 specified writing individual `.stats` text files alongside each metric log. This spec removes `_save_stats_file` entirely — no `.stats` files are written at any point. Req 4 hardcoded the bar subplot loop to `[PSNR, SSIM, VMAF]`; this spec replaces that with a dynamic loop over the `metrics` dict.
+- **standalone-measure** (2025-07-17, updated 2026-04-03): Req 3.4 specified raw metric log files written into `<target_stem>.metrics/` subdirectory. This spec removes that subdirectory entirely — raw `.tmp` files are written directly into `measure_dir`. Req 3.4 also referenced canonical log extensions (`.log`, `.json`); this spec keeps files as `.tmp` throughout their lifetime (no rename). The `METRICS_SUBDIR_SUFFIX` constant is no longer used by `run_measure`.
+- **pipeline-correctness-refactor** (2026-03-16): No conflicts — that spec focused on typed models and CRF naming. `QualityArtifacts` changes here (removing `stats_files`, adding `vif_log`) are additive and compatible.
+- **all-in-one-metrics** (2026-04-11, supersedes parts of this spec): `run_metric` (singular) + `asyncio.gather` pattern introduced here is replaced by a single `run_metrics` call. The `vif` lavfi filter and its plain-text log format (`n:0 vif_scale0:… vif:…`) are superseded — VIF is now embedded in the VMAF pass via `feature=name=vif` and parsed from the VMAF JSON. `MetricData` wrapper introduced here is removed. `MetricInfo.complexity` field is removed. `_extract_key_stats` is made public as `extract_key_stats`. `create_unified_plot` now accepts `pd.DataFrame` instead of `dict[MetricType, MetricData]`.
+- **measure-phase-ux-overhaul** (2026-05-01): Screenshot capture replaced with `ScreenshotPositions` + `make_screenshots` (Strategy C fast-seek primary, A2/A4 fallbacks). `SCREENSHOTS_SUBDIR_SUFFIX` constant removed — screenshot folders now named `{video.stem}` directly. `screenshot_interval` parameter removed from `run_measure` and `measure_quality`. `_log_measure_summary` added — per-metric median INFO lines suppressed in favour of summary table. `screenshot_include_edges` parameter added to `measure_quality` and CLI.
+
+## Introduction
+
+Add VIF (Video Information Fidelity) as a fully supported quality metric alongside the existing PSNR, SSIM, and VMAF metrics. VIF measures perceptual quality by modelling the human visual system's information channel. The raw ffmpeg VIF score uses an inverted scale (0.0 = lossless, higher = worse), but after normalization (`normalized = 100 - raw`) it is displayed on the same 0–100 scale as PSNR/SSIM/VMAF: 100 = lossless, lower = worse. After normalization, VIF behaves identically to the other metrics (`higher_is_better = True`).
+
+The implementation must reuse all existing mechanics: `MetricInfo` descriptor, `MetricType` enum, `QualityTarget` parsing, normalization pipeline, `QualityEvaluator`, `analyze_chunk_quality`, unified plot generation, and sidecar YAML writing. Raw metric log files are treated as transient scratch files (`.tmp` throughout their lifetime) — no rename to a canonical name, no `.stats` sidecar. The only new code is the VIF-specific ffmpeg filter command and its log file parser.
+
+VIF is computed by ffmpeg's `vif` lavfi filter, which writes a plain-text log file (one line per frame) with per-scale component values and a combined `vif:` score. Only the combined `vif:` field is used; per-scale values are ignored.
+
+This feature also formalises the `MetricInfo` internal field naming convention: normalization implementation details (`_scale_factor`, `_clip_lower`, `_clip_upper`, `_offset`) are underscore-prefixed to signal they are not part of the public API.
+
+## Glossary
+
+- **VIF**: Video Information Fidelity — a full-reference perceptual quality metric. Raw ffmpeg score: 0.0 = lossless, higher = worse. After normalization (`100 - raw`): 100.0 = lossless, lower = worse. Displayed on the same 0–100 scale as PSNR/SSIM/VMAF.
+- **VIF_Filter**: The ffmpeg lavfi filter `vif` that computes VIF scores and writes a log file.
+- **VIF_Log**: Plain-text log file produced by the `vif` ffmpeg filter. One line per frame, containing frame index, per-scale VIF component values, and a combined `vif:` score. Only the combined `vif:` field is used.
+- **MetricType**: Enum in `pyqenc/quality.py` enumerating all supported metrics. VIF is added as `MetricType.VIF`.
+- **MetricInfo**: Frozen dataclass in `pyqenc/quality.py` carrying all metric-specific properties (normalization, display, CRF search behaviour). One instance per `MetricType`. Public fields: `name`, `id`, `higher_is_better`, `lossless_value`, `lossless_raw_repr`, `display_unit`, `plot_y_min`, `plot_y_max`, `complexity`, `comparison_range`, `acceptance_delta`. Internal fields (not part of public API): `_scale_factor`, `_clip_lower`, `_clip_upper`, `_offset`. Note: VMAF and SSIM use `display_unit = ""` (not `"%"`); PSNR uses `display_unit = " dB"`.
+- **QualityTarget**: Pydantic model representing a quality threshold (e.g. `vif-min:85.0`). Parsed from CLI strings.
+- **QualityEvaluator**: Class in `pyqenc/utils/visualization.py` that orchestrates metric generation, parsing, plotting, and target evaluation for a single encoded/reference pair.
+- **analyze_chunk_quality**: Module-level function in `pyqenc/utils/visualization.py` that accepts metric log file paths, computes statistics, generates the unified plot, and returns `ChunkQualityStats`.
+- **ChunkQualityStats**: `dict[MetricType, MetricStats]` — the per-metric statistics dict returned by `analyze_chunk_quality` and stored in sidecars.
+- **QualityArtifacts**: Dataclass in `pyqenc/quality.py` holding paths to generated metric files and the plot.
+- **Sidecar_YAML**: Per-target YAML file written by `_write_sidecar` in `pyqenc/phases/measure.py` containing flat `{metric_stat: value}` entries (e.g. `vif_min`, `vif_median`).
+- **Unified_Plot**: PNG graph generated by `create_unified_plot` in `pyqenc/utils/visualization.py` showing all available metrics over time.
+- **Normalization**: Converting a raw metric value to the display scale using the formula `_offset + raw * _scale_factor`, then clipping to `[_clip_lower, _clip_upper]`. All parameters are internal fields of `MetricInfo`.
+
+---
+
+## Requirements
+
+### Requirement 1: MetricInfo Internal Field Cleanup
+
+**User Story:** As a developer, I want `MetricInfo` normalization implementation details to be clearly separated from its public API, so that callers cannot accidentally depend on internal fields.
+
+#### Acceptance Criteria
+
+<!-- ACs 1–6 are already implemented in pyqenc/quality.py -->
+1. THE `MetricInfo` dataclass SHALL rename `scale_factor` to `_scale_factor`, `clip_lower` to `_clip_lower`, and `clip_upper` to `_clip_upper`. *(implemented)*
+2. THE `MetricInfo` dataclass SHALL add a new field `_offset: float` representing the additive offset applied before scaling in the normalization formula. *(implemented)*
+3. THE normalization formula SHALL be: `normalized = _offset + raw * _scale_factor`, then clip to `[_clip_lower, _clip_upper]` (either bound may be `None` to skip that clip). *(implemented)*
+4. THE existing metrics (VMAF, SSIM, PSNR) SHALL be updated to use `_offset = 0.0`, `_scale_factor` (renamed from `scale_factor`), `_clip_lower` (renamed from `clip_lower`), and `_clip_upper` (renamed from `clip_upper`) — no change to their normalization behaviour. *(implemented)*
+5. THE public fields of `MetricInfo` SHALL be: `name`, `id`, `higher_is_better`, `lossless_value`, `lossless_raw_repr`, `display_unit`, `plot_y_min`, `plot_y_max`, `complexity`, `comparison_range`, `acceptance_delta`. *(implemented)*
+6. THE internal fields `_scale_factor`, `_clip_lower`, `_clip_upper`, and `_offset` SHALL NOT be referenced directly by any code outside of `MetricInfo.normalize()`. *(implemented)*
+7. THE public methods `normalize()`, `passes()`, and `deficit()` SHALL remain unchanged in signature and behaviour.
+8. THE `MetricInfo` class docstring SHALL be updated to replace references to old field names (`scale_factor`, `clip_lower`, `clip_upper`) with the new underscore-prefixed names (`_scale_factor`, `_clip_lower`, `_clip_upper`, `_offset`).
+
+---
+
+### Requirement 2: VIF MetricType and MetricInfo
+
+**User Story:** As a developer, I want VIF registered as a first-class `MetricType` with a complete `MetricInfo` descriptor, so that all metric-agnostic pipeline code handles VIF automatically without special-casing.
+
+#### Acceptance Criteria
+
+<!-- ACs 1–3 and 8–11 are already implemented in pyqenc/quality.py -->
+1. THE `MetricType` enum SHALL contain a `VIF` member with `.value == "vif"`. *(implemented)*
+2. THE `_METRIC_INFO` dict SHALL contain an entry for `MetricType.VIF` with a fully populated `MetricInfo` instance. *(implemented)*
+3. THE `MetricInfo` for VIF SHALL have `higher_is_better = True`, `_scale_factor = -1.0`, `_offset = 100.0`, `_clip_lower = 0.0`, `_clip_upper = None` (no upper clip — raw VIF is naturally bounded so values above 100 cannot occur from the formula), `lossless_value = 100.0`, and `lossless_raw_repr = "100.0"`. *(implemented)*
+4. WHEN `MetricType.VIF.info.normalize(raw)` is called with `raw = 0.0` (lossless), THE result SHALL be `100.0`.
+5. WHEN `MetricType.VIF.info.normalize(raw)` is called with a raw value that would produce a result below `0.0` after the formula, THE result SHALL be clipped to `0.0`.
+6. WHEN `MetricType.VIF.info.normalize(value)` is called twice on the same value, THE result SHALL equal the result of calling it once (idempotence of clipping).
+7. WHEN `MetricType.VIF.info.passes(actual, target)` is called with `actual >= target`, THE result SHALL be `True`. *(implemented)*
+8. WHEN `MetricType.VIF.info.passes(actual, target)` is called with `actual < target`, THE result SHALL be `False`. *(implemented)*
+9. THE `MetricInfo` for VIF SHALL have `display_unit = ""`, `complexity = 1.0`, `comparison_range = 10.0`, and `acceptance_delta = 0.2`. *(implemented)*
+10. THE `MetricInfo` for VIF SHALL have `plot_y_min = 0.0` and `plot_y_max = 103.0` (matching the PSNR/SSIM/VMAF plot range). *(implemented)*
+
+---
+
+### Requirement 3: VIF ffmpeg Command
+
+**User Story:** As a developer, I want `run_metric` to build the correct ffmpeg filter-graph command for VIF, so that VIF scores are computed using the `vif` lavfi filter via the unified ffmpeg runner.
+
+#### Acceptance Criteria
+
+1. WHEN `run_metric` is called with `metric = MetricType.VIF`, THE `run_metric` function SHALL build an ffmpeg command using the `vif` lavfi filter with a `stats_file` argument pointing to the output log path.
+2. WHEN `run_metric` is called with `metric = MetricType.VIF`, THE command SHALL be passed to `run_ffmpeg_async` (the unified runner) and SHALL NOT use any direct subprocess call.
+3. WHEN `run_metric` is called with `metric = MetricType.VIF` and `output_extension = ".tmp"`, THE output log path SHALL use the `.tmp` extension.
+4. WHEN `run_metric` is called with `metric = MetricType.VIF` and `output_extension = None`, THE output log path SHALL use the `.log` extension.
+5. WHEN `run_metric` is called with `metric = MetricType.VIF` and `subsample > 1`, THE command SHALL apply frame subsampling at the video-stream level (same as PSNR/SSIM).
+6. IF `run_metric` is called with `metric = MetricType.VIF` and the ffmpeg process exits with a non-zero return code, THEN THE `run_metric` function SHALL return the `FFmpegRunResult` with `success = False` without raising.
+
+---
+
+### Requirement 4: VIF Log File Parser
+
+**User Story:** As a developer, I want a `parse_vif_file` function that reads a VIF log file into a frame-indexed DataFrame, so that VIF data can be fed into the existing statistics and plotting pipeline.
+
+#### Acceptance Criteria
+
+1. THE `parse_vif_file` function SHALL accept a `file_path: Path` and `factor: int = 1` and return a `pd.DataFrame` indexed by `frameNum` with a single `"vif"` column containing the combined `vif:` score per frame (extracted from the `vif:` field in each log line; per-scale fields are ignored).
+2. WHEN `parse_vif_file` is called with a valid VIF log file, THE returned DataFrame SHALL have one row per frame present in the log.
+3. WHEN `parse_vif_file` is called with a valid VIF log file and `factor = N`, THE `frameNum` index values SHALL equal `(line_index) * N` (zero-based frame numbering, consistent with PSNR/SSIM convention).
+4. IF `parse_vif_file` is called with a file that contains no parseable VIF lines, THEN THE function SHALL raise `ValueError` with a descriptive message.
+5. IF `parse_vif_file` encounters a malformed line, THEN THE function SHALL skip that line and continue parsing remaining lines.
+6. FOR ALL valid VIF log files, parsing the file SHALL produce a DataFrame where every value in the `"vif"` column is a finite float (no NaN, no inf from the parser itself).
+7. THE `parse_vif_file` function SHALL be placed in `pyqenc/utils/visualization.py` alongside `parse_psnr_file`, `parse_ssim_file`, and `parse_vmaf_file`.
+
+---
+
+### Requirement 5: VIF Integration in analyze_chunk_quality
+
+**User Story:** As a developer, I want `analyze_chunk_quality` to accept and process a VIF log file, so that VIF statistics are computed, included in the returned `ChunkQualityStats`, and shown in the unified plot.
+
+#### Acceptance Criteria
+
+1. THE `analyze_chunk_quality` function SHALL accept a `vif_log: Path | None = None` parameter.
+2. WHEN `vif_log` is provided and the file is valid, THE function SHALL parse it, compute statistics, and include `MetricType.VIF` in the returned `ChunkQualityStats`.
+3. WHEN `vif_log` is provided and the file is valid, THE function SHALL normalize all VIF statistics using `MetricType.VIF.info.normalize()` before storing them in `ChunkQualityStats`.
+4. WHEN `vif_log` is provided and the file is valid and `generate_plot = True`, THE function SHALL include VIF data in the unified plot passed to `create_unified_plot`.
+5. WHEN `vif_log` is `None`, THE function SHALL behave identically to the current implementation (no VIF in output).
+6. IF `vif_log` is provided but cannot be parsed, THEN THE function SHALL log a warning and continue without VIF (same pattern as PSNR/SSIM/VMAF failure handling).
+7. WHEN `vif_log` is provided, THE function SHALL NOT write any `.stats` sidecar file — statistics are kept in memory only (see Requirement 12).
+8. WHEN `vif_log` is provided, THE raw `.tmp` log file SHALL be deleted immediately after it has been successfully parsed (best-effort; startup `.tmp` glob is the safety net for interrupted runs — see Requirement 12).
+
+---
+
+### Requirement 6: VIF Integration in QualityEvaluator
+
+**User Story:** As a developer, I want `QualityEvaluator` to generate, rename, and process VIF metric files automatically alongside PSNR, SSIM, and VMAF, so that VIF requires no special-casing in the evaluation pipeline.
+
+#### Acceptance Criteria
+
+1. WHEN `QualityEvaluator._generate_metrics` runs, THE function SHALL run the VIF metric computation for `MetricType.VIF` concurrently with PSNR, SSIM, and VMAF (via `asyncio.gather`).
+2. WHEN `QualityEvaluator._generate_metrics` completes, THE VIF `.tmp` file (`<uuid>.vif.tmp`) SHALL be returned directly as its path — it SHALL NOT be renamed (see Requirement 12).
+3. IF the VIF tmp file is not found after ffmpeg completes, THEN THE function SHALL log a warning (same as PSNR/SSIM/VMAF missing file handling).
+4. THE `QualityArtifacts` dataclass SHALL contain a `vif_log: Path | None` field.
+5. WHEN `_finish_evaluation` is called, THE `vif_log` field of `QualityArtifacts` SHALL be set to the VIF log path if the file exists, or `None` otherwise.
+6. WHEN `_finish_evaluation` calls `analyze_chunk_quality`, THE `vif_log` argument SHALL be passed.
+7. WHEN `QualityEvaluator.evaluate_chunk_async` computes the progress bar total complexity, THE VIF metric's `complexity` value SHALL be included in the sum (same as other metrics).
+
+---
+
+### Requirement 7: VIF in QualityTarget Parsing and Evaluation
+
+**User Story:** As a developer, I want `QualityTarget.parse` to accept `"vif"` as a valid metric, so that users can specify VIF-based quality targets (e.g. `vif-min:0.3`) for encoding optimization.
+
+#### Acceptance Criteria
+
+1. WHEN `QualityTarget.parse("vif-min:85.0")` is called, THE function SHALL return a `QualityTarget` with `metric = "vif"`, `statistic = "min"`, and `value = 85.0`.
+2. WHEN `QualityTarget.parse` is called with an invalid metric name (not in the valid set), THE function SHALL raise `ValueError` (existing behaviour preserved).
+3. THE valid metrics set in `QualityTarget.parse` SHALL be derived from `MetricType` (e.g. `{m.value for m in MetricType}`) rather than a hardcoded set, so any future metric is automatically accepted.
+4. WHEN a VIF quality target is evaluated against a `ChunkQualityStats` result, THE evaluation SHALL use `MetricType.VIF.info.passes()` semantics (higher is better — `actual >= target`).
+
+---
+
+### Requirement 8: VIF in Unified Plot
+
+**User Story:** As a developer, I want the unified quality plot to display VIF data when available, so that VIF trends are visible alongside other metrics.
+
+#### Acceptance Criteria
+
+1. WHEN `create_unified_plot` is called with VIF data in the `metrics` dict, THE function SHALL render a VIF line on the plot.
+2. THE VIF entry in `DEFAULT_METRIC_STYLES` SHALL use a purple color scheme (e.g. `#7B2D8B` for the main line and `#C084D4` for the fill/secondary), distinct from the existing blue (PSNR), green (SSIM), and orange (VMAF) styles — no magic color strings outside of `DEFAULT_METRIC_STYLES`.
+3. WHEN VIF is the only metric present, THE function SHALL render a valid single-metric plot without error.
+4. WHEN VIF is present alongside PSNR and/or SSIM/VMAF, THE function SHALL assign VIF to an appropriate Y-axis (its own scale or shared with other non-PSNR metrics, consistent with its `plot_y_min`/`plot_y_max` range).
+5. WHEN `create_unified_plot` renders the statistics bar subplots, THE VIF subplot SHALL be included when VIF data is present. The bar subplot loop SHALL iterate over the `metrics` dict rather than a hardcoded list of metric types.
+6. THE summary box for VIF in the plot SHALL display min, median, max, and std values with the correct unit (empty string for VIF).
+
+---
+
+### Requirement 9: VIF in Sidecar YAML
+
+**User Story:** As a developer, I want VIF statistics to be included in the metrics sidecar YAML written by `_write_sidecar`, so that VIF results are persisted alongside PSNR/SSIM/VMAF for downstream use.
+
+#### Acceptance Criteria
+
+1. WHEN `_write_sidecar` is called with a `ChunkQualityStats` that includes `MetricType.VIF`, THE sidecar YAML SHALL contain flat keys `vif_min`, `vif_p05`, `vif_p25`, `vif_median`, `vif_p75`, `vif_p95`, `vif_max`, and `vif_std`.
+2. THE sidecar YAML generation SHALL NOT require any VIF-specific code — the existing flattening loop over `metric_type.value` SHALL produce the correct keys automatically once `MetricType.VIF` is in the enum.
+3. WHEN `_write_sidecar` is called without VIF data in `ChunkQualityStats`, THE sidecar YAML SHALL contain no `vif_*` keys (no change to existing behaviour).
+
+---
+
+### Requirement 10: No Magic Strings or Numbers
+
+**User Story:** As a developer, I want all VIF-related string literals and numeric constants to be expressed as named constants or enum values, so that the codebase remains consistent with project coding standards.
+
+#### Acceptance Criteria
+
+1. THE string `"vif"` SHALL NOT appear as a bare string literal anywhere in the implementation — all references SHALL use `MetricType.VIF.value`.
+2. ALL numeric constants specific to VIF (clip bounds, plot axis limits, complexity, comparison_range, acceptance_delta, offset) SHALL be defined as named fields in the `MetricInfo` instance for `MetricType.VIF`, not as inline literals in calling code.
+3. THE VIF log file extension (`.log`) SHALL be referenced via the same constant or pattern used for PSNR/SSIM log extensions — no new magic string.
+
+
+---
+
+### Requirement 11: Quality Target CLI Help Text
+
+**User Story:** As a user, I want the `--quality-target` CLI argument help text to include a concise explanation of the normalized metric scale and per-metric quality landmarks, so I can set meaningful targets without consulting external documentation.
+
+#### Acceptance Criteria
+
+1. THE `--quality-target` argument help string SHALL include a brief note explaining that all metrics are normalized to a 0–100 scale where 100 represents lossless quality.
+2. THE help text SHALL include per-metric quality landmarks in a concise human-readable form, specifically: VMAF good quality at 95+, SSIM good quality at 98+, PSNR typical range 40–60, VIF good quality at 95+.
+3. THE help text SHALL mention the target format (e.g. `vmaf-min:95`, `psnr-median:45`).
+4. THE help text SHALL be concise — a few lines at most — and written for a non-expert user.
+5. THE help text content SHALL be defined as a named constant or docstring, NOT as an inline magic string in the argument parser call.
+
+---
+
+### Requirement 12: Raw Metrics Pipeline Simplification
+
+**User Story:** As a developer, I want raw metric log files to be treated as purely transient scratch files that are never renamed or persisted as named artifacts, so that the pipeline has fewer I/O steps, no orphaned named log files, and startup `.tmp` cleanup handles any leftovers automatically.
+
+#### Acceptance Criteria
+
+1. AFTER `_generate_metrics` completes, THE raw metric log files SHALL remain at their `<uuid>.<metric>.tmp` paths — they SHALL NOT be renamed to any canonical name.
+2. THE `_generate_metrics` method SHALL return the `.tmp` paths directly (e.g. `<cwd>/<uuid>.psnr.tmp`, `<cwd>/<uuid>.ssim.tmp`, `<cwd>/<uuid>.vmaf.tmp`, `<cwd>/<uuid>.vif.tmp`) as its return value.
+3. THE `analyze_chunk_quality` function SHALL accept `.tmp`-named paths for all metric log parameters — it SHALL NOT require or assume any specific filename convention.
+4. THE `_save_stats_file` function SHALL be removed. No `.stats` sidecar files SHALL be written at any point in the metrics pipeline.
+5. THE `_cleanup_raw_metric_files` function SHALL be removed. `analyze_chunk_quality` SHALL accept a `delete_after_parse: bool = True` parameter; when `True`, each raw metric `.tmp` file is deleted immediately after successful parsing (best-effort: log warning on failure, do not raise). The startup `.tmp` glob cleanup at the beginning of each phase serves as a safety net for any files left behind by interrupted runs.
+6. THE `QualityArtifacts.stats_files` field SHALL be removed (it is always empty and unused).
+7. THE `run_measure` phase SHALL NOT create per-target metric subdirectories (currently `<stem>.metrics/`). Raw metric `.tmp` files SHALL be written directly into the `measure_dir` (or an explicit output directory argument — see AC8).
+8. THE `QualityEvaluator.evaluate_chunk_async` (and `evaluate_chunk`) SHALL accept an explicit `metrics_output_dir: Path | None = None` parameter. When provided, metric `.tmp` files are written there; when `None`, they are written to `output_dir` (existing behaviour for the encoding pipeline).
+9. THE startup `.tmp` cleanup in the `measure` phase SHALL glob for `*.tmp` in `measure_dir` and delete any found before beginning work (same pattern as other phases).
+10. WHEN a metric ffmpeg process fails (non-zero exit), THE `.tmp` file for that metric MAY not exist; the pipeline SHALL log a warning and continue without that metric (existing behaviour preserved).
+11. THE `analyze_chunk_quality` function's docstring SHALL be updated to remove references to `.stats` file side effects.

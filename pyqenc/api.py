@@ -337,38 +337,46 @@ def merge_final(
 
 
 def measure_quality(
-    source_video:        Path,
-    target_videos:       list[Path]   = [],
-    work_dir:            Path         = Path("."),
-    crop_params:         CropParams | None = None,
-    metrics_sampling:    int          = DEFAULT_METRICS_SAMPLING,
-    screenshot_count:    int | None   = DEFAULT_SCREENSHOT_COUNT,
-    screenshot_interval: str | None   = None,
-    width:               int | None   = None,
+    source_video:             Path,
+    target_videos:            list[Path]        = [],
+    work_dir:                 Path              = Path("."),
+    crop_params:              CropParams | None = None,
+    metrics_sampling:         int               = DEFAULT_METRICS_SAMPLING,
+    screenshot_count:         int | None        = DEFAULT_SCREENSHOT_COUNT,
+    screenshot_interval:      str | None        = None,
+    width:                    int | None        = None,
+    screenshot_include_edges: bool              = False,
 ) -> "MeasureResult":
     """Measure quality metrics between a source and one or more encoded videos.
 
     Computes VMAF, SSIM, and PSNR metrics for each target, writes a metrics
     sidecar YAML per target, generates a quality graph per target, and captures
-    screenshots from the source (once, shared timestamps) and each target.
+    screenshots from the source (once, shared positions) and each target.
+
+    Screenshot positions are computed from the source video's frame count and
+    exact rational FPS using integer frame arithmetic — no float drift.
 
     All outputs are written under ``work_dir/measure/``.
 
     Args:
-        source_video:        Path to the reference (original) video file.
-        target_videos:       Paths to encoded/distorted videos to evaluate. Pass an
-                             empty list to run in screenshots-only mode.
-        work_dir:            Working directory. Outputs go under ``work_dir/measure/``.
-        crop_params:         Crop parameters applied to the source during metric
-                             computation. Pass ``None`` to auto-load from
-                             ``job.yaml`` in ``work_dir`` if present; pass an
-                             empty ``CropParams`` to explicitly disable cropping.
-        metrics_sampling:    Frame subsampling factor (≥1, default 10).
-        screenshot_count:    Screenshots to capture from each video (≥1, default 20).
-        screenshot_interval: Interval string between screenshots in interval mode
-                             (e.g. ``"30s"``, ``"5m"``). ``None`` = count mode.
-        width:               Scale both inputs to this width during metric computation
-                             (after cropping). ``None`` = no scaling.
+        source_video:             Path to the reference (original) video file.
+        target_videos:            Paths to encoded/distorted videos to evaluate. Pass an
+                                  empty list to run in screenshots-only mode.
+        work_dir:                 Working directory. Outputs go under ``work_dir/measure/``.
+        crop_params:              Crop parameters applied to the source during metric
+                                  computation. Pass ``None`` to auto-load from
+                                  ``job.yaml`` in ``work_dir`` if present; pass an
+                                  empty ``CropParams`` to explicitly disable cropping.
+        metrics_sampling:         Frame subsampling factor (≥1, default 3).
+        screenshot_count:         Screenshots to capture from each video (≥1, default 20).
+                                  In interval mode, acts as a cap on the total count.
+        screenshot_interval:      Interval string between screenshots in interval mode
+                                  (e.g. ``"30s"``, ``"5m"``). ``None`` = count mode
+                                  (evenly spaced across full duration).
+        width:                    Scale both inputs to this width during metric computation
+                                  (after cropping). ``None`` = no scaling.
+        screenshot_include_edges: When True, include frame 0 and the last frame in
+                                  screenshot positions (count mode only).
 
     Returns:
         ``MeasureResult`` containing source screenshots directory and per-target results.
@@ -391,14 +399,15 @@ def measure_quality(
         parsed_interval = _parse_duration(screenshot_interval)
 
     return asyncio.run(run_measure(
-        source_video        = source_video,
-        target_videos       = target_videos,
-        work_dir            = work_dir,
-        crop_params         = crop_params,
-        metrics_sampling    = metrics_sampling,
-        width               = width,
-        screenshot_count    = screenshot_count,
-        screenshot_interval = parsed_interval,
+        source_video             = source_video,
+        target_videos            = target_videos,
+        work_dir                 = work_dir,
+        crop_params              = crop_params,
+        metrics_sampling         = metrics_sampling,
+        width                    = width,
+        screenshot_count         = screenshot_count,
+        screenshot_interval      = parsed_interval,
+        screenshot_include_edges = screenshot_include_edges,
     ))
 
 

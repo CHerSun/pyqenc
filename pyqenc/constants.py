@@ -110,11 +110,9 @@ MEASURE_DIR            = "measure"
 """Output subdirectory name for standalone measure artifacts."""
 
 # Measure artifact naming
-METRICS_SUBDIR_SUFFIX     = ".metrics"
+METRICS_SUBDIR_SUFFIX    = ".metrics"
 """Suffix appended to target stem to form the raw metric logs subdirectory."""
-SCREENSHOTS_SUBDIR_SUFFIX = ".screenshots"
-"""Suffix appended to target stem to form the screenshots subdirectory."""
-SCREENSHOT_TIMESTAMP_FMT  = "{h:02d}{sep}{m:02d}{sep}{s:02d}{ms_sep}{ms:03d}"
+SCREENSHOT_TIMESTAMP_FMT = "{h:02d}{sep}{m:02d}{sep}{s:02d}{ms_sep}{ms:03d}"
 """Zero-padded timestamp format for screenshot filenames.
 
 Uses TIME_SEPARATOR_SAFE and TIME_SEPARATOR_MS from constants — the same

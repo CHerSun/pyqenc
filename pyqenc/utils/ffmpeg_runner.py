@@ -193,11 +193,16 @@ async def _read_stdout(
 
 
 async def _read_stderr(stderr: asyncio.StreamReader) -> list[str]:
-    """Read ffmpeg stderr line-by-line and collect all non-empty lines.
+    """Read ffmpeg stderr and collect all non-empty lines.
 
-    With ``-nostats`` injected, stderr contains only the short header block
-    (``Duration:``, ``Stream #0:0: Video:``, codec info) plus a one-line final
-    summary — typically 20–60 lines, never large enough to be a memory concern.
+    ffmpeg uses three different line endings depending on context:
+    - ``\\r\\n`` — Windows-style (some header lines)
+    - ``\\n``    — Unix-style (most header/summary lines)
+    - ``\\r``    — in-place overwrite (VIF per-frame output, progress lines)
+
+    ``readline()`` only splits on ``\\n``, so ``\\r``-only lines block until
+    EOF.  Instead we read raw bytes in chunks and manually reconstruct lines
+    from all three separators.
 
     Args:
         stderr: Async stream reader attached to the subprocess stderr pipe.
@@ -205,14 +210,32 @@ async def _read_stderr(stderr: asyncio.StreamReader) -> list[str]:
     Returns:
         List of all non-empty stripped lines from stderr.
     """
-    lines: list[str] = []
+    _CHUNK = 4096
+    lines:  list[str] = []
+    buf:    bytes      = b""
+
     while True:
-        raw = await stderr.readline()
-        if not raw:
+        chunk = await stderr.read(_CHUNK)
+        if not chunk:
             break
-        line = raw.decode(errors="replace").strip()
+        buf += chunk
+        # Split on \r\n first (must come before \r to avoid double-splitting),
+        # then \n, then \r — normalise to a single separator.
+        normalised = buf.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        # Keep the last (potentially incomplete) segment in the buffer.
+        parts = normalised.split(b"\n")
+        buf   = parts[-1]          # incomplete tail — wait for more bytes
+        for part in parts[:-1]:
+            line = part.decode(errors="replace").strip()
+            if line:
+                lines.append(line)
+
+    # Flush whatever remains in the buffer after EOF
+    if buf:
+        line = buf.decode(errors="replace").strip()
         if line:
             lines.append(line)
+
     return lines
 
 

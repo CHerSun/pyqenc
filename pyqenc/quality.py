@@ -8,12 +8,12 @@ algorithms for iterative encoding optimization.
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 from os import PathLike
 from pathlib import Path
-from typing import Protocol, TypedDict, TypeVar, assert_never, runtime_checkable
+from typing import Iterable, Protocol, TypedDict, TypeVar, assert_never, runtime_checkable
 
 import pandas as pd
 
@@ -38,34 +38,39 @@ class MetricInfo:
     Single source of truth for normalization, display, and CRF search behaviour.
     Accessed via ``MetricType.PSNR.info``, etc.
 
+    Public fields: ``name``, ``id``, ``higher_is_better``, ``lossless_value``,
+    ``lossless_raw_repr``, ``display_unit``, ``plot_y_min``, ``plot_y_max``,
+    ``comparison_range``, ``acceptance_delta``.
+
+    Internal fields (not part of public API — used only by ``normalize()``):
+    ``_offset``, ``_scale_factor``, ``_clip_lower``, ``_clip_upper``.
+
     Attributes:
         name:              Human-readable display name (e.g. ``"PSNR"``).
         id:                Lowercase string key matching ``MetricType.value``
                            (e.g. ``"psnr"``).  Used for dict keys and filenames.
         higher_is_better:  ``True`` when a higher normalized value is better
-                           (VMAF, SSIM, PSNR).  ``False`` for metrics like VIF
-                           where 0 is lossless and higher means worse.
-        scale_factor:      Multiply the raw value by this before clipping.
-                           SSIM raw range is 0–1, so ``scale_factor=100.0``.
-                           All others use ``1.0``.
-        clip_upper:        After scaling, clip values above this threshold.
+                           (VMAF, SSIM, PSNR, VIF after normalization).
+        _offset:           Additive offset applied before scaling in the
+                           normalization formula: ``normalized = _offset + raw * _scale_factor``.
+                           VIF uses ``100.0`` (inverts the scale); all others use ``0.0``.
+        _scale_factor:     Multiply the raw value by this after adding ``_offset``.
+                           SSIM raw range is 0–1, so ``_scale_factor=100.0``.
+                           VIF uses ``-1.0`` to invert. All others use ``1.0``.
+        _clip_upper:       After applying the formula, clip values above this threshold.
                            ``None`` means no upper clipping.
                            PSNR: ``100.0`` (caps ∞ dB).
-        clip_lower:        After scaling, clip values below this threshold.
+        _clip_lower:       After applying the formula, clip values below this threshold.
                            ``None`` means no lower clipping.
+                           VIF: ``0.0`` (prevents negative normalized values).
         lossless_value:    Normalized value that represents lossless quality
-                           (e.g. ``100.0`` for VMAF/SSIM/PSNR, ``0.0`` for VIF).
+                           (``100.0`` for all current metrics after normalization).
         lossless_raw_repr: Human-readable string for the raw lossless value
-                           (e.g. ``"∞ dB"`` for PSNR, ``"100.0"`` for SSIM/VMAF).
+                           (e.g. ``"∞ dB"`` for PSNR, ``"100.0"`` for SSIM/VMAF/VIF).
         display_unit:      Unit suffix for display (e.g. ``" dB"``, ``"%"``).
         plot_y_min:        Lower bound for the Y-axis in plots (normalized scale).
         plot_y_max:        Upper bound for the Y-axis in plots (normalized scale).
                            Slightly above ``lossless_value`` to leave headroom.
-        complexity:        Relative computational cost compared to SSIM/PSNR (baseline 1.0).
-                           Used to weight progress bar totals so that slower metrics
-                           (e.g. VMAF) contribute proportionally more to the reported
-                           duration.  SSIM and PSNR are 1.0; VMAF is ~10.0 (empirical
-                           estimate — actual ratio varies by content and hardware).
         comparison_range:  Practical value span used *only* for normalizing
                            cross-metric deficit comparisons (``_score_failing_attempt``).
                            Not the theoretical lossless ceiling — the realistic range
@@ -78,22 +83,28 @@ class MetricInfo:
                            search — saves an extra encoding pass when the result is
                            already close enough.  Values are in normalized metric units
                            (post-scale_factor).
+        subsample_via_filter: When ``True``, the metric uses a stream-level
+                           ``select='not(mod(n,factor))'`` filter on its branch in the
+                           combined ffmpeg pass (PSNR, SSIM).  When ``False``,
+                           subsampling is handled internally by the filter itself
+                           (VMAF via ``n_subsample``) or is not applicable (VIF).
     """
 
-    name:              str
-    id:                str
-    higher_is_better:  bool
-    scale_factor:      float
-    clip_upper:        float | None
-    clip_lower:        float | None
-    lossless_value:    float
-    lossless_raw_repr: str
-    display_unit:      str
-    plot_y_min:        float
-    plot_y_max:        float
-    complexity:        float
-    comparison_range:  float
-    acceptance_delta:  float
+    name:                 str
+    id:                   str
+    higher_is_better:     bool
+    _offset:              float
+    _scale_factor:        float
+    _clip_upper:          float | None
+    _clip_lower:          float | None
+    lossless_value:       float
+    lossless_raw_repr:    str
+    display_unit:         str
+    plot_y_min:           float
+    plot_y_max:           float
+    comparison_range:     float
+    acceptance_delta:     float
+    subsample_via_filter: bool
 
     def normalize(self, value: float | pd.Series) -> float | pd.Series:
         """Normalize a raw metric value (or Series) to the display scale.
@@ -109,19 +120,19 @@ class MetricInfo:
             Normalized scalar or ``pd.Series`` on the display scale.
         """
         if isinstance(value, pd.Series):
-            result = value * self.scale_factor
-            if self.clip_lower is not None:
-                result = result.clip(lower=self.clip_lower)
-            if self.clip_upper is not None:
-                result = result.clip(upper=self.clip_upper)
+            result = self._offset + value * self._scale_factor
+            if self._clip_lower is not None:
+                result = result.clip(lower=self._clip_lower)
+            if self._clip_upper is not None:
+                result = result.clip(upper=self._clip_upper)
             return result
         else:
             # scalar path — handle inf explicitly
-            result_f = value * self.scale_factor
-            if self.clip_lower is not None:
-                result_f = max(result_f, self.clip_lower)
-            if self.clip_upper is not None:
-                result_f = min(result_f, self.clip_upper)
+            result_f = self._offset + value * self._scale_factor
+            if self._clip_lower is not None:
+                result_f = max(result_f, self._clip_lower)
+            if self._clip_upper is not None:
+                result_f = min(result_f, self._clip_upper)
             return result_f
 
     def passes(self, actual: float, target: float) -> bool:
@@ -165,6 +176,7 @@ class MetricType(Enum):
     VMAF = "vmaf"
     SSIM = "ssim"
     PSNR = "psnr"
+    VIF  = "vif"
 
     @property
     def info(self) -> MetricInfo:
@@ -177,67 +189,71 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         name              = "VMAF",
         id                = "vmaf",
         higher_is_better  = True,
-        scale_factor      = 1.0,
-        clip_upper        = None,
-        clip_lower        = None,
+        _offset           = 0.0,
+        _scale_factor     = 1.0,
+        _clip_upper       = None,
+        _clip_lower       = None,
         lossless_value    = 100.0,
         lossless_raw_repr = "100.0",
-        display_unit      = "%",
+        display_unit      = "",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        complexity        = 10.0,  # empirical estimate; VMAF is significantly slower than PSNR/SSIM
         comparison_range  = 20.0,  # practical target range ~80–100
         acceptance_delta  = 0.15,  # 0.15% surplus should be negligible
+        subsample_via_filter = False,  # VMAF uses n_subsample internally
     ),
     MetricType.SSIM: MetricInfo(
         name              = "SSIM",
         id                = "ssim",
         higher_is_better  = True,
-        scale_factor      = 100.0,
-        clip_upper        = None,
-        clip_lower        = None,
+        _offset           = 0.0,
+        _scale_factor     = 100.0,
+        _clip_upper       = None,
+        _clip_lower       = None,
         lossless_value    = 100.0,
         lossless_raw_repr = "100.0",
-        display_unit      = "%",
+        display_unit      = "",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        complexity        = 1.0,
         comparison_range  = 10.0,  # practical target range ~90–100
         acceptance_delta  = 0.05,  # 0.05% after scaling (0.0005 raw)
+        subsample_via_filter = True,   # uses select='not(mod(n,factor))' on its branch
     ),
     MetricType.PSNR: MetricInfo(
         name              = "PSNR",
         id                = "psnr",
         higher_is_better  = True,
-        scale_factor      = 1.0,
-        clip_upper        = 100.0,
-        clip_lower        = None,
+        _offset           = 0.0,
+        _scale_factor     = 1.0,
+        _clip_upper       = 100.0,
+        _clip_lower       = None,
         lossless_value    = 100.0,
         lossless_raw_repr = "∞ dB",
         display_unit      = " dB",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        complexity        = 1.0,
         comparison_range  = 30.0,  # practical target range ~40–70 dB
         acceptance_delta  = 0.5,   # 0.5 dB surplus is negligible
+        subsample_via_filter = True,   # uses select='not(mod(n,factor))' on its branch
     ),
-    # VIF placeholder (not yet active and not checked for correctness):
-    # MetricType.VIF: MetricInfo(
-    #     name              = "VIF",
-    #     id                = "vif",
-    #     higher_is_better  = False,
-    #     scale_factor      = 1.0,
-    #     clip_upper        = None,
-    #     clip_lower        = 0.0,
-    #     lossless_value    = 0.0,
-    #     lossless_raw_repr = "0.0",
-    #     display_unit      = "",
-    #     plot_y_min        = -0.1,
-    #     plot_y_max        = 2.0,
-    #     complexity        = 1.0,
-    #     comparison_range  = 10.0,
-    #     acceptance_delta  = 0.2,
-    # ),
+    # VIF
+    MetricType.VIF: MetricInfo(
+        name              = "VIF",
+        id                = "vif",
+        higher_is_better  = True,
+        _offset           = 0.0,
+        _scale_factor     = 100.0,
+        _clip_upper       = 100.0,
+        _clip_lower       = 0.0,
+        lossless_value    = 100.0,
+        lossless_raw_repr = "100.0",
+        display_unit      = "",
+        plot_y_min        = 0.0,
+        plot_y_max        = 103.0,
+        comparison_range  = 10.0,
+        acceptance_delta  = 0.2,
+        subsample_via_filter = False,  # VIF has no independent branch; embedded in VMAF
+    ),
 }
 
 
@@ -278,16 +294,8 @@ class _MetricStatistics(TypedDict):
     std: float
 
 
-@dataclass
-class MetricData:
-    """Pure data container for a single metric (DataFrame + column name)."""
-
-    df:     pd.DataFrame
-    column: str
-
-
-async def run_metric(
-    metric:            MetricType,
+async def run_metrics(
+    metrics:           Iterable[MetricType],
     distorted:         Path,
     reference:         Path,
     crop_distorted:    CropParams,
@@ -301,14 +309,22 @@ async def run_metric(
     progress_callback: ProgressCallback | None = None,
     output_extension:  str | None              = None,
 ) -> FFmpegRunResult:
-    """Build and run a single metric calculation subprocess via FFmpegRunner.
+    """Build and run a single ffmpeg pass computing all requested metrics simultaneously.
+
+    Uses ``split[]`` to fan decoded frames to multiple metric filters in one process,
+    saving the cost of repeated video decoding.  PSNR and SSIM branches apply
+    ``select='not(mod(n,subsample))'`` when ``subsample > 1``
+    (``MetricInfo.subsample_via_filter == True``).  VMAF uses ``n_subsample``
+    internally.  VIF is always embedded in the VMAF pass via ``feature=name=vif``
+    and is not a separate branch.
 
     ffmpeg is run with ``cwd`` set to the distorted file's directory (or an
     explicit override) so that ``output_prefix`` can be a plain UUID-based
     filename with no path separators or special characters.
 
     Args:
-        metric:            Metric to compute.
+        metrics:           Metrics to compute.  VIF is automatically included when
+                           VMAF is present (or when VIF is requested, VMAF is added).
         distorted:         Path to the distorted (encoded) video.
         reference:         Path to the reference video.
         crop_distorted:    Crop parameters for the distorted input.
@@ -323,93 +339,136 @@ async def run_metric(
                            the parent directory of ``distorted``.
         progress_callback: Optional ``(frame, out_time_seconds)`` callable
                            invoked once per completed progress block.
-        output_extension:  Override the default file extension for the metric
-                           output file (e.g. ``".tmp"``).  When ``None``, the
-                           default extension for each metric is used (``.log``
-                           for PSNR/SSIM, ``.json`` for VMAF).
+        output_extension:  Override the default file extension for metric output
+                           files (e.g. ``".tmp"``).  When ``None``, defaults are
+                           used (``.log`` for PSNR/SSIM, ``.json`` for VMAF).
 
     Returns:
         ``FFmpegRunResult`` with returncode, success, stderr_lines, and frame_count.
+
+    Raises:
+        ValueError: If ``metrics`` is empty after deduplication.
     """
     if cwd is None:
         cwd = distorted.parent
 
+    # Deduplicate and ensure VMAF is present when VIF is requested
+    active: set[MetricType] = set(metrics)
+    if not active:
+        raise ValueError("run_metrics: metrics set is empty")
+    if MetricType.VIF in active:
+        active.add(MetricType.VMAF)
+
+    # Independent branches: VIF is not a branch (embedded in VMAF)
+    branches: list[MetricType] = [m for m in MetricType if m in active and m != MetricType.VIF]
+    n_branches = len(branches)
+
     width_str = f",scale={width}:-1" if width else ""
+    crop_d    = crop_distorted.to_ffmpeg_filter()
+    crop_r    = crop_reference.to_ffmpeg_filter()
 
-    if metric != MetricType.VMAF and subsample > 1:
-        # PSNR / SSIM: apply frame selection at the video-stream level
-        f_distorted = (
-            f"[0:v]{crop_distorted.to_ffmpeg_filter()}{width_str}"
-            f",select='not(mod(n,{subsample}))',setpts=PTS-STARTPTS[main]"
-        )
-        f_reference = (
-            f"[1:v]{crop_reference.to_ffmpeg_filter()}{width_str}"
-            f",select='not(mod(n,{subsample}))',setpts=PTS-STARTPTS[ref]"
-        )
+    # Build shared input streams with split
+    if n_branches == 1:
+        # No split needed — single branch uses [main]/[ref] directly
+        sel = f",select='not(mod(n,{subsample}))',setpts=PTS-STARTPTS" if (
+            subsample > 1 and branches[0].info.subsample_via_filter
+        ) else ",setpts=PTS-STARTPTS"
+        f_dist = f"[0:v]{crop_d}{width_str}{sel}[main]"
+        f_ref  = f"[1:v]{crop_r}{width_str}{sel}[ref]"
+        branch_labels_d = ["main"]
+        branch_labels_r = ["ref"]
     else:
-        f_distorted = (
-            f"[0:v]{crop_distorted.to_ffmpeg_filter()}{width_str},setpts=PTS-STARTPTS[main]"
-        )
-        f_reference = (
-            f"[1:v]{crop_reference.to_ffmpeg_filter()}{width_str},setpts=PTS-STARTPTS[ref]"
-        )
+        # Split into N branches; each branch gets its own label
+        split_labels_d = "".join(f"[d{i}]" for i in range(n_branches))
+        split_labels_r = "".join(f"[r{i}]" for i in range(n_branches))
+        f_dist_base = f"[0:v]{crop_d}{width_str},split={n_branches}{split_labels_d}"
+        f_ref_base  = f"[1:v]{crop_r}{width_str},split={n_branches}{split_labels_r}"
 
-    filter_start = f"{f_distorted};{f_reference};[main][ref]"
+        # Per-branch select/setpts
+        branch_parts_d: list[str] = []
+        branch_parts_r: list[str] = []
+        branch_labels_d = []
+        branch_labels_r = []
+        for i, branch in enumerate(branches):
+            label_d = f"main{i}"
+            label_r = f"ref{i}"
+            if subsample > 1 and branch.info.subsample_via_filter:
+                sel = f"select='not(mod(n,{subsample}))',setpts=PTS-STARTPTS"
+                branch_parts_d.append(f"[d{i}]{sel}[{label_d}]")
+                branch_parts_r.append(f"[r{i}]{sel}[{label_r}]")
+            else:
+                branch_parts_d.append(f"[d{i}]setpts=PTS-STARTPTS[{label_d}]")
+                branch_parts_r.append(f"[r{i}]setpts=PTS-STARTPTS[{label_r}]")
+            branch_labels_d.append(label_d)
+            branch_labels_r.append(label_r)
 
-    # output_prefix is a plain filename (no path separators) — no escaping needed
-    if metric == MetricType.VMAF:
-        lib: str     = "libvmaf_cuda" if use_gpu else "libvmaf"
-        options: str = "" if use_gpu else "n_threads=4:"
-        if subsample > 1:
-            options += f"n_subsample={subsample}:"
-        vmaf_ext = output_extension if output_extension is not None else ".json"
-        filter_metric = (
-            f"{lib}={options}log_path={output_prefix}{metric.value}{vmaf_ext}:log_fmt=json"
-        )
-    elif metric == MetricType.SSIM:
-        ssim_ext = output_extension if output_extension is not None else ".log"
-        filter_metric = f"ssim=stats_file={output_prefix}{metric.value}{ssim_ext}"
-    elif metric == MetricType.PSNR:
-        psnr_ext = output_extension if output_extension is not None else ".log"
-        filter_metric = f"psnr=stats_file={output_prefix}{metric.value}{psnr_ext}"
-    else:
-        assert_never(metric)
+        f_dist = f_dist_base + ";" + ";".join(branch_parts_d)
+        f_ref  = f_ref_base  + ";" + ";".join(branch_parts_r)
 
-    cmd: list[str | PathLike] = [
-        "ffmpeg",
-        "-hide_banner",
-        "-nostats",
-        "-progress", "pipe:1",
-    ]
+    # Build per-branch metric filters
+    metric_filters: list[str] = []
+    for i, branch in enumerate(branches):
+        ld = branch_labels_d[i]
+        lr = branch_labels_r[i]
+        if branch == MetricType.VMAF:
+            lib: str     = "libvmaf_cuda" if use_gpu else "libvmaf"
+            options: str = "" if use_gpu else "n_threads=4:"
+            if subsample > 1:
+                options += f"n_subsample={subsample}:"
+            ext = output_extension if output_extension is not None else ".json"
+            metric_filters.append(
+                f"[{ld}][{lr}]{lib}={options}"
+                f"log_path={output_prefix}{branch.value}{ext}:log_fmt=json:feature=name=vif"
+            )
+        elif branch == MetricType.SSIM:
+            ext = output_extension if output_extension is not None else ".log"
+            metric_filters.append(
+                f"[{ld}][{lr}]ssim=stats_file={output_prefix}{branch.value}{ext}"
+            )
+        elif branch == MetricType.PSNR:
+            ext = output_extension if output_extension is not None else ".log"
+            metric_filters.append(
+                f"[{ld}][{lr}]psnr=stats_file={output_prefix}{branch.value}{ext}"
+            )
+
+    filter_complex = f"{f_dist};{f_ref};" + ";".join(metric_filters)
+
+    cmd: list[str | PathLike] = ["ffmpeg", "-hide_banner", "-nostats", "-progress", "pipe:1"]
     if duration:
         cmd.extend(["-t", str(duration)])
     cmd.extend(["-i", distorted.resolve()])
     if duration:
         cmd.extend(["-t", str(duration)])
     cmd.extend(["-i", reference.resolve()])
-    cmd.extend(["-filter_complex", filter_start + filter_metric])
-    cmd.extend(["-f", "null", "-"])
+    cmd.extend(["-filter_complex", filter_complex, "-f", "null", "-"])
 
-    return await run_ffmpeg_async(cmd, output_file=None, progress_callback=progress_callback, video_meta=None, cwd=cwd)
+    return await run_ffmpeg_async(
+        cmd, output_file=None, progress_callback=progress_callback, video_meta=None, cwd=cwd,
+    )
+
 
 
 @dataclass
 class QualityArtifacts:
     """Artifacts generated during quality evaluation.
 
+    All log paths point to ``.tmp``-suffixed files during their lifetime —
+    they are never renamed to canonical names.  Each file is deleted
+    immediately after successful parsing by ``analyze_chunk_quality``.
+
     Attributes:
-        psnr_log: Path to PSNR log file
-        ssim_log: Path to SSIM log file
-        vmaf_json: Path to VMAF JSON file
-        plot: Path to unified metrics plot
-        stats_files: Paths to individual statistics files
+        psnr_log:  Path to PSNR ``.tmp`` log file, or ``None`` if not generated.
+        ssim_log:  Path to SSIM ``.tmp`` log file, or ``None`` if not generated.
+        vmaf_json: Path to VMAF ``.tmp`` JSON file, or ``None`` if not generated.
+        vif_log:   Path to VIF ``.tmp`` log file, or ``None`` if not generated.
+        plot:      Path to unified metrics PNG plot, or ``None`` before plotting.
     """
 
-    psnr_log: Path | None = None
-    ssim_log: Path | None = None
+    psnr_log:  Path | None = None
+    ssim_log:  Path | None = None
     vmaf_json: Path | None = None
-    plot: Path | None = None
-    stats_files: list[Path] = field(default_factory=list)
+    vif_log:   Path | None = None
+    plot:      Path | None = None
 
 
 @dataclass

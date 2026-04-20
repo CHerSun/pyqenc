@@ -9,7 +9,6 @@ from the legacy metrics_visualization module.
 import asyncio
 import json
 import logging
-import os
 import uuid
 import warnings
 from dataclasses import dataclass
@@ -21,21 +20,18 @@ import matplotlib
 
 from pyqenc.constants import (
     DEFAULT_METRICS_SAMPLING,
-    KEEP_RAW_METRICS_FILES,
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
 from pyqenc.models import CropParams, QualityTarget
 from pyqenc.quality import (
     ChunkQualityStats,
-    MetricData,
     MetricStats,
     MetricType,
     QualityArtifacts,
     QualityEvaluation,
     _MetricStatistics,
-    normalize_metric,
-    run_metric,
+    run_metrics,
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 
@@ -128,6 +124,10 @@ _CRF_Y_MIN:       float = 0.0
 _CRF_Y_MAX:       float = 42.0        # assuming 40 is max sane CRF for the plot + a little spacing
 _CRF_Y_MAJOR_TICK: float = 5.0
 _CRF_Y_MINOR_TICK: float = 1.0
+
+# VIF metric colors
+_VIF_COLOR:      str = "#7B2D8B"   # purple
+_VIF_FILL_COLOR: str = "#C084D4"   # light purple (range fill)
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +278,65 @@ def parse_vmaf_file(file_path: Path, factor: int = 1) -> pd.DataFrame:
     return df
 
 
+def parse_vif_file(file_path: Path, factor: int = 1) -> pd.DataFrame:
+    """Parse VIF per-frame scores from a VMAF JSON file.
+
+    VIF data is embedded in the VMAF JSON when libvmaf is run with
+    ``feature=name=vif``.  Each frame contains ``integer_vif_scale0``
+    through ``integer_vif_scale3`` (range 0–1, where 1.0 = lossless).
+    The combined VIF score is the average of the four scales.
+
+    Args:
+        file_path: Path to the VMAF JSON file (same file as ``parse_vmaf_file``).
+        factor:    Frame sampling factor used during metric generation.
+
+    Returns:
+        DataFrame indexed by ``frameNum`` with a single ``vif`` column
+        containing the combined VIF score per frame (range 0–1).
+
+    Raises:
+        ValueError: If the file is not a valid VMAF JSON or contains no VIF data.
+    """
+    try:
+        with file_path.open("r") as fh:
+            vmaf_data = json.load(fh)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in VIF/VMAF file {file_path}: {exc}") from exc
+
+    frames = vmaf_data.get("frames")
+    if not isinstance(frames, list) or not frames:
+        raise ValueError(f"No frames found in VIF/VMAF file: {file_path}")
+
+    _VIF_SCALES = (
+        "integer_vif_scale0",
+        "integer_vif_scale1",
+        "integer_vif_scale2",
+        "integer_vif_scale3",
+    )
+
+    data: list[dict[str, float | int]] = []
+    for frame in frames:
+        metrics = frame.get("metrics", {})
+        scales  = [metrics.get(s) for s in _VIF_SCALES]
+        if any(v is None for v in scales):
+            raise ValueError(
+                f"VIF scale data missing from frame {frame.get('frameNum')} in {file_path}. "
+                f"Ensure libvmaf was run with feature=name=vif."
+            )
+        combined = sum(scales) / len(scales)  # type: ignore[arg-type]
+        data.append({
+            _KEY_FRAME_NUM:       frame["frameNum"],
+            MetricType.VIF.value: combined,
+        })
+
+    if not data:
+        raise ValueError(f"No VIF data found in: {file_path}")
+
+    df = pd.DataFrame(data)
+    df.set_index(_KEY_FRAME_NUM, inplace=True)
+    return df
+
+
 # ---------------------------------------------------------------------------
 # Statistics
 # ---------------------------------------------------------------------------
@@ -336,34 +395,44 @@ class MetricVisualStyle:
 
 DEFAULT_METRIC_STYLES: dict[MetricType, MetricVisualStyle] = {
     MetricType.PSNR: MetricVisualStyle(
-        label="PSNR",
-        color="blue",
-        unit=MetricType.PSNR.info.display_unit,
-        y_axis="left",
-        linestyle="-",
-        linewidth=_LINE_WIDTH_DEFAULT,
-        lossless_threshold=MetricType.PSNR.info.clip_upper,
-        lossless_label=MetricType.PSNR.info.lossless_raw_repr,
+        label              = "PSNR",
+        color              = "blue",
+        unit               = MetricType.PSNR.info.display_unit,
+        y_axis             = "left",
+        linestyle          = "-",
+        linewidth          = _LINE_WIDTH_DEFAULT,
+        lossless_threshold = MetricType.PSNR.info.lossless_value,
+        lossless_label     = MetricType.PSNR.info.lossless_raw_repr,
     ),
     MetricType.SSIM: MetricVisualStyle(
-        label="SSIM",
-        color="green",
-        unit=MetricType.SSIM.info.display_unit,
-        y_axis="right",
-        linestyle="-",
-        linewidth=_LINE_WIDTH_DEFAULT,
-        lossless_threshold=MetricType.SSIM.info.lossless_value,
-        lossless_label=MetricType.SSIM.info.lossless_raw_repr,
+        label              = "SSIM",
+        color              = "green",
+        unit               = MetricType.SSIM.info.display_unit,
+        y_axis             = "right",
+        linestyle          = "-",
+        linewidth          = _LINE_WIDTH_DEFAULT,
+        lossless_threshold = MetricType.SSIM.info.lossless_value,
+        lossless_label     = MetricType.SSIM.info.lossless_raw_repr,
     ),
     MetricType.VMAF: MetricVisualStyle(
-        label="VMAF",
-        color="#CC6600",
-        unit=MetricType.VMAF.info.display_unit,
-        y_axis="right",
-        linestyle="-",
-        linewidth=_LINE_WIDTH_DEFAULT,
-        lossless_threshold=MetricType.VMAF.info.lossless_value,
-        lossless_label=MetricType.VMAF.info.lossless_raw_repr,
+        label              = "VMAF",
+        color              = "#CC6600",
+        unit               = MetricType.VMAF.info.display_unit,
+        y_axis             = "right",
+        linestyle          = "-",
+        linewidth          = _LINE_WIDTH_DEFAULT,
+        lossless_threshold = MetricType.VMAF.info.lossless_value,
+        lossless_label     = MetricType.VMAF.info.lossless_raw_repr,
+    ),
+    MetricType.VIF: MetricVisualStyle(
+        label              = "VIF",
+        color              = _VIF_COLOR,
+        unit               = MetricType.VIF.info.display_unit,
+        y_axis             = "right",
+        linestyle          = "-",
+        linewidth          = _LINE_WIDTH_DEFAULT,
+        lossless_threshold = MetricType.VIF.info.lossless_value,
+        lossless_label     = MetricType.VIF.info.lossless_raw_repr,
     ),
 }
 
@@ -373,7 +442,7 @@ DEFAULT_METRIC_STYLES: dict[MetricType, MetricVisualStyle] = {
 # ---------------------------------------------------------------------------
 
 def create_unified_plot(
-    metrics:             dict[MetricType, MetricData],
+    df_norm:             pd.DataFrame,
     factor:              int,
     output_path:         Path,
     title:               str                                  = "Video Quality Metrics Analysis",
@@ -389,7 +458,9 @@ def create_unified_plot(
     - Per-metric statistics bar subplots below the main plot.
 
     Args:
-        metrics:             Mapping of ``MetricType`` to ``MetricData``.
+        df_norm:             Normalized DataFrame (output of ``normalize_metrics``),
+                             indexed by ``frameNum`` with one column per metric
+                             (column names are ``MetricType.value`` strings).
         factor:              Frame sampling factor used during metric generation.
         output_path:         Destination path for the saved PNG.
         title:               Plot title.
@@ -408,8 +479,17 @@ def create_unified_plot(
         Mapping of ``MetricType`` to full ``_MetricStatistics``.
 
     Raises:
-        ValueError: If ``metrics`` is empty.
+        ValueError: If ``df_norm`` contains no recognized metric columns.
     """
+    # Derive per-metric Series from DataFrame columns
+    metrics: dict[MetricType, pd.Series] = {}
+    for col in df_norm.columns:
+        try:
+            mt = MetricType(col)
+        except ValueError:
+            continue
+        metrics[mt] = df_norm[col]
+
     if not metrics:
         raise ValueError("No valid metrics provided for visualization")
 
@@ -436,8 +516,7 @@ def create_unified_plot(
     has_psnr:               bool = MetricType.PSNR in metrics
     has_ssim:               bool = MetricType.SSIM in metrics
     has_vmaf:               bool = MetricType.VMAF in metrics
-    has_percentage_metrics: bool = has_ssim or has_vmaf
-
+    has_percentage_metrics: bool = has_ssim or has_vmaf or (MetricType.VIF in metrics)
     ax_left:  plt.Axes | None = None
     ax_right: plt.Axes | None = None
 
@@ -454,9 +533,9 @@ def create_unified_plot(
         ax.grid(True, which="minor", alpha=_GRID_ALPHA_MINOR, zorder=0)
 
     def _configure_pct_axis(ax: plt.Axes, color: str) -> None:
-        ax.set_ylabel("SSIM / VMAF (%)", color=color, fontsize=_FONT_AXIS_LABEL, fontweight="bold")
+        ax.set_ylabel("SSIM / VMAF / VIF", color=color, fontsize=_FONT_AXIS_LABEL, fontweight="bold")
         # Use the plot range from the first percentage metric present
-        pct_metric = MetricType.SSIM if has_ssim else MetricType.VMAF
+        pct_metric = MetricType.SSIM if has_ssim else (MetricType.VMAF if has_vmaf else MetricType.VIF)
         ax.set_ylim(pct_metric.info.plot_y_min, pct_metric.info.plot_y_max)
         ax.tick_params(axis="y", labelcolor=color, labelsize=_FONT_AXIS_TICKS)
         ax.yaxis.set_major_locator(plt.MultipleLocator(_PCT_Y_MAJOR_TICK))
@@ -489,14 +568,12 @@ def create_unified_plot(
     # Compute frame offset from chunk start so x-axis reflects source timestamps
     frame_offset: float = chunk_start_seconds * fps if (fps is not None and fps > 0) else 0.0
 
-    # Scale metrics to display range using each metric's MetricInfo descriptor.
-    # All subsequent code uses scaled_values exclusively.
+    # Values are already normalized (df_norm); build index map per metric.
     scaled_values: dict[MetricType, pd.Series] = {}
     frame_index:   dict[MetricType, pd.Index]  = {}
-    for metric_type, metric_data in metrics.items():
-        vals = metric_data.df[metric_data.column].copy()
-        scaled_values[metric_type] = metric_type.info.normalize(vals)
-        frame_index[metric_type]   = metric_data.df.index
+    for metric_type, series in metrics.items():
+        scaled_values[metric_type] = series
+        frame_index[metric_type]   = series.index
 
     if fps is not None and fps > 0:
         # Capture total_frames before converting index to seconds
@@ -596,7 +673,7 @@ def create_unified_plot(
     ))
     current_x += _SUMMARY_BOX_WIDTH + _SUMMARY_BOX_SPACING
 
-    for metric_type in [MetricType.PSNR, MetricType.SSIM, MetricType.VMAF]:
+    for metric_type in metrics:
         if metric_type not in scaled_values:
             continue
         metric_stats = stats[metric_type]
@@ -637,7 +714,7 @@ def create_unified_plot(
     stat_keys  = ["min", "p5", "p25", "p50", "p75", "p95", "max"]
     subplot_idx = 0
 
-    for metric_type in [MetricType.PSNR, MetricType.SSIM, MetricType.VMAF]:
+    for metric_type in metrics:
         if metric_type not in scaled_values:
             continue
         metric_stats = stats[metric_type]
@@ -726,6 +803,19 @@ def create_unified_plot(
 # High-level API
 # ---------------------------------------------------------------------------
 
+# All four metrics run together in a single ffmpeg pass.
+_metrics_all: list[MetricType] = list(MetricType)
+
+
+def _is_known_metric(col: str) -> bool:
+    """Return ``True`` if *col* is a recognized ``MetricType.value``."""
+    try:
+        MetricType(col)
+        return True
+    except ValueError:
+        return False
+
+
 def _extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -> MetricStats:
     """Extract the key statistics subset from a full statistics dict.
 
@@ -759,215 +849,242 @@ def _extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -
     }
 
 
-def _auto_output_path(
-    psnr_log:  Path | None,
-    ssim_log:  Path | None,
-    vmaf_json: Path | None,
-) -> Path:
-    """Derive an output plot path from the first available metric file."""
-    first = psnr_log or ssim_log or vmaf_json
+def parse_metrics(artifacts: QualityArtifacts, factor: int = 1) -> pd.DataFrame:
+    """Parse all available metric files from *artifacts* into a single DataFrame.
+
+    Dispatches to the individual parsers (``parse_psnr_file``, ``parse_ssim_file``,
+    ``parse_vmaf_file``, ``parse_vif_file``) for each non-``None``, existing path
+    in *artifacts*.  Results are joined via ``pd.concat(..., axis=1)`` on the shared
+    ``frameNum`` index.
+
+    Frame number alignment at factor *F*:
+    - PSNR/SSIM: raw ``n`` is 1-based sequential; parser maps to ``(n-1)*F`` → ``{0, F, 2F, …}``
+    - VMAF/VIF: raw ``frameNum`` is the true video frame number → ``{0, F, 2F, …}``
+
+    All four metrics produce the same index at the same factor, so the inner join
+    is lossless with no NaN.
+
+    Individual parse failures are caught, logged as warnings, and that metric is
+    omitted from the result.
+
+    Args:
+        artifacts: ``QualityArtifacts`` with paths to metric files.
+        factor:    Frame sampling factor used during metric generation.
+
+    Returns:
+        DataFrame indexed by ``frameNum`` with one column per successfully parsed
+        metric (column names are ``MetricType.value`` strings).
+
+    Raises:
+        ValueError: If no metric files could be parsed.
+    """
+    # Map each metric to its parser and the relevant artifact path.
+    _parsers: list[tuple[MetricType, Path | None, object]] = [
+        (MetricType.PSNR, artifacts.psnr_log,  parse_psnr_file),
+        (MetricType.SSIM, artifacts.ssim_log,  parse_ssim_file),
+        (MetricType.VMAF, artifacts.vmaf_json, parse_vmaf_file),
+        (MetricType.VIF,  artifacts.vif_log,   parse_vif_file),
+    ]
+
+    frames: list[pd.DataFrame] = []
+    for metric_type, path, parser in _parsers:
+        if path is None or not path.exists():
+            continue
+        try:
+            df = parser(path, factor)  # type: ignore[operator]
+            frames.append(df)
+            logger.debug("parse_metrics: parsed %s (%d frames)", metric_type.value, len(df))
+        except Exception as exc:
+            logger.warning("parse_metrics: failed to parse %s from %s: %s", metric_type.value, path, exc)
+
+    if not frames:
+        raise ValueError(
+            "parse_metrics: no metric files could be parsed from artifacts. "
+            "At least one valid metric file (PSNR, SSIM, VMAF, or VIF) is required."
+        )
+
+    return pd.concat(frames, axis=1)
+
+
+def normalize_metrics(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """Convert raw metric values to the 0–100 display scale.
+
+    For each column whose name matches a ``MetricType.value``, applies
+    ``MetricType(col).info.normalize(series)``.  Columns not matching any
+    ``MetricType.value`` are passed through unchanged (forward-compatible).
+
+    Args:
+        df_raw: DataFrame with raw metric values (``frameNum`` index,
+                column names are ``MetricType.value`` strings).
+
+    Returns:
+        New DataFrame with the same index and columns, values on the 0–100 scale.
+    """
+    result = df_raw.copy()
+    for col in result.columns:
+        try:
+            mt = MetricType(col)
+        except ValueError:
+            continue  # unknown column — pass through unchanged
+        result[col] = mt.info.normalize(result[col])
+    return result
+
+
+def extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -> MetricStats:
+    """Extract the key statistics subset from a full statistics dict.
+
+    Public alias for the internal ``_extract_key_stats`` implementation.
+    For PSNR, substitutes the highest non-inf percentile for ``max`` when the
+    true maximum is infinite.
+
+    Args:
+        full_stats:  Full statistics dictionary from ``compute_statistics``.
+        metric_type: Metric type (affects PSNR max handling).
+
+    Returns:
+        ``MetricStats`` with ``min``, ``p05``, ``p25``, ``median``, ``p75``,
+        ``p95``, ``max``, and ``std``.
+    """
+    return _extract_key_stats(full_stats, metric_type)
+
+
+def compute_metric_stats(df_norm: pd.DataFrame) -> ChunkQualityStats:
+    """Compute key statistics for each metric column in a normalized DataFrame.
+
+    For each column whose name matches a ``MetricType.value``, calls
+    ``compute_statistics`` then ``extract_key_stats`` and stores the result.
+    Columns not matching any ``MetricType.value`` are silently skipped.
+
+    Args:
+        df_norm: Normalized DataFrame (output of ``normalize_metrics``).
+
+    Returns:
+        ``ChunkQualityStats`` mapping each recognized ``MetricType`` to its
+        ``MetricStats``.
+    """
+    result: ChunkQualityStats = {}
+    for col in df_norm.columns:
+        try:
+            mt = MetricType(col)
+        except ValueError:
+            continue
+        std_cutoff = 100.0 if mt == MetricType.PSNR else None
+        full = compute_statistics(df_norm[col], std_cutoff_max=std_cutoff)
+        result[mt] = extract_key_stats(full, mt)
+        logger.debug(
+            "compute_metric_stats: %s min=%.2f med=%.2f max=%.2f",
+            mt.value, result[mt]["min"], result[mt]["median"], result[mt]["max"],
+        )
+    return result
+
+
+def _auto_output_path(artifacts: "QualityArtifacts") -> Path:
+    """Derive an output plot path from the first available metric file in *artifacts*."""
+    first = artifacts.psnr_log or artifacts.ssim_log or artifacts.vmaf_json or artifacts.vif_log
     if not first:
         raise ValueError("At least one metric file must be provided")
     stem   = first.stem
-    prefix = stem.split("_")[0] if "_" in stem else stem
+    prefix = stem.split(".")[0] if "." in stem else stem
     return first.parent / f"{prefix}_metrics.png"
 
 
-def _save_stats_file(
-    metric_type: MetricType,
-    stats:       _MetricStatistics,
-    metric_file: Path,
-) -> None:
-    """Persist statistics as a human-readable ``.stats`` text file.
-
-    Args:
-        metric_type: Metric type (determines unit and display scaling).
-        stats:       Full statistics dictionary.
-        metric_file: Original metric log file; ``.stats`` is written alongside it.
-    """
-    stats_path:    Path                  = metric_file.with_suffix(".stats")
-    display_stats: dict[str, float]      = dict(stats)
-
-    lines = [
-        f"{metric_type.value.upper()} statistics",
-        "=" * 40,
-        *[f"{key:<3}:{display_stats[key]:>8.2f}" for key in display_stats],
-    ]
-    stats_path.write_text(os.linesep.join(lines), encoding="utf-8")
-    logger.debug("Saved %s statistics to %s", metric_type.value.upper(), stats_path)
-
-
-def _cleanup_raw_metric_files(metric_files: dict[MetricType, Path]) -> None:
-    """Delete raw metric log files, their ``.stats`` sidecars, and the metrics subdir.
-
-    Called after the graph PNG has been generated when ``KEEP_RAW_METRICS_FILES``
-    is ``False``.  Failures are logged as warnings and never raised — the graph
-    and sidecar YAML are already written and must not be lost.
-
-    The metrics subdirectory is removed only when it is empty after the files
-    are deleted (i.e. it contained only the raw logs for this run).
-
-    Args:
-        metric_files: Mapping of metric type to raw log file path.
-    """
-    dirs_to_try: set[Path] = set()
-    for metric_file in metric_files.values():
-        for path in (metric_file, metric_file.with_suffix(".stats")):
-            try:
-                path.unlink(missing_ok=True)
-                logger.debug("Deleted raw metric file: %s", path)
-            except Exception as exc:
-                logger.warning("Could not delete %s: %s", path, exc)
-        dirs_to_try.add(metric_file.parent)
-
-    for directory in dirs_to_try:
-        try:
-            if directory.is_dir() and not any(directory.iterdir()):
-                directory.rmdir()
-                logger.debug("Removed empty metrics directory: %s", directory)
-        except Exception as exc:
-            logger.warning("Could not remove metrics directory %s: %s", directory, exc)
-
-
 def analyze_chunk_quality(
-    psnr_log:            Path | None = None,
-    ssim_log:            Path | None = None,
-    vmaf_json:           Path | None = None,
-    factor:              int         = 1,
-    output_path:         Path | None = None,
-    title:               str | None  = None,
-    generate_plot:       bool        = True,
+    psnr_log:            Path | None  = None,
+    ssim_log:            Path | None  = None,
+    vmaf_json:           Path | None  = None,
+    vif_log:             Path | None  = None,
+    factor:              int          = 1,
+    output_path:         Path | None  = None,
+    title:               str | None   = None,
+    generate_plot:       bool         = True,
     fps:                 float | None = None,
-    chunk_start_seconds: float       = 0.0,
+    chunk_start_seconds: float        = 0.0,
+    delete_after_parse:  bool         = True,
 ) -> ChunkQualityStats:
     """Analyze video chunk quality from metric log files.
 
-    Parses the provided metric files, computes statistics, optionally generates
-    a unified visualization plot, and saves per-metric ``.stats`` text files.
+    Parses the provided metric files, computes statistics, and optionally
+    generates a unified visualization plot.  Each raw ``.tmp`` log file is
+    deleted immediately after successful parsing when ``delete_after_parse``
+    is ``True`` (best-effort; a warning is logged on failure).
+
+    Internally uses the composable pipeline:
+    ``parse_metrics`` → ``normalize_metrics`` → ``compute_metric_stats``
+    → ``create_unified_plot``.
 
     Args:
         psnr_log:            Path to PSNR log file (optional).
         ssim_log:            Path to SSIM log file (optional).
         vmaf_json:           Path to VMAF JSON file (optional).
+        vif_log:             Path to VIF log file (optional).
         factor:              Frame sampling factor used during metric generation.
         output_path:         Destination for the plot PNG.  Auto-derived when ``None``.
         title:               Plot title.  Auto-generated when ``None``.
         generate_plot:       Whether to create and save the visualization.
-        fps:                 Frames per second of the encoded video.  When provided,
-                             x-axis tick labels show ``HH:MM:SS`` on the top line and
-                             the adjusted frame number on the bottom line.
-        chunk_start_seconds: Start timestamp of the chunk in seconds.  When non-zero,
-                             the x-axis is offset so frame numbers reflect the actual
-                             position in the source video.
+        fps:                 Frames per second of the encoded video.
+        chunk_start_seconds: Start timestamp of the chunk in seconds.
+        delete_after_parse:  When ``True`` (default), each raw metric file is
+                             deleted immediately after successful parsing.
 
     Returns:
-        ``ChunkQualityStats`` with ``min``, ``p05``, ``p25``, ``median``,
-        ``p75``, ``p95``, ``max``, and ``std`` for each available metric.
+        ``ChunkQualityStats`` with statistics for each available metric.
 
     Raises:
         ValueError: If no valid metric file could be parsed.
-
-    Side Effects:
-        - Saves plot PNG to ``output_path`` (when ``generate_plot`` is ``True``).
-        - Saves ``.stats`` text files alongside each metric log file, then
-          deletes the raw log files, ``.stats`` files, and the metrics
-          subdirectory when ``KEEP_RAW_METRICS_FILES`` is ``False`` (default)
-          and ``generate_plot`` is ``True``.
     """
-    result = ChunkQualityStats()
+    from pyqenc.quality import QualityArtifacts
 
-    parsed_metrics: dict[MetricType, MetricData]          = {}
-    full_stats:     dict[MetricType, _MetricStatistics]   = {}
-    metric_files:   dict[MetricType, Path]                = {}
+    artifacts = QualityArtifacts(
+        psnr_log  = psnr_log,
+        ssim_log  = ssim_log,
+        vmaf_json = vmaf_json,
+        vif_log   = vif_log,
+    )
 
-    # --- PSNR ---
-    if psnr_log is not None:
-        try:
-            logger.debug("Parsing PSNR log: %s", psnr_log)
-            df = parse_psnr_file(psnr_log, factor)
-            parsed_metrics[MetricType.PSNR] = MetricData(df=df, column=MetricType.PSNR.value)
-            metric_files[MetricType.PSNR]   = psnr_log
-            fs = compute_statistics(df[MetricType.PSNR.value], std_cutoff_max=100.0)
-            full_stats[MetricType.PSNR]     = fs
-            result[MetricType.PSNR]         = _extract_key_stats(fs, MetricType.PSNR)
-            logger.debug("Parsed PSNR: %d frames", len(df))
-        except Exception as exc:
-            logger.warning("Failed to parse PSNR from %s: %s", psnr_log, exc)
+    # parse_metrics handles per-metric failures internally (logs warning, skips).
+    df_raw  = parse_metrics(artifacts, factor)
+    df_norm = normalize_metrics(df_raw)
+    result  = compute_metric_stats(df_norm)
 
-    # --- SSIM ---
-    if ssim_log is not None:
-        try:
-            logger.debug("Parsing SSIM log: %s", ssim_log)
-            df = parse_ssim_file(ssim_log, factor)
-            parsed_metrics[MetricType.SSIM] = MetricData(df=df, column=MetricType.SSIM.value)
-            metric_files[MetricType.SSIM]   = ssim_log
-            fs = compute_statistics(df[MetricType.SSIM.value])
-            full_stats[MetricType.SSIM]     = fs
-            result[MetricType.SSIM]         = _extract_key_stats(fs, MetricType.SSIM)
-            logger.debug("Parsed SSIM: %d frames", len(df))
-        except Exception as exc:
-            logger.warning("Failed to parse SSIM from %s: %s", ssim_log, exc)
-
-    # --- VMAF ---
-    if vmaf_json is not None:
-        try:
-            logger.debug("Parsing VMAF JSON: %s", vmaf_json)
-            df = parse_vmaf_file(vmaf_json, factor)
-            parsed_metrics[MetricType.VMAF] = MetricData(df=df, column=MetricType.VMAF.value)
-            metric_files[MetricType.VMAF]   = vmaf_json
-            fs = compute_statistics(df[MetricType.VMAF.value])
-            full_stats[MetricType.VMAF]     = fs
-            result[MetricType.VMAF]         = _extract_key_stats(fs, MetricType.VMAF)
-            logger.debug("Parsed VMAF: %d frames", len(df))
-        except Exception as exc:
-            logger.warning("Failed to parse VMAF from %s: %s", vmaf_json, exc)
-
-    if not parsed_metrics:
-        raise ValueError(
-            "No valid metrics could be parsed. "
-            "At least one valid metric file (PSNR, SSIM, or VMAF) is required."
-        )
-
-    # Normalize all stat values to 0–100 scale immediately after extraction (Req 5.1)
-    for metric_type, stats in result.items():
-        if stats is not None:
-            for stat_key in ("min", "p05", "p25", "median", "p75", "p95", "max", "std"):
-                raw = stats.get(stat_key)
-                if raw is not None:
-                    stats[stat_key] = normalize_metric(metric_type, raw)  # type: ignore[literal-required]
+    # Deferred deletion — all parsers have finished, safe to remove files now.
+    # vif_log and vmaf_json may point to the same file; use a set to delete once.
+    if delete_after_parse:
+        to_delete: set[Path] = set()
+        for path in (psnr_log, ssim_log, vmaf_json, vif_log):
+            if path is not None and path.exists():
+                to_delete.add(path)
+        for path in to_delete:
+            try:
+                path.unlink(missing_ok=True)
+                logger.debug("Deleted raw metric tmp file: %s", path.name)
+            except Exception as exc:
+                logger.warning("Could not delete metric tmp file %s: %s", path.name, exc)
 
     # Single concise info summary
-    parts = []
-    for mt in [MetricType.VMAF, MetricType.PSNR, MetricType.SSIM]:
-        if mt in result and result[mt] is not None:
-            s = result[mt]
-            parts.append(f"{mt.value.upper()} min={s['min']:.1f} med={s['median']:.1f}")
+    parts = [
+        f"{mt.value.upper()} min={result[mt]['min']:.1f} med={result[mt]['median']:.1f}"
+        for mt in [MetricType.VMAF, MetricType.PSNR, MetricType.SSIM, MetricType.VIF]
+        if mt in result
+    ]
     if parts:
         logger.debug("Metrics (normalized): %s", " | ".join(parts))
 
     if generate_plot:
         if output_path is None:
-            output_path = _auto_output_path(psnr_log, ssim_log, vmaf_json)
+            output_path = _auto_output_path(artifacts)
         if title is None:
-            names = [mt.value.upper() for mt in parsed_metrics]
+            names = [col.upper() for col in df_norm.columns if _is_known_metric(col)]
             title = f"Video Quality Metrics Analysis ({', '.join(names)})"
         logger.debug("Generating unified plot: %s", output_path)
         create_unified_plot(
-            metrics=parsed_metrics,
-            factor=factor,
-            output_path=output_path,
-            title=title,
-            fps=fps,
-            chunk_start_seconds=chunk_start_seconds,
+            df_norm             = df_norm,
+            factor              = factor,
+            output_path         = output_path,
+            title               = title,
+            fps                 = fps,
+            chunk_start_seconds = chunk_start_seconds,
         )
         logger.debug("Plot saved to %s", output_path)
-
-    for metric_type, metric_file in metric_files.items():
-        if metric_type in full_stats:
-            _save_stats_file(metric_type, full_stats[metric_type], metric_file)
-
-    if not KEEP_RAW_METRICS_FILES and generate_plot:
-        _cleanup_raw_metric_files(metric_files)
 
     return result
 
@@ -1162,124 +1279,106 @@ class QualityEvaluator:
         reference:        Path,
         ref_crop:         CropParams,
         output_prefix:    str,
-        metrics_sampling: int                          = DEFAULT_METRICS_SAMPLING,
+        metrics_sampling: int                            = DEFAULT_METRICS_SAMPLING,
         bar_advance:      Callable[[float], None] | None = None,
-        duration_seconds: float                        = 0.0,
-        width:            int                          = 0,
-    ) -> tuple[Path, Path, Path]:
+        duration_seconds: float                          = 0.0,
+        width:            int                            = 0,
+        cwd:              Path | None                    = None,
+    ) -> QualityArtifacts:
         """Generate metric log files for quality comparison.
 
-        ffmpeg is run in the output directory (derived from ``output_prefix``) using
-        a UUID-based temporary filename prefix so that no special characters appear in
-        the filter-graph string.  Each metric is written to a ``.tmp``-suffixed file
-        while ffmpeg is running; on success the file is atomically renamed to its
-        final canonical path derived from ``output_prefix``.
-
-        The working directory is always the metrics output directory — never the
-        encoded file's parent — so tmp files never appear in the source/target video
-        directories.
-
-        When ``bar_advance`` is provided, each ffmpeg process reports progress
-        via ``ProgressCallback`` which advances the bar based on ``out_time_seconds``.
+        Runs all four metrics (PSNR, SSIM, VMAF, VIF) in a single ffmpeg pass
+        via ``run_metrics``.  Each metric is written to a ``.tmp``-suffixed file;
+        the ``.tmp`` paths are returned directly in a ``QualityArtifacts`` instance
+        — no rename is performed.
 
         Args:
-            encoded:          Path to encoded video file
-            reference:        Path to reference video file
-            ref_crop:         Crop parameters for the reference input
-            output_prefix:    Full path prefix for the final metric files
-                              (e.g. ``/work/encoded/slow_h265/chunk.000000-000195.``)
-            metrics_sampling: Frame subsampling factor
-            bar_advance:      Optional callable that advances the progress bar
-                              by the given number of seconds.
-            duration_seconds: Duration of the encoded clip in seconds; used to
-                              cap per-process bar advances.
+            encoded:          Path to encoded video file.
+            reference:        Path to reference video file.
+            ref_crop:         Crop parameters for the reference input.
+            output_prefix:    Full path prefix for metric files (unused for path
+                              derivation — ``cwd`` and a UUID prefix are used instead).
+            metrics_sampling: Frame subsampling factor (applied to VMAF via
+                              ``n_subsample`` and to PSNR/SSIM via ``select``).
+            bar_advance:      Optional callable that advances the progress bar.
+            duration_seconds: Duration of the encoded clip in seconds.
             width:            Scale both inputs to this width (0 = no scaling).
+            cwd:              Working directory for metric ``.tmp`` files.  When
+                              ``None``, derived from ``output_prefix``'s parent.
 
         Returns:
-            Tuple of (psnr_log, ssim_log, vmaf_json) final paths
+            ``QualityArtifacts`` with ``.tmp`` paths for all four metrics
+            (``plot`` is ``None`` — filled in by ``_finish_evaluation``).
         """
-        # UUID prefix keeps special characters out of the ffmpeg filter graph;
-        # the .tmp extension ensures cleanup on interrupted runs.
-        uuid_hex = uuid.uuid4().hex
-        # tmp files are written into the same directory as the final metric files
-        # (derived from output_prefix), NOT encoded.parent — the target video may
-        # live anywhere and we must not litter there.
-        cwd = Path(output_prefix).parent
-        cwd.mkdir(parents=True, exist_ok=True)
+        uuid_hex   = uuid.uuid4().hex
+        output_cwd = cwd if cwd is not None else Path(output_prefix).parent
+        output_cwd.mkdir(parents=True, exist_ok=True)
 
         logger.debug(
             "Generating metrics for %s vs %s (tmp prefix: %s)",
             encoded.name, reference.name, uuid_hex,
         )
 
-        def _make_progress_callback(metric: MetricType, last_time: list[float]) -> Callable[[int, float], None] | None:
-            """Build a ProgressCallback that converts absolute out_time_s to complexity-weighted bar deltas."""
+        # Single ffmpeg pass — progress is linear: total = duration_seconds, weight = 1.0.
+        _weight = 1.0
+
+        def _progress_callback(frame: int, out_time_s: float) -> None:
             if bar_advance is None or duration_seconds <= 0:
-                return None
+                return
+            nonlocal _last_time
+            delta = max(0.0, out_time_s - _last_time)
+            delta = min(delta, duration_seconds - _last_time)
+            if delta > 0:
+                bar_advance(delta * _weight)
+                _last_time = out_time_s
 
-            weight = metric.info.complexity
+        _last_time: float = 0.0
+        tmp_prefix        = f"{uuid_hex}."
 
-            def _callback(frame: int, out_time_s: float) -> None:
-                delta = max(0.0, out_time_s - last_time[0])
-                delta = min(delta, duration_seconds - last_time[0])
-                if delta > 0:
-                    bar_advance(delta * weight)
-                    last_time[0] = out_time_s
+        result = await run_metrics(
+            metrics          = _metrics_all,
+            distorted        = encoded,
+            reference        = reference,
+            crop_distorted   = CropParams(),
+            crop_reference   = ref_crop,
+            duration         = 0,
+            width            = width,
+            use_gpu          = False,
+            subsample        = metrics_sampling,
+            output_prefix    = tmp_prefix,
+            cwd              = output_cwd,
+            progress_callback = _progress_callback if bar_advance is not None else None,
+            output_extension = ".tmp",
+        )
+        if not result.success:
+            logger.warning("Metrics run had non-zero exit code: %d", result.returncode)
 
-            return _callback
+        # Build artifact paths — .tmp files stay as-is, no rename.
+        # VIF data is embedded in the VMAF JSON (via feature=name=vif), so
+        # vif_log points to the same file as vmaf_json — explicit for clarity.
+        vmaf_tmp = output_cwd / f"{tmp_prefix}{MetricType.VMAF.value}.tmp"
+        artifacts = QualityArtifacts(
+            psnr_log  = output_cwd / f"{tmp_prefix}{MetricType.PSNR.value}.tmp",
+            ssim_log  = output_cwd / f"{tmp_prefix}{MetricType.SSIM.value}.tmp",
+            vmaf_json = vmaf_tmp,
+            vif_log   = vmaf_tmp,   # VIF is parsed from the same VMAF JSON
+            plot      = None,
+        )
 
-        # tmp_prefix used as output_prefix in run_metric; extension overridden to .tmp
-        # so ffmpeg writes e.g. <uuid>.psnr.tmp, <uuid>.ssim.tmp, <uuid>.vmaf.tmp
-        tmp_prefix = f"{uuid_hex}."
-
-        async def _run_one(metric: MetricType) -> None:
-            result = await run_metric(
-                metric=metric,
-                distorted=encoded,
-                reference=reference,
-                crop_distorted=CropParams(),
-                crop_reference=ref_crop,
-                duration=0,
-                width=width,
-                use_gpu=False,
-                subsample=metrics_sampling,
-                output_prefix=tmp_prefix,
-                cwd=cwd,
-                progress_callback=_make_progress_callback(metric, [0.0]),
-                output_extension=".tmp",
-            )
-            if not result.success:
-                logger.warning(
-                    "Metric %s calculation had non-zero exit code: %d",
-                    metric.value, result.returncode,
-                )
-
-        await asyncio.gather(*[_run_one(metric) for metric in MetricType])
-
-        # Rename <uuid>.<metric>.tmp → final canonical path (single atomic rename per file)
-        final_psnr = Path(f"{output_prefix}{MetricType.PSNR.value}.log")
-        final_ssim = Path(f"{output_prefix}{MetricType.SSIM.value}.log")
-        final_vmaf = Path(f"{output_prefix}{MetricType.VMAF.value}.json")
-
-        for metric, final_path in [
-            (MetricType.PSNR, final_psnr),
-            (MetricType.SSIM, final_ssim),
-            (MetricType.VMAF, final_vmaf),
+        # Warn for any missing tmp file (ffmpeg failure).
+        # vif_log intentionally shares the vmaf_json path — only check distinct paths.
+        checked: set[Path] = set()
+        for attr, path in [
+            ("psnr_log",  artifacts.psnr_log),
+            ("ssim_log",  artifacts.ssim_log),
+            ("vmaf_json", artifacts.vmaf_json),
         ]:
-            tmp_path = cwd / f"{tmp_prefix}{metric.value}.tmp"
-            if tmp_path.exists():
-                final_path.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    tmp_path.replace(final_path)
-                except OSError as exc:
-                    logger.warning(
-                        "Failed to rename metric tmp file %s → %s: %s",
-                        tmp_path, final_path, exc,
-                    )
-            else:
-                logger.warning("Expected metric tmp file not found: %s", tmp_path)
+            if path is not None and path not in checked:
+                checked.add(path)
+                if not path.exists():
+                    logger.warning("Expected metric tmp file not found: %s", path)
 
-        return final_psnr, final_ssim, final_vmaf
+        return artifacts
 
     async def evaluate_chunk_async(
         self,
@@ -1294,6 +1393,7 @@ class QualityEvaluator:
         chunk_start_seconds: float             = 0.0,
         width:               int               = 0,
         bar_title:           str | None        = None,
+        metrics_output_dir:  Path | None       = None,
     ) -> QualityEvaluation:
         """Async variant of ``evaluate_chunk`` for use inside a running event loop.
 
@@ -1302,15 +1402,17 @@ class QualityEvaluator:
         an ``async`` context (e.g. ``run_measure``).
 
         Args:
-            bar_title: Override the progress bar title. When ``None``, defaults to
-                       the encoded file stem (same as ``evaluate_chunk``).
+            bar_title:          Override the progress bar title.  When ``None``,
+                                defaults to the encoded file stem.
+            metrics_output_dir: Directory for raw metric ``.tmp`` files.  When
+                                ``None``, uses ``output_dir``.
             (all other args same as ``evaluate_chunk``)
 
         Returns:
-            QualityEvaluation with metrics and target evaluation results
+            QualityEvaluation with metrics and target evaluation results.
         """
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_prefix = str(output_dir / f"{encoded.stem}.")
+        cwd = metrics_output_dir if metrics_output_dir is not None else output_dir
 
         duration_seconds: float | None = None
         fps_value:        float | None = None
@@ -1322,47 +1424,42 @@ class QualityEvaluator:
         except Exception:
             pass
 
-        resolved_title = bar_title if bar_title is not None \
+        resolved_title    = bar_title if bar_title is not None \
             else encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
-
-        _total_complexity = sum(m.info.complexity for m in MetricType)
+        _total_complexity = duration_seconds or 0.0  # single ffmpeg run, linear time
 
         if show_progress:
-            with ProgressBar(_total_complexity * (duration_seconds or 0.0), title=f"Metrics: {resolved_title}", show_counters=False) as advance:
-                psnr_log, ssim_log, vmaf_json = await self._generate_metrics(
-                    encoded,
-                    reference,
-                    ref_crop,
-                    output_prefix,
-                    subsample_factor,
-                    bar_advance=advance,
-                    duration_seconds=duration_seconds or 0.0,
-                    width=width,
+            with ProgressBar(_total_complexity, title=f"Metrics: {resolved_title}", show_counters=False) as advance:
+                artifacts = await self._generate_metrics(
+                    encoded, reference, ref_crop,
+                    output_prefix    = str(cwd / f"{encoded.stem}."),
+                    metrics_sampling = subsample_factor,
+                    bar_advance      = advance,
+                    duration_seconds = duration_seconds or 0.0,
+                    width            = width,
+                    cwd              = cwd,
                 )
                 advance(0, AdvanceState.COMPLETE)
         else:
-            psnr_log, ssim_log, vmaf_json = await self._generate_metrics(
-                encoded,
-                reference,
-                ref_crop,
-                output_prefix,
-                subsample_factor,
-                bar_advance=None,
-                duration_seconds=duration_seconds or 0.0,
-                width=width,
+            artifacts = await self._generate_metrics(
+                encoded, reference, ref_crop,
+                output_prefix    = str(cwd / f"{encoded.stem}."),
+                metrics_sampling = subsample_factor,
+                bar_advance      = None,
+                duration_seconds = duration_seconds or 0.0,
+                width            = width,
+                cwd              = cwd,
             )
 
         return self._finish_evaluation(
-            encoded=encoded,
-            psnr_log=psnr_log,
-            ssim_log=ssim_log,
-            vmaf_json=vmaf_json,
-            output_dir=output_dir,
-            targets=targets,
-            subsample_factor=subsample_factor,
-            plot_path=plot_path,
-            fps_value=fps_value,
-            chunk_start_seconds=chunk_start_seconds,
+            encoded             = encoded,
+            artifacts           = artifacts,
+            output_dir          = output_dir,
+            targets             = targets,
+            subsample_factor    = subsample_factor,
+            plot_path           = plot_path,
+            fps_value           = fps_value,
+            chunk_start_seconds = chunk_start_seconds,
         )
 
     def evaluate_chunk(
@@ -1377,38 +1474,31 @@ class QualityEvaluator:
         plot_path:           Path | None       = None,
         chunk_start_seconds: float             = 0.0,
         width:               int               = 0,
+        metrics_output_dir:  Path | None       = None,
     ) -> QualityEvaluation:
         """Evaluate encoded chunk against reference and quality targets.
 
         Args:
-            encoded:             Path to encoded video file
-            reference:           Path to reference video file
-            ref_crop:            Crop parameters for the reference input
-            targets:             List of quality targets to evaluate against
-            output_dir:          Directory for raw metric log files and stats
-            subsample_factor:    Frame subsampling factor for metrics
-            show_progress:       If True, display a live progress bar (use only
-                                 when not nested inside another alive_bar context,
-                                 e.g. for the final full-video metrics run after merge).
+            encoded:             Path to encoded video file.
+            reference:           Path to reference video file.
+            ref_crop:            Crop parameters for the reference input.
+            targets:             List of quality targets to evaluate against.
+            output_dir:          Directory for the plot PNG.
+            subsample_factor:    Frame subsampling factor for metrics.
+            show_progress:       If True, display a live progress bar.
             plot_path:           Explicit path for the PNG plot.  When ``None``,
-                                 the plot is written as ``<encoded.stem>.png``
-                                 inside ``output_dir``.
-            chunk_start_seconds: Start timestamp of the chunk in seconds.  Used to
-                                 offset the x-axis so the graph reflects the actual
-                                 position in the source video.
-            width:               Scale both inputs to this width during metric
-                                 computation (0 = no scaling).
+                                 written as ``<encoded.stem>.png`` inside ``output_dir``.
+            chunk_start_seconds: Start timestamp of the chunk in seconds.
+            width:               Scale both inputs to this width (0 = no scaling).
+            metrics_output_dir:  Directory for raw metric ``.tmp`` files.  When
+                                 ``None``, uses ``output_dir``.
 
         Returns:
-            QualityEvaluation with metrics and target evaluation results
+            QualityEvaluation with metrics and target evaluation results.
         """
-        # Ensure output directory exists
         output_dir.mkdir(parents=True, exist_ok=True)
+        cwd = metrics_output_dir if metrics_output_dir is not None else output_dir
 
-        # Generate output prefix for metric files
-        output_prefix = str(output_dir / f"{encoded.stem}.")
-
-        # Probe duration for progress bar total (weighted by metric complexity)
         duration_seconds: float | None = None
         fps_value:        float | None = None
         try:
@@ -1419,111 +1509,51 @@ class QualityEvaluator:
         except Exception:
             pass
 
-        bar_title = encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
-        _total_complexity = sum(m.info.complexity for m in MetricType)
+        bar_title         = encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
+        _total_complexity = duration_seconds or 0.0  # single ffmpeg run, linear time
 
         if show_progress:
-            with ProgressBar(_total_complexity * (duration_seconds or 0.0), title=f"Metrics: {bar_title}", show_counters=False) as advance:
-                psnr_log, ssim_log, vmaf_json = asyncio.run(
+            with ProgressBar(_total_complexity, title=f"Metrics: {bar_title}", show_counters=False) as advance:
+                artifacts = asyncio.run(
                     self._generate_metrics(
-                        encoded,
-                        reference,
-                        ref_crop,
-                        output_prefix,
-                        subsample_factor,
-                        bar_advance=advance,
-                        duration_seconds=duration_seconds or 0.0,
-                        width=width,
+                        encoded, reference, ref_crop,
+                        output_prefix    = str(cwd / f"{encoded.stem}."),
+                        metrics_sampling = subsample_factor,
+                        bar_advance      = advance,
+                        duration_seconds = duration_seconds or 0.0,
+                        width            = width,
+                        cwd              = cwd,
                     )
                 )
                 advance(0, AdvanceState.COMPLETE)
         else:
-            psnr_log, ssim_log, vmaf_json = asyncio.run(
+            artifacts = asyncio.run(
                 self._generate_metrics(
-                    encoded,
-                    reference,
-                    ref_crop,
-                    output_prefix,
-                    subsample_factor,
-                    bar_advance=None,
-                    duration_seconds=duration_seconds or 0.0,
-                    width=width,
+                    encoded, reference, ref_crop,
+                    output_prefix    = str(cwd / f"{encoded.stem}."),
+                    metrics_sampling = subsample_factor,
+                    bar_advance      = None,
+                    duration_seconds = duration_seconds or 0.0,
+                    width            = width,
+                    cwd              = cwd,
                 )
             )
 
-        # Parse metrics and generate plots using metrics_visualization
-        logger.debug("Parsing metrics and generating plots")
-        resolved_plot_path = plot_path if plot_path is not None else output_dir / f"{encoded.stem}.png"
-        metrics = analyze_chunk_quality(
-            psnr_log=psnr_log if psnr_log.exists() else None,
-            ssim_log=ssim_log if ssim_log.exists() else None,
-            vmaf_json=vmaf_json if vmaf_json.exists() else None,
-            factor=subsample_factor,
-            output_path=resolved_plot_path,
-            title=f"Quality metrics\n{encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")}",
-            generate_plot=True,
-            fps=fps_value,
-            chunk_start_seconds=chunk_start_seconds,
-        )
-
-        # Collect artifacts
-        artifacts = QualityArtifacts(
-            psnr_log=psnr_log if psnr_log.exists() else None,
-            ssim_log=ssim_log if ssim_log.exists() else None,
-            vmaf_json=vmaf_json if vmaf_json.exists() else None,
-            plot=resolved_plot_path,
-            stats_files=[],
-        )
-
-        # Evaluate against targets
-        failed_targets: list[QualityTarget] = []
-        for target in targets:
-
-            metric_stats = metrics.get(MetricType(target.metric))
-            if metric_stats is None:
-                logger.warning("Target metric '%s' not available in results", target.metric)
-                failed_targets.append(target)
-                continue
-
-            # Get the statistic value
-            actual_value = metric_stats.get(target.statistic)
-            if actual_value is None:
-                logger.warning(
-                    "Target statistic '%s' not available for metric '%s'",
-                    target.statistic,
-                    target.metric,
-                )
-                failed_targets.append(target)
-                continue
-
-            # Compare against target
-            if actual_value < target.value:
-                logger.debug(
-                    "Target not met: %s-%s:%s (actual: %.2f)",
-                    target.metric, target.statistic, target.value, actual_value,
-                )
-                failed_targets.append(target)
-            else:
-                logger.debug(
-                    "Target met: %s-%s:%s (actual: %.2f)",
-                    target.metric, target.statistic, target.value, actual_value,
-                )
-
-        targets_met = len(failed_targets) == 0
-
-        return QualityEvaluation(
-            metrics=metrics,
-            targets_met=targets_met,
-            failed_targets=failed_targets,
-            artifacts=artifacts
+        return self._finish_evaluation(
+            encoded             = encoded,
+            artifacts           = artifacts,
+            output_dir          = output_dir,
+            targets             = targets,
+            subsample_factor    = subsample_factor,
+            plot_path           = plot_path,
+            fps_value           = fps_value,
+            chunk_start_seconds = chunk_start_seconds,
         )
 
     def _finish_evaluation(
         self,
         encoded:             Path,
-        psnr_log:            Path,
-        ssim_log:            Path,
-        vmaf_json:           Path,
+        artifacts:           QualityArtifacts,
         output_dir:          Path,
         targets:             list[QualityTarget],
         subsample_factor:    int,
@@ -1535,28 +1565,66 @@ class QualityEvaluator:
 
         Shared post-processing used by both ``evaluate_chunk`` and
         ``evaluate_chunk_async`` after metric files have been produced.
+
+        Args:
+            encoded:             Path to the encoded video (used for plot title/path).
+            artifacts:           ``QualityArtifacts`` returned by ``_generate_metrics``.
+            output_dir:          Directory for the plot PNG.
+            targets:             Quality targets to evaluate.
+            subsample_factor:    Frame subsampling factor.
+            plot_path:           Explicit plot path override; auto-derived when ``None``.
+            fps_value:           Frames per second for x-axis labelling.
+            chunk_start_seconds: Chunk start offset for x-axis.
+
+        Returns:
+            ``QualityEvaluation`` with metrics, target results, and artifact paths.
         """
         logger.debug("Parsing metrics and generating plots")
         resolved_plot_path = plot_path if plot_path is not None else output_dir / f"{encoded.stem}.png"
-        metrics = analyze_chunk_quality(
-            psnr_log=psnr_log if psnr_log.exists() else None,
-            ssim_log=ssim_log if ssim_log.exists() else None,
-            vmaf_json=vmaf_json if vmaf_json.exists() else None,
-            factor=subsample_factor,
-            output_path=resolved_plot_path,
-            title=f"Quality metrics\n{encoded.stem.replace(TIME_SEPARATOR_MS, '.').replace(TIME_SEPARATOR_SAFE, ':')}",
-            generate_plot=True,
-            fps=fps_value,
-            chunk_start_seconds=chunk_start_seconds,
+
+        artifacts_for_parse = QualityArtifacts(
+            psnr_log  = artifacts.psnr_log  if artifacts.psnr_log  is not None and artifacts.psnr_log.exists()  else None,
+            ssim_log  = artifacts.ssim_log  if artifacts.ssim_log  is not None and artifacts.ssim_log.exists()  else None,
+            vmaf_json = artifacts.vmaf_json if artifacts.vmaf_json is not None and artifacts.vmaf_json.exists() else None,
+            vif_log   = artifacts.vif_log   if artifacts.vif_log   is not None and artifacts.vif_log.exists()   else None,
         )
 
-        artifacts = QualityArtifacts(
-            psnr_log=psnr_log if psnr_log.exists() else None,
-            ssim_log=ssim_log if ssim_log.exists() else None,
-            vmaf_json=vmaf_json if vmaf_json.exists() else None,
-            plot=resolved_plot_path,
-            stats_files=[],
+        df_raw  = parse_metrics(artifacts_for_parse, subsample_factor)
+        df_norm = normalize_metrics(df_raw)
+        metrics = compute_metric_stats(df_norm)
+
+        plot_title = (
+            f"Quality metrics\n"
+            f"{encoded.stem.replace(TIME_SEPARATOR_MS, '.').replace(TIME_SEPARATOR_SAFE, ':')}"
         )
+        create_unified_plot(
+            df_norm             = df_norm,
+            factor              = subsample_factor,
+            output_path         = resolved_plot_path,
+            title               = plot_title,
+            fps                 = fps_value,
+            chunk_start_seconds = chunk_start_seconds,
+        )
+
+        # Delete tmp files after both parse_metrics and create_unified_plot have consumed them.
+        # vif_log and vmaf_json may share the same path — use a set.
+        to_delete: set[Path] = set()
+        for path in (
+            artifacts_for_parse.psnr_log,
+            artifacts_for_parse.ssim_log,
+            artifacts_for_parse.vmaf_json,
+            artifacts_for_parse.vif_log,
+        ):
+            if path is not None:
+                to_delete.add(path)
+        for path in to_delete:
+            try:
+                path.unlink(missing_ok=True)
+                logger.debug("Deleted raw metric tmp file: %s", path.name)
+            except Exception as exc:
+                logger.warning("Could not delete metric tmp file %s: %s", path.name, exc)
+
+        artifacts.plot = resolved_plot_path
 
         failed_targets: list[QualityTarget] = []
         for target in targets:
@@ -1573,15 +1641,15 @@ class QualityEvaluator:
                 )
                 failed_targets.append(target)
                 continue
-            if actual_value < target.value:
+            if not MetricType(target.metric).info.passes(actual_value, target.value):
                 logger.debug("Target not met: %s-%s:%s (actual: %.2f)", target.metric, target.statistic, target.value, actual_value)
                 failed_targets.append(target)
             else:
                 logger.debug("Target met: %s-%s:%s (actual: %.2f)", target.metric, target.statistic, target.value, actual_value)
 
         return QualityEvaluation(
-            metrics=metrics,
-            targets_met=len(failed_targets) == 0,
-            failed_targets=failed_targets,
-            artifacts=artifacts,
+            metrics        = metrics,
+            targets_met    = len(failed_targets) == 0,
+            failed_targets = failed_targets,
+            artifacts      = artifacts,
         )

@@ -894,16 +894,14 @@ class ChunkEncoder:
 
             # Evaluate quality — raw metric logs/stats go into a per-attempt subfolder;
             # the plot and YAML sidecar stay next to the .mkv.
-            attempt_metrics_dir = output_file.parent / output_file.stem
-            attempt_plot_path   = output_file.parent / f"{output_file.stem}.png"
             evaluation = self.quality_evaluator.evaluate_chunk(
                 encoded              = output_file,
                 reference            = reference.path,
                 ref_crop             = self._crop_params or CropParams(),
                 targets              = quality_targets,
-                output_dir           = attempt_metrics_dir,
+                output_dir           = output_file.parent,
                 subsample_factor     = self._metrics_sampling,
-                plot_path            = attempt_plot_path,
+                plot_path            = output_file.parent / f"{output_file.stem}.png",
                 chunk_start_seconds  = chunk.start_timestamp,
             )
 

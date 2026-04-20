@@ -101,6 +101,17 @@ def _add_pipeline_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+_QUALITY_TARGET_HELP: str = (
+    "Quality targets as comma-separated metric-stat:value pairs "
+    "(e.g. 'vmaf-min:95,ssim-med:98,vif-min:95'). "
+    "All metrics are normalized to 0–100 where 100 = lossless. "
+    "Landmarks: VMAF 95+ good, SSIM 98+ good, PSNR 40–60 typical, VIF 95+ good. "
+    "Note: 'min' targets are unreliable with subsampling (factor>1) — "
+    "worst frames may be missed. Prefer 'p05' or 'med' for reliable targeting. "
+    "If not specified, uses default from config file."
+)
+
+
 def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
     """Add quality-related arguments.
 
@@ -113,9 +124,7 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="QUALITY_TARGETS",
         dest="quality_target",
-        help="Quality targets (e.g., 'vmaf-min:95,ssim-med:98'). "
-             "If not specified, uses default from config file. "
-             "NOTE: all metrics are scaled to 0-100 range (e.g. ssim-med:98 means raw SSIM ≥ 0.98)."
+        help=_QUALITY_TARGET_HELP,
     )
     parser.add_argument(
         "--strategies",
@@ -757,7 +766,7 @@ def _create_measure_subcommand(subparsers) -> None:
         type=int,
         default=DEFAULT_SCREENSHOT_COUNT,
         metavar="N",
-        help=f"Screenshots to capture from each video (default: {DEFAULT_SCREENSHOT_COUNT}, min 1)",
+        help=f"Screenshots to capture from each video (default: {DEFAULT_SCREENSHOT_COUNT}, min 1). In interval mode (--every), acts as a cap.",
     )
     p.add_argument(
         "--every",
@@ -769,12 +778,20 @@ def _create_measure_subcommand(subparsers) -> None:
             "Can be combined with --screenshots to cap the total count."
         ),
     )
+    p.add_argument(
+        "--include-edges",
+        action="store_true",
+        default=False,
+        dest="screenshot_include_edges",
+        help="Include frame 0 and the last frame in screenshot positions (count mode only, default: off).",
+    )
     p.set_defaults(func=_cmd_measure)
 
 
 def _cmd_measure(args: argparse.Namespace) -> int:
     """Execute the 'measure' subcommand."""
     from pyqenc.api import measure_quality
+    from pyqenc.config import ConfigManager
 
     try:
         crop_params = _resolve_crop_params(args)
@@ -784,18 +801,19 @@ def _cmd_measure(args: argparse.Namespace) -> int:
 
     # Resolve metrics sampling: CLI arg takes precedence over config file
     metrics_sampling = args.metrics_sampling if args.metrics_sampling is not None \
-                       else config_manager.get_metrics_sampling()
+                       else ConfigManager().get_metrics_sampling()
 
     try:
         measure_quality(
-            source_video         = args.source,
-            target_videos        = args.targets,
-            work_dir             = args.work_dir,
-            crop_params          = crop_params,
-            metrics_sampling     = metrics_sampling,
-            screenshot_count     = args.screenshots,
-            screenshot_interval  = args.every,
-            width                = args.width,
+            source_video             = args.source,
+            target_videos            = args.targets,
+            work_dir                 = args.work_dir,
+            crop_params              = crop_params,
+            metrics_sampling         = metrics_sampling,
+            screenshot_count         = args.screenshots,
+            screenshot_interval      = args.every,
+            screenshot_include_edges = args.screenshot_include_edges,
+            width                    = args.width,
         )
         return 0
     except FileNotFoundError as e:
