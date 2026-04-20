@@ -37,7 +37,10 @@ version = {attr = "pyqenc.__version__"}
 
 [dependency-groups]
 dev = [
+    "debugpy>=1.8.20",
+    "ty>=0.0.31",
     "types-psutil>=7.2.2.20260130",
+    "uv>=0.11.7",
 ]
 test = [
     "hypothesis>=6.0",
