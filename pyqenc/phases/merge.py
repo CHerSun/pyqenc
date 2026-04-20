@@ -248,26 +248,26 @@ def _measure_quality(
 ) -> tuple[dict[str, float], bool, Path | None]:
     """Measure final quality metrics for *final_result* against *source_video*.
 
-    Intermediate metric artifacts (raw logs, ``.stats`` files) are placed in
-    ``output_dir / final_result.stem``.  The quality plot PNG is written to
-    ``output_dir / f"{final_result.stem}.png"``.
+    Raw metric ``.tmp`` files are written directly to ``output_dir`` and deleted
+    immediately after parsing.  The quality plot PNG is written to
+    ``output_dir / f"{final_result.stem}.png"`` and kept.
 
     Returns:
         Tuple of ``(metrics_dict, targets_met, plot_path)``.
     """
-    evaluator   = QualityEvaluator(output_dir)
-    metrics_dir = output_dir / final_result.stem
-    plot_path   = output_dir / f"{final_result.stem}.png"
+    evaluator = QualityEvaluator(output_dir)
+    plot_path = output_dir / f"{final_result.stem}.png"
 
     evaluation = evaluator.evaluate_chunk(
-        encoded=final_result,
-        reference=source_video.path,
-        ref_crop=ref_crop,
-        targets=quality_targets,
-        output_dir=metrics_dir,
-        subsample_factor=metrics_sampling,
-        show_progress=True,
-        plot_path=plot_path,
+        encoded            = final_result,
+        reference          = source_video.path,
+        ref_crop           = ref_crop,
+        targets            = quality_targets,
+        output_dir         = output_dir,
+        metrics_output_dir = output_dir,
+        subsample_factor   = metrics_sampling,
+        show_progress      = True,
+        plot_path          = plot_path,
     )
 
     metrics_dict: dict[str, float] = {}
