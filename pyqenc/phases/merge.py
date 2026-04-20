@@ -38,7 +38,6 @@ from pyqenc.constants import (
 )
 from pyqenc.models import CropParams, PhaseOutcome, QualityTarget, VideoMetadata
 from pyqenc.phase import Artifact, ArtifactState, Phase, PhaseResult
-
 from pyqenc.state import MergeParams, MergeStrategySummary
 from pyqenc.utils.ffmpeg_runner import get_frame_count, run_ffmpeg
 from pyqenc.utils.log_format import (
@@ -491,11 +490,11 @@ def _collect_crf_data(
 
         crf = artifact.crf
         if crf is None:
-            # Fallback: parse CRF from the artifact filename (e.g. "…crf26.5.mkv")
+            # Fallback: parse quality from the artifact filename (e.g. "…q26.5.mkv")
             m = ENCODED_ATTEMPT_NAME_PATTERN.match(artifact.path.name)
             if m:
                 try:
-                    crf = Decimal(str(m.group("crf")))
+                    crf = Decimal(str(m.group("quality")))
                 except (ValueError, IndexError):
                     pass
 
@@ -955,10 +954,11 @@ class MergePhase:
 
                 concat_cmd: list[str | os.PathLike] = [
                     "ffmpeg",
-                    "-f",    "concat",
-                    "-safe", "0",
-                    "-i",    concat_file,
-                    "-c",    "copy",
+                    "-f",      "concat",
+                    "-safe",   "0",
+                    "-i",      concat_file,
+                    "-c",      "copy",
+                    "-fflags", "+genpts"
                     "-y",
                     output_file,
                 ]

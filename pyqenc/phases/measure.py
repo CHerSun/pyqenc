@@ -936,7 +936,7 @@ async def run_measure(
 
     fmt_key_value_table({
         "source":      str(source_video),
-        "targets":     [t.name for t in target_videos] if target_videos else ["(none — screenshots only)"],
+        "targets":     [f"{i+1:>2} - {t.name}" for i, t in enumerate(target_videos)] if target_videos else ["(none — screenshots only)"],
         "crop":        str(resolved_crop) if not resolved_crop.is_empty() else "none",
         "width":       str(width) if width else "none",
         "sampling":    str(metrics_sampling),
@@ -1113,6 +1113,7 @@ async def run_measure(
     for idx, (target_video, target_meta) in enumerate(zip(target_videos, target_metas), start=1):
         eff_dur = effective_durations[target_video]
 
+        logger.info("Measuring target %d of %d: %s", idx, len(target_videos), target_video.stem)
         metrics = await _run_metrics(
             source_video     = source_video,
             target_video     = target_video,
@@ -1121,7 +1122,7 @@ async def run_measure(
             metrics_dir      = measure_dir,
             graph_path       = graph_paths[target_video],
             subsample_factor = metrics_sampling,
-            bar_title        = f"Measuring target {idx} {target_video.stem}",
+            bar_title        = f"measuring target {idx:>2}",
         )
 
         _write_sidecar(
