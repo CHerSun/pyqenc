@@ -21,13 +21,14 @@ from hypothesis import strategies as st
 from pyqenc.metrics import (
     AttemptStats,
     ConvergenceStats,
+    MetricKey,
     PipelineMetrics,
     TimeDistribution,
     TimeEntry,
-    TimeKey,
     YamlMetricsCollector,
     _ConvergenceAccumulator,
     _compute_convergence,
+    _last_dot_prefix,
     _update_accumulator,
 )
 
@@ -294,13 +295,13 @@ def test_convergence_stats_resume_from_yaml(counts: list[int]) -> None:
 
 @settings(max_examples=200, deadline=None)
 @given(
-    key=st.sampled_from(list(TimeKey)),
+    key=st.sampled_from(list(MetricKey)),
     durations=st.lists(
         st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False),
         min_size=1, max_size=50,
     ),
 )
-def test_time_accumulation_round_trip(key: TimeKey, durations: list[float]) -> None:
+def test_time_accumulation_round_trip(key: MetricKey, durations: list[float]) -> None:
     """Property 1: Time accumulation round-trip.
 
     Validates: Requirements 2.1, 2.2, 2.2a
@@ -309,11 +310,11 @@ def test_time_accumulation_round_trip(key: TimeKey, durations: list[float]) -> N
     with tempfile.TemporaryDirectory() as _tmp:
         collector = _make_yaml_collector(Path(_tmp))
         for d in durations:
-            collector._time_accum[key] += d
+            collector._time_accum[key.value] += d
 
         expected = sum(durations)
         tol = max(1e-9, abs(expected) * 1e-9)
-        assert abs(collector._time_accum[key] - expected) <= tol
+        assert abs(collector._time_accum[key.value] - expected) <= tol
 
 
 # ---------------------------------------------------------------------------
@@ -325,10 +326,10 @@ def test_time_accumulation_round_trip(key: TimeKey, durations: list[float]) -> N
 @given(
     time_map=st.fixed_dictionaries({
         key: st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False)
-        for key in TimeKey
+        for key in MetricKey
     }),
 )
-def test_time_distribution_math(time_map: dict[TimeKey, float]) -> None:
+def test_time_distribution_math(time_map: dict[MetricKey, float]) -> None:
     """Property 2: Time distribution math.
 
     Validates: Requirements 2.3, 2.5
@@ -338,7 +339,7 @@ def test_time_distribution_math(time_map: dict[TimeKey, float]) -> None:
         collector = _make_yaml_collector(Path(_tmp))
         for key, elapsed in time_map.items():
             if elapsed > 0:
-                collector._time_accum[key] = elapsed
+                collector._time_accum[key.value] = elapsed
 
         collector.flush()
 
@@ -350,7 +351,7 @@ def test_time_distribution_math(time_map: dict[TimeKey, float]) -> None:
 
         # Only non-zero categories appear in breakdown (zeros are omitted)
         present_categories = {e["category"] for e in breakdown}
-        expected_nonzero   = {k.value for k in TimeKey if int(round(collector._time_accum[k])) > 0}
+        expected_nonzero   = {k.value for k in MetricKey if int(round(collector._time_accum.get(k.value, 0.0))) > 0}
         assert present_categories == expected_nonzero
         assert total_secs == int(round(sum(collector._time_accum.values())))
 
@@ -370,10 +371,10 @@ def test_time_distribution_math(time_map: dict[TimeKey, float]) -> None:
 @given(
     time_map=st.fixed_dictionaries({
         key: st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False)
-        for key in TimeKey
+        for key in MetricKey
     }),
 )
-def test_breakdown_sorted_descending(time_map: dict[TimeKey, float]) -> None:
+def test_breakdown_sorted_descending(time_map: dict[MetricKey, float]) -> None:
     """Property 3: Breakdown sorted descending.
 
     Validates: Requirements 2.6
@@ -383,10 +384,42 @@ def test_breakdown_sorted_descending(time_map: dict[TimeKey, float]) -> None:
         collector = _make_yaml_collector(Path(_tmp))
         for key, elapsed in time_map.items():
             if elapsed > 0:
-                collector._time_accum[key] = elapsed
+                collector._time_accum[key.value] = elapsed
         collector.flush()
 
         raw      = yaml.safe_load((Path(_tmp) / "metrics.yaml").read_text(encoding="utf-8"))
         secs_lst = [e["seconds"] for e in raw["pipeline_metrics"]["time_distribution"]["breakdown"]]
         assert secs_lst == sorted(secs_lst, reverse=True)
 
+
+
+# ---------------------------------------------------------------------------
+# Property 1 (metrics-two-tier): Prefix extraction is last-dot
+# ---------------------------------------------------------------------------
+
+# Feature: metrics-two-tier, Property 1: Prefix extraction is last-dot
+
+_st_segment = st.text(
+    alphabet=st.characters(whitelist_categories=("Ll", "Lu", "Nd"), whitelist_characters="_"),
+    min_size=1,
+    max_size=20,
+)
+
+
+@st.composite
+def _st_dotted_key(draw: st.DrawFn) -> str:
+    """Generate a dotted key string with 1–3 dots and random alphanumeric segments."""
+    num_dots = draw(st.integers(min_value=1, max_value=3))
+    segments = draw(st.lists(_st_segment, min_size=num_dots + 1, max_size=num_dots + 1))
+    return ".".join(segments)
+
+
+@settings(max_examples=100)
+@given(key=_st_dotted_key())
+def test_last_dot_prefix_is_last_dot(key: str) -> None:
+    """Property 1 (metrics-two-tier): Prefix extraction is last-dot.
+
+    Validates: Requirements 1.4
+    # Feature: metrics-two-tier, Property 1: Prefix extraction is last-dot
+    """
+    assert _last_dot_prefix(key) == key.rsplit(".", 1)[0]
