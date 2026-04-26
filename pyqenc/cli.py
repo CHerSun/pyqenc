@@ -74,7 +74,7 @@ def _parse_cleanup_level(cleanup_value: str | None) -> CleanupLevel:
 
 def _add_base_arguments(parser: argparse.ArgumentParser) -> None:
     """Add arguments universal to ALL subcommands (including measure)."""
-    parser.add_argument("--work-dir", type=Path, default=Path("./pyqenc"), help="Working directory for intermediate files and state (default: ./pyqenc)")
+    parser.add_argument("--work-dir", type=Path, default=Path("."), help="Working directory for intermediate files and state (default: .)")
     parser.add_argument("--log-level", choices=["debug", "info", "warning", "critical"], default="info", help="Logging level (default: info)")
 
 
