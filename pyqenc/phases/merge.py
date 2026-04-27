@@ -643,9 +643,9 @@ class MergePhase:
                 f"{t.metric}-{t.statistic}≥{t.value}" for t in self._config.quality_targets
             ))
 
-        from pyqenc.metrics import TimeKey
+        from pyqenc.metrics import MetricKey
 
-        with self._collector.time(TimeKey.RECOVERY):
+        with self._collector.time(MetricKey.RECOVERY):
             artifacts = self._recover(force_wipe=force_wipe, execute=True)
 
         complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
@@ -896,7 +896,7 @@ class MergePhase:
         Returns:
             ``MergePhaseResult`` after merging.
         """
-        from pyqenc.metrics import TimeKey
+        from pyqenc.metrics import MetricKey
 
         work_dir  = self._config.work_dir
         final_dir = work_dir / FINAL_OUTPUT_DIR
@@ -964,7 +964,7 @@ class MergePhase:
                 ]
 
                 logger.debug("Concat command: %s", " ".join(str(a) for a in concat_cmd))
-                with self._collector.time(TimeKey.MERGE_CONCAT):
+                with self._collector.time(MetricKey.MERGE):
                     concat_result = run_ffmpeg(concat_cmd, output_file=output_file)
                 concat_file.unlink(missing_ok=True)
 
@@ -999,7 +999,7 @@ class MergePhase:
 
                 if source_video and self._config.quality_targets:
                     try:
-                        with self._collector.time(TimeKey.MERGE_QUALITY_MEASURE):
+                        with self._collector.time(MetricKey.MERGE):
                             metrics_dict, targets_met, plot_path = _measure_quality(
                                 final_result     = output_file,
                                 source_video     = source_video,

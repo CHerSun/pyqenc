@@ -1282,9 +1282,9 @@ async def _encode_chunks_parallel(
                         if advance is not None:
                             advance(chunk.end_timestamp - chunk.start_timestamp)
                         # Record convergence for this chunk/strategy pair
-                        from pyqenc.metrics import ConvergenceUpdate, TimeKey
+                        from pyqenc.metrics import ConvergenceUpdate, MetricKey
                         collector.step(
-                            TimeKey.ENCODING_MAIN,
+                            MetricKey.ENCODING,
                             convergence_update=ConvergenceUpdate(
                                 strategy      = strategy.name,
                                 attempt_count = chunk_result.attempts,
@@ -1303,8 +1303,8 @@ async def _encode_chunks_parallel(
     workers = [asyncio.create_task(encode_worker()) for _ in range(max_parallel)]
 
     # Wait for all workers to complete
-    from pyqenc.metrics import TimeKey
-    async with collector.time(TimeKey.ENCODING_MAIN):
+    from pyqenc.metrics import MetricKey
+    async with collector.time(MetricKey.ENCODING):
         await asyncio.gather(*workers)
 
     return result
@@ -1607,14 +1607,14 @@ class EncodingPhase:
             self.result = dep_result
             return self.result
 
-        from pyqenc.metrics import TimeKey
+        from pyqenc.metrics import MetricKey
 
         job_result = self._job.result  # type: ignore[union-attr]
         force_wipe = getattr(job_result, "force_wipe", False)
         crop       = getattr(job_result, "crop", None)
 
         # Key parameters — strategies come from OptimizationPhase after deps are resolved
-        with self._collector.time(TimeKey.RECOVERY):
+        with self._collector.time(MetricKey.RECOVERY):
             artifacts = self._recover(force_wipe=force_wipe, execute=True)
 
         # Log key parameters now that dependencies are resolved

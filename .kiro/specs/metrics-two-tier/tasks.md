@@ -49,7 +49,7 @@ construction time, and update all property-based and integration tests.
     variadic signature — both remain no-ops
   - _Requirements: 6.4, 6.5, 6.6_
 
-- [ ] 4. Replace Pydantic models with two-tier structure in `pyqenc/metrics.py`
+- [x] 4. Replace Pydantic models with two-tier structure in `pyqenc/metrics.py`
   - Remove `TimeEntry` and the old `TimeDistribution` / `PipelineMetrics`
   - Add `TopLevelEntry(key, seconds, duration, percent)`
   - Add `DottedEntry(key, seconds, duration, percent)`
@@ -59,19 +59,19 @@ construction time, and update all property-based and integration tests.
   - Update `__all__` to export the new models; remove `TimeEntry`
   - _Requirements: 5.1, 5.2, 5.3, 5.4_
 
-- [ ] 5. Update `YamlMetricsCollector` internals
-  - [ ] 5.1 Replace `_time_accum` with sparse `_store: MetricsStore`
+- [x] 5. Update `YamlMetricsCollector` internals
+  - [x] 5.1 Replace `_time_accum` with sparse `_store: MetricsStore`
     - Change `__init__` to initialise `_store: MetricsStore = {}` (no pre-seeding)
     - Update `_active_timers` type to `list[tuple[str, float]]` (stores resolved key strings)
     - _Requirements: 2.2, 3.4_
-  - [ ] 5.2 Update `_TimingContext` to use `_build_key` and `_store`
+  - [x] 5.2 Update `_TimingContext` to use `_build_key` and `_store`
     - Accept `key: MetricKey, *parts: str`; resolve to storage key via `_build_key` in `__init__`
     - Accumulate into `_store[resolved_key]` on exit (create entry on first use)
     - _Requirements: 2.1, 3.1_
-  - [ ] 5.3 Update `step()` to accept `MetricKey, *parts: str`
+  - [x] 5.3 Update `step()` to accept `MetricKey, *parts: str`
     - Resolve key via `_build_key`; convergence logic unchanged
     - _Requirements: 6.6_
-  - [ ] 5.4 Implement two-tier `_build_metrics()`
+  - [x] 5.4 Implement two-tier `_build_metrics()`
     - Add `_compute_top_level_entries(store)` — filters top-level keys, computes grand total,
       formats percentages, sorts descending, omits zeros
     - Add `_compute_dotted_groups(store)` — groups dotted keys by `_last_dot_prefix`,
@@ -79,32 +79,32 @@ construction time, and update all property-based and integration tests.
     - Assemble `TimeDistribution` with `top_level` and `dotted` from the two helpers
     - Handle zero grand total (all percentages `"0.0%"`) and zero prefix total per group
     - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 5.3, 5.4_
-  - [ ] 5.5 Write property test for time accumulation (Property 2)
+  - [x] 5.5 Write property test for time accumulation (Property 2)
     - **Property 2: Time accumulation is additive**
     - Generate a random key (top-level or dotted) and a list of non-negative floats;
       inject into `_store`; verify `_store[key] == sum(durations)` within float tolerance
     - Tag: `# Feature: metrics-two-tier, Property 2: Time accumulation is additive`
     - **Validates: Requirements 2.2, 3.4**
-  - [ ] 5.6 Write property test for top-level percentages (Property 3)
+  - [x] 5.6 Write property test for top-level percentages (Property 3)
     - **Property 3: Top-level percentages sum to 100%**
     - Generate random top-level value dicts; inject into `_store`; call `flush()`; parse YAML;
       sum `float(e["percent"].rstrip("%"))` for all `top_level` entries; assert `abs(total - 100.0) < 0.15`
     - Tag: `# Feature: metrics-two-tier, Property 3: Top-level percentages sum to 100%`
     - **Validates: Requirements 4.1, 4.4**
-  - [ ] 5.7 Write property test for dotted percentages (Property 4)
+  - [x] 5.7 Write property test for dotted percentages (Property 4)
     - **Property 4: Dotted percentages sum to 100% per prefix**
     - Generate random groups of sibling dotted keys (same prefix, random suffixes, at least one
       non-zero); inject into `_store`; call `flush()`; parse YAML; for each prefix group sum
       percentages; assert `abs(total - 100.0) < 0.15`
     - Tag: `# Feature: metrics-two-tier, Property 4: Dotted percentages sum to 100% per prefix`
     - **Validates: Requirements 4.2, 4.5**
-  - [ ] 5.8 Write property test for top-level sort order (Property 8)
+  - [x] 5.8 Write property test for top-level sort order (Property 8)
     - **Property 8: Top-level list sorted descending with no zeros**
     - Generate random top-level value dicts; inject into `_store`; call `flush()`; parse YAML
       `top_level` list; assert `seconds` values are non-increasing and all `> 0`
     - Tag: `# Feature: metrics-two-tier, Property 8: Top-level list sorted descending with no zeros`
     - **Validates: Requirements 5.2**
-  - [ ] 5.9 Write property test for dotted breakdown sort order (Property 9)
+  - [x] 5.9 Write property test for dotted breakdown sort order (Property 9)
     - **Property 9: Dotted breakdown sorted descending with no zeros**
     - Generate random dotted value dicts (multiple prefix groups); inject into `_store`; call
       `flush()`; parse YAML `dotted` section; for each prefix group assert `breakdown` `seconds`
@@ -112,13 +112,13 @@ construction time, and update all property-based and integration tests.
     - Tag: `# Feature: metrics-two-tier, Property 9: Dotted breakdown sorted descending with no zeros`
     - **Validates: Requirements 5.3**
 
-- [ ] 6. Update `_try_resume()` for two-tier YAML structure
+- [x] 6. Update `_try_resume()` for two-tier YAML structure
   - Read `top_level` entries and restore each key's float seconds into `_store`
   - Read all `dotted` prefix groups and restore each `breakdown` entry's key into `_store`
   - Skip unknown keys with `logger.debug` (do not raise)
   - Restore convergence accumulators unchanged (existing Welford resume logic)
   - _Requirements: 5.6_
-  - [ ] 6.1 Write property test for resume (Property 6)
+  - [x] 6.1 Write property test for resume (Property 6)
     - **Property 6: Resume restores accumulated store**
     - Generate a random `MetricsStore` (mix of top-level and dotted keys, non-zero values);
       inject into a `YamlMetricsCollector`; call `flush()`; construct a second collector with
@@ -126,7 +126,7 @@ construction time, and update all property-based and integration tests.
     - Tag: `# Feature: metrics-two-tier, Property 6: Resume restores accumulated store`
     - **Validates: Requirements 5.6**
 
-- [ ] 7. Checkpoint — ensure all tests pass
+- [-] 7. Checkpoint — ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 8. Sanitize ASCII dots in `Strategy` and `BaseStrategy`

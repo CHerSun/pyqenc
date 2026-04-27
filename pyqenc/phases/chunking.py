@@ -203,7 +203,7 @@ def split_chunks(
     Returns:
         List of ``ChunkMetadata`` for every chunk that was successfully split or reused.
     """
-    from pyqenc.metrics import TimeKey
+    from pyqenc.metrics import MetricKey
     if not boundaries:
         raise RuntimeError(
             "No scene boundaries provided to split_chunks. "
@@ -294,7 +294,7 @@ def split_chunks(
 
             result_chunks.append(chunk_meta)
             logger.debug("Chunk %s split successfully", stem)
-            collector.step(TimeKey.CHUNKING_SPLIT)
+            collector.step(MetricKey.CHUNKING)
             advance(end_ts - start_ts)
 
         advance(0, AdvanceState.COMPLETE)
@@ -502,8 +502,8 @@ class ChunkingPhase:
         # Key parameters
         logger.info("Mode:  %s", self._config.chunking_mode.value)
 
-        from pyqenc.metrics import TimeKey as _TimeKey
-        with self._collector.time(_TimeKey.RECOVERY):
+        from pyqenc.metrics import MetricKey as _MetricKey
+        with self._collector.time(_MetricKey.RECOVERY):
             artifacts = self._recover(force_wipe=force_wipe, execute=True)
 
         # Mode mismatch without --force: abort
@@ -756,7 +756,7 @@ class ChunkingPhase:
         Returns:
             ``ChunkingPhaseResult`` after chunking.
         """
-        from pyqenc.metrics import TimeKey
+        from pyqenc.metrics import MetricKey
         work_dir   = self._config.work_dir
         chunks_dir = work_dir / CHUNKS_DIR
         chunks_dir.mkdir(parents=True, exist_ok=True)
@@ -789,7 +789,7 @@ class ChunkingPhase:
             )
         else:
             try:
-                with self._collector.time(TimeKey.CHUNKING_SCENE_DETECT):
+                with self._collector.time(MetricKey.CHUNKING):
                     boundaries = detect_scenes(
                         video_meta       = video_meta,
                         scene_threshold  = 27.0,
@@ -822,7 +822,7 @@ class ChunkingPhase:
         )
 
         try:
-            with self._collector.time(TimeKey.CHUNKING_SPLIT):
+            with self._collector.time(MetricKey.CHUNKING):
                 chunk_metas = split_chunks(
                     video_meta    = video_meta,
                     output_dir    = chunks_dir,

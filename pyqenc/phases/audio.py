@@ -1393,9 +1393,9 @@ class AudioPhase:
         if self._config.audio_base_bitrate:
             logger.info("Base bitrate:    %s", self._config.audio_base_bitrate)
 
-        from pyqenc.metrics import TimeKey
+        from pyqenc.metrics import MetricKey
 
-        with self._collector.time(TimeKey.RECOVERY):
+        with self._collector.time(MetricKey.RECOVERY):
             artifacts = self._recover(force_wipe=force_wipe, execute=True)
 
         complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
@@ -1433,7 +1433,7 @@ class AudioPhase:
             return self.result
 
         # Execute audio processing
-        with self._collector.time(TimeKey.AUDIO):
+        with self._collector.time(MetricKey.AUDIO):
             result = self._execute_audio(artifacts)
         self.result = result
         return result

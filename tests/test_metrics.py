@@ -3,46 +3,51 @@
 Covers enum membership, protocol conformance, and lifecycle behaviour.
 """
 
-from pyqenc.metrics import NoOpMetricsCollector, TimeKey
+from pyqenc.metrics import MetricKey, NoOpMetricsCollector
 
 
 # ---------------------------------------------------------------------------
-# TimeKey enum membership
+# MetricKey enum membership
 # ---------------------------------------------------------------------------
 
-_EXPECTED_TIME_KEYS: list[tuple[str, str]] = [
-    ("JOB_PROBE",             "job.probe"),
-    ("JOB_CROP_DETECT",       "job.crop_detect"),
-    ("EXTRACTION",            "extraction.mkvextract"),
-    ("CHUNKING_SCENE_DETECT", "chunking.scene_detect"),
-    ("CHUNKING_SPLIT",        "chunking.split"),
-    ("AUDIO",                 "audio.processing"),
-    ("ENCODING_OPTIMIZATION", "encoding.optimization"),
-    ("ENCODING_MAIN",         "encoding.main"),
-    ("MERGE_CONCAT",          "merge.concat"),
-    ("MERGE_QUALITY_MEASURE", "merge.quality_measure"),
-    ("RECOVERY",              "recovery"),
+_EXPECTED_METRIC_KEYS: list[tuple[str, str]] = [
+    ("JOB",          "job"),
+    ("EXTRACTION",   "extraction"),
+    ("CHUNKING",     "chunking"),
+    ("AUDIO",        "audio"),
+    ("ENCODING",     "encoding"),
+    ("OPTIMIZATION", "optimization"),
+    ("MERGE",        "merge"),
+    ("RECOVERY",     "recovery"),
 ]
 
 
-def test_time_key_member_count() -> None:
-    """TimeKey must have exactly 11 members (Req 2.4)."""
-    assert len(TimeKey) == 11
+def test_metric_key_member_count() -> None:
+    """MetricKey must have exactly 8 members (Req 6.1, 6.2)."""
+    assert len(MetricKey) == 8
 
 
-def test_time_key_member_names_and_values() -> None:
-    """Every TimeKey member must have the correct dotted string value (Req 2.4)."""
-    for name, expected_value in _EXPECTED_TIME_KEYS:
-        member = TimeKey[name]
+def test_metric_key_member_names_and_values() -> None:
+    """Every MetricKey member must have the correct flat string value (Req 6.1, 6.2)."""
+    for name, expected_value in _EXPECTED_METRIC_KEYS:
+        member = MetricKey[name]
         assert member.value == expected_value, (
-            f"TimeKey.{name}: expected {expected_value!r}, got {member.value!r}"
+            f"MetricKey.{name}: expected {expected_value!r}, got {member.value!r}"
         )
 
 
-def test_time_key_is_str() -> None:
-    """TimeKey values must be plain strings (StrEnum contract)."""
-    for member in TimeKey:
+def test_metric_key_is_str() -> None:
+    """MetricKey values must be plain strings (StrEnum contract)."""
+    for member in MetricKey:
         assert isinstance(member, str)
+
+
+def test_metric_key_values_have_no_dot() -> None:
+    """MetricKey values must contain no dot separator (top-level keys only)."""
+    for member in MetricKey:
+        assert "." not in member.value, (
+            f"MetricKey.{member.name} value {member.value!r} must not contain a dot"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +58,7 @@ def test_time_key_is_str() -> None:
 def test_noop_collector_time_returns_context_manager() -> None:
     """NoOpMetricsCollector.time() must return a usable context manager."""
     collector = NoOpMetricsCollector()
-    with collector.time(TimeKey.ENCODING_MAIN):
+    with collector.time(MetricKey.ENCODING):
         pass  # must not raise
 
 
@@ -61,9 +66,9 @@ def test_noop_collector_step_is_noop() -> None:
     """NoOpMetricsCollector.step() must accept all args without error."""
     from pyqenc.metrics import ConvergenceUpdate
     collector = NoOpMetricsCollector()
-    collector.step(TimeKey.ENCODING_MAIN)
+    collector.step(MetricKey.ENCODING)
     collector.step(
-        TimeKey.ENCODING_MAIN,
+        MetricKey.ENCODING,
         convergence_update=ConvergenceUpdate(strategy="slow+h265", attempt_count=3),
     )
 
@@ -88,7 +93,7 @@ import yaml
 from pyqenc.metrics import (
     METRICS_YAML_FILENAME,
     ConvergenceUpdate,
-    TimeKey,
+    MetricKey,
     YamlMetricsCollector,
 )
 
@@ -154,7 +159,7 @@ def test_convergence_present_after_step(tmp_path: Path) -> None:
     """Convergence section must appear after a step() with convergence_update."""
     collector = _make_collector(tmp_path)
     collector.step(
-        TimeKey.ENCODING_MAIN,
+        MetricKey.ENCODING,
         convergence_update=ConvergenceUpdate(strategy="slow+h265", attempt_count=3),
     )
     collector.flush()
@@ -170,12 +175,12 @@ def test_resume_restores_time_accum(tmp_path: Path) -> None:
     """Resuming from persisted metrics.yaml must restore time accumulators (Req 1.1)."""
     # First run: set time directly and flush
     c1 = YamlMetricsCollector(work_dir=tmp_path)
-    c1._time_accum[TimeKey.AUDIO] = 120.0
+    c1._store[MetricKey.AUDIO] = 120.0
     c1.flush()
 
     # Second run: resume and check accumulator
     c2 = YamlMetricsCollector(work_dir=tmp_path)
-    assert c2._time_accum[TimeKey.AUDIO] == pytest.approx(120.0, abs=1.0)
+    assert c2._store[MetricKey.AUDIO] == pytest.approx(120.0, abs=1.0)
 
 
 def test_resume_bad_file_starts_fresh(
@@ -188,7 +193,7 @@ def test_resume_bad_file_starts_fresh(
     with caplog.at_level(logging.WARNING, logger="pyqenc.metrics"):
         collector = YamlMetricsCollector(work_dir=tmp_path)
 
-    assert all(v == 0.0 for v in collector._time_accum.values())
+    assert all(v == 0.0 for v in collector._store.values())
     assert any("starting fresh" in r.message for r in caplog.records)
 
 
@@ -299,23 +304,23 @@ def test_flush_while_timer_active_includes_partial_elapsed(tmp_path: Path) -> No
     """flush() called while a time() context is active must include partial elapsed (Req 1.4)."""
     collector = _make_collector(tmp_path)
 
-    ctx = collector.time(TimeKey.AUDIO)
+    ctx = collector.time(MetricKey.AUDIO)
     ctx.__enter__()
 
     # Flush while the context is still open
     collector.flush()
 
     raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
-    breakdown = {e["category"]: e["seconds"] for e in raw["pipeline_metrics"]["time_distribution"]["breakdown"]}
+    top_level = {e["key"]: e["seconds"] for e in raw["pipeline_metrics"]["time_distribution"]["top_level"]}
 
     # The partial elapsed must be >= 0 (timer was running when flush happened)
     # Key may be absent if elapsed rounds to 0 (zero entries are omitted)
-    elapsed_in_yaml = breakdown.get(TimeKey.AUDIO.value, 0)
+    elapsed_in_yaml = top_level.get(MetricKey.AUDIO.value, 0)
     assert elapsed_in_yaml >= 0, "Expected non-negative partial elapsed for active timer"
 
-    # _time_accum must NOT have been mutated by the flush
-    assert collector._time_accum[TimeKey.AUDIO] == 0.0, (
-        "flush() must not mutate _time_accum for in-flight timers"
+    # _store must NOT have been mutated by the flush
+    assert collector._store.get(MetricKey.AUDIO, 0.0) == 0.0, (
+        "flush() must not mutate _store for in-flight timers"
     )
 
     # Clean up — exit the context normally
@@ -326,43 +331,43 @@ def test_active_timer_not_double_counted_after_exit(tmp_path: Path) -> None:
     """After a time() context exits normally, the elapsed must not be double-counted (Req 1.4)."""
     collector = _make_collector(tmp_path)
 
-    with collector.time(TimeKey.AUDIO):
+    with collector.time(MetricKey.AUDIO):
         # Trigger a flush mid-context via the flush counter
         collector.flush()
-        # _time_accum still 0 here — timer not yet exited
+        # _store still 0 here — timer not yet exited
 
-    # After exit: _time_accum holds the real elapsed; active_timers is empty
+    # After exit: _store holds the real elapsed; active_timers is empty
     assert len(collector._active_timers) == 0
-    elapsed_after = collector._time_accum[TimeKey.AUDIO]
+    elapsed_after = collector._store.get(MetricKey.AUDIO, 0.0)
     assert elapsed_after > 0.0
 
     # A second flush must report the same value (no double-count)
     collector.flush()
     raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
-    breakdown = {e["category"]: e["seconds"] for e in raw["pipeline_metrics"]["time_distribution"]["breakdown"]}
+    top_level = {e["key"]: e["seconds"] for e in raw["pipeline_metrics"]["time_distribution"]["top_level"]}
     # seconds is int(round(elapsed)); if it rounds to 0 the key is absent (zeros omitted)
     expected_secs = int(round(elapsed_after))
     if expected_secs == 0:
-        assert TimeKey.AUDIO.value not in breakdown
+        assert MetricKey.AUDIO.value not in top_level
     else:
-        assert breakdown[TimeKey.AUDIO.value] == expected_secs
+        assert top_level[MetricKey.AUDIO.value] == expected_secs
 
 
 def test_snapshot_active_timers_does_not_mutate(tmp_path: Path) -> None:
     """_snapshot_active_timers() must not modify _active_timers or _time_accum."""
     collector = _make_collector(tmp_path)
 
-    ctx = collector.time(TimeKey.ENCODING_MAIN)
+    ctx = collector.time(MetricKey.ENCODING)
     ctx.__enter__()
 
-    before_accum  = collector._time_accum[TimeKey.ENCODING_MAIN]
+    before_accum  = collector._store.get(MetricKey.ENCODING, 0.0)
     before_timers = len(collector._active_timers)
 
     snapshot = collector._snapshot_active_timers()
 
-    assert collector._time_accum[TimeKey.ENCODING_MAIN] == before_accum
+    assert collector._store.get(MetricKey.ENCODING, 0.0) == before_accum
     assert len(collector._active_timers) == before_timers
-    assert TimeKey.ENCODING_MAIN in snapshot
-    assert snapshot[TimeKey.ENCODING_MAIN] >= 0.0
+    assert MetricKey.ENCODING in snapshot
+    assert snapshot[MetricKey.ENCODING] >= 0.0
 
     ctx.__exit__(None, None, None)

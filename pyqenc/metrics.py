@@ -32,7 +32,9 @@ __all__ = [
     # Pydantic models
     "AttemptStats",
     "ConvergenceStats",
-    "TimeEntry",
+    "TopLevelEntry",
+    "DottedEntry",
+    "DottedGroup",
     "TimeDistribution",
     "PipelineMetrics",
     # Protocol + implementations
@@ -42,6 +44,8 @@ __all__ = [
     "_ConvergenceAccumulator",
     "_update_accumulator",
     "_compute_convergence",
+    "_compute_top_level_entries",
+    "_compute_dotted_groups",
     # Added in task 7:
     "YamlMetricsCollector",
     # Active collector registry (task 19):
@@ -244,21 +248,39 @@ class ConvergenceStats(BaseModel):
     attempts: AttemptStats
 
 
-class TimeEntry(BaseModel):
-    """A single row in the time distribution breakdown."""
+class TopLevelEntry(BaseModel):
+    """A single row in the top-level (wall-clock) time distribution list."""
 
-    category: str  # metric key string, e.g. "encoding.main"
+    key:      str  # e.g. "encoding"
     seconds:  int  # integer seconds
     duration: str  # "[Dd ]HH:MM:SS"
-    percent:  str  # "X.X%"
+    percent:  str  # "X.X%" relative to grand total
+
+
+class DottedEntry(BaseModel):
+    """A single row in a dotted-key breakdown group."""
+
+    key:      str  # e.g. "encoding.h265"
+    seconds:  int  # integer seconds
+    duration: str  # "[Dd ]HH:MM:SS"
+    percent:  str  # "X.X%" relative to prefix total
+
+
+class DottedGroup(BaseModel):
+    """All dotted keys sharing the same last-dot prefix."""
+
+    prefix_seconds:  int              # sum of all sibling dotted key seconds
+    prefix_duration: str              # "[Dd ]HH:MM:SS" of prefix total
+    breakdown:       list[DottedEntry]  # sorted descending by seconds, zeros omitted
 
 
 class TimeDistribution(BaseModel):
-    """Time distribution section of the metrics report."""
+    """Two-tier time distribution section of the metrics report."""
 
-    seconds:   int             # total wall-clock seconds across all phases
-    duration:  str             # "[Dd ]HH:MM:SS" total
-    breakdown: list[TimeEntry] # sorted descending by seconds, zeros omitted
+    total_seconds:  int                    # grand total wall-clock seconds
+    total_duration: str                    # "[Dd ]HH:MM:SS" grand total
+    top_level:      list[TopLevelEntry]    # sorted descending by seconds, zeros omitted
+    dotted:         dict[str, DottedGroup] # keyed by prefix string
 
 
 class PipelineMetrics(BaseModel):
@@ -266,6 +288,9 @@ class PipelineMetrics(BaseModel):
 
     ``convergence`` is ``None`` when no encoded result data has been collected
     (e.g. all chunks were reused from a prior run).
+
+    Note: ``parallelism`` is written separately by the pipeline orchestrator
+    and is NOT part of this model.
     """
 
     time_distribution: TimeDistribution
@@ -422,6 +447,87 @@ class NoOpMetricsCollector(MetricsCollector):
 
 
 # ---------------------------------------------------------------------------
+# Module-level metrics computation helpers
+# ---------------------------------------------------------------------------
+
+
+def _compute_top_level_entries(store: MetricsStore) -> tuple[int, list[TopLevelEntry]]:
+    """Build sorted top-level entries and grand total from *store*.
+
+    Filters keys where :func:`_is_top_level` is ``True``, computes the grand
+    total (sum of all top-level values), formats percentages as ``"X.X%"``
+    (one decimal), handles zero grand total → ``"0.0%"``, sorts descending by
+    seconds, and omits zero-second entries.
+
+    Returns:
+        A ``(grand_total_seconds, entries)`` tuple where *grand_total_seconds*
+        is the integer-rounded sum of all top-level values.
+    """
+    top_level_raw = {k: v for k, v in store.items() if _is_top_level(k)}
+    grand_total   = int(round(sum(top_level_raw.values()))) if top_level_raw else 0
+    entries: list[TopLevelEntry] = []
+    for key, val in top_level_raw.items():
+        secs = int(round(val))
+        if secs == 0:
+            continue
+        percent = f"{secs / grand_total * 100:.1f}%" if grand_total > 0 else "0.0%"
+        entries.append(TopLevelEntry(
+            key=key,
+            seconds=secs,
+            duration=_format_duration(secs),
+            percent=percent,
+        ))
+    entries.sort(key=lambda e: e.seconds, reverse=True)
+    return grand_total, entries
+
+
+def _compute_dotted_groups(store: MetricsStore) -> dict[str, DottedGroup]:
+    """Build prefix-keyed dotted groups from *store*.
+
+    Filters keys where :func:`_is_top_level` is ``False`` (dotted keys),
+    groups them by :func:`_last_dot_prefix`, computes prefix totals, formats
+    percentages relative to the prefix total, sorts breakdowns descending by
+    seconds, omits zero-second entries, and omits prefix groups where all
+    values are zero.
+
+    Returns:
+        A ``dict`` keyed by prefix string, each value a :class:`DottedGroup`.
+    """
+    dotted_raw = {k: v for k, v in store.items() if not _is_top_level(k)}
+    prefix_groups: dict[str, dict[str, float]] = {}
+    for key, val in dotted_raw.items():
+        prefix = _last_dot_prefix(key)
+        prefix_groups.setdefault(prefix, {})[key] = val
+
+    result: dict[str, DottedGroup] = {}
+    for prefix, siblings in prefix_groups.items():
+        prefix_total = int(round(sum(siblings.values())))
+        if prefix_total == 0:
+            continue  # omit prefix groups where all values are zero
+        breakdown: list[DottedEntry] = []
+        for key, val in siblings.items():
+            secs = int(round(val))
+            if secs == 0:
+                continue
+            percent = f"{secs / prefix_total * 100:.1f}%" if prefix_total > 0 else "0.0%"
+            breakdown.append(DottedEntry(
+                key=key,
+                seconds=secs,
+                duration=_format_duration(secs),
+                percent=percent,
+            ))
+        breakdown.sort(key=lambda e: e.seconds, reverse=True)
+        if not breakdown:
+            continue
+        result[prefix] = DottedGroup(
+            prefix_seconds=prefix_total,
+            prefix_duration=_format_duration(prefix_total),
+            breakdown=breakdown,
+        )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # YAML-backed implementation
 # ---------------------------------------------------------------------------
 
@@ -450,7 +556,7 @@ class YamlMetricsCollector(MetricsCollector):
         self._tmp_path:     Path = work_dir / (METRICS_YAML_FILENAME + _TEMP_SUFFIX)
 
         # Internal accumulators
-        self._time_accum:        dict[str, float]                   = {k.value: 0.0 for k in MetricKey}
+        self._store:             MetricsStore                       = {}
         self._conv_accumulators: dict[str, _ConvergenceAccumulator] = {}
         self._flush_counter:     int                                = 0
         self._active_timers:     list[tuple[str, float]]            = []
@@ -479,12 +585,20 @@ class YamlMetricsCollector(MetricsCollector):
             logger.warning("Metrics: failed to load %s, starting fresh: %s", metrics_file, exc)
             return
 
-        # Restore time accumulators
-        for entry in pm.time_distribution.breakdown:
+        # Restore top-level time accumulators
+        for entry in pm.time_distribution.top_level:
             try:
-                self._time_accum[entry.category] = float(entry.seconds)
+                self._store[entry.key] = float(entry.seconds)
             except (KeyError, ValueError):
-                logger.debug("Metrics: unknown key %r in persisted file, skipping", entry.category)
+                logger.debug("Metrics: unknown key %r in persisted file, skipping", entry.key)
+
+        # Restore dotted time accumulators
+        for _prefix, group in pm.time_distribution.dotted.items():
+            for entry in group.breakdown:
+                try:
+                    self._store[entry.key] = float(entry.seconds)
+                except (KeyError, ValueError):
+                    logger.debug("Metrics: unknown key %r in persisted file, skipping", entry.key)
 
         # Restore convergence accumulators (resume Welford from stddev² * n)
         if pm.convergence is not None:
@@ -511,7 +625,7 @@ class YamlMetricsCollector(MetricsCollector):
         """Return a context manager that accumulates elapsed seconds for *key*.
 
         Records ``time.monotonic()`` on enter; on exit accumulates elapsed into
-        ``_time_accum[resolved_key]``, increments the flush counter, and triggers an
+        ``_store[resolved_key]``, increments the flush counter, and triggers an
         incremental flush if needed.  Exceptions are re-raised after recording
         elapsed time so timing is never lost.
         """
@@ -543,8 +657,8 @@ class YamlMetricsCollector(MetricsCollector):
                 self._collector._active_timers.remove((self._key, self._t0))
             except ValueError:
                 pass  # already removed (shouldn't happen, but be defensive)
-            self._collector._time_accum[self._key] = (
-                self._collector._time_accum.get(self._key, 0.0) + elapsed
+            self._collector._store[self._key] = (
+                self._collector._store.get(self._key, 0.0) + elapsed
             )
             self._collector._flush_counter += 1
             if self._collector._flush_counter >= FLUSH_INTERVAL:
@@ -589,7 +703,7 @@ class YamlMetricsCollector(MetricsCollector):
     def _snapshot_active_timers(self) -> dict[str, float]:
         """Return partial elapsed seconds for all currently in-flight ``time()`` contexts.
 
-        Does not modify ``_active_timers`` or ``_time_accum`` — the timers are
+        Does not modify ``_active_timers`` or ``_store`` — the timers are
         still running.  Called by both ``_flush_incremental()`` and ``flush()``
         so that a forced exit captures partial elapsed rather than losing it.
         """
@@ -604,33 +718,22 @@ class YamlMetricsCollector(MetricsCollector):
 
         Merges partial elapsed from any in-flight ``time()`` contexts so that
         a forced flush captures work-in-progress timing.  Zero-second entries
-        are omitted from the breakdown.
+        are omitted from both the top-level list and dotted breakdowns.
         """
         active_partial = self._snapshot_active_timers()
-        effective_accum: dict[str, float] = {
-            k: self._time_accum.get(k, 0.0) + active_partial.get(k, 0.0)
-            for k in set(self._time_accum) | set(active_partial)
+        effective_store: MetricsStore = {
+            k: self._store.get(k, 0.0) + active_partial.get(k, 0.0)
+            for k in set(self._store) | set(active_partial)
         }
 
-        total_secs = int(round(sum(effective_accum.values())))
-        breakdown_time: list[TimeEntry] = []
-        for key, val in effective_accum.items():
-            secs = int(round(val))
-            if secs == 0:
-                continue
-            percent = f"{secs / total_secs * 100:.1f}%" if total_secs > 0 else "0.0%"
-            breakdown_time.append(TimeEntry(
-                category=key,
-                seconds=secs,
-                duration=_format_duration(secs),
-                percent=percent,
-            ))
-        breakdown_time.sort(key=lambda e: e.seconds, reverse=True)
+        grand_total, top_level_entries = _compute_top_level_entries(effective_store)
+        dotted_groups                  = _compute_dotted_groups(effective_store)
 
         time_dist = TimeDistribution(
-            seconds=total_secs,
-            duration=_format_duration(total_secs),
-            breakdown=breakdown_time,
+            total_seconds=grand_total,
+            total_duration=_format_duration(grand_total),
+            top_level=top_level_entries,
+            dotted=dotted_groups,
         )
 
         convergence_stats = _compute_convergence(self._conv_accumulators)
