@@ -277,7 +277,7 @@ class ChaptersStream(StreamBase):
 
     @property
     def file_extension(self) -> str:
-        return 'txt'
+        return 'xml'
 
     def display_name(self, track_num_width: int = 2, track_id_width: int = 2) -> str:
         return f"chapters.{self.file_extension}"
@@ -328,6 +328,7 @@ def _log_stream_table(
     all_tracks:      list[StreamBase],
     selected_tracks: list[StreamBase],
     on_disk_names:   set[str],
+    timestamps_path: Path | None = None,
 ) -> None:
     """Log a 3-column stream table: wanted, present, artifact name.
 
@@ -339,9 +340,11 @@ def _log_stream_table(
     - name:    The would-be output filename for the stream.
 
     Args:
-        all_tracks:    All streams discovered in the source file.
+        all_tracks:      All streams discovered in the source file.
         selected_tracks: Streams that passed the include/exclude filters.
-        on_disk_names: Set of filenames currently present in the extracted dir.
+        on_disk_names:   Set of filenames currently present in the extracted dir.
+        timestamps_path: Path to timestamps.txt if known; used to add a fixed row
+                         for the TimestampArtifact (always wanted, never filtered).
     """
     if not all_tracks:
         return
@@ -362,6 +365,9 @@ def _log_stream_table(
             w_sym   = SUCCESS_SYMBOL_MINOR if wanted else FAILURE_SYMBOL_MINOR
             p_sym   = (SUCCESS_SYMBOL_MINOR if name in on_disk_names else FAILURE_SYMBOL_MINOR) if wanted else "-"
             logger.info("   %s  %s  \"%s\"", w_sym, p_sym, name)
+        if timestamps_path is not None:
+            p_sym = SUCCESS_SYMBOL_MINOR if timestamps_path.exists() else FAILURE_SYMBOL_MINOR
+            logger.info("   %s  %s  \"%s\"", SUCCESS_SYMBOL_MINOR, p_sym, timestamps_path.name)
     else:
         logger.error("No streams found")
 
@@ -552,36 +558,68 @@ _SUBTITLE_FFMPEG_FORMAT: dict[str, str] = {
 Bitmap subtitle codecs (pgs, sub) are self-describing and do not need ``-f``."""
 
 
-def _extract_timestamps(source: Path, video_track_id: int, output: Path) -> None:
+def _extract_timestamps(
+    source:         Path,
+    video_track_id: int,
+    output:         Path,
+    duration_ms:    int | None = None,
+) -> None:
     """Extract per-frame PTS values from source and write timestamps.txt.
 
-    Uses ffprobe to obtain pts_time for every packet in the specified video
-    track, converts to integer milliseconds, and writes in ``# timestamp format v2``
-    using the ``.tmp``-then-rename protocol for atomicity.
+    Tries ``mkvextract timecodes_v2`` first (native format, already sorted,
+    includes the final duration entry). Falls back to ``ffprobe packet=pts``
+    for non-MKV containers or when mkvextract is unavailable — in that case
+    values are sorted ascending and ``duration_ms`` is appended as the final
+    entry (approximating the mkvextract trailing timestamp).
+
+    Both paths use the ``.tmp``-then-rename protocol for atomicity.
 
     Args:
         source:         Path to the source video file.
-        video_track_id: The ffprobe stream index of the video track to extract
-                        timestamps from (same value as ``VideoStream.track_id``).
+        video_track_id: The ffprobe stream index of the video track.
         output:         Destination path (``extracted/timestamps.txt``).
+        duration_ms:    Source video duration in milliseconds, used as the
+                        trailing entry in the ffprobe fallback path.  When
+                        ``None`` the trailing entry is omitted.
 
     Raises:
-        subprocess.CalledProcessError: If ffprobe fails.
+        subprocess.CalledProcessError: If both mkvextract and ffprobe fail.
         ValueError: If ffprobe output is empty or contains unparseable lines.
         OSError: If the output file cannot be written.
     """
-    cmd: list[str | os.PathLike] = [
+    tmp = output.parent / f"{output.stem}{TEMP_SUFFIX}"
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    # --- Attempt 1: mkvextract timecodes_v2 ---
+    mkvextract_cmd: list[str | os.PathLike] = [
+        "mkvextract", source,
+        "timecodes_v2", f"0:{tmp}",
+    ]
+    logger.debug("Extracting timestamps via mkvextract: %s", source.name)
+    try:
+        subprocess.run(mkvextract_cmd, capture_output=True, check=True)
+        if tmp.exists() and tmp.stat().st_size > 0:
+            tmp.replace(output)
+            logger.debug("Timestamps written via mkvextract → %s", output.name)
+            return
+        tmp.unlink(missing_ok=True)
+        raise subprocess.CalledProcessError(1, mkvextract_cmd)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        logger.debug("mkvextract timecodes_v2 failed (%s), falling back to ffprobe", exc)
+        tmp.unlink(missing_ok=True)
+
+    # --- Attempt 2: ffprobe packet=pts fallback ---
+    ffprobe_cmd: list[str | os.PathLike] = [
         "ffprobe", "-v", "error",
         "-select_streams", str(video_track_id),
         "-show_packets",
-        "-show_entries", "packet=pts_time",
+        "-show_entries", "packet=pts",
         "-of", "csv=print_section=0",
         source,
     ]
-    logger.debug("Extracting timestamps: ffprobe -select_streams %d %s", video_track_id, source.name)
-
+    logger.debug("Extracting timestamps via ffprobe: %s", source.name)
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as exc:
         logger.critical(
             "ffprobe failed extracting timestamps (exit %d): %s",
@@ -598,20 +636,24 @@ def _extract_timestamps(source: Path, video_track_id: int, output: Path) -> None
     pts_ms: list[int] = []
     for line in lines:
         try:
-            pts_ms.append(int(float(line) * 1000))
+            pts_ms.append(int(line))
         except (ValueError, OverflowError) as exc:
             msg = f"Unparseable PTS line from ffprobe: {line!r} — {exc}"
             logger.critical(msg)
             raise ValueError(msg) from exc
 
-    tmp = output.parent / f"{output.stem}{TEMP_SUFFIX}"
-    output.parent.mkdir(parents=True, exist_ok=True)
+    pts_ms.sort()
+
+    # Append duration as trailing entry (approximates mkvextract's final timestamp)
+    if duration_ms is not None and (not pts_ms or duration_ms > pts_ms[-1]):
+        pts_ms.append(duration_ms)
+
     with tmp.open("w", encoding="utf-8") as fh:
         fh.write("# timestamp format v2\n")
         for ms in pts_ms:
             fh.write(f"{ms}\n")
     tmp.replace(output)
-    logger.debug("Timestamps written: %d frames → %s", len(pts_ms), output.name)
+    logger.debug("Timestamps written via ffprobe fallback: %d entries → %s", len(pts_ms), output.name)
 
 
 @dataclass
@@ -930,7 +972,8 @@ class ExtractionPhase:
                     include_pattern = self._config.include,
                     exclude_pattern = self._config.exclude,
                 )
-                _log_stream_table(extractor.tracks, selected, set())
+                _log_stream_table(extractor.tracks, selected, set(),
+                                  timestamps_path=extracted_dir / TIMESTAMPS_FILENAME)
                 absent: list[ExtractionArtifact] = []
                 for track in selected:
                     path = extracted_dir / track.display_name()
@@ -963,7 +1006,8 @@ class ExtractionPhase:
                     include_pattern = self._config.include,
                     exclude_pattern = self._config.exclude,
                 )
-                _log_stream_table(extractor.tracks, selected, set())
+                _log_stream_table(extractor.tracks, selected, set(),
+                                  timestamps_path=extracted_dir / TIMESTAMPS_FILENAME)
                 absent = []
                 for track in selected:
                     path = extracted_dir / track.display_name()
@@ -1051,7 +1095,7 @@ class ExtractionPhase:
             artifacts.append(TimestampArtifact(path=timestamps_file, state=ArtifactState.ABSENT))
 
         # Emit stream table with wanted + present columns
-        _log_stream_table(extractor.tracks, selected_tracks, on_disk_names)
+        _log_stream_table(extractor.tracks, selected_tracks, on_disk_names, timestamps_path=timestamps_file)
 
         return artifacts, primary_video, audio_list
 
@@ -1122,8 +1166,11 @@ class ExtractionPhase:
 
         # Extract timestamps unconditionally (not gated by include/exclude filters)
         timestamps_output = extracted_dir / TIMESTAMPS_FILENAME
+        job_source = getattr(getattr(self._job, "result", None), "job", None)
+        source_duration_s: float | None = job_source.source.duration_seconds if job_source is not None else None
+        duration_ms: int | None = int(source_duration_s * 1000) if source_duration_s is not None else None
         try:
-            _extract_timestamps(source, video_tracks[0].track_id, timestamps_output)
+            _extract_timestamps(source, video_tracks[0].track_id, timestamps_output, duration_ms=duration_ms)
         except Exception as exc:
             err = f"Failed to extract timestamps: {exc}"
             logger.critical(err)
@@ -1173,18 +1220,50 @@ class ExtractionPhase:
                 continue
 
             if isinstance(track, ChaptersStream):
-                # Chapters: use ffmetadata format
-                cmd = [
-                    "ffmpeg", "-i", source,
-                    "-f", "ffmetadata",
-                    output_file,
-                ]
+                # Chapters: try mkvextract first (native MKV XML format).
+                # Fall back to ffprobe -show_chapters -print_format xml for
+                # non-MKV containers or when mkvextract is unavailable.
+                # Both paths use .tmp-then-rename for atomicity.
+                tmp = output_file.parent / f"{output_file.stem}{TEMP_SUFFIX}"
                 logger.debug("Extracting chapters: %s", output_file.name)
-                res = run_ffmpeg(cmd, output_file=output_file)
-                if not res.success:
-                    err = "ffmpeg failed extracting chapters"
-                    logger.error(err)
-                    errors.append(err)
+
+                mkvextract_cmd: list[str | os.PathLike] = [
+                    "mkvextract", source, "chapters", tmp,
+                ]
+                try:
+                    subprocess.run(mkvextract_cmd, capture_output=True, check=True)
+                    if tmp.exists() and tmp.stat().st_size > 0:
+                        tmp.replace(output_file)
+                        logger.debug("Chapters extracted via mkvextract")
+                    else:
+                        raise subprocess.CalledProcessError(1, mkvextract_cmd)
+                except (subprocess.CalledProcessError, OSError) as exc:
+                    logger.debug(
+                        "mkvextract chapters failed (%s), falling back to ffprobe", exc,
+                    )
+                    # Clean up any partial output from mkvextract
+                    output_file.unlink(missing_ok=True)
+                    tmp.unlink(missing_ok=True)
+
+                    ffprobe_cmd: list[str | os.PathLike] = [
+                        "ffprobe", "-v", "error",
+                        "-show_chapters",
+                        "-print_format", "xml",
+                        source,
+                    ]
+                    try:
+                        ffprobe_result = subprocess.run(
+                            ffprobe_cmd, capture_output=True, text=True, check=True,
+                        )
+                    except subprocess.CalledProcessError as ffprobe_exc:
+                        err = f"ffprobe failed extracting chapters (exit {ffprobe_exc.returncode}): {(ffprobe_exc.stderr or '').strip()}"
+                        logger.error(err)
+                        errors.append(err)
+                        continue
+                    comment = "<!-- Extracted by ffprobe -show_chapters -print_format xml (mkvextract not available or not applicable) -->\n"
+                    tmp.write_text(comment + ffprobe_result.stdout, encoding="utf-8")
+                    tmp.replace(output_file)
+                    logger.debug("Chapters extracted via ffprobe fallback")
 
             elif isinstance(track, AttachmentStream):
                 # Attachments: -dump_attachment writes directly — bypass muxer
