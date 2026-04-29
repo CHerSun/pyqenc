@@ -9,6 +9,7 @@ parsing and extracting MKV tracks via ffprobe / mkvextract.
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -24,6 +25,7 @@ from pyqenc.constants import (
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
     THICK_LINE,
+    TIMESTAMPS_FILENAME,
 )
 from pyqenc.models import AudioMetadata, PhaseOutcome, VideoMetadata
 from pyqenc.phase import Artifact, Phase, PhaseResult
@@ -125,11 +127,12 @@ class StreamBase:
         return [f"{key}={value}" for key, value in self._wanted_tags.items() if value]
 
     def __display_name(self, track_num_width: int = 2, track_id_width: int = 2) -> str:
-        return ' '.join([
+        name = ' '.join(filter(None, [
             self._track_ids_string(track_num_width, track_id_width),
             f"({self.codec_type}-{self.codec_name})",
-            f"{' '.join(self._tags_formatted)}.{self.file_extension}",
-        ])
+            ' '.join(self._tags_formatted),
+        ]))
+        return f"{name}.{self.file_extension}"
 
     def display_name(self, track_num_width: int = 2, track_id_width: int = 2) -> str:
         """Human-readable filename/display string for this stream."""
@@ -326,6 +329,7 @@ def _log_stream_table(
     all_tracks:      list[StreamBase],
     selected_tracks: list[StreamBase],
     on_disk_names:   set[str],
+    timestamps_path: Path | None = None,
 ) -> None:
     """Log a 3-column stream table: wanted, present, artifact name.
 
@@ -337,9 +341,11 @@ def _log_stream_table(
     - name:    The would-be output filename for the stream.
 
     Args:
-        all_tracks:    All streams discovered in the source file.
+        all_tracks:      All streams discovered in the source file.
         selected_tracks: Streams that passed the include/exclude filters.
-        on_disk_names: Set of filenames currently present in the extracted dir.
+        on_disk_names:   Set of filenames currently present in the extracted dir.
+        timestamps_path: Path to timestamps.txt if known; used to add a fixed row
+                         for the TimestampArtifact (always wanted, never filtered).
     """
     if not all_tracks:
         return
@@ -360,6 +366,9 @@ def _log_stream_table(
             w_sym   = SUCCESS_SYMBOL_MINOR if wanted else FAILURE_SYMBOL_MINOR
             p_sym   = (SUCCESS_SYMBOL_MINOR if name in on_disk_names else FAILURE_SYMBOL_MINOR) if wanted else "-"
             logger.info("   %s  %s  \"%s\"", w_sym, p_sym, name)
+        if timestamps_path is not None:
+            p_sym = SUCCESS_SYMBOL_MINOR if timestamps_path.exists() else FAILURE_SYMBOL_MINOR
+            logger.info("   %s  %s  \"%s\"", SUCCESS_SYMBOL_MINOR, p_sym, timestamps_path.name)
     else:
         logger.error("No streams found")
 
@@ -526,7 +535,13 @@ import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeAlias, cast
 
-from pyqenc.constants import EXTRACTED_DIR, TEMP_SUFFIX, THICK_LINE, THIN_LINE
+from pyqenc.constants import (
+    EXTRACTED_DIR,
+    TEMP_SUFFIX,
+    THICK_LINE,
+    THIN_LINE,
+    TIMESTAMPS_FILENAME,
+)
 from pyqenc.models import AudioMetadata, PhaseOutcome, VideoMetadata
 from pyqenc.phase import Artifact, Phase, PhaseResult
 from pyqenc.state import ArtifactState, ExtractionParams
@@ -538,6 +553,114 @@ if TYPE_CHECKING:
     from pyqenc.phases.job import JobPhase, JobPhaseResult
 
 _EXTRACTION_YAML_NAME = "extraction.yaml"
+
+
+_SUBTITLE_FFMPEG_FORMAT: dict[str, str] = {
+    "srt": "srt",
+    "ssa": "ass",
+    "ass": "ass",
+}
+"""Text subtitle codecs that require an explicit ``-f`` flag when writing to a
+``.tmp`` file (ffmpeg cannot infer the format from the extension).
+Bitmap subtitle codecs (pgs, sub) are self-describing and do not need ``-f``."""
+
+
+def _extract_timestamps(
+    source:         Path,
+    video_track_id: int,
+    output:         Path,
+    duration_ms:    int | None = None,
+) -> None:
+    """Extract per-frame PTS values from source and write timestamps.txt.
+
+    Tries ``mkvextract timecodes_v2`` first (native format, already sorted,
+    includes the final duration entry). Falls back to ``ffprobe packet=pts``
+    for non-MKV containers or when mkvextract is unavailable — in that case
+    values are sorted ascending and ``duration_ms`` is appended as the final
+    entry (approximating the mkvextract trailing timestamp).
+
+    Both paths use the ``.tmp``-then-rename protocol for atomicity.
+
+    Args:
+        source:         Path to the source video file.
+        video_track_id: The ffprobe stream index of the video track.
+        output:         Destination path (``extracted/timestamps.txt``).
+        duration_ms:    Source video duration in milliseconds, used as the
+                        trailing entry in the ffprobe fallback path.  When
+                        ``None`` the trailing entry is omitted.
+
+    Raises:
+        subprocess.CalledProcessError: If both mkvextract and ffprobe fail.
+        ValueError: If ffprobe output is empty or contains unparseable lines.
+        OSError: If the output file cannot be written.
+    """
+    tmp = output.parent / f"{output.stem}{TEMP_SUFFIX}"
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    # --- Attempt 1: mkvextract timecodes_v2 ---
+    mkvextract_cmd: list[str | os.PathLike] = [
+        "mkvextract", source,
+        "timecodes_v2", f"0:{tmp}",
+    ]
+    logger.debug("Extracting timestamps via mkvextract: %s", source.name)
+    try:
+        subprocess.run(mkvextract_cmd, capture_output=True, check=True)
+        if tmp.exists() and tmp.stat().st_size > 0:
+            tmp.replace(output)
+            logger.debug("Timestamps written via mkvextract → %s", output.name)
+            return
+        tmp.unlink(missing_ok=True)
+        raise subprocess.CalledProcessError(1, mkvextract_cmd)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        logger.debug("mkvextract timecodes_v2 failed (%s), falling back to ffprobe", exc)
+        tmp.unlink(missing_ok=True)
+
+    # --- Attempt 2: ffprobe packet=pts fallback ---
+    ffprobe_cmd: list[str | os.PathLike] = [
+        "ffprobe", "-v", "error",
+        "-select_streams", str(video_track_id),
+        "-show_packets",
+        "-show_entries", "packet=pts",
+        "-of", "csv=print_section=0",
+        source,
+    ]
+    logger.debug("Extracting timestamps via ffprobe: %s", source.name)
+    try:
+        result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError as exc:
+        logger.critical(
+            "ffprobe failed extracting timestamps (exit %d): %s",
+            exc.returncode, (exc.stderr or "").strip(),
+        )
+        raise
+
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        msg = f"ffprobe returned empty output for timestamps from {source.name}"
+        logger.critical(msg)
+        raise ValueError(msg)
+
+    pts_ms: list[int] = []
+    for line in lines:
+        try:
+            pts_ms.append(int(line))
+        except (ValueError, OverflowError) as exc:
+            msg = f"Unparseable PTS line from ffprobe: {line!r} — {exc}"
+            logger.critical(msg)
+            raise ValueError(msg) from exc
+
+    pts_ms.sort()
+
+    # Append duration as trailing entry (approximates mkvextract's final timestamp)
+    if duration_ms is not None and (not pts_ms or duration_ms > pts_ms[-1]):
+        pts_ms.append(duration_ms)
+
+    with tmp.open("w", encoding="utf-8") as fh:
+        fh.write("# timestamp format v2\n")
+        for ms in pts_ms:
+            fh.write(f"{ms}\n")
+    tmp.replace(output)
+    logger.debug("Timestamps written via ffprobe fallback: %d entries → %s", len(pts_ms), output.name)
 
 
 @dataclass
@@ -570,8 +693,18 @@ class OtherArtifact(Artifact):
     """
 
 
+@dataclass
+class TimestampArtifact(Artifact):
+    """Extraction artifact for the per-frame PTS timestamp file.
+
+    Path: extracted/timestamps.txt
+    States: COMPLETE (file exists and non-empty) or ABSENT only.
+    Not subject to include/exclude stream filtering.
+    """
+
+
 # Type alias for all extraction artifacts — use this in annotations throughout
-ExtractionArtifact: TypeAlias = VideoArtifact | AudioArtifact | OtherArtifact
+ExtractionArtifact: TypeAlias = VideoArtifact | AudioArtifact | OtherArtifact | TimestampArtifact
 
 
 @dataclass
@@ -579,12 +712,14 @@ class ExtractionPhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying extraction-specific payload.
 
     Attributes:
-        video:  Primary extracted video metadata; ``None`` on failure.
-        audio:  List of extracted audio track metadata.
+        video:           Primary extracted video metadata; ``None`` on failure.
+        audio:           List of extracted audio track metadata.
+        timestamps_path: Path to the extracted timestamps.txt file; ``None`` when absent.
     """
 
-    video: VideoMetadata | None = None
-    audio: list[AudioMetadata] = field(default_factory=list)
+    video:           VideoMetadata | None = None
+    audio:           list[AudioMetadata]  = field(default_factory=list)
+    timestamps_path: Path | None          = None
 
 
 class ExtractionPhase:
@@ -645,12 +780,14 @@ class ExtractionPhase:
             force_wipe=force_wipe, execute=False
         )
         outcome = self._outcome_from_artifacts(artifacts, did_work=False)
+        ts_artifact = next((a for a in artifacts if isinstance(a, TimestampArtifact)), None)
         self.result = ExtractionPhaseResult(
-            outcome   = outcome,
-            artifacts = artifacts,
-            message   = self._recovery_message(artifacts),
-            video     = video_meta,
-            audio     = audio_meta,
+            outcome         = outcome,
+            artifacts       = artifacts,
+            message         = self._recovery_message(artifacts),
+            video           = video_meta,
+            audio           = audio_meta,
+            timestamps_path = ts_artifact.path if ts_artifact and ts_artifact.state == ArtifactState.COMPLETE else None,
         )
         return self.result
 
@@ -713,23 +850,27 @@ class ExtractionPhase:
                 outcome = PhaseOutcome.REUSED
             else:
                 outcome = PhaseOutcome.DRY_RUN
+            ts_artifact = next((a for a in artifacts if isinstance(a, TimestampArtifact)), None)
             self.result = ExtractionPhaseResult(
-                outcome   = outcome,
-                artifacts = artifacts,
-                message   = "dry-run",
-                video     = video_meta,
-                audio     = audio_meta,
+                outcome         = outcome,
+                artifacts       = artifacts,
+                message         = "dry-run",
+                video           = video_meta,
+                audio           = audio_meta,
+                timestamps_path = ts_artifact.path if ts_artifact and ts_artifact.state == ArtifactState.COMPLETE else None,
             )
             return self.result
 
         # Nothing to do — only skip if we actually have complete artifacts
         if pending_count == 0 and complete_count > 0:
+            ts_artifact = next((a for a in artifacts if isinstance(a, TimestampArtifact)), None)
             self.result = ExtractionPhaseResult(
-                outcome   = PhaseOutcome.REUSED,
-                artifacts = artifacts,
-                message   = "all artifacts reused",
-                video     = video_meta,
-                audio     = audio_meta,
+                outcome         = PhaseOutcome.REUSED,
+                artifacts       = artifacts,
+                message         = "all artifacts reused",
+                video           = video_meta,
+                audio           = audio_meta,
+                timestamps_path = ts_artifact.path if ts_artifact and ts_artifact.state == ArtifactState.COMPLETE else None,
             )
             return self.result
 
@@ -838,7 +979,8 @@ class ExtractionPhase:
                     include_pattern = self._config.include,
                     exclude_pattern = self._config.exclude,
                 )
-                _log_stream_table(extractor.tracks, selected, set())
+                _log_stream_table(extractor.tracks, selected, set(),
+                                  timestamps_path=extracted_dir / TIMESTAMPS_FILENAME)
                 absent: list[ExtractionArtifact] = []
                 for track in selected:
                     path = extracted_dir / track.display_name()
@@ -848,10 +990,15 @@ class ExtractionPhase:
                         absent.append(AudioArtifact(path=path, state=ArtifactState.ABSENT))
                     else:
                         absent.append(OtherArtifact(path=path, state=ArtifactState.ABSENT))
+                absent.append(TimestampArtifact(
+                    path=extracted_dir / TIMESTAMPS_FILENAME, state=ArtifactState.ABSENT
+                ))
                 return absent, None, []
             except Exception:
                 pass
-            return [], None, []
+            return [TimestampArtifact(
+                path=extracted_dir / TIMESTAMPS_FILENAME, state=ArtifactState.ABSENT
+            )], None, []
 
         all_files = [
             f for f in extracted_dir.iterdir()
@@ -866,7 +1013,8 @@ class ExtractionPhase:
                     include_pattern = self._config.include,
                     exclude_pattern = self._config.exclude,
                 )
-                _log_stream_table(extractor.tracks, selected, set())
+                _log_stream_table(extractor.tracks, selected, set(),
+                                  timestamps_path=extracted_dir / TIMESTAMPS_FILENAME)
                 absent = []
                 for track in selected:
                     path = extracted_dir / track.display_name()
@@ -876,10 +1024,15 @@ class ExtractionPhase:
                         absent.append(AudioArtifact(path=path, state=ArtifactState.ABSENT))
                     else:
                         absent.append(OtherArtifact(path=path, state=ArtifactState.ABSENT))
+                absent.append(TimestampArtifact(
+                    path=extracted_dir / TIMESTAMPS_FILENAME, state=ArtifactState.ABSENT
+                ))
                 return absent, None, []
             except Exception:
                 pass
-            return [], None, []
+            return [TimestampArtifact(
+                path=extracted_dir / TIMESTAMPS_FILENAME, state=ArtifactState.ABSENT
+            )], None, []
 
         # Build extractor to know what files are expected under current filters
         try:
@@ -900,6 +1053,10 @@ class ExtractionPhase:
         audio_list: list[AudioMetadata] = []
 
         for f in sorted(all_files):
+            # TimestampArtifact is handled separately below — skip here
+            if f.name == TIMESTAMPS_FILENAME:
+                continue
+
             if filter_changed:
                 state = ArtifactState.COMPLETE if f.name in expected_names else ArtifactState.STALE
             else:
@@ -937,8 +1094,15 @@ class ExtractionPhase:
                 else:
                     artifacts.append(OtherArtifact(path=extracted_dir / name, state=ArtifactState.ABSENT))
 
+        # TimestampArtifact — always present regardless of include/exclude filters
+        timestamps_file = extracted_dir / TIMESTAMPS_FILENAME
+        if timestamps_file.exists():
+            artifacts.append(TimestampArtifact(path=timestamps_file, state=ArtifactState.COMPLETE))
+        else:
+            artifacts.append(TimestampArtifact(path=timestamps_file, state=ArtifactState.ABSENT))
+
         # Emit stream table with wanted + present columns
-        _log_stream_table(extractor.tracks, selected_tracks, on_disk_names)
+        _log_stream_table(extractor.tracks, selected_tracks, on_disk_names, timestamps_path=timestamps_file)
 
         return artifacts, primary_video, audio_list
 
@@ -1007,6 +1171,18 @@ class ExtractionPhase:
 
         errors: list[str] = []
 
+        # Extract timestamps unconditionally (not gated by include/exclude filters)
+        timestamps_output = extracted_dir / TIMESTAMPS_FILENAME
+        job_source = getattr(getattr(self._job, "result", None), "job", None)
+        source_duration_s: float | None = job_source.source.duration_seconds if job_source is not None else None
+        duration_ms: int | None = int(source_duration_s * 1000) if source_duration_s is not None else None
+        try:
+            _extract_timestamps(source, video_tracks[0].track_id, timestamps_output, duration_ms=duration_ms)
+        except Exception as exc:
+            err = f"Failed to extract timestamps: {exc}"
+            logger.critical(err)
+            errors.append(err)
+
         # Extract video tracks
         for track in video_tracks:
             output_file = extracted_dir / track.display_name()
@@ -1016,9 +1192,8 @@ class ExtractionPhase:
                 "ffmpeg", "-i", source,
                 "-map", f"0:{track.track_id}",
                 "-c", "copy",
-                "-fflags", "+genpts",
-                "-avoid_negative_ts", "make_zero",
-                "-y", output_file,
+                "-f", "matroska",
+                output_file,
             ]
             logger.debug("Extracting video track %d: %s", track.track_id, output_file.name)
             res = run_ffmpeg(cmd, output_file=output_file)
@@ -1036,9 +1211,7 @@ class ExtractionPhase:
                 "ffmpeg", "-i", source,
                 "-map", f"0:{track.track_id}",
                 "-c", "copy",
-                "-fflags", "+genpts",
-                "-avoid_negative_ts", "make_zero",
-                "-y", output_file,
+                output_file,
             ]
             logger.debug("Extracting audio track %d: %s", track.track_id, output_file.name)
             res = run_ffmpeg(cmd, output_file=output_file)
@@ -1047,13 +1220,93 @@ class ExtractionPhase:
                 logger.error(err)
                 errors.append(err)
 
-        # Extract other tracks (subtitles, chapters, attachments) via mkvextract
-        other_absent = [t for t in other_tracks if (extracted_dir / t.display_name()).name in absent_names]
-        if other_absent:
-            logger.debug("Extracting %d other track(s) via mkvextract", len(other_absent))
-            from pyqenc.metrics import MetricKey
-            with self._collector.time(MetricKey.EXTRACTION):
-                extractor.extract_tracks(other_absent, extracted_dir)
+        # Extract other tracks (subtitles, chapters, attachments) via ffmpeg
+        for track in other_tracks:
+            output_file = extracted_dir / track.display_name()
+            if output_file.name not in absent_names:
+                continue
+
+            if isinstance(track, ChaptersStream):
+                # Chapters: try mkvextract first (native MKV XML format).
+                # Fall back to ffprobe -show_chapters -print_format xml for
+                # non-MKV containers or when mkvextract is unavailable.
+                # Both paths use .tmp-then-rename for atomicity.
+                tmp = output_file.parent / f"{output_file.stem}{TEMP_SUFFIX}"
+                logger.debug("Extracting chapters: %s", output_file.name)
+
+                mkvextract_cmd: list[str | os.PathLike] = [
+                    "mkvextract", source, "chapters", tmp,
+                ]
+                try:
+                    subprocess.run(mkvextract_cmd, capture_output=True, check=True)
+                    if tmp.exists() and tmp.stat().st_size > 0:
+                        tmp.replace(output_file)
+                        logger.debug("Chapters extracted via mkvextract")
+                    else:
+                        raise subprocess.CalledProcessError(1, mkvextract_cmd)
+                except (subprocess.CalledProcessError, OSError) as exc:
+                    logger.debug(
+                        "mkvextract chapters failed (%s), falling back to ffprobe", exc,
+                    )
+                    # Clean up any partial output from mkvextract
+                    output_file.unlink(missing_ok=True)
+                    tmp.unlink(missing_ok=True)
+
+                    ffprobe_cmd: list[str | os.PathLike] = [
+                        "ffprobe", "-v", "error",
+                        "-show_chapters",
+                        "-print_format", "xml",
+                        source,
+                    ]
+                    try:
+                        ffprobe_result = subprocess.run(
+                            ffprobe_cmd, capture_output=True, text=True, check=True,
+                        )
+                    except subprocess.CalledProcessError as ffprobe_exc:
+                        err = f"ffprobe failed extracting chapters (exit {ffprobe_exc.returncode}): {(ffprobe_exc.stderr or '').strip()}"
+                        logger.error(err)
+                        errors.append(err)
+                        continue
+                    comment = "<!-- Extracted by ffprobe -show_chapters -print_format xml (mkvextract not available or not applicable) -->\n"
+                    tmp.write_text(comment + ffprobe_result.stdout, encoding="utf-8")
+                    tmp.replace(output_file)
+                    logger.debug("Chapters extracted via ffprobe fallback")
+
+            elif isinstance(track, AttachmentStream):
+                # Attachments: -dump_attachment writes directly — bypass muxer
+                cmd = [
+                    "ffmpeg", "-i", source,
+                    f"-dump_attachment:{track.track_id}", output_file,
+                    "-t", "0", "-f", "null", "-",
+                ]
+                logger.debug("Extracting attachment track %d: %s", track.track_id, output_file.name)
+                # output_file=None: dump_attachment writes directly, .tmp protocol does not apply
+                res = run_ffmpeg(cmd, output_file=None)
+                if not res.success:
+                    err = f"ffmpeg failed extracting attachment track {track.track_id}"
+                    logger.error(err)
+                    errors.append(err)
+
+            elif isinstance(track, SubtitleStream):
+                # Subtitles: text codecs need explicit -f; bitmap codecs do not
+                fmt = _SUBTITLE_FFMPEG_FORMAT.get(track.file_extension)
+                cmd = [
+                    "ffmpeg", "-i", source,
+                    "-map", f"0:{track.track_id}",
+                    "-c", "copy",
+                ]
+                if fmt:
+                    cmd += ["-f", fmt]
+                cmd.append(output_file)
+                logger.debug("Extracting subtitle track %d: %s", track.track_id, output_file.name)
+                res = run_ffmpeg(cmd, output_file=output_file)
+                if not res.success:
+                    err = f"ffmpeg failed extracting subtitle track {track.track_id}"
+                    logger.error(err)
+                    errors.append(err)
+
+            else:
+                logger.warning("Skipping unknown stream type %s: %s", type(track).__name__, output_file.name)
 
         # Persist extraction.yaml
         try:
@@ -1088,6 +1341,12 @@ class ExtractionPhase:
             state = ArtifactState.COMPLETE if f.exists() else ArtifactState.ABSENT
             final_artifacts.append(OtherArtifact(path=f, state=state))
 
+        # TimestampArtifact — always present regardless of include/exclude filters
+        ts_file  = extracted_dir / TIMESTAMPS_FILENAME
+        ts_state = ArtifactState.COMPLETE if ts_file.exists() else ArtifactState.ABSENT
+        final_artifacts.append(TimestampArtifact(path=ts_file, state=ts_state))
+        final_timestamps_path: Path | None = ts_file if ts_state == ArtifactState.COMPLETE else None
+
         # Keep STALE artifacts from original recovery (they stay on disk)
         for a in artifacts:
             if a.state == ArtifactState.STALE:
@@ -1099,12 +1358,13 @@ class ExtractionPhase:
             logger.error(err_summary)
             outcome = PhaseOutcome.FAILED if failed_count > 0 else PhaseOutcome.COMPLETED
             return ExtractionPhaseResult(
-                outcome   = outcome,
-                artifacts = final_artifacts,
-                message   = err_summary,
-                error     = err_summary if outcome == PhaseOutcome.FAILED else None,
-                video     = final_video,
-                audio     = final_audio,
+                outcome         = outcome,
+                artifacts       = final_artifacts,
+                message         = err_summary,
+                error           = err_summary if outcome == PhaseOutcome.FAILED else None,
+                video           = final_video,
+                audio           = final_audio,
+                timestamps_path = final_timestamps_path,
             )
 
         complete_count = sum(1 for a in final_artifacts if a.state == ArtifactState.COMPLETE)
@@ -1115,11 +1375,12 @@ class ExtractionPhase:
         logger.info(THICK_LINE)
 
         return ExtractionPhaseResult(
-            outcome   = PhaseOutcome.COMPLETED,
-            artifacts = final_artifacts,
-            message   = f"extracted {complete_count} artifact(s)",
-            video     = final_video,
-            audio     = final_audio,
+            outcome         = PhaseOutcome.COMPLETED,
+            artifacts       = final_artifacts,
+            message         = f"extracted {complete_count} artifact(s)",
+            video           = final_video,
+            audio           = final_audio,
+            timestamps_path = final_timestamps_path,
         )
 
     @staticmethod

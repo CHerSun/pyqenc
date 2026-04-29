@@ -33,6 +33,7 @@ from pyqenc.constants import (
     TEMP_SUFFIX,
     THICK_LINE,
     THRESHOLD_ATTEMPTS_WARNING,
+    WARNING_SYMBOL,
 )
 from pyqenc.models import (
     AttemptMetadata,
@@ -1474,12 +1475,16 @@ def encode_all_chunks(
         advance(0, AdvanceState.COMPLETE)
 
     # Log summary
+    status_message = f"{SUCCESS_SYMBOL_MINOR} Encoding complete" if not result.failed_chunks and result.outcome == PhaseOutcome.COMPLETED else \
+                    f"{WARNING_SYMBOL} Encoding complete with {len(result.failed_chunks)} failures" if result.failed_chunks and result.outcome == PhaseOutcome.COMPLETED else \
+                    f"{FAILURE_SYMBOL_MINOR} Encoding failed with {len(result.failed_chunks)} failures"
     logger.info(
-        "Encoding complete: %d newly encoded, %d reused, %d failed",
+         status_message + ": %d newly encoded, %d reused, %d failed",
         result.encoded_count, result.reused_count, len(result.failed_chunks),
     )
 
     if result.failed_chunks:
+        # Duplicate to ERROR level on failed chunks
         logger.error("Failed chunks: %s", ", ".join(result.failed_chunks))
 
     return result
@@ -1952,18 +1957,6 @@ class EncodingPhase:
 
         # Log phase summary
         complete_count = sum(1 for a in final_artifacts if a.state == ArtifactState.COMPLETE)
-        total_count    = len(final_artifacts)
-        logger.info(THICK_LINE)
-        logger.info("ENCODING SUMMARY")
-        logger.info(THICK_LINE)
-        logger.info(
-            "  Encoded: %d/%d pairs complete (%d newly encoded, %d reused)",
-            complete_count, total_count,
-            enc_result.encoded_count, enc_result.reused_count,
-        )
-        if failed_pairs:
-            logger.error("  Failed pairs: %s", ", ".join(failed_pairs[:10]))
-        logger.info(THICK_LINE)
 
         if failed_pairs:
             return EncodingPhaseResult(

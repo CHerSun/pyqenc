@@ -145,6 +145,10 @@ CONFIG_FILENAME_HOME = "config.yaml"
 CONFIG_DIR_HOME      = ".config/pyqenc"
 """Relative path under the user home directory for the user-level config."""
 
+# Extraction artifact filenames
+TIMESTAMPS_FILENAME = "timestamps.txt"
+"""Filename for the per-frame PTS timestamp file produced by ExtractionPhase."""
+
 # Artifact discovery patterns
 CHUNK_GLOB_PATTERN = "*.mkv"
 """Glob mask used to discover chunk files in a chunk output directory."""
