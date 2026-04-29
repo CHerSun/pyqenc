@@ -6,9 +6,10 @@
 #
 # Configuration Sections:
 # -----------------------
-# 1. default_strategies: Strategy patterns used when --strategies is not specified
-# 2. codecs: Video codec definitions with encoder settings
-# 3. profiles: Named encoding profiles with custom FFmpeg arguments
+# 1. default_targets --- a set of metric targets that are used when user gave none.
+# 2. default_strategies --- strategy patterns used when --strategies is not specified
+# 3. codecs --- video codec definitions with encoder settings. Codecs are not directly usable - a profile is required.
+# 4. profiles --- named encoding profiles with custom FFmpeg arguments.
 #
 # Strategy Specification Syntax:
 # ------------------------------
@@ -28,6 +29,7 @@
 #     "slow+h265*,medium+h264"
 #
 # Wildcard Matching:
+#   - "" - empty string matches everything, same as "*"
 #   - "*" matches any characters in profile names
 #   - "h265*" matches: h265, h265-aq, h265-anime
 #   - "h264*" matches: h264
@@ -36,13 +38,14 @@
 # --------------
 # To customize this configuration:
 #
-# 1. Copy this file to one of these locations:
+# 1. Copy this file to one of these locations (using `pyqenc config`):
 #    - ./pyqenc.yaml (current directory)
 #    - ~/.config/pyqenc/config.yaml (user config)
 #
 # 2. Modify the copied file with your custom settings
 #
-# 3. The pipeline will automatically use your custom config
+# 3. The pipeline will automatically use your custom config in order:
+#    - current directory > user config > built-in config
 #
 # Adding Custom Profiles:
 # -----------------------
@@ -74,19 +77,20 @@
 #   - x264: https://trac.ffmpeg.org/wiki/Encode/H.264
 #   - x265: https://trac.ffmpeg.org/wiki/Encode/H.265
 
+
 # Default Targets
 # ---------------
-# These quality targets are used when --quality-targets is not specified on the command line.
+# These quality targets are used when --targets is not specified on the command line.
 # Each target is a string in "metric-stat:value" format (e.g. "vmaf-min:94").
 # All metrics are scaled to 0-100 range (e.g. ssim-min:94 means raw SSIM ≥ 0.94).
 # Supported metrics: vmaf, ssim, psnr, vif
 # Supported statistics: min, med, max, p05, p25, p75, p95
 # NOTE: avoid using min or max statistics unless you know what you're doing. Use p05 instead of min, especially for GPU encoders
 default_targets:
-  - "vmaf-p05:96.5"
-  - "vif-min:92"
-  - "psnr-med:46"
-  - "ssim-med:99"
+  - "vif-med:92.5"   # this is a helper to control film grain retention. 92-94 should be good enough. Higher values consume a lot of bandwidth.
+  - "vmaf-p05:95.0"  # DO NOT USE MIN targeting here or too high MED targetting. Normally for med ~97.5 is max-achievable. And MIN is affected by the first frame problem (lack of motion part).
+  - "psnr-med:45.0"  # PSNR values 50-60 are considered to be visually lossless. ~44-46 should produce good quality.
+  - "ssim-med:98.0"  # SSIM score is very non-linear, strongly compressed towards 100.0. Visually lossless is considered to be around 98.5-99.
 
 # Default Strategies
 # ------------------
@@ -96,8 +100,10 @@ default_targets:
 default_strategies:
   - "veryslow+h264*"  # All h264 profiles with veryslow preset
   - "slow+h265*"      # All h265 profiles with slow preset
-  # - "p7+nvenc*"       # All NVENC (Nvidia GPU) profiles with highest quality preset
-  # - "any+vulkan*"     # All Vulkan profiles. Needs GPU to support Vulkan and Vulkan SDK installed and ffmpeg built with vulkan support (default since recently).
+  # - "p7+nvenc*"       # All NVENC profiles with highest quality preset. Needs NVidia GPU support.
+  # - "any+vulkan*"     # All Vulkan profiles. Needs GPU to support Vulkan and Vulkan SDK installed and ffmpeg built with vulkan support (default since recently). 
+                        # NOTE: Current Vulkan implementation only supports the most simple QP control, which often gives subpar results, compared to nvenc encoder.
+                        # NOTE: GPU strategies are disabled by default. You can target them manually via console flags.
 
 # Codec Definitions
 # -----------------
@@ -425,7 +431,9 @@ audio_output:
 # sampling: Metrics sampling factor — measure every N-th frame.
 #   Min: 1 (every frame measured, slowest but most precise).
 #   Default: 3 (recommended balance of speed and precision).
-#   Values above 20 are not recommended due to measurement volatility.
+#
+# NOTE: Values above 10 are not recommended due to high measurement volatility with negligible performance gain.
+
 metrics:
   sampling: 3
 
@@ -439,6 +447,9 @@ metrics:
 # exclude: Regex matched against the would-be output filename of each stream.
 #   Matching streams are skipped even if they also match include.
 #   null = exclude no streams.  Exclusion takes precedence over inclusion.
+#
+# NOTE: those values are only applied if user didn't supply filters on the pyqenc run. Could be useful if you often filter the same things.
+
 streams:
   include: null
   exclude: null
