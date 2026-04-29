@@ -33,7 +33,7 @@ from pyqenc.constants import (
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
 )
-from pyqenc.metrics import TimeKey
+from pyqenc.metrics import MetricKey
 from pyqenc.models import (
     ChunkMetadata,
     CropParams,
@@ -285,7 +285,7 @@ class OptimizationPhase:
                 "All strategy results cached; tolerance changed (%.1f%% → %.1f%%) — re-selecting without re-encoding",
                 persisted.tolerance_pct, tolerance,
             )
-            with self._collector.time(TimeKey.RECOVERY):
+            with self._collector.time(MetricKey.RECOVERY):
                 selected = self._apply_tolerance(persisted.strategy_results, tolerance)
                 OptimizationParams(
                     crop             = persisted.crop,
@@ -321,7 +321,7 @@ class OptimizationPhase:
             emit_phase_banner("OPTIMIZATION", logger)
             logger.info("Strategies:  %s", ", ".join(s.name for s in self._config.strategies))
             logger.info("Tolerance:   %.1f%%", tolerance)
-            with self._collector.time(TimeKey.RECOVERY):
+            with self._collector.time(MetricKey.RECOVERY):
                 selected = persisted.selected or self._apply_tolerance(persisted.strategy_results, tolerance)
             log_recovery_line(logger, len(persisted.strategy_results), 0, unit="strategy result")
             self._log_optimization_summary(persisted.strategy_results, selected)
@@ -452,7 +452,7 @@ class OptimizationPhase:
         strategy_names = [s.name for s in strategies_to_test]
         phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, strategy_names)
 
-        with self._collector.time(TimeKey.ENCODING_OPTIMIZATION), ProgressBar(total_seconds, title="Optimization", total_count=total_count) as advance:
+        with self._collector.time(MetricKey.OPTIMIZATION), ProgressBar(total_seconds, title="Optimization", total_count=total_count) as advance:
             # Pre-advance bar for already-complete pairs
             chunks_by_id = {c.chunk_id: c for c in test_chunks}
             for r in phase_recovery.pairs.values():
@@ -461,16 +461,17 @@ class OptimizationPhase:
 
             enc_result = asyncio.run(
                 _encode_chunks_parallel(
-                    encoder         = encoder,
-                    chunks          = test_chunks,
-                    reference_dir   = reference_dir,
-                    strategies      = strategies_to_test,
-                    quality_targets = self._config.quality_targets,
-                    max_parallel    = self._config.max_parallel,
-                    force           = False,
-                    collector       = self._collector,
-                    phase_recovery  = phase_recovery,
-                    advance         = advance,
+                    encoder           = encoder,
+                    chunks            = test_chunks,
+                    reference_dir     = reference_dir,
+                    strategies        = strategies_to_test,
+                    quality_targets   = self._config.quality_targets,
+                    max_parallel      = self._config.max_parallel,
+                    force             = False,
+                    collector         = self._collector,
+                    phase_recovery    = phase_recovery,
+                    advance           = advance,
+                    dotted_metric_key = MetricKey.OPTIMIZATION,
                 )
             )
             advance(0, AdvanceState.COMPLETE)

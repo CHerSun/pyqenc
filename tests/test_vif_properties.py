@@ -269,20 +269,34 @@ def test_generate_metrics_vif_shares_vmaf_path(tmp_path: Path) -> None:
     Validates: Requirements 6.2, 12.1, 12.2
     # Feature: vif-metric-support, Property 15: _generate_metrics VIF shares vmaf path
     """
+    from pyqenc.quality import MetricType as _MetricType
     from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
 
     evaluator = QualityEvaluator(work_dir=tmp_path)
 
-    async def _fake_run_metric(**kwargs: object) -> FFmpegRunResult:
-        cwd    = kwargs.get("cwd") or tmp_path
-        prefix = kwargs.get("output_prefix", "")
-        metric = kwargs.get("metric")
-        ext    = kwargs.get("output_extension", ".tmp")
-        if metric is not None:
-            (Path(str(cwd)) / f"{prefix}{metric.value}{ext}").touch()  # type: ignore[union-attr]
+    async def _fake_run_metrics(
+        metrics:           object = None,
+        distorted:         object = None,
+        reference:         object = None,
+        crop_distorted:    object = None,
+        crop_reference:    object = None,
+        duration:          object = None,
+        width:             object = None,
+        use_gpu:           object = None,
+        subsample:         object = None,
+        output_prefix:     str    = "",
+        cwd:               Path | None = None,
+        progress_callback: object = None,
+        output_extension:  str | None = None,
+    ) -> FFmpegRunResult:
+        """Fake run_metrics: touch the expected .tmp output files."""
+        ext        = output_extension or ".tmp"
+        output_dir = cwd or tmp_path
+        for mt in (_MetricType.PSNR, _MetricType.SSIM, _MetricType.VMAF):
+            (Path(str(output_dir)) / f"{output_prefix}{mt.value}{ext}").touch()
         return FFmpegRunResult(returncode=0, success=True, stderr_lines=[], frame_count=0)
 
-    with patch("pyqenc.utils.visualization.run_metric", side_effect=_fake_run_metric):
+    with patch("pyqenc.utils.visualization.run_metrics", side_effect=_fake_run_metrics):
         artifacts = asyncio.run(
             evaluator._generate_metrics(
                 encoded          = tmp_path / "encoded.mkv",

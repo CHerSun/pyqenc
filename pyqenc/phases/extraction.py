@@ -692,8 +692,8 @@ class ExtractionPhase:
             if self._config.exclude:
                 logger.info("  Exclude:  %s", self._config.exclude)
 
-        from pyqenc.metrics import TimeKey
-        with self._collector.time(TimeKey.RECOVERY):
+        from pyqenc.metrics import MetricKey
+        with self._collector.time(MetricKey.RECOVERY):
             artifacts, video_meta, audio_meta = self._recover(
                 force_wipe=force_wipe, execute=True
             )
@@ -1051,8 +1051,8 @@ class ExtractionPhase:
         other_absent = [t for t in other_tracks if (extracted_dir / t.display_name()).name in absent_names]
         if other_absent:
             logger.debug("Extracting %d other track(s) via mkvextract", len(other_absent))
-            from pyqenc.metrics import TimeKey
-            with self._collector.time(TimeKey.EXTRACTION):
+            from pyqenc.metrics import MetricKey
+            with self._collector.time(MetricKey.EXTRACTION):
                 extractor.extract_tracks(other_absent, extracted_dir)
 
         # Persist extraction.yaml

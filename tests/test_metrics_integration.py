@@ -1,6 +1,6 @@
 """Phase integration tests for MetricsCollector timing instrumentation.
 
-Verifies that phases call ``time()`` and ``step()`` with the expected ``TimeKey``
+Verifies that phases call ``time()`` and ``step()`` with the expected ``MetricKey``
 values when their core work methods run.  External I/O (ffprobe, ffmpeg, crop
 detect) is mocked out so tests run without real media files.
 
@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyqenc.metrics import MetricsCollector, NoOpMetricsCollector, TimeKey
+from pyqenc.metrics import MetricsCollector, NoOpMetricsCollector, MetricKey
 from pyqenc.config import ConfigManager as _ConfigManager
 from pyqenc.models import (
     ChunkingMode,
@@ -28,6 +28,7 @@ from pyqenc.models import (
 )
 
 _STRATEGY_SLOW_H265 = _ConfigManager().resolve_strategies(["slow+h265"])[0]
+_STRATEGY_H265_AQ   = _ConfigManager().resolve_strategies(["slow+h265-aq"])[0]
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +89,7 @@ class TestJobPhaseTiming:
     """Integration tests for ``JobPhase`` timing instrumentation (Req 6.5)."""
 
     def test_job_probe_recorded_on_run(self, tmp_path: Path) -> None:
-        """``time(TimeKey.JOB_PROBE)`` must be called when ``run()`` executes.
+        """``time(MetricKey.JOB)`` must be called when ``run()`` executes.
 
         Validates: Requirements 6.5
         """
@@ -111,8 +112,8 @@ class TestJobPhaseTiming:
 
         # Verify time() was called with JOB_PROBE
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.JOB_PROBE in time_keys_called, (
-            f"Expected TimeKey.JOB_PROBE in time() calls, got: {time_keys_called}"
+        assert MetricKey.JOB in time_keys_called, (
+            f"Expected MetricKey.JOB in time() calls, got: {time_keys_called}"
         )
 
     def test_job_probe_not_recorded_when_reused(self, tmp_path: Path) -> None:
@@ -142,7 +143,7 @@ class TestJobPhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.JOB_PROBE not in time_keys_called, (
+        assert MetricKey.JOB not in time_keys_called, (
             f"Expected JOB_PROBE NOT called on reuse, but got: {time_keys_called}"
         )
 
@@ -169,12 +170,17 @@ class TestJobPhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.JOB_CROP_DETECT in time_keys_called, (
-            f"Expected TimeKey.JOB_CROP_DETECT in time() calls, got: {time_keys_called}"
+        assert MetricKey.JOB in time_keys_called, (
+            f"Expected MetricKey.JOB in time() calls, got: {time_keys_called}"
         )
 
     def test_job_crop_detect_not_recorded_for_manual_crop(self, tmp_path: Path) -> None:
-        """``time(JOB_CROP_DETECT)`` must NOT be called when manual crop is set.
+        """With manual crop, only probe timing calls are made — no crop_detect calls.
+
+        After migration to two-tier keys, probe emits two calls:
+        ``time(MetricKey.JOB)`` (top-level wall-clock) and
+        ``time(MetricKey.JOB, "probe")`` (dotted sub-operation).
+        Crop-detect emits ``time(MetricKey.JOB, "crop_detect")`` — which must NOT appear.
 
         Validates: Requirements 6.5
         """
@@ -192,9 +198,15 @@ class TestJobPhaseTiming:
         ):
             phase.run()
 
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.JOB_CROP_DETECT not in time_keys_called, (
-            f"Expected JOB_CROP_DETECT NOT called for manual crop, got: {time_keys_called}"
+        job_key_calls = [call for call in collector.time.call_args_list if call.args[0] == MetricKey.JOB]
+        # Probe emits 2 calls: top-level + dotted "probe"; crop_detect must NOT appear.
+        crop_detect_calls = [c for c in job_key_calls if c.args[1:] == ("crop_detect",)]
+        assert not crop_detect_calls, (
+            f"Expected no crop_detect calls for manual crop, got: {crop_detect_calls}"
+        )
+        probe_calls = [c for c in job_key_calls if c.args[1:] == ("probe",)]
+        assert len(probe_calls) == 1, (
+            f"Expected exactly 1 dotted probe call for manual crop, got: {probe_calls}"
         )
 
     def test_job_crop_detect_not_recorded_for_cached_crop(self, tmp_path: Path) -> None:
@@ -221,7 +233,7 @@ class TestJobPhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.JOB_CROP_DETECT not in time_keys_called, (
+        assert MetricKey.JOB not in time_keys_called, (
             f"Expected JOB_CROP_DETECT NOT called for cached crop, got: {time_keys_called}"
         )
 
@@ -284,7 +296,7 @@ class TestExtractionPhaseTiming:
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
-        """``time(TimeKey.RECOVERY)`` must be called even when all artifacts are reused.
+        """``time(MetricKey.RECOVERY)`` must be called even when all artifacts are reused.
 
         Validates: Requirements 6.5, 2.7
         """
@@ -306,12 +318,12 @@ class TestExtractionPhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.RECOVERY in time_keys_called, (
-            f"Expected TimeKey.RECOVERY in time() calls, got: {time_keys_called}"
+        assert MetricKey.RECOVERY in time_keys_called, (
+            f"Expected MetricKey.RECOVERY in time() calls, got: {time_keys_called}"
         )
 
     def test_extraction_recorded_for_mkvextract_tracks(self, tmp_path: Path) -> None:
-        """``time(TimeKey.EXTRACTION)`` must be called when mkvextract runs for other tracks.
+        """``time(MetricKey.EXTRACTION)`` must be called when mkvextract runs for other tracks.
 
         Validates: Requirements 6.5
         """
@@ -370,8 +382,8 @@ class TestExtractionPhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.EXTRACTION in time_keys_called, (
-            f"Expected TimeKey.EXTRACTION in time() calls, got: {time_keys_called}"
+        assert MetricKey.EXTRACTION in time_keys_called, (
+            f"Expected MetricKey.EXTRACTION in time() calls, got: {time_keys_called}"
         )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
@@ -464,7 +476,7 @@ class TestChunkingPhaseTiming:
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
-        """``time(TimeKey.RECOVERY)`` must be called even when all chunks are reused.
+        """``time(MetricKey.RECOVERY)`` must be called even when all chunks are reused.
 
         Validates: Requirements 6.5, 2.7
         """
@@ -485,12 +497,12 @@ class TestChunkingPhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.RECOVERY in time_keys_called, (
-            f"Expected TimeKey.RECOVERY in time() calls, got: {time_keys_called}"
+        assert MetricKey.RECOVERY in time_keys_called, (
+            f"Expected MetricKey.RECOVERY in time() calls, got: {time_keys_called}"
         )
 
     def test_scene_detect_recorded_when_no_cached_boundaries(self, tmp_path: Path) -> None:
-        """``time(TimeKey.CHUNKING_SCENE_DETECT)`` must be called when detection runs.
+        """``time(MetricKey.CHUNKING)`` must be called when detection runs.
 
         Validates: Requirements 6.5
         """
@@ -513,12 +525,17 @@ class TestChunkingPhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.CHUNKING_SCENE_DETECT in time_keys_called, (
-            f"Expected TimeKey.CHUNKING_SCENE_DETECT in time() calls, got: {time_keys_called}"
+        assert MetricKey.CHUNKING in time_keys_called, (
+            f"Expected MetricKey.CHUNKING in time() calls, got: {time_keys_called}"
         )
 
     def test_scene_detect_not_recorded_when_boundaries_cached(self, tmp_path: Path) -> None:
-        """``time(TimeKey.CHUNKING_SCENE_DETECT)`` must NOT be called when scenes are cached.
+        """When scenes are cached, only split timing calls are made — no scene_detect calls.
+
+        After migration to two-tier keys, split emits two calls:
+        ``time(MetricKey.CHUNKING)`` (top-level wall-clock) and
+        ``time(MetricKey.CHUNKING, "split")`` (dotted sub-operation).
+        Scene-detect emits ``time(MetricKey.CHUNKING, "scene_detect")`` — which must NOT appear.
 
         Validates: Requirements 6.5
         """
@@ -538,13 +555,20 @@ class TestChunkingPhaseTiming:
         ):
             phase.run()
 
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.CHUNKING_SCENE_DETECT not in time_keys_called, (
-            f"Expected CHUNKING_SCENE_DETECT NOT called when cached, got: {time_keys_called}"
+        chunking_calls = [call for call in collector.time.call_args_list if call.args[0] == MetricKey.CHUNKING]
+        # scene_detect must NOT appear when boundaries are cached
+        scene_detect_calls = [c for c in chunking_calls if c.args[1:] == ("scene_detect",)]
+        assert not scene_detect_calls, (
+            f"Expected no scene_detect calls when boundaries cached, got: {scene_detect_calls}"
+        )
+        # split dotted call must appear
+        split_calls = [c for c in chunking_calls if c.args[1:] == ("split",)]
+        assert len(split_calls) == 1, (
+            f"Expected exactly 1 dotted split call when boundaries cached, got: {split_calls}"
         )
 
     def test_chunking_split_recorded_when_chunks_pending(self, tmp_path: Path) -> None:
-        """``time(TimeKey.CHUNKING_SPLIT)`` must be called when split_chunks runs.
+        """``time(MetricKey.CHUNKING)`` must be called when split_chunks runs.
 
         Validates: Requirements 6.5, 2.2a
         """
@@ -569,12 +593,12 @@ class TestChunkingPhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.CHUNKING_SPLIT in time_keys_called, (
-            f"Expected TimeKey.CHUNKING_SPLIT in time() calls, got: {time_keys_called}"
+        assert MetricKey.CHUNKING in time_keys_called, (
+            f"Expected MetricKey.CHUNKING in time() calls, got: {time_keys_called}"
         )
 
     def test_step_called_per_successful_split(self, tmp_path: Path) -> None:
-        """``step(TimeKey.CHUNKING_SPLIT)`` must be called once per successful chunk split.
+        """``step(MetricKey.CHUNKING)`` must be called once per successful chunk split.
 
         Two boundaries produce two chunks, so two ``step`` calls are expected.
 
@@ -621,7 +645,7 @@ class TestChunkingPhaseTiming:
                 collector     = collector,
             )
         step_keys = [call.args[0] for call in collector.step.call_args_list]
-        assert step_keys.count(TimeKey.CHUNKING_SPLIT) == 2, (
+        assert step_keys.count(MetricKey.CHUNKING) == 2, (
             f"Expected 2 step(CHUNKING_SPLIT) calls (one per boundary), got: {step_keys}"
         )
 
@@ -704,7 +728,7 @@ class TestAudioPhaseTiming:
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
-        """``time(TimeKey.RECOVERY)`` must be called even when all artifacts are reused.
+        """``time(MetricKey.RECOVERY)`` must be called even when all artifacts are reused.
 
         Validates: Requirements 6.5, 2.7
         """
@@ -722,12 +746,12 @@ class TestAudioPhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.RECOVERY in time_keys_called, (
-            f"Expected TimeKey.RECOVERY in time() calls, got: {time_keys_called}"
+        assert MetricKey.RECOVERY in time_keys_called, (
+            f"Expected MetricKey.RECOVERY in time() calls, got: {time_keys_called}"
         )
 
     def test_audio_recorded_when_processing_runs(self, tmp_path: Path) -> None:
-        """``time(TimeKey.AUDIO)`` must be called when audio processing executes.
+        """``time(MetricKey.AUDIO)`` must be called when audio processing executes.
 
         Validates: Requirements 6.5
         """
@@ -755,12 +779,12 @@ class TestAudioPhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.AUDIO in time_keys_called, (
-            f"Expected TimeKey.AUDIO in time() calls, got: {time_keys_called}"
+        assert MetricKey.AUDIO in time_keys_called, (
+            f"Expected MetricKey.AUDIO in time() calls, got: {time_keys_called}"
         )
 
     def test_audio_not_recorded_when_all_reused(self, tmp_path: Path) -> None:
-        """``time(TimeKey.AUDIO)`` must NOT be called when all artifacts are already complete.
+        """``time(MetricKey.AUDIO)`` must NOT be called when all artifacts are already complete.
 
         Validates: Requirements 6.5
         """
@@ -778,8 +802,8 @@ class TestAudioPhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.AUDIO not in time_keys_called, (
-            f"Expected TimeKey.AUDIO NOT called on reuse, got: {time_keys_called}"
+        assert MetricKey.AUDIO not in time_keys_called, (
+            f"Expected MetricKey.AUDIO NOT called on reuse, got: {time_keys_called}"
         )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
@@ -865,7 +889,7 @@ class TestOptimizationPhaseTiming:
         config = _make_config(tmp_path)
         config.work_dir.mkdir(parents=True, exist_ok=True)
         config.optimize   = optimize  # type: ignore[attr-defined]
-        config.strategies = [_STRATEGY_SLOW_H265]  # type: ignore[attr-defined]
+        config.strategies = [_STRATEGY_SLOW_H265, _STRATEGY_H265_AQ]  # type: ignore[attr-defined]
 
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
@@ -879,7 +903,7 @@ class TestOptimizationPhaseTiming:
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
-        """``time(TimeKey.RECOVERY)`` must be called when all results are already cached.
+        """``time(MetricKey.RECOVERY)`` must be called when all results are already cached.
 
         Validates: Requirements 6.5, 2.7
         """
@@ -895,11 +919,14 @@ class TestOptimizationPhaseTiming:
         persisted = OptimizationParams(
             crop             = CropParams(),
             test_chunks      = ["chunk_0"],
-            strategy_results = [StrategyTestResult(strategy_name=strategy.name, total_size=1024)],
+            strategy_results = [
+                StrategyTestResult(strategy_name=strategy.name, total_size=1024),
+                StrategyTestResult(strategy_name=_STRATEGY_H265_AQ.name, total_size=512),
+            ],
             tolerance_pct    = 5.0,   # matches PipelineConfig.strategy_selection_tolerance default
             selected         = [strategy.name],
             quality_targets  = [],
-            metrics_sampling = 1,     # matches PipelineConfig.metrics_sampling default (DEFAULT_METRICS_SAMPLING=1)
+            metrics_sampling = 3,     # matches PipelineConfig.metrics_sampling default
         )
 
         # All results cached with matching tolerance → reuse path (step 4 in run())
@@ -907,12 +934,12 @@ class TestOptimizationPhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.RECOVERY in time_keys_called, (
-            f"Expected TimeKey.RECOVERY in time() calls on reuse path, got: {time_keys_called}"
+        assert MetricKey.RECOVERY in time_keys_called, (
+            f"Expected MetricKey.RECOVERY in time() calls on reuse path, got: {time_keys_called}"
         )
 
     def test_encoding_optimization_recorded_when_test_encodes_run(self, tmp_path: Path) -> None:
-        """``time(TimeKey.ENCODING_OPTIMIZATION)`` must be called when test encodes run.
+        """``time(MetricKey.OPTIMIZATION)`` must be called when test encodes run.
 
         The ``time()`` call wraps the entire parallel encode loop in OptimizationPhase.run(),
         so we verify the collector receives it by running _encode_chunks_parallel directly
@@ -967,12 +994,12 @@ class TestOptimizationPhaseTiming:
             )
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.ENCODING_MAIN in time_keys_called, (
-            f"Expected TimeKey.ENCODING_MAIN in time() calls, got: {time_keys_called}"
+        assert MetricKey.ENCODING in time_keys_called, (
+            f"Expected MetricKey.ENCODING in time() calls, got: {time_keys_called}"
         )
 
     def test_step_called_with_convergence_update_per_chunk(self, tmp_path: Path) -> None:
-        """``step(TimeKey.ENCODING_MAIN, convergence_update=...)`` must be called
+        """``step(MetricKey.ENCODING, convergence_update=...)`` must be called
         once per successfully converged test chunk inside _encode_chunks_parallel.
 
         Validates: Requirements 6.5, 4.1a
@@ -1031,7 +1058,7 @@ class TestOptimizationPhaseTiming:
         assert len(step_calls) == 1, f"Expected 1 step() call, got {len(step_calls)}"
         call_key    = step_calls[0].args[0]
         call_update = step_calls[0].kwargs.get("convergence_update")
-        assert call_key == TimeKey.ENCODING_MAIN, f"Wrong key: {call_key}"
+        assert call_key == MetricKey.ENCODING, f"Wrong key: {call_key}"
         assert isinstance(call_update, ConvergenceUpdate), f"Expected ConvergenceUpdate, got: {call_update}"
         assert call_update.strategy      == strategy.name, f"Wrong strategy: {call_update.strategy}"
         assert call_update.attempt_count == 3,             f"Wrong attempt_count: {call_update.attempt_count}"
@@ -1052,11 +1079,14 @@ class TestOptimizationPhaseTiming:
         persisted = OptimizationParams(
             crop             = CropParams(),
             test_chunks      = ["chunk_0"],
-            strategy_results = [StrategyTestResult(strategy_name=strategy.name, total_size=1024)],
+            strategy_results = [
+                StrategyTestResult(strategy_name=strategy.name, total_size=1024),
+                StrategyTestResult(strategy_name=_STRATEGY_H265_AQ.name, total_size=512),
+            ],
             tolerance_pct    = 0.0,
             selected         = [strategy.name],
             quality_targets  = [],
-            metrics_sampling = 1,
+            metrics_sampling = 3,
         )
 
         with patch.object(OptimizationParams, "load", return_value=persisted):
@@ -1156,7 +1186,7 @@ class TestEncodingPhaseTiming:
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
-        """``time(TimeKey.RECOVERY)`` must be called even when all pairs are already complete.
+        """``time(MetricKey.RECOVERY)`` must be called even when all pairs are already complete.
 
         Validates: Requirements 6.5, 2.7
         """
@@ -1175,12 +1205,12 @@ class TestEncodingPhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.RECOVERY in time_keys_called, (
-            f"Expected TimeKey.RECOVERY in time() calls, got: {time_keys_called}"
+        assert MetricKey.RECOVERY in time_keys_called, (
+            f"Expected MetricKey.RECOVERY in time() calls, got: {time_keys_called}"
         )
 
     def test_encoding_main_recorded_when_encodes_run(self, tmp_path: Path) -> None:
-        """``time(TimeKey.ENCODING_MAIN)`` must be called when encoding executes.
+        """``time(MetricKey.ENCODING)`` must be called when encoding executes.
 
         Uses ``_encode_chunks_parallel`` directly with mocked inner encode calls
         to verify the collector receives the timing call.
@@ -1227,12 +1257,12 @@ class TestEncodingPhaseTiming:
             )
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.ENCODING_MAIN in time_keys_called, (
-            f"Expected TimeKey.ENCODING_MAIN in time() calls, got: {time_keys_called}"
+        assert MetricKey.ENCODING in time_keys_called, (
+            f"Expected MetricKey.ENCODING in time() calls, got: {time_keys_called}"
         )
 
     def test_step_called_with_convergence_update_per_chunk(self, tmp_path: Path) -> None:
-        """``step(TimeKey.ENCODING_MAIN, convergence_update=...)`` must be called
+        """``step(MetricKey.ENCODING, convergence_update=...)`` must be called
         once per successfully converged (non-reused) chunk/strategy pair.
 
         Validates: Requirements 6.5, 4.1a
@@ -1284,13 +1314,13 @@ class TestEncodingPhaseTiming:
         assert len(step_calls) == 1, f"Expected 1 step() call, got {len(step_calls)}"
         call_key    = step_calls[0].args[0]
         call_update = step_calls[0].kwargs.get("convergence_update")
-        assert call_key == TimeKey.ENCODING_MAIN, f"Wrong key: {call_key}"
+        assert call_key == MetricKey.ENCODING, f"Wrong key: {call_key}"
         assert isinstance(call_update, ConvergenceUpdate), f"Expected ConvergenceUpdate, got: {call_update}"
         assert call_update.strategy      == _STRATEGY_SLOW_H265.name, f"Wrong strategy: {call_update.strategy}"
         assert call_update.attempt_count == 3,                         f"Wrong attempt_count: {call_update.attempt_count}"
 
     def test_step_not_called_for_reused_pairs(self, tmp_path: Path) -> None:
-        """``step(TimeKey.ENCODING_MAIN)`` must NOT be called for reused pairs.
+        """``step(MetricKey.ENCODING)`` must NOT be called for reused pairs.
 
         Reused pairs have already been counted in a prior run — no new convergence
         data to record.
@@ -1456,7 +1486,7 @@ class TestMergePhaseTiming:
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
-        """``time(TimeKey.RECOVERY)`` must be called even when all artifacts are already complete.
+        """``time(MetricKey.RECOVERY)`` must be called even when all artifacts are already complete.
 
         Validates: Requirements 6.5, 2.7
         """
@@ -1480,12 +1510,12 @@ class TestMergePhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.RECOVERY in time_keys_called, (
-            f"Expected TimeKey.RECOVERY in time() calls, got: {time_keys_called}"
+        assert MetricKey.RECOVERY in time_keys_called, (
+            f"Expected MetricKey.RECOVERY in time() calls, got: {time_keys_called}"
         )
 
     def test_merge_concat_recorded_when_merge_runs(self, tmp_path: Path) -> None:
-        """``time(TimeKey.MERGE_CONCAT)`` must be called when a pending strategy is merged.
+        """``time(MetricKey.MERGE)`` must be called when a pending strategy is merged.
 
         Validates: Requirements 6.5
         """
@@ -1522,12 +1552,12 @@ class TestMergePhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.MERGE_CONCAT in time_keys_called, (
-            f"Expected TimeKey.MERGE_CONCAT in time() calls, got: {time_keys_called}"
+        assert MetricKey.MERGE in time_keys_called, (
+            f"Expected MetricKey.MERGE in time() calls, got: {time_keys_called}"
         )
 
     def test_merge_quality_measure_recorded_when_targets_set(self, tmp_path: Path) -> None:
-        """``time(TimeKey.MERGE_QUALITY_MEASURE)`` must be called when quality targets are configured.
+        """``time(MetricKey.MERGE)`` must be called when quality targets are configured.
 
         Validates: Requirements 6.5
         """
@@ -1602,8 +1632,8 @@ class TestMergePhaseTiming:
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert TimeKey.MERGE_QUALITY_MEASURE in time_keys_called, (
-            f"Expected TimeKey.MERGE_QUALITY_MEASURE in time() calls, got: {time_keys_called}"
+        assert MetricKey.MERGE in time_keys_called, (
+            f"Expected MetricKey.MERGE in time() calls, got: {time_keys_called}"
         )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
@@ -1631,3 +1661,243 @@ class TestMergePhaseTiming:
             result = phase.run()
 
         assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# Smoke tests — MetricKey, time(), step(), NoOp, Strategy dots, YAML tiers
+# ---------------------------------------------------------------------------
+
+
+class TestMetricKeySmoke:
+    """Smoke tests for MetricKey enum, collector API, strategy dot sanitization,
+    and two-tier YAML structure.
+
+    Validates: Requirements 6.1, 6.2, 6.4, 6.5, 6.6
+    """
+
+    # ------------------------------------------------------------------
+    # 1. MetricKey has exactly 8 members with correct string values
+    # ------------------------------------------------------------------
+
+    def test_metric_key_has_eight_members(self) -> None:
+        """MetricKey must have exactly 8 members with the correct string values.
+
+        Validates: Requirements 6.1, 6.2
+        """
+        expected = {
+            "JOB":          "job",
+            "EXTRACTION":   "extraction",
+            "CHUNKING":     "chunking",
+            "AUDIO":        "audio",
+            "ENCODING":     "encoding",
+            "OPTIMIZATION": "optimization",
+            "MERGE":        "merge",
+            "RECOVERY":     "recovery",
+        }
+        assert len(MetricKey) == 8, (
+            f"Expected 8 MetricKey members, got {len(MetricKey)}: {list(MetricKey)}"
+        )
+        for name, value in expected.items():
+            member = MetricKey[name]
+            assert member.value == value, (
+                f"MetricKey.{name} expected value {value!r}, got {member.value!r}"
+            )
+
+    # ------------------------------------------------------------------
+    # 2. time() accepts MetricKey with zero or more suffix parts
+    # ------------------------------------------------------------------
+
+    def test_time_accepts_metric_key_no_suffix(self) -> None:
+        """collector.time(MetricKey.ENCODING) must work without error.
+
+        Validates: Requirements 6.4, 6.5
+        """
+        collector = NoOpMetricsCollector()
+        with collector.time(MetricKey.ENCODING):
+            pass  # no error expected
+
+    def test_time_accepts_metric_key_with_suffix(self) -> None:
+        """collector.time(MetricKey.JOB, "probe") must work without error.
+
+        Validates: Requirements 6.4, 6.5
+        """
+        collector = NoOpMetricsCollector()
+        with collector.time(MetricKey.JOB, "probe"):
+            pass  # no error expected
+
+    # ------------------------------------------------------------------
+    # 3. step() accepts MetricKey with zero or more suffix parts
+    # ------------------------------------------------------------------
+
+    def test_step_accepts_metric_key_no_suffix(self) -> None:
+        """collector.step(MetricKey.ENCODING) must work without error.
+
+        Validates: Requirements 6.4, 6.6
+        """
+        collector = NoOpMetricsCollector()
+        collector.step(MetricKey.ENCODING)  # no error expected
+
+    def test_step_accepts_metric_key_with_suffix(self) -> None:
+        """collector.step(MetricKey.CHUNKING, "split") must work without error.
+
+        Validates: Requirements 6.4, 6.6
+        """
+        collector = NoOpMetricsCollector()
+        collector.step(MetricKey.CHUNKING, "split")  # no error expected
+
+    # ------------------------------------------------------------------
+    # 4. NoOpMetricsCollector accepts both time() and step() with MetricKey
+    # ------------------------------------------------------------------
+
+    def test_noop_accepts_time_and_step_with_metric_key(self) -> None:
+        """NoOpMetricsCollector must accept time() and step() with MetricKey and suffix parts.
+
+        Validates: Requirements 6.4, 6.5, 6.6
+        """
+        collector = NoOpMetricsCollector()
+        # time() — top-level and dotted
+        with collector.time(MetricKey.MERGE):
+            pass
+        with collector.time(MetricKey.MERGE, "concat"):
+            pass
+        # step() — top-level and dotted
+        collector.step(MetricKey.ENCODING)
+        collector.step(MetricKey.ENCODING, "h265")
+        # flush() — no-op
+        collector.flush()
+
+    # ------------------------------------------------------------------
+    # 5. Strategy construction with dots in preset/profile produces name with no ASCII dots
+    # ------------------------------------------------------------------
+
+    def test_strategy_dots_sanitized_in_name(self) -> None:
+        """Strategy(preset="h265.fast", profile="slow.2") must produce name with no ASCII dots.
+
+        Validates: Requirements 8.1, 8.3, 8.4
+        """
+        from pyqenc.config import ConfigManager
+
+        # Build a Strategy directly via Pydantic to test the field_validator
+        from pyqenc.models import CodecConfig, Strategy
+        from decimal import Decimal
+
+        codec = CodecConfig(
+            name="h265-8bit",
+            default_quality=Decimal("28"),
+            quality_range=(Decimal("0"), Decimal("51")),
+            encoder_args=["-i", "{input}", "-c:v", "libx265", "-crf", "{quality}", "{input}"],
+        )
+        strategy = Strategy(preset="h265.fast", profile="slow.2", codec=codec, profile_args=[])
+        assert "." not in strategy.name, (
+            f"Expected no ASCII dot in strategy.name, got: {strategy.name!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # 6. BaseStrategy construction with dots in strategy_short produces no ASCII dots
+    # ------------------------------------------------------------------
+
+    def test_base_strategy_dots_sanitized_in_strategy_short(self) -> None:
+        """BaseStrategy(name="audio.5.1", strategy_short="5.1") must produce no ASCII dots.
+
+        Validates: Requirements 8.2, 8.3, 8.4, 8.5
+        """
+        from pyqenc.phases.audio import BaseStrategy as _BaseStrategy
+
+        class _TestStrategy(_BaseStrategy):
+            def check(self, source: Path) -> bool:
+                return False
+            def plan(self, source: Path) -> Path:
+                return source
+            def execute(self, source: Path, output: Path, dry_run: bool) -> None:
+                pass
+
+        strategy = _TestStrategy(name="audio.5.1", strategy_short="5.1")
+        assert "." not in strategy.name, (
+            f"Expected no ASCII dot in BaseStrategy.name, got: {strategy.name!r}"
+        )
+        assert "." not in strategy.strategy_short, (
+            f"Expected no ASCII dot in BaseStrategy.strategy_short, got: {strategy.strategy_short!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # 7. Top-level and dotted keys coexist in the same store
+    # ------------------------------------------------------------------
+
+    def test_top_level_and_dotted_keys_coexist(self, tmp_path: Path) -> None:
+        """YamlMetricsCollector must store both top-level and dotted keys independently.
+
+        Call time(MetricKey.ENCODING) and time(MetricKey.ENCODING, "h265"), flush,
+        parse YAML, assert both top_level has an "encoding" entry and dotted has
+        an "encoding" group.
+
+        Validates: Requirements 1.3, 6.1, 6.2
+        """
+        import time as _time
+        import yaml as _yaml
+        from pyqenc.metrics import YamlMetricsCollector
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        collector = YamlMetricsCollector(work_dir=work_dir, force_wipe=True)
+
+        # Inject non-zero values directly into _store to avoid real timing
+        collector._store["encoding"]      = 10.0
+        collector._store["encoding.h265"] = 8.0
+
+        collector.flush()
+
+        metrics_path = work_dir / "metrics.yaml"
+        assert metrics_path.exists(), "metrics.yaml was not written"
+
+        raw = _yaml.safe_load(metrics_path.read_text(encoding="utf-8"))
+        pm  = raw["pipeline_metrics"]
+        td  = pm["time_distribution"]
+
+        top_level_keys = [e["key"] for e in td.get("top_level", [])]
+        assert "encoding" in top_level_keys, (
+            f"Expected 'encoding' in top_level, got: {top_level_keys}"
+        )
+
+        dotted = td.get("dotted", {})
+        assert "encoding" in dotted, (
+            f"Expected 'encoding' group in dotted, got: {list(dotted.keys())}"
+        )
+        breakdown_keys = [e["key"] for e in dotted["encoding"].get("breakdown", [])]
+        assert "encoding.h265" in breakdown_keys, (
+            f"Expected 'encoding.h265' in dotted breakdown, got: {breakdown_keys}"
+        )
+
+    # ------------------------------------------------------------------
+    # 8. YAML dotted section is absent when no dotted keys have non-zero values
+    # ------------------------------------------------------------------
+
+    def test_yaml_dotted_absent_when_no_dotted_keys(self, tmp_path: Path) -> None:
+        """YAML dotted section must be absent or empty when only top-level keys are used.
+
+        Validates: Requirements 5.4
+        """
+        import yaml as _yaml
+        from pyqenc.metrics import YamlMetricsCollector
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        collector = YamlMetricsCollector(work_dir=work_dir, force_wipe=True)
+
+        # Only top-level keys — no dotted keys
+        collector._store["encoding"]   = 10.0
+        collector._store["merge"]      = 5.0
+        collector._store["extraction"] = 3.0
+
+        collector.flush()
+
+        metrics_path = work_dir / "metrics.yaml"
+        assert metrics_path.exists(), "metrics.yaml was not written"
+
+        raw = _yaml.safe_load(metrics_path.read_text(encoding="utf-8"))
+        pm  = raw["pipeline_metrics"]
+        td  = pm["time_distribution"]
+
+        dotted = td.get("dotted", {})
+        assert not dotted, (
+            f"Expected dotted section to be absent or empty when no dotted keys used, got: {dotted}"
+        )

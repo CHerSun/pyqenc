@@ -8,6 +8,7 @@
 - Use our `ProgressBar` for progress display to the end user for long tasks.
 - For any artifacts use .tmp-then-rename protocol for atomicity and consistency enforcement.
 - For subprocess cmd building use type hint `list[str|os.PathLike]` and supply `Path` typed variables directly (without converting to `str`).
+- Tests should never check internal state, only observable behavior.
 - `Path` from `pathlib` is mandatory for cross-platform path handling. NO `str` for paths.
 - When directly opening a file for reading or writing - use `Path`. This does NOT apply to libraries that handle their own file I/O (JSON, PNG, etc.).
 - NO MAGIC NUMBERS or MAGIC STRINGS allowed. Use named constants or enum values. `"psnr"` is NOT allowed; `MetricType.PSNR.value` is.

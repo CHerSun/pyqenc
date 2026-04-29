@@ -20,6 +20,7 @@ from pyqenc.constants import (
     AUDIO_CH_51,
     AUDIO_CH_71,
     AUDIO_STEM_SEPARATOR,
+    TIME_SEPARATOR_MS,
     _NORMALISED_PREFIXES,
 )
 from pyqenc.phases.audio import (
@@ -193,10 +194,11 @@ class TestConversionStrategyCheck:
 
 class TestStrategyShortAndOutputPath:
     def test_strategy_shorts(self) -> None:
-        assert DownmixStrategy71to51().strategy_short == "5.1"
-        assert DownmixStrategy51to20Std().strategy_short == "2.0 std"
-        assert DownmixStrategy51to20Night().strategy_short == "2.0 night"
-        assert DownmixStrategy51to20NBoost().strategy_short == "2.0 nboost"
+        _dot = TIME_SEPARATOR_MS   # ASCII dot is sanitized at construction time
+        assert DownmixStrategy71to51().strategy_short == f"5{_dot}1"
+        assert DownmixStrategy51to20Std().strategy_short == f"2{_dot}0 std"
+        assert DownmixStrategy51to20Night().strategy_short == f"2{_dot}0 night"
+        assert DownmixStrategy51to20NBoost().strategy_short == f"2{_dot}0 nboost"
         assert NormStrategy().strategy_short == "norm"
         assert DynaudnormStrategy().strategy_short == "dynaudnorm"
         assert ConversionStrategy(profiles=_default_profiles()).strategy_short == "aac"
@@ -250,7 +252,7 @@ class TestAudioEngineBuildPlan:
     can discover them without running any real ffmpeg commands.
     """
 
-    _CONVERT_FILTER = r"^(norm|dynaudnorm|2\.0 (std|night|nboost)) ←"
+    _CONVERT_FILTER = r"^(norm|dynaudnorm|2[\.․]0 (std|night|nboost)) ←"
 
     def _make_engine(self) -> AudioEngine:
         return AudioEngine(
@@ -274,14 +276,15 @@ class TestAudioEngineBuildPlan:
         plan = engine.build_plan(tmp_path, self._CONVERT_FILTER)
 
         strategy_shorts = [t.strategy.strategy_short for t in plan.tasks]
+        _dot = TIME_SEPARATOR_MS
 
-        assert strategy_shorts.count("2.0 std")    == 1
-        assert strategy_shorts.count("2.0 night")  == 1
-        assert strategy_shorts.count("2.0 nboost") == 1
+        assert strategy_shorts.count(f"2{_dot}0 std")    == 1
+        assert strategy_shorts.count(f"2{_dot}0 night")  == 1
+        assert strategy_shorts.count(f"2{_dot}0 nboost") == 1
         assert strategy_shorts.count("norm")       == 1
         assert strategy_shorts.count("dynaudnorm") == 4
         assert strategy_shorts.count("aac")        == 8
-        assert strategy_shorts.count("5.1")        == 0
+        assert strategy_shorts.count(f"5{_dot}1")  == 0
 
     def test_71_source_graph(self, tmp_path: Path) -> None:
         """A 7.1 source expands to 21 tasks:
@@ -299,14 +302,15 @@ class TestAudioEngineBuildPlan:
         plan = engine.build_plan(tmp_path, self._CONVERT_FILTER)
 
         strategy_shorts = [t.strategy.strategy_short for t in plan.tasks]
+        _dot = TIME_SEPARATOR_MS
 
-        assert strategy_shorts.count("5.1")        == 1
-        assert strategy_shorts.count("norm")       == 2   # once on raw 7.1, once on 5.1 output
-        assert strategy_shorts.count("2.0 std")    == 1
-        assert strategy_shorts.count("2.0 night")  == 1
-        assert strategy_shorts.count("2.0 nboost") == 1
-        assert strategy_shorts.count("dynaudnorm") == 5   # norm←7.1, norm←5.1, std, night, nboost
-        assert strategy_shorts.count("aac")        == 10
+        assert strategy_shorts.count(f"5{_dot}1")         == 1
+        assert strategy_shorts.count("norm")               == 2   # once on raw 7.1, once on 5.1 output
+        assert strategy_shorts.count(f"2{_dot}0 std")     == 1
+        assert strategy_shorts.count(f"2{_dot}0 night")   == 1
+        assert strategy_shorts.count(f"2{_dot}0 nboost")  == 1
+        assert strategy_shorts.count("dynaudnorm")         == 5   # norm←7.1, norm←5.1, std, night, nboost
+        assert strategy_shorts.count("aac")                == 10
 
     def test_stereo_source_only_norm(self, tmp_path: Path) -> None:
         """A stereo source should only get norm + dynaudnorm + aac (no downmix)."""

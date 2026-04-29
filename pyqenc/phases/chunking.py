@@ -188,7 +188,7 @@ def split_chunks(
 
     Skips chunks already present on disk (as determined by *recovery*).
     Writes a ``<chunk_stem>.yaml`` sidecar after each successful split (Req 5.5).
-    Calls ``collector.step(TimeKey.CHUNKING_SPLIT)`` after each successful split
+    Calls ``collector.step(MetricKey.CHUNKING, "split")`` after each successful split
     to trigger incremental metrics flushes (Req 6.5, 2.2a).
 
     Args:
@@ -203,7 +203,7 @@ def split_chunks(
     Returns:
         List of ``ChunkMetadata`` for every chunk that was successfully split or reused.
     """
-    from pyqenc.metrics import TimeKey
+    from pyqenc.metrics import MetricKey
     if not boundaries:
         raise RuntimeError(
             "No scene boundaries provided to split_chunks. "
@@ -294,7 +294,7 @@ def split_chunks(
 
             result_chunks.append(chunk_meta)
             logger.debug("Chunk %s split successfully", stem)
-            collector.step(TimeKey.CHUNKING_SPLIT)
+            collector.step(MetricKey.CHUNKING, "split")
             advance(end_ts - start_ts)
 
         advance(0, AdvanceState.COMPLETE)
@@ -502,8 +502,8 @@ class ChunkingPhase:
         # Key parameters
         logger.info("Mode:  %s", self._config.chunking_mode.value)
 
-        from pyqenc.metrics import TimeKey as _TimeKey
-        with self._collector.time(_TimeKey.RECOVERY):
+        from pyqenc.metrics import MetricKey as _MetricKey
+        with self._collector.time(_MetricKey.RECOVERY):
             artifacts = self._recover(force_wipe=force_wipe, execute=True)
 
         # Mode mismatch without --force: abort
@@ -756,7 +756,7 @@ class ChunkingPhase:
         Returns:
             ``ChunkingPhaseResult`` after chunking.
         """
-        from pyqenc.metrics import TimeKey
+        from pyqenc.metrics import MetricKey
         work_dir   = self._config.work_dir
         chunks_dir = work_dir / CHUNKS_DIR
         chunks_dir.mkdir(parents=True, exist_ok=True)
@@ -789,12 +789,13 @@ class ChunkingPhase:
             )
         else:
             try:
-                with self._collector.time(TimeKey.CHUNKING_SCENE_DETECT):
-                    boundaries = detect_scenes(
-                        video_meta       = video_meta,
-                        scene_threshold  = 27.0,
-                        min_scene_length = 15,
-                    )
+                with self._collector.time(MetricKey.CHUNKING):
+                    with self._collector.time(MetricKey.CHUNKING, "scene_detect"):
+                        boundaries = detect_scenes(
+                            video_meta       = video_meta,
+                            scene_threshold  = 27.0,
+                            min_scene_length = 15,
+                        )
                 self.params.scenes = boundaries
                 self.params.save(work_dir / _CHUNKING_YAML)
             except Exception as exc:
@@ -822,15 +823,16 @@ class ChunkingPhase:
         )
 
         try:
-            with self._collector.time(TimeKey.CHUNKING_SPLIT):
-                chunk_metas = split_chunks(
-                    video_meta    = video_meta,
-                    output_dir    = chunks_dir,
-                    boundaries    = boundaries,
-                    recovery      = recovery_obj,
-                    chunking_mode = self._config.chunking_mode,
-                    collector     = self._collector,
-                )
+            with self._collector.time(MetricKey.CHUNKING):
+                with self._collector.time(MetricKey.CHUNKING, "split"):
+                    chunk_metas = split_chunks(
+                        video_meta    = video_meta,
+                        output_dir    = chunks_dir,
+                        boundaries    = boundaries,
+                        recovery      = recovery_obj,
+                        chunking_mode = self._config.chunking_mode,
+                        collector     = self._collector,
+                    )
         except Exception as exc:
             logger.error("Chunk splitting failed: %s", exc, exc_info=True)
             return _failed(str(exc))

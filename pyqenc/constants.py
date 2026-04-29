@@ -84,6 +84,11 @@ TIME_SEPARATOR_SAFE = "꞉"
 """A visually similar but filesystem-safe separator for time components in filenames, replacing the standard colon (:) which can cause issues on some filesystems."""
 TIME_SEPARATOR_MS = "․"
 """Separator for milliseconds in time representations, visually similar to the standard dot (.), but different symbol to avoid parsing collisions."""
+DOTTED_KEY_SEPARATOR: str = "."
+"""Separator used to join ``MetricKey`` prefix and suffix parts into a dotted metric key
+(e.g. ``"encoding.h265"``).  This is the standard ASCII dot (U+002E) used exclusively
+for metric key structure — distinct from file extension dots, ``TIME_SEPARATOR_MS``
+(U+2024, used in filenames), and other uses of ``"."`` in the codebase."""
 BRACKET_LEFT = "｟"
 """Left bracket symbol for visually distinct log formatting."""
 BRACKET_RIGHT = " ｠"
