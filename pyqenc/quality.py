@@ -590,7 +590,7 @@ def _score_attempt(
 
     fail_score   = 0.0
     pass_score   = 0.0
-    early_accept = False
+    all_within_delta = True
 
     for target in quality_targets:
         key    = f"{target.metric}_{target.statistic}"
@@ -605,12 +605,13 @@ def _score_attempt(
 
         if deficit < 0.0:
             fail_score  += normalized
+            all_within_delta = False
         else:
             pass_score += normalized
-            if abs(deficit) <= info.acceptance_delta:
-                early_accept = True
+            if abs(deficit) > info.acceptance_delta:
+                all_within_delta = False
 
-    return fail_score or (0.0 if early_accept else pass_score)
+    return fail_score or (0.0 if all_within_delta else pass_score)
 
 @dataclass
 class QualityPoint:
@@ -793,6 +794,9 @@ class QualitySearch:
         # Lower-quality point (higher CRF, lower VBR)
         self._worse_point = QualityPoint(quality_worse, 0, None)
 
+        # Best attempt regardless of pass/fail (for best_quality fallback)
+        self._best_point: QualityPoint | None = None
+
     # ------------------------------------------------------------------
     # Protocol properties
     # ------------------------------------------------------------------
@@ -805,16 +809,20 @@ class QualitySearch:
     @property
     def best_quality(self) -> Decimal | None:
         """Best quality found: passing value if any pass, else best-fail value."""
-        if self._better_point.is_sentinel:
-            return None
-        return self._better_point.q
+        if not self._better_point.is_sentinel:
+            return self._better_point.q
+        if self._best_point is not None:
+            return self._best_point.q
+        return None
 
     @property
     def best_metrics(self) -> dict[str, float] | None:
         """Metrics dict associated with ``best_quality``."""
-        if self._better_point.is_sentinel:
-            return None
-        return self._better_point.metrics
+        if not self._better_point.is_sentinel:
+            return self._better_point.metrics
+        if self._best_point is not None:
+            return self._best_point.metrics
+        return None
 
     @property
     def best_targets_met(self) -> bool:

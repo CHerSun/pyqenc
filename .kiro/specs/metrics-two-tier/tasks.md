@@ -248,7 +248,7 @@ construction time, and update all property-based and integration tests.
   - Update assertions that check `call.args[0]` to also verify suffix parts where applicable
   - _Requirements: 6.1, 6.2, 6.4, 6.5, 6.6_
 
-- [-] 12. Final checkpoint — ensure all tests pass
+- [ ] 12. Final checkpoint — ensure all tests pass
   - Run `uv run python -m pytest` to confirm no regressions across the full test suite.
   - Ensure all tests pass, ask the user if questions arise.
 

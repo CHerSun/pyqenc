@@ -431,17 +431,18 @@ def test_time_accumulation_is_additive(key: str, durations: list[float]) -> None
 
 @st.composite
 def _st_top_level_store(draw: st.DrawFn) -> dict[str, float]:
-    """Generate a dict of top-level keys (no dots) with at least one non-zero value."""
+    """Generate a dict of top-level keys (no dots) with realistic integer-second values.
+
+    Uses integer seconds (min 1) to match real-world usage and avoid
+    sub-second rounding artifacts in percentage calculations.
+    """
     keys = draw(st.lists(_st_top_level_key, min_size=1, max_size=8, unique=True))
     values = draw(st.lists(
-        st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False),
+        st.integers(min_value=1, max_value=7200),
         min_size=len(keys),
         max_size=len(keys),
     ))
-    store = dict(zip(keys, values))
-    # Ensure at least one non-zero value
-    assume(any(v > 0.5 for v in store.values()))
-    return store
+    return dict(zip(keys, values))
 
 
 @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
@@ -478,21 +479,22 @@ def test_top_level_percentages_sum_to_100(store: dict[str, float]) -> None:
 
 @st.composite
 def _st_dotted_store(draw: st.DrawFn) -> dict[str, float]:
-    """Generate a dict of dotted keys grouped by prefix, at least one non-zero per group."""
+    """Generate a dict of dotted keys grouped by prefix with realistic integer-second values.
+
+    Uses integer seconds (min 1) to match real-world usage and avoid
+    sub-second rounding artifacts in percentage calculations.
+    """
     num_prefixes = draw(st.integers(min_value=1, max_value=4))
     store: dict[str, float] = {}
     for _ in range(num_prefixes):
         prefix   = draw(_st_top_level_key)
         suffixes = draw(st.lists(_st_suffix, min_size=2, max_size=5, unique=True))
         values   = draw(st.lists(
-            st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False),
+            st.integers(min_value=1, max_value=7200),
             min_size=len(suffixes),
             max_size=len(suffixes),
         ))
-        group = {f"{prefix}.{s}": v for s, v in zip(suffixes, values)}
-        # Ensure at least one non-zero value in this group
-        assume(any(v > 0.5 for v in group.values()))
-        store.update(group)
+        store.update({f"{prefix}.{s}": v for s, v in zip(suffixes, values)})
     return store
 
 

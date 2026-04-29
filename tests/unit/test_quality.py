@@ -382,9 +382,11 @@ from pyqenc.quality import QualitySearchV2
 
 
 class TestQualitySearchV2:
-    """Unit tests for QualitySearchV2 state transitions.
+    """Unit tests for QualitySearchV2 observable behavior.
 
     Uses CRF range [0, 51] (lower=better), granularity 0.5, VMAF target min=95.0.
+    All assertions use only the public API: record(), best_quality, best_metrics,
+    best_targets_met, attempts.
     """
 
     _BETTER  = Decimal("0")
@@ -392,9 +394,9 @@ class TestQualitySearchV2:
     _GRAN    = Decimal("0.5")
     _TARGET  = [QualityTarget(metric="vmaf", statistic="min", value=95.0)]
 
-    # pass metrics: vmaf_min=96.0 → surplus=1.0 > delta → positive score
+    # pass metrics: vmaf_min=96.0 → surplus > 0 → targets met
     _PASS_M  = {"vmaf_min": 96.0}
-    # fail metrics: vmaf_min=80.0 → deficit=-15 → negative score
+    # fail metrics: vmaf_min=80.0 → deficit → targets not met
     _FAIL_M  = {"vmaf_min": 80.0}
 
     @staticmethod
@@ -416,202 +418,148 @@ class TestQualitySearchV2:
     # Initial state
     # ------------------------------------------------------------------
 
-    def test_initial_sentinel_state(self) -> None:
-        """_pass_q == quality_better, _best_q == quality_worse, _fail_q == quality_worse."""
+    def test_initial_state(self) -> None:
+        """Before any record() call: no best, no metrics, targets not met, 0 attempts."""
         s = self._make()
-        assert s._better_q == self._BETTER
-        assert s._worse_q == self._WORSE
-        assert s._middle_q == self._WORSE
         assert s.best_quality is None
         assert s.best_metrics is None
         assert s.best_targets_met is False
         assert s.attempts == 0
 
     # ------------------------------------------------------------------
-    # All-failing phase
+    # Single attempt
     # ------------------------------------------------------------------
 
-    def test_all_failing_first_attempt_becomes_best(self) -> None:
-        """First fail: _best_q = quality, _fail_q = quality_worse (unchanged sentinel)."""
+    def test_first_fail_sets_best(self) -> None:
+        """First failing attempt: best_quality is set, targets not met."""
         s = self._make()
         s.record(Decimal("25"), self._FAIL_M)
-        assert s._worse_q == Decimal("25")
-        assert s._middle_q == self._WORSE   # sentinel unchanged
         assert s.best_quality == Decimal("25")
         assert s.best_targets_met is False
+        assert s.attempts == 1
 
-    def test_all_failing_new_best_updates_state(self) -> None:
-        """Two fails: second is closer to sweet spot → _fail_q = old _best_q, _best_q = new."""
-        s = self._make()
-        # First fail at 25 (vmaf=80, score≈-0.75)
-        s.record(Decimal("25"), {"vmaf_min": 80.0})
-        # Second fail at 15 (vmaf=88, score≈-0.35 — closer to sweet spot)
-        s.record(Decimal("15"), {"vmaf_min": 88.0})
-        assert s._worse_q == Decimal("15")
-        assert s._middle_q == Decimal("25")   # old _best_q lagged here
-        assert s.best_quality == Decimal("15")
-
-    def test_all_failing_sweet_spot_passed_transitions_to_3point(self) -> None:
-        """Two fails: second is worse → _pass_q = second quality, _pass_metrics set."""
-        s = self._make()
-        # First fail at 15 (vmaf=88, closer to sweet spot)
-        s.record(Decimal("15"), {"vmaf_min": 88.0})
-        # Second fail at 25 (vmaf=80, worse) → sweet spot passed → _pass_q = 25
-        s.record(Decimal("25"), {"vmaf_min": 80.0})
-        # _pass_q should now be 25 (the worse attempt triggers transition)
-        assert s._better_q == Decimal("25")
-        assert s._better_stats == {"vmaf_min": 80.0}
-        assert s._worse_q == Decimal("15")
-        # _pass_metrics is set; _fail_metrics may still be None (only one new-best seen)
-        assert s._better_stats is not None
-
-    # ------------------------------------------------------------------
-    # All-passing phase
-    # ------------------------------------------------------------------
-
-    def test_all_passing_first_attempt_becomes_best(self) -> None:
-        """First pass: _best_q = quality, _pass_q = quality_better (unchanged sentinel)."""
+    def test_first_pass_sets_best(self) -> None:
+        """First passing attempt: best_quality is set, targets met."""
         s = self._make()
         s.record(Decimal("18"), self._PASS_M)
-        assert s._worse_q == Decimal("18")
-        assert s._better_q == self._BETTER   # sentinel unchanged
+        assert s.best_quality == Decimal("18")
+        assert s.best_targets_met is True
+        assert s.attempts == 1
+
+    def test_first_fail_returns_next_q(self) -> None:
+        """First failing attempt returns a next quality value to try (not None)."""
+        s = self._make()
+        result = s.record(Decimal("25"), self._FAIL_M)
+        assert result is not None
+        assert isinstance(result, Decimal)
+
+    def test_first_pass_returns_next_q(self) -> None:
+        """First passing attempt returns a next quality value to try (not None)."""
+        s = self._make()
+        result = s.record(Decimal("18"), self._PASS_M)
+        assert result is not None
+        assert isinstance(result, Decimal)
+
+    # ------------------------------------------------------------------
+    # Best tracking across multiple attempts
+    # ------------------------------------------------------------------
+
+    def test_pass_beats_fail_as_best(self) -> None:
+        """A passing attempt always becomes best over a prior failing attempt."""
+        s = self._make()
+        s.record(Decimal("25"), self._FAIL_M)
+        s.record(Decimal("18"), self._PASS_M)
         assert s.best_quality == Decimal("18")
         assert s.best_targets_met is True
 
-    def test_all_passing_new_best_updates_state(self) -> None:
-        """Two passes: second is closer to sweet spot → _pass_q = old _best_q, _best_q = new."""
+    def test_closer_fail_beats_farther_fail(self) -> None:
+        """Among two failing attempts, the one with higher score (closer to 0) is best."""
         s = self._make()
-        # First pass at 18 (vmaf=96, score≈0.05)
-        s.record(Decimal("18"), {"vmaf_min": 96.0})
-        # Second pass at 22 (vmaf=95.6, score≈0.03 — closer to sweet spot)
-        s.record(Decimal("22"), {"vmaf_min": 95.6})
-        assert s._worse_q == Decimal("22")
-        assert s._better_q == Decimal("18")   # old _best_q lagged here
+        s.record(Decimal("25"), {"vmaf_min": 80.0})   # score ≈ -0.75
+        s.record(Decimal("15"), {"vmaf_min": 88.0})   # score ≈ -0.35 — closer to target
+        assert s.best_quality == Decimal("15")
+        assert s.best_targets_met is False
+
+    def test_closer_pass_beats_farther_pass(self) -> None:
+        """Among two passing attempts, the one with lower score (closer to 0) is best."""
+        s = self._make()
+        s.record(Decimal("18"), {"vmaf_min": 96.0})   # further from sweet spot
+        s.record(Decimal("22"), {"vmaf_min": 95.6})   # closer to sweet spot
         assert s.best_quality == Decimal("22")
         assert s.best_targets_met is True
 
-    def test_all_passing_sweet_spot_passed_transitions_to_3point(self) -> None:
-        """Two passes: second is worse → _fail_q = second quality, _fail_metrics set."""
+    # ------------------------------------------------------------------
+    # Convergence: next quality stays within bounds
+    # ------------------------------------------------------------------
+
+    def test_next_quality_within_bounds(self) -> None:
+        """record() always returns a quality value within [quality_better, quality_worse]."""
         s = self._make()
-        # First pass at 22 (vmaf=95.6, closer to sweet spot)
-        s.record(Decimal("22"), {"vmaf_min": 95.6})
-        # Second pass at 18 (vmaf=96.0, worse — further from sweet spot)
-        s.record(Decimal("18"), {"vmaf_min": 96.0})
-        # _fail_q should now be 18 (the worse attempt triggers transition)
-        assert s._middle_q == Decimal("18")
-        assert s._middle_stats == {"vmaf_min": 96.0}
-        assert s._worse_q == Decimal("22")
-        # _fail_metrics is set; _pass_metrics may still be None (only one new-best seen)
-        assert s._middle_stats is not None
+        current_q = Decimal("25")
+        for _ in range(10):
+            result = s.record(current_q, self._FAIL_M)
+            if result is None:
+                break
+            assert self._BETTER <= result <= self._WORSE, (
+                f"Next quality {result} is outside [{self._BETTER}, {self._WORSE}]"
+            )
+            current_q = result
 
-    # ------------------------------------------------------------------
-    # 3-point mode helpers
-    # ------------------------------------------------------------------
-
-    def _setup_3point(self) -> QualitySearchV2:
-        """Set up 3-point mode via three all-failing calls.
-
-        Call 1: fail at 25 (vmaf=80) → first best, _fail_q=51(sentinel), _fail_metrics=None
-        Call 2: fail at 15 (vmaf=88) → new best, _fail_q=25, _fail_metrics={vmaf=80}, _best_q=15
-        Call 3: fail at 20 (vmaf=82) → worse than best → _pass_q=20, _pass_metrics={vmaf=82}
-
-        Final state: _pass_q=20, _best_q=15, _fail_q=25
-        Range A = |15-20| = 5, Range B = |25-15| = 10
-        """
+    def test_sweet_spot_passed_next_q_between_two_fails(self) -> None:
+        """After sweet spot is passed, next quality is between the two bounding fails."""
         s = self._make()
-        s.record(Decimal("25"), {"vmaf_min": 80.0})   # first best
-        s.record(Decimal("15"), {"vmaf_min": 88.0})   # new best → _fail_q=25
-        s.record(Decimal("20"), {"vmaf_min": 82.0})   # worse → _pass_q=20
-        # Verify 3-point mode is active.
-        assert s._better_stats is not None, "Expected _pass_metrics to be set"
-        assert s._middle_stats is not None, "Expected _fail_metrics to be set"
-        assert s._better_q == Decimal("20")
-        assert s._worse_q == Decimal("15")
-        assert s._middle_q == Decimal("25")
-        return s
+        s.record(Decimal("15"), {"vmaf_min": 88.0})   # closer to target
+        next_q = s.record(Decimal("25"), {"vmaf_min": 80.0})   # worse → sweet spot passed
+        assert next_q is not None
+        assert Decimal("15") < next_q < Decimal("25")
+
+    def test_sweet_spot_passed_next_q_between_two_passes(self) -> None:
+        """After sweet spot is passed on the pass side, next quality is between the two passes."""
+        s = self._make()
+        s.record(Decimal("22"), {"vmaf_min": 95.6})   # closer to sweet spot
+        next_q = s.record(Decimal("18"), {"vmaf_min": 96.0})   # worse → sweet spot passed
+        assert next_q is not None
+        assert Decimal("18") < next_q < Decimal("22")
 
     # ------------------------------------------------------------------
-    # Phase 2 (3-point mode) tests
+    # Early acceptance
     # ------------------------------------------------------------------
 
-    def test_phase2_range_b_new_best_promotes(self) -> None:
-        """In 3-point mode, Range B attempt with better score: _pass_q = old _best_q."""
-        s = self._setup_3point()
-        # State: _pass_q=20, _best_q=15, _fail_q=25
-        # Range B is [_best_q=15 ... _fail_q=25]; quality=22 is in Range B.
-        # vmaf=92 → score closer to 0 than vmaf=88 (current best) → new best
-        old_best_q = s._worse_q   # 15
-        s.record(Decimal("22"), {"vmaf_min": 92.0})
-        assert s._better_q == old_best_q   # old _best_q promoted to _pass_q
-        assert s._worse_q == Decimal("22")
-
-    def test_phase2_range_a_new_best_demotes(self) -> None:
-        """In 3-point mode, Range A attempt with better score: _fail_q = old _best_q."""
-        s = self._setup_3point()
-        # State: _pass_q=20, _best_q=15, _fail_q=25
-        # Range A is (_best_q=15 ... _pass_q=20) exclusive of _best_q; quality=18 is in Range A.
-        # vmaf=92 → score closer to 0 than vmaf=88 → new best
-        old_best_q = s._worse_q   # 15
-        s.record(Decimal("18"), {"vmaf_min": 92.0})
-        assert s._middle_q == old_best_q   # old _best_q demoted to _fail_q
-        assert s._worse_q == Decimal("18")
-
-    def test_phase2_range_b_tighten(self) -> None:
-        """In 3-point mode, Range B attempt with worse score: _fail_q = quality."""
-        s = self._setup_3point()
-        # State: _pass_q=20, _best_q=15, _fail_q=25
-        # Range B: quality=23 (vmaf=79, worse than vmaf=88) → tighten _fail_q
-        s.record(Decimal("23"), {"vmaf_min": 79.0})
-        assert s._middle_q == Decimal("23")
-        assert s._worse_q == Decimal("15")   # unchanged
-
-    def test_phase2_range_a_tighten(self) -> None:
-        """In 3-point mode, Range A attempt with worse score: _pass_q = quality."""
-        s = self._setup_3point()
-        # State: _pass_q=20, _best_q=15, _fail_q=25
-        # Range A: quality=18 (vmaf=79, worse than vmaf=88) → tighten _pass_q
-        s.record(Decimal("18"), {"vmaf_min": 79.0})
-        assert s._better_q == Decimal("18")
-        assert s._worse_q == Decimal("15")   # unchanged
-
-    # ------------------------------------------------------------------
-    # Early acceptance and exhaustion
-    # ------------------------------------------------------------------
-
-    def test_early_acceptance_sets_exhausted(self) -> None:
-        """score == 0.0 → _exhausted = True, returns None, best_targets_met = True."""
+    def test_early_acceptance_returns_none(self) -> None:
+        """A winner result (score == 0) causes record() to return None immediately."""
         s = self._make()
         result = s.record(Decimal("20"), self._early_m())
         assert result is None
-        assert s._exhausted is True
         assert s.best_targets_met is True
         assert s.best_quality == Decimal("20")
 
-    def test_exhaustion_both_ranges_le_granularity(self) -> None:
-        """When both ranges collapse to <= granularity, returns None."""
-        # Use a very tight range so it exhausts quickly.
+    def test_subsequent_calls_after_early_acceptance_return_none(self) -> None:
+        """After early acceptance, all subsequent record() calls return None."""
+        s = self._make()
+        s.record(Decimal("20"), self._early_m())
+        assert s.record(Decimal("20"), self._PASS_M) is None
+        assert s.record(Decimal("25"), self._FAIL_M) is None
+
+    # ------------------------------------------------------------------
+    # Exhaustion via tight range
+    # ------------------------------------------------------------------
+
+    def test_exhaustion_tight_range_terminates(self) -> None:
+        """A very tight range exhausts within a bounded number of iterations."""
         s = QualitySearchV2(
             quality_better  = Decimal("19"),
             quality_worse   = Decimal("21"),
             quality_targets = self._TARGET,
             granularity     = self._GRAN,
         )
-        # Drive it to exhaustion by recording attempts.
         current_q = Decimal("20")
         for _ in range(20):
             result = s.record(current_q, self._FAIL_M)
             if result is None:
                 break
             current_q = result
-        assert s._exhausted is True
-
-    def test_subsequent_calls_after_exhaustion_return_none(self) -> None:
-        """After exhaustion, all subsequent record() calls return None."""
-        s = self._make()
-        # Early acceptance exhausts immediately.
-        s.record(Decimal("20"), self._early_m())
-        assert s.record(Decimal("20"), self._PASS_M) is None
-        assert s.record(Decimal("25"), self._FAIL_M) is None
+        else:
+            pytest.fail("QualitySearchV2 did not exhaust within 20 iterations on a tight range")
 
     # ------------------------------------------------------------------
     # Constructor validation
@@ -679,6 +627,7 @@ class TestEncodeChunkIntegration:
         # After one record call, attempts == 1 and best_quality is set.
         assert s.attempts == 1
         assert s.best_quality is not None
+        assert isinstance(s, QualitySearchProtocol)
 
     def test_qualitysearch_protocol_structural_compatibility(self) -> None:
         """QualitySearch is structurally compatible with QualitySearchProtocol (runtime check)."""
