@@ -13,9 +13,11 @@ manually or in a downstream step.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -58,6 +60,7 @@ if TYPE_CHECKING:
         EncodingPhase,
         EncodingPhaseResult,
     )
+    from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
     from pyqenc.phases.job import JobPhase, JobPhaseResult
 
 logger = logging.getLogger(__name__)
@@ -562,19 +565,24 @@ class MergePhase:
     ) -> None:
         from pyqenc.phases.audio import AudioPhase as _AudioPhase
         from pyqenc.phases.encoding import EncodingPhase as _EncodingPhase
+        from pyqenc.phases.extraction import ExtractionPhase as _ExtractionPhase
         from pyqenc.phases.job import JobPhase as _JobPhase
 
-        self._config:    "PipelineConfig"           = config
-        self._collector: "MetricsCollector"         = collector
-        self._job:       "_JobPhase | None"          = cast("_JobPhase",      phases[_JobPhase])      if phases else None
-        self._encoding:  "_EncodingPhase | None"     = cast("_EncodingPhase", phases[_EncodingPhase]) if phases else None
-        self._audio:     "_AudioPhase | None"        = cast("_AudioPhase",    phases[_AudioPhase])    if phases else None
+        self._config:     "PipelineConfig"            = config
+        self._collector:  "MetricsCollector"          = collector
+        self._job:        "_JobPhase | None"           = cast("_JobPhase",        phases[_JobPhase])        if phases else None
+        self._extraction: "_ExtractionPhase | None"   = cast("_ExtractionPhase", phases[_ExtractionPhase]) if phases else None
+        self._encoding:   "_EncodingPhase | None"     = cast("_EncodingPhase",   phases[_EncodingPhase])   if phases else None
+        self._audio:      "_AudioPhase | None"        = cast("_AudioPhase",      phases[_AudioPhase])      if phases else None
         self.params      = MergeParams(
             quality_targets  = _targets_as_strings(config.quality_targets),
             metrics_sampling = config.metrics_sampling,
         )
-        self.result:     "MergePhaseResult | None"   = None
-        self.dependencies: "list[Phase]"             = [d for d in [self._job, self._encoding, self._audio] if d is not None]
+        self.result:      "MergePhaseResult | None"   = None
+        self.dependencies: "list[Phase]"              = [
+            d for d in [self._job, self._extraction, self._encoding, self._audio]
+            if d is not None
+        ]
 
     # ------------------------------------------------------------------
     # Public Phase interface
@@ -711,6 +719,20 @@ class MergePhase:
 
         if not self._job.result.is_complete:  # type: ignore[union-attr]
             err = "JobPhase did not complete successfully"
+            logger.critical(err)
+            return _failed(err)
+
+        if self._extraction is None:
+            return _failed("MergePhase requires ExtractionPhase")
+
+        if self._extraction.result is None:
+            if execute:
+                self._extraction.run()
+            else:
+                self._extraction.scan()
+
+        if not self._extraction.result.is_complete:  # type: ignore[union-attr]
+            err = "ExtractionPhase did not complete successfully"
             logger.critical(err)
             return _failed(err)
 
@@ -946,36 +968,63 @@ class MergePhase:
 
                 logger.info("  Starting concatenation of %d chunks...", len(strategy_chunks))
 
-                # Write concat list to a temp file
-                concat_file = final_dir / f"concat_{safe_name}{TEMP_SUFFIX}.txt"
-                with concat_file.open("w", encoding="utf-8") as fh:
-                    for chunk_path in strategy_chunks:
-                        abs_path = chunk_path.resolve()
-                        escaped  = str(abs_path).replace("'", "'\\''")
-                        fh.write(f"file '{escaped}'\n")
+                # Resolve timestamps path from ExtractionPhase result
+                timestamps_path: Path | None = (
+                    self._extraction.result.timestamps_path  # type: ignore[union-attr]
+                    if self._extraction is not None and self._extraction.result is not None
+                    else None
+                )
 
+                if timestamps_path is None or not timestamps_path.exists():
+                    logger.critical(
+                        "timestamps.txt not found — cannot restore PTS. "
+                        "Re-run the extraction phase to generate it."
+                    )
+                    failed_strategies.append(strategy_name)
+                    continue
+
+                # Write mkvmerge options file
+                options_file = final_dir / f"concat_{safe_name}.json"
+                args = _build_mkvmerge_options(strategy_chunks, output_file, timestamps_path)
+                _write_mkvmerge_options_file(options_file, args)
+
+                # Run mkvmerge via options file (avoids OS command-line length limits)
+                cmd_mkvmerge: list[str | os.PathLike] = ["mkvmerge", f"@{options_file}"]
+                logger.debug("mkvmerge command: %s", " ".join(str(a) for a in cmd_mkvmerge))
+
+                with self._collector.time(MetricKey.MERGE, "concat"):
+                    mkvmerge_result = subprocess.run(
+                        cmd_mkvmerge, capture_output=True, text=True
+                    )
+
+                if mkvmerge_result.returncode != 0:
+                    logger.error(
+                        "mkvmerge failed for strategy %s (exit %d)",
+                        strategy_name, mkvmerge_result.returncode,
+                    )
+                    for line in mkvmerge_result.stderr.splitlines()[-20:]:
+                        logger.error("mkvmerge stderr: %s", line)
+                    # Leave options file on disk for debugging
+                    failed_strategies.append(strategy_name)
+                    continue
+
+                # Delete options file on success
+                options_file.unlink(missing_ok=True)
+
+                logger.debug("  Concatenation complete: %s", output_file.name)
+
+                # Write concat list to a temp file (kept for reference / dead code after mkvmerge switch)
+                concat_file = final_dir / f"concat_{safe_name}{TEMP_SUFFIX}.txt"
                 concat_cmd: list[str | os.PathLike] = [
                     "ffmpeg",
                     "-f",      "concat",
                     "-safe",   "0",
                     "-i",      concat_file,
                     "-c",      "copy",
-                    "-fflags", "+genpts"
+                    "-fflags", "+genpts",
                     "-y",
                     output_file,
                 ]
-
-                logger.debug("Concat command: %s", " ".join(str(a) for a in concat_cmd))
-                with self._collector.time(MetricKey.MERGE, "concat"):
-                    concat_result = run_ffmpeg(concat_cmd, output_file=output_file)
-                concat_file.unlink(missing_ok=True)
-
-                if not concat_result.success:
-                    logger.error("Concatenation failed for strategy %s", strategy_name)
-                    failed_strategies.append(strategy_name)
-                    continue
-
-                logger.debug("  Concatenation complete: %s", output_file.name)
 
                 # Verify frame count
                 frame_count:       int | None = None
@@ -1163,6 +1212,49 @@ class MergePhase:
 # ---------------------------------------------------------------------------
 # MergePhase module-level helpers
 # ---------------------------------------------------------------------------
+
+def _build_mkvmerge_options(
+    chunks:          list[Path],
+    output:          Path,
+    timestamps_path: Path,
+) -> list[str]:
+    """Build the mkvmerge argument list for chunk concatenation with PTS restoration.
+
+    The first chunk is listed without a prefix; each subsequent chunk is
+    preceded by ``"+"`` as a separate element (mkvmerge append syntax).
+    ``--timestamps`` is applied to track 0 of the first chunk only.
+
+    Args:
+        chunks:          Ordered list of encoded chunk paths.
+        output:          Destination output MKV path.
+        timestamps_path: Path to the timestamps.txt file.
+
+    Returns:
+        List of strings suitable for writing to a JSON options file.
+    """
+    args: list[str] = [
+        "-o",          str(output),
+        "--timestamps", f"0:{timestamps_path}",
+        str(chunks[0]),
+    ]
+    for chunk in chunks[1:]:
+        args.append(f"+{chunk}")
+    return args
+
+
+def _write_mkvmerge_options_file(path: Path, args: list[str]) -> None:
+    """Write mkvmerge arguments to a JSON options file atomically.
+
+    Uses the ``.tmp``-then-rename protocol for consistency.
+
+    Args:
+        path: Destination path for the options file.
+        args: List of mkvmerge argument strings.
+    """
+    tmp = path.parent / f"{path.stem}{TEMP_SUFFIX}"
+    tmp.write_text(json.dumps(args, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
 
 def _outcome_from_artifacts(
     artifacts: list[MergeArtifact],
