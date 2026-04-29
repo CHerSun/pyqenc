@@ -869,6 +869,9 @@ class QualitySearch:
             self._better_point = new_point
         else:
             self._worse_point = new_point
+            # Track best-fail for best_quality fallback
+            if self._best_point is None or new_point.score > self._best_point.score:
+                self._best_point = new_point
 
         # Exhaustion check: bracket collapsed to ≤ granularity.
         if (
@@ -994,6 +997,7 @@ class QualitySearchV2:
         self._granularity:      Decimal              = granularity
         self._quality_max_step: Decimal | None       = quality_max_step
         self._best_score_point: QualityPoint | None  = None
+        self._exhausted:        bool                 = False
 
         # Inclusive limits
         self._upper : QualityPoint = QualityPoint(quality_better, 0, None)
@@ -1054,12 +1058,16 @@ class QualitySearchV2:
         except ValueError:
             raise ValueError("QualitySearchV2: missing metric key for quality=%s" % quality)
 
+        if self._exhausted:
+            return None
+
         # Save the new point
         self._attempted_points[quality] = new_point
 
         # Do we have a winner?
         if new_point.is_winner:
             self._best_score_point = new_point
+            self._exhausted        = True
             return None
         # Update best score point if:
         # - no best score point is present yet

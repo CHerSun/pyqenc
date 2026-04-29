@@ -622,9 +622,9 @@ class TestEncodeChunkIntegration:
         assert s.best_quality is None
         assert s.best_metrics is None
         assert s.best_targets_met is False
-        result = s.record(Decimal("25"), {"vmaf_min": 90.0})
+        result = s.record(Decimal("25"), {"vmaf_min": 96.0})   # passing attempt
         assert result is None or isinstance(result, Decimal)
-        # After one record call, attempts == 1 and best_quality is set.
+        # After one passing record call, attempts == 1 and best_quality is set.
         assert s.attempts == 1
         assert s.best_quality is not None
         assert isinstance(s, QualitySearchProtocol)
