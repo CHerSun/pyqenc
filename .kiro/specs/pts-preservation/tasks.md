@@ -24,8 +24,9 @@ No new external tools or Python packages are introduced — only `ffmpeg`,
 
 - [x] 2. Implement timestamp extraction
   - [x] 2.1 Implement `_extract_timestamps(source, video_track_id, output)` in `extraction.py`
-    - Run `ffprobe -v error -select_streams <video_track_id> -show_packets -show_entries packet=pts_time -of csv=print_section=0`
-    - Convert each output line: `int(float(line.strip()) * 1000)` → integer milliseconds
+    - Run `ffprobe -v error -select_streams <video_track_id> -show_packets -show_entries packet=pts -of csv=print_section=0`
+    - Parse each output line as a direct integer (`int(line.strip())`)
+    - Sort values ascending (ffprobe returns packets in decode/DTS order, non-monotonic for B-frame content)
     - Write `# timestamp format v2` header followed by one value per line
     - Use `.tmp`-then-rename protocol for atomicity
     - On ffprobe failure, empty output, or any unparseable line → log `critical`, raise
@@ -50,7 +51,7 @@ No new external tools or Python packages are introduced — only `ffmpeg`,
     - _Requirements: 5.2_
  
   - [x] 2.5 Write unit tests for timestamp extraction
-    - `test_extract_timestamps_format`: mock ffprobe output with known PTS values; verify header and `int(pts * 1000)` per line
+    - `test_extract_timestamps_format`: mock ffprobe output with known integer PTS values in decode order; verify header and sorted ascending values per line
     - `test_timestamp_artifact_recovery_complete`: timestamps.txt present → `COMPLETE`
     - `test_timestamp_artifact_recovery_absent`: timestamps.txt absent → `ABSENT`
     - `test_timestamp_artifact_force_wipe`: `force_wipe=True` → file deleted
@@ -59,7 +60,7 @@ No new external tools or Python packages are introduced — only `ffmpeg`,
 
   - [x] 2.6 Write property test: PTS conversion correctness (Property 1)
     - **Property 1: PTS conversion correctness**
-    - Generate random float PTS values in seconds; call conversion logic directly; verify each output line equals `int(pts_seconds * 1000)` and file starts with `# timestamp format v2`
+    - Generate random integer PTS values in decode order (unsorted); call conversion logic directly; verify output is sorted ascending and file starts with `# timestamp format v2`
     - Tag: `# Feature: pts-preservation, Property 1: PTS conversion correctness`
     - **Validates: Requirements 3.1, 3.2**
 
@@ -107,9 +108,9 @@ No new external tools or Python packages are introduced — only `ffmpeg`,
     - Bitmap subtitles (pgs, sub): no `-f` flag needed
     - _Requirements: 1.1, 1.4, 1.5_
 
-  - [x] 5.3 Replace chapter extraction with `run_ffmpeg()` call
-    - `ffmpeg -i source -f ffmetadata output_file`
-    - Update `ChaptersStream.file_extension` from `"xml"` to `"txt"`
+  - [x] 5.3 Replace chapter extraction with `ffprobe` call
+    - `ffprobe -v error -show_chapters -print_format xml source` → capture stdout → write atomically via `.tmp`-then-rename
+    - Update `ChaptersStream.file_extension` from `"txt"` to `"xml"`
     - _Requirements: 1.1, 1.4, 1.6_
 
   - [x] 5.4 Replace attachment extraction with `run_ffmpeg()` call
@@ -125,7 +126,7 @@ No new external tools or Python packages are introduced — only `ffmpeg`,
   - [x] 5.6 Write unit tests for ffmpeg-based stream extraction
     - `test_subtitle_text_extraction_uses_ffmpeg`: verify `run_ffmpeg` called with `-f srt` / `-f ass`
     - `test_subtitle_bitmap_extraction_no_format_flag`: verify no `-f` for pgs/sub
-    - `test_chapter_extraction_uses_ffmetadata`: verify `-f ffmetadata` in chapter cmd
+    - `test_chapter_extraction_uses_ffprobe_xml`: verify `ffprobe` called with `-show_chapters -print_format xml` and output written to `chapters.xml`
     - `test_attachment_extraction_uses_dump_attachment`: verify `-dump_attachment:<id>` in cmd
     - `test_no_mkvextract_calls`: verify `mkvextract` is never invoked
     - _Requirements: 1.1, 1.4–1.7_
@@ -195,7 +196,7 @@ No new external tools or Python packages are introduced — only `ffmpeg`,
 - [x] 8. Final checkpoint — ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [-] 9. Cross-spec review and spec housekeeping
+- [x] 9. Cross-spec review and spec housekeeping
   - Review this spec against `merge-phase-revamp`, `ffmpeg-unified-runner`, `phase-recovery-refactor`, and `metrics-two-tier`
   - Add or update cross-spec summary at the top of this spec and at the top of each related spec where relevant changes or supersessions exist
   - Update `Completed` date in this spec (`- Completed: <ISO date>`)

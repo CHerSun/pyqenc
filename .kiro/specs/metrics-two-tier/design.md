@@ -4,6 +4,14 @@
 
 - Created: 2026-06-15
 
+## Cross-Spec Summary
+
+| Spec | Created | Relationship |
+|------|---------|--------------|
+| `pts-preservation` | 2026-04-29 (Completed) | **No conflict. Earlier spec.** `pts-preservation` was completed before this spec was created. It does not use any `MetricKey` dotted keys for the new `_extract_timestamps()` step, though timing it under `MetricKey.EXTRACTION` is possible if desired. The `mkvmerge` concat step in `MergePhase` could similarly be timed under `MetricKey.MERGE, "concat"` per this spec's dotted key convention. No changes to `pts-preservation` are required. |
+
+---
+
 ## Overview
 
 The current `TimeKey` StrEnum maps phase events to dotted string values (e.g.

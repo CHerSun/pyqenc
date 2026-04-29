@@ -3,6 +3,7 @@
 <!-- markdownlint-disable MD024 -->
 
 - Created: 2026-04-29
+- Completed: 2026-04-29
 
 ## Cross-Spec Summary
 
@@ -71,8 +72,8 @@ flowchart TD
 
 ```
 source.mkv
-  └─► ffprobe -select_streams <video_track_id> -show_packets -show_entries packet=pts_time
-        └─► parse float seconds → int milliseconds → sort → deduplicate
+  └─► ffprobe -select_streams <video_track_id> -show_packets -show_entries packet=pts
+        └─► parse raw integer PTS values → sort ascending (decode order → presentation order)
               └─► extracted/timestamps.txt  (# timestamp format v2)
                     └─► ExtractionPhaseResult.timestamps_path
                           └─► mkvmerge options file: --timestamps 0:timestamps.txt
@@ -118,9 +119,10 @@ class ExtractionPhaseResult(PhaseResult):
 def _extract_timestamps(source: Path, video_track_id: int, output: Path) -> None:
     """Extract per-frame PTS values from source and write timestamps.txt.
 
-    Uses ffprobe to obtain pts_time for every packet in the specified video
-    track, converts to integer milliseconds, sorts, deduplicates, and
-    writes in # timestamp format v2 using the .tmp-then-rename protocol.
+    Uses ffprobe to obtain raw integer ``pts`` for every packet in the specified
+    video track, sorts ascending (ffprobe returns packets in decode/DTS order,
+    which is non-monotonic for B-frame content), and writes in
+    # timestamp format v2 using the .tmp-then-rename protocol.
 
     The video_track_id must be the same track_id used for video extraction
     (from VideoStream.track_id) to guarantee PTS values correspond to the
@@ -146,17 +148,17 @@ def _extract_timestamps(source: Path, video_track_id: int, output: Path) -> None
         "ffprobe", "-v", "error",
         "-select_streams", str(video_track_id),
         "-show_packets",
-        "-show_entries", "packet=pts_time",
+        "-show_entries", "packet=pts",
         "-of", "csv=print_section=0",
         source,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
-    pts_ms: list[int] = [
-        int(float(line.strip()) * 1000)
+    pts_ms: list[int] = sorted(
+        int(line.strip())
         for line in result.stdout.splitlines()
         if line.strip()
-    ]
+    )
 
     tmp = output.parent / f"{output.stem}{TEMP_SUFFIX}"
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -223,13 +225,15 @@ run_ffmpeg(cmd, output_file=output_file)
 
 Bitmap subtitles (`.sub`, `.pgs`) use `-c copy` without `-f` — the codec is self-describing.
 
-**Chapters** (ffmetadata format — note: produces ffmetadata, not XML):
+**Chapters** (ffprobe XML format):
 ```python
-cmd = ["ffmpeg", "-i", source, "-f", "ffmetadata", output_file]
-run_ffmpeg(cmd, output_file=output_file)
+chapters_cmd = ["ffprobe", "-v", "error", "-show_chapters", "-print_format", "xml", source]
+result = subprocess.run(chapters_cmd, capture_output=True, text=True, check=True)
+tmp.write_text(result.stdout, encoding="utf-8")
+tmp.replace(output_file)
 ```
 
-The chapter output file extension changes from `.xml` (mkvextract format) to `.txt` (ffmetadata format). The `ChaptersStream.file_extension` property must be updated accordingly.
+The chapter output file extension is `.xml`. ffprobe writes to stdout — we capture it and write atomically using the `.tmp`-then-rename protocol ourselves. This is consistent with the `_extract_timestamps()` pattern (direct `subprocess.run` for non-ffmpeg tools).
 
 **Attachments:**
 
@@ -433,8 +437,8 @@ class ExtractionPhaseResult(PhaseResult):
 ```
 
 - Line 1: literal `# timestamp format v2`
-- Lines 2…N+1: one integer millisecond timestamp per frame (`int(pts_seconds * 1000)`)
-- No filtering, sorting, or deduplication — values are written as-is from ffprobe output
+- Lines 2…N+1: one integer PTS value per frame in the container's native timebase units, sorted ascending
+- Values are sorted (ffprobe returns packets in decode/DTS order, non-monotonic for B-frame content)
 
 ### mkvmerge options file format
 
@@ -459,9 +463,9 @@ class ExtractionPhaseResult(PhaseResult):
 
 ### Property 1: PTS conversion correctness
 
-*For any* floating-point PTS value in seconds (as produced by ffprobe), the conversion to integer milliseconds must equal `int(pts_seconds * 1000)`, and the output file must start with exactly `# timestamp format v2` followed by one converted value per input line.
+*For any* integer PTS value (as produced by ffprobe `packet=pts`), the value must be written as-is to the output file, and the output file must start with exactly `# timestamp format v2` followed by the values sorted ascending.
 
-This property tests only the format translation — float seconds to integer milliseconds with the v2 header. The conversion does not filter, sort, deduplicate, or otherwise modify the input values.
+This property tests only the format translation — raw integer PTS values with the v2 header, sorted. No unit conversion is applied; ffprobe `packet=pts` already returns values in the container's native timebase units.
 
 **Validates: Requirements 3.1, 3.2**
 
@@ -529,7 +533,7 @@ This property tests only the format translation — float seconds to integer mil
 
 Unit tests verify specific behaviors with concrete examples:
 
-- `test_extract_timestamps_format`: Given a mock `ffprobe` output with known PTS values, verify the written `timestamps.txt` has the correct header and correct integer millisecond values (`int(pts_seconds * 1000)` per line).
+- `test_extract_timestamps_format`: Given a mock `ffprobe` output with known integer PTS values in decode order, verify the written `timestamps.txt` has the correct header and values sorted ascending.
 - `test_timestamp_artifact_recovery_complete`: Given `timestamps.txt` present on disk, verify `_recover()` classifies it as `COMPLETE`.
 - `test_timestamp_artifact_recovery_absent`: Given no `timestamps.txt` on disk, verify `_recover()` classifies it as `ABSENT`.
 - `test_timestamp_artifact_force_wipe`: Given `force_wipe=True`, verify `timestamps.txt` is deleted.
@@ -550,7 +554,7 @@ Each test is tagged with a comment referencing the design property:
 # Feature: pts-preservation, Property N: <property_text>
 ```
 
-- **Property 1** — `test_pts_conversion_correctness`: Generate random float PTS values in seconds, call the conversion function directly, verify each output line equals `int(pts_seconds * 1000)` and the file starts with `# timestamp format v2`.
+- **Property 1** — `test_pts_conversion_correctness`: Generate random integer PTS values in decode order (unsorted); call the conversion function directly; verify the output file starts with `# timestamp format v2` and values are sorted ascending with no modification.
 
 - **Property 2** — `test_timestamp_filter_independence`: Generate random include/exclude filter strings, run `_recover()` with a pre-existing `timestamps.txt`, verify `TimestampArtifact` is always in the artifact list and its state is only `COMPLETE` or `ABSENT`.
 

@@ -3,6 +3,7 @@
 <!-- markdownlint-disable MD024 -->
 
 - Created: 2026-04-29
+- Completed: 2026-04-29
 
 ## Introduction
 
@@ -23,9 +24,10 @@ The solution has two parts:
 
 - **Extraction phase**: remove `avoid_negative_ts make_zero`; extract per-frame
   PTS timestamps from the source using `ffprobe` and save them as
-  `extracted/timestamps.txt` in `# timestamp format v2` (milliseconds, one per
-  line, sorted). Also replace `mkvextract` for subtitles/chapters/attachments
-  with `ffmpeg`, making extraction fully container-agnostic.
+  `extracted/timestamps.txt` in `# timestamp format v2` (raw integer PTS values
+  in the container's native timebase, sorted ascending). Also replace `mkvextract`
+  for subtitles/chapters/attachments with `ffmpeg`/`ffprobe`, making extraction
+  fully container-agnostic.
 
 - **Merge phase**: replace the ffmpeg concat demuxer with `mkvmerge`, passing
   all arguments via a JSON options file (`@options.json`) to handle thousands of
@@ -97,8 +99,9 @@ to MKV/WebM sources.
    this change.
 5. WHEN extracting a subtitle stream with `ffmpeg`, THE ExtractionPhase SHALL
    use `-map 0:<track_id> -c copy` and write to the appropriate output file.
-6. WHEN extracting chapters with `ffmpeg`, THE ExtractionPhase SHALL use
-   `-f ffmetadata` or an equivalent format that preserves chapter metadata.
+6. WHEN extracting chapters with `ffprobe`, THE ExtractionPhase SHALL use
+   `-show_chapters -print_format xml` and write the XML output atomically to
+   `chapters.xml` using the `.tmp`-then-rename protocol.
 7. WHEN extracting attachments with `ffmpeg`, THE ExtractionPhase SHALL use
    `-map 0:<track_id> -c copy` and write to the appropriate output file.
 
@@ -133,11 +136,12 @@ that the merge phase can restore exact source timestamps.
 #### Acceptance Criteria
 
 1. THE ExtractionPhase SHALL run `ffprobe` with
-   `-v error -select_streams v:0 -show_packets -show_entries packet=pts_time -of csv=print_section=0`
-   on the source video to obtain per-frame PTS values in seconds (floating-point).
-2. THE ExtractionPhase SHALL convert the `ffprobe` output to `# timestamp format v2`:
-   first line is `# timestamp format v2`, followed by one integer millisecond
-   timestamp per line, sorted ascending, one per frame.
+   `-v error -select_streams v:0 -show_packets -show_entries packet=pts -of csv=print_section=0`
+   on the source video to obtain raw integer PTS values in the container's timebase units.
+2. THE ExtractionPhase SHALL write the `ffprobe` output to `# timestamp format v2`:
+   first line is `# timestamp format v2`, followed by the PTS values sorted ascending
+   (one integer per line). Sorting is required because ffprobe returns packets in
+   decode order (DTS order), which is non-monotonic for B-frame content.
 3. THE ExtractionPhase SHALL write the result to `extracted/timestamps.txt` using
    the `.tmp`-then-rename protocol for atomicity.
 4. THE TimestampArtifact SHALL NOT be subject to include/exclude stream filtering —

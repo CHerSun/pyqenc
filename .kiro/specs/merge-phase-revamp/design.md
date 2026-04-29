@@ -5,6 +5,14 @@
 - Created: 2026-03-19
 - Completed: 2026-03-19
 
+## Cross-Spec Summary
+
+| Spec | Created | Relationship |
+|------|---------|--------------|
+| `pts-preservation` | 2026-04-29 (Completed) | **Supersedes this spec in part.** `pts-preservation` replaces the ffmpeg concat demuxer path introduced here (the `concat_<safe_name>.txt` file and the `_execute_merge` ffmpeg concat logic) with `mkvmerge` + a JSON options file. The Python string concatenation bug (`"+genpts"` missing comma) that was introduced by this spec is fixed by `pts-preservation` Requirement 7, even though the ffmpeg concat path becomes dead code after the switch. |
+
+---
+
 ## Overview
 
 This document describes the design for eight targeted improvements to the merge phase and the shared metrics pipeline. The changes are surgical — no new abstractions are introduced; existing code is corrected and extended in place.

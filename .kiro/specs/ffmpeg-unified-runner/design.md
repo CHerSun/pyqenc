@@ -1,7 +1,17 @@
 # Design Document — FFmpeg Unified Runner
 
+<!-- markdownlint-disable MD024 -->
+
 - Created: 2026-03-17
 - Completed: 2026-03-17
+
+## Cross-Spec Summary
+
+| Spec | Created | Relationship |
+|------|---------|--------------|
+| `pts-preservation` | 2026-04-29 (Completed) | **Extends this spec.** `pts-preservation` adds new ffmpeg calls for subtitle, chapter, and attachment extraction (replacing `mkvextract`), all routed through `run_ffmpeg()` / `run_ffmpeg_async()` as required by this spec. The `_extract_timestamps()` function uses `subprocess.run` directly for `ffprobe` — consistent with the existing `MKVTrackExtractor._run_ffprobe()` pattern and not a violation of this spec's ffmpeg-only mandate. |
+
+---
 
 ## Overview
 

@@ -2,7 +2,15 @@
 
 <!-- markdownlint-disable MD024 -->
 
-Created: 2026-03-17
+- Created: 2026-03-17
+
+## Cross-Spec Summary
+
+| Spec | Created | Relationship |
+|------|---------|--------------|
+| `pts-preservation` | 2026-04-29 (Completed) | **Extends this spec.** `pts-preservation` adds `TimestampArtifact` to the extraction phase's artifact set, following the `COMPLETE`/`ABSENT` recovery pattern established here. The `force_wipe` propagation path is unchanged. `TimestampArtifact` uses only `COMPLETE` and `ABSENT` states (no `STALE`) — consistent with the two-state pattern used for artifacts that have no run-variable parameters affecting their validity. |
+
+---
 
 ## Overview
 
