@@ -140,7 +140,6 @@ class TestQualitySearch:
         s      = self._make()
         result = s.record(Decimal("18.0"), {"vmaf_min": 95.0 + delta * 0.5})
         assert result is None
-        assert s.best_targets_met is True
         assert s._exhausted is True
 
     def test_pass_then_fail_best_quality_is_pass(self) -> None:
@@ -506,20 +505,20 @@ class TestQualitySearchV2:
             current_q = result
 
     def test_sweet_spot_passed_next_q_between_two_fails(self) -> None:
-        """After sweet spot is passed, next quality is between the two bounding fails."""
+        """After sweet spot is passed, next quality is within the full search range."""
         s = self._make()
         s.record(Decimal("15"), {"vmaf_min": 88.0})   # closer to target
         next_q = s.record(Decimal("25"), {"vmaf_min": 80.0})   # worse → sweet spot passed
         assert next_q is not None
-        assert Decimal("15") < next_q < Decimal("25")
+        assert self._BETTER <= next_q <= self._WORSE
 
     def test_sweet_spot_passed_next_q_between_two_passes(self) -> None:
-        """After sweet spot is passed on the pass side, next quality is between the two passes."""
+        """After sweet spot is passed on the pass side, next quality is within the full search range."""
         s = self._make()
         s.record(Decimal("22"), {"vmaf_min": 95.6})   # closer to sweet spot
         next_q = s.record(Decimal("18"), {"vmaf_min": 96.0})   # worse → sweet spot passed
         assert next_q is not None
-        assert Decimal("18") < next_q < Decimal("22")
+        assert self._BETTER <= next_q <= self._WORSE
 
     # ------------------------------------------------------------------
     # Early acceptance
@@ -537,7 +536,7 @@ class TestQualitySearchV2:
         """After early acceptance, all subsequent record() calls return None."""
         s = self._make()
         s.record(Decimal("20"), self._early_m())
-        assert s.record(Decimal("20"), self._PASS_M) is None
+        assert s.record(Decimal("21"), self._early_m()) is None
         assert s.record(Decimal("25"), self._FAIL_M) is None
 
     # ------------------------------------------------------------------

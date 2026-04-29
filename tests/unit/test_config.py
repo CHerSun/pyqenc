@@ -46,8 +46,11 @@ class TestConfigManager:
         assert "slow+h265*" in strategies
 
     def test_get_codec(self):
-        """Test retrieving codec configuration."""
-        config = ConfigManager()
+        """Test retrieving codec configuration from the built-in default config."""
+        from pyqenc.config import find_config_source
+        # Use the built-in default explicitly to avoid picking up a local pyqenc.yaml
+        builtin = Path(__import__("pyqenc").__file__).parent / "default_config.yaml"
+        config = ConfigManager(builtin)
 
         codec = config.get_codec("h265-10bit")
         assert codec.name == "h265-10bit"
