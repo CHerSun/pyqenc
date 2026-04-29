@@ -127,11 +127,12 @@ class StreamBase:
         return [f"{key}={value}" for key, value in self._wanted_tags.items() if value]
 
     def __display_name(self, track_num_width: int = 2, track_id_width: int = 2) -> str:
-        return ' '.join([
+        name = ' '.join(filter(None, [
             self._track_ids_string(track_num_width, track_id_width),
             f"({self.codec_type}-{self.codec_name})",
-            f"{' '.join(self._tags_formatted)}.{self.file_extension}",
-        ])
+            ' '.join(self._tags_formatted),
+        ]))
+        return f"{name}.{self.file_extension}"
 
     def display_name(self, track_num_width: int = 2, track_id_width: int = 2) -> str:
         """Human-readable filename/display string for this stream."""
@@ -534,7 +535,13 @@ import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeAlias, cast
 
-from pyqenc.constants import EXTRACTED_DIR, TEMP_SUFFIX, THICK_LINE, THIN_LINE, TIMESTAMPS_FILENAME
+from pyqenc.constants import (
+    EXTRACTED_DIR,
+    TEMP_SUFFIX,
+    THICK_LINE,
+    THIN_LINE,
+    TIMESTAMPS_FILENAME,
+)
 from pyqenc.models import AudioMetadata, PhaseOutcome, VideoMetadata
 from pyqenc.phase import Artifact, Phase, PhaseResult
 from pyqenc.state import ArtifactState, ExtractionParams
