@@ -681,7 +681,9 @@ class MergePhase:
             return self.result
 
         # Execute merging
-        result = self._execute_merge(artifacts)
+        from pyqenc.metrics import MetricKey
+        with self._collector.time(MetricKey.MERGE):
+            result = self._execute_merge(artifacts)
         self.result = result
         return result
 
@@ -964,7 +966,7 @@ class MergePhase:
                 ]
 
                 logger.debug("Concat command: %s", " ".join(str(a) for a in concat_cmd))
-                with self._collector.time(MetricKey.MERGE):
+                with self._collector.time(MetricKey.MERGE, "concat"):
                     concat_result = run_ffmpeg(concat_cmd, output_file=output_file)
                 concat_file.unlink(missing_ok=True)
 
@@ -999,7 +1001,7 @@ class MergePhase:
 
                 if source_video and self._config.quality_targets:
                     try:
-                        with self._collector.time(MetricKey.MERGE):
+                        with self._collector.time(MetricKey.MERGE, "quality_measure"):
                             metrics_dict, targets_met, plot_path = _measure_quality(
                                 final_result     = output_file,
                                 source_video     = source_video,

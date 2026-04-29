@@ -32,6 +32,7 @@ from pyqenc.constants import (
     DOWN_ARROW,
     LEFT_ARROW,
     RIGHT_ARROW,
+    TIME_SEPARATOR_MS,
     TIMEOUT_SECONDS_SHORT,
     UP_ARROW,
 )
@@ -171,6 +172,12 @@ class Strategy(BaseModel):
     profile:      str
     codec:        "CodecConfig"
     profile_args: list[str]
+
+    @field_validator("preset", "profile", mode="before")
+    @classmethod
+    def _sanitize_dots(cls, v: str) -> str:
+        """Replace ASCII dots with ``TIME_SEPARATOR_MS`` so ``strategy.name`` is dot-free."""
+        return v.replace(".", TIME_SEPARATOR_MS)
 
     @property
     def name(self) -> str:

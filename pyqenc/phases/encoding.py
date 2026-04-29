@@ -1162,16 +1162,17 @@ async def _encode_chunk_async(
 
 
 async def _encode_chunks_parallel(
-    encoder:         ChunkEncoder,
-    chunks:          list[ChunkMetadata],
-    reference_dir:   Path,
-    strategies:      list[Strategy],
-    quality_targets: list[QualityTarget],
-    max_parallel:    int,
-    force:           bool,
-    collector:       "MetricsCollector",
-    phase_recovery:  "_PhaseRecovery | None"                                  = None,
-    advance:         Callable[[int | float, AdvanceState | None], None] | None = None,
+    encoder:          ChunkEncoder,
+    chunks:           list[ChunkMetadata],
+    reference_dir:    Path,
+    strategies:       list[Strategy],
+    quality_targets:  list[QualityTarget],
+    max_parallel:     int,
+    force:            bool,
+    collector:        "MetricsCollector",
+    phase_recovery:   "_PhaseRecovery | None"                                  = None,
+    advance:          Callable[[int | float, AdvanceState | None], None] | None = None,
+    dotted_metric_key: "MetricKey | None"                                       = None,
 ) -> EncodingResult:
     """Encode chunks in parallel with semaphore control.
 
@@ -1191,9 +1192,12 @@ async def _encode_chunks_parallel(
                         chunk completion.
         collector:      Metrics collector for timing and convergence tracking;
                         wraps the entire encoding loop with
-                        ``time(TimeKey.ENCODING_MAIN)`` and calls
-                        ``step(TimeKey.ENCODING_MAIN, convergence_update=...)``
+                        ``time(MetricKey.ENCODING)`` and calls
+                        ``step(MetricKey.ENCODING, convergence_update=...)``
                         after each chunk/strategy pair converges.
+        dotted_metric_key: When provided, use this key instead of
+                        ``MetricKey.ENCODING`` for per-strategy dotted timing
+                        (e.g. ``MetricKey.OPTIMIZATION`` for test encodes).
 
     Returns:
         EncodingResult with all encoding outcomes.
@@ -1256,15 +1260,18 @@ async def _encode_chunks_parallel(
                 chunk_initial_crf = strategy.codec.default_quality.quantize(gran)
 
                 # Encode chunk
-                chunk_result = await _encode_chunk_async(
-                    encoder,
-                    chunk,
-                    VideoMetadata(path=reference),
-                    strategy,
-                    quality_targets,
-                    chunk_initial_crf,
-                    force,
-                )
+                from pyqenc.metrics import MetricKey as _MetricKey
+                _per_strategy_key = dotted_metric_key if dotted_metric_key is not None else _MetricKey.ENCODING
+                async with collector.time(_per_strategy_key, strategy.name):
+                    chunk_result = await _encode_chunk_async(
+                        encoder,
+                        chunk,
+                        VideoMetadata(path=reference),
+                        strategy,
+                        quality_targets,
+                        chunk_initial_crf,
+                        force,
+                    )
 
                 # Update result
                 if chunk_result.success:

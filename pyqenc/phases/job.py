@@ -371,11 +371,12 @@ class JobPhase:
         source = VideoMetadata(path=self._config.source_video)
         # Eagerly probe all fields so they are persisted in job.yaml
         with self._collector.time(MetricKey.JOB):
-            _ = source.file_size_bytes
-            _ = source.duration_seconds
-            _ = source.fps
-            _ = source.resolution
-            _ = source.frame_count
+            with self._collector.time(MetricKey.JOB, "probe"):
+                _ = source.file_size_bytes
+                _ = source.duration_seconds
+                _ = source.fps
+                _ = source.resolution
+                _ = source.frame_count
 
         job = JobState(source=source)
         logger.info("Initialized job.yaml for new pipeline run")
@@ -408,5 +409,6 @@ class JobPhase:
         logger.info("Cropping: detecting black borders...")
         source = VideoMetadata(path=self._config.source_video)
         with self._collector.time(MetricKey.JOB):
-            crop = detect_crop_parameters(source)
+            with self._collector.time(MetricKey.JOB, "crop_detect"):
+                crop = detect_crop_parameters(source)
         return crop

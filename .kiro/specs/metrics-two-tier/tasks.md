@@ -126,21 +126,21 @@ construction time, and update all property-based and integration tests.
     - Tag: `# Feature: metrics-two-tier, Property 6: Resume restores accumulated store`
     - **Validates: Requirements 5.6**
 
-- [-] 7. Checkpoint — ensure all tests pass
+- [x] 7. Checkpoint — ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 8. Sanitize ASCII dots in `Strategy` and `BaseStrategy`
-  - [ ] 8.1 Add `field_validator` to `Strategy` in `pyqenc/models.py`
+- [x] 8. Sanitize ASCII dots in `Strategy` and `BaseStrategy`
+  - [x] 8.1 Add `field_validator` to `Strategy` in `pyqenc/models.py`
     - Add `@field_validator("preset", "profile", mode="before")` that replaces `"."` with
       `TIME_SEPARATOR_MS` (import from `pyqenc.constants`)
     - Import `TIME_SEPARATOR_MS` at the top of `models.py` (add to existing constants import)
     - _Requirements: 8.1, 8.3, 8.4_
-  - [ ] 8.2 Sanitize dots in `BaseStrategy.__init__` in `pyqenc/phases/audio.py`
+  - [x] 8.2 Sanitize dots in `BaseStrategy.__init__` in `pyqenc/phases/audio.py`
     - Replace `self.name = name` with `self.name = name.replace(".", TIME_SEPARATOR_MS)`
     - Replace `self.strategy_short = strategy_short` with the same replacement
     - Import `TIME_SEPARATOR_MS` from `pyqenc.constants` at the top of `audio.py`
     - _Requirements: 8.2, 8.3, 8.4, 8.5_
-  - [ ] 8.3 Write property test for strategy dot sanitization (Property 7)
+  - [x] 8.3 Write property test for strategy dot sanitization (Property 7)
     - **Property 7: Strategy dot sanitization produces valid metric keys**
     - Generate random strings (possibly containing ASCII dots) as `preset`/`profile`; construct
       `Strategy`; assert `strategy.name` contains no ASCII dot (U+002E); pass `strategy.name`
@@ -150,20 +150,20 @@ construction time, and update all property-based and integration tests.
     - Tag: `# Feature: metrics-two-tier, Property 7: Strategy dot sanitization produces valid metric keys`
     - **Validates: Requirements 8.1, 8.2, 8.5**
 
-- [ ] 9. Migrate phase call sites from `TimeKey` to `MetricKey`
-  - [ ] 9.1 Migrate `pyqenc/phases/job.py`
+- [x] 9. Migrate phase call sites from `TimeKey` to `MetricKey`
+  - [x] 9.1 Migrate `pyqenc/phases/job.py`
     - Replace `TimeKey.JOB_PROBE` → `MetricKey.JOB` (top-level, wall-clock)
     - Replace `TimeKey.JOB_CROP_DETECT` → `MetricKey.JOB` (top-level, accumulates)
     - Add dotted calls: `collector.time(MetricKey.JOB, "probe")` and
       `collector.time(MetricKey.JOB, "crop_detect")` wrapping the respective sub-operations
     - Update import: `from pyqenc.metrics import MetricKey` (remove `TimeKey`)
     - _Requirements: 2.5, 3.7, 6.4_
-  - [ ] 9.2 Migrate `pyqenc/phases/extraction.py`
+  - [x] 9.2 Migrate `pyqenc/phases/extraction.py`
     - Replace `TimeKey.EXTRACTION` → `MetricKey.EXTRACTION` (top-level only, no dotted keys)
     - Replace `TimeKey.RECOVERY` → `MetricKey.RECOVERY`
     - Update import
     - _Requirements: 2.5, 6.4_
-  - [ ] 9.3 Migrate `pyqenc/phases/chunking.py`
+  - [x] 9.3 Migrate `pyqenc/phases/chunking.py`
     - Replace `TimeKey.CHUNKING_SCENE_DETECT` → `MetricKey.CHUNKING` (top-level) + add
       `collector.time(MetricKey.CHUNKING, "scene_detect")` wrapping scene detection
     - Replace `TimeKey.CHUNKING_SPLIT` → `MetricKey.CHUNKING` (top-level) + add
@@ -172,14 +172,14 @@ construction time, and update all property-based and integration tests.
     - Replace `TimeKey.RECOVERY` → `MetricKey.RECOVERY`
     - Update import (including the `_TimeKey` alias import)
     - _Requirements: 2.5, 3.7, 6.4_
-  - [ ] 9.4 Migrate `pyqenc/phases/audio.py`
+  - [x] 9.4 Migrate `pyqenc/phases/audio.py`
     - Replace `TimeKey.AUDIO` → `MetricKey.AUDIO` (top-level, wall-clock for the whole phase)
     - Add dotted call: `collector.time(MetricKey.AUDIO, strategy.strategy_short)` wrapping
       per-strategy audio processing
     - Replace `TimeKey.RECOVERY` → `MetricKey.RECOVERY`
     - Update import
     - _Requirements: 2.5, 3.7, 6.4_
-  - [ ] 9.5 Migrate `pyqenc/phases/encoding.py`
+  - [x] 9.5 Migrate `pyqenc/phases/encoding.py`
     - Replace `TimeKey.ENCODING_MAIN` → `MetricKey.ENCODING` (top-level, wall-clock)
     - Add dotted call: `collector.time(MetricKey.ENCODING, strategy.name)` wrapping
       per-strategy encoding work inside the encoding loop
@@ -187,14 +187,14 @@ construction time, and update all property-based and integration tests.
     - Replace `TimeKey.RECOVERY` → `MetricKey.RECOVERY`
     - Update import
     - _Requirements: 2.5, 3.7, 6.4_
-  - [ ] 9.6 Migrate `pyqenc/phases/optimization.py`
+  - [x] 9.6 Migrate `pyqenc/phases/optimization.py`
     - Replace `TimeKey.ENCODING_OPTIMIZATION` → `MetricKey.OPTIMIZATION` (top-level)
     - Add dotted call: `collector.time(MetricKey.OPTIMIZATION, strategy.name)` wrapping
       per-strategy test encodes
     - Replace `TimeKey.RECOVERY` → `MetricKey.RECOVERY`
     - Update import
     - _Requirements: 2.5, 3.7, 6.4_
-  - [ ] 9.7 Migrate `pyqenc/phases/merge.py`
+  - [x] 9.7 Migrate `pyqenc/phases/merge.py`
     - Replace `TimeKey.MERGE_CONCAT` → `MetricKey.MERGE` (top-level) + add
       `collector.time(MetricKey.MERGE, "concat")` wrapping concat operation
     - Replace `TimeKey.MERGE_QUALITY_MEASURE` → `MetricKey.MERGE` (top-level) + add
@@ -203,7 +203,7 @@ construction time, and update all property-based and integration tests.
     - Update import
     - _Requirements: 2.5, 3.7, 6.4_
 
-- [ ] 10. Update `test_metrics_properties.py` for two-tier model
+- [x] 10. Update `test_metrics_properties.py` for two-tier model
   - Replace all `TimeKey` imports and usages with `MetricKey`
   - Replace `TimeEntry` / old `TimeDistribution` / old `PipelineMetrics` strategies with
     new `TopLevelEntry`, `DottedEntry`, `DottedGroup`, `TimeDistribution`, `PipelineMetrics`
@@ -215,14 +215,14 @@ construction time, and update all property-based and integration tests.
   - Add new property tests for Properties 1–4 and 6–9 as sub-tasks under tasks 2, 5, 6, 8
     (already listed there); remove the old Properties 1–3 tests that used `TimeKey`
   - _Requirements: 5.1, 5.6_
-  - [ ] 10.1 Write property test for YAML round-trip (Property 5)
+  - [x] 10.1 Write property test for YAML round-trip (Property 5)
     - **Property 5: YAML serialisation round-trip preserves all values**
     - Generate random `PipelineMetrics` instances with `top_level` and `dotted` sections;
       serialise to YAML string; deserialise; assert structural equality of all fields
     - Tag: `# Feature: metrics-two-tier, Property 5: YAML serialisation round-trip preserves all values`
     - **Validates: Requirements 5.1, 5.6**
 
-- [ ] 11. Update `test_metrics_integration.py` for `MetricKey` migration
+- [x] 11. Update `test_metrics_integration.py` for `MetricKey` migration
   - Replace `from pyqenc.metrics import ... TimeKey` with `MetricKey`
   - Update all `TimeKey.X` references per the conversion table in Requirement 6.2:
     - `TimeKey.JOB_PROBE` → `MetricKey.JOB`
@@ -248,7 +248,7 @@ construction time, and update all property-based and integration tests.
   - Update assertions that check `call.args[0]` to also verify suffix parts where applicable
   - _Requirements: 6.1, 6.2, 6.4, 6.5, 6.6_
 
-- [ ] 12. Final checkpoint — ensure all tests pass
+- [-] 12. Final checkpoint — ensure all tests pass
   - Run `uv run python -m pytest` to confirm no regressions across the full test suite.
   - Ensure all tests pass, ask the user if questions arise.
 

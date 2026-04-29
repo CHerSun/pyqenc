@@ -4,15 +4,13 @@ Each test is tagged with the feature and property it validates.
 Run with: uv run python -m pytest tests/test_metrics_properties.py
 """
 
-# Feature: pipeline-metrics-report, Property 6: YAML serialization round-trip
+# Feature: metrics-two-tier, Property 5: YAML serialisation round-trip preserves all values
 
 from __future__ import annotations
 
 import math
-import re
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import yaml
 from hypothesis import HealthCheck, given, settings
@@ -30,10 +28,13 @@ from pyqenc.metrics import (
     TopLevelEntry,
     YamlMetricsCollector,
     _ConvergenceAccumulator,
+    _build_key,
     _compute_convergence,
     _last_dot_prefix,
     _update_accumulator,
 )
+from pyqenc.models import CodecConfig, Strategy
+from pyqenc.phases.audio import BaseStrategy
 
 # ---------------------------------------------------------------------------
 # Shared strategies
@@ -179,17 +180,19 @@ def _deserialize(text: str) -> PipelineMetrics:
 
 
 # ---------------------------------------------------------------------------
-# Property 6: YAML serialization round-trip
+# Property 5 (metrics-two-tier): YAML serialisation round-trip preserves all values
 # ---------------------------------------------------------------------------
+
+# Feature: metrics-two-tier, Property 5: YAML serialisation round-trip preserves all values
 
 
 @settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
 @given(metrics=_st_pipeline_metrics())
 def test_yaml_round_trip(metrics: PipelineMetrics) -> None:
-    """Property 6: YAML serialization round-trip.
+    """Property 5 (metrics-two-tier): YAML serialisation round-trip preserves all values.
 
-    Validates: Requirements 5.1, 5.2, 5.3, 5.4
-    # Feature: pipeline-metrics-report, Property 6: YAML serialization round-trip
+    Validates: Requirements 5.1, 5.6
+    # Feature: metrics-two-tier, Property 5: YAML serialisation round-trip preserves all values
     """
     restored = _deserialize(_serialize(metrics))
 
@@ -345,110 +348,6 @@ def test_convergence_stats_resume_from_yaml(counts: list[int]) -> None:
     assert stats_resumed.attempts.max    == stats_fresh.attempts.max
     assert abs(stats_resumed.attempts.avg   - stats_fresh.attempts.avg)   < 1e-6
     assert abs(stats_resumed.attempts.stddev - stats_fresh.attempts.stddev) < 1e-6
-
-
-# ---------------------------------------------------------------------------
-# Property 1: Time accumulation round-trip
-# ---------------------------------------------------------------------------
-
-
-@settings(max_examples=200, deadline=None)
-@given(
-    key=st.sampled_from(list(MetricKey)),
-    durations=st.lists(
-        st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False),
-        min_size=1, max_size=50,
-    ),
-)
-def test_time_accumulation_round_trip(key: MetricKey, durations: list[float]) -> None:
-    """Property 1: Time accumulation round-trip.
-
-    Validates: Requirements 2.1, 2.2, 2.2a
-    # Feature: pipeline-metrics-report, Property 1: Time accumulation round-trip
-    """
-    with tempfile.TemporaryDirectory() as _tmp:
-        collector = _make_yaml_collector(Path(_tmp))
-        for d in durations:
-            collector._store[key.value] = collector._store.get(key.value, 0.0) + d
-
-        expected = sum(durations)
-        tol = max(1e-9, abs(expected) * 1e-9)
-        assert abs(collector._store[key.value] - expected) <= tol
-
-
-# ---------------------------------------------------------------------------
-# Property 2: Time distribution math
-# ---------------------------------------------------------------------------
-
-
-@settings(max_examples=200, deadline=None)
-@given(
-    time_map=st.fixed_dictionaries({
-        key: st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False)
-        for key in MetricKey
-    }),
-)
-def test_time_distribution_math(time_map: dict[MetricKey, float]) -> None:
-    """Property 2: Time distribution math.
-
-    Validates: Requirements 2.3, 2.5
-    # Feature: pipeline-metrics-report, Property 2: Time distribution math
-    """
-    with tempfile.TemporaryDirectory() as _tmp:
-        collector = _make_yaml_collector(Path(_tmp))
-        for key, elapsed in time_map.items():
-            if elapsed > 0:
-                collector._store[key.value] = elapsed
-
-        collector.flush()
-
-        raw = yaml.safe_load((Path(_tmp) / "metrics.yaml").read_text(encoding="utf-8"))
-        td  = raw["pipeline_metrics"]["time_distribution"]
-
-        total_secs = td["total_seconds"]
-        top_level  = td["top_level"]
-
-        # Only non-zero top-level keys appear in top_level list (zeros are omitted)
-        present_keys   = {e["key"] for e in top_level}
-        expected_nonzero = {k.value for k in MetricKey if int(round(collector._store.get(k.value, 0.0))) > 0}
-        assert present_keys == expected_nonzero
-        assert total_secs == int(round(sum(collector._store.values())))
-
-        for entry in top_level:
-            secs    = entry["seconds"]
-            pct     = float(entry["percent"].rstrip("%"))
-            exp_pct = secs / total_secs * 100 if total_secs > 0 else 0.0
-            assert abs(pct - exp_pct) < 0.15
-
-
-# ---------------------------------------------------------------------------
-# Property 3: Breakdown sorted descending
-# ---------------------------------------------------------------------------
-
-
-@settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
-@given(
-    time_map=st.fixed_dictionaries({
-        key: st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False)
-        for key in MetricKey
-    }),
-)
-def test_breakdown_sorted_descending(time_map: dict[MetricKey, float]) -> None:
-    """Property 3: Top-level list sorted descending.
-
-    Validates: Requirements 2.6
-    # Feature: pipeline-metrics-report, Property 3: Breakdown sorted descending
-    """
-    with tempfile.TemporaryDirectory() as _tmp:
-        collector = _make_yaml_collector(Path(_tmp))
-        for key, elapsed in time_map.items():
-            if elapsed > 0:
-                collector._store[key.value] = elapsed
-        collector.flush()
-
-        raw      = yaml.safe_load((Path(_tmp) / "metrics.yaml").read_text(encoding="utf-8"))
-        secs_lst = [e["seconds"] for e in raw["pipeline_metrics"]["time_distribution"]["top_level"]]
-        assert secs_lst == sorted(secs_lst, reverse=True)
 
 
 
@@ -758,3 +657,101 @@ def test_resume_restores_accumulated_store(store: dict[str, float]) -> None:
                 f"Key {key!r}: resumed={resumed._store[key]}, "
                 f"expected≈{int(round(original_value))} (original={original_value})"
             )
+
+
+# ---------------------------------------------------------------------------
+# Property 7 (metrics-two-tier): Strategy dot sanitization produces valid metric keys
+# ---------------------------------------------------------------------------
+
+# Feature: metrics-two-tier, Property 7: Strategy dot sanitization produces valid metric keys
+
+_ASCII_DOT = "."
+
+# Minimal CodecConfig used to construct Strategy instances in property tests.
+_MINIMAL_CODEC = CodecConfig(
+    name            = "test-codec",
+    default_quality = "18",
+    quality_range   = ("0", "51"),
+    encoder_args    = ["-i", "{input}", "-crf", "{quality}", "-preset", "{preset}", "{output}"],
+)
+
+_st_name_with_dots = st.text(
+    alphabet=st.characters(blacklist_categories=("Cs",)),
+    min_size=1,
+    max_size=20,
+)
+"""Arbitrary strings that may contain ASCII dots — used as preset/profile/strategy_short inputs."""
+
+
+class _ConcreteStrategy(BaseStrategy):
+    """Minimal concrete BaseStrategy for property testing."""
+
+    def check(self, source: Path) -> bool:  # noqa: D102
+        return False
+
+    def plan(self, source: Path) -> Path:  # noqa: D102
+        return source
+
+    def execute(self, source: Path, output: Path, dry_run: bool) -> None:  # noqa: D102
+        pass
+
+
+@settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+@given(
+    preset  = _st_name_with_dots,
+    profile = _st_name_with_dots,
+)
+def test_strategy_dot_sanitization_produces_valid_metric_keys(
+    preset: str,
+    profile: str,
+) -> None:
+    """Property 7 (metrics-two-tier): Strategy dot sanitization produces valid metric keys.
+
+    Validates: Requirements 8.1, 8.2, 8.5
+    # Feature: metrics-two-tier, Property 7: Strategy dot sanitization produces valid metric keys
+    """
+    strategy = Strategy(
+        preset       = preset,
+        profile      = profile,
+        codec        = _MINIMAL_CODEC,
+        profile_args = [],
+    )
+
+    # strategy.name must contain no ASCII dot
+    assert _ASCII_DOT not in strategy.name, (
+        f"strategy.name={strategy.name!r} still contains ASCII dot "
+        f"(preset={preset!r}, profile={profile!r})"
+    )
+
+    # Using strategy.name as a suffix must produce a key that groups under MetricKey.ENCODING
+    dotted = _build_key(MetricKey.ENCODING, strategy.name)
+    prefix = _last_dot_prefix(dotted)
+    assert prefix == MetricKey.ENCODING, (
+        f"prefix={prefix!r} != {MetricKey.ENCODING!r} for dotted key {dotted!r}"
+    )
+
+
+@settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+@given(strategy_short=_st_name_with_dots)
+def test_base_strategy_dot_sanitization_produces_valid_metric_keys(
+    strategy_short: str,
+) -> None:
+    """Property 7b (metrics-two-tier): BaseStrategy dot sanitization produces valid metric keys.
+
+    Validates: Requirements 8.2, 8.5
+    # Feature: metrics-two-tier, Property 7: Strategy dot sanitization produces valid metric keys
+    """
+    bs = _ConcreteStrategy(name=strategy_short, strategy_short=strategy_short)
+
+    # strategy_short must contain no ASCII dot after sanitization
+    assert _ASCII_DOT not in bs.strategy_short, (
+        f"strategy_short={bs.strategy_short!r} still contains ASCII dot "
+        f"(input={strategy_short!r})"
+    )
+
+    # Using strategy_short as a suffix must produce a key that groups under MetricKey.AUDIO
+    dotted = _build_key(MetricKey.AUDIO, bs.strategy_short)
+    prefix = _last_dot_prefix(dotted)
+    assert prefix == MetricKey.AUDIO, (
+        f"prefix={prefix!r} != {MetricKey.AUDIO!r} for dotted key {dotted!r}"
+    )

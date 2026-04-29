@@ -461,16 +461,17 @@ class OptimizationPhase:
 
             enc_result = asyncio.run(
                 _encode_chunks_parallel(
-                    encoder         = encoder,
-                    chunks          = test_chunks,
-                    reference_dir   = reference_dir,
-                    strategies      = strategies_to_test,
-                    quality_targets = self._config.quality_targets,
-                    max_parallel    = self._config.max_parallel,
-                    force           = False,
-                    collector       = self._collector,
-                    phase_recovery  = phase_recovery,
-                    advance         = advance,
+                    encoder           = encoder,
+                    chunks            = test_chunks,
+                    reference_dir     = reference_dir,
+                    strategies        = strategies_to_test,
+                    quality_targets   = self._config.quality_targets,
+                    max_parallel      = self._config.max_parallel,
+                    force             = False,
+                    collector         = self._collector,
+                    phase_recovery    = phase_recovery,
+                    advance           = advance,
+                    dotted_metric_key = MetricKey.OPTIMIZATION,
                 )
             )
             advance(0, AdvanceState.COMPLETE)

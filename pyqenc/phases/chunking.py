@@ -188,7 +188,7 @@ def split_chunks(
 
     Skips chunks already present on disk (as determined by *recovery*).
     Writes a ``<chunk_stem>.yaml`` sidecar after each successful split (Req 5.5).
-    Calls ``collector.step(TimeKey.CHUNKING_SPLIT)`` after each successful split
+    Calls ``collector.step(MetricKey.CHUNKING, "split")`` after each successful split
     to trigger incremental metrics flushes (Req 6.5, 2.2a).
 
     Args:
@@ -294,7 +294,7 @@ def split_chunks(
 
             result_chunks.append(chunk_meta)
             logger.debug("Chunk %s split successfully", stem)
-            collector.step(MetricKey.CHUNKING)
+            collector.step(MetricKey.CHUNKING, "split")
             advance(end_ts - start_ts)
 
         advance(0, AdvanceState.COMPLETE)
@@ -790,11 +790,12 @@ class ChunkingPhase:
         else:
             try:
                 with self._collector.time(MetricKey.CHUNKING):
-                    boundaries = detect_scenes(
-                        video_meta       = video_meta,
-                        scene_threshold  = 27.0,
-                        min_scene_length = 15,
-                    )
+                    with self._collector.time(MetricKey.CHUNKING, "scene_detect"):
+                        boundaries = detect_scenes(
+                            video_meta       = video_meta,
+                            scene_threshold  = 27.0,
+                            min_scene_length = 15,
+                        )
                 self.params.scenes = boundaries
                 self.params.save(work_dir / _CHUNKING_YAML)
             except Exception as exc:
@@ -823,14 +824,15 @@ class ChunkingPhase:
 
         try:
             with self._collector.time(MetricKey.CHUNKING):
-                chunk_metas = split_chunks(
-                    video_meta    = video_meta,
-                    output_dir    = chunks_dir,
-                    boundaries    = boundaries,
-                    recovery      = recovery_obj,
-                    chunking_mode = self._config.chunking_mode,
-                    collector     = self._collector,
-                )
+                with self._collector.time(MetricKey.CHUNKING, "split"):
+                    chunk_metas = split_chunks(
+                        video_meta    = video_meta,
+                        output_dir    = chunks_dir,
+                        boundaries    = boundaries,
+                        recovery      = recovery_obj,
+                        chunking_mode = self._config.chunking_mode,
+                        collector     = self._collector,
+                    )
         except Exception as exc:
             logger.error("Chunk splitting failed: %s", exc, exc_info=True)
             return _failed(str(exc))

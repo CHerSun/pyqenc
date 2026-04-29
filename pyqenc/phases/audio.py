@@ -33,6 +33,7 @@ from pyqenc.constants import (
     AUDIO_CH_51,
     AUDIO_CH_71,
     AUDIO_STEM_SEPARATOR,
+    TIME_SEPARATOR_MS,
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg, run_ffmpeg_async
@@ -173,8 +174,8 @@ class BaseStrategy(ABC):
     """Base class for all audio processing strategies."""
 
     def __init__(self, name: str, strategy_short: str) -> None:
-        self.name           = name
-        self.strategy_short = strategy_short
+        self.name           = name.replace(".", TIME_SEPARATOR_MS)
+        self.strategy_short = strategy_short.replace(".", TIME_SEPARATOR_MS)
 
     def output_path(self, source: Path, extension: str = "flac") -> Path:
         """Construct the output path using the ``{strategy_short} ← {stem}.{extension}`` convention."""
@@ -788,12 +789,18 @@ class AudioEngine:
 class SynchronousRunner:
     """Execute a :class:`PlanResult` synchronously with a live progress bar."""
 
-    def __init__(self, engine: AudioEngine, plan: PlanResult) -> None:
+    def __init__(
+        self,
+        engine:    AudioEngine,
+        plan:      PlanResult,
+        collector: "MetricsCollector | None" = None,
+    ) -> None:
         self._engine:          AudioEngine = engine
         self._found_files:     int         = plan.found_files
         self._skipped_files:   int         = plan.skipped_files
         self.tasks:            list[Task]  = plan.tasks
         self._started:         bool        = False
+        self._collector:       "MetricsCollector | None" = collector
 
     def process(self, dry_run: bool) -> PlanExecutionResult:
         """Execute the plan.  May only be called once.
@@ -830,7 +837,12 @@ class SynchronousRunner:
                         continue
 
                     try:
-                        task.strategy.execute(task.source, task.output, dry_run=False)
+                        if self._collector is not None:
+                            from pyqenc.metrics import MetricKey
+                            with self._collector.time(MetricKey.AUDIO, task.strategy.strategy_short):
+                                task.strategy.execute(task.source, task.output, dry_run=False)
+                        else:
+                            task.strategy.execute(task.source, task.output, dry_run=False)
                         count_success += 1
                         logger.info("SUCCESS [%s] %s", task.strategy.name, task.output.name)
                         advance()
@@ -953,6 +965,7 @@ def process_audio_streams(
     audio_convert:      str | None = None,
     audio_codec:        str | None = None,
     audio_base_bitrate: str | None = None,
+    collector:          "MetricsCollector | None" = None,
 ) -> AudioResult:
     """Process audio files through the full strategy graph and convert to AAC delivery files.
 
@@ -1105,7 +1118,7 @@ def process_audio_streams(
         )
         logger.debug("Audio pipeline plan: %d tasks", len(plan.tasks))
 
-        exec_result = SynchronousRunner(engine, plan).process(dry_run=False)
+        exec_result = SynchronousRunner(engine, plan, collector=collector).process(dry_run=False)
         logger.info(
             "Audio pipeline complete: %d succeeded, %d failed, %d skipped",
             exec_result.success, exec_result.failed, exec_result.skipped,
@@ -1656,6 +1669,7 @@ class AudioPhase:
             audio_convert      = self._config.audio_convert,
             audio_codec        = self._config.audio_codec,
             audio_base_bitrate = self._config.audio_base_bitrate,
+            collector          = self._collector,
         )
 
         if not audio_result.success:
