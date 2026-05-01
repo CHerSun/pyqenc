@@ -1311,8 +1311,8 @@ class QualityEvaluator:
             (``plot`` is ``None`` — filled in by ``_finish_evaluation``).
         """
         uuid_hex   = uuid.uuid4().hex
-        output_cwd = cwd if cwd is not None else Path(output_prefix).parent
-        output_cwd.mkdir(parents=True, exist_ok=True)
+        output_dir = cwd if cwd is not None else Path(output_prefix).parent
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         logger.debug(
             "Generating metrics for %s vs %s (tmp prefix: %s)",
@@ -1346,7 +1346,7 @@ class QualityEvaluator:
             use_gpu          = False,
             subsample        = metrics_sampling,
             output_prefix    = tmp_prefix,
-            cwd              = output_cwd,
+            cwd              = output_dir,
             progress_callback = _progress_callback if bar_advance is not None else None,
             output_extension = ".tmp",
         )
@@ -1356,10 +1356,10 @@ class QualityEvaluator:
         # Build artifact paths — .tmp files stay as-is, no rename.
         # VIF data is embedded in the VMAF JSON (via feature=name=vif), so
         # vif_log points to the same file as vmaf_json — explicit for clarity.
-        vmaf_tmp = output_cwd / f"{tmp_prefix}{MetricType.VMAF.value}.tmp"
+        vmaf_tmp = output_dir / f"{tmp_prefix}{MetricType.VMAF.value}.tmp"
         artifacts = QualityArtifacts(
-            psnr_log  = output_cwd / f"{tmp_prefix}{MetricType.PSNR.value}.tmp",
-            ssim_log  = output_cwd / f"{tmp_prefix}{MetricType.SSIM.value}.tmp",
+            psnr_log  = output_dir / f"{tmp_prefix}{MetricType.PSNR.value}.tmp",
+            ssim_log  = output_dir / f"{tmp_prefix}{MetricType.SSIM.value}.tmp",
             vmaf_json = vmaf_tmp,
             vif_log   = vmaf_tmp,   # VIF is parsed from the same VMAF JSON
             plot      = None,
