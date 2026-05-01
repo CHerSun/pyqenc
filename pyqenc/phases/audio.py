@@ -463,7 +463,7 @@ class DynaudnormStrategy(BaseStrategy):
     """Dynamic normalisation applied on top of any statically normalised output.
 
     Applied only to files whose filename starts with one of the
-    ``_NORMALISED_PREFIXES`` (i.e. ``norm ←``, ``2.0 std ←``, etc.).
+    ``NORMALISED_PREFIXES`` (i.e. ``norm ←``, ``2.0 std ←``, etc.).
     """
 
     _FILTER: str = "dynaudnorm=f=500:g=31:p=0.95:m=10.0:r=0.5:b=1"

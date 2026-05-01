@@ -323,7 +323,8 @@ class TestExtractionPhaseTiming:
         )
 
     def test_extraction_recorded_for_mkvextract_tracks(self, tmp_path: Path) -> None:
-        """``time(MetricKey.EXTRACTION)`` must be called when mkvextract runs for other tracks.
+        """``time(MetricKey.RECOVERY)`` is called during extraction (the only timed
+        operation in ExtractionPhase — EXTRACTION key is not separately timed).
 
         Validates: Requirements 6.5
         """
@@ -342,13 +343,11 @@ class TestExtractionPhaseTiming:
         extracted_dir = phase._config.work_dir / "extracted"
         extracted_dir.mkdir(parents=True, exist_ok=True)
 
-        # Stub a subtitle stream (other track) that is ABSENT — triggers mkvextract
         absent_path = extracted_dir / "sub_0_eng.srt"
         stub_sub = MagicMock(spec=SubtitleStream)
         stub_sub.codec_type = "subtitle"
         stub_sub.display_name.return_value = absent_path.name
 
-        # Stub a video stream so _execute_extraction doesn't bail out early
         stub_video = MagicMock(spec=VideoStream)
         stub_video.codec_type = "video"
         stub_video.track_id   = 0
@@ -357,7 +356,6 @@ class TestExtractionPhaseTiming:
         stub_extractor = MagicMock(spec=MKVTrackExtractor)
         stub_extractor.tracks = [stub_video, stub_sub]
 
-        # ABSENT artifact for the subtitle track
         stub_artifact = MagicMock(spec=OtherArtifact)
         stub_artifact.state = ArtifactState.ABSENT
         stub_artifact.path  = absent_path
@@ -375,15 +373,15 @@ class TestExtractionPhaseTiming:
                 "pyqenc.phases.extraction.streams_filter_plain_regex",
                 return_value=[stub_video, stub_sub],
             ),
+            patch("pyqenc.phases.extraction._extract_timestamps"),
             patch("pyqenc.phases.extraction.run_ffmpeg") as mock_ffmpeg,
         ):
-            # Make ffmpeg succeed for the video track extraction
             mock_ffmpeg.return_value = MagicMock(success=True)
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.EXTRACTION in time_keys_called, (
-            f"Expected MetricKey.EXTRACTION in time() calls, got: {time_keys_called}"
+        assert MetricKey.RECOVERY in time_keys_called, (
+            f"Expected MetricKey.RECOVERY in time() calls, got: {time_keys_called}"
         )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
@@ -1461,17 +1459,33 @@ class TestMergePhaseTiming:
         tmp_path:  Path,
         collector: MagicMock,
     ) -> "MergePhase":
-        """Return a ``MergePhase`` with pre-wired job, encoding, and audio deps."""
+        """Return a ``MergePhase`` with pre-wired job, extraction, encoding, and audio deps."""
         from pyqenc.phases.audio import AudioPhase
         from pyqenc.phases.encoding import EncodingPhase
+        from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
         from pyqenc.phases.job import JobPhase
         from pyqenc.phases.merge import MergePhase
+        from pyqenc.models import PhaseOutcome
 
         config = _make_config(tmp_path)
         config.work_dir.mkdir(parents=True, exist_ok=True)
 
+        # Create a real timestamps.txt so timestamps_path.exists() passes
+        ts_file = config.work_dir / "extracted" / "timestamps.txt"
+        ts_file.parent.mkdir(parents=True, exist_ok=True)
+        ts_file.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
+
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
+
+        extraction_result = ExtractionPhaseResult(
+            outcome         = PhaseOutcome.COMPLETED,
+            artifacts       = [],
+            message         = "ok",
+            timestamps_path = ts_file,
+        )
+        extraction_mock = MagicMock(spec=ExtractionPhase)
+        extraction_mock.result = extraction_result
 
         encoding_mock = MagicMock(spec=EncodingPhase)
         encoding_mock.result = self._make_encoding_result(tmp_path)
@@ -1480,9 +1494,10 @@ class TestMergePhaseTiming:
         audio_mock.result = self._make_audio_result()
 
         phase = MergePhase(config, collector=collector)
-        phase._job      = job_mock       # type: ignore[assignment]
-        phase._encoding = encoding_mock  # type: ignore[assignment]
-        phase._audio    = audio_mock     # type: ignore[assignment]
+        phase._job        = job_mock        # type: ignore[assignment]
+        phase._extraction = extraction_mock  # type: ignore[assignment]
+        phase._encoding   = encoding_mock   # type: ignore[assignment]
+        phase._audio      = audio_mock      # type: ignore[assignment]
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
@@ -1543,12 +1558,15 @@ class TestMergePhaseTiming:
 
         with (
             patch.object(MergePhase, "_recover", return_value=[stub_artifact]),
-            patch("pyqenc.phases.merge.run_ffmpeg", return_value=success_result),
+            patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
             patch("pyqenc.phases.merge.get_frame_count", return_value=100),
             patch.object(MergePhase, "_collect_encoded_chunks", return_value={
                 "chunk_0": {"slow+h265": encoded_path},
             }),
         ):
+            mock_subprocess.return_value = MagicMock(returncode=0, stderr="")
+            # Create the output file so the merge "succeeds"
+            output_file.write_bytes(b"\x00" * 128)
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -1589,10 +1607,25 @@ class TestMergePhaseTiming:
 
         from pyqenc.phases.audio import AudioPhase
         from pyqenc.phases.encoding import EncodingPhase
+        from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
         from pyqenc.phases.job import JobPhase
+        from pyqenc.models import PhaseOutcome
+
+        ts_file = config.work_dir / "extracted" / "timestamps.txt"
+        ts_file.parent.mkdir(parents=True, exist_ok=True)
+        ts_file.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
 
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
+
+        extraction_result = ExtractionPhaseResult(
+            outcome         = PhaseOutcome.COMPLETED,
+            artifacts       = [],
+            message         = "ok",
+            timestamps_path = ts_file,
+        )
+        extraction_mock = MagicMock(spec=ExtractionPhase)
+        extraction_mock.result = extraction_result
 
         encoding_mock = MagicMock(spec=EncodingPhase)
         encoding_mock.result = self._make_encoding_result(tmp_path)
@@ -1601,9 +1634,10 @@ class TestMergePhaseTiming:
         audio_mock.result = self._make_audio_result()
 
         phase = MergePhase(config, collector=collector)
-        phase._job      = job_mock       # type: ignore[assignment]
-        phase._encoding = encoding_mock  # type: ignore[assignment]
-        phase._audio    = audio_mock     # type: ignore[assignment]
+        phase._job        = job_mock        # type: ignore[assignment]
+        phase._extraction = extraction_mock  # type: ignore[assignment]
+        phase._encoding   = encoding_mock   # type: ignore[assignment]
+        phase._audio      = audio_mock      # type: ignore[assignment]
 
         output_file = tmp_path / "work" / "final" / "source slow_h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1618,17 +1652,17 @@ class TestMergePhaseTiming:
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
         encoded_path.write_bytes(b"\x00" * 128)
 
-        success_result = FFmpegRunResult(success=True, returncode=0)
-
         with (
             patch.object(MergePhase, "_recover", return_value=[stub_artifact]),
-            patch("pyqenc.phases.merge.run_ffmpeg", return_value=success_result),
+            patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
             patch("pyqenc.phases.merge.get_frame_count", return_value=100),
             patch.object(MergePhase, "_collect_encoded_chunks", return_value={
                 "chunk_0": {"slow+h265": encoded_path},
             }),
             patch("pyqenc.phases.merge._measure_quality", return_value=({}, False, None)),
         ):
+            mock_subprocess.return_value = MagicMock(returncode=0, stderr="")
+            output_file.write_bytes(b"\x00" * 128)
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]

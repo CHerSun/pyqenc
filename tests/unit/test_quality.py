@@ -277,7 +277,12 @@ class TestScoreAttempt:
         assert score > 0.0
 
     def test_pass_one_target_above_delta_one_below(self):
-        """One surplus > delta, one ≤ delta → positive (not early acceptance)."""
+        """Least-proficit surplus ≤ delta → early acceptance even if another target has large surplus.
+
+        The binding constraint (PSNR, smallest surplus) is within its delta, so
+        further search cannot meaningfully improve the tightest metric.  The large
+        VMAF surplus is irrelevant to the early-exit decision.
+        """
         from pyqenc.quality import MetricType
         targets = [
             QualityTarget(metric="vmaf", statistic="min",    value=80.0),
@@ -285,11 +290,11 @@ class TestScoreAttempt:
         ]
         psnr_delta = MetricType.PSNR.info.acceptance_delta
         metrics = {
-            "vmaf_min":    95.0,                    # large surplus > delta
-            "psnr_median": 44.9 + psnr_delta * 0.5, # tiny surplus ≤ delta
+            "vmaf_min":    95.0,                     # large surplus > delta — not the binding constraint
+            "psnr_median": 44.9 + psnr_delta * 0.5,  # tiny surplus ≤ delta — least proficit
         }
         score = _score_attempt(metrics, targets)
-        assert score > 0.0
+        assert score == 0.0  # early acceptance: least-proficit metric is within its delta
 
     # ------------------------------------------------------------------
     # Fail (returns negative)

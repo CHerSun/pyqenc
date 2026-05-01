@@ -28,9 +28,25 @@ from pyqenc.state import ArtifactState
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_ffprobe_stdout(pts_values: list[float]) -> str:
-    """Build a fake ffprobe stdout string from a list of PTS float values."""
-    return "\n".join(str(v) for v in pts_values) + "\n"
+import subprocess as _subprocess
+
+def _make_mkvextract_fail() -> MagicMock:
+    """Return a side_effect that makes mkvextract fail and ffprobe succeed."""
+    def _side_effect(cmd: list, **kwargs: object) -> MagicMock:
+        result = MagicMock()
+        if cmd and str(cmd[0]) == "mkvextract":
+            raise _subprocess.CalledProcessError(1, cmd, stderr=b"not an mkv")
+        # ffprobe call — return empty stdout by default; tests override as needed
+        result.returncode = 0
+        result.stdout     = ""
+        result.stderr     = ""
+        return result
+    return _side_effect
+
+
+def _make_ffprobe_stdout(pts_ms_values: list[int]) -> str:
+    """Build a fake ffprobe stdout string from a list of integer millisecond PTS values."""
+    return "\n".join(str(v) for v in pts_ms_values) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -38,98 +54,121 @@ def _make_ffprobe_stdout(pts_values: list[float]) -> str:
 # ---------------------------------------------------------------------------
 
 class TestExtractTimestampsFormat:
-    """_extract_timestamps writes correct header and int(pts * 1000) per line."""
+    """_extract_timestamps writes correct header and integer ms values per line.
+
+    The implementation tries mkvextract first; tests make it fail so the
+    ffprobe fallback path is exercised.  ffprobe returns integer PTS values
+    (milliseconds) directly — no float-to-int conversion in the test layer.
+    """
+
+    def _mock_run(self, pts_ms: list[int]) -> MagicMock:
+        """Return a patch side_effect: mkvextract fails, ffprobe returns integer ms."""
+        stdout = _make_ffprobe_stdout(pts_ms)
+        def _side_effect(cmd: list, **kwargs: object) -> MagicMock:
+            result = MagicMock()
+            if cmd and str(cmd[0]) == "mkvextract":
+                raise _subprocess.CalledProcessError(1, cmd, stderr=b"not an mkv")
+            result.returncode = 0
+            result.stdout     = stdout
+            result.stderr     = ""
+            return result
+        return _side_effect
 
     def test_header_is_timestamp_format_v2(self, tmp_path: Path) -> None:
-        pts_values = [0.0, 0.042, 0.083]
-        stdout = _make_ffprobe_stdout(pts_values)
+        pts_ms = [0, 42, 83]
         output = tmp_path / TIMESTAMPS_FILENAME
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout=stdout, returncode=0)
+        with patch("subprocess.run", side_effect=self._mock_run(pts_ms)):
             _extract_timestamps(Path("source.mkv"), 0, output)
 
         lines = output.read_text(encoding="utf-8").splitlines()
         assert lines[0] == "# timestamp format v2"
 
-    def test_values_are_int_pts_times_1000(self, tmp_path: Path) -> None:
-        pts_values = [0.0, 0.042, 0.083, 0.125]
-        stdout = _make_ffprobe_stdout(pts_values)
+    def test_values_are_integer_ms(self, tmp_path: Path) -> None:
+        pts_ms = [0, 42, 83, 125]
         output = tmp_path / TIMESTAMPS_FILENAME
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout=stdout, returncode=0)
+        with patch("subprocess.run", side_effect=self._mock_run(pts_ms)):
             _extract_timestamps(Path("source.mkv"), 0, output)
 
         lines = output.read_text(encoding="utf-8").splitlines()
         data_lines = lines[1:]  # skip header
-        expected = [int(v * 1000) for v in pts_values]
-        assert [int(l) for l in data_lines] == expected
+        assert [int(l) for l in data_lines] == sorted(pts_ms)
 
     def test_one_value_per_line(self, tmp_path: Path) -> None:
-        pts_values = [0.0, 0.033, 0.066]
-        stdout = _make_ffprobe_stdout(pts_values)
+        pts_ms = [0, 33, 66]
         output = tmp_path / TIMESTAMPS_FILENAME
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout=stdout, returncode=0)
+        with patch("subprocess.run", side_effect=self._mock_run(pts_ms)):
             _extract_timestamps(Path("source.mkv"), 0, output)
 
         lines = output.read_text(encoding="utf-8").splitlines()
         # header + one line per value
-        assert len(lines) == 1 + len(pts_values)
+        assert len(lines) == 1 + len(pts_ms)
 
     def test_output_file_created(self, tmp_path: Path) -> None:
-        stdout = _make_ffprobe_stdout([0.0, 0.042])
         output = tmp_path / TIMESTAMPS_FILENAME
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout=stdout, returncode=0)
+        with patch("subprocess.run", side_effect=self._mock_run([0, 42])):
             _extract_timestamps(Path("source.mkv"), 0, output)
 
         assert output.exists()
 
     def test_tmp_file_not_left_behind(self, tmp_path: Path) -> None:
-        stdout = _make_ffprobe_stdout([0.0, 0.042])
         output = tmp_path / TIMESTAMPS_FILENAME
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout=stdout, returncode=0)
+        with patch("subprocess.run", side_effect=self._mock_run([0, 42])):
             _extract_timestamps(Path("source.mkv"), 0, output)
 
         tmp_file = tmp_path / "timestamps.tmp"
         assert not tmp_file.exists()
 
     def test_raises_on_ffprobe_failure(self, tmp_path: Path) -> None:
-        import subprocess
         output = tmp_path / TIMESTAMPS_FILENAME
 
-        with patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "ffprobe")):
-            with pytest.raises(subprocess.CalledProcessError):
+        def _both_fail(cmd: list, **kwargs: object) -> MagicMock:
+            raise _subprocess.CalledProcessError(1, cmd, stderr=b"error")
+
+        with patch("subprocess.run", side_effect=_both_fail):
+            with pytest.raises(_subprocess.CalledProcessError):
                 _extract_timestamps(Path("source.mkv"), 0, output)
 
     def test_raises_on_empty_output(self, tmp_path: Path) -> None:
         output = tmp_path / TIMESTAMPS_FILENAME
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="", returncode=0)
+        def _mkvextract_fail_ffprobe_empty(cmd: list, **kwargs: object) -> MagicMock:
+            result = MagicMock()
+            if cmd and str(cmd[0]) == "mkvextract":
+                raise _subprocess.CalledProcessError(1, cmd, stderr=b"not an mkv")
+            result.returncode = 0
+            result.stdout     = ""
+            result.stderr     = ""
+            return result
+
+        with patch("subprocess.run", side_effect=_mkvextract_fail_ffprobe_empty):
             with pytest.raises(ValueError, match="empty output"):
                 _extract_timestamps(Path("source.mkv"), 0, output)
 
     def test_raises_on_unparseable_line(self, tmp_path: Path) -> None:
         output = tmp_path / TIMESTAMPS_FILENAME
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="0.0\nN/A\n0.083\n", returncode=0)
+        def _mkvextract_fail_ffprobe_bad(cmd: list, **kwargs: object) -> MagicMock:
+            result = MagicMock()
+            if cmd and str(cmd[0]) == "mkvextract":
+                raise _subprocess.CalledProcessError(1, cmd, stderr=b"not an mkv")
+            result.returncode = 0
+            result.stdout     = "0\nN/A\n83\n"
+            result.stderr     = ""
+            return result
+
+        with patch("subprocess.run", side_effect=_mkvextract_fail_ffprobe_bad):
             with pytest.raises(ValueError, match="Unparseable"):
                 _extract_timestamps(Path("source.mkv"), 0, output)
 
     def test_creates_parent_dirs(self, tmp_path: Path) -> None:
-        stdout = _make_ffprobe_stdout([0.0, 0.042])
         output = tmp_path / "nested" / "deep" / TIMESTAMPS_FILENAME
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout=stdout, returncode=0)
+        with patch("subprocess.run", side_effect=self._mock_run([0, 42])):
             _extract_timestamps(Path("source.mkv"), 0, output)
 
         assert output.exists()
@@ -837,26 +876,39 @@ class TestFfmpegStreamExtraction:
     # ------------------------------------------------------------------
 
     def test_chapter_extraction_uses_ffmetadata(self, tmp_path: Path) -> None:
-        """Requirement 1.6: Chapter extraction uses -f ffmetadata."""
+        """Chapter extraction falls back to ffprobe -show_chapters -print_format xml
+        when mkvextract is unavailable. Verifies the ffprobe fallback is invoked
+        via subprocess.run (not run_ffmpeg) and produces XML output."""
         from pyqenc.phases.extraction import ChaptersStream
 
         fake_chapters = MagicMock(spec=ChaptersStream)
         fake_chapters.track_id        = -2
         fake_chapters.codec_type      = "chapters"
-        fake_chapters.file_extension  = "txt"
-        fake_chapters.display_name.return_value = "chapters.txt"
+        fake_chapters.file_extension  = "xml"
+        fake_chapters.display_name.return_value = "chapters.xml"
 
-        cmds = self._run_and_capture_other_cmds(tmp_path, [fake_chapters])
-        assert cmds, "Expected a run_ffmpeg call for chapter extraction"
-        flat = [str(a) for a in cmds[0]]
-        assert "-f" in flat, f"-f flag must be present for chapter extraction; got: {flat}"
-        f_idx = flat.index("-f")
-        assert flat[f_idx + 1] == "ffmetadata", (
-            f"Expected 'ffmetadata' after -f for chapters; got {flat[f_idx + 1]!r}"
-        )
+        ffprobe_called = False
 
-    def test_chapter_file_extension_is_txt(self) -> None:
-        """Requirement 1.6: ChaptersStream.file_extension must be 'txt' (ffmetadata format)."""
+        def _subprocess_side_effect(cmd: list, **kwargs: object) -> MagicMock:
+            nonlocal ffprobe_called
+            result = MagicMock()
+            if cmd and str(cmd[0]) == "mkvextract":
+                # Make mkvextract fail so ffprobe fallback is triggered
+                raise _subprocess.CalledProcessError(1, cmd, stderr=b"not an mkv")
+            if cmd and str(cmd[0]) == "ffprobe":
+                ffprobe_called = True
+                result.returncode = 0
+                result.stdout     = "<chapters/>"
+                result.stderr     = ""
+            return result
+
+        with patch("subprocess.run", side_effect=_subprocess_side_effect):
+            cmds = self._run_and_capture_other_cmds(tmp_path, [fake_chapters])
+
+        assert ffprobe_called, "Expected ffprobe to be called for chapter extraction fallback"
+
+    def test_chapter_file_extension_is_xml(self) -> None:
+        """ChaptersStream.file_extension is 'xml' (mkvextract/ffprobe XML format)."""
         from pyqenc.phases.extraction import ChaptersStream
 
         chapters = ChaptersStream.__new__(ChaptersStream)
@@ -866,8 +918,8 @@ class TestFfmpegStreamExtraction:
         chapters.tags        = {}
         chapters.disposition = {}
 
-        assert chapters.file_extension == "txt", (
-            f"ChaptersStream.file_extension must be 'txt'; got {chapters.file_extension!r}"
+        assert chapters.file_extension == "xml", (
+            f"ChaptersStream.file_extension must be 'xml'; got {chapters.file_extension!r}"
         )
 
     # ------------------------------------------------------------------
@@ -921,7 +973,9 @@ class TestFfmpegStreamExtraction:
     # ------------------------------------------------------------------
 
     def test_no_mkvextract_calls(self, tmp_path: Path) -> None:
-        """Requirement 1.4: mkvextract must never be invoked during extraction."""
+        """mkvextract is called only for chapters (primary path); subtitles and
+        attachments use run_ffmpeg exclusively. Verifies mkvextract is never
+        invoked for subtitle or attachment tracks."""
         from pyqenc.phases.extraction import SubtitleStream, ChaptersStream, AttachmentStream
 
         fake_sub = MagicMock(spec=SubtitleStream)
@@ -933,8 +987,8 @@ class TestFfmpegStreamExtraction:
         fake_chapters = MagicMock(spec=ChaptersStream)
         fake_chapters.track_id        = -2
         fake_chapters.codec_type      = "chapters"
-        fake_chapters.file_extension  = "txt"
-        fake_chapters.display_name.return_value = "chapters.txt"
+        fake_chapters.file_extension  = "xml"
+        fake_chapters.display_name.return_value = "chapters.xml"
 
         fake_att = MagicMock(spec=AttachmentStream)
         fake_att.track_id        = 3
@@ -960,21 +1014,24 @@ class TestFfmpegStreamExtraction:
         all_artifacts = [
             VideoArtifact(path=extracted_dir / "video.mkv",     state=ArtifactState.ABSENT),
             OtherArtifact(path=extracted_dir / "subtitle.srt",  state=ArtifactState.ABSENT),
-            OtherArtifact(path=extracted_dir / "chapters.txt",  state=ArtifactState.ABSENT),
+            OtherArtifact(path=extracted_dir / "chapters.xml",  state=ArtifactState.ABSENT),
             OtherArtifact(path=extracted_dir / "font.ttf",      state=ArtifactState.ABSENT),
             TimestampArtifact(path=extracted_dir / "timestamps.txt", state=ArtifactState.ABSENT),
         ]
 
-        mkvextract_called = False
+        mkvextract_for_non_chapters: list[str] = []
 
         def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
-            nonlocal mkvextract_called
             if cmd and str(cmd[0]) == "mkvextract":
-                mkvextract_called = True
+                # mkvextract is allowed for chapters — record what it was called for
+                # to detect any non-chapter invocations
+                if len(cmd) > 2 and str(cmd[2]) not in ("chapters", "timecodes_v2"):
+                    mkvextract_for_non_chapters.append(str(cmd[2]))
+                raise _subprocess.CalledProcessError(1, cmd, stderr=b"not an mkv")
             result = MagicMock()
             result.returncode = 0
-            result.stdout = ""
-            result.stderr = ""
+            result.stdout     = "<chapters/>"
+            result.stderr     = ""
             return result
 
         with (
@@ -989,7 +1046,6 @@ class TestFfmpegStreamExtraction:
             mock_extractor.tracks = all_tracks
             mock_extractor_cls.return_value = mock_extractor
             mock_filter.return_value = all_tracks
-
             mock_run_ffmpeg.return_value = MagicMock(success=True)
 
             phase._execute_extraction(  # type: ignore[attr-defined]
@@ -998,4 +1054,7 @@ class TestFfmpegStreamExtraction:
                 audio_meta = [],
             )
 
-        assert not mkvextract_called, "mkvextract must never be called during extraction"
+        assert not mkvextract_for_non_chapters, (
+            f"mkvextract must not be called for non-chapter tracks; "
+            f"called for: {mkvextract_for_non_chapters}"
+        )
