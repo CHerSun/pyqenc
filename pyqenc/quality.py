@@ -13,7 +13,14 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 from os import PathLike
 from pathlib import Path
-from typing import Iterable, Protocol, TypedDict, TypeVar, assert_never, runtime_checkable
+from typing import (
+    Iterable,
+    Protocol,
+    TypedDict,
+    TypeVar,
+    assert_never,
+    runtime_checkable,
+)
 
 import pandas as pd
 
@@ -78,11 +85,12 @@ class MetricInfo:
                            VMAF ≈ 20 (targets typically 80–100), SSIM ≈ 10 (90–100),
                            PSNR ≈ 30 (40–70 dB), VIF ≈ 5 (empirical; limited data).
         acceptance_delta:  Per-metric threshold for early acceptance during CRF search.
-                           When all targets pass and every surplus is within this delta,
-                           the current quality value is accepted as final without further
-                           search — saves an extra encoding pass when the result is
-                           already close enough.  Values are in normalized metric units
-                           (post-scale_factor).
+                           When all targets pass and the least-proficit target's surplus
+                           (smallest surplus across all passing targets) is within this
+                           delta, the current quality value is accepted as final without
+                           further search — saves an extra encoding pass when the binding
+                           constraint is already close enough.  Values are in normalized
+                           metric units (post-scale_factor).
         subsample_via_filter: When ``True``, the metric uses a stream-level
                            ``select='not(mod(n,factor))'`` filter on its branch in the
                            combined ffmpeg pass (PSNR, SSIM).  When ``False``,
@@ -198,7 +206,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = "",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        comparison_range  = 20.0,  # practical target range ~80–100
+        comparison_range  = 15.0,  # practical target range ~85–100
         acceptance_delta  = 0.15,  # 0.15% surplus should be negligible
         subsample_via_filter = False,  # VMAF uses n_subsample internally
     ),
@@ -215,8 +223,8 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = "",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        comparison_range  = 10.0,  # practical target range ~90–100
-        acceptance_delta  = 0.05,  # 0.05% after scaling (0.0005 raw)
+        comparison_range  = 5.0,   # practical target range ~95–100
+        acceptance_delta  = 0.05,  # 0.05% after scaling (0.0005 raw). Metric is quite compressed towards 100, so we have to use a low value.
         subsample_via_filter = True,   # uses select='not(mod(n,factor))' on its branch
     ),
     MetricType.PSNR: MetricInfo(
@@ -232,8 +240,8 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = " dB",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        comparison_range  = 30.0,  # practical target range ~40–70 dB
-        acceptance_delta  = 0.5,   # 0.5 dB surplus is negligible
+        comparison_range  = 20.0,  # practical target range ~40–60 dB
+        acceptance_delta  = 0.3,   # 0.3 dB surplus should be negligible
         subsample_via_filter = True,   # uses select='not(mod(n,factor))' on its branch
     ),
     # VIF
@@ -250,8 +258,8 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         display_unit      = "",
         plot_y_min        = 0.0,
         plot_y_max        = 103.0,
-        comparison_range  = 10.0,
-        acceptance_delta  = 0.2,
+        comparison_range  = 20.0,  # Practical target range being ~80-100
+        acceptance_delta  = 0.15,  # 0.15 after scaling should be good. VIF scales nicely with ~92 being quite good.
         subsample_via_filter = False,  # VIF has no independent branch; embedded in VMAF
     ),
 }
@@ -560,9 +568,12 @@ def _score_attempt(
     in sidecars.  No normalization is performed here.
 
     Returns a float encoding both pass/fail and distance from the sweet spot:
-    - ``0.0``: all targets pass and every surplus ≤ ``acceptance_delta`` (early acceptance).
-    - Positive: all targets pass, at least one surplus > ``acceptance_delta``.
-      Value is ``sum(surplus / comparison_range)`` for all targets.
+    - ``0.0``: all targets pass and the least-proficit target's surplus ≤ its
+      ``acceptance_delta`` (early acceptance).  Only the tightest constraint is
+      checked — a large surplus on other metrics does not block early exit.
+    - Positive: all targets pass, but the least-proficit surplus > its
+      ``acceptance_delta``.  Value is ``sum(surplus / comparison_range)`` for
+      all targets.
     - Negative: at least one target fails.
       Value is ``sum(deficit / comparison_range)`` for failing targets only.
 
@@ -588,9 +599,11 @@ def _score_attempt(
                 f"Available keys: {list(metrics.keys())}"
             )
 
-    fail_score   = 0.0
-    pass_score   = 0.0
-    all_within_delta = True
+    fail_score        = 0.0
+    pass_score        = 0.0
+    any_fail          = False
+    min_surplus       = float("inf")   # smallest surplus across all passing targets
+    min_surplus_delta = 0.0            # acceptance_delta for the least-proficit target
 
     for target in quality_targets:
         key    = f"{target.metric}_{target.statistic}"
@@ -604,12 +617,17 @@ def _score_attempt(
                      target.metric, target.statistic, actual, target.value, deficit, normalized)
 
         if deficit < 0.0:
-            fail_score  += normalized
-            all_within_delta = False
+            fail_score += normalized
+            any_fail    = True
         else:
             pass_score += normalized
-            if abs(deficit) > info.acceptance_delta:
-                all_within_delta = False
+            if deficit < min_surplus:
+                min_surplus       = deficit
+                min_surplus_delta = info.acceptance_delta
+
+    # Early acceptance: all targets pass AND the least-proficit metric's surplus
+    # is within its acceptance_delta — no further search can meaningfully improve.
+    all_within_delta = (not any_fail) and (min_surplus <= min_surplus_delta)
 
     return fail_score or (0.0 if all_within_delta else pass_score)
 
@@ -873,10 +891,28 @@ class QualitySearch:
             if self._best_point is None or new_point.score > self._best_point.score:
                 self._best_point = new_point
 
-        # Exhaustion check: bracket collapsed to ≤ granularity.
+        # Exhaustion check 1: bracket collapsed to ≤ granularity (normal case).
         if (
             not (self._better_point.is_sentinel or self._worse_point.is_sentinel)
             and abs(self._better_point.q - self._worse_point.q) <= self._granularity
+        ):
+            self._exhausted = True
+            return None
+
+        # Exhaustion check 2: all-fail — fail bracket reached quality_better boundary.
+        if (
+            self._better_point.is_sentinel
+            and not self._worse_point.is_sentinel
+            and self._worse_point.q == self._better_point.q
+        ):
+            self._exhausted = True
+            return None
+
+        # Exhaustion check 3: all-pass — pass bracket reached quality_worse boundary.
+        if (
+            self._worse_point.is_sentinel
+            and not self._better_point.is_sentinel
+            and self._better_point.q == self._worse_point.q
         ):
             self._exhausted = True
             return None
@@ -1083,9 +1119,9 @@ class QualitySearchV2:
         if self.attempts == 1:
             if new_point.is_pass:
                 # find new attempt placement between current result and the WORSE result
-                return self._compute_next(new_point, self._lower, new_point)
+                return self._next_or_exhaust(self._compute_next(new_point, self._lower, new_point))
             # find new attempt placement between current result and the BETTER result
-            return self._compute_next(new_point, new_point, self._upper)
+            return self._next_or_exhaust(self._compute_next(new_point, new_point, self._upper))
 
         #! NO `NEW_POINT` BELOW THIS POINT, only the best point and its adjacent points
 
@@ -1096,9 +1132,7 @@ class QualitySearchV2:
         first_failing_q = next((q for q in sorted_q if self._attempted_points[q].is_fail), None)
         last_passing_q = next((q for q in reversed(sorted_q) if self._attempted_points[q].is_pass), None)
         if first_failing_q is not None and last_passing_q is not None:
-            return self._compute_next(self._attempted_points[first_failing_q], self._attempted_points[first_failing_q], self._attempted_points[last_passing_q])
-
-
+            return self._next_or_exhaust(self._compute_next(self._attempted_points[first_failing_q], self._attempted_points[first_failing_q], self._attempted_points[last_passing_q]))
 
         # Find adjacent points to the best scoring point. Best scoring point is always present, regardless of if there were passing attempts
         best_p = self._best_score_point
@@ -1108,17 +1142,17 @@ class QualitySearchV2:
         # ATTENTION: Proportional search could work here, but it often looses sweet-point curve shape, thus never reaching 3-point mode. Keep it at binary.
         if best_p.is_fail and best_q_index == 0:
             # we are still searching into higher-quality direction (i.e. not exhausted). Continue with a safeguard against endless upper-bound (sentinel) reuse
-            return self._compute_next(best_p, best_p, self._attempted_points.get(self._upper.q, self._upper))
+            return self._next_or_exhaust(self._compute_next(best_p, best_p, self._attempted_points.get(self._upper.q, self._upper)))
         if best_p.is_pass and best_q_index == len(sorted_q) - 1:
             # we are still searching into lower-quality direction (i.e. not exhausted). Continue with a safeguard against endless lower-bound (sentinel) reuse
-            return self._compute_next(best_p, self._attempted_points.get(self._lower.q, self._lower), best_p)
+            return self._next_or_exhaust(self._compute_next(best_p, self._attempted_points.get(self._lower.q, self._lower), best_p))
 
         # HERE: we've exhausted outwards search, but didn't reach 3-point yet - proportional search between 2 points.
         # Shouldn't be triggered ever (dumb-preliminary 2-point search already did it).
         if best_p.is_pass and best_q_index == 0:
-            return self._compute_next(best_p, self._attempted_points[sorted_q[1]], best_p)
+            return self._next_or_exhaust(self._compute_next(best_p, self._attempted_points[sorted_q[1]], best_p))
         if best_p.is_fail and best_q_index == len(sorted_q) - 1:
-            return self._compute_next(best_p, best_p, self._attempted_points[sorted_q[-2]])
+            return self._next_or_exhaust(self._compute_next(best_p, best_p, self._attempted_points[sorted_q[-2]]))
 
         # HERE: make 3-point decision
         # Algorithm:
@@ -1131,9 +1165,9 @@ class QualitySearchV2:
             # we do have both pass and failing points in our 3 point range. Pick the range (current_point ... either -1 or +1)
             # first go towards lower quality in this case - to reduce the size of resulting video
             if adjacent_points[0].is_fail != adjacent_points[1].is_fail:
-                return self._compute_next(best_p, adjacent_points[1], adjacent_points[0])
+                return self._next_or_exhaust(self._compute_next(best_p, adjacent_points[1], adjacent_points[0]))
             # if not - go towards higher quality in this case - to increase the size of resulting video
-            return self._compute_next(best_p, adjacent_points[2], adjacent_points[1])
+            return self._next_or_exhaust(self._compute_next(best_p, adjacent_points[2], adjacent_points[1]))
 
         # HERE: we have 3 points, all are passing or all are failing. We need to search for sweet spot.
         # Problem - the curve isn't monotonic (otherwise we would've been at 2-point decision point)
@@ -1141,9 +1175,25 @@ class QualitySearchV2:
         range_1_len = adjacent_points[1].q - adjacent_points[0].q
         range_2_len = adjacent_points[2].q - adjacent_points[1].q
         if abs(range_1_len) > abs(range_2_len):
-            return self._compute_next(best_p, adjacent_points[1], adjacent_points[0])
-        return self._compute_next(best_p, adjacent_points[2], adjacent_points[1])
+            return self._next_or_exhaust(self._compute_next(best_p, adjacent_points[1], adjacent_points[0]))
+        return self._next_or_exhaust(self._compute_next(best_p, adjacent_points[2], adjacent_points[1]))
 
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _next_or_exhaust(self, next_q: Decimal | None) -> Decimal | None:
+        """Return *next_q* if it is a quality value not yet attempted; exhaust otherwise.
+
+        Prevents infinite loops: if ``_compute_next`` proposes a quality that is
+        already in ``_attempted_points`` (or returns ``None``), the search is
+        exhausted immediately.
+        """
+        if next_q is None or next_q in self._attempted_points:
+            self._exhausted = True
+            return None
+        return next_q
 
     # ------------------------------------------------------------------
     # Next quality computation
