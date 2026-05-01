@@ -171,7 +171,7 @@ Config search order (first found wins): `./pyqenc.yaml` → `~/.config/pyqenc/co
 
 **Insufficient disk space** — lossless mode needs ~7–10× source size (5× for FFV1 chunks + extraction + encoding + audio + merging). Use `--work-dir` to point to a larger disk, or `--remux-chunking` to reduce chunk size at the cost of frame-perfect splits.
 
-**Slow encoding** — try a faster preset (`fast`, `medium`) or a faster codec (h.264 >> h.265 >> av1 for encoding speed). `--max-parallel 4` can help if CPU cores are not fully utilized.
+**Slow encoding** — try a faster preset (`fast`, `medium`) or a faster codec (h.264 >> h.265 >> av1 for encoding speed). `--max-parallel 2` or higher can help if CPU cores are not fully utilized.
 
 **Strategy wildcard not expanding** — some shells require quoting: `"slow+h265*"`. Use dry-run to verify expansion.
 

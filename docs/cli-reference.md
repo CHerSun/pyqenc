@@ -41,12 +41,12 @@ Applies to all subcommands.
 
 ### Quality & Strategy
 
-| Option                     | Description                                                           | Default                                                  |
-| -------------------------- | --------------------------------------------------------------------- | -------------------------------------------------------- |
-| `--quality-target TARGETS` | Quality targets (see [Quality Target Format](#quality-target-format)) | `vif-med:92.0,vmaf-p05:95.0,psnr-med:45.0,ssim-med:98.0` |
-| `--strategies STRATEGIES`  | Encoding strategies (see [Strategy Format](#strategy-format))         | `veryslow+h264*,slow+h265*`                              |
-| `--all-strategies`         | Disable optimization — produce output for all strategies              | `False` (optimization enabled)                           |
-| `--max-parallel N`         | Maximum concurrent encoding processes                                 | `2`                                                      |
+| Option                     | Description                                                                              | Default                                                  |
+| -------------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `--quality-target TARGETS` | Quality targets (see [Quality Target Format](#quality-target-format))                    | `vif-med:92.0,vmaf-p05:95.0,psnr-med:45.0,ssim-med:98.0` |
+| `--strategies STRATEGIES`  | Encoding strategies (see [Strategy Format](#strategy-format))                            | `veryslow+h264*,slow+h265*`                              |
+| `--all-strategies`         | Disable optimization — produce output for all strategies                                 | `False` (optimization enabled)                           |
+| `--max-parallel N`         | Maximum concurrent encoding processes. Increase only if you see CPU cores underutilized. | `1`                                                      |
 
 ### Cropping
 

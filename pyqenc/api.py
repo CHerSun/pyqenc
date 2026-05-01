@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pyqenc.constants import DEFAULT_METRICS_SAMPLING, DEFAULT_SCREENSHOT_COUNT
+from pyqenc.constants import DEFAULT_MAX_PARALLEL, DEFAULT_METRICS_SAMPLING, DEFAULT_SCREENSHOT_COUNT
 from pyqenc.models import (
     ChunkingMode,
     CleanupLevel,
@@ -70,7 +70,7 @@ def _minimal_config(
     include:            str | None = None,
     exclude:            str | None = None,
     chunking_mode:      ChunkingMode = ChunkingMode.LOSSLESS,
-    max_parallel:       int = 2,
+    max_parallel:       int,
     force:              bool = False,
     audio_convert:      str | None = None,
     audio_codec:        str | None = None,
@@ -142,7 +142,7 @@ def extract_streams(
         raise FileNotFoundError(f"Source video not found: {source_video}")
 
     work_dir.mkdir(parents=True, exist_ok=True)
-    config   = _minimal_config(source_video=source_video, work_dir=work_dir, include=include, exclude=exclude, force=force)
+    config   = _minimal_config(source_video=source_video, work_dir=work_dir, include=include, exclude=exclude, force=force, max_parallel=DEFAULT_MAX_PARALLEL)
     registry = _build_registry(config, NoOpMetricsCollector())
     phase    = registry[ExtractionPhase]
     return phase.run(dry_run=dry_run)  # type: ignore[return-value]
@@ -189,7 +189,7 @@ def chunk_video(
         raise ValueError(f"Minimum scene length must be positive, got {min_scene_length}")
 
     work_dir.mkdir(parents=True, exist_ok=True)
-    config   = _minimal_config(source_video=source_video, work_dir=work_dir, chunking_mode=chunking_mode, force=force)
+    config   = _minimal_config(source_video=source_video, work_dir=work_dir, chunking_mode=chunking_mode, force=force, max_parallel=DEFAULT_MAX_PARALLEL)
     registry = _build_registry(config, NoOpMetricsCollector())
     phase    = registry[ChunkingPhase]
     return phase.run(dry_run=dry_run)  # type: ignore[return-value]
@@ -200,7 +200,7 @@ def encode_chunks(
     work_dir:         Path,
     strategies:       list[str],
     quality_targets:  list[str],
-    max_parallel:     int = 2,
+    max_parallel:     int,
     force:            bool = False,
     dry_run:          bool = False,
     metrics_sampling: int | None = None,
@@ -215,7 +215,7 @@ def encode_chunks(
         work_dir:         Working directory (same as used by ``auto``).
         strategies:       List of encoding strategy name strings.
         quality_targets:  List of quality target strings (e.g. ``["vmaf-min:95"]``).
-        max_parallel:     Maximum concurrent encoding processes (default: 2).
+        max_parallel:     Maximum concurrent encoding processes.
         force:            Wipe existing artifacts on source mismatch when ``True``.
         dry_run:          Report only, no files written.
         metrics_sampling: Frame subsampling factor for quality metric generation.
@@ -295,6 +295,7 @@ def process_audio(
         audio_convert      = audio_convert,
         audio_codec        = audio_codec,
         audio_base_bitrate = audio_base_bitrate,
+        max_parallel       = DEFAULT_MAX_PARALLEL,
     )
     registry = _build_registry(config, NoOpMetricsCollector())
     phase    = registry[AudioPhase]
@@ -330,7 +331,7 @@ def merge_final(
         raise FileNotFoundError(f"Source video not found: {source_video}")
 
     work_dir.mkdir(parents=True, exist_ok=True)
-    config   = _minimal_config(source_video=source_video, work_dir=work_dir, metrics_sampling=metrics_sampling)
+    config   = _minimal_config(source_video=source_video, work_dir=work_dir, metrics_sampling=metrics_sampling, max_parallel=DEFAULT_MAX_PARALLEL)
     registry = _build_registry(config, NoOpMetricsCollector())
     phase    = registry[MergePhase]
     return phase.run(dry_run=dry_run)  # type: ignore[return-value]

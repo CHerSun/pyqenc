@@ -1325,7 +1325,7 @@ def encode_all_chunks(
     quality_targets:   list[QualityTarget],
     work_dir:          Path,
     collector:         "MetricsCollector",
-    max_parallel:    int               = 2,
+    max_parallel:    int,
     force:           bool              = False,
     dry_run:         bool              = False,
     crop_params:     CropParams | None = None,

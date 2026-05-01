@@ -13,6 +13,9 @@ TIMEOUT_SECONDS_MAX = 3600
 THRESHOLD_ATTEMPTS_WARNING = 10
 """Threshold for warning about excessive encoding attempts."""
 
+DEFAULT_MAX_PARALLEL = 1
+"""Default maximum number of concurrent encoding processes."""
+
 TEMP_SUFFIX = ".tmp"
 """A suffix to append to temporary files during processing. This helps avoid confusion with final output files and allows for easy cleanup of incomplete files."""
 
