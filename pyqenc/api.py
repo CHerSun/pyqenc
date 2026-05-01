@@ -65,12 +65,12 @@ def run_pipeline(
 def _minimal_config(
     source_video:       Path,
     work_dir:           Path,
+    max_parallel:       int,
     quality_targets:    list[QualityTarget] | None = None,
     strategies:         list[Strategy] | None = None,
     include:            str | None = None,
     exclude:            str | None = None,
     chunking_mode:      ChunkingMode = ChunkingMode.LOSSLESS,
-    max_parallel:       int,
     force:              bool = False,
     audio_convert:      str | None = None,
     audio_codec:        str | None = None,
