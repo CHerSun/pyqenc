@@ -54,12 +54,12 @@ To get stable results you should target multiple metrics. Considering we use chu
 Ny set is something like:
 
 ```yaml
-- "vmaf-p05:95"   # see the vmaf-min notice - prefer p05 over min
-- "vif-med:92"    # vif is stable, could target min or med finely. 92 is the bare minimum, just to control.
-- "psnr-med:46"   # psnr is stable, could target min or med finely. I like 46+.
-- "ssim-med:98"   # ssim is stable, could target min or med finely. The metric itself is very compressed around 98-100.0 range, small changes there matter. 99 feels to be ok.
+- "vif-med:92"    # vif is stable, could target min or med finely. 92 looks to be a good value to add extra control on retention of film grain.
+- "vmaf-p05:95"   # see the vmaf-min notice - prefer p05 over min. VMAF is the main metric controlling perceived quality.
+- "psnr-med:45"   # psnr is stable, could target min or med finely. 45+ should give quite good value.
+- "ssim-med:98"   # ssim is stable, could target min or med finely. SSIM is considered to not be a good measure of perceived quality. The metric itself is very compressed around 98-100.0 range, small changes there matter. 98 feels to be ok as an extra control.
 ```
 
-I'm pursuing nearly visually lossless results. Those could be too high for you, if you want smaller result size.
+I'm pursuing nearly visually lossless results. These values could be too high for you, if you prefer smaller resulting size.
 
 > This is the area of personal preference really, just measure a few results that you like to see the measured stats.

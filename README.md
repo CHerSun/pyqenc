@@ -178,13 +178,13 @@ pyqenc auto movie.mkv
 pyqenc auto movie.mkv -y
 ```
 
-> NOTE: It is highly recommended to explicitly specify `--work-dir` and use different ones per encode job (i.e. if you change source file - change the work dir). Don't run multiple encodings in parallel onto the same `--work-dir` - this will cause conflicts.
+> NOTE: It is recommended to use a separate working directory per encode job — either `cd` into a dedicated folder before running, or pass `--work-dir <path>`. Don't run multiple encodings in parallel onto the same `--work-dir` - this will cause conflicts.
 
-Let's be a bit more specific on our target quality, strategy and work dir:
+Let's be a bit more specific on our target quality and strategy:
 
 ```sh
 # Execute with custom quality targets and strategies selection
-pyqenc auto movie.mkv --work-dir ./movie --quality-target vmaf-min:95 --strategies slow+h265-aq -y
+pyqenc auto movie.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq -y
 ```
 
 pyqenc pipeline gives final results in form of individual processed audio files (per strategy) and video files (per strategy). It is up to you to choose what you like and package that into a single container afterwards. The simplest way is the MKVmerge GUI - just drag wanted video stream and wanted audio streams there, add metadata (cover, descriptions, chapters, etc) and mux that.
@@ -192,12 +192,6 @@ pyqenc pipeline gives final results in form of individual processed audio files 
 For audios - `audio` subfolder - it takes all filtered streams (see `include`/`exclude` arguments) and applies all strategies - downmixing (different modes, including night and dialogs boosting), normalization, dynamic normalization and converts to your wanted format (default = AAC CBR 96kbps per channel).
 
 For videos - `final` subfolder - the number of results depends on selected strategies and optimization phase results. You will get 1 video stream per selected processing strategy.
-
-Default settings:
-
-- target quality `vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94` - a balanced set of metrics for very good visual quality and rather small size;
-- strategies selector `veryslow+h264*,slow+h265*` - use all defined h264 profiles with veryslow preset and all h265 profiles with slow preset - focus on quality and resulting size, rather then encoding speed;
-- optimization phase enabled - allow pyqenc to test & choose the optimal strategies.
 
 ### Get CLI help
 
@@ -260,7 +254,7 @@ For example, if you did a full encode with default settings, but the resulting q
 One of the purpose of the pyqenc is to provide ability to compare results. You might want to do different encodes using different tools. As long as they stay synced - you can consistently measure those using pyqenc built-in mechanics (same as used for pipeline):
 
 ```sh
-pyqenc measure <source_video> <target_video> [<target_video> ...] --work_dir <work_dir_for_source_video>
+pyqenc measure <source_video> <target_video> [<target_video> ...]
 ```
 
 This will give under the `measure` subfolder:
@@ -276,37 +270,37 @@ You should be able to measure even incomplete encodings.
 Slow h265 strategy tuned to better encode dark scenes and for crisper look with higher quality targets:
 
 ```sh
-pyqenc auto movie.mkv --work-dir ./movie --quality-target vmaf-min:95,vmaf-med:98 --strategies slow+h265-aq -y
+pyqenc auto movie.mkv --quality-target vmaf-min:95,vmaf-med:98 --strategies slow+h265-aq -y
 ```
 
 Fast basic h.264 encoding strategy targeting only the VMAF min score:
 
 ```sh
-pyqenc auto movie.mkv --work-dir ./movie --quality-target vmaf-min:93 --strategies fast+h264 -y
+pyqenc auto movie.mkv --quality-target vmaf-min:93 --strategies fast+h264 -y
 ```
 
 Search through multiple strategies for the best one (or a few) and encode to it:
 
 ```sh
-pyqenc auto movie.mkv --work-dir ./movie --strategies slow+h265-aq,veryslow+h265-anime -y
+pyqenc auto movie.mkv --strategies slow+h265-aq,veryslow+h265-anime -y
 ```
 
 Encode using all specified strategies chosen with NO optimization phase:
 
 ```sh
-pyqenc auto movie.mkv --work-dir ./movie --strategies slow+h265-aq,veryslow+h265-anime --all-strategies -y
+pyqenc auto movie.mkv --strategies slow+h265-aq,veryslow+h265-anime --all-strategies -y
 ```
 
 Wildcard strategy selection (slow preset + all h265 profiles):
 
 ```sh
-pyqenc auto movie.mkv --work-dir ./movie --strategies slow+h265* -y
+pyqenc auto movie.mkv --strategies slow+h265* -y
 ```
 
 Encode using all presets of specified profile (ultrafast...placebo of h265 basic profile):
 
 ```sh
-pyqenc auto movie.mkv --work-dir ./movie --strategies +h265 -y
+pyqenc auto movie.mkv --strategies +h265 -y
 ```
 
 > NOTE: Some shells might need to escape the `*` character. The easiest is to just enclose full `slow+h265*` in quotes `"slow+h265*"` - this normally helps.
@@ -314,7 +308,7 @@ pyqenc auto movie.mkv --work-dir ./movie --strategies +h265 -y
 Disable automatic cropping:
 
 ```sh
-pyqenc auto movie.mkv --work-dir ./movie --no-crop -y
+pyqenc auto movie.mkv --crop "0 0" -y
 ```
 
 Manual crop specification:
@@ -339,7 +333,7 @@ pyqenc auto <source_video> [options]
 
 | Option              | Description                                        | Default  |
 | ------------------- | -------------------------------------------------- | -------- |
-| `--work-dir PATH`   | Working directory for intermediate files           | `./work` |
+| `--work-dir PATH`   | Working directory for intermediate files           | `.`      |
 | `--log-level LEVEL` | Logging level (debug, info, warning, critical)     | `info`   |
 | `-y, --execute`     | Execute phases (no flag = dry-run, `-y` = execute) | dry-run  |
 
@@ -347,7 +341,7 @@ pyqenc auto <source_video> [options]
 
 | Option                     | Description                                             | Default                                           |
 | -------------------------- | ------------------------------------------------------- | ------------------------------------------------- |
-| `--quality-target TARGETS` | Quality targets (see format below)                      | `vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94` |
+| `--quality-target TARGETS` | Quality targets (see format below)                      | `vif-med:92.5,vmaf-p05:95.0,psnr-med:45.0,ssim-med:98.0` |
 | `--strategies STRATEGIES`  | Encoding strategies (see format below)                  | `veryslow+h264*,slow+h265*`                       |
 | `--all-strategies`         | Disable optimization, produce output for all strategies | `False` (optimization enabled)                    |
 | `--max-parallel N`         | Maximum concurrent encoding processes                   | `2`                                               |
@@ -364,10 +358,7 @@ pyqenc auto <source_video> [options]
 
 | Option            | Description                                                   | Default     |
 | ----------------- | ------------------------------------------------------------- | ----------- |
-| `--no-crop`       | Disable automatic black border detection                      | Auto-detect |
-| `--crop "VALUES"` | Manual crop (format: "top bottom" or "top bottom left right") | Auto-detect |
-
-> NOTE: `--no-crop` is the same as `--crop "0 0 0 0"`, just a short-hand.
+| `--crop "VALUES"` | Manual crop (format: "top bottom" or "top bottom left right"). Use `"0 0"` to disable auto-detection. | Auto-detect |
 
 ### Stream Filtering Options
 
@@ -388,31 +379,42 @@ Quality targets specify minimum acceptable quality using metrics and statistics:
 - `vmaf` - Video Multimethod Assessment Fusion (0-100.0 scale)
 - `ssim` - Structural Similarity Index (0.0-1.0 scale normalized to 0.0-100.0 scale)
 - `psnr` - Peak Signal-to-Noise Ratio (dB scale, clipped to 0.0-100.0 scale; good quality is normally around 40-60)
+- `vif`  - Visual Information Fidelity (0-100.0 scale; embedded in the VMAF pass). Useful for controlling film grain retention — VMAF tends to reward smoothed-out content, VIF is less biased.
 
 #### Statistics:
 
 - `min` - Minimum score across all frames
-- `med` or `median` - Median score across all frames
+- `p05` - 5th percentile (recommended over `min` — avoids outlier sensitivity)
+- `p25` - 25th percentile
+- `med` or `median` - Median (50th percentile)
+- `p75` - 75th percentile
+- `p95` - 95th percentile
+- `max` - Maximum score across all frames
 
-**Default:** If not specified, defaults to `vmaf-min:94,vmaf-med:97,psnr-min:42,ssim-min:94`
+> NOTE: Avoid `min` and `max` unless you know what you're doing. `vmaf-min` in particular is unreliable due to a first-frame bias — use `vmaf-p05` instead.
+
+**Default:** If not specified, defaults to `vif-med:92.5,vmaf-p05:95.0,psnr-med:45.0,ssim-med:98.0`
 
 #### Examples:
 
 ```sh
-# Single target: VMAF minimum of 95
---quality-target vmaf-min:95
+# Recommended baseline: multiple metrics, stable statistics
+--quality-target vif-med:92,vmaf-p05:95,psnr-med:45,ssim-med:98
 
-# Multiple targets: VMAF minimum 95 AND median 98
---quality-target vmaf-min:95,vmaf-med:98
+# VMAF p05 (preferred over min)
+--quality-target vmaf-p05:95
+
+# VMAF median with VIF for grain retention
+--quality-target vmaf-med:97,vif-med:92
 
 # SSIM target (note the normalized 0-100 scale)
---quality-target ssim-min:98
+--quality-target ssim-med:98
 
 # PSNR target (dB scale clipped to 0-100, but normally in range ~40-60 for good quality)
---quality-target psnr-min:45
+--quality-target psnr-med:45
 
 # Mixed metrics
---quality-target vmaf-min:95,ssim-med:99,psnr-min:45
+--quality-target vmaf-p05:95,vif-med:92,psnr-med:45,ssim-med:98
 ```
 
 ### Strategy Format
@@ -569,7 +571,7 @@ Specify crop values manually if automatic detection fails:
 To disable cropping entirely:
 
 ```sh
---no-crop
+--crop "0 0"
 ```
 
 ## Strategy Optimization

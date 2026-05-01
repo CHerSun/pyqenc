@@ -338,8 +338,8 @@ def merge_final(
 
 def measure_quality(
     source_video:             Path,
+    work_dir:                 Path,
     target_videos:            list[Path]        = [],
-    work_dir:                 Path              = Path("."),
     crop_params:              CropParams | None = None,
     metrics_sampling:         int               = DEFAULT_METRICS_SAMPLING,
     screenshot_count:         int | None        = DEFAULT_SCREENSHOT_COUNT,
@@ -360,9 +360,9 @@ def measure_quality(
 
     Args:
         source_video:             Path to the reference (original) video file.
+        work_dir:                 Working directory. Outputs go under ``work_dir/measure/``.
         target_videos:            Paths to encoded/distorted videos to evaluate. Pass an
                                   empty list to run in screenshots-only mode.
-        work_dir:                 Working directory. Outputs go under ``work_dir/measure/``.
         crop_params:              Crop parameters applied to the source during metric
                                   computation. Pass ``None`` to auto-load from
                                   ``job.yaml`` in ``work_dir`` if present; pass an

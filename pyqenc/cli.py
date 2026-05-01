@@ -806,8 +806,8 @@ def _cmd_measure(args: argparse.Namespace) -> int:
     try:
         measure_quality(
             source_video             = args.source,
-            target_videos            = args.targets,
             work_dir                 = args.work_dir,
+            target_videos            = args.targets,
             crop_params              = crop_params,
             metrics_sampling         = metrics_sampling,
             screenshot_count         = args.screenshots,
