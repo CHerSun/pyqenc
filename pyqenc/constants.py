@@ -188,11 +188,11 @@ AUDIO_CH_20     = "ch=2.0"
 AUDIO_CH_STEREO = "ch=stereo"
 """Channel layout tag embedded in filenames by the extraction phase for stereo (non-numeric)."""
 
-_NORMALISED_PREFIXES: tuple[str, ...] = (
+NORMALISED_PREFIXES: tuple[str, ...] = (
     f"norm {AUDIO_STEM_SEPARATOR}",
-    f"2.0 std {AUDIO_STEM_SEPARATOR}",
-    f"2.0 night {AUDIO_STEM_SEPARATOR}",
-    f"2.0 nboost {AUDIO_STEM_SEPARATOR}",
+    f"2{TIME_SEPARATOR_MS}0 std {AUDIO_STEM_SEPARATOR}",
+    f"2{TIME_SEPARATOR_MS}0 night {AUDIO_STEM_SEPARATOR}",
+    f"2{TIME_SEPARATOR_MS}0 nboost {AUDIO_STEM_SEPARATOR}",
 )
 """Filename prefixes that indicate a file has already been statically normalised.
 Used by ``NormStrategy.check()`` (to skip already-normalised files) and

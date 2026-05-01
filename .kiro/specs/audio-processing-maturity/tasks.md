@@ -13,7 +13,7 @@ Completed: 2026-03-18
 
   - Add `AUDIO_STEM_SEPARATOR = "←"` constant
   - Add `AUDIO_CH_71`, `AUDIO_CH_51`, `AUDIO_CH_20`, `AUDIO_CH_STEREO` channel layout tag constants
-  - Add `_NORMALISED_PREFIXES` tuple (used by `norm` and `dynaudnorm` check logic) — or export the individual prefix strings so strategies can build them from constants
+  - Add `NORMALISED_PREFIXES` tuple (used by `norm` and `dynaudnorm` check logic) — or export the individual prefix strings so strategies can build them from constants
   - _Requirements: 2.4, 3.1, 4.5_
 
 - [x] 2. Refactor `BaseStrategy` and add `strategy_short` to all strategies
