@@ -262,8 +262,8 @@ codecs:
 
   nvenc-h265-10bit-vbr:            # NVenc multipass VBR
     default_quality: 20            # 20Mbit/s as a starting point
-    quality_range: [99, 0]         # Limit to 99Mbit/s, reversed (higher=better)
-    quality_granularity: 0.1
+    quality_range: [99, 0.5]       # Limit to 99Mbit/s, reversed (higher=better)
+    quality_granularity: 0.5
     quality_max_step: 10.0
     quality_label: "Mbit/s"
     encoder_args:
