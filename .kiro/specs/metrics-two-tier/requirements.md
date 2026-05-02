@@ -4,6 +4,14 @@
 
 - Created: 2026-06-15
 
+## Cross-Spec Summary
+
+| Spec                           | Created    | Relationship                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------ | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `metrics-two-tier` (this spec) | 2026-06-15 | **Superseded in part by later work.** The original design placed `encoding.<strategy>` timing as an outer async wrapper in `_encode_chunks_parallel`, covering both ffmpeg encode and quality evaluation together. A subsequent change moved timing into `ChunkEncoder` itself, splitting it into `encoding.<strategy>` (ffmpeg encode only) and `encoding.quality_measure` (quality evaluation only). The `METRIC_KEY_QUALITY_MEASURE` constant was added to `constants.py`. See Requirement 3.7 for the current dotted key list. |
+
+---
+
 ## Introduction
 
 The pipeline already records wall-clock time for each phase category in `metrics.yaml`
@@ -164,8 +172,14 @@ and compare strategy-level costs even when parallelism > 1.
      are left as-is (valid in YAML keys and do not corrupt the dot-based prefix
      structure). Dots in `strategy_short` (e.g. `"5.1"`) are sanitized per
      Requirement 9 (e.g. `"5.1"` → `"audio.5․1"`).
-   - `"encoding.<strategy>"` — per-strategy encoding process time in EncodingPhase
-     (e.g. `"encoding.h265"`, `"encoding.slow+h265"`)
+   - `"encoding.<strategy>"` — ffmpeg encode process time per strategy in EncodingPhase,
+     accumulated across all chunks and all CRF search attempts
+     (e.g. `"encoding.h265"`, `"encoding.slow+h265"`).
+     **Does NOT include quality evaluation time** — that is captured separately.
+   - `"encoding.quality_measure"` — VMAF/PSNR evaluation time in EncodingPhase,
+     accumulated across all chunks and all CRF search attempts regardless of strategy.
+     The suffix `"quality_measure"` is defined as `METRIC_KEY_QUALITY_MEASURE` in
+     `constants.py` and shared with `MergePhase`.
    - `"optimization.<strategy>"` — per-strategy optimization test encode process time
      in OptimizationPhase (e.g. `"optimization.h265"`, `"optimization.slow+h265"`);
      the `"optimization"` prefix group works exactly like `"encoding"` — per-strategy

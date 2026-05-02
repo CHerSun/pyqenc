@@ -9,6 +9,7 @@
 | Spec | Created | Relationship |
 |------|---------|--------------|
 | `pts-preservation` | 2026-04-29 (Completed) | **No conflict. Earlier spec.** `pts-preservation` was completed before this spec was created. It does not use any `MetricKey` dotted keys for the new `_extract_timestamps()` step, though timing it under `MetricKey.EXTRACTION` is possible if desired. The `mkvmerge` concat step in `MergePhase` could similarly be timed under `MetricKey.MERGE, "concat"` per this spec's dotted key convention. No changes to `pts-preservation` are required. |
+| `metrics-two-tier` (this spec) | 2026-06-15 | **Superseded in part by later work.** The original design placed `encoding.<strategy>` timing in `_encode_chunks_parallel` as an outer async wrapper covering both the ffmpeg encode and the quality evaluation. A subsequent change (post-completion) moved timing into `ChunkEncoder` itself: `encoding.<strategy>` now covers only the ffmpeg encode, and `encoding.quality_measure` covers only the quality evaluation. The `METRIC_KEY_QUALITY_MEASURE` constant was added to `constants.py` and is shared by both `EncodingPhase` and `MergePhase`. The `dotted_metric_key` parameter on `_encode_chunks_parallel` was removed. See the Phase call-site mapping table below for the current state. |
 
 ---
 
@@ -42,6 +43,7 @@ dot-based prefix structure.
 │  collector.time(MetricKey.ENCODING)                  ← top     │
 │  collector.time(MetricKey.JOB, "probe")              ← fixed   │
 │  collector.time(MetricKey.ENCODING, strategy.name)   ← dynamic │
+│  collector.time(MetricKey.ENCODING, "quality_measure") ← fixed │
 └────────────────────────┬────────────────────────────────────────┘
                          │
                          ▼
@@ -327,17 +329,21 @@ pipeline_metrics:
       # zeros omitted, sorted descending
     dotted:
       encoding:
-        prefix_seconds: 5882
-        prefix_duration: "01:38:02"
+        prefix_seconds: 6882
+        prefix_duration: "01:54:42"
         breakdown:
           - key: encoding.h265
             seconds: 4120
             duration: "01:08:40"
-            percent: "70.1%"
+            percent: "59.9%"
           - key: encoding.slow+h265
             seconds: 1762
             duration: "00:29:22"
-            percent: "29.9%"
+            percent: "25.6%"
+          - key: encoding.quality_measure
+            seconds: 1000
+            duration: "00:16:40"
+            percent: "14.5%"
       merge:
         prefix_seconds: 820
         prefix_duration: "00:13:40"
@@ -370,39 +376,42 @@ time is authoritative.
 
 ### Phase call-site mapping (post-migration)
 
-| Phase | Key used | Type |
-|---|---|---|
-| JobPhase — probe | `MetricKey.JOB` | top-level |
-| JobPhase — crop detect | `MetricKey.JOB` | top-level (same key, accumulates) |
-| JobPhase — recovery | `MetricKey.RECOVERY` | top-level |
-| ExtractionPhase — mkvextract | `MetricKey.EXTRACTION` | top-level |
-| ExtractionPhase — recovery | `MetricKey.RECOVERY` | top-level |
-| ChunkingPhase — scene detect | `MetricKey.CHUNKING` | top-level |
-| ChunkingPhase — split | `MetricKey.CHUNKING` | top-level (same key, accumulates) |
-| ChunkingPhase — recovery | `MetricKey.RECOVERY` | top-level |
-| AudioPhase — per-strategy | `MetricKey.AUDIO` | top-level |
-| AudioPhase — recovery | `MetricKey.RECOVERY` | top-level |
-| EncodingPhase — main loop | `MetricKey.ENCODING` | top-level |
-| EncodingPhase — recovery | `MetricKey.RECOVERY` | top-level |
-| OptimizationPhase — test encodes | `MetricKey.OPTIMIZATION` | top-level |
-| OptimizationPhase — recovery | `MetricKey.RECOVERY` | top-level |
-| MergePhase — concat | `MetricKey.MERGE` | top-level |
-| MergePhase — quality measure | `MetricKey.MERGE` | top-level (same key, accumulates) |
-| MergePhase — recovery | `MetricKey.RECOVERY` | top-level |
+| Phase                            | Key used                 | Type                              |
+| -------------------------------- | ------------------------ | --------------------------------- |
+| JobPhase — probe                 | `MetricKey.JOB`          | top-level                         |
+| JobPhase — crop detect           | `MetricKey.JOB`          | top-level (same key, accumulates) |
+| JobPhase — recovery              | `MetricKey.RECOVERY`     | top-level                         |
+| ExtractionPhase — mkvextract     | `MetricKey.EXTRACTION`   | top-level                         |
+| ExtractionPhase — recovery       | `MetricKey.RECOVERY`     | top-level                         |
+| ChunkingPhase — scene detect     | `MetricKey.CHUNKING`     | top-level                         |
+| ChunkingPhase — split            | `MetricKey.CHUNKING`     | top-level (same key, accumulates) |
+| ChunkingPhase — recovery         | `MetricKey.RECOVERY`     | top-level                         |
+| AudioPhase — per-strategy        | `MetricKey.AUDIO`        | top-level                         |
+| AudioPhase — recovery            | `MetricKey.RECOVERY`     | top-level                         |
+| EncodingPhase — main loop        | `MetricKey.ENCODING`     | top-level                         |
+| EncodingPhase — recovery         | `MetricKey.RECOVERY`     | top-level                         |
+| OptimizationPhase — test encodes | `MetricKey.OPTIMIZATION` | top-level                         |
+| OptimizationPhase — recovery     | `MetricKey.RECOVERY`     | top-level                         |
+| MergePhase — concat              | `MetricKey.MERGE`        | top-level                         |
+| MergePhase — quality measure     | `MetricKey.MERGE`        | top-level (same key, accumulates) |
+| MergePhase — recovery            | `MetricKey.RECOVERY`     | top-level                         |
 
 Dotted keys added by phases in the new design:
 
-| Phase | Call expression | Resulting key |
-|---|---|---|
-| JobPhase | `collector.time(MetricKey.JOB, "probe")` | `"job.probe"` |
-| JobPhase | `collector.time(MetricKey.JOB, "crop_detect")` | `"job.crop_detect"` |
-| ChunkingPhase | `collector.time(MetricKey.CHUNKING, "scene_detect")` | `"chunking.scene_detect"` |
-| ChunkingPhase | `collector.time(MetricKey.CHUNKING, "split")` | `"chunking.split"` |
-| AudioPhase | `collector.time(MetricKey.AUDIO, strategy.strategy_short)` | `"audio.norm"` etc. |
-| EncodingPhase | `collector.time(MetricKey.ENCODING, strategy.name)` | `"encoding.slow+h265"` etc. |
-| OptimizationPhase | `collector.time(MetricKey.OPTIMIZATION, strategy.name)` | `"optimization.h265"` etc. |
-| MergePhase | `collector.time(MetricKey.MERGE, "concat")` | `"merge.concat"` |
-| MergePhase | `collector.time(MetricKey.MERGE, "quality_measure")` | `"merge.quality_measure"` |
+| Phase             | Call expression                                                  | Resulting key                                              |
+| ----------------- | ---------------------------------------------------------------- | ---------------------------------------------------------- |
+| JobPhase          | `collector.time(MetricKey.JOB, "probe")`                         | `"job.probe"`                                              |
+| JobPhase          | `collector.time(MetricKey.JOB, "crop_detect")`                   | `"job.crop_detect"`                                        |
+| ChunkingPhase     | `collector.time(MetricKey.CHUNKING, "scene_detect")`             | `"chunking.scene_detect"`                                  |
+| ChunkingPhase     | `collector.time(MetricKey.CHUNKING, "split")`                    | `"chunking.split"`                                         |
+| AudioPhase        | `collector.time(MetricKey.AUDIO, strategy.strategy_short)`       | `"audio.norm"` etc.                                        |
+| EncodingPhase     | `collector.time(MetricKey.ENCODING, strategy.name)`              | `"encoding.slow+h265"` etc. — **ffmpeg encode only**       |
+| EncodingPhase     | `collector.time(MetricKey.ENCODING, METRIC_KEY_QUALITY_MEASURE)` | `"encoding.quality_measure"` — **quality evaluation only** |
+| OptimizationPhase | `collector.time(MetricKey.OPTIMIZATION, strategy.name)`          | `"optimization.h265"` etc.                                 |
+| MergePhase        | `collector.time(MetricKey.MERGE, "concat")`                      | `"merge.concat"`                                           |
+| MergePhase        | `collector.time(MetricKey.MERGE, METRIC_KEY_QUALITY_MEASURE)`    | `"merge.quality_measure"`                                  |
+
+> **Note on `encoding.<strategy>` vs `encoding.quality_measure`:** Timing is recorded inside `ChunkEncoder` (not in the outer async wrapper). `encoding.<strategy>` accumulates only the ffmpeg subprocess time per attempt. `encoding.quality_measure` accumulates only the VMAF/PSNR evaluation time per attempt. Both are accumulated across all chunks and all attempts for the run. The `METRIC_KEY_QUALITY_MEASURE` constant (`"quality_measure"`) is defined in `constants.py` and shared by both `EncodingPhase` and `MergePhase`.
 
 The key joining is internal to the collector — call sites only import
 `MetricKey`. No `dotted()` function, no string constants, no hardcoded

@@ -92,6 +92,12 @@ DOTTED_KEY_SEPARATOR: str = "."
 (e.g. ``"encoding.h265"``).  This is the standard ASCII dot (U+002E) used exclusively
 for metric key structure — distinct from file extension dots, ``TIME_SEPARATOR_MS``
 (U+2024, used in filenames), and other uses of ``"."`` in the codebase."""
+
+METRIC_KEY_QUALITY_MEASURE: str = "quality_measure"
+"""Dotted-key suffix used to time quality metric measurement (VMAF/PSNR evaluation)
+within a phase.  Combined with a ``MetricKey`` prefix it forms keys such as
+``"encoding.quality_measure"`` and ``"merge.quality_measure"``.  Using a shared
+constant ensures the suffix is identical across all phases that measure quality."""
 BRACKET_LEFT = "｟"
 """Left bracket symbol for visually distinct log formatting."""
 BRACKET_RIGHT = " ｠"
