@@ -42,18 +42,18 @@ V3 is a drop-in replacement for V2 (same `QualitySearchProtocol` interface, same
 
 ## Requirements
 
-### Requirement 1: QualitySearchV3 Class and Protocol Compliance
+### Requirement 1: QualitySearchV3 Class and Base Class Compliance
 
-**User Story:** As a developer, I want a `QualitySearchV3` class that satisfies `QualitySearchProtocol`, so that it can be used as a drop-in replacement for `QualitySearchV2` without changing any caller code.
+**User Story:** As a developer, I want a `QualitySearchV3` class that inherits from `QualitySearchBase`, so that it can be used as a drop-in replacement for `QualitySearchV2` without changing any caller code.
 
 #### Acceptance Criteria
 
-1. THE `QualitySearchV3` class SHALL be defined in `pyqenc/quality.py` and SHALL implement `QualitySearchProtocol`.
-2. THE `QualitySearchV3` constructor SHALL accept the same parameters as `QualitySearchV2`: `quality_better: Decimal`, `quality_worse: Decimal`, `quality_targets: list[QualityTarget]`, `granularity: Decimal`, `quality_max_step: Decimal | None = None`.
-3. IF `quality_better == quality_worse`, THEN THE `QualitySearchV3` constructor SHALL raise `ValueError`.
-4. IF `granularity <= 0`, THEN THE `QualitySearchV3` constructor SHALL raise `ValueError`.
+1. THE `QualitySearchV3` class SHALL be defined in `pyqenc/quality.py` and SHALL inherit from `QualitySearchBase`.
+2. THE `QualitySearchV3` constructor SHALL call `super().__init__()` and accept the same parameters as `QualitySearchV2`: `quality_better: Decimal`, `quality_worse: Decimal`, `quality_targets: list[QualityTarget]`, `granularity: Decimal`, `quality_max_step: Decimal | None = None`.
+3. IF `quality_better == quality_worse`, THE `QualitySearchV3` constructor SHALL accept the input without raising. The first `record()` call SHALL record the result and return `None` (single fixed quality value, no search). All subsequent calls SHALL also return `None`.
+4. IF `granularity <= 0`, THEN THE `QualitySearchV3` constructor SHALL raise `ValueError` (enforced by `QualitySearchBase.__init__`).
 5. WHEN `record()` has never been called, THE `QualitySearchV3` SHALL return `None` for `best_quality` and `best_metrics`, `False` for `best_targets_met`, and `0` for `attempts`.
-6. THE `QualitySearchV3` SHALL NOT delegate its `_compute_next` logic to `QualitySearch._compute_next` — it SHALL have its own clean implementation.
+6. THE `QualitySearchV3` SHALL use `self._compute_next_quality(...)` (inherited from `QualitySearchBase`) rather than any standalone function or delegation to another class.
 7. THE `QualitySearchV3` SHALL be importable from `pyqenc.quality` alongside `QualitySearch` and `QualitySearchV2`.
 
 ---
@@ -196,15 +196,24 @@ V3 is a drop-in replacement for V2 (same `QualitySearchProtocol` interface, same
 
 ---
 
-### Requirement 12: Isolation — No Changes to Existing Code
+### Requirement 12: Minimal Changes to Existing Code
 
-**User Story:** As a developer, I want V3 to be added without modifying any existing code, so that V1 and V2 remain unaffected and the encoding pipeline continues to use V2 until V3 is proven correct.
+**User Story:** As a developer, I want V3 to be added with minimal changes to existing code, so that the encoding pipeline continues to use V2 until V3 is proven correct.
 
 #### Acceptance Criteria
 
-1. THE `QualitySearchV3` implementation SHALL be added to `pyqenc/quality.py` without modifying `QualitySearch`, `QualitySearchV2`, `QualitySearchProtocol`, `_score_attempt`, `_compute_proportional_candidate`, `_clamp_to_range`, `_in_range`, or `QualityPoint`.
-2. THE encoding pipeline (`pyqenc/phases/encoding.py`) SHALL NOT be modified to use `QualitySearchV3` as part of this spec — it SHALL continue to use `QualitySearchV2`.
-3. THE `QualitySearchV3` class SHALL be exported from `pyqenc/quality.py` so it is importable by tests.
+1. `QualitySearchProtocol` SHALL be replaced by `QualitySearchBase(ABC)` — an abstract base class with:
+   - Shared constructor (raises `ValueError` only if `granularity <= 0`; `quality_better == quality_worse` is valid and results in single-point search)
+   - Abstract `attempts`, `best_quality`, `best_metrics`, `best_targets_met`, and `record()` members (same contract as the former Protocol)
+   - Protected helpers: `_score(metrics)`, `_find_worst_target(metrics)`, `_next_or_exhaust(next_q, attempted)`, `_finalize_q(raw_q, from_q, worse_point, better_point)`, `_compute_next_quality(new_point, worse_point, better_point)`
+2. `_finalize_q` SHALL apply the full post-processing pipeline in order: max-step clamp → granularity snap → sentinel-aware range clamp. It SHALL return `None` when the range is exhausted. Every return path in every subclass SHALL use `_finalize_q` — no inline max-step/snap/clamp sequences in subclass code.
+3. `QualitySearch` and `QualitySearchV2` SHALL be updated to inherit from `QualitySearchBase`, use `self._score(...)`, `self._find_worst_target(...)`, `self._next_or_exhaust(...)`, `self._finalize_q(...)`, and `self._compute_next_quality(...)` instead of the current inline code and module-level calls. The existing `ValueError` on `quality_better == quality_worse` SHALL be removed from both — the base class constructor accepts it.
+4. Existing tests that assert `ValueError` when `quality_better == quality_worse` SHALL be updated to assert the single-point search behavior instead.
+5. All `isinstance(x, QualitySearchProtocol)` checks in tests and production code SHALL be updated to `isinstance(x, QualitySearchBase)`.
+6. THE module-level functions `_score_attempt` and `_find_worst_target` SHALL be removed and replaced by `self._score(metrics)` and `self._find_worst_target(metrics)` on the base class. All callers (including tests) SHALL be updated accordingly. The module-level `_compute_proportional_candidate`, `_clamp_to_range`, and `_in_range` SHALL remain unchanged.
+7. THE module-level `normalize_metric` function SHALL be removed — it is dead code (never called) and is superseded by `MetricType.info.normalize()` directly.
+8. THE encoding pipeline (`pyqenc/phases/encoding.py`) SHALL NOT be modified to use `QualitySearchV3` as part of this spec — it SHALL continue to use `QualitySearchV2`.
+9. THE `QualitySearchV3` class SHALL be exportable from `pyqenc.quality` so it is importable by tests.
 
 ---
 

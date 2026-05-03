@@ -6,7 +6,7 @@
 - Completed:
 
 > **Relationship to `crf-search-refactor` spec:**
-> This spec builds directly on the `crf-search-refactor` spec (which introduced `QualitySearchV2`, `QualitySearchProtocol`, `_score_attempt`, `_compute_proportional_candidate`, `_clamp_to_range`, `QualityPoint`, and the 3-point sweet-spot algorithm). All of those remain unchanged. `QualitySearchV3` is added alongside them as a drop-in replacement that replaces V2's binary half-steps with linear extrapolation and adds a midpoint-probe safety net.
+> This spec builds directly on the `crf-search-refactor` spec (which introduced `QualitySearchV2`, `QualitySearchProtocol`, `_score_attempt`, `_compute_proportional_candidate`, `_clamp_to_range`, `QualityPoint`, and the 3-point sweet-spot algorithm). As part of this spec, `QualitySearchProtocol` is replaced by `QualitySearchBase` — an abstract base class that carries the shared constructor, config fields, `_exhausted` flag, and `_compute_next_quality` as a protected method. `QualitySearch` and `QualitySearchV2` are updated to inherit from it. `QualitySearchV3` is added as a third subclass, replacing V2's binary half-steps with linear extrapolation and adding a midpoint-probe safety net.
 
 ---
 
@@ -19,8 +19,10 @@
 V3 is a drop-in replacement for V2 (same `QualitySearchProtocol` interface, same constructor signature). It lives alongside V1 and V2 in `pyqenc/quality.py`. The encoding pipeline is **not** switched to V3 until tests prove it works.
 
 Key design decisions:
-- V3 has its own clean `_compute_next` implementation — it does **not** delegate to `QualitySearch._compute_next` (the V2 hack).
-- `clamp_range=False` is used for the extrapolation case, allowing `t` outside `[0, 1]`. V2 never does this.
+- `QualitySearchProtocol` is replaced by `QualitySearchBase(ABC)` — an abstract base class that owns the shared constructor (with validation), config fields (`_quality_targets`, `_granularity`, `_quality_max_step`, `_quality_better`, `_quality_worse`, `_exhausted`), and all protected helpers. `QualitySearch` and `QualitySearchV2` are updated to inherit from it.
+- All post-processing of a candidate quality value (max-step clamp → granularity snap → range clamp) is unified into a single `_finalize_q(raw_q, from_q, worse_point, better_point)` method. Every return path in every subclass calls `_finalize_q` — no inline sequences.
+- `_compute_next_quality` is a protected method on the base class, reading `self` fields directly. It always calls `_compute_proportional_candidate` without range clamping — `t` outside `[0, 1]` is allowed in all cases. When points are on opposite sides the projection naturally lands between them; when same-side it extrapolates outward. The `clamp_range` parameter is removed.
+- `_score`, `_find_worst_target`, and `_next_or_exhaust` are thin wrappers on the base class that bind `self._quality_targets` and `self._exhausted`, eliminating repeated arguments at every call site.
 - The `_midpoint_probe_flag` resets whenever the best-scoring point changes, because a new best may allow further extrapolation.
 - Direction-exhaustion is defined by actual tested points, not by reaching the sentinel value. The sentinel is only the hard clamp boundary.
 
@@ -31,7 +33,7 @@ Key design decisions:
 ```mermaid
 graph TD
     subgraph quality.py
-        P[QualitySearchProtocol]
+        B[QualitySearchBase ABC]
         V1[QualitySearch]
         V2[QualitySearchV2]
         V3[QualitySearchV3]
@@ -46,32 +48,34 @@ graph TD
         CE[ChunkEncoder.encode_chunk]
     end
 
-    V1 -->|implements| P
-    V2 -->|implements| P
-    V3 -->|implements| P
+    V1 -->|inherits| B
+    V2 -->|inherits| B
+    V3 -->|inherits| B
     V1 -->|uses| SA
     V2 -->|uses| SA
-    V2 -->|uses| PC
-    V2 -->|uses| CR
     V3 -->|uses| SA
-    V3 -->|uses| PC
-    V3 -->|uses| CR
     V3 -->|uses| IR
+    B -->|_compute_next_quality uses| PC
+    B -->|_compute_next_quality uses| CR
     CE -->|instantiates| V2
 ```
 
-V3 reuses all existing helpers without modification. The encoding pipeline continues to use V2 until V3 is proven correct by tests.
+`QualitySearchBase` owns `_compute_next_quality` as a protected method — all three subclasses call `self._compute_next_quality(...)` directly. The encoding pipeline continues to use V2 until V3 is proven correct by tests.
 
 ---
 
-## Components and Interfaces
+### QualitySearchBase (replaces QualitySearchProtocol)
 
-### QualitySearchV3
-
-Defined in `pyqenc/quality.py`. Implements `QualitySearchProtocol` with the same constructor signature as `QualitySearchV2`.
+Defined in `pyqenc/quality.py` as an abstract base class. Replaces `QualitySearchProtocol`. All internal implementations inherit from it. Callers type-hint against `QualitySearchBase`.
 
 ```python
-class QualitySearchV3:
+class QualitySearchBase(ABC):
+    """Abstract base class for all quality search implementations.
+
+    Owns shared constructor (with validation), config fields, exhaustion flag,
+    and all protected helper methods used by subclasses.
+    """
+
     def __init__(
         self,
         quality_better:   Decimal,
@@ -79,9 +83,132 @@ class QualitySearchV3:
         quality_targets:  list[QualityTarget],
         granularity:      Decimal,
         quality_max_step: Decimal | None = None,
-    ) -> None: ...
+    ) -> None:
+        # Raises ValueError if quality_better == quality_worse or granularity <= 0
 
-    # Protocol properties
+    # Shared config fields
+    _quality_targets:  list[QualityTarget]
+    _granularity:      Decimal
+    _quality_max_step: Decimal | None
+    _quality_better:   Decimal
+    _quality_worse:    Decimal
+    _exhausted:        bool
+
+    # Abstract contract — same as the former QualitySearchProtocol
+    @property
+    @abstractmethod
+    def attempts(self) -> int: ...
+
+    @property
+    @abstractmethod
+    def best_quality(self) -> Decimal | None: ...
+
+    @property
+    @abstractmethod
+    def best_metrics(self) -> dict[str, float] | None: ...
+
+    @property
+    @abstractmethod
+    def best_targets_met(self) -> bool: ...
+
+    @abstractmethod
+    def record(self, quality: Decimal, quality_results: dict[str, float]) -> Decimal | None: ...
+
+    # Protected helpers — available to all subclasses
+    def _score(self, metrics: dict[str, float]) -> float: ...
+    def _find_worst_target(self, metrics: dict[str, float]) -> tuple[QualityTarget, float, float] | None: ...
+    def _next_or_exhaust(self, next_q: Decimal | None, attempted: dict[Decimal, QualityPoint]) -> Decimal | None: ...
+    def _finalize_q(self, raw_q: Decimal, from_q: Decimal, worse_point: QualityPoint, better_point: QualityPoint) -> Decimal | None: ...
+    def _compute_next_quality(self, new_point: QualityPoint, worse_point: QualityPoint, better_point: QualityPoint) -> Decimal | None: ...
+```
+
+`QualitySearchProtocol` is **removed**. All `isinstance(x, QualitySearchProtocol)` checks in tests and production code are updated to `isinstance(x, QualitySearchBase)`.
+
+### QualitySearchBase protected helpers
+
+#### `_score(self, metrics)`
+
+Replaces the module-level `_score_attempt(metrics, targets)`. Moved into the base class — the `self._quality_targets` argument is implicit.
+
+```python
+def _score(self, metrics: dict[str, float]) -> float:
+```
+
+Raises `ValueError` if any target key is absent from `metrics`. The module-level `_score_attempt` is **removed**. Tests that imported it directly are updated to instantiate a search object and call `search._score(metrics)`, or to test scoring behavior through `record()`.
+
+#### `_find_worst_target(self, metrics)`
+
+Replaces the module-level `_find_worst_target(metrics, targets)`. Moved into the base class.
+
+```python
+def _find_worst_target(self, metrics: dict[str, float]) -> tuple[QualityTarget, float, float] | None:
+```
+
+The module-level `_find_worst_target` is **removed**.
+
+#### `_next_or_exhaust(self, next_q, attempted)`
+
+Checks whether `next_q` is `None` or already in `attempted`. If so, sets `self._exhausted = True` and returns `None`. Otherwise returns `next_q`. Prevents infinite loops from repeated quality values.
+
+```python
+def _next_or_exhaust(self, next_q: Decimal | None, attempted: dict[Decimal, QualityPoint]) -> Decimal | None:
+```
+
+#### `_finalize_q(self, raw_q, from_q, worse_point, better_point)`
+
+The single exit point for all quality value computations. Applies the full post-processing pipeline in order:
+
+1. **Max-step clamp**: if `self._quality_max_step` is set, clamp `raw_q` to within `±quality_max_step` of `from_q`.
+2. **Granularity snap**: round to nearest granularity step using `ROUND_HALF_EVEN`.
+3. **Range clamp**: call `_clamp_to_range(q, self._granularity, worse_point, better_point)` — sentinel-aware, returns `None` if no valid interior point exists.
+
+Returns the finalized `Decimal`, or `None` if the range is exhausted (step 3 returned `None`). Does **not** set `self._exhausted` — caller is responsible.
+
+```python
+def _finalize_q(
+    self,
+    raw_q:        Decimal,
+    from_q:       Decimal,
+    worse_point:  QualityPoint,
+    better_point: QualityPoint,
+) -> Decimal | None:
+```
+
+Every return path in every subclass uses `_finalize_q` — no inline max-step/snap/clamp sequences anywhere in subclass code.
+
+#### `_compute_next_quality(self, new_point, worse_point, better_point, clamp_range=True)`
+
+The former `QualitySearch._compute_next` method, promoted to the base class. Reads `self._quality_targets`, `self._granularity`, `self._quality_max_step` from `self`. Uses `_find_worst_target`, `_compute_proportional_candidate`, and `_finalize_q` internally.
+
+```python
+def _compute_next_quality(
+    self,
+    new_point:    QualityPoint,
+    worse_point:  QualityPoint,
+    better_point: QualityPoint,
+) -> Decimal | None:
+```
+
+- Tries candidates in order: primary worst-target proportional, reverse worst-target proportional, binary midpoint (0.5).
+- Always calls `_compute_proportional_candidate` without range clamping — `t` outside `[0, 1]` is allowed. When points are on opposite sides the projection naturally lands between them; when same-side it extrapolates outward.
+- Calls `_finalize_q(raw_q, new_point.q, worse_point, better_point)` for the final value.
+- Returns `None` when `_finalize_q` returns `None` (range exhausted); caller sets `self._exhausted`.
+
+### QualitySearchV3
+
+Defined in `pyqenc/quality.py`. Inherits from `QualitySearchBase`.
+
+```python
+class QualitySearchV3(QualitySearchBase):
+    def __init__(
+        self,
+        quality_better:   Decimal,
+        quality_worse:    Decimal,
+        quality_targets:  list[QualityTarget],
+        granularity:      Decimal,
+        quality_max_step: Decimal | None = None,
+    ) -> None: ...  # calls super().__init__(), then sets V3-specific fields
+
     @property
     def attempts(self) -> int: ...
     @property
@@ -94,18 +221,24 @@ class QualitySearchV3:
     def record(self, quality: Decimal, quality_results: dict[str, float]) -> Decimal | None: ...
 ```
 
-### Reused Helpers (no modification)
+### Remaining Module-Level Helpers (no modification)
 
-All of the following are used by V3 without any changes:
+These stay module-level because they have no instance state and are genuinely generic utilities:
 
 | Helper | Purpose |
 |---|---|
-| `_score_attempt(metrics, targets)` | Returns signed composite score; 0=winner, >0=pass, <0=fail |
-| `_compute_proportional_candidate(target, pass_point, fail_point, clamp_range)` | Returns interpolation/extrapolation fraction `t`; `clamp_range=False` allows `t` outside `[0,1]` |
-| `_clamp_to_range(q, granularity, worse_point, better_point)` | Clamps `q` to valid interior of range, respecting sentinels; returns `None` when no interior point exists |
-| `_in_range(value, start, end)` | Checks range membership, handles inverted ranges |
+| `_compute_proportional_candidate(target, pass_point, fail_point)` | Returns proportional estimation fraction `t`; `t` outside `[0,1]` is allowed (extrapolation when same-side, natural interpolation when different-side) |
+| `_clamp_to_range(q, granularity, worse_point, better_point)` | Sentinel-aware range clamp; called by `_finalize_q` on the base class |
+| `_in_range(value, start, end)` | Generic range membership check; no instance state |
 | `QualityPoint` | Dataclass `(q, score, metrics)`; `is_sentinel` when `metrics is None` |
-| `QualitySearchProtocol` | Structural protocol all implementations satisfy |
+
+The following module-level functions are **removed** and replaced by base class methods or deleted as dead code:
+
+| Removed | Replaced by |
+|---|---|
+| `_score_attempt(metrics, targets)` | `self._score(metrics)` |
+| `_find_worst_target(metrics, targets)` | `self._find_worst_target(metrics)` |
+| `normalize_metric(metric_type, value)` | Deleted — dead code, superseded by `MetricType.info.normalize()` directly |
 
 ---
 
@@ -177,36 +310,52 @@ The half-range step is direction-agnostic: it uses `quality_worse` or `quality_b
 ```mermaid
 flowchart TD
     A[2+ attempts] --> B[Select best + neighbours]
-    B --> C{How many points?}
-    C -->|2 points| D{Same side?}
-    C -->|3 points| E{Span both sides?}
-    D -->|Yes, not exhausted| F[Linear extrapolation\nclamp_range=False]
-    D -->|Yes, exhausted\nmidpoint_probe_flag=False| G[Probe midpoint\nset flag=True]
-    D -->|Yes, exhausted\nmidpoint_probe_flag=True| H[_exhausted=True\nreturn None]
-    D -->|No - different sides| I[Proportional interpolation\nclamp_range=True]
-    E -->|Yes - spans both sides| J[Reduce to straddling pair\ncontinue as 2-point different-sides]
-    E -->|No - all same side| K[Sweet-spot search\nmidpoint of larger sub-range]
+    B --> C{3 points?}
+
+    C -->|No - 2 points| D{Same side?}
+    C -->|Yes - 3 points| E{Any pass AND any fail?}
+
+    D -->|Yes - same side| F{Direction exhausted?}
+    D -->|No - different sides| PROP[Proportional estimation]
+
+    F -->|Yes| G{Midpoint probe flag set?}
+    F -->|No| PROP
+
+    G -->|No| PROBE[Probe midpoint\nset flag=True]
+    G -->|Yes| EXHAUST([_exhausted=True\nreturn None])
+
+    E -->|Yes - spans both sides| PREFER[Pick straddling pair\nprefer worse-quality side if both straddle]
+    E -->|No - all same side| SWEET[Sweet-spot search\nmidpoint of larger sub-range]
+
+    PREFER --> PROP
+
+    SWEET --> I{Sub-range ≤ 1 granularity?}
+    I -->|Yes| EXHAUST
+    I -->|No| DONE([return _finalize_q])
+
+    PROP --> DONE
+    PROBE --> DONE
+
+    classDef decision fill:#226
+    class C,D,F,E,G,I decision
+    style DONE fill:#262
+    style EXHAUST fill:#622
 ```
 
 #### 2 Points, Same Side, NOT Direction-Exhausted
 
-Linear extrapolation outside the two points:
+Proportional estimation outside the two points:
 
-1. Call `_compute_proportional_candidate(target, pass_point, fail_point, clamp_range=False)` where the two same-side points are treated as `pass_point` and `fail_point` for the purpose of the call (the function computes `t` from the metric values; `t` outside `[0,1]` is the extrapolation).
-2. Compute `raw_q = p1.q + t * (p2.q - p1.q)` where `p1` and `p2` are the two same-side points ordered by quality.
-3. Clamp outward to the hard boundary:
-   - If no opposite-side tested point exists: clamp to the sentinel (`quality_better` or `quality_worse`).
-   - If an opposite-side tested point exists: clamp to the best-scoring opposite-side tested point.
-4. Apply `quality_max_step` from the last tested point (if set).
-5. Snap to granularity using `ROUND_HALF_EVEN`.
-6. If the snapped result collides with an already-tested value: move 1 granularity step outward if possible, else treat as direction-exhausted (go to midpoint-probe path).
-7. If `_compute_proportional_candidate` returns `None` (flat curve, missing metrics): fall back to midpoint of the two points.
+1. Call `self._compute_next_quality(new_point, worse_point, better_point)` where `worse_point` and `better_point` are the two same-side points. The function projects `t` outside `[0, 1]` (extrapolation), applies `_finalize_q`, and returns the result.
+2. The outward clamp boundary is the sentinel (`quality_better` or `quality_worse`) if no opposite-side tested point exists, or the best-scoring opposite-side tested point if one exists — this is handled by passing the appropriate sentinel/tested point as `worse_point`/`better_point`.
+3. If `_compute_proportional_candidate` returns `None` (flat curve, missing metrics): `_compute_next_quality` falls back to the binary midpoint (0.5).
+4. Return `self._next_or_exhaust(_compute_next_quality(...), _attempted_points)`.
 
 #### 2 Points, Same Side, Direction-Exhausted, `_midpoint_probe_flag=False`
 
-- Probe midpoint between the 2 points: `mid = (p1.q + p2.q) / 2`, snapped to granularity.
+- Probe midpoint between the 2 points: `mid = (p1.q + p2.q) / 2`.
+- Return `self._finalize_q(mid, last_q, p1, p2)`.
 - Set `_midpoint_probe_flag = True`.
-- Return the midpoint.
 
 #### 2 Points, Same Side, Direction-Exhausted, `_midpoint_probe_flag=True`
 
@@ -214,21 +363,16 @@ Linear extrapolation outside the two points:
 
 #### 2 Points, Different Sides (one pass, one fail)
 
-Proportional interpolation between the two points:
+Proportional estimation between the two points:
 
-1. Call `_compute_proportional_candidate(target, pass_point, fail_point, clamp_range=True)`.
-2. Compute `raw_q = pass_point.q + t * (fail_point.q - pass_point.q)`.
-3. Clamp to interior of `[pass_point, fail_point]` using `_clamp_to_range`.
-4. Apply `quality_max_step` from the last tested point (if set).
-5. Snap to granularity using `ROUND_HALF_EVEN`.
-6. If `_clamp_to_range` returns `None`, or the result equals an already-tested value: set `_exhausted = True`, return `None`.
-7. If `_compute_proportional_candidate` returns `None`: fall back to midpoint of the two points.
+1. Call `self._compute_next_quality(new_point, fail_point, pass_point)`. The projection naturally lands between the two points (interpolation) since they straddle the target.
+2. Return `self._next_or_exhaust(_compute_next_quality(...), _attempted_points)`.
 
 #### 3 Points, Spanning Both Sides
 
 1. Identify the two adjacent pairs: `(lower_neighbour, best)` and `(best, upper_neighbour)`.
 2. Find the pair where one point is pass and the other is fail (the straddling pair).
-3. If both pairs straddle (both contain a crossing): prefer the pair that includes the **worse-quality** neighbour (higher CRF / lower VBR), to bias toward more efficient encodings.
+3. If both pairs straddle (both contain a crossing): prefer the pair that includes the **worse-quality** neighbour, to bias toward more efficient encodings.
 4. Continue as 2-point different-sides with the selected pair.
 
 #### 3 Points, All Same Side
@@ -237,8 +381,9 @@ Sweet-spot search:
 
 1. Compute `left_range = abs(best.q - lower_neighbour.q)` and `right_range = abs(upper_neighbour.q - best.q)`.
 2. Select the larger sub-range.
-3. Probe its midpoint: `mid = (endpoint1.q + endpoint2.q) / 2`, snapped to granularity, clamped by `quality_max_step`.
-4. If the selected sub-range ≤ 1 granularity (no untested point can be placed inside it): set `_exhausted = True`, return `None`.
+3. If the selected sub-range ≤ 1 granularity: set `_exhausted = True`, return `None`.
+4. Probe its midpoint: `mid = (endpoint1.q + endpoint2.q) / 2`.
+5. Return `self._finalize_q(mid, last_q, endpoint1, endpoint2)`.
 
 ### Direction-Exhaustion Definition
 
@@ -263,10 +408,9 @@ Every quality value returned by `record()` must satisfy all of the following bef
 
 `_exhausted` is set to `True` in any of these cases:
 - Score == 0 (winner found).
-- Range-exhausted: active search window collapsed to ≤ 1 granularity.
+- Range-exhausted: `_finalize_q` returns `None` (active search window collapsed to ≤ 1 granularity).
 - Direction-exhausted after midpoint probe: `_midpoint_probe_flag` was already `True`.
-- `_clamp_to_range` returns `None` in the different-sides case.
-- Collision with already-tested value and no room to move outward.
+- `_next_or_exhaust` detects a collision with an already-tested value.
 
 Once `_exhausted` is `True`, all subsequent `record()` calls return `None` immediately without mutating any state.
 
@@ -276,22 +420,22 @@ Once `_exhausted` is `True`, all subsequent `record()` calls return `None` immed
 
 | Aspect | V2 | V3 |
 |---|---|---|
-| Outward search (same-side 2 points) | Binary half-steps toward boundary | Linear extrapolation outside the two points |
-| `clamp_range` for outward search | Always `True` (interpolation only) | `False` (extrapolation allowed) |
+| Outward search (same-side 2 points) | Binary half-steps toward boundary | Proportional estimation outside the two points |
 | Safety net for direction-exhaustion | None — declares exhausted immediately | One midpoint probe before declaring exhausted |
-| `_compute_next` | Delegates to `QualitySearch._compute_next` (hack) | Own clean implementation |
-| Convergence on monotonic linear curve | O(log N) half-steps to find crossing | O(1) steps to find crossing (one extrapolation jump) |
+| Post-processing pipeline | Inline max-step/snap/clamp in `_compute_next` | `self._finalize_q(raw_q, from_q, worse, better)` |
+| `_compute_next_quality` | Calls `QualitySearch._compute_next(self, ...)` (hack) | Calls `self._compute_next_quality(...)` (inherited from base) |
+| Convergence on monotonic linear curve | O(log N) half-steps to find crossing | O(1) steps to find crossing (one proportional jump) |
 
 ---
 
 ## Error Handling
 
 - `record()` called after exhaustion (`_exhausted = True`): return `None` immediately, do not mutate state.
-- `quality_results` missing keys for any `quality_targets`: `_score_attempt` raises `ValueError`; propagated to caller.
-- `quality_better == quality_worse`: raise `ValueError` at construction time.
+- `quality_results` missing keys for any `quality_targets`: `self._score(metrics)` raises `ValueError`; propagated to caller.
+- `quality_better == quality_worse`: valid — single-point search, first `record()` returns `None`.
 - `granularity <= 0`: raise `ValueError` at construction time.
-- `_compute_proportional_candidate` returns `None` (flat curve, missing metrics): fall back to midpoint of the two points.
-- `_clamp_to_range` returns `None` (range collapsed): set `_exhausted = True`, return `None`.
+- `_compute_proportional_candidate` returns `None` (flat curve, missing metrics): `_compute_next_quality` falls back to binary midpoint (0.5).
+- `_finalize_q` returns `None` (range collapsed): caller sets `_exhausted = True` and returns `None`.
 
 ---
 
@@ -394,7 +538,7 @@ One test per fork case, plus curve tests with precalculated expected results. Al
 | `test_subsequent_calls_after_exhaustion_return_none` | Req 9.3: all subsequent calls return `None` |
 | `test_raises_if_better_equals_worse` | Req 1.3: `ValueError` on equal boundaries |
 | `test_raises_if_granularity_zero` | Req 1.4: `ValueError` on zero granularity |
-| `test_protocol_compliance` | Req 1.1: `isinstance(s, QualitySearchProtocol)` |
+| `test_protocol_compliance` | Req 1.1: `isinstance(s, QualitySearchBase)` |
 | `test_linear_curve_all_failing` | Req 13.9: all-failing linear curve |
 | `test_linear_curve_all_passing` | Req 13.9: all-passing linear curve |
 | `test_linear_curve_crossing_zero` | Req 13.9: crossing-zero linear curve |
