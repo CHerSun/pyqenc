@@ -87,10 +87,14 @@
 # Supported statistics: min, med, max, p05, p25, p75, p95
 # NOTE: avoid using min or max statistics unless you know what you're doing. Use p05 instead of min, especially for GPU encoders
 default_targets:
-  - "vif-med:92.5"   # this is a helper to control film grain retention. 92-94 should be good enough. Higher values consume a lot of bandwidth.
-  - "vmaf-p05:95.0"  # DO NOT USE MIN targeting here or too high MED targetting. Normally for med ~97.5 is max-achievable. And MIN is affected by the first frame problem (lack of motion part).
-  - "psnr-med:45.0"  # PSNR values 50-60 are considered to be visually lossless. ~44-46 should produce good quality.
+  - "vif-med:92.0"   # this is a helper to control film grain retention. 92-94 should be good enough. Higher values consume a lot of bandwidth.
+  - "vif-min:88.0"   # a safeguard against too low values
+  - "vmaf-p05:95.0"  # A p05 instead of median. Median has some issues with reachability on certain types of chunks.
+  - "vmaf-min:92.0"  # a safeguard against too low values
+  - "psnr-med:45.0"  # PSNR values 50-60 are considered to be visually lossless. ~44-46 should produce good quality retention.
+  - "psnr-min:42.0"  # a safeguard against too low values
   - "ssim-med:98.0"  # SSIM score is very non-linear, strongly compressed towards 100.0. Visually lossless is considered to be around 98.5-99.
+  - "ssim-min:95.0"  # a safeguard against too low values
 
 # Default Strategies
 # ------------------
