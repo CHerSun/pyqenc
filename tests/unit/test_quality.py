@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 
 from pyqenc.models import CodecConfig, QualityTarget
-from pyqenc.quality import QualitySearch, _score_attempt
+from pyqenc.quality import QualitySearch, QualitySearchBase, _score_attempt
 
 _CRF_MIN    = Decimal("0")
 _CRF_MAX    = Decimal("51")
@@ -116,13 +116,16 @@ class TestQualitySearch:
         assert s.record(Decimal("19.5"), {"vmaf_min": 80.0}) is None
 
     def test_raises_if_better_equals_worse(self) -> None:
-        with pytest.raises(ValueError):
-            QualitySearch(
-                quality_better  = Decimal("18"),
-                quality_worse   = Decimal("18"),
-                quality_targets = self._TARGET,
-                granularity     = self._GRAN,
-            )
+        # equal boundaries are now valid — single-point search: first record() returns None
+        s = QualitySearch(
+            quality_better  = Decimal("18"),
+            quality_worse   = Decimal("18"),
+            quality_targets = self._TARGET,
+            granularity     = self._GRAN,
+        )
+        result = s.record(Decimal("18"), {"vmaf_min": 96.0})
+        assert result is None
+        assert s.best_quality == Decimal("18")
 
     def test_raises_if_granularity_zero(self) -> None:
         with pytest.raises(ValueError):
@@ -570,14 +573,16 @@ class TestQualitySearchV2:
     # ------------------------------------------------------------------
 
     def test_raises_if_better_equals_worse(self) -> None:
-        """ValueError when quality_better == quality_worse."""
-        with pytest.raises(ValueError):
-            QualitySearchV2(
-                quality_better  = Decimal("18"),
-                quality_worse   = Decimal("18"),
-                quality_targets = self._TARGET,
-                granularity     = self._GRAN,
-            )
+        """Equal boundaries are valid — single-point search: first record() returns None."""
+        s = QualitySearchV2(
+            quality_better  = Decimal("18"),
+            quality_worse   = Decimal("18"),
+            quality_targets = self._TARGET,
+            granularity     = self._GRAN,
+        )
+        result = s.record(Decimal("18"), self._PASS_M)
+        assert result is None
+        assert s.best_quality == Decimal("18")
 
     def test_raises_if_granularity_zero(self) -> None:
         """ValueError when granularity <= 0."""
@@ -610,9 +615,9 @@ class TestEncodeChunkIntegration:
         assert "QualitySearchV2" in src, "encode_chunk must instantiate QualitySearchV2"
 
     def test_qualitysearch_usable_as_drop_in(self) -> None:
-        """QualitySearch satisfies QualitySearchProtocol and can be used where V2 is expected."""
+        """QualitySearch satisfies QualitySearchBase and can be used where V2 is expected."""
         from pyqenc.models import QualityTarget
-        from pyqenc.quality import QualitySearch, QualitySearchProtocol
+        from pyqenc.quality import QualitySearch, QualitySearchBase
 
         target = QualityTarget(metric="vmaf", statistic="min", value=95.0)
         s = QualitySearch(
@@ -631,12 +636,12 @@ class TestEncodeChunkIntegration:
         # After one passing record call, attempts == 1 and best_quality is set.
         assert s.attempts == 1
         assert s.best_quality is not None
-        assert isinstance(s, QualitySearchProtocol)
+        assert isinstance(s, QualitySearchBase)
 
     def test_qualitysearch_protocol_structural_compatibility(self) -> None:
-        """QualitySearch is structurally compatible with QualitySearchProtocol (runtime check)."""
+        """QualitySearch inherits from QualitySearchBase."""
         from pyqenc.models import QualityTarget
-        from pyqenc.quality import QualitySearch, QualitySearchProtocol
+        from pyqenc.quality import QualitySearch, QualitySearchBase
 
         target = QualityTarget(metric="vmaf", statistic="min", value=95.0)
         s = QualitySearch(
@@ -645,13 +650,12 @@ class TestEncodeChunkIntegration:
             quality_targets = [target],
             granularity     = Decimal("0.5"),
         )
-        # Protocol is runtime_checkable — verify isinstance works.
-        assert isinstance(s, QualitySearchProtocol)
+        assert isinstance(s, QualitySearchBase)
 
     def test_qualitysearchv2_protocol_structural_compatibility(self) -> None:
-        """QualitySearchV2 is structurally compatible with QualitySearchProtocol."""
+        """QualitySearchV2 inherits from QualitySearchBase."""
         from pyqenc.models import QualityTarget
-        from pyqenc.quality import QualitySearchProtocol, QualitySearchV2
+        from pyqenc.quality import QualitySearchBase, QualitySearchV2
 
         target = QualityTarget(metric="vmaf", statistic="min", value=95.0)
         s = QualitySearchV2(
@@ -660,4 +664,4 @@ class TestEncodeChunkIntegration:
             quality_targets = [target],
             granularity     = Decimal("0.5"),
         )
-        assert isinstance(s, QualitySearchProtocol)
+        assert isinstance(s, QualitySearchBase)
