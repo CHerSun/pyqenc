@@ -1717,30 +1717,19 @@ class QualitySearchV3(QualitySearchBase):
 
         if p1.is_pass:
             # Both pass → outward is toward quality_worse.
-            # Determine the outward clamp: best-scoring fail tested point, or sentinel.
+            # Outward clamp: best-scoring tested fail point, or quality_worse sentinel.
             fail_points = [pt for pt in self._attempted_points.values() if pt.is_fail]
-            if fail_points:
-                outward_clamp = min(fail_points, key=lambda pt: abs(pt.score))
-            else:
-                outward_clamp = QualityPoint(self._quality_worse, 0, None)
-            # worse_point = outward clamp (hard limit on the worse side)
-            # better_point = closer_p (the pass point with smaller surplus, i.e. closer to target)
-            # further_p is the other pass point — used only for metrics via new_point
+            outward_clamp = min(fail_points, key=lambda pt: abs(pt.score)) if fail_points else QualityPoint(self._quality_worse, 0, None)
             worse_pt  = outward_clamp
             better_pt = closer_p
         else:
             # Both fail → outward is toward quality_better.
+            # Outward clamp: best-scoring tested pass point, or quality_better sentinel.
             pass_points = [pt for pt in self._attempted_points.values() if pt.is_pass]
-            if pass_points:
-                outward_clamp = min(pass_points, key=lambda pt: abs(pt.score))
-            else:
-                outward_clamp = QualityPoint(self._quality_better, 0, None)
-            # better_point = outward clamp (hard limit on the better side)
-            # worse_point = closer_p (the fail point with smaller deficit, i.e. closer to target)
+            outward_clamp = min(pass_points, key=lambda pt: abs(pt.score)) if pass_points else QualityPoint(self._quality_better, 0, None)
             better_pt = outward_clamp
             worse_pt  = closer_p
 
-        # _compute_next_quality uses new_point.metrics for _find_worst_target.
         # Pass further_p as new_point so its metrics drive the proportional candidate —
         # it has the larger deficit/surplus and gives a better extrapolation slope.
         result = self._compute_next_quality(further_p, worse_pt, better_pt)
