@@ -342,9 +342,9 @@ codecs:
 
   av1-10bit:                          # AV1 codec via libsvtav1
     default_quality: 18
-    quality_range: [10, 26]           # CRF 0..63 for this codec; 10–26 is a good working band
-    quality_granularity: 0.5
-    encoder_args:
+    quality_range: [10, 30]           # CRF 0..63 for this codec; 10–30 is a good working band
+    quality_granularity: 1            # libsvtav1 accepts CRF with granularity of 0.25, but such steps often produce binary-identical outputs, which cause problems with the quality search
+    encoder_args:                     # so for CRF we use granularity of 1 here instead to ensure we actually do take meaningful steps. This causes a bit of bits overhead, but it is small enough to ignore
       - "-i"
       - "{input}"
       - "-c:v"

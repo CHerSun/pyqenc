@@ -601,18 +601,18 @@ class TestEncodeChunkIntegration:
     """
 
     def test_qualitysearchv2_imported_in_encoding(self) -> None:
-        """QualitySearchV2 is importable from pyqenc.phases.encoding (verifies the import exists)."""
+        """QualitySearchV3 is importable from pyqenc.phases.encoding (verifies the import exists)."""
         import importlib
 
         import pyqenc.phases.encoding as enc_mod
 
-        # Verify QualitySearchV2 is accessible via the module's quality import
-        from pyqenc.quality import QualitySearchV2
-        assert QualitySearchV2 is not None
-        # Verify encoding module uses QualitySearchV2 (it's referenced in encode_chunk source)
+        # Verify QualitySearchV3 is accessible via the module's quality import
+        from pyqenc.quality import QualitySearchV3
+        assert QualitySearchV3 is not None
+        # Verify encoding module uses QualitySearchV3 (it's referenced in encode_chunk source)
         import inspect
         src = inspect.getsource(enc_mod.ChunkEncoder.encode_chunk)
-        assert "QualitySearchV2" in src, "encode_chunk must instantiate QualitySearchV2"
+        assert "QualitySearchV3" in src, "encode_chunk must instantiate QualitySearchV3"
 
     def test_qualitysearch_usable_as_drop_in(self) -> None:
         """QualitySearch satisfies QualitySearchBase and can be used where V2 is expected."""

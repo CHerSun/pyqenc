@@ -1671,8 +1671,8 @@ class QualitySearchV3(QualitySearchBase):
         if not direction_exhausted:
             return self._extrapolate_outward(p1, p2, new_point, outward_boundary)
 
-        # Direction exhausted
-        if not self._midpoint_probe_flag:
+        # Direction exhausted and we don't have a passing point (i.e. all-fail scenario only):
+        if not self._midpoint_probe_flag and self._best_score_point and self._best_score_point.score<0:
             return self._midpoint_probe(p1, p2, new_point)
 
         # Midpoint probe already used — fully exhausted
@@ -1704,35 +1704,52 @@ class QualitySearchV3(QualitySearchBase):
         Returns:
             Next quality value, or ``None`` when exhausted.
         """
-        # Order the two same-side points so that the one *closer* to the target
-        # (higher score, i.e. less negative for fails or less positive for passes)
-        # acts as ``better_point`` and the one further away acts as ``worse_point``.
-        # This ensures _compute_proportional_candidate extrapolates in the right
-        # direction (t < 0 for fails going outward toward quality_better, t > 1 for
-        # passes going outward toward quality_worse).
+        # Identify closer (smaller abs(score)) and further (larger abs(score)) points.
+        # The further point has the larger surplus/deficit and gives a better slope
+        # for proportional extrapolation.
         if abs(p1.score) <= abs(p2.score):
             closer_p, further_p = p1, p2
         else:
             closer_p, further_p = p2, p1
 
+        # For proportional extrapolation we need both points to have real metrics.
+        # Pass the two tested points as better_point/worse_point so that
+        # _compute_proportional_candidate can compute t from their metric values.
+        # The outward clamp (sentinel or best opposite-side tested point) is used
+        # only in _finalize_q to enforce the hard boundary.
+        #
+        # For two fails: closer_p is the fail nearest the target (smallest deficit).
+        #   better_point = closer_p, worse_point = further_p
+        #   t > 1 extrapolates past further_p toward quality_better (outward) ✓
+        #   t = 0.5 binary midpoint lands between the two fails (inward) — but
+        #   _finalize_q clamps to [outward_clamp, closer_p) so it still moves outward ✓
+        #
+        # For two passes: closer_p is the pass nearest the target (smallest surplus).
+        #   better_point = closer_p, worse_point = further_p
+        #   t > 1 extrapolates past further_p toward quality_worse (outward) ✓
         if p1.is_pass:
-            # Both pass → outward is toward quality_worse.
-            # Outward clamp: best-scoring tested fail point, or quality_worse sentinel.
-            fail_points = [pt for pt in self._attempted_points.values() if pt.is_fail]
+            fail_points   = [pt for pt in self._attempted_points.values() if pt.is_fail]
             outward_clamp = min(fail_points, key=lambda pt: abs(pt.score)) if fail_points else QualityPoint(self._quality_worse, 0, None)
-            worse_pt  = outward_clamp
-            better_pt = closer_p
         else:
-            # Both fail → outward is toward quality_better.
-            # Outward clamp: best-scoring tested pass point, or quality_better sentinel.
-            pass_points = [pt for pt in self._attempted_points.values() if pt.is_pass]
+            pass_points   = [pt for pt in self._attempted_points.values() if pt.is_pass]
             outward_clamp = min(pass_points, key=lambda pt: abs(pt.score)) if pass_points else QualityPoint(self._quality_better, 0, None)
-            better_pt = outward_clamp
-            worse_pt  = closer_p
 
-        # Pass further_p as new_point so its metrics drive the proportional candidate —
-        # it has the larger deficit/surplus and gives a better extrapolation slope.
-        result = self._compute_next_quality(further_p, worse_pt, better_pt)
+        # Find the worst target from further_p's metrics for the proportional candidate.
+        found_worst  = self._find_worst_target(further_p.metrics)  # type: ignore[arg-type]
+        worst_target = found_worst[0] if found_worst is not None else None
+
+        # Compute t: extrapolate using the two real tested points.
+        # better_point = closer_p, worse_point = further_p so that t > 1 is outward.
+        t = _compute_proportional_candidate(worst_target, closer_p, further_p, clamp_range=False)
+
+        if t is not None:
+            q_span = further_p.q - closer_p.q
+            raw_q  = closer_p.q + Decimal(str(t)) * q_span
+        else:
+            # Flat curve or missing metrics: binary step from further_p toward outward_clamp.
+            raw_q = (further_p.q + outward_clamp.q) / 2
+
+        result = self._finalize_q(raw_q, new_point.q, outward_clamp, closer_p)
 
         logger.debug(
             "QualitySearchV3 extrapolate: p1=%s(%.3f) p2=%s(%.3f) boundary=%s -> %s",

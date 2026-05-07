@@ -47,7 +47,7 @@ from pyqenc.models import (
     VideoMetadata,
 )
 from pyqenc.phase import Artifact, Phase, PhaseResult
-from pyqenc.quality import QualitySearchV2
+from pyqenc.quality import QualitySearchV3
 from pyqenc.state import (
     ArtifactState,
     EncodingParams,
@@ -742,7 +742,7 @@ class ChunkEncoder:
         """
         logger.debug(fmt_chunk_start(strategy.name, chunk.chunk_id, self._visual_hash))
 
-        search = QualitySearchV2(
+        search = QualitySearchV3(
             quality_better   = strategy.codec.quality_better,
             quality_worse    = strategy.codec.quality_worse,
             quality_targets  = quality_targets,
@@ -820,7 +820,12 @@ class ChunkEncoder:
                             all_sidecar_metrics.get(f"{t.metric}_{t.statistic}", 0.0) >= t.value
                             for t in quality_targets
                         )
-                        metric_summary = fmt_metric_summary(metrics_dict, quality_targets)
+                        _worst         = search._find_worst_target(metrics_dict)
+                        metric_summary = fmt_metric_summary(
+                            metrics_dict,
+                            worst_key    = f"{_worst[0].metric}_{_worst[0].statistic}" if _worst else None,
+                            worst_passed = (_worst[1] >= 0) if _worst else True,
+                        )
                         pass_fail      = (
                             f"{SUCCESS_SYMBOL_MINOR} pass"
                             if targets_met
@@ -951,7 +956,12 @@ class ChunkEncoder:
             elif not search.best_targets_met and search.best_quality == current_q:
                 best_fail_attempt = attempt_meta
 
-            metric_summary = fmt_metric_summary(metrics_dict, quality_targets)
+            _worst         = search._find_worst_target(metrics_dict)
+            metric_summary = fmt_metric_summary(
+                metrics_dict,
+                worst_key    = f"{_worst[0].metric}_{_worst[0].statistic}" if _worst else None,
+                worst_passed = (_worst[1] >= 0) if _worst else True,
+            )
             pass_fail      = (
                 f"{SUCCESS_SYMBOL_MINOR} pass"
                 if evaluation.targets_met
