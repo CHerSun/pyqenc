@@ -105,7 +105,7 @@ default_strategies:
   - "veryslow+h264*"  # All h264 profiles with veryslow preset
   - "slow+h265*"      # All h265 profiles with slow preset
   # - "p7+nvenc*"       # All NVENC profiles with highest quality preset. Needs NVidia GPU support.
-  # - "any+vulkan*"     # All Vulkan profiles. Needs GPU to support Vulkan and Vulkan SDK installed and ffmpeg built with vulkan support (default since recently). 
+  # - "any+vulkan*"     # All Vulkan profiles. Needs GPU to support Vulkan and Vulkan SDK installed and ffmpeg built with vulkan support (default since recently).
                         # NOTE: Current Vulkan implementation only supports the most simple QP control, which often gives subpar results, compared to nvenc encoder.
                         # NOTE: GPU strategies are disabled by default. You can target them manually via console flags.
 
@@ -137,7 +137,7 @@ default_strategies:
 #       {profile_args}    — replaced with the profile's extra_args list in-place
 #   - presets: List of encoding presets supported by this encoder
 codecs:
-  h264-8bit:
+  h264-8bit:              # H.264 codec via libx264 and CRF quality control
     default_quality: 25
     quality_range: [0, 51]
     quality_granularity: 0.5
@@ -156,7 +156,7 @@ codecs:
       - "yuv420p"
       - "{profile_args}"
     presets:
-      - ultrafast
+      - ultrafast              # fastest
       - superfast
       - veryfast
       - faster
@@ -164,10 +164,10 @@ codecs:
       - medium
       - slow
       - slower
-      - veryslow
-      - placebo
+      - veryslow               # h.264 is an older, lighter codec. With modern CPUs veryslow is quite affordable, still cheaper then h.265 often.
+      - placebo                # best quality, very slow
 
-  h265-10bit:
+  h265-10bit:             # H.265 codec via libx265 and CRF quality control
     default_quality: 25
     quality_range: [0, 51]
     quality_granularity: 0.5
@@ -186,21 +186,21 @@ codecs:
       - "yuv420p10le"
       - "{profile_args}"
     presets:
-      - ultrafast
+      - ultrafast          # fastest
       - superfast
       - veryfast
       - faster
       - fast
       - medium
-      - slow
+      - slow               # h.265 is quite CPU intensive. Slow looks like the optimal choice for speed vs quality.
       - slower
       - veryslow
-      - placebo
+      - placebo            # extremely slow
 
-  nvenc-h265-10bit-cq:  # CQ = Constant Quality - a perception-based quality, controlled by the codec. Codec decides how many bits to use. Similar to CRF.
-    default_quality: 25
-    quality_range: [0, 51]
-    quality_granularity: 0.5
+  nvenc-h265-10bit-cq:       # HEVC NVENC GPU encoding with CQ quality control.
+    default_quality: 25      # CQ = Constant Quality - a perception-based quality, controlled by the codec. Similar to CRF.
+    quality_range: [10, 26]  # CQ codec range is 0-51. Sane band looks to be ~10-26.
+    quality_granularity: 0.5 # <float>
     quality_label: "CQ"
     encoder_args:
       - "-i"
@@ -231,7 +231,7 @@ codecs:
       - p4
       - p5
       - p6
-      - p7
+      - p7         # slowest, best quality. Normally, difference in speed is negligible between codecs for single encoder on modern GPUs.
 
 
   nvenc-h265-10bit-qp:  # QP = Quantization Parameter - it directly controls how many bits to use, straightforward and dumb. Often wastes bandwidth, NOT RECOMMENDED.
@@ -262,7 +262,7 @@ codecs:
       - p4
       - p5
       - p6
-      - p7
+      - p7         # slowest, best quality. Normally, difference in speed is negligible between codecs for single encoder on modern GPUs.
 
   nvenc-h265-10bit-vbr:            # NVenc multipass VBR
     default_quality: 20            # 20Mbit/s as a starting point
@@ -274,7 +274,7 @@ codecs:
       - "-i"
       - "{input}"
       - "-vf"
-      - "{vf},format=yuv420p10le"
+      - "{vf},format=p010le,hwupload_cuda"
       - "-c:v"
       - "hevc_nvenc"
       - "-preset"
@@ -291,8 +291,6 @@ codecs:
       # - "12M"
       # - "-bufsize"    # can't control this dynamically yet
       # - "16M"
-      - "-profile"
-      - "main10"
       - "{profile_args}"
     presets:
       - p1
@@ -301,12 +299,12 @@ codecs:
       - p4
       - p5
       - p6
-      - p7
+      - p7         # slowest, best quality. Normally, difference in speed is negligible between codecs for single encoder on modern GPUs.
 
-  # TODO: better vulkan codec profiles. Multipass vbr?
-  vulkan-h265-10bit-qp:    # QP = Quantization Parameter - it directly controls how many bits to use, straightforward and dumb. Often wastes bandwidth, NOT RECOMMENDED.
+  # TODO: better vulkan codec profile
+  vulkan-h265-10bit-qp:     # QP = Quantization Parameter - it directly controls how many bits to use, straightforward and dumb. Often wastes bandwidth, NOT RECOMMENDED.
     default_quality: 25
-    quality_range: [0, 51] # [-1, 255] actually, but -1=auto and values above 50 produce ugly quality, so capping to the same range
+    quality_range: [10, 30] # [-1, 255] actually, but -1=auto and values above 50 produce ugly quality, so capping to the same range
     quality_granularity: 1 # in docs it is marked as <int>, unlike CRF and CQ, which are float
     quality_label: "QP"
     encoder_args:
@@ -340,7 +338,41 @@ codecs:
       - "high"
       - "{profile_args}"
     presets:
-      - any
+      - any         # hevc_vulkan has no codec presets
+
+  av1-10bit:                          # AV1 codec via libsvtav1
+    default_quality: 18
+    quality_range: [10, 26]           # CRF 0..63 for this codec; 10–26 is a good working band
+    quality_granularity: 0.5
+    encoder_args:
+      - "-i"
+      - "{input}"
+      - "-c:v"
+      - "libsvtav1"
+      - "-preset"
+      - "{preset}"
+      - "-crf"
+      - "{quality}"
+      - "-vf"
+      - "{vf}"
+      - "-pix_fmt"
+      - "yuv420p10le"
+      - "{profile_args}"
+    presets:
+      - "0"      # slowest / highest quality
+      - "1"
+      - "2"      # Levels of 2 or higher are recommended for grain retention profiles.
+      - "3"
+      - "4"
+      - "5"      # Levels 4-6 are often claimed as optimal level quality vs speed
+      - "6"
+      - "7"
+      - "8"
+      - "9"
+      - "10"
+      - "11"
+      - "12"
+      - "13"     # fastest / lowest quality
 
 # Encoding Profiles
 # -----------------
@@ -398,6 +430,29 @@ profiles:
     codec: vulkan-h265-10bit-qp
     description: "HEVC Vulkan encoding — 10-bit, QP mode. Requires Vulkan support."
     extra_args: []
+
+  # AV1 10-bit Profiles
+  # -------------------
+  av1:
+    codec: av1-10bit
+    description: "Default AV1 10-bit encoding – no extra tuning"
+    extra_args: []
+
+  av1-fgs:
+    codec: av1-10bit
+    description: "AV1 10-bit with Film Grain Synthesis – removes original noise and replaces it with light synthetic grain (bitrate efficient, grain perception preserved)"
+    extra_args: ["-svtav1-params", "film-grain=10:15"]
+    # film-grain=denoise_level:synthesis_level    (0-50 scale)
+    # denoise=10  → removes most camera noise before encoding (saves bits)
+    # synthesis=15 → adds back perceptually similar grain during playback
+
+  av1-grain:
+    codec: av1-10bit
+    description: "AV1 10-bit – preserves original film grain. Disables temporal filtering & FGS to avoid blurring and keep natural texture."
+    extra_args: ["-svtav1-params", "enable-tf=0:film-grain=0"]
+    # enable-tf=0  → turns off the in-loop temporal filter (main source of 'blurring')
+    # film-grain=0 → explicitly disables any film grain synthesis
+    # do we need -tune grain? (same as -tune 4? mentions higher presets are recommended, like 2 or lower).
 
 # Audio Output Configuration
 # --------------------------
