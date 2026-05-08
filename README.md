@@ -110,6 +110,18 @@ Results are written under the working directory:
 
 ---
 
+## AV1 encoding
+
+AV1 profiles are also included in the default config, but not enabled by default. If you want to target AV1 codec specifically you can:
+
+```sh
+pyqenc auto movie.mkv --strategies 4+av1* -y
+```
+
+This will test all defined AV1 profiles and select the optimal ones for the full encoding.
+
+> NOTE: Your devices could lack AV1 hardware decoding support and struggle with the codec.
+
 ## 📊 Measuring quality
 
 You can measure quality metrics between any source and encoded video(s), including results from other encoders:
