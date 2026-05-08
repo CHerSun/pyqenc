@@ -406,3 +406,7 @@ ffmpeg and modern codecs (x264, x265, SVT-AV1) already scale across all availabl
 ### Atomic writes everywhere
 
 All artifact and sidecar writes use `.tmp`-then-rename. A partial write (from a crash or kill signal) leaves a `.tmp` file that is ignored by artifact scanning — the artifact is treated as `ABSENT` and re-produced on the next run. No corruption, no manual cleanup needed.
+
+### QualitySearchV3 and mid-probe
+
+A newer version of search algorithm, unifies many decisions, utilizes extrapolation instead of binary outwards search - this allows a bit faster convergence, but at the price of possible miss of curve sweet spot, so for all-fail attempts when direction search is exhausted - we do an extra check of the curve via stepping a half-range back.

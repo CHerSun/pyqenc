@@ -8,8 +8,8 @@
 # -----------------------
 # 1. default_targets --- a set of metric targets that are used when user gave none.
 # 2. default_strategies --- strategy patterns used when --strategies is not specified
-# 3. codecs --- video codec definitions with encoder settings. Codecs are not directly usable - a profile is required.
-# 4. profiles --- named encoding profiles with custom FFmpeg arguments.
+# 3. codecs --- video codec definitions with encoder settings. Codecs set a baseline for the encoder, they are not directly usable - a profile is required.
+# 4. profiles --- named encoding profiles with custom FFmpeg arguments, multiple profiles could use the same codec, but tweak settings.
 #
 # Strategy Specification Syntax:
 # ------------------------------
@@ -29,7 +29,7 @@
 #     "slow+h265*,medium+h264"
 #
 # Wildcard Matching:
-#   - "" - empty string matches everything, same as "*"
+#   - "" - empty string matches everything, same as "*", but "*" could be combined with text, while "" can't.
 #   - "*" matches any characters in profile names
 #   - "h265*" matches: h265, h265-aq, h265-anime
 #   - "h264*" matches: h264
@@ -51,7 +51,7 @@
 # -----------------------
 # To add a new encoding profile:
 #
-# 1. Choose which codec it uses (h264-8bit or h265-10bit)
+# 1. Choose which codec it uses (like, h264-8bit or h265-10bit)
 # 2. Add a new entry under 'profiles' section
 # 3. Specify the codec, description, and extra FFmpeg arguments
 #
@@ -67,6 +67,7 @@
 # FFmpeg Encoder Arguments:
 # -------------------------
 # The extra_args list contains FFmpeg arguments passed to the encoder.
+#
 # Common x265 parameters:
 #   - aq-mode: Adaptive quantization mode (0-4)
 #   - aq-strength: AQ strength (0.0-3.0)
@@ -76,72 +77,86 @@
 # Refer to FFmpeg documentation for complete parameter lists:
 #   - x264: https://trac.ffmpeg.org/wiki/Encode/H.264
 #   - x265: https://trac.ffmpeg.org/wiki/Encode/H.265
+#   - libsvt-AV1 with ffmpeg: https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Ffmpeg.md
 
 
-# Default Targets
+# DEFAULT TARGETS
 # ---------------
-# These quality targets are used when --targets is not specified on the command line.
-# Each target is a string in "metric-stat:value" format (e.g. "vmaf-min:94").
-# All metrics are scaled to 0-100 range (e.g. ssim-min:94 means raw SSIM ≥ 0.94).
+# - These quality targets are used when user gave no targets.
+# - Each target is a string in "metric-stat:value" format (e.g. "vmaf-min:94").
+# - All metrics are scaled to 0-100 range (e.g. ssim-min:94 means raw SSIM ≥ 0.94, PSNR infinity is clipped to 100).
+#
 # Supported metrics: vmaf, ssim, psnr, vif
 # Supported statistics: min, med, max, p05, p25, p75, p95
-# NOTE: avoid using min or max statistics unless you know what you're doing. Use p05 instead of min, especially for GPU encoders
-default_targets:
-  - "vif-med:92.0"   # this is a helper to control film grain retention. 92-94 should be good enough. Higher values consume a lot of bandwidth.
-  - "vif-min:88.0"   # a safeguard against too low values
-  - "vmaf-p05:95.0"  # A p05 instead of median. Median has some issues with reachability on certain types of chunks.
-  - "vmaf-min:92.0"  # a safeguard against too low values
-  - "psnr-med:45.0"  # PSNR values 50-60 are considered to be visually lossless. ~44-46 should produce good quality retention.
-  - "psnr-min:42.0"  # a safeguard against too low values
-  - "ssim-med:98.0"  # SSIM score is very non-linear, strongly compressed towards 100.0. Visually lossless is considered to be around 98.5-99.
-  - "ssim-min:95.0"  # a safeguard against too low values
+#
+# NOTE: read quality-targeting.md docs for detailed explanation of choosing metrics and statistics.
 
-# Default Strategies
+# Targets for nearly visually lossless quality (aka visually transparent). These targets are quite strict, but they ensure that the output is very close to the original,
+# with minimal perceptible quality loss. Adjusting these targets can allow for more aggressive compression at the cost of potential quality degradation.
+# A step of 1.0 is quite a significant change, so even small adjustments can have a noticeable impact on the output.
+# When tuning these targets the recommended way is to do full-encoding. Check the resulting quality and logs on the most limiting metric - then adjust in 0.5 steps.
+default_targets:
+  - "vif-med:92.0"   # this is a helper to control film grain retention. 92-94 should be really good. Higher values consume a lot of bandwidth. Lower values allow to save more bits.
+  - "vif-min:88.0"   # a min safeguard against too low values.
+  - "vmaf-p05:95.0"  # A p05 instead of median. Median has some issues with reachability on certain types of chunks. 95-97 give really good quality.
+  - "vmaf-min:92.0"  # a min safeguard against too low values.
+  - "psnr-med:45.0"  # PSNR values 50-60 are considered to be visually lossless. ~44-46 should produce good quality retention.
+  - "psnr-min:42.0"  # a min safeguard against too low values
+  - "ssim-med:98.0"  # SSIM score is very non-linear, strongly compressed towards 100.0. Visually lossless is considered to be around 98.5-99.
+  - "ssim-min:95.0"  # a min safeguard against too low values
+
+# DEFAULT STRATEGIES
 # ------------------
 # These strategies are used when --strategies is not specified on the command line.
 # The pipeline will test these strategies and select the optimal one (smallest file size
 # while meeting quality targets), unless --all-strategies flag is used.
+#
+# By default the most compatible ones are enabled - H.264 and H.265 CPU encoding.
+# GPU strategies are disabled by default due to hardware-encoding requirements (GPU, drivers, ffmpeg support, etc).
+# AV1 is disabled by default due to worser hardware decoding support, which can cause playback issues on older devices.
 default_strategies:
   - "veryslow+h264*"  # All h264 profiles with veryslow preset
   - "slow+h265*"      # All h265 profiles with slow preset
+  # - "4+av1*"          # All AV1 with a preset of 4 (good balance of speed vs quality). AV1 doesn't have as wide HW decoding support, many players could have problems, especially older models (situation with AV1 hardware decoding got much better in 2025-2026).
   # - "p7+nvenc*"       # All NVENC profiles with highest quality preset. Needs NVidia GPU support.
   # - "any+vulkan*"     # All Vulkan profiles. Needs GPU to support Vulkan and Vulkan SDK installed and ffmpeg built with vulkan support (default since recently).
                         # NOTE: Current Vulkan implementation only supports the most simple QP control, which often gives subpar results, compared to nvenc encoder.
                         # NOTE: GPU strategies are disabled by default. You can target them manually via console flags.
 
-# Codec Definitions
+# CODEC DEFINITIONS
 # -----------------
-# Defines available video codecs with their FFmpeg encoder settings.
+# Defines available video codecs with their FFmpeg encoder base settings.
+#
 # Each codec specifies:
-#   - encoder: FFmpeg encoder name (e.g., libx264, libx265, hevc_nvenc)
-#   - pixel_format: Pixel format for encoding
-#   - default_quality: Starting quality parameter value
-#   - quality_range: Valid quality range [better, worse] — order matters.
-#       The first value is always the *better* end, the second is the *worse* end.
-#       For CRF/CQ/QP codecs: [0, 51] (lower = better quality).
-#       For VBR bitrate codecs: [99, 0] (higher Mbit/s = better quality).
-#       The search algorithm moves toward the first value to increase quality
-#       and toward the second value to reduce quality (find efficiency).
-#   - quality_granularity: Minimal step size for the quality search algorithm
-#   - quality_max_step: Optional. Maximum absolute step per search iteration.
-#       Useful for codecs with wide ranges (e.g. VBR bitrate) to avoid large
-#       jumps on early attempts. Omit to allow unrestricted steps.
-#   - quality_label: Human-readable label for logs and plots (default: CRF; file names will still use crf for ease of parsing)
-#   - encoder_args: Full ffmpeg argument template. Must contain:
-#       -i {input}        — two consecutive items; {input} is replaced with the
-#                           actual input path at runtime. Args before -i are
+#   - encoder --- FFmpeg encoder, like libx264, libx265, hevc_nvenc, etc. Passed as ffmpeg arg.
+#   - pixel_format --- pixel format for encoding, this defines 8 or 10 bit color and color-coding.
+#     Common formats: yuv420p (8-bit), yuv420p10le (10-bit). Passed as ffmpeg arg.
+#   - quality control mechanics --- currently codec owns quality parameter control, so you have to define all codecs per quality control mechanic (i.e. of encoder
+#     supports VBR, QP, CRF - then you need 3 codec profiles). Quality control mechanics include:
+#       - default_quality --- starting quality parameter value for the search algorithm. Anything in the middle should work finely.
+#       - quality_range --- valid quality range [better, worse] — order matters. Like, for CRF you'd do [0, 51], for VBR - [99, 0]. Can be narrower than the actual codec limits.
+#         The search algorithm relies on this order to know which direction to move the quality parameter to increase or decrease quality.
+#         The first value is always the *better* end, the second is the *worse* end.
+#       - quality_granularity --- minimal step size for the quality search algorithm. This has 2 meaning - the precision (1 vs 1.0) of display and the granularity (0.5 vs 1.0).
+#         Granularity strongly affects number of steps required for search convergence, but also the amount of wasted bits.
+#         Too low granularity could cause problems, if results produce horizontal lines (i.e. binary-identical results) - this is not fully supported yet (though there's some support).
+#       - quality_max_step --- (optional) maximum absolute step per search iteration. Useful for codecs with wide ranges (e.g. VBR bitrate) to avoid too large
+#          jumps on early attempts. Omit to allow unrestricted steps.
+#       - quality_label --- a human-readable label for logs and plots (default: CRF; file names will still use crf for ease of parsing).
+#   - encoder_args --- Full ffmpeg argument template. Must contain:
+#       -i {input}        — two consecutive items; {input} is replaced with the actual input path at runtime. Args before -i are
 #                           injected before the input (e.g. -hwaccel options).
-#       {quality}         — replaced with the quality value; may appear multiple
-#                           times (e.g. -cq:v {quality} -qmin {quality} -qmax {quality})
+#       {quality}         — replaced with the quality value; may appear multiple times if needed (e.g. -cq:v {quality} -qmin {quality} -qmax {quality})
 #       {preset}          — replaced with the strategy preset name
 #       {profile_args}    — replaced with the profile's extra_args list in-place
+#       -vf {vf}          — replaced with the final filtergraph for the chunk, including all filters, like crop, scale, etc. Must be included in the encoder_args for filters to work.
 #   - presets: List of encoding presets supported by this encoder
 codecs:
-  h264-8bit:              # H.264 codec via libx264 and CRF quality control
-    default_quality: 25
-    quality_range: [0, 51]
-    quality_granularity: 0.5
-    encoder_args:
+  h264-8bit:                  # H.264 codec via libx264 and CRF quality control
+    default_quality: 20.0
+    quality_range: [8.0, 30.0] # CRF 0..51 for this codec. 8-30 looks to be a good working band.
+    quality_granularity: 0.5   # libx264 accepts CRF with granularity of 0.1, but that's too low for quality search and could produce binary-identical outputs,
+    encoder_args:              # which cause problems with the quality search. 0.5 is a good granularity here.
       - "-i"
       - "{input}"
       - "-c:v"
@@ -167,10 +182,10 @@ codecs:
       - veryslow               # h.264 is an older, lighter codec. With modern CPUs veryslow is quite affordable, still cheaper then h.265 often.
       - placebo                # best quality, very slow
 
-  h265-10bit:             # H.265 codec via libx265 and CRF quality control
-    default_quality: 25
-    quality_range: [0, 51]
-    quality_granularity: 0.5
+  h265-10bit:                  # H.265 codec via libx265 and CRF quality control
+    default_quality: 20.0
+    quality_range: [8.0, 30.0] # CRF 0..51 for this codec. 8-30 looks to be a good working band.
+    quality_granularity: 0.5   # same as for libx264. 0.5 is a good granularity here.
     encoder_args:
       - "-i"
       - "{input}"
@@ -186,21 +201,21 @@ codecs:
       - "yuv420p10le"
       - "{profile_args}"
     presets:
-      - ultrafast          # fastest
+      - ultrafast             # fastest
       - superfast
       - veryfast
       - faster
       - fast
       - medium
-      - slow               # h.265 is quite CPU intensive. Slow looks like the optimal choice for speed vs quality.
+      - slow                  # h.265 is quite CPU intensive. Slow looks like the optimal choice for speed vs quality.
       - slower
       - veryslow
-      - placebo            # extremely slow
+      - placebo               # extremely slow
 
-  nvenc-h265-10bit-cq:       # HEVC NVENC GPU encoding with CQ quality control.
-    default_quality: 25      # CQ = Constant Quality - a perception-based quality, controlled by the codec. Similar to CRF.
-    quality_range: [10, 26]  # CQ codec range is 0-51. Sane band looks to be ~10-26.
-    quality_granularity: 0.5 # <float>
+  nvenc-h265-10bit-cq:         # HEVC NVENC GPU encoding with CQ quality control.
+    default_quality: 20.0      # CQ = Constant Quality - a perception-based quality, controlled by the codec. Nvidia answer to CRF.
+    quality_range: [8.0, 30.0] # CQ codec range is 0-51.
+    quality_granularity: 0.5   # 0.5 looks to be a good granularity here.
     quality_label: "CQ"
     encoder_args:
       - "-i"
@@ -219,9 +234,9 @@ codecs:
       - "0"
       - "-cq:v"
       - "{quality}"
-      - "-qmin"
-      - "{quality}" # TODO: make a percentage of quality, like 50%, 120% for the qmin/qmax
-      - "-qmax"
+      - "-qmin"                # without qmin/qmax CQ often ignores requested quality and produces much worse results. Currently we cannot dynamically control those extra params
+      - "{quality}"            # so we use the same quality here too. This is not ideal, but it is better than nothing. In the future we could add support for extra params in the profile's extra_args list.
+      - "-qmax"                # TODO: make a percentage of quality, like 50%, 120% for the qmin/qmax
       - "{quality}"
       - "{profile_args}"
     presets:
@@ -231,13 +246,13 @@ codecs:
       - p4
       - p5
       - p6
-      - p7         # slowest, best quality. Normally, difference in speed is negligible between codecs for single encoder on modern GPUs.
+      - p7                     # slowest, best quality. Normally, difference in speed is negligible between codecs for single encoder on modern GPUs.
 
 
-  nvenc-h265-10bit-qp:  # QP = Quantization Parameter - it directly controls how many bits to use, straightforward and dumb. Often wastes bandwidth, NOT RECOMMENDED.
-    default_quality: 25
-    quality_range: [0, 51]
-    quality_granularity: 1 # <int>
+  nvenc-h265-10bit-qp:         # NOT RECOMMENDED! Use CQ instead. QP = Quantization Parameter - it directly controls how many bits to use, straightforward and dumb.
+    default_quality: 20.0      # Often wastes bandwidth and gives subpar results. Only use if you have specific reason to do so and know what you are doing.
+    quality_range: [8.0, 30.0] # 0-51 codec range.
+    quality_granularity: 1.0   # <int>!
     quality_label: "QP"
     encoder_args:
       - "-i"
@@ -262,12 +277,12 @@ codecs:
       - p4
       - p5
       - p6
-      - p7         # slowest, best quality. Normally, difference in speed is negligible between codecs for single encoder on modern GPUs.
+      - p7                     # slowest, best quality. Normally, difference in speed is negligible between codecs for single encoder on modern GPUs.
 
-  nvenc-h265-10bit-vbr:            # NVenc multipass VBR
-    default_quality: 20            # 20Mbit/s as a starting point
-    quality_range: [99, 0.5]       # Limit to 99Mbit/s, reversed (higher=better)
-    quality_granularity: 0.5
+  nvenc-h265-10bit-vbr:            # NOT RECOMMENDED. NVenc multipass VBR in single ffmpeg run. VBR = Variable Bitrate. It is similar to CQ, but tries to give more preference
+    default_quality: 20.0          # to static scenes. This ruins measured results, which causes the search to increase quality above the level it should be at and waste bits.
+    quality_range: [99.5, 0.5]     # Limit to 99.5Mbit/s, reversed (higher=better). The upper limit is purely for display formatting. Can set anything really, but 99 should be more then enough.
+    quality_granularity: 0.5       # Too low granularity wastes steps on identical attempts, too high causes overshooting. 0.5Mbit/s seems to be a good balance for VBR.
     quality_max_step: 10.0
     quality_label: "Mbit/s"
     encoder_args:
@@ -283,10 +298,10 @@ codecs:
       - "hq"
       - "-rc:v"
       - "vbr"
-      - "-multipass"
+      - "-multipass"    # nvenc-specific multipass implementation within single ffmpeg run
       - "fullres"
       - "-b:v"
-      - "{quality}M"
+      - "{quality}M"    # NOTE the `M` - for Mbit/s.
       # - "-maxrate"    # can't control this dynamically yet
       # - "12M"
       # - "-bufsize"    # can't control this dynamically yet
@@ -302,10 +317,11 @@ codecs:
       - p7         # slowest, best quality. Normally, difference in speed is negligible between codecs for single encoder on modern GPUs.
 
   # TODO: better vulkan codec profile
-  vulkan-h265-10bit-qp:     # QP = Quantization Parameter - it directly controls how many bits to use, straightforward and dumb. Often wastes bandwidth, NOT RECOMMENDED.
-    default_quality: 25
-    quality_range: [10, 30] # [-1, 255] actually, but -1=auto and values above 50 produce ugly quality, so capping to the same range
-    quality_granularity: 1 # in docs it is marked as <int>, unlike CRF and CQ, which are float
+  # Vulkan is currently not very mature. It supports only CBR, VBR and QP. CBR and single-pass VBR are not really suitable for controllable video encoding. Sticking with QP for now.
+  vulkan-h265-10bit-qp:     # STRONGLY NOT RECOMMENDED! QP = Quantization Parameter - it directly controls how many bits to use, straightforward and dumb. Often wastes bandwidth.
+    default_quality: 25     # Use Vulkan only if you have no other GPU API supported. It is not mature enough yet. Results are often subpar, even comparing to other GPU profiles.
+    quality_range: [8, 40]  # [-1, 255] actually. -1=auto. Values above 50 produce ugly quality.
+    quality_granularity: 1  # <int>!
     quality_label: "QP"
     encoder_args:
       - "-hwaccel"
@@ -341,8 +357,8 @@ codecs:
       - any         # hevc_vulkan has no codec presets
 
   av1-10bit:                          # AV1 codec via libsvtav1
-    default_quality: 18
-    quality_range: [10, 30]           # CRF 0..63 for this codec; 10–30 is a good working band
+    default_quality: 20
+    quality_range: [8, 30]            # CRF 0..63 for this codec; 8–30 looks to be a good working band
     quality_granularity: 1            # libsvtav1 accepts CRF with granularity of 0.25, but such steps often produce binary-identical outputs, which cause problems with the quality search
     encoder_args:                     # so for CRF we use granularity of 1 here instead to ensure we actually do take meaningful steps. This causes a bit of bits overhead, but it is small enough to ignore
       - "-i"
@@ -369,44 +385,44 @@ codecs:
       - "7"
       - "8"
       - "9"
-      - "10"
+      - "10"     # near-realtime encoding
       - "11"
       - "12"
-      - "13"     # fastest / lowest quality
+      - "13"     # fastest / lowest quality. Docs note humans shouldn't use 13 and recommend to use level 12 instead.
 
-# Encoding Profiles
+# ENCODING PROFILES
 # -----------------
-# Named profiles that define specific encoder configurations.
-# Each profile specifies:
-#   - codec: Which codec this profile uses (references codec name above)
-#   - description: Human-readable description of the profile
-#   - extra_args: Additional FFmpeg arguments for this profile
+# Named profiles that further tune specific encoder configurations.
 #
-# Profiles can be referenced in strategy specifications and combined
-# with any preset supported by their codec.
+# Each profile specifies:
+#   - codec --- which codec this profile uses (references codec name above)
+#   - description --- human-readable description of the profile
+#   - extra_args --- actual tuning via ffmpeg arguments. Must be present, could be empty.
+#
+# Profiles can be referenced in strategy specifications and combined with any preset supported by their codec.
 profiles:
   # H.264 8-bit Profiles
   # --------------------
   h264:
     codec: h264-8bit
-    description: "Default h.264 8-bit encoding with no extra arguments"
+    description: "Default h.264 8-bit encoding with no extra tuning"
     extra_args: []
 
   # H.265 10-bit Profiles
   # ---------------------
   h265:
     codec: h265-10bit
-    description: "Default h.265 10-bit encoding with no extra arguments"
+    description: "Default h.265 10-bit encoding with no extra tuning"
     extra_args: []
 
   h265-aq:
     codec: h265-10bit
-    description: "h.265 10-bit with adaptive quantization tuning for better quality distribution"
+    description: "h.265 10-bit with adaptive quantization tuning for better quality distribution towards grains and darker areas"
     extra_args: ["-x265-params", "aq-mode=3:aq-strength=0.8"]
 
   h265-anime:
     codec: h265-10bit
-    description: "h.265 10-bit optimized for anime content with reduced blocking and enhanced detail"
+    description: "h.265 10-bit optimized for anime content with reduced blocking and enhanced detail. Purpose is to retain fine details and crisp edges."
     extra_args: ["-x265-params", "aq-mode=2:psy-rd=1.0:deblock=-1,-1"]
 
   # HEVC NVENC (GPU) Profiles
@@ -421,12 +437,14 @@ profiles:
   #   description: "HEVC NVENC GPU encoding — 10-bit, constant QP mode. Requires NVIDIA GPU with NVENC support."
   #   extra_args: []
 
-  nvenc-h265-10bit-vbr:
+  nvenc-h265-10bit-vbr: # NOT RECOMMENDED, CQ mode usually produces better results.
     codec: nvenc-h265-10bit-vbr
     description: "HEVC NVENC GPU encoding — 10-bit, multipass-vbr mode. Requires NVIDIA GPU with NVENC support."
     extra_args: []
 
-  vulkan-h265-10bit-qp: # NOT RECOMMENDED, but I don't have other codec profiles for vulkan yet. single-pass VBR and CBR look to be bad choices for transcoding.
+  # VULKAN profiles
+  # ---------------
+  vulkan-h265-10bit-qp: # STRONGLY NOT RECOMMENDED, but kept enabled for people with no other GPU APIs support for testing.
     codec: vulkan-h265-10bit-qp
     description: "HEVC Vulkan encoding — 10-bit, QP mode. Requires Vulkan support."
     extra_args: []
@@ -435,38 +453,71 @@ profiles:
   # -------------------
   av1:
     codec: av1-10bit
-    description: "Default AV1 10-bit encoding – no extra tuning"
+    description: "AV1 10-bit encoding with no extra tuning"
     extra_args: []
 
-  av1-fgs:
+  av1-fgs-light:
+    # FGS variations profiles are meant for auto-testing via optimization phase
     codec: av1-10bit
     description: "AV1 10-bit with Film Grain Synthesis – removes original noise and replaces it with light synthetic grain (bitrate efficient, grain perception preserved)"
-    extra_args: ["-svtav1-params", "film-grain=10:15"]
-    # film-grain=denoise_level:synthesis_level    (0-50 scale)
-    # denoise=10  → removes most camera noise before encoding (saves bits)
-    # synthesis=15 → adds back perceptually similar grain during playback
+    extra_args: ["-svtav1-params", "film-grain=10:film-grain-denoise=1"]
+    # film-grain=10 → enables film grain synthesis with a rather light grain (max 50)
+    # film-grain-denoise=1 → enables grain denoising
+
+  av1-fgs-medium:
+    # FGS variations profiles are meant for auto-testing via optimization phase
+    codec: av1-10bit
+    description: "AV1 10-bit with Film Grain Synthesis – removes original noise and replaces it with medium synthetic grain (bitrate efficient, grain perception preserved)"
+    extra_args: ["-svtav1-params", "film-grain=20:film-grain-denoise=1"]
+    # film-grain=20 → enables film grain synthesis with a medium grain (max 50)
+    # film-grain-denoise=1 → enables grain denoising
+
+  av1-fgs-high:
+    # FGS variations profiles are meant for auto-testing via optimization phase
+    codec: av1-10bit
+    description: "AV1 10-bit with Film Grain Synthesis – removes original noise and replaces it with high synthetic grain (bitrate efficient, grain perception preserved)"
+    extra_args: ["-svtav1-params", "film-grain=30:film-grain-denoise=1"]
+    # film-grain=30 → enables film grain synthesis with a high grain (max 50)
+    # film-grain-denoise=1 → enables grain denoising
 
   av1-grain:
+    # AV1 is highly tuned for clean sources. It is not very effective for grain preservation. This profile tries to preserve original grain by disabling all the main sources of blurring and detail loss in AV1 encoding, while keeping the grain itself intact (i.e. not denoised or re-synthesized). This is the most bitrate-efficient way to preserve grain, but it can still produce worse results than a more aggressive film grain synthesis (like in av1-fgs profile) on heavily grained sources, due to AV1's inefficiency with grain retention.
     codec: av1-10bit
-    description: "AV1 10-bit – preserves original film grain. Disables temporal filtering & FGS to avoid blurring and keep natural texture."
-    extra_args: ["-svtav1-params", "enable-tf=0:film-grain=0"]
+    description: "AV1 10-bit tuned to preserve original grain and crispness."
+    extra_args: ["-svtav1-params", "enable-tf=0:film-grain=0:film-grain-denoise=0:enable-restoration=0:enable-cdef=0:sharpness=1"]
     # enable-tf=0  → turns off the in-loop temporal filter (main source of 'blurring')
     # film-grain=0 → explicitly disables any film grain synthesis
-    # do we need -tune grain? (same as -tune 4? mentions higher presets are recommended, like 2 or lower).
+    # film-grain-denoise=0 → disables grain denoising, which can cause loss of fine grain details
+    # enable-restoration=0 → disables loop restoration filters, which can also blur fine details (QUESTIONABLE; could be useful in enabled state, needs testing; high effect on bits used).
+    # enable-cdef=0 → disables the Constrained Directional Enhancement Filter, which can further soften the image (low-pass filter around edges to make them look cleaner and save bits; can cause blur).
+    # sharpness=1 → slight bias to high-frequency details, which can help preserve grain texture (ranges from -7 to +7, default is 0)
+    #
+    # No `-tune` is used here, as the default of 0 (VQ) is good normally. Baseline SVT-AV1 supports only VQ, PSNR, SSIM.
+    # You need a PSY or HDR forks for tunes 4/5 (better grain retention).
 
-# Audio Output Configuration
+  av1-grain-resto:
+    # AV1 is highly tuned for clean sources, but keeping the restoration filter enabled - could save quite some bits without strong effect on grain retention.
+    codec: av1-10bit
+    description: "AV1 10-bit tuned to preserve original grain and crispness. Restoration filter kept enabled for better bitrate efficiency with minimal effect on grain retention."
+    extra_args: ["-svtav1-params", "enable-tf=0:film-grain=0:film-grain-denoise=0:enable-restoration=1:enable-cdef=0:sharpness=1"]
+    # enable-tf=0  → turns off the in-loop temporal filter (main source of 'blurring')
+    # film-grain=0 → explicitly disables any film grain synthesis
+    # film-grain-denoise=0 → disables grain denoising, which can cause loss of fine grain details
+    # enable-restoration=1 → enables loop restoration filters, which can help preserve fine details (QUESTIONABLE; could be useful in enabled state, needs testing; high effect on bits used).
+    # enable-cdef=0 → disables the Constrained Directional Enhancement Filter, which can further soften the image (low-pass filter around edges to make them look cleaner and save bits; can cause blur).
+    # sharpness=1 → slight bias to high-frequency details, which can help preserve grain texture (ranges from -7 to +7, default is 0)
+    #
+    # No `-tune` is used here, as the default of 0 (VQ) is good normally. Baseline SVT-AV1 supports only VQ, PSNR, SSIM.
+    # You need a PSY or HDR forks for tunes 4/5 (better grain retention).
+
+# AUDIO OUTPUT CONFIGURATION
 # --------------------------
-# Controls which processed audio files are converted to the final delivery
-# format (AAC) and what codec/bitrate profile is used per channel layout.
+# Controls which processed audio files are converted to the final delivery format (AAC) and what codec/bitrate profile is used per channel layout.
 #
-# convert_filter: Regex matched against the output filename.  Any file whose
-#   name matches is passed to the ConversionStrategy finalizer.  The default
-#   matches all statically-normalised outputs (norm, 2.0 std/night/nboost,
-#   dynaudnorm).
-#
-# profiles: Map of channel-layout key to codec/bitrate/extension settings.
-#   Keys must match the channel layout tags embedded in filenames by the
-#   extraction phase (e.g. "2.0", "5.1", "7.1").
+# - convert_filter --- Regex pattern matched against the output filename. Any file whose name matches is passed to the ConversionStrategy finalizer.
+#   The default value matches all normalized outputs (norm, 2.0 std/night/nboost, dynaudnorm).
+# - profiles --- map of channel-layout key to codec/bitrate/extension settings. For granular control of output codecs.
+#   The default is to use AAC codec with 96Kbps per channel (192 for stereo).
 audio_output:
   convert_filter: "^(norm|dynaudnorm|2\\.0 (std|night|nboost)) ←"
   profiles:
@@ -483,12 +534,12 @@ audio_output:
       bitrate: 768k
       extension: .aac
 
-# Metrics Configuration
+# METRICS CONFIGURATION
 # ---------------------
 # Controls quality metrics measurement behavior.
 #
-# sampling: Metrics sampling factor — measure every N-th frame.
-#   Default (and min): 1 (every frame measured, slowest but most precise).
+# - sampling --- Metrics sampling factor — measure every N-th frame.
+#   Default (and min): 1 (every frame is measured, slowest but most precise).
 #   Optimal: 3 (recommended balance of speed and precision; could speed up encoding by ~10% total, but less precise).
 #
 # NOTE: Values above 10 are not recommended due to high measurement volatility with negligible performance gain.
@@ -496,16 +547,14 @@ audio_output:
 metrics:
   sampling: 1
 
-# Stream Filter Configuration
-# ---------------------------
-# Unified include/exclude regex patterns applied to ALL stream types
-# (video, audio, subtitles, chapters) during the extraction phase.
+# STREAMS FILTERING CONFIGURATION
+# -------------------------------
+# Unified include/exclude regex patterns applied to ALL stream types (video, audio, subtitles, chapters) during the extraction phase.
 #
-# include: Regex matched against the would-be output filename of each stream.
-#   Only matching streams are extracted.  null = include all streams.
-# exclude: Regex matched against the would-be output filename of each stream.
-#   Matching streams are skipped even if they also match include.
-#   null = exclude no streams.  Exclusion takes precedence over inclusion.
+# - include --- Regex matched against the would-be output filename of each stream. Only matching streams are extracted.
+#   Default: null = include all streams.
+# - exclude --- Regex matched against the would-be output filename of each stream. Matching streams are skipped even if they also match include.
+#   Default: null = exclude no streams.  Exclusion takes precedence over inclusion.
 #
 # NOTE: those values are only applied if user didn't supply filters on the pyqenc run. Could be useful if you often filter the same things.
 

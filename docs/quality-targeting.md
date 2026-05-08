@@ -56,12 +56,22 @@ To get stable results you should target multiple metrics. Considering we use chu
 My set is something like:
 
 ```yaml
-- "vif-med:92"    # vif is stable, could target min or med finely. 92 looks to be a good value to add extra control on retention of film grain.
-- "vmaf-p05:95"   # see the vmaf-min notice - prefer p05 over min. VMAF is the main metric controlling perceived quality.
-- "psnr-med:45"   # psnr is stable, could target min or med finely. 45+ should give quite good value.
-- "ssim-med:98"   # ssim is stable, could target min or med finely. SSIM is considered to not be a good measure of perceived quality. The metric itself is very compressed around 98-100.0 range, small changes there matter. 98 feels to be ok as an extra control.
+default_targets:
+  - "vif-med:92.0"   # this is a helper to control film grain retention. 92-94 should be really good. Higher values consume a lot of bandwidth. Lower values allow to save more bits.
+  - "vif-min:88.0"   # a min safeguard against too low values.
+  - "vmaf-p05:95.0"  # A p05 instead of median. Median has some issues with reachability on certain types of chunks. 95-97 give really good quality.
+  - "vmaf-min:92.0"  # a min safeguard against too low values.
+  - "psnr-med:45.0"  # PSNR values 50-60 are considered to be visually lossless. ~44-46 should produce good quality retention.
+  - "psnr-min:42.0"  # a min safeguard against too low values
+  - "ssim-med:98.0"  # SSIM score is very non-linear, strongly compressed towards 100.0. Visually lossless is considered to be around 98.5-99.
+  - "ssim-min:95.0"  # a min safeguard against too low values
 ```
 
-I'm pursuing nearly visually lossless results. These values could be too high for you, if you prefer smaller resulting size.
+I'm pursuing nearly visually lossless results, but this is an opinionated target. Metrics targets above could be too high or too low for you.
+This is the area of personal preference really. Encode a sample video and check for yourself if you want to change those.
 
-> This is the area of personal preference really, just measure a few results that you like to see the measured stats.
+## How to tune metrics
+
+If you want to increase quality (increase resulting size) - look for the most constraining passing metric (marked with `•` symbol in logs). You want to increase those a bit (0.5-1.0 steps are recommended).
+
+If you want to decrease quality (reduce resulting size) - looks for the most constraining failing metric (marked with `✘` symbol in logs). You want to reduce those a bit.

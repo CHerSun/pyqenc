@@ -47,11 +47,11 @@ Run actual encoding with defaults:
 pyqenc auto movie.mkv -y
 ```
 
-> `.mkv` input is recommended. Other containers may work; if not, remux to `.mkv` via MKVmerge GUI first.
+> `.mkv` input is recommended. Other containers may work; if not, remux into `.mkv` via MKVmerge GUI first.
 
-That's it. Default settings should work well for most movies. Later you'll learn to customize that.
+That's it. Default settings should work well. Later you can customize settings.
 
-> Use a separate folder per encode job — either `cd` into a dedicated folder first, or pass `--work-dir <path>`. Don't run two encodes in parallel on the same folder.
+> Use a separate folder per encode job — either `cd` into a dedicated folder first, or pass `--work-dir <path>`. Don't run two encodes in parallel onto the same work dir.
 
 For all options: `pyqenc auto --help` or [CLI Reference](docs/cli-reference.md).
 
@@ -79,7 +79,7 @@ pyqenc can be stopped at any point — power loss, `Ctrl+C`, whatever. Re-run th
 
 This also means you can change your mind mid-way: adjust quality targets, add a strategy — only the minimum necessary work is redone.
 
-### Strategy optimization
+### Best strategy search
 
 An encoding *strategy* is a combination of codec preset and profile (e.g. `slow+h265-aq`). Different strategies produce different size/quality tradeoffs.
 
@@ -93,7 +93,7 @@ Use `--all-strategies` to skip optimization and produce one output per strategy 
 
 Results are written under the working directory:
 
-```
+```log
 <work-dir>/
 ├── 📁 final/      ← ✅ your encoded video(s), one per selected strategy
 ├── 📁 audio/      ← ✅ processed audio (normalized, downmixed, converted)
@@ -106,7 +106,7 @@ Results are written under the working directory:
 └── 📄 *.yaml      ← phase parameters
 ```
 
-`final/` and `audio/` are what you care about. Pick the video and audio streams you want, then mux them together with MKVmerge GUI (drag, drop, export). Everything else is intermediate — preserved for inspection and resumption unless you use `--cleanup`.
+`final/` and `audio/` folders hold the results you should care about. Pick the video and audio streams you want, then mux them together with MKVmerge GUI (drag&drop streams, export). Everything else is intermediate — preserved for inspection and resumption unless you use `--cleanup`.
 
 ---
 
@@ -127,7 +127,7 @@ Outputs go under `<work-dir>/measure/`: per-target metrics YAML, quality plot ov
 pyqenc works out of the box. When you want to customize — codecs, presets, profiles, default targets — copy the active config and edit it:
 
 ```sh
-pyqenc config .     # preview: would copy to ./pyqenc.yaml
+pyqenc config .     # preview: would show which config is active and where it will be copied to
 pyqenc config . -y  # execute the copy
 ```
 
@@ -137,14 +137,14 @@ Config search order (first found wins): `./pyqenc.yaml` → `~/.config/pyqenc/co
 
 ## 📺 Progress display
 
-#### Optimization phase summary
+### Optimization phase summary
 
 ![sample optimization summary](samples/optimization_summary_numbered.png)
 
 1. Input summary — strategies, tolerance, recovery status
 2. Results — strategies tested, sizes, selected strategy(ies) for full encoding
 
-#### Encoding attempts log
+### Encoding attempts log
 
 ![sample log of encoding attempts](samples/encoding_log_numbered.png)
 
@@ -154,7 +154,7 @@ Config search order (first found wins): `./pyqenc.yaml` → `~/.config/pyqenc/co
 4. Quality metrics snapshot — least-performing metric marked `✘` (miss) or `•` (pass)
 5. Chunk success — winning attempt found
 
-#### Encoding progress bar
+### Encoding progress bar
 
 ![sample encoding progress bar](samples/progress_bar_numbered.png)
 
@@ -169,11 +169,11 @@ Config search order (first found wins): `./pyqenc.yaml` → `~/.config/pyqenc/co
 
 **FFmpeg / MKVToolNix not found** — install them and ensure they're in your PATH (`ffmpeg -version`, `mkvmerge --version`).
 
-**Insufficient disk space** — lossless mode needs ~7–10× source size (5× for FFV1 chunks + extraction + encoding + audio + merging). Use `--work-dir` to point to a larger disk, or `--remux-chunking` to reduce chunk size at the cost of frame-perfect splits.
+**Insufficient disk space** — with lossless chunking mode whole process needs ~7–10× source size (5× for FFV1 chunks + extraction + encoding + audio + merging). Use `--work-dir` to point to a larger disk, or `--remux-chunking` to reduce chunk size at the cost of frame-perfect splits (not recommended).
 
-**Slow encoding** — try a faster preset (`fast`, `medium`) or a faster codec (h.264 >> h.265 >> av1 for encoding speed). `--max-parallel 2` or higher can help if CPU cores are not fully utilized.
+**Slow encoding** — try a faster codec or faster codec preset (`fast`, `medium`). If CPU is not fully utilized - add `--max-parallel 2` or higher. OR switch to GPU-encoding. All options reduce resulting quality or increase output size, effective encoding is slow.
 
-**Strategy wildcard not expanding** — some shells require quoting: `"slow+h265*"`. Use dry-run to verify expansion.
+**Strategy wildcard not expanding** — some shells require quoting: `"slow+h265*"`. Use dry-run to verify expansion. Verify that the config does have wanted profiles.
 
 **Debug logging** — add `--log-level debug` to any command for detailed output.
 

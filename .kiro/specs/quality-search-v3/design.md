@@ -342,6 +342,8 @@ flowchart TD
     style EXHAUST fill:#622
 ```
 
+> UPD 2026-05-08: Midpoint probe is required only for all-fail scenario (best-scoring point score is below 0). For all-passing - we don't really care about sweet-spot - the lower the quality - the better the resulting size.
+
 #### 2 Points, Same Side, NOT Direction-Exhausted
 
 Proportional estimation outside the two points:
