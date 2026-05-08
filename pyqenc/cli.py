@@ -11,6 +11,7 @@ import psutil
 
 import pyqenc
 from pyqenc.constants import (
+    DEFAULT_MAX_PARALLEL,
     DEFAULT_METRICS_SAMPLING,
     DEFAULT_SCREENSHOT_COUNT,
     FAILURE_SYMBOL_MAJOR,
@@ -142,8 +143,8 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--max-parallel",
         type=int,
-        default=2,
-        help="Maximum concurrent encoding processes (default: 2). Don't set this high, ffmpeg knows how to scale too."
+        default=DEFAULT_MAX_PARALLEL,
+        help=f"Maximum concurrent encoding processes (default: {DEFAULT_MAX_PARALLEL}). Don't set this high, ffmpeg knows how to scale too."
     )
     parser.add_argument(
         "--sampling",
@@ -806,8 +807,8 @@ def _cmd_measure(args: argparse.Namespace) -> int:
     try:
         measure_quality(
             source_video             = args.source,
-            target_videos            = args.targets,
             work_dir                 = args.work_dir,
+            target_videos            = args.targets,
             crop_params              = crop_params,
             metrics_sampling         = metrics_sampling,
             screenshot_count         = args.screenshots,

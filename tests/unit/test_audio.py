@@ -20,8 +20,8 @@ from pyqenc.constants import (
     AUDIO_CH_51,
     AUDIO_CH_71,
     AUDIO_STEM_SEPARATOR,
+    NORMALISED_PREFIXES,
     TIME_SEPARATOR_MS,
-    _NORMALISED_PREFIXES,
 )
 from pyqenc.phases.audio import (
     AudioConversionProfile,
@@ -37,7 +37,6 @@ from pyqenc.phases.audio import (
 )
 from pyqenc.phases.extraction import streams_filter_plain_regex
 from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -83,7 +82,7 @@ class TestDownmixStrategy71to51Check:
 
     def test_rejects_normalised_output(self) -> None:
         # A 5.1 downmix output is not a raw source — 71→51 must not re-fire on it
-        name = f"5.1 {AUDIO_STEM_SEPARATOR} {_stem('7.1')}.flac"
+        name = f"5{TIME_SEPARATOR_MS}1 {AUDIO_STEM_SEPARATOR} {_stem('7.1')}.flac"
         assert self.s.check(_path(name)) is False
 
 
@@ -113,16 +112,16 @@ class TestDownmixStrategy51to20Check:
             assert s.check(p) is False
 
     def test_matches_51_downmix_output(self) -> None:
-        # The 7.1→5.1 downmix output has prefix "5.1" — the 5.1→2.0 strategies
-        # SHOULD match it so the graph continues correctly.
-        name = f"5.1 {AUDIO_STEM_SEPARATOR} {_stem('7.1')}.flac"
+        # The 7.1→5.1 downmix output has prefix "5․1" (TIME_SEPARATOR_MS) —
+        # the 5.1→2.0 strategies SHOULD match it so the graph continues correctly.
+        name = f"5{TIME_SEPARATOR_MS}1 {AUDIO_STEM_SEPARATOR} {_stem('7.1')}.flac"
         p = _path(name)
         for s in self.strategies:
             assert s.check(p) is True, f"{s.strategy_short} should match 5.1 downmix output"
 
     def test_rejects_chained_20_output(self) -> None:
         # A 2.0 std output should not re-trigger any 5.1→2.0 strategy
-        name = f"2.0 std {AUDIO_STEM_SEPARATOR} {_stem('5.1')}.flac"
+        name = f"2{TIME_SEPARATOR_MS}0 std {AUDIO_STEM_SEPARATOR} {_stem('5.1')}.flac"
         p = _path(name)
         for s in self.strategies:
             assert s.check(p) is False, f"{s.strategy_short} should reject 2.0 std output"
@@ -139,7 +138,7 @@ class TestNormStrategyCheck:
     def test_matches_plain_stereo_source(self) -> None:
         assert self.s.check(_path(f"{_stem('stereo')}.mka")) is True
 
-    @pytest.mark.parametrize("prefix", list(_NORMALISED_PREFIXES))
+    @pytest.mark.parametrize("prefix", list(NORMALISED_PREFIXES))
     def test_rejects_normalised_prefix(self, prefix: str) -> None:
         # A processed output starting with a normalised prefix is not a raw source
         name = f"{prefix} {_stem('5.1')}.flac"
@@ -152,7 +151,7 @@ class TestNormStrategyCheck:
 
     def test_rejects_any_processed_output(self) -> None:
         # Any file with ← in the name is not a raw source
-        name = f"2.0 std {AUDIO_STEM_SEPARATOR} {_stem('5.1')}.flac"
+        name = f"2{TIME_SEPARATOR_MS}0 std {AUDIO_STEM_SEPARATOR} {_stem('5.1')}.flac"
         assert self.s.check(_path(name)) is False
 
 
@@ -160,7 +159,7 @@ class TestDynaudnormStrategyCheck:
     def setup_method(self) -> None:
         self.s = DynaudnormStrategy()
 
-    @pytest.mark.parametrize("prefix", list(_NORMALISED_PREFIXES))
+    @pytest.mark.parametrize("prefix", list(NORMALISED_PREFIXES))
     def test_matches_direct_normalised_output(self, prefix: str) -> None:
         # A direct normalised output (not raw, starts with normalised prefix)
         name = f"{prefix} {_stem('5.1')}.flac"
@@ -177,7 +176,7 @@ class TestDynaudnormStrategyCheck:
 
     def test_rejects_plain_downmix_output(self) -> None:
         # 5.1 downmix output doesn't start with a normalised prefix
-        name = f"5.1 {AUDIO_STEM_SEPARATOR} {_stem('7.1')}.flac"
+        name = f"5{TIME_SEPARATOR_MS}1 {AUDIO_STEM_SEPARATOR} {_stem('7.1')}.flac"
         assert self.s.check(_path(name)) is False
 
 
@@ -252,7 +251,10 @@ class TestAudioEngineBuildPlan:
     can discover them without running any real ffmpeg commands.
     """
 
-    _CONVERT_FILTER = r"^(norm|dynaudnorm|2[\.․]0 (std|night|nboost)) ←"
+    @staticmethod
+    def _convert_filter() -> str:
+        """Build the correct convert_filter using the actual separator constants."""
+        return f"^(norm|dynaudnorm|2{TIME_SEPARATOR_MS}0 (std|night|nboost)) {AUDIO_STEM_SEPARATOR}"
 
     def _make_engine(self) -> AudioEngine:
         return AudioEngine(
@@ -268,12 +270,16 @@ class TestAudioEngineBuildPlan:
         )
 
     def test_51_source_graph(self, tmp_path: Path) -> None:
-        """A 5.1 source should produce: 3 downmix + 1 norm + 4 dynaudnorm + 8 aac = 16 tasks."""
+        """A 5.1 source produces: 3 downmix + 1 norm + 4 dynaudnorm + 8 aac = 16 tasks.
+
+        DynaudnormStrategy fires on all 4 normalised outputs (norm←, 2.0std←,
+        2.0night←, 2.0nboost←) because NORMALISED_PREFIXES uses TIME_SEPARATOR_MS.
+        """
         stem = _stem("5.1")
         (tmp_path / f"{stem}.flac").touch()
 
         engine = self._make_engine()
-        plan = engine.build_plan(tmp_path, self._CONVERT_FILTER)
+        plan = engine.build_plan(tmp_path, self._convert_filter())
 
         strategy_shorts = [t.strategy.strategy_short for t in plan.tasks]
         _dot = TIME_SEPARATOR_MS
@@ -299,7 +305,7 @@ class TestAudioEngineBuildPlan:
         (tmp_path / f"{stem}.flac").touch()
 
         engine = self._make_engine()
-        plan = engine.build_plan(tmp_path, self._CONVERT_FILTER)
+        plan = engine.build_plan(tmp_path, self._convert_filter())
 
         strategy_shorts = [t.strategy.strategy_short for t in plan.tasks]
         _dot = TIME_SEPARATOR_MS
@@ -318,7 +324,7 @@ class TestAudioEngineBuildPlan:
         (tmp_path / f"{stem}.flac").touch()
 
         engine = self._make_engine()
-        plan = engine.build_plan(tmp_path, self._CONVERT_FILTER)
+        plan = engine.build_plan(tmp_path, self._convert_filter())
 
         strategy_shorts = [t.strategy.strategy_short for t in plan.tasks]
 
@@ -334,14 +340,14 @@ class TestAudioEngineBuildPlan:
         (tmp_path / f"{stem}.flac").touch()
 
         engine = self._make_engine()
-        plan = engine.build_plan(tmp_path, self._CONVERT_FILTER)
+        plan = engine.build_plan(tmp_path, self._convert_filter())
 
         outputs = [t.output for t in plan.tasks]
         assert len(outputs) == len(set(outputs)), "Duplicate output paths in plan"
 
     def test_empty_directory(self, tmp_path: Path) -> None:
         engine = self._make_engine()
-        plan = engine.build_plan(tmp_path, self._CONVERT_FILTER)
+        plan = engine.build_plan(tmp_path, self._convert_filter())
         assert plan.tasks == []
         assert plan.found_files == 0
 
@@ -351,7 +357,7 @@ class TestAudioEngineBuildPlan:
         (tmp_path / f"{stem}.flac").touch()
 
         engine = self._make_engine()
-        plan = engine.build_plan(tmp_path, self._CONVERT_FILTER)
+        plan = engine.build_plan(tmp_path, self._convert_filter())
 
         dynaudnorm_outputs = {
             t.output for t in plan.tasks if t.strategy.strategy_short == "dynaudnorm"
@@ -386,7 +392,7 @@ class TestConversionStrategyProfileSelection:
         assert profile.bitrate == "512k"
 
     def test_selects_71_profile(self) -> None:
-        source = _path(f"5.1 {AUDIO_STEM_SEPARATOR} {_stem('7.1')}.flac")
+        source = _path(f"5{TIME_SEPARATOR_MS}1 {AUDIO_STEM_SEPARATOR} {_stem('7.1')}.flac")
         profile = self.s._select_profile(source)
         assert profile.bitrate == "768k"
 
@@ -428,7 +434,7 @@ class TestConversionStrategyBitrateScaling:
 
     def test_base_override_scales_for_71(self) -> None:
         s = ConversionStrategy(profiles=_default_profiles(), base_bitrate_override="192k")
-        source = _path(f"5.1 {AUDIO_STEM_SEPARATOR} {_stem('7.1')}.flac")
+        source = _path(f"5{TIME_SEPARATOR_MS}1 {AUDIO_STEM_SEPARATOR} {_stem('7.1')}.flac")
         profile = s._select_profile(source)
         bitrate = s._resolve_bitrate(source, profile)
         assert bitrate == "768k"  # 192 * 8/2 = 768

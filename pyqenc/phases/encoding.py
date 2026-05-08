@@ -29,6 +29,7 @@ from pyqenc.constants import (
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
     FAILURE_SYMBOL_MINOR,
+    METRIC_KEY_QUALITY_MEASURE,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
     THICK_LINE,
@@ -46,7 +47,7 @@ from pyqenc.models import (
     VideoMetadata,
 )
 from pyqenc.phase import Artifact, Phase, PhaseResult
-from pyqenc.quality import QualitySearchV2
+from pyqenc.quality import QualitySearchV3
 from pyqenc.state import (
     ArtifactState,
     EncodingParams,
@@ -69,8 +70,9 @@ from pyqenc.utils.log_format import (
 from pyqenc.utils.visualization import QualityEvaluator
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
+from pyqenc.metrics import ConvergenceUpdate, MetricKey, MetricsCollector
+
 if TYPE_CHECKING:
-    from pyqenc.metrics import MetricsCollector
     from pyqenc.models import PipelineConfig
     from pyqenc.phases.chunking import ChunkingPhase, ChunkingPhaseResult
     from pyqenc.phases.job import JobPhase, JobPhaseResult
@@ -415,6 +417,7 @@ class ChunkEncoder:
         self,
         quality_evaluator: QualityEvaluator,
         work_dir:          Path,
+        collector:         MetricsCollector,
         crop_params:       CropParams | None = None,
         cleanup_level:     CleanupLevel      = CleanupLevel.NONE,
         visual_hash:       bool              = True,
@@ -425,6 +428,10 @@ class ChunkEncoder:
         Args:
             quality_evaluator: Quality evaluator for metric calculation.
             work_dir:          Working directory for artifacts.
+            collector:         Metrics collector for per-attempt timing.
+                               ``encoding.<strategy>`` is recorded for each
+                               ffmpeg encode; ``encoding.quality_measure`` is
+                               recorded for each quality evaluation.
             crop_params:       Optional crop parameters to apply to every chunk attempt.
             cleanup_level:     Controls deletion of intermediate attempt files after
                                a pair converges (Req 12.3).
@@ -434,6 +441,7 @@ class ChunkEncoder:
         """
         self.quality_evaluator = quality_evaluator
         self.work_dir          = work_dir
+        self._collector        = collector
         self._crop_params      = crop_params
         self._cleanup_level    = cleanup_level
         self._visual_hash      = visual_hash
@@ -734,7 +742,7 @@ class ChunkEncoder:
         """
         logger.debug(fmt_chunk_start(strategy.name, chunk.chunk_id, self._visual_hash))
 
-        search = QualitySearchV2(
+        search = QualitySearchV3(
             quality_better   = strategy.codec.quality_better,
             quality_worse    = strategy.codec.quality_worse,
             quality_targets  = quality_targets,
@@ -812,7 +820,12 @@ class ChunkEncoder:
                             all_sidecar_metrics.get(f"{t.metric}_{t.statistic}", 0.0) >= t.value
                             for t in quality_targets
                         )
-                        metric_summary = fmt_metric_summary(metrics_dict, quality_targets)
+                        _worst         = search._find_worst_target(metrics_dict)
+                        metric_summary = fmt_metric_summary(
+                            metrics_dict,
+                            worst_key    = f"{_worst[0].metric}_{_worst[0].statistic}" if _worst else None,
+                            worst_passed = (_worst[1] >= 0) if _worst else True,
+                        )
                         pass_fail      = (
                             f"{SUCCESS_SYMBOL_MINOR} pass"
                             if targets_met
@@ -862,9 +875,10 @@ class ChunkEncoder:
                 output_file    = self._get_attempt_path(
                     chunk.chunk_id, strategy, resolution=resolution, crf=current_q
                 )
-                encode_success = self._encode_with_ffmpeg(
-                    chunk, strategy, current_q, output_file
-                )
+                with self._collector.time(MetricKey.ENCODING, strategy.name):
+                    encode_success = self._encode_with_ffmpeg(
+                        chunk, strategy, current_q, output_file
+                    )
 
                 if not encode_success:
                     error_msg = f"Encoding failed for chunk {chunk.chunk_id}"
@@ -895,16 +909,17 @@ class ChunkEncoder:
 
             # Evaluate quality — raw metric logs/stats go into a per-attempt subfolder;
             # the plot and YAML sidecar stay next to the .mkv.
-            evaluation = self.quality_evaluator.evaluate_chunk(
-                encoded              = output_file,
-                reference            = reference.path,
-                ref_crop             = self._crop_params or CropParams(),
-                targets              = quality_targets,
-                output_dir           = output_file.parent,
-                subsample_factor     = self._metrics_sampling,
-                plot_path            = output_file.parent / f"{output_file.stem}.png",
-                chunk_start_seconds  = chunk.start_timestamp,
-            )
+            with self._collector.time(MetricKey.ENCODING, METRIC_KEY_QUALITY_MEASURE):
+                evaluation = self.quality_evaluator.evaluate_chunk(
+                    encoded              = output_file,
+                    reference            = reference.path,
+                    ref_crop             = self._crop_params or CropParams(),
+                    targets              = quality_targets,
+                    output_dir           = output_file.parent,
+                    subsample_factor     = self._metrics_sampling,
+                    plot_path            = output_file.parent / f"{output_file.stem}.png",
+                    chunk_start_seconds  = chunk.start_timestamp,
+                )
 
             # Collect ALL measured metrics (not filtered to current targets) for the sidecar
             # so the quality history is reusable when quality targets change.
@@ -941,7 +956,12 @@ class ChunkEncoder:
             elif not search.best_targets_met and search.best_quality == current_q:
                 best_fail_attempt = attempt_meta
 
-            metric_summary = fmt_metric_summary(metrics_dict, quality_targets)
+            _worst         = search._find_worst_target(metrics_dict)
+            metric_summary = fmt_metric_summary(
+                metrics_dict,
+                worst_key    = f"{_worst[0].metric}_{_worst[0].statistic}" if _worst else None,
+                worst_passed = (_worst[1] >= 0) if _worst else True,
+            )
             pass_fail      = (
                 f"{SUCCESS_SYMBOL_MINOR} pass"
                 if evaluation.targets_met
@@ -1170,10 +1190,9 @@ async def _encode_chunks_parallel(
     quality_targets:  list[QualityTarget],
     max_parallel:     int,
     force:            bool,
-    collector:        "MetricsCollector",
+    collector:        MetricsCollector,
     phase_recovery:   "_PhaseRecovery | None"                                  = None,
     advance:          Callable[[int | float, AdvanceState | None], None] | None = None,
-    dotted_metric_key: "MetricKey | None"                                       = None,
 ) -> EncodingResult:
     """Encode chunks in parallel with semaphore control.
 
@@ -1185,20 +1204,18 @@ async def _encode_chunks_parallel(
         quality_targets: Quality targets to meet.
         max_parallel:   Maximum concurrent encodings.
         force:          Whether to force re-encoding.
+        collector:      Metrics collector for timing and convergence tracking.
+                        Per-attempt timing is recorded inside ``ChunkEncoder``:
+                        ``encoding.<strategy>`` for each ffmpeg encode and
+                        ``encoding.quality_measure`` for each quality evaluation.
+                        ``step(MetricKey.ENCODING, convergence_update=...)`` is
+                        called after each chunk/strategy pair converges.
         phase_recovery: Optional recovery state from ``recover_attempts``; when
                         provided, ``COMPLETE`` pairs are skipped and ``ARTIFACT_ONLY``
                         pairs resume from their recovered ``QualitySearch`` state.
         advance:        Optional advance callable from ``ProgressBar``; called with
                         chunk duration in seconds and an ``AdvanceState`` on each
                         chunk completion.
-        collector:      Metrics collector for timing and convergence tracking;
-                        wraps the entire encoding loop with
-                        ``time(MetricKey.ENCODING)`` and calls
-                        ``step(MetricKey.ENCODING, convergence_update=...)``
-                        after each chunk/strategy pair converges.
-        dotted_metric_key: When provided, use this key instead of
-                        ``MetricKey.ENCODING`` for per-strategy dotted timing
-                        (e.g. ``MetricKey.OPTIMIZATION`` for test encodes).
 
     Returns:
         EncodingResult with all encoding outcomes.
@@ -1260,19 +1277,18 @@ async def _encode_chunks_parallel(
                 gran = strategy.codec.quality_granularity
                 chunk_initial_crf = strategy.codec.default_quality.quantize(gran)
 
-                # Encode chunk
-                from pyqenc.metrics import MetricKey as _MetricKey
-                _per_strategy_key = dotted_metric_key if dotted_metric_key is not None else _MetricKey.ENCODING
-                async with collector.time(_per_strategy_key, strategy.name):
-                    chunk_result = await _encode_chunk_async(
-                        encoder,
-                        chunk,
-                        VideoMetadata(path=reference),
-                        strategy,
-                        quality_targets,
-                        chunk_initial_crf,
-                        force,
-                    )
+                # Encode chunk — timing is recorded inside encode_chunk:
+                #   encoding.<strategy>       for each ffmpeg encode attempt
+                #   encoding.quality_measure  for each quality evaluation
+                chunk_result = await _encode_chunk_async(
+                    encoder,
+                    chunk,
+                    VideoMetadata(path=reference),
+                    strategy,
+                    quality_targets,
+                    chunk_initial_crf,
+                    force,
+                )
 
                 # Update result
                 if chunk_result.success:
@@ -1290,7 +1306,6 @@ async def _encode_chunks_parallel(
                         if advance is not None:
                             advance(chunk.end_timestamp - chunk.start_timestamp)
                         # Record convergence for this chunk/strategy pair
-                        from pyqenc.metrics import ConvergenceUpdate, MetricKey
                         collector.step(
                             MetricKey.ENCODING,
                             convergence_update=ConvergenceUpdate(
@@ -1324,8 +1339,8 @@ def encode_all_chunks(
     strategies:        list[str],
     quality_targets:   list[QualityTarget],
     work_dir:          Path,
-    collector:         "MetricsCollector",
-    max_parallel:    int               = 2,
+    collector:         MetricsCollector,
+    max_parallel:    int,
     force:           bool              = False,
     dry_run:         bool              = False,
     crop_params:     CropParams | None = None,
@@ -1441,6 +1456,7 @@ def encode_all_chunks(
     encoder = ChunkEncoder(
         quality_evaluator = QualityEvaluator(work_dir),
         work_dir          = work_dir,
+        collector         = collector,
         crop_params       = crop_params,
         cleanup_level     = cleanup_level,
         visual_hash       = visual_hash,

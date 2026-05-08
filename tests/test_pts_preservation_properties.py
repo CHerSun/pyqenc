@@ -78,13 +78,25 @@ def test_pts_conversion_correctness(pts_values: list[float]) -> None:
 
     **Validates: Requirements 3.1, 3.2**
     """
-    stdout = "\n".join(str(v) for v in pts_values) + "\n"
+    # Convert float seconds to integer milliseconds — this is what mkvextract
+    # outputs natively, and what ffprobe outputs with the current format string.
+    pts_ms_values = sorted(int(v * 1000) for v in pts_values)
+    stdout = "\n".join(str(v) for v in pts_ms_values) + "\n"
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         output = Path(tmp_dir) / TIMESTAMPS_FILENAME
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout=stdout, returncode=0)
+        def _mock_run(cmd: list, **kwargs: object) -> MagicMock:
+            result = MagicMock()
+            if cmd and str(cmd[0]) == "mkvextract":
+                import subprocess as _sp
+                raise _sp.CalledProcessError(1, cmd, stderr=b"not an mkv")
+            result.returncode = 0
+            result.stdout     = stdout
+            result.stderr     = ""
+            return result
+
+        with patch("subprocess.run", side_effect=_mock_run):
             _extract_timestamps(Path("source.mkv"), 0, output)
 
         lines = output.read_text(encoding="utf-8").splitlines()
@@ -94,16 +106,15 @@ def test_pts_conversion_correctness(pts_values: list[float]) -> None:
         f"Expected '# timestamp format v2' header, got {lines[0]!r}"
     )
 
-    # Each data line must equal int(pts_seconds * 1000)
+    # Each data line must be an integer millisecond value matching the input
     data_lines = lines[1:]
-    assert len(data_lines) == len(pts_values), (
-        f"Expected {len(pts_values)} data lines, got {len(data_lines)}"
+    assert len(data_lines) == len(pts_ms_values), (
+        f"Expected {len(pts_ms_values)} data lines, got {len(data_lines)}"
     )
-    for i, (line, pts_s) in enumerate(zip(data_lines, pts_values)):
-        expected_ms = int(pts_s * 1000)
-        actual_ms   = int(line)
+    for i, (line, expected_ms) in enumerate(zip(data_lines, pts_ms_values)):
+        actual_ms = int(line)
         assert actual_ms == expected_ms, (
-            f"Line {i+1}: expected {expected_ms} (int({pts_s} * 1000)), got {actual_ms}"
+            f"Line {i+1}: expected {expected_ms}, got {actual_ms}"
         )
 
 
@@ -425,27 +436,38 @@ def test_pts_accuracy(pts_values: list[float]) -> None:
     import tempfile
     from pyqenc.phases.extraction import _extract_timestamps
 
+    # The implementation receives integer ms values directly (from mkvextract or
+    # ffprobe with integer PTS format). The round-trip accuracy is exact — no
+    # float conversion occurs inside _extract_timestamps.
+    # Convert float seconds to integer ms here (as the caller would), then verify
+    # the file preserves them exactly.
+    pts_ms_values = sorted(int(v * 1000) for v in pts_values)
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         output = Path(tmp_dir) / "timestamps.txt"
 
-        stdout = "\n".join(str(v) for v in pts_values) + "\n"
+        stdout = "\n".join(str(v) for v in pts_ms_values) + "\n"
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout=stdout, returncode=0)
+        def _mock_run(cmd: list, **kwargs: object) -> MagicMock:
+            result = MagicMock()
+            if cmd and str(cmd[0]) == "mkvextract":
+                import subprocess as _sp
+                raise _sp.CalledProcessError(1, cmd, stderr=b"not an mkv")
+            result.returncode = 0
+            result.stdout     = stdout
+            result.stderr     = ""
+            return result
+
+        with patch("subprocess.run", side_effect=_mock_run):
             _extract_timestamps(Path("source.mkv"), 0, output)
 
         lines = output.read_text(encoding="utf-8").splitlines()
         data_lines = lines[1:]  # skip header
 
-    assert len(data_lines) == len(pts_values)
+    assert len(data_lines) == len(pts_ms_values)
 
-    for i, (line, source_pts_s) in enumerate(zip(data_lines, pts_values)):
-        merged_pts_ms  = int(line)
-        source_pts_ms  = source_pts_s * 1000.0
-        abs_diff       = abs(merged_pts_ms - source_pts_ms)
-
-        assert abs_diff <= 1.0, (
-            f"Frame {i}: PTS accuracy exceeded 1 ms tolerance. "
-            f"source={source_pts_s:.6f}s ({source_pts_ms:.3f}ms), "
-            f"merged={merged_pts_ms}ms, diff={abs_diff:.3f}ms"
+    for i, (line, expected_ms) in enumerate(zip(data_lines, pts_ms_values)):
+        actual_ms = int(line)
+        assert actual_ms == expected_ms, (
+            f"Frame {i}: round-trip failed — expected {expected_ms}ms, got {actual_ms}ms"
         )

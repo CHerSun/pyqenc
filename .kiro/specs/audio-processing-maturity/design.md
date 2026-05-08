@@ -93,7 +93,7 @@ class BaseStrategy(ABC):
 Normalised prefixes (shared constant set used by both `NormStrategy.check()` and `DynaudnormStrategy.check()`):
 
 ```python
-_NORMALISED_PREFIXES = (
+NORMALISED_PREFIXES = (
     f"norm {AUDIO_STEM_SEPARATOR}",
     f"2.0 std {AUDIO_STEM_SEPARATOR}",
     f"2.0 night {AUDIO_STEM_SEPARATOR}",

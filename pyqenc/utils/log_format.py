@@ -62,8 +62,9 @@ def fmt_metric_value(value: float) -> str:
 
 
 def fmt_metric_summary(
-    metrics_dict:    dict[str, float],
-    quality_targets: "list[QualityTarget]",
+    metrics_dict: dict[str, float],
+    worst_key:    str | None,
+    worst_passed: bool,
 ) -> str:
     """Format a metric summary string, marking the worst-deficit metric.
 
@@ -74,8 +75,9 @@ def fmt_metric_summary(
     selection.
 
     Args:
-        metrics_dict:    Measured metrics keyed as ``"<metric>_<stat>"``.
-        quality_targets: Quality targets used to determine worst deficit.
+        metrics_dict: Measured metrics keyed as ``"<metric>_<stat>"``.
+        worst_key:    Key of the worst-deficit metric, or ``None`` if unknown.
+        worst_passed: ``True`` when the worst metric still passed its target.
 
     Returns:
         Space-separated string where each value has a trailing symbol:
@@ -84,15 +86,11 @@ def fmt_metric_summary(
         `` `` (space) for all others — keeping columns aligned across log lines.
         Example: ``"psnr_min=41.8✘ ssim_min=97.8  vmaf_min=95.9 "``
     """
-    from pyqenc.quality import _find_worst_target
-    found      = _find_worst_target(metrics_dict, quality_targets)
-    worst_key  = f"{found[0].metric}_{found[0].statistic}" if found is not None else None
-    worst_pass = found[1] >= 0 if found is not None else True
 
     parts: list[str] = []
     for k, v in metrics_dict.items():
         if k == worst_key:
-            symbol = NEUTRAL_INDICATOR_SYMBOL if worst_pass else FAILURE_SYMBOL_MINOR
+            symbol = NEUTRAL_INDICATOR_SYMBOL if worst_passed else FAILURE_SYMBOL_MINOR
         else:
             symbol = " "
         parts.append(f"{k}={fmt_metric_value(v)}{symbol}")

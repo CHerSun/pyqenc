@@ -29,10 +29,10 @@ from typing import Callable
 from alive_progress import config_handler
 
 from pyqenc.constants import (
-    _NORMALISED_PREFIXES,
     AUDIO_CH_51,
     AUDIO_CH_71,
     AUDIO_STEM_SEPARATOR,
+    NORMALISED_PREFIXES,
     TIME_SEPARATOR_MS,
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
@@ -324,7 +324,7 @@ class DownmixStrategy51to20Std(BaseStrategy):
 
     def check(self, source: Path) -> bool:
         """Return True for raw 5.1 sources or the direct 7.1→5.1 downmix output."""
-        return (_is_raw_source(source) and AUDIO_CH_51 in source.name) or _filename_prefix(source) == "5.1"
+        return (_is_raw_source(source) and AUDIO_CH_51 in source.name) or _filename_prefix(source) == f"5{TIME_SEPARATOR_MS}1"
 
     def plan(self, source: Path) -> Path:
         return self.output_path(source)
@@ -362,7 +362,7 @@ class DownmixStrategy51to20Night(BaseStrategy):
 
     def check(self, source: Path) -> bool:
         """Return True for raw 5.1 sources or the direct 7.1→5.1 downmix output."""
-        return (_is_raw_source(source) and AUDIO_CH_51 in source.name) or _filename_prefix(source) == "5.1"
+        return (_is_raw_source(source) and AUDIO_CH_51 in source.name) or _filename_prefix(source) == f"5{TIME_SEPARATOR_MS}1"
 
     def plan(self, source: Path) -> Path:
         return self.output_path(source)
@@ -400,7 +400,7 @@ class DownmixStrategy51to20NBoost(BaseStrategy):
 
     def check(self, source: Path) -> bool:
         """Return True for raw 5.1 sources or the direct 7.1→5.1 downmix output."""
-        return (_is_raw_source(source) and AUDIO_CH_51 in source.name) or _filename_prefix(source) == "5.1"
+        return (_is_raw_source(source) and AUDIO_CH_51 in source.name) or _filename_prefix(source) == f"5{TIME_SEPARATOR_MS}1"
 
     def plan(self, source: Path) -> Path:
         return self.output_path(source)
@@ -424,7 +424,7 @@ class NormStrategy(BaseStrategy):
     """Standalone EBU R128 static normalisation (2-pass, no downmix).
 
     Applied to any source that has not yet been normalised — i.e. whose filename
-    does not start with any of the ``_NORMALISED_PREFIXES``.
+    does not start with any of the ``NORMALISED_PREFIXES``.
     """
 
     def __init__(self) -> None:
@@ -438,8 +438,8 @@ class NormStrategy(BaseStrategy):
         EBU R128.  All other processed outputs (anything else with a ``←``) are
         excluded.
         """
-        is_eligible = _is_raw_source(source) or _filename_prefix(source) == "5.1"
-        return is_eligible and not source.name.startswith(_NORMALISED_PREFIXES)
+        is_eligible = _is_raw_source(source) or _filename_prefix(source) == f"5{TIME_SEPARATOR_MS}1"
+        return is_eligible and not source.name.startswith(NORMALISED_PREFIXES)
 
     def plan(self, source: Path) -> Path:
         return self.output_path(source)
@@ -463,7 +463,7 @@ class DynaudnormStrategy(BaseStrategy):
     """Dynamic normalisation applied on top of any statically normalised output.
 
     Applied only to files whose filename starts with one of the
-    ``_NORMALISED_PREFIXES`` (i.e. ``norm ←``, ``2.0 std ←``, etc.).
+    ``NORMALISED_PREFIXES`` (i.e. ``norm ←``, ``2.0 std ←``, etc.).
     """
 
     _FILTER: str = "dynaudnorm=f=500:g=31:p=0.95:m=10.0:r=0.5:b=1"
@@ -485,7 +485,7 @@ class DynaudnormStrategy(BaseStrategy):
         - ``dynaudnorm ←`` outputs (their name starts with ``dynaudnorm``, not
           a normalised prefix, so ``startswith`` already excludes them).
         """
-        return source.name.startswith(_NORMALISED_PREFIXES) and not _is_raw_source(source)
+        return source.name.startswith(NORMALISED_PREFIXES) and not _is_raw_source(source)
 
     def plan(self, source: Path) -> Path:
         return self.output_path(source)

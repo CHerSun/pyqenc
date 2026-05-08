@@ -1,520 +1,412 @@
-# Architecture Documentation
+# Architecture
 
-This document describes the architecture, design decisions, and key flows of the pyqenc quality-based encoding pipeline.
+<!-- markdownlint-disable MD024 -->
+
+This document describes the current architecture, key design decisions, and main flows of pyqenc.
 
 ## Table of Contents
 
 - [System Overview](#system-overview)
-- [Architecture Diagrams](#architecture-diagrams)
-- [Component Details](#component-details)
-- [Key Flows](#key-flows)
+- [Phase Pipeline](#phase-pipeline)
+- [Artifact-Based Recovery](#artifact-based-recovery)
+- [Quality Search Algorithm](#quality-search-algorithm)
+- [Metrics](#metrics)
+- [Audio Processing](#audio-processing)
+- [FFmpeg Runner](#ffmpeg-runner)
+- [Key Data Models](#key-data-models)
+- [Public API](#public-api)
 - [Design Decisions](#design-decisions)
-- [Performance Considerations](#performance-considerations)
+
+---
 
 ## System Overview
 
-The pyqenc pipeline is a quality-first video encoding system that orchestrates multiple phases to achieve user-specified quality targets while optimizing file size. The system follows a phased pipeline architecture with artifact-based resumption.
+pyqenc is a quality-first video encoding pipeline. The user specifies quality targets; the pipeline figures out the right encoding parameters per scene to meet them, automatically, with full resumption support.
 
-### Key Characteristics
+### Entry points
 
-- **Quality-First**: Never compromises on user-specified quality targets
-- **Resumable**: Automatically resumes from interruptions using artifact detection
-- **Modular**: Each phase is independent with clear APIs
-- **Transparent**: Preserves all intermediate artifacts for inspection
-- **Content-Aware**: Automatically detects and removes black borders
-- **Parallel**: Encodes multiple chunks concurrently
-
-## Architecture Diagrams
-
-### System Context
-
-```log
-┌─────────────┐
-│    User     │
-└──────┬──────┘
-       │
-       │ CLI Commands / API Calls
-       │
-       ▼
-┌─────────────────────────────────────────┐
-│  Quality-Based Encoding Pipeline        │
-│                                         │
-│  ┌────────────┐  ┌──────────────────┐   │
-│  │    CLI     │  │   Public API     │   │
-│  └─────┬──────┘  └────────┬─────────┘   │
-│        │                  │             │
-│        └──────────┬───────┘             │
-│                   │                     │
-│                   ▼                     │
-│         ┌──────────────────┐            │
-│         │  Orchestrator    │            │
-│         └────────┬─────────┘            │
-│                  │                      │
-│         ┌────────┴────────┐             │
-│         │                 │             │
-│    ┌────▼────┐      ┌────▼────┐         │
-│    │ Phases  │      │Progress │         │
-│    │         │      │Tracker  │         │
-│    └─────────┘      └─────────┘         │
-└─────────────────────────────────────────┘
-       │                    │
-       │                    │
-       ▼                    ▼
-┌──────────────┐    ┌──────────────┐
-│   FFmpeg     │    │  MKVToolnix  │
-│   FFprobe    │    │              │
-└──────────────┘    └──────────────┘
+```mermaid
+flowchart LR
+    User -->|CLI| cli["pyqenc CLI\n(cli.py)"]
+    User -->|code| api["Public API\n(api.py)"]
+    cli --> orch["PipelineOrchestrator"]
+    api --> orch
+    orch --> phases["Phase objects"]
+    phases --> ffmpeg["FFmpeg / FFprobe"]
+    phases --> mkv["MKVToolNix"]
 ```
 
-### Component Architecture
+### External dependencies
 
-```log
-┌─────────────────────────────────────────────────────────┐
-│                    Pipeline Orchestrator                │
-│  - Coordinates phase execution                          │
-│  - Manages state transitions                            │
-│  - Handles artifact-based resumption                    │
-└────────────────────┬────────────────────────────────────┘
-                     │
-        ┌────────────┼────────────┐
-        │            │            │
-        ▼            ▼            ▼
-┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-│  Extraction  │ │   Chunking   │ │Optimization  │
-│    Phase     │ │    Phase     │ │    Phase     │
-└──────────────┘ └──────────────┘ └──────────────┘
-        │            │            │
-        ▼            ▼            ▼
-┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-│   Encoding   │ │    Audio     │ │    Merge     │
-│    Phase     │ │    Phase     │ │    Phase     │
-└──────────────┘ └──────────────┘ └──────────────┘
-        │            │            │
-        └────────────┼────────────┘
-                     │
-                     ▼
-        ┌────────────────────────┐
-        │   Progress Tracker     │
-        │  - State persistence   │
-        │  - Chunk tracking      │
-        │  - CRF history         │
-        └────────────────────────┘
+| Tool         | Used for                                                      |
+| ------------ | ------------------------------------------------------------- |
+| `ffmpeg`     | Encoding, chunking, metrics, audio processing, crop detection |
+| `ffprobe`    | Video metadata probing                                        |
+| `mkvextract` | Stream extraction from source MKV                             |
+| `mkvmerge`   | Final MKV assembly                                            |
+
+---
+
+## Phase Pipeline
+
+### Phase dependency graph
+
+```mermaid
+flowchart TD
+    subgraph Job["Job (job.yaml — source binding, crop params)"]
+        EX["Extraction\nextracted/ streams"]
+        CH["Chunking\nchunks/ scene splits"]
+        OP["Optimization\noptimization.yaml\n(optional)"]
+        EN["Encoding\nencoded/ winning chunks"]
+        AU["Audio\naudio/ processed streams"]
+        ME["Merge\nfinal/ output MKVs"]
+
+        EX --> CH
+        CH --> OP
+        CH --> EN
+        OP --> EN
+        EX --> AU
+        EN --> ME
+        AU --> ME
+    end
 ```
 
-### Data Flow
+### Phase descriptions
 
-```log
-Source Video
-    │
-    ▼
-[Extraction] ──────► Extracted Streams + Crop Parameters
-    │
-    ▼
-[Chunking] ─────────► Scene-Based Chunks (Cropped)
-    │
-    ▼
-[Optimization] ─────► Optimal Strategy (Optional)
-    │
-    ▼
-[Encoding] ─────────► Encoded Chunks + Quality Metrics
-    │                  (Multiple Strategies)
-    ▼
-[Audio] ────────────► Processed Audio (Day/Night)
-    │
-    ▼
-[Merge] ────────────► Final MKV Files
-```
+| Phase            | Inputs                  | Outputs                                      | Key sidecar                                                           |
+| ---------------- | ----------------------- | -------------------------------------------- | --------------------------------------------------------------------- |
+| **Job**          | `PipelineConfig`        | `job.yaml`                                   | `job.yaml`                                                            |
+| **Extraction**   | Source video            | `extracted/` streams                         | `extraction.yaml`                                                     |
+| **Chunking**     | Extracted video stream  | `chunks/` FFV1 or remux chunks               | `chunking.yaml`                                                       |
+| **Optimization** | Chunks + strategies     | `optimization.yaml` with optimal strategy    | `optimization.yaml`                                                   |
+| **Encoding**     | Chunks + strategies     | `encoding/` attempts,<br> `encoded/` winners | • `encoding.yaml`, <br> • per-attempt `.yaml`, <br> • per-win `.yaml` |
+| **Audio**        | Extracted audio streams | `audio/` normalized/converted files          | `audio.yaml`                                                          |
+| **Merge**        | Encoded chunks + audio  | `final/` MKV file(s)                         | `merge.yaml`                                                          |
 
-## Component Details
+> NOTE: Originally the intention was to merge both audio and video during Merge phase, but audio selection is an opinionated process, so I've decided to only merge the videos, leaving the final step for the end user and MKVmerge GUI.
 
-### CLI Interface (`pyqenc.cli`)
+### Phase object model
 
-**Responsibility**: Provide command-line interface with subcommands
+Every phase implements a common protocol:
 
-**Key Features**:
-
-- Main `auto` command for full pipeline
-- Phase-specific subcommands for manual execution
-- Dry-run mode by default (requires `-y` to execute)
-- Process priority management (below normal)
-
-**Arguments**:
-
-- `--work-dir`: Working directory for intermediate files
-- `--quality-target`: Quality targets (e.g., "vmaf-min:95")
-- `--strategies`: Encoding strategies (e.g., "slow+h265-aq")
-- `--max-parallel`: Concurrent encoding processes
-- `-y/--execute`: Execute phases (default: dry-run)
-- `--keep-all`: Skip cleanup prompt
-
-### Pipeline Orchestrator (`pyqenc.orchestrator`)
-
-**Responsibility**: Coordinate phase execution and manage state
-
-**Key Features**:
-
-- Executes all phases in order
-- Each phase checks for existing artifacts
-- Dry-run mode support
-- Cleanup prompting after completion
-- Disk space checking before execution
-
-**Phases**:
-
-1. Extraction
-2. Chunking
-3. Optimization (optional)
-4. Encoding
-5. Audio
-6. Merge
-
-### Progress Tracker (`pyqenc.progress`)
-
-**Responsibility**: Persistent state management
-
-**Key Features**:
-
-- JSON-based state file
-- Atomic writes using temporary files
-- Batched updates to reduce I/O
-- Phase status tracking
-- Chunk attempt history
-- CRF averaging for strategy
-
-**State Structure**:
-
-```json
-{
-  "version": "1.0",
-  "source_video": "movie.mkv",
-  "current_phase": "encoding",
-  "phases": {
-    "extraction": {"status": "completed", "timestamp": "..."},
-    "chunking": {"status": "completed", "chunks_count": 150}
-  },
-  "chunks": {
-    "chunk_001": {
-      "strategies": {
-        "slow+aq": {
-          "status": "completed",
-          "attempts": [...],
-          "final_crf": 18.0
-        }
-      }
+```mermaid
+classDiagram
+    direction LR
+    class Phase {
+        +scan(dry_run) PhaseResult
+        +run(dry_run) PhaseResult
     }
-  }
-}
+    class PhaseOutcome {
+        COMPLETED
+        REUSED
+        DRY_RUN
+        FAILED
+    }
+    Phase --> PhaseOutcome
 ```
 
-### Configuration Manager (`pyqenc.config`)
+- `scan()` — read-only artifact enumeration; classifies each artifact without doing any work
+- `run()` — executes work for artifacts not already `COMPLETE`; calls `scan()` internally
 
-**Responsibility**: Load and validate encoding profiles
+The orchestrator is a thin driver: it builds the phase registry in execution order and calls `phase.run(dry_run)` on each, stopping on the first `FAILED` or `DRY_RUN` outcome. Results are passed forward directly — no filesystem re-scanning between phases.
 
-**Key Features**:
+### Chunking modes
 
-- YAML-based configuration
-- Codec definitions (h264-8bit, h265-10bit)
-- Encoding profiles with extra arguments
-- Strategy parsing (preset+profile format)
-- Profile validation
+| Mode | How | Trade-off |
+|------|-----|-----------|
+| **Lossless FFV1** (default) | Re-encode each chunk to lossless FFV1 | Frame-perfect splits; ~5× source size on disk |
+| **Remux / stream-copy** | Copy stream segments aligned to source I-frames | Faster, ~1× source size; imprecise boundaries, potential audio desync |
 
-### Quality Evaluator (`pyqenc.quality`)
+---
 
-**Responsibility**: Evaluate encoded chunks against quality targets
+## Artifact-Based Recovery
 
-**Key Features**:
+There is no central progress tracker or state file. Recovery is fully filesystem-driven.
 
-- Integration with pymkvcompare for metrics
-- Integration with metrics_visualization for plots
-- Multi-metric support (VMAF, SSIM, PSNR)
-- Target evaluation (min, median, max statistics)
-- Metric normalization for CRF adjustment
+### How it works
 
-### CRF Adjustment Algorithm
+Each phase follows the same pattern:
 
-**Responsibility**: Intelligently adjust CRF to meet quality targets
-
-**Key Features**:
-
-- Bidirectional adjustment (increase/decrease CRF)
-- Metric-aware step sizing
-- History-based cycle prevention
-- Binary search between known bounds
-- 0.25 CRF granularity
-
-**Algorithm**:
-
-1. Encode chunk with initial CRF (from average or default)
-2. Calculate quality metrics
-3. Compare against all targets
-4. If all targets met: success
-5. If targets not met: adjust CRF based on deficit
-6. Use history bounds to prevent cycles
-7. Repeat until targets met or max attempts reached
-
-## Key Flows
-
-### Complete Pipeline Flow
-
-```log
-1. User runs: pyqenc auto source.mkv --quality-target vmaf-min:95 --strategies slow+h265-aq -y
-
-2. CLI parses arguments and creates PipelineConfig
-
-3. Orchestrator.run():
-   a. Check disk space
-   b. Load existing state (if any)
-   c. Execute phases in order:
-      - Extraction: Extract streams, detect crop
-      - Chunking: Split into scenes, apply crop
-      - Encoding: Encode chunks with CRF adjustment
-      - Audio: Process audio streams
-      - Merge: Concatenate and mux
-   d. Prompt for cleanup
-
-4. Each phase:
-   a. Check for existing artifacts
-   b. Reuse if valid, perform work if needed
-   c. Update progress tracker
-   d. Return result
-
-5. Cleanup (if user confirms):
-   a. Remove chunks
-   b. Remove encoded attempts
-   c. Keep or remove metrics
-   d. Keep final output and progress tracker
+```mermaid
+flowchart LR
+    A["Phase starts"] --> B["Load stored parameters\n(phase YAML sidecar)"]
+    B --> C{"Parameters\nchanged?"}
+    C -->|yes| D["Invalidate affected artifacts"]
+    C -->|no| E["Scan artifacts"]
+    D --> E
+    E --> F["Classify each artifact"]
+    F --> G["Execute only ABSENT / STALE work"]
+    G --> H["Write artifact + sidecar atomically"]
 ```
 
-### Chunk Encoding with CRF Adjustment
+### Artifact states
 
-```log
-1. ChunkEncoder.encode_chunk():
-   a. Get initial CRF from successful chunks average or default
-   b. Check if chunk already encoded and meets current targets
-   c. If yes: reuse existing encoding
-   d. If no: start encoding loop
+| State           | Meaning                                                 |
+| --------------- | ------------------------------------------------------- |
+| `ABSENT`        | File missing — must produce                             |
+| `ARTIFACT_ONLY` | File present, sidecar missing — repair sidecar only     |
+| `STALE`         | File + sidecar present, parameters changed — re-produce |
+| `COMPLETE`      | File + sidecar present, parameters match — skip         |
 
-2. Encoding Loop:
-   a. Encode chunk with current CRF
-   b. Calculate quality metrics (SSIM, PSNR, VMAF)
-   c. Evaluate against all quality targets
-   d. If all targets met: success, save chunk
-   e. If targets not met:
-      - Calculate normalized deficit
-      - Adjust CRF using history bounds
-      - Check if CRF already attempted
-      - If new CRF: repeat from step a
-      - If no new CRF: fail (max attempts)
+### YAML sidecars
 
-3. Update progress tracker with attempt info
+| File                 | Contents                                                                |
+| -------------------- | ----------------------------------------------------------------------- |
+| `job.yaml`           | Source path, size, duration, fps, resolution, frame count, crop params  |
+| `chunking.yaml`      | Scene boundaries (frame index + timestamp per chunk)                    |
+| `optimization.yaml`  | Test chunk IDs, per-strategy results, selected optimal strategy         |
+| `encoding.yaml`      | Crop params active during encoding                                      |
+| `audio.yaml`         | Audio codec and base bitrate                                            |
+| `<chunk>.yaml`       | Chunk duration, frame count, fps, resolution                            |
+| `<attempt>.yaml`     | Quality value, targets met, all measured metrics                        |
+| `<chunk>.<res>.yaml` | Winning attempt path, quality value, targeted metrics                   |
+| `metrics.yaml`       | Pipeline execution metrics (time/space distribution, convergence stats) |
 
-4. Return encoded chunk path and metrics
+### What this enables
+
+- **Interruption recovery** — re-run the same command; completed artifacts are reused
+- **Parameter changes** — change quality targets or add a strategy; only affected work is redone
+- **Manual inspection** — all intermediate files are preserved and human-readable
+- **No corruption risk** — all writes use `.tmp`-then-rename; a partial write leaves no stale artifact
+
+---
+
+## Quality Search Algorithm
+
+The quality search is fully generic — it works with any codec's quality parameter (CRF for x264/x265, CQ for NVENC, QP for Vulkan, bitrate for VBR).
+
+### Codec quality configuration
+
+```yaml
+# In config.yaml — example for h265-10bit
+h265-10bit:
+  default_quality: 25
+  quality_range: [0, 51]      # [better_end, worse_end]
+  quality_granularity: 0.5    # minimum step
+  quality_label: "CRF"        # display label (default)
 ```
 
-### Artifact-Based Resumption
+The search algorithm always moves toward `quality_range[0]` to improve quality and toward `quality_range[1]` to reduce it (find efficiency). This works for both CRF-style (lower=better) and bitrate-style (higher=better) codecs.
 
-```log
-1. Pipeline starts (after interruption or config change)
+### Search implementations
 
-2. Orchestrator loads existing state from progress.json
+Both implement `QualitySearchProtocol`:
 
-3. For each phase:
-   a. Phase scans for existing artifacts
-   b. Validates artifacts against current configuration
-   c. If valid: reuse (mark as reused)
-   d. If invalid or missing: perform work
+| Implementation    | Algorithm          | Notes                                                                        |
+| ----------------- | ------------------ | ---------------------------------------------------------------------------- |
+| `QualitySearch`   | Binary bracket     | Legacy; preserved for compatibility                                          |
+| `QualitySearchV2` | 3-point sweet-spot | Default; faster convergence. Supports non-monotonic curve sweet-spot search. |
 
-4. Example: Encoding phase
-   a. Scan encoded/ directory for all strategies
-   b. For each chunk+strategy:
-      - Check if encoded file exists
-      - Check if metrics exist
-      - Parse metrics and evaluate against current targets
-      - If targets met: reuse
-      - If targets not met or missing: encode
+The protocol:
 
-5. This approach handles:
-   - Interruptions: Resume where left off
-   - New strategies: Only encode new strategy
-   - Changed targets: Re-encode chunks not meeting new targets
-   - Manual cleanup: Re-encode deleted chunks
+```python
+def record(quality: Decimal, quality_results: dict[str, float]) -> Decimal | None:
+    # Returns next quality value to try, or None when done
 ```
+
+`None` means the search is exhausted (either early acceptance or search space collapsed).
+
+### Per-chunk encoding loop
+
+```mermaid
+flowchart TD
+    A("Get initial quality parameter Q\n(codec config default)") --> B["Encode chunk at quality Q"]
+    B --> C["Measure metrics\n(VMAF, VIF, SSIM, PSNR)"]
+    C --> D["Score attempt\n(pass/fail per target;\ncheck surplus vs acceptance_delta)"]
+    D --> E{"Score?"}
+    E -->|"= 0\nWINNER\nall targets met within a negligible positive acceptance_delta"| F["Early accept"]
+    E -->|"&gt; 0\npass\nall targets met but at some surplus"| G["search.record(Q, metrics)\n→ next Q toward worse quality\n(narrow search space)"]
+    E -->|"&lt; 0\nFAIL\nat least one target missed"| H["search.record(Q, metrics)\n→ next Q toward better quality\n(narrow search space)"]
+    G --> I{"Next Q\nis None?"}
+    H --> I
+    I -->|no| B
+    I -->|"yes  exhausted"| J{"Any passing\nattempt recorded?"}
+    J -->|yes| K["Save best-efficiency passing attempt\nas winning attempt"]
+    J -->|no| L["Save best available\n(targets not fully met)"]
+    K --> Z
+    L --> Z
+    F --> Z
+    Z("Winner selected")
+
+    classDef terminal fill:#ccf,stroke:#333,stroke-width:2px
+    class A,Z terminal
+```
+
+Attempt files are named `<chunk>.<resolution>.q<value>.mkv` — codec-agnostic naming.
+
+---
+
+## Metrics
+
+### Quality metrics
+
+All quality metrics are computed in a **single ffmpeg pass** via a dynamic filter graph:
+
+```mermaid
+flowchart LR
+    D["distorted"] --> dsplit["split[d0][d1][d2]"]
+    R["reference"] --> rsplit["split[r0][r1][r2]"]
+    dsplit --> d0(["d0 stream"])
+    dsplit --> d1(["d1 stream"])
+    dsplit --> d2(["d2 stream"])
+    rsplit --> r0(["r0 stream"])
+    rsplit --> r1(["r1 stream"])
+    rsplit --> r2(["r2 stream"])
+    d0 --> vmaf["[d0][r0] libvmaf\n(+ VIF embedded)"]
+    d1 --> ssim["[d1][r1] ssim"]
+    d2 --> psnr["[d2][r2] psnr"]
+    r0 --> vmaf
+    r1 --> ssim
+    r2 --> psnr
+    vmaf --> out["metrics output"]
+    ssim --> out
+    psnr --> out
+
+    classDef ref fill:#ccf
+    class R,rsplit,r0,r1,r2 ref
+```
+
+- VIF is always embedded in the VMAF pass via `feature=name=vif` — no separate branch
+- PSNR and SSIM use `select='not(mod(n,factor))'` for subsampling; VMAF uses `n_subsample`
+- All metrics normalized to 0–100 scale for consistent targeting
+
+**Metrics pipeline:**
+
+```
+run_metrics(...)         → FFmpegRunResult (raw log files)
+parse_metrics(artifacts) → pd.DataFrame   (raw per-frame values)
+normalize_metrics(df)    → pd.DataFrame   (0–100 scale)
+compute_metric_stats(df) → ChunkQualityStats (min, p05, p25, med, p75, p95, max, std)
+create_unified_plot(df)  → PNG visualization
+```
+
+### Pipeline execution metrics
+
+`MetricsCollector` is injected into every phase. It tracks:
+
+- Wall-clock time per operation type (`TimeKey` enum)
+- Disk space distribution across work-dir subdirectories
+- Quality search convergence statistics
+
+Metrics are written to `metrics.yaml` and flushed periodically — they survive interruptions via signal handlers and `atexit`. Use `--no-metrics` to suppress.
+
+---
+
+## Audio Processing
+
+Audio processing applies a strategy DAG to each extracted audio stream. Each strategy produces one output file named `{strategy_short} ← {source_stem}.{ext}`.
+
+### Strategy types
+
+| Strategy | What it does |
+|----------|-------------|
+| `DownmixStrategy` | Reduce channel count (7.1→5.1, 5.1→2.0 std/night/nboost variants) |
+| `NormStrategy` | 2-pass EBU R128 static loudness normalization |
+| `DynaudnormStrategy` | Dynamic normalization applied on top of static norm |
+| `ConversionStrategy` | Convert to delivery format (AAC, bitrate scaled by channel count) |
+
+Each strategy implements `check(source_path) -> bool` to determine applicability. The DAG terminates naturally — no explicit terminal flag needed.
+
+### Audio strategy graph
+
+Graph below shows full path of currently implemented audio strategies for 3 cases - stereo, 5.1 and 7.1 audios:
+
+![Audio processing graph](./audio-processing-graph.mermaid)
+
+### Parallelism
+
+Audio processing is parallelized independently from the main pipeline — audio tasks are I/O-bound and benefit from concurrency. Pipeline encoding parallelism defaults to 1 because ffmpeg/codecs already saturate available CPUs; extra pipeline-level parallelism adds memory pressure and disrupts progress display without meaningful throughput gain.
+
+---
+
+## FFmpeg Runner
+
+All ffmpeg subprocess calls go through `pyqenc/utils/ffmpeg_runner.py`. Direct subprocess calls are not allowed.
+
+```mermaid
+flowchart LR
+    caller["Phase / Quality\nEvaluator"] -->|"run_ffmpeg(cmd)\nrun_ffmpeg_async(cmd)"| runner["FFmpeg Runner"]
+    runner -->|injects flags| ffmpeg["ffmpeg process"]
+    ffmpeg -->|stdout progress blocks| runner
+    ffmpeg -->|stderr metadata| runner
+    runner -->|FFmpegRunResult| caller
+    progress["Progress reporting"] ---|"ProgressCallback"| runner
+```
+
+The runner:
+
+- Injects `-hide_banner -nostats -progress pipe:1` automatically
+- Reads stdout (structured progress blocks) and stderr (metadata/errors) concurrently
+- Enforces `.tmp`-then-rename on all output files
+- Optionally populates `VideoMetadata` in-place from ffmpeg stderr
+- Optionally invokes `ProgressCallback(frame, out_time_s)` for live progress updates
+- `run_ffmpeg()` is sync; `run_ffmpeg_async()` is async — both return `FFmpegRunResult`
+
+---
+
+## Key Data Models
+
+All models are Pydantic.
+
+| Model | Purpose |
+|-------|---------|
+| `PipelineConfig` | Full pipeline configuration — source, work_dir, strategies, quality targets, audio settings, cleanup level |
+| `VideoMetadata` | Lazy-loading video properties (path, duration, fps, resolution, frame_count); probe on first access, cached |
+| `ChunkMetadata` | Extends `VideoMetadata` with chunk_id, start/end timestamps |
+| `AudioMetadata` | Audio stream properties (path, codec, channels, language, duration, delay) |
+| `AttemptMetadata` | Encoded attempt artifact (path, chunk_id, strategy, quality value, resolution, file size) |
+| `CropParams` | Crop geometry (top, bottom, left, right pixel offsets) |
+| `Strategy` | Encoding strategy (name, safe_name, codec config, resolved ffmpeg args) |
+| `QualityTarget` | Quality constraint (metric, statistic, threshold value) |
+| `CodecConfig` | Encoder configuration (quality range, granularity, max_step, label, profiles) |
+| `PhaseOutcome` | `COMPLETED` / `REUSED` / `DRY_RUN` / `FAILED` |
+
+---
+
+## Public API
+
+`pyqenc/api.py` exposes standalone functions for each phase, usable without the CLI:
+
+```python
+run_pipeline(config, dry_run)          # full pipeline
+extract_streams(source, work_dir, ...) # extraction only
+chunk_video(source, work_dir, ...)     # chunking only
+encode_chunks(source, work_dir, ...)   # encoding only
+process_audio(source, work_dir, ...)   # audio only
+merge_final(source, work_dir, ...)     # merge only
+measure_quality(source, work_dir, ...) # standalone quality measurement
+```
+
+All functions accept `work_dir: Path` as a required parameter (no default). The CLI is the only place where `work_dir` defaults to `.`.
+
+---
 
 ## Design Decisions
 
-### 1. Artifact-Based Resumption vs Explicit Resume
+### Artifact-based recovery over a central state file
 
-**Decision**: Use artifact-based detection instead of explicit resume logic
+A central JSON/YAML tracker is fragile — it can go out of sync with the filesystem, and a corrupted tracker breaks resumption entirely. Artifact-based recovery uses the filesystem itself as the source of truth: the presence of a final artifact file (without `.tmp`) is proof of consistency. This also handles configuration changes automatically — phases re-validate their parameters on every run.
 
-**Rationale**:
+### Generic quality parameter abstraction
 
-- Simpler implementation (no complex state machine)
-- More flexible (handles configuration changes automatically)
-- More robust (works even if state file corrupted)
-- Transparent (user can inspect and manipulate artifacts)
+The quality search algorithm knows nothing about CRF, CQ, or QP specifically. It operates on a `[quality_better, quality_worse]` range with a configurable granularity and optional max step. This makes the same search logic work for x264/x265 (CRF), NVENC (CQ/QP), and VBR bitrate codecs without any code changes.
 
-**Trade-offs**:
+### Single-pass all-in-one metrics
 
-- Slightly more I/O (scanning directories)
-- Need to validate artifacts each time
+Running VMAF, SSIM, PSNR, and VIF in separate ffmpeg passes is ~4× slower and requires 4× the I/O. A single pass with a `split[]` filter graph computes all metrics simultaneously. VIF is embedded in the VMAF pass via `feature=name=vif` — no extra branch needed.
 
-### 2. JSON for Progress Tracking
+### Automatic crop detection
 
-**Decision**: Use JSON for state file
+Crop is detected once during the Job phase using ffmpeg's `cropdetect` filter across multiple sampled frames. The same crop parameters are stored in `job.yaml` and applied consistently across all subsequent phases. Crop is applied during encoding only — chunks remain uncropped for remux compatibility.
 
-**Rationale**:
+### Pipeline parallelism default of 1
 
-- Human-readable for debugging
-- Standard library support (no dependencies)
-- Easy to parse and validate
-- Sufficient for state complexity
+ffmpeg and modern codecs (x264, x265, SVT-AV1) already scale across all available CPU cores internally. Adding pipeline-level parallelism (encoding multiple chunks simultaneously) creates memory pressure, disrupts the progress display ordering, and provides no meaningful throughput improvement for CPU-bound codecs. Audio processing is different — audio tasks are lightweight and I/O-bound, so audio parallelism is configured separately and defaults higher.
 
-**Alternatives Considered**:
+### Atomic writes everywhere
 
-- SQLite: Overkill for single-process access
-- Pickle: Not human-readable, version issues
-- YAML: Slower parsing, unnecessary features
+All artifact and sidecar writes use `.tmp`-then-rename. A partial write (from a crash or kill signal) leaves a `.tmp` file that is ignored by artifact scanning — the artifact is treated as `ABSENT` and re-produced on the next run. No corruption, no manual cleanup needed.
 
-### 3. CRF-Based Encoding
+### QualitySearchV3 and mid-probe
 
-**Decision**: Use CRF with iterative adjustment
-
-**Rationale**:
-
-- Quality-first approach
-- Predictable results across chunks
-- Bidirectional optimization
-- Industry standard
-
-**Alternatives Considered**:
-
-- Target bitrate: Less predictable quality
-- Two-pass: Slower, unnecessary for quality targets
-
-### 4. Automatic Black Border Detection
-
-**Decision**: Detect and remove black borders automatically
-
-**Rationale**:
-
-- Encoding efficiency (don't waste bits on black)
-- File size reduction
-- Quality metrics accuracy
-- Storage savings (cropped chunks)
-
-**Implementation**:
-
-- Detect once during extraction
-- Sample multiple frames for accuracy
-- Apply crop during chunking
-- Store chunks in cropped form
-
-### 5. Batched Progress Updates
-
-**Decision**: Batch progress tracker updates
-
-**Rationale**:
-
-- Reduce disk I/O during parallel encoding
-- Improve performance (10x fewer writes)
-- Still safe (force write on phase transitions)
-
-**Configuration**:
-
-- Default batch size: 10 updates
-- Phase updates: Always immediate
-- Chunk updates: Batched
-
-### 6. Cleanup Prompt After Completion
-
-**Decision**: Prompt user for cleanup instead of automatic
-
-**Rationale**:
-
-- User control over disk space
-- Transparency (user sees what's kept/removed)
-- Safety (no accidental deletion)
-- Flexibility (keep metrics for analysis)
-
-**Options**:
-
-- Keep metrics: Remove chunks and encoded files, keep metrics
-- Remove all: Remove all intermediate files
-- No cleanup: Keep everything
-- `--keep-all` flag: Skip prompt entirely
-
-## Performance Considerations
-
-### Parallel Encoding
-
-- Default: 2 concurrent chunks
-- Recommended: Physical CPU cores / 2
-- Prioritize completing started chunks
-- Share successful CRF values across chunks
-
-### Disk I/O Optimization
-
-- Batched progress tracker updates (10x reduction)
-- Atomic writes using temporary files
-- SSD recommended for working directory
-
-### Memory Usage
-
-- Chunks processed independently (low memory)
-- Metrics stored on disk (not in memory)
-- State file kept small (< 1 MB typically)
-
-### CPU Usage
-
-- Main process runs at below-normal priority
-- All subprocesses inherit lowered priority
-- Prevents system interference
-
-### Disk Space
-
-- Estimation: $Size_{source} * (2.2 + 2.3 * Num_{strategies})$
-- Check before starting (with 10% margin)
-- Warn if space is tight
-
-## Future Extensibility
-
-### Adding New Codecs
-
-- Add to `default_config.yaml`
-- Define codec parameters
-- Create profiles
-- No code changes needed
-
-### Adding New Metrics
-
-- Update `quality.py`
-- Add metric calculation
-- Update normalization logic
-- Add tests
-
-### Adding New Phases
-
-- Create phase module
-- Add to orchestrator
-- Add CLI subcommand
-- Add API function
-- Write tests
-
-### Distributed Processing
-
-- Chunk-based processing is naturally parallelizable
-- Progress tracker can be extended to distributed store
-- API-based design allows remote workers
-
-### Web Interface
-
-- CLI and API separation enables web UI
-- REST API wrapper around public API
-- WebSocket for real-time progress
-- Visual quality comparison viewer
-
-## References
-
-- Design Document: `.kiro/specs/quality-based-encoding-pipeline/design.md`
-- Requirements: `.kiro/specs/quality-based-encoding-pipeline/requirements.md`
-- Tasks: `.kiro/specs/quality-based-encoding-pipeline/tasks.md`
+A newer version of search algorithm, unifies many decisions, utilizes extrapolation instead of binary outwards search - this allows a bit faster convergence, but at the price of possible miss of curve sweet spot, so for all-fail attempts when direction search is exhausted - we do an extra check of the curve via stepping a half-range back.

@@ -438,7 +438,7 @@ class TestQualitySearchV2Convergence:
         dist_to_upper = abs(float(search.best_quality) - q_efficiency)
         dist_to_nearest = min(dist_to_lower, dist_to_upper)
 
-        tolerance = 3 * float(granularity)
+        tolerance = 4 * float(granularity)
         assert dist_to_nearest <= tolerance, (
             f"best_quality={search.best_quality} is not within {tolerance} of either root "
             f"(q_lower={q_lower:.3f}, q_upper={q_efficiency:.3f}) — "

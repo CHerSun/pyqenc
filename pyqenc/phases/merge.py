@@ -29,6 +29,7 @@ from pyqenc.constants import (
     ENCODED_ATTEMPT_NAME_PATTERN,
     FAILURE_SYMBOL_MINOR,
     FINAL_OUTPUT_DIR,
+    METRIC_KEY_QUALITY_MEASURE,
     RANGE_SEPARATOR,
     SUCCESS_SYMBOL_MAJOR,
     SUCCESS_SYMBOL_MINOR,
@@ -1050,7 +1051,7 @@ class MergePhase:
 
                 if source_video and self._config.quality_targets:
                     try:
-                        with self._collector.time(MetricKey.MERGE, "quality_measure"):
+                        with self._collector.time(MetricKey.MERGE, METRIC_KEY_QUALITY_MEASURE):
                             metrics_dict, targets_met, plot_path = _measure_quality(
                                 final_result     = output_file,
                                 source_video     = source_video,

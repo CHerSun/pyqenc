@@ -13,6 +13,9 @@ TIMEOUT_SECONDS_MAX = 3600
 THRESHOLD_ATTEMPTS_WARNING = 10
 """Threshold for warning about excessive encoding attempts."""
 
+DEFAULT_MAX_PARALLEL = 1
+"""Default maximum number of concurrent encoding processes."""
+
 TEMP_SUFFIX = ".tmp"
 """A suffix to append to temporary files during processing. This helps avoid confusion with final output files and allows for easy cleanup of incomplete files."""
 
@@ -89,6 +92,12 @@ DOTTED_KEY_SEPARATOR: str = "."
 (e.g. ``"encoding.h265"``).  This is the standard ASCII dot (U+002E) used exclusively
 for metric key structure — distinct from file extension dots, ``TIME_SEPARATOR_MS``
 (U+2024, used in filenames), and other uses of ``"."`` in the codebase."""
+
+METRIC_KEY_QUALITY_MEASURE: str = "quality_measure"
+"""Dotted-key suffix used to time quality metric measurement (VMAF/PSNR evaluation)
+within a phase.  Combined with a ``MetricKey`` prefix it forms keys such as
+``"encoding.quality_measure"`` and ``"merge.quality_measure"``.  Using a shared
+constant ensures the suffix is identical across all phases that measure quality."""
 BRACKET_LEFT = "｟"
 """Left bracket symbol for visually distinct log formatting."""
 BRACKET_RIGHT = " ｠"
@@ -185,11 +194,11 @@ AUDIO_CH_20     = "ch=2.0"
 AUDIO_CH_STEREO = "ch=stereo"
 """Channel layout tag embedded in filenames by the extraction phase for stereo (non-numeric)."""
 
-_NORMALISED_PREFIXES: tuple[str, ...] = (
+NORMALISED_PREFIXES: tuple[str, ...] = (
     f"norm {AUDIO_STEM_SEPARATOR}",
-    f"2.0 std {AUDIO_STEM_SEPARATOR}",
-    f"2.0 night {AUDIO_STEM_SEPARATOR}",
-    f"2.0 nboost {AUDIO_STEM_SEPARATOR}",
+    f"2{TIME_SEPARATOR_MS}0 std {AUDIO_STEM_SEPARATOR}",
+    f"2{TIME_SEPARATOR_MS}0 night {AUDIO_STEM_SEPARATOR}",
+    f"2{TIME_SEPARATOR_MS}0 nboost {AUDIO_STEM_SEPARATOR}",
 )
 """Filename prefixes that indicate a file has already been statically normalised.
 Used by ``NormStrategy.check()`` (to skip already-normalised files) and
