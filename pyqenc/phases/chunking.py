@@ -323,7 +323,6 @@ def _write_chunk_sidecar(chunk_file: Path, chunk_meta: ChunkMetadata) -> None:
 # ---------------------------------------------------------------------------
 
 import shutil
-from dataclasses import dataclass as _dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -370,6 +369,7 @@ class ChunkArtifact(Artifact):
         sidecar = self.path.with_suffix(".yaml")
         try:
             import yaml as _yaml
+
             from pyqenc.state import ChunkSidecar as _ChunkSidecar
             with sidecar.open("r", encoding="utf-8") as fh:
                 data = _yaml.safe_load(fh)
@@ -381,7 +381,7 @@ class ChunkArtifact(Artifact):
         return self._metadata
 
 
-@_dataclass
+@dataclass
 class ChunkingPhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying chunking-specific payload.
 

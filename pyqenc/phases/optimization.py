@@ -436,7 +436,7 @@ class OptimizationPhase:
         ).save(opt_yaml)
 
         # Step 10: run test encodes for all pending strategies in parallel (unified pool)
-        encoder       = _make_encoder(work_dir, crop, self._config.visual_hash, self._config.metrics_sampling)
+        encoder       = _make_encoder(work_dir, self._collector, crop, self._config.visual_hash, self._config.metrics_sampling)
         reference_dir = work_dir / CHUNKS_DIR
 
         from pyqenc.phases.encoding import (
@@ -471,7 +471,6 @@ class OptimizationPhase:
                     collector         = self._collector,
                     phase_recovery    = phase_recovery,
                     advance           = advance,
-                    dotted_metric_key = MetricKey.OPTIMIZATION,
                 )
             )
             advance(0, AdvanceState.COMPLETE)
@@ -855,6 +854,7 @@ def _select_test_chunks(
 
 def _make_encoder(
     work_dir:         Path,
+    collector:        MetricsCollector,
     crop_params:      CropParams | None,
     visual_hash:      bool = True,
     metrics_sampling: int  = DEFAULT_METRICS_SAMPLING,
@@ -877,6 +877,7 @@ def _make_encoder(
         crop_params       = crop_params,
         visual_hash       = visual_hash,
         metrics_sampling  = metrics_sampling,
+        collector           = collector,
     )
 
 

@@ -36,6 +36,7 @@ from pyqenc.constants import (
     THRESHOLD_ATTEMPTS_WARNING,
     WARNING_SYMBOL,
 )
+from pyqenc.metrics import ConvergenceUpdate, MetricKey, MetricsCollector
 from pyqenc.models import (
     AttemptMetadata,
     ChunkMetadata,
@@ -69,8 +70,6 @@ from pyqenc.utils.log_format import (
 )
 from pyqenc.utils.visualization import QualityEvaluator
 from pyqenc.utils.yaml_utils import write_yaml_atomic
-
-from pyqenc.metrics import ConvergenceUpdate, MetricKey, MetricsCollector
 
 if TYPE_CHECKING:
     from pyqenc.models import PipelineConfig
@@ -724,7 +723,6 @@ class ChunkEncoder:
         quality_targets:  list[QualityTarget],
         initial_crf:      Decimal,
         force:            bool  = False,
-        max_attempts:     int   = 10,
     ) -> ChunkEncodingResult:
         """Encode single chunk, adjusting CRF until quality targets met.
 
@@ -1178,7 +1176,6 @@ async def _encode_chunk_async(
         quality_targets,
         initial_crf,
         force,
-        10,  # max_attempts (unused, kept for API compat)
     )
 
 
@@ -1192,7 +1189,7 @@ async def _encode_chunks_parallel(
     force:            bool,
     collector:        MetricsCollector,
     phase_recovery:   "_PhaseRecovery | None"                                  = None,
-    advance:          Callable[[int | float, AdvanceState | None], None] | None = None,
+    advance:          Callable[[int | float, AdvanceState], None] | None = None,
 ) -> EncodingResult:
     """Encode chunks in parallel with semaphore control.
 
