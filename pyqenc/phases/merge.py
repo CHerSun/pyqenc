@@ -55,14 +55,13 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 if TYPE_CHECKING:
     from pyqenc.metrics import MetricsCollector
     from pyqenc.models import PipelineConfig
-    from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
+    from pyqenc.phases.audio import AudioPhase
     from pyqenc.phases.encoding import (
         EncodedArtifact,
         EncodingPhase,
-        EncodingPhaseResult,
     )
-    from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
-    from pyqenc.phases.job import JobPhase, JobPhaseResult
+    from pyqenc.phases.extraction import ExtractionPhase
+    from pyqenc.phases.job import JobPhase
 
 logger = logging.getLogger(__name__)
 
@@ -220,28 +219,6 @@ def _write_merge_sidecar(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _strategy_display_name(strategy: str) -> str:
-    """Return a human-readable strategy name (preserves ``+`` and ``:`` separators)."""
-    return strategy.replace("_", "+", 1)  # only first underscore — profile may contain underscores
-
-
-def _strategy_safe_name(strategy: str) -> str:
-    """Return a filesystem-safe strategy name."""
-    return strategy.replace("+", "_").replace(":", "_")
-
-
-def _cleanup_tmp_files(directory: Path) -> None:
-    """Remove leftover ``.tmp`` files from a previous interrupted run."""
-    if not directory.exists():
-        return
-    for tmp_file in directory.glob(f"*{TEMP_SUFFIX}"):
-        try:
-            tmp_file.unlink()
-            logger.warning("Removed leftover temp file: %s", tmp_file.name)
-        except OSError as exc:
-            logger.warning("Could not remove temp file %s: %s", tmp_file.name, exc)
-
-
 def _measure_quality(
     final_result:     Path,
     source_video:     VideoMetadata,
@@ -363,7 +340,6 @@ def _log_merge_summary(
         size_bytes = _safe_file_size(artifact.path)
         size_mb    = size_bytes / (1024 * 1024)
         size_str   = f"{size_mb:,.1f}".replace(",", "\u202f")
-        display    = _strategy_display_name(artifact.strategy_name)
         pct        = _pct_str(size_bytes)
 
         if has_targets:
@@ -373,9 +349,9 @@ def _log_merge_summary(
                     any_miss = True
             else:
                 mark = "-"
-            logger.info("  %-25s  %12s  %7s  %s", display[:25], size_str, pct, mark)
+            logger.info("  %-25s  %12s  %7s  %s", artifact.strategy_name[:25], size_str, pct, mark)
         else:
-            logger.info("  %-25s  %12s  %7s", display[:25], size_str, pct)
+            logger.info("  %-25s  %12s  %7s", artifact.strategy_name[:25], size_str, pct)
 
     # --- Output location note ---
     output_dir = sorted_artifacts[0].path.parent
@@ -404,7 +380,6 @@ def _log_merge_summary(
     for artifact in sorted_artifacts:
         if artifact.targets_met or not artifact.metrics:
             continue
-        display      = _strategy_display_name(artifact.strategy_name)
         missed_lines = []
         for target in quality_targets:
             key   = f"{target.metric}_{target.statistic}"
@@ -414,7 +389,7 @@ def _log_merge_summary(
             elif value < target.value:
                 missed_lines.append(f"{target.metric}-{target.statistic}: {value:.2f} (target: {target.value:.2f})")
         if missed_lines:
-            miss_table[f"{WARNING_SYMBOL} {display}"] = missed_lines if len(missed_lines) > 1 else missed_lines[0]
+            miss_table[f"{WARNING_SYMBOL} {artifact.strategy_name}"] = missed_lines if len(missed_lines) > 1 else missed_lines[0]
 
     fmt_key_value_table(miss_table)
 
@@ -564,17 +539,17 @@ class MergePhase:
         *,
         collector: "MetricsCollector",
     ) -> None:
-        from pyqenc.phases.audio import AudioPhase as _AudioPhase
-        from pyqenc.phases.encoding import EncodingPhase as _EncodingPhase
-        from pyqenc.phases.extraction import ExtractionPhase as _ExtractionPhase
-        from pyqenc.phases.job import JobPhase as _JobPhase
+        from pyqenc.phases.audio import AudioPhase
+        from pyqenc.phases.encoding import EncodingPhase
+        from pyqenc.phases.extraction import ExtractionPhase
+        from pyqenc.phases.job import JobPhase
 
-        self._config:     "PipelineConfig"            = config
-        self._collector:  "MetricsCollector"          = collector
-        self._job:        "_JobPhase | None"           = cast("_JobPhase",        phases[_JobPhase])        if phases else None
-        self._extraction: "_ExtractionPhase | None"   = cast("_ExtractionPhase", phases[_ExtractionPhase]) if phases else None
-        self._encoding:   "_EncodingPhase | None"     = cast("_EncodingPhase",   phases[_EncodingPhase])   if phases else None
-        self._audio:      "_AudioPhase | None"        = cast("_AudioPhase",      phases[_AudioPhase])      if phases else None
+        self._config:     "PipelineConfig"         = config
+        self._collector:  "MetricsCollector"       = collector
+        self._job:        JobPhase | None          = cast(JobPhase,        phases[JobPhase])        if phases else None
+        self._extraction: ExtractionPhase | None   = cast(ExtractionPhase, phases[ExtractionPhase]) if phases else None
+        self._encoding:   EncodingPhase | None     = cast(EncodingPhase,   phases[EncodingPhase])   if phases else None
+        self._audio:      AudioPhase | None        = cast(AudioPhase,      phases[AudioPhase])      if phases else None
         self.params      = MergeParams(
             quality_targets  = _targets_as_strings(config.quality_targets),
             metrics_sampling = config.metrics_sampling,

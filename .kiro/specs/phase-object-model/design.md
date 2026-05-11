@@ -130,11 +130,11 @@ class PhaseResult:
 @dataclass(frozen=True)
 class Strategy:
     name:      str   # display form: "slow+h265-aq"
-    safe_name: str   # filesystem-safe: "slow_h265-aq"
+    safe_name: str   # filesystem-safe: "slow+h265-aq"
 
     @staticmethod
     def from_name(name: str) -> "Strategy":
-        return Strategy(name=name, safe_name=name.replace("+", "_").replace(":", "_"))
+        return Strategy(name=name, safe_name=name.replace(":", "_"))
 ```
 
 Replaces all string-based strategy name handling throughout the codebase.

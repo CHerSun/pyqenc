@@ -188,7 +188,7 @@ class Strategy(BaseModel):
     @property
     def safe_name(self) -> str:
         """Filesystem-safe name for directory paths (e.g. ``'slow_h265-aq'``)."""
-        return self.name.replace("+", "_").replace(":", "_")
+        return self.name.replace(":", "_")
 
     def to_ffmpeg_args(self, quality: Decimal, vf_filter: str | None = None) -> list[str]:
         """Expand the codec's ``encoder_args`` template into a concrete ffmpeg argument list.
