@@ -7,6 +7,7 @@ timestamp generation, and screenshot filename formatting.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import shutil
@@ -23,6 +24,7 @@ from pyqenc.models import CropParams, VideoMetadata
 from pyqenc.quality import ChunkQualityStats, MetricType
 from pyqenc.state import JobState, MeasureSidecar
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg_async
+from pyqenc.utils.win_path import lp_exists, lp_rename, lp_unlink
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 logger = logging.getLogger(__name__)
@@ -600,17 +602,31 @@ async def _capture_single_frame(
     seek_ts:     str,
     output_path: Path,
     crop_params: CropParams | None,
-) -> bool:
-    """Capture a single frame via fast-seek. Returns True on success."""
-    cmd: list[str | Path] = ["ffmpeg", "-ss", seek_ts, "-i", video_path]
+) -> str | None:
+    """Capture a single frame via fast-seek.
+
+    Returns:
+        None on success, or a short human-readable failure reason string.
+    """
+    cmd: list[str | Path] = ["ffmpeg", "-y", "-ss", seek_ts, "-i", video_path]
     if crop_params is not None and not crop_params.is_empty():
         cmd += ["-vf", crop_params.to_ffmpeg_filter()]
     cmd += ["-frames:v", "1", "-f", "image2", "-c:v", "png", output_path]
     try:
         result = await run_ffmpeg_async(cmd, output_file=None)
-        return result.success and output_path.exists()
-    except Exception:
-        return False
+        if not result.success:
+            reason = f"ffmpeg exit {result.returncode}"
+            logger.debug("Strategy C frame failed (%s) seek_ts=%s output=%s", reason, seek_ts, output_path.name)
+            return reason
+        if not lp_exists(output_path):
+            reason = "no output file produced"
+            logger.debug("Strategy C frame failed (%s) seek_ts=%s output=%s", reason, seek_ts, output_path.name)
+            return reason
+        return None
+    except Exception as exc:
+        reason = str(exc)
+        logger.debug("Strategy C frame raised exception seek_ts=%s output=%s: %s", seek_ts, output_path.name, exc)
+        return reason
 
 
 async def _capture_single_pass(
@@ -620,23 +636,25 @@ async def _capture_single_pass(
     crop_params: CropParams | None,
 ) -> list[Path]:
     """Run a single-pass select-filter capture. Returns sorted list of output PNGs."""
-    tmp_dir.mkdir(parents=True, exist_ok=True)
     output_pattern = tmp_dir / "%04d.png"
     vf_parts = [f"select='{select_expr}'"]
     if crop_params is not None and not crop_params.is_empty():
         vf_parts.append(crop_params.to_ffmpeg_filter())
     vf_parts.append("setpts=N/FRAME_RATE/TB")
     cmd: list[str | Path] = [
-        "ffmpeg", "-i", video_path,
+        "ffmpeg", "-y", "-i", video_path,
         "-vf", ",".join(vf_parts),
         "-vsync", "0",
         str(output_pattern),
     ]
     try:
+        tmp_dir.mkdir(parents=True, exist_ok=True)
         result = await run_ffmpeg_async(cmd, output_file=None)
         if not result.success:
+            logger.debug("Single-pass capture failed (ffmpeg non-zero) tmp_dir=%s", tmp_dir)
             return []
-    except Exception:
+    except Exception as exc:
+        logger.debug("Single-pass capture raised exception tmp_dir=%s: %s", tmp_dir, exc)
         return []
     return sorted(tmp_dir.glob("*.png"))
 
@@ -662,13 +680,13 @@ def _rename_raw_screenshots(
         tmp_path    = output_dir / f"{final_name}{TEMP_SUFFIX}"
         try:
             shutil.copy2(raw_file, tmp_path)
-            tmp_path.replace(final_path)
+            lp_rename(tmp_path, final_path)
             written.append(final_path)
             logger.debug("Screenshot written: %s", final_path.name)
         except Exception as exc:
             logger.warning("Failed to write screenshot %s: %s", final_name, exc)
             try:
-                tmp_path.unlink(missing_ok=True)
+                lp_unlink(tmp_path, missing_ok=True)
             except Exception:
                 pass
     return written
@@ -707,6 +725,7 @@ async def make_screenshots(
     # Strategy C: N sequential fast-seek calls
     # ------------------------------------------------------------------
     written: list[Path] = []
+    c_failure_reasons: set[str] = set()
     for frame_num in positions.frame_nums:
         seek_ts     = positions.seek_ts(frame_num)
         filename_ts = positions.filename_ts(frame_num)
@@ -715,17 +734,19 @@ async def make_screenshots(
         tmp_path    = screenshots_dir / f"{final_name}{TEMP_SUFFIX}"
 
         logger.debug("Strategy C: frame %d seek_ts=%s → %s", frame_num, seek_ts, final_name)
-        ok = await _capture_single_frame(video_path, seek_ts, tmp_path, crop_params)
-        if ok:
+        failure = await _capture_single_frame(video_path, seek_ts, tmp_path, crop_params)
+        if failure is None:
             try:
-                tmp_path.replace(final_path)
+                lp_rename(tmp_path, final_path)
                 written.append(final_path)
             except Exception as exc:
                 logger.warning("Failed to rename screenshot %s: %s", final_name, exc)
                 try:
-                    tmp_path.unlink(missing_ok=True)
+                    lp_unlink(tmp_path, missing_ok=True)
                 except Exception:
                     pass
+        else:
+            c_failure_reasons.add(failure)
 
     if written:
         return written
@@ -733,12 +754,14 @@ async def make_screenshots(
     # ------------------------------------------------------------------
     # Strategy A2 fallback: single-pass frame-number select
     # ------------------------------------------------------------------
+    reasons_str = "; ".join(sorted(c_failure_reasons)) if c_failure_reasons else "unknown"
     logger.warning(
-        "Screenshot strategy C failed for %s — falling back to A2 (single-pass frame-number select)",
-        video_stem,
+        "Screenshot strategy C failed for %s (%s) — falling back to A2 (single-pass frame-number select)",
+        video_stem, reasons_str,
     )
     select_expr_a2 = "+".join(f"eq(n,{n})" for n in positions.frame_nums)
-    tmp_dir_a2     = screenshots_dir / f".tmp_a2_{video_stem}"
+    stem_hash      = hashlib.sha1(video_stem.encode()).hexdigest()[:12]
+    tmp_dir_a2     = screenshots_dir / f".tmp_a2_{stem_hash}"
     raw_a2         = await _capture_single_pass(video_path, select_expr_a2, tmp_dir_a2, crop_params)
 
     if raw_a2:
@@ -757,7 +780,7 @@ async def make_screenshots(
         video_stem,
     )
     select_expr_a4 = f"not(mod(n,{positions.step}))*gt(n,0)"
-    tmp_dir_a4     = screenshots_dir / f".tmp_a4_{video_stem}"
+    tmp_dir_a4     = screenshots_dir / f".tmp_a4_{stem_hash}"
     raw_a4         = await _capture_single_pass(video_path, select_expr_a4, tmp_dir_a4, crop_params)
 
     if raw_a4:
@@ -1067,12 +1090,15 @@ async def run_measure(
     source_screenshots: list[Path] = []
     if positions is not None:
         logger.info("Taking %d screenshots of %s...", len(positions.frame_nums), source_video.stem)
-        source_screenshots = await make_screenshots(
-            video_path      = source_video,
-            positions       = positions,
-            screenshots_dir = source_screenshots_dir,
-            crop_params     = resolved_crop if not resolved_crop.is_empty() else None,
-        )
+        try:
+            source_screenshots = await make_screenshots(
+                video_path      = source_video,
+                positions       = positions,
+                screenshots_dir = source_screenshots_dir,
+                crop_params     = resolved_crop if not resolved_crop.is_empty() else None,
+            )
+        except Exception as exc:
+            logger.error("Screenshots failed for %s — skipping: %s", source_video.stem, exc)
 
     # ------------------------------------------------------------------
     # (3) Capture all target screenshots
@@ -1082,12 +1108,16 @@ async def run_measure(
     for target_video in target_videos:
         if positions is not None:
             logger.info("Taking %d screenshots of %s...", len(positions.frame_nums), target_video.stem)
-            shots = await make_screenshots(
-                video_path      = target_video,
-                positions       = positions,
-                screenshots_dir = target_screenshots_dirs[target_video],
-                crop_params     = None,
-            )
+            try:
+                shots = await make_screenshots(
+                    video_path      = target_video,
+                    positions       = positions,
+                    screenshots_dir = target_screenshots_dirs[target_video],
+                    crop_params     = None,
+                )
+            except Exception as exc:
+                logger.error("Screenshots failed for %s — skipping: %s", target_video.stem, exc)
+                shots = []
             target_screenshots_map[target_video] = shots
         else:
             target_screenshots_map[target_video] = []
