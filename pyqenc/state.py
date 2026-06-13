@@ -30,7 +30,7 @@ from pyqenc.models import (
     SceneBoundary,
     VideoMetadata,
 )
-from pyqenc.quality import ChunkQualityStats, MetricType
+from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 logger = logging.getLogger(__name__)
@@ -655,7 +655,7 @@ class MergeStrategySummary(BaseModel):
         """Restore from a dict loaded from ``merge.yaml``."""
         return cls(
             strategy_name   = data["strategy_name"],
-            output_path     = Path(data["output_path"]),
+            output_path     = LongPath(data["output_path"]),
             file_size_bytes = int(data.get("file_size_bytes", 0)),
             metrics         = {k: float(v) for k, v in data.get("metrics", {}).items()},
             targets_met     = bool(data.get("targets_met", False)),

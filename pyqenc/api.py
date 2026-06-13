@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pyqenc.constants import DEFAULT_MAX_PARALLEL, DEFAULT_METRICS_SAMPLING, DEFAULT_SCREENSHOT_COUNT
+from pyqenc.utils.long_path import LongPath
 from pyqenc.models import (
     ChunkingMode,
     CleanupLevel,
@@ -56,6 +57,7 @@ def run_pipeline(
     if not config.source_video.exists():
         raise FileNotFoundError(f"Source video not found: {config.source_video}")
 
+    config.work_dir = LongPath(config.work_dir)
     config.work_dir.mkdir(parents=True, exist_ok=True)
 
     orchestrator = PipelineOrchestrator(config)
@@ -141,6 +143,7 @@ def extract_streams(
     if not source_video.exists():
         raise FileNotFoundError(f"Source video not found: {source_video}")
 
+    work_dir = LongPath(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     config   = _minimal_config(source_video=source_video, work_dir=work_dir, include=include, exclude=exclude, force=force, max_parallel=DEFAULT_MAX_PARALLEL)
     registry = _build_registry(config, NoOpMetricsCollector())
@@ -188,6 +191,7 @@ def chunk_video(
     if min_scene_length < 1:
         raise ValueError(f"Minimum scene length must be positive, got {min_scene_length}")
 
+    work_dir = LongPath(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     config   = _minimal_config(source_video=source_video, work_dir=work_dir, chunking_mode=chunking_mode, force=force, max_parallel=DEFAULT_MAX_PARALLEL)
     registry = _build_registry(config, NoOpMetricsCollector())
@@ -242,6 +246,7 @@ def encode_chunks(
     parsed_targets    = [QualityTarget.parse(t) for t in quality_targets]
     parsed_strategies = [Strategy.from_name(s) for s in strategies]
 
+    work_dir = LongPath(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     config   = _minimal_config(
         source_video     = source_video,
@@ -288,6 +293,7 @@ def process_audio(
     if not source_video.exists():
         raise FileNotFoundError(f"Source video not found: {source_video}")
 
+    work_dir = LongPath(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     config   = _minimal_config(
         source_video       = source_video,
@@ -330,6 +336,7 @@ def merge_final(
     if not source_video.exists():
         raise FileNotFoundError(f"Source video not found: {source_video}")
 
+    work_dir = LongPath(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     config   = _minimal_config(source_video=source_video, work_dir=work_dir, metrics_sampling=metrics_sampling, max_parallel=DEFAULT_MAX_PARALLEL)
     registry = _build_registry(config, NoOpMetricsCollector())
@@ -388,11 +395,12 @@ def measure_quality(
     """
     import asyncio
 
-    from pyqenc.phases.measure import MeasureResult, _parse_duration, run_measure
+    from pyqenc.phases.measure import _parse_duration, run_measure
 
     if not source_video.exists():
         raise FileNotFoundError(f"Source video not found: {source_video}")
 
+    work_dir = LongPath(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
 
     parsed_interval: float | None = None

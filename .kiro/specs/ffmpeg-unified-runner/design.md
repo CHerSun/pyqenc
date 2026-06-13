@@ -10,6 +10,7 @@
 | Spec | Created | Relationship |
 |------|---------|--------------|
 | `pts-preservation` | 2026-04-29 (Completed) | **Extends this spec.** `pts-preservation` adds new ffmpeg calls for subtitle, chapter, and attachment extraction (replacing `mkvextract`), all routed through `run_ffmpeg()` / `run_ffmpeg_async()` as required by this spec. The `_extract_timestamps()` function uses `subprocess.run` directly for `ffprobe` — consistent with the existing `MKVTrackExtractor._run_ffprobe()` pattern and not a violation of this spec's ffmpeg-only mandate. |
+| `windows-long-path` | 2026-06-09 | **Imposes a path-string constraint on callers of this spec.** `windows-long-path` introduces `LongPath`, a `pathlib.Path` subclass whose `__fspath__()` injects the `\\?\` extended-length prefix on Windows for paths longer than 260 chars. ffmpeg does **not** accept `\\?\`-prefixed paths; callers MUST use `str(path)` (not `os.fspath(path)`) when building command lists for `run_ffmpeg` / `run_ffmpeg_async`. The runner's `list[str \| os.PathLike]` type signature is unchanged — passing `str(path)` explicitly satisfies it. |
 
 ---
 
