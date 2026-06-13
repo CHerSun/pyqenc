@@ -24,7 +24,6 @@ from pyqenc.models import CropParams, VideoMetadata
 from pyqenc.quality import ChunkQualityStats, MetricType
 from pyqenc.state import JobState, MeasureSidecar
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg_async
-from pyqenc.utils.win_path import lp_exists, lp_rename, lp_unlink
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 logger = logging.getLogger(__name__)
@@ -618,7 +617,7 @@ async def _capture_single_frame(
             reason = f"ffmpeg exit {result.returncode}"
             logger.debug("Strategy C frame failed (%s) seek_ts=%s output=%s", reason, seek_ts, output_path.name)
             return reason
-        if not lp_exists(output_path):
+        if not output_path.exists():
             reason = "no output file produced"
             logger.debug("Strategy C frame failed (%s) seek_ts=%s output=%s", reason, seek_ts, output_path.name)
             return reason
@@ -680,13 +679,13 @@ def _rename_raw_screenshots(
         tmp_path    = output_dir / f"{final_name}{TEMP_SUFFIX}"
         try:
             shutil.copy2(raw_file, tmp_path)
-            lp_rename(tmp_path, final_path)
+            tmp_path.replace(final_path)
             written.append(final_path)
             logger.debug("Screenshot written: %s", final_path.name)
         except Exception as exc:
             logger.warning("Failed to write screenshot %s: %s", final_name, exc)
             try:
-                lp_unlink(tmp_path, missing_ok=True)
+                tmp_path.unlink(missing_ok=True)
             except Exception:
                 pass
     return written
@@ -737,12 +736,12 @@ async def make_screenshots(
         failure = await _capture_single_frame(video_path, seek_ts, tmp_path, crop_params)
         if failure is None:
             try:
-                lp_rename(tmp_path, final_path)
+                tmp_path.replace(final_path)
                 written.append(final_path)
             except Exception as exc:
                 logger.warning("Failed to rename screenshot %s: %s", final_name, exc)
                 try:
-                    lp_unlink(tmp_path, missing_ok=True)
+                    tmp_path.unlink(missing_ok=True)
                 except Exception:
                     pass
         else:
