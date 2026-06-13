@@ -2,7 +2,8 @@
 
 <!-- markdownlint-disable MD024 -->
 
-- Created: 2026-01-27
+- Created: 2026-06-08
+- Completed: 2026-06-13
 
 ## Introduction
 
@@ -74,33 +75,27 @@ A whack-a-mole partial fix currently exists in `pyqenc/utils/win_path.py` (`lp_e
 
 ---
 
-## Bug Condition (Structured Pseudocode)
+## Bug Condition
 
-```pascal
-FUNCTION isBugCondition(X)
-  INPUT: X of type PathOperation
-  OUTPUT: boolean
-
-  // Bug triggers when ALL of the following hold:
-  RETURN sys.platform = "win32"
-     AND len(str(X.path)) > 260
-     AND X.path is pathlib.Path (not LongPath)
-END FUNCTION
+```python
+def is_bug_condition(path: Path) -> bool:
+    # Bug triggers when ALL of the following hold:
+    return (
+        sys.platform == "win32"
+        and len(str(path)) > 260
+        and type(path) is Path  # not LongPath
+    )
 ```
 
-```pascal
-// Property: Fix Checking — Long Path Operations on Windows
-FOR ALL X WHERE isBugCondition(X) DO
-  result ← F'(X)   // F' uses LongPath with \\?\ prefix injection
-  ASSERT no_os_error(result)
-  ASSERT result = expected_fs_outcome(X)  // e.g. exists()=True, file renamed, etc.
-END FOR
-```
+```python
+# Fix Checking — long path operations on Windows must succeed
+for path, operation, expected in long_path_cases:
+    assert is_bug_condition(path)
+    result = operation(LongPath(path))  # LongPath injects \\?\ in __fspath__
+    assert result == expected           # e.g. exists()==True, file renamed, etc.
 
-```pascal
-// Property: Preservation Checking
-FOR ALL X WHERE NOT isBugCondition(X) DO
-  // Non-Windows, or path ≤ 260 chars, or already using LongPath
-  ASSERT F(X) = F'(X)   // identical behavior before and after the fix
-END FOR
+# Preservation Checking — non-Windows and short paths are unaffected
+for path, operation, expected in all_cases:
+    if not is_bug_condition(path):
+        assert operation(Path(path)) == operation(LongPath(path))
 ```
