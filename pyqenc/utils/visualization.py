@@ -816,7 +816,7 @@ def _is_known_metric(col: str) -> bool:
         return False
 
 
-def _extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -> MetricStats:
+def extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -> MetricStats:
     """Extract the key statistics subset from a full statistics dict.
 
     For PSNR, substitutes the highest non-inf percentile for ``max`` when the
@@ -928,24 +928,6 @@ def normalize_metrics(df_raw: pd.DataFrame) -> pd.DataFrame:
             continue  # unknown column — pass through unchanged
         result[col] = mt.info.normalize(result[col])
     return result
-
-
-def extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -> MetricStats:
-    """Extract the key statistics subset from a full statistics dict.
-
-    Public alias for the internal ``_extract_key_stats`` implementation.
-    For PSNR, substitutes the highest non-inf percentile for ``max`` when the
-    true maximum is infinite.
-
-    Args:
-        full_stats:  Full statistics dictionary from ``compute_statistics``.
-        metric_type: Metric type (affects PSNR max handling).
-
-    Returns:
-        ``MetricStats`` with ``min``, ``p05``, ``p25``, ``median``, ``p75``,
-        ``p95``, ``max``, and ``std``.
-    """
-    return _extract_key_stats(full_stats, metric_type)
 
 
 def compute_metric_stats(df_norm: pd.DataFrame) -> ChunkQualityStats:

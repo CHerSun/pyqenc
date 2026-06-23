@@ -17,45 +17,10 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pyqenc.constants import (
-    CHUNK_NAME_PATTERN,
-    RANGE_SEPARATOR,
-    TEMP_SUFFIX,
-    TIME_SEPARATOR_MS,
-    TIME_SEPARATOR_SAFE,
-)
 from pyqenc.models import ChunkMetadata, SceneBoundary
-from pyqenc.state import ArtifactState, ChunkSidecar
+from pyqenc.state import ArtifactState
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Shared low-level helpers (kept for use by legacy functions and phase objects)
-# ---------------------------------------------------------------------------
-
-def _cleanup_tmp_files(directory: Path) -> None:
-    """Delete any leftover ``.tmp`` files in *directory*.
-
-    Called at the start of each phase to remove partial files from a
-    previously interrupted run.  Logs a warning for each file removed.
-
-    Args:
-        directory: Directory to scan for ``.tmp`` files.
-    """
-    if not directory.exists():
-        return
-    for tmp_file in directory.glob(f"*{TEMP_SUFFIX}"):
-        try:
-            tmp_file.unlink()
-            logger.warning(
-                "Removed leftover temp file from previous interrupted run: %s",
-                tmp_file,
-            )
-        except OSError as exc:
-            logger.warning("Could not remove temp file %s: %s", tmp_file, exc)
-
-
 
 
 # ---------------------------------------------------------------------------

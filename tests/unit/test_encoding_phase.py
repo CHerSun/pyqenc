@@ -26,7 +26,7 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 _CHUNK_ID   = "00꞉00꞉00․000-00꞉01꞉30․000"
 _STRATEGY   = "slow+h265-aq"
-_SAFE_STRAT = "slow_h265-aq"
+_SAFE_STRAT = "slow+h265-aq"
 _RESOLUTION = "1920x800"
 _CRF        = Decimal("18.0")
 

@@ -266,7 +266,7 @@ class _PhaseRecovery:
 
 def _enc_encoded_strategy_dir(work_dir: Path, strategy: str) -> Path:
     """Return the finalized output directory for *strategy* under ``encoded/``."""
-    safe = strategy.replace("+", "_").replace(":", "_")
+    safe = strategy.replace(":", "_")
     return work_dir / ENCODED_OUTPUT_DIR / safe
 
 

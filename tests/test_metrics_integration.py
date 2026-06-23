@@ -1425,7 +1425,7 @@ class TestMergePhaseTiming:
         from pyqenc.phases.encoding import EncodedArtifact, EncodingPhaseResult
         from pyqenc.state import ArtifactState
 
-        encoded_path = tmp_path / "work" / "encoded" / "slow_h265" / "chunk_0.mkv"
+        encoded_path = tmp_path / "work" / "encoded" / "slow+h265" / "chunk_0.mkv"
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
         encoded_path.write_bytes(b"\x00" * 128)
 
@@ -1511,7 +1511,7 @@ class TestMergePhaseTiming:
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        output_file = tmp_path / "work" / "final" / "source slow_h265.mkv"
+        output_file = tmp_path / "work" / "final" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
         output_file.write_bytes(b"\x00" * 64)
 
@@ -1541,7 +1541,7 @@ class TestMergePhaseTiming:
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        output_file = tmp_path / "work" / "final" / "source slow_h265.mkv"
+        output_file = tmp_path / "work" / "final" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
         stub_artifact = MergeArtifact(
@@ -1550,7 +1550,7 @@ class TestMergePhaseTiming:
             strategy_name = "slow+h265",
         )
 
-        encoded_path = tmp_path / "work" / "encoded" / "slow_h265" / "chunk_0.mkv"
+        encoded_path = tmp_path / "work" / "encoded" / "slow+h265" / "chunk_0.mkv"
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
         encoded_path.write_bytes(b"\x00" * 128)
 
@@ -1639,7 +1639,7 @@ class TestMergePhaseTiming:
         phase._encoding   = encoding_mock   # type: ignore[assignment]
         phase._audio      = audio_mock      # type: ignore[assignment]
 
-        output_file = tmp_path / "work" / "final" / "source slow_h265.mkv"
+        output_file = tmp_path / "work" / "final" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
         stub_artifact = MergeArtifact(
@@ -1648,7 +1648,7 @@ class TestMergePhaseTiming:
             strategy_name = "slow+h265",
         )
 
-        encoded_path = tmp_path / "work" / "encoded" / "slow_h265" / "chunk_0.mkv"
+        encoded_path = tmp_path / "work" / "encoded" / "slow+h265" / "chunk_0.mkv"
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
         encoded_path.write_bytes(b"\x00" * 128)
 
@@ -1681,7 +1681,7 @@ class TestMergePhaseTiming:
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
 
-        output_file = tmp_path / "work" / "final" / "source slow_h265.mkv"
+        output_file = tmp_path / "work" / "final" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
         output_file.write_bytes(b"\x00" * 64)
 
