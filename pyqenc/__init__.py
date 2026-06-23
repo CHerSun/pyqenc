@@ -12,6 +12,7 @@ from pyqenc.api import (
     chunk_video,
     encode_chunks,
     extract_streams,
+    measure_quality,
     merge_final,
     process_audio,
     run_pipeline,
@@ -25,4 +26,5 @@ __all__ = [
     "encode_chunks",
     "process_audio",
     "merge_final",
+    "measure_quality",
 ]

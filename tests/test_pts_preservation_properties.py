@@ -265,7 +265,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
         chunk = tmp_path / "chunk1.mkv"
         chunk.write_bytes(b"\x00" * 64)
 
-        output_file = final_dir / "source slow_h265.mkv"
+        output_file = final_dir / "source slow+h265.mkv"
 
         # Build a minimal MergePhase
         config = MagicMock()

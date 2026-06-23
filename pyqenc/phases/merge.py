@@ -883,7 +883,7 @@ class MergePhase:
         for artifact in encoded:
             if artifact.state == ArtifactState.COMPLETE:
                 strategy_name = artifact.strategy
-                safe_name     = strategy_name.replace("+", "_").replace(":", "_")
+                safe_name     = strategy_name.replace(":", "_")
                 seen[strategy_name] = safe_name
         return list(seen.items())
 
@@ -917,7 +917,7 @@ class MergePhase:
 
         for artifact in artifacts:
             strategy_name = artifact.strategy_name
-            safe_name     = strategy_name.replace("+", "_").replace(":", "_")
+            safe_name     = strategy_name.replace(":", "_")
 
             if artifact.state == ArtifactState.COMPLETE:
                 final_artifacts.append(artifact)

@@ -1,5 +1,6 @@
 # Project Coding Standards
 
+- **Before making any code changes — discuss the proposed approach with the user and get explicit approval first.**
 - Targeting Python>=3.13 syntax.
 - For volatile things - try (not check).
 - All functions, classes and class members MUST BE type-hinted.

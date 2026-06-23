@@ -244,7 +244,7 @@ class TestMkvmergeOptionsFileLifecycle:
         chunk = tmp_path / "chunk1.mkv"
         chunk.write_bytes(b"\x00" * 64)
 
-        output_file = final_dir / "source slow_h265.mkv"
+        output_file = final_dir / "source slow+h265.mkv"
 
         phase = self._make_phase_with_extraction(tmp_path, ts_file)
 
@@ -259,7 +259,7 @@ class TestMkvmergeOptionsFileLifecycle:
             return_value={"chunk1": {"slow+h265": chunk}}
         )
 
-        options_file = final_dir / "concat_slow_h265.json"
+        options_file = final_dir / "concat_slow+h265.json"
 
         def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
             # Verify options file exists when mkvmerge is called
@@ -292,7 +292,7 @@ class TestMkvmergeOptionsFileLifecycle:
         chunk = tmp_path / "chunk1.mkv"
         chunk.write_bytes(b"\x00" * 64)
 
-        output_file = final_dir / "source slow_h265.mkv"
+        output_file = final_dir / "source slow+h265.mkv"
 
         phase = self._make_phase_with_extraction(tmp_path, ts_file)
 
@@ -306,7 +306,7 @@ class TestMkvmergeOptionsFileLifecycle:
             return_value={"chunk1": {"slow+h265": chunk}}
         )
 
-        options_file = final_dir / "concat_slow_h265.json"
+        options_file = final_dir / "concat_slow+h265.json"
 
         def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
             result = MagicMock()
@@ -367,7 +367,7 @@ class TestMergeFailsWithoutTimestamps:
         chunk = tmp_path / "chunk1.mkv"
         chunk.write_bytes(b"\x00" * 64)
 
-        output_file = final_dir / "source slow_h265.mkv"
+        output_file = final_dir / "source slow+h265.mkv"
 
         phase = self._make_phase_with_timestamps(tmp_path, timestamps_path=None)
 
@@ -401,7 +401,7 @@ class TestMergeFailsWithoutTimestamps:
         chunk = tmp_path / "chunk1.mkv"
         chunk.write_bytes(b"\x00" * 64)
 
-        output_file = final_dir / "source slow_h265.mkv"
+        output_file = final_dir / "source slow+h265.mkv"
 
         phase = self._make_phase_with_timestamps(tmp_path, timestamps_path=missing_ts)
 
@@ -431,7 +431,7 @@ class TestMergeFailsWithoutTimestamps:
         chunk = tmp_path / "chunk1.mkv"
         chunk.write_bytes(b"\x00" * 64)
 
-        output_file = final_dir / "source slow_h265.mkv"
+        output_file = final_dir / "source slow+h265.mkv"
 
         phase = self._make_phase_with_timestamps(tmp_path, timestamps_path=None)
 
