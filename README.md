@@ -2,6 +2,8 @@
 
 <!-- markdownlint-disable MD024 MD026 MD028 -->
 
+> WARNING: This is EXPERIMENTAL project in pre-alpha state currently. It could break or drastically change from version to version.
+
 Encoding a movie to archive it sounds simple — until you spend hours tweaking quality settings, only to get inconsistent results across scenes, or lose everything to a power cut mid-encode.
 
 **pyqenc** automates this. You tell it the quality you want. It figures out the rest — per scene, automatically, and picks up right where it left off if interrupted.
