@@ -965,6 +965,7 @@ def process_audio_streams(
     audio_convert:      str | None = None,
     audio_codec:        str | None = None,
     audio_base_bitrate: str | None = None,
+    audio_profiles:     "dict[str, AppAudioConversionProfile] | None" = None,
     collector:          "MetricsCollector | None" = None,
 ) -> AudioResult:
     """Process audio files through the full strategy graph and convert to AAC delivery files.
@@ -982,11 +983,13 @@ def process_audio_streams(
         force:              Re-process even when output files already exist.
         dry_run:            Report status only; do not perform actual processing.
         audio_convert:      Regex pattern selecting processed audio files to convert to the
-                            final delivery format. Overrides the config-derived
-                            ``audio_output.convert_filter`` when provided.
+                            final delivery format. Acts as the effective convert filter when
+                            provided; must not be ``None`` when ``audio_profiles`` is supplied.
         audio_codec:        Override audio codec for all conversion profiles (e.g. ``'aac'``).
         audio_base_bitrate: Base bitrate for 2.0 stereo conversion (e.g. ``'192k'``). Bitrates
                             for other channel layouts are scaled proportionally by channel count.
+        audio_profiles:     Pydantic ``AudioConversionProfile`` map from ``AppConfig.audio.profiles``.
+                            Required — caller must supply the profiles from ``self._job.result.config.audio``.
 
     Returns:
         :class:`AudioResult` with paths to all produced AAC delivery files.
@@ -997,14 +1000,13 @@ def process_audio_streams(
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # --- Load config profiles and apply CLI overrides ---
-        from pyqenc.config import ConfigManager
-        config_manager = ConfigManager()
-        audio_output_config = config_manager.get_audio_output_config()
+        # --- Build effective profiles from caller-supplied AppConfig profiles ---
+        if audio_profiles is None:
+            raise ValueError("audio_profiles must be supplied to process_audio_streams")
 
-        # Build effective profiles: start from config, apply codec/bitrate overrides
+        # Build effective profiles: start from caller-supplied profiles, apply codec/bitrate overrides
         effective_profiles: dict[str, AudioConversionProfile] = {}
-        for layout, profile in audio_output_config.profiles.items():
+        for layout, profile in audio_profiles.items():
             effective_codec   = audio_codec or profile.codec
             effective_bitrate = profile.bitrate
             if audio_base_bitrate:
@@ -1025,8 +1027,10 @@ def process_audio_streams(
                 extension = profile.extension,
             )
 
-        # Effective convert filter: CLI override takes precedence over config
-        effective_convert_filter = audio_convert or audio_output_config.convert_filter
+        # Effective convert filter comes from the caller (audio_convert parameter)
+        if not audio_convert:
+            raise ValueError("audio_convert (convert_filter) must be supplied to process_audio_streams")
+        effective_convert_filter = audio_convert
 
         # --- Reuse check ---
         if not force:
@@ -1204,8 +1208,9 @@ from dataclasses import dataclass as _dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pyqenc.app_config import AppConfig
+    from pyqenc.app_config import AudioConversionProfile as AppAudioConversionProfile
     from pyqenc.metrics import MetricsCollector
-    from pyqenc.models import PipelineConfig
     from pyqenc.phase import Phase, PhaseResult
     from pyqenc.phases.extraction import ExtractionPhase
     from pyqenc.phases.job import JobPhase
@@ -1253,25 +1258,25 @@ class AudioPhaseResult(PhaseResult):
 def _build_audio_engine(
     audio_codec:        str | None,
     audio_base_bitrate: str | None,
+    profiles:           "dict[str, AppAudioConversionProfile]",
 ) -> AudioEngine:
     """Build an ``AudioEngine`` with the standard strategy set and AAC finalizer.
 
-    Uses the config-derived profiles with optional codec/bitrate overrides.
-    This is the same engine used by ``process_audio_streams`` and
-    ``AudioPhase._recover()`` so that plan evaluation is consistent.
+    Uses the caller-supplied profiles (from ``AppConfig.audio.profiles``) with
+    optional codec/bitrate overrides.  This is the same engine used by
+    ``process_audio_streams`` and ``AudioPhase._recover()`` so that plan
+    evaluation is consistent.
 
     Args:
         audio_codec:        Override codec for all conversion profiles.
         audio_base_bitrate: Override base bitrate for 2.0 stereo (scaled for other layouts).
+        profiles:           Pydantic ``AudioConversionProfile`` map from ``AppConfig.audio.profiles``.
 
     Returns:
         Configured :class:`AudioEngine` instance.
     """
-    from pyqenc.config import ConfigManager
-    audio_output_config = ConfigManager().get_audio_output_config()
-
     effective_profiles: dict[str, AudioConversionProfile] = {}
-    for layout, profile in audio_output_config.profiles.items():
+    for layout, profile in profiles.items():
         effective_codec   = audio_codec or profile.codec
         effective_bitrate = profile.bitrate
         if audio_base_bitrate:
@@ -1319,7 +1324,7 @@ class AudioPhase:
 
     def __init__(
         self,
-        config:    "PipelineConfig",
+        config:    "AppConfig",
         phases:    "dict[type[Phase], Phase] | None" = None,
         *,
         collector: "MetricsCollector",
@@ -1329,11 +1334,11 @@ class AudioPhase:
         from pyqenc.phases.extraction import ExtractionPhase as _ExtractionPhase
         from pyqenc.phases.job import JobPhase as _JobPhase
 
-        self._config:     "PipelineConfig"           = config
+        self._config:     "AppConfig"                = config
         self._collector:  "MetricsCollector"         = collector
-        self._job:        "_JobPhase | None"          = cast(_JobPhase,        phases[_JobPhase])        if phases else None
-        self._extraction: "_ExtractionPhase | None"  = cast(_ExtractionPhase, phases[_ExtractionPhase]) if phases else None
-        self.params       = AudioParams(audio_codec=config.audio_codec, audio_base_bitrate=config.audio_base_bitrate)
+        self._job:        "_JobPhase | None"          = cast(_JobPhase,        phases.get(_JobPhase))        if phases else None
+        self._extraction: "_ExtractionPhase | None"  = cast(_ExtractionPhase, phases.get(_ExtractionPhase)) if phases else None
+        self.params       = AudioParams(audio_codec=config.audio.audio_codec, audio_base_bitrate=config.audio.audio_base_bitrate)
         self.result:      "AudioPhaseResult | None"  = None
         self.dependencies: "list[Phase]"             = [d for d in [self._job, self._extraction] if d is not None]
 
@@ -1399,12 +1404,13 @@ class AudioPhase:
         force_wipe = getattr(job_result, "force_wipe", False)
 
         # Key parameters
-        if self._config.audio_convert:
-            logger.info("Convert filter:  %s", self._config.audio_convert)
-        if self._config.audio_codec:
-            logger.info("Codec:           %s", self._config.audio_codec)
-        if self._config.audio_base_bitrate:
-            logger.info("Base bitrate:    %s", self._config.audio_base_bitrate)
+        audio_cfg = self._job.result.config.audio  # type: ignore[union-attr]
+        if audio_cfg.convert_filter:
+            logger.info("Convert filter:  %s", audio_cfg.convert_filter)
+        if audio_cfg.audio_codec:
+            logger.info("Codec:           %s", audio_cfg.audio_codec)
+        if audio_cfg.audio_base_bitrate:
+            logger.info("Base bitrate:    %s", audio_cfg.audio_base_bitrate)
 
         from pyqenc.metrics import MetricKey
 
@@ -1513,7 +1519,7 @@ class AudioPhase:
         Returns:
             List of ``AudioArtifact`` objects.
         """
-        work_dir  = self._config.work_dir
+        work_dir  = self._job.result.work_dir  # type: ignore[union-attr]
         audio_dir = work_dir / AUDIO_OUTPUT_DIR
 
         # Step 1: force-wipe
@@ -1537,8 +1543,9 @@ class AudioPhase:
 
         if audio_dir.exists():
             engine = _build_audio_engine(
-                audio_codec        = self._config.audio_codec,
-                audio_base_bitrate = self._config.audio_base_bitrate,
+                audio_codec        = self._job.result.config.audio.audio_codec,        # type: ignore[union-attr]
+                audio_base_bitrate = self._job.result.config.audio.audio_base_bitrate, # type: ignore[union-attr]
+                profiles           = self._job.result.config.audio.profiles,           # type: ignore[union-attr]
             )
             plan = engine.build_plan(
                 directory      = audio_dir,
@@ -1601,11 +1608,8 @@ class AudioPhase:
         return artifacts
 
     def _effective_convert_filter(self) -> str:
-        """Return the effective convert filter: CLI override or config default."""
-        if self._config.audio_convert:
-            return self._config.audio_convert
-        from pyqenc.config import ConfigManager
-        return ConfigManager().get_audio_output_config().convert_filter
+        """Return the effective convert filter from job result config."""
+        return self._job.result.config.audio.convert_filter  # type: ignore[union-attr]
 
     def _build_absent_artifacts(self) -> list[AudioArtifact]:
         """Build a list of ABSENT artifacts from ExtractionPhase audio results.
@@ -1616,7 +1620,7 @@ class AudioPhase:
         extraction_result = self._extraction.result if self._extraction else None  # type: ignore[union-attr]
         audio_meta: list[AudioMetadata] = getattr(extraction_result, "audio", []) or []
 
-        work_dir  = self._config.work_dir
+        work_dir  = self._job.result.work_dir  # type: ignore[union-attr]
         audio_dir = work_dir / AUDIO_OUTPUT_DIR
 
         if not audio_meta:
@@ -1642,7 +1646,7 @@ class AudioPhase:
         Returns:
             ``AudioPhaseResult`` after processing.
         """
-        work_dir  = self._config.work_dir
+        work_dir  = self._job.result.work_dir  # type: ignore[union-attr]
         audio_dir = work_dir / AUDIO_OUTPUT_DIR
         audio_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1661,14 +1665,16 @@ class AudioPhase:
             )
             return self.result
 
+        audio_cfg    = self._job.result.config.audio  # type: ignore[union-attr]
         audio_result = process_audio_streams(
             audio_files        = source_files,
             output_dir         = audio_dir,
             force              = False,
             dry_run            = False,
-            audio_convert      = self._config.audio_convert,
-            audio_codec        = self._config.audio_codec,
-            audio_base_bitrate = self._config.audio_base_bitrate,
+            audio_convert      = audio_cfg.convert_filter,
+            audio_codec        = audio_cfg.audio_codec,
+            audio_base_bitrate = audio_cfg.audio_base_bitrate,
+            audio_profiles     = audio_cfg.profiles,
             collector          = self._collector,
         )
 
@@ -1693,7 +1699,7 @@ class AudioPhase:
 
         # Persist audio.yaml with current codec/bitrate config
         try:
-            self.params.save(self._config.work_dir / _AUDIO_YAML)
+            self.params.save(self._job.result.work_dir / _AUDIO_YAML)  # type: ignore[union-attr]
         except Exception as exc:
             logger.warning("Could not persist audio.yaml: %s", exc)
 

@@ -44,7 +44,12 @@ def _make_extraction_phase(tmp_path: Path) -> ExtractionPhase:
     phase = ExtractionPhase.__new__(ExtractionPhase)
     phase._config    = config
     phase._collector = collector
-    phase._job       = None
+    mock_job = MagicMock()
+    mock_job.result.work_dir                      = tmp_path
+    mock_job.result.source                        = source
+    mock_job.result.config.extraction.include     = None
+    mock_job.result.config.extraction.exclude     = None
+    phase._job       = mock_job
     phase.params     = MagicMock()
     phase.params.include = None
     phase.params.exclude = None
@@ -299,12 +304,15 @@ def test_frame_count_preservation(frame_count: int) -> None:
         job_result.force_wipe = False
         job_result.crop = None
         job_result.job = None
+        job_result.work_dir = tmp_path
+        job_result.source   = tmp_path / "source.mkv"
+        job_result.config.encoding.resolved_targets = []
+        job_result.config.encoding.metrics_sampling = 1
         job = MagicMock()
         job.result = job_result
         phase._job = job
 
         phase._audio = None
-        phase.params  = MagicMock()
         phase.result  = None
         phase.dependencies = []
 

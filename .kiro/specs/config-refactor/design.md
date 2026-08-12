@@ -3,7 +3,46 @@
 <!-- markdownlint-disable MD024 -->
 
 - Created: 2026-06-23
-- Completed:
+- Completed: 2026-07-06
+
+## Cross-Reference Notes
+
+This spec (Created: 2026-06-23) is the definitive authority on the config system. It supersedes all earlier references to `ConfigManager`, `PipelineConfig`, `RunContext`, `find_config_source`, and the plain-dataclass `AudioConversionProfile` / `AudioOutputConfig` / `EncodingProfile`. After this spec is completed, those types no longer exist in the codebase.
+
+| Spec | Created | Relationship |
+|------|---------|--------------|
+| `quality-based-encoding-pipeline` | 2026-03-15 (Completed) | **Superseded.** Introduced `PipelineConfig` as the monolithic flat config model and `ConfigManager` as the single-file YAML loader. Both are deleted by this spec. All `PipelineConfig` fields now live on domain-structured sub-models of `AppConfig`. |
+| `e2e-pipeline-testing` | 2026-03-15 | **Superseded in part.** Test fixtures construct `PipelineConfig(...)` directly and use `ConfigManager`. Those constructors are gone; tests that reference them must be updated to use `load_app_config()` + direct attribute overrides. `ChunkingMode` is no longer set on `PipelineConfig` — it lives on `AppConfig.chunking.mode`. |
+| `pipeline-maturity-refactor` | 2026-03-15 (Completed) | **Superseded in part.** The `PipelineConfig`-based architecture described here is replaced by `AppConfig`. Volatile runtime fields (`source_video`, `work_dir`, `force`) that lived on `PipelineConfig` now travel as plain kwargs through `_build_registry` and land as typed fields on `JobPhaseResult`. |
+| `ffv1-lossless-chunking` | 2026-03-15 (Completed) | **Superseded.** Added `chunking_mode: ChunkingMode` to `PipelineConfig`. That field is deleted from `PipelineConfig` (which is itself deleted). The equivalent now lives at `AppConfig.chunking.mode`. |
+| `phase-object-model` | 2026-03-20 | **Extended.** Established `_build_registry(config: PipelineConfig, ...)` and the phase constructor pattern. This spec changes the signature to `_build_registry(config: AppConfig, source, work_dir, force, cleanup, no_metrics, collector)`. All phase constructors stay `(config, phases, *, collector)` but now receive `AppConfig` instead of `PipelineConfig`. |
+| `audio-processing-maturity` | 2026-03-18 (Completed) | **Superseded in part.** References `ConfigManager` loading the `audio_output` section, and the plain-dataclass `AudioConversionProfile` / `AudioOutputConfig`. Those are deleted. Audio config now lives at `AppConfig.audio` (an `AudioConfig` Pydantic model). `AudioConversionProfile` is a Pydantic model in `app_config.py`. The CLI flags `--audio-convert`, `--audio-codec`, `--audio-bitrate` survive but are applied as direct attribute assignments on `AppConfig.audio.*` instead of being passed through `ConfigManager`. |
+| `merge-phase-revamp` | 2026-03-19 (Completed) | **Superseded in part.** Added `metrics_sampling` to `ConfigManager.get_metrics_sampling()` and `PipelineConfig.metrics_sampling`. Both are gone. The equivalent is `AppConfig.encoding.metrics_sampling`. The `--metrics-sampling` CLI flag survives, applied via `config.encoding.metrics_sampling = value`. |
+| `pipeline-metrics-report` | 2026-06-10 | **Extended.** Added the `collector: MetricsCollector` third parameter to every phase constructor and extended `_build_registry`. This spec further extends `_build_registry` by adding the five volatile kwargs. The `pipeline-metrics-report` spec still references `PipelineConfig` in its design diagrams — those diagrams are now stale; the canonical constructor signature is `(config: AppConfig, phases, *, collector)`. |
+| `project-cleanup` | 2026-06-11 | **Superseded in part.** Several of its bug conditions involve `ConfigManager` deferred imports, `AudioConversionProfile.bitrate` field consolidation, and `ConfigManager.get_audio_output_config()`. All of those are made moot by this spec: `ConfigManager` is deleted entirely, `AudioConversionProfile` is a Pydantic model in `app_config.py` (no `bitrate` field — base bitrate now lives on `AudioConfig.audio_base_bitrate`), and `AudioOutputConfig` is gone. The remaining non-config cleanup items in `project-cleanup` are unaffected. |
+| `windows-long-path` | 2026-06-09 (Completed: 2026-06-13) | **Superseded in part.** References `PipelineConfig.work_dir: Path` accepting `LongPath`. `PipelineConfig` is deleted; `work_dir` now travels as a plain volatile kwarg through `_build_registry` and is stored as a typed `Path` field on `JobPhaseResult`. `LongPath` usage remains correct — callers still wrap `args.work_dir` with `LongPath(...)` in the CLI before passing it as the `work_dir` kwarg to `_build_registry`. |
+
+---
+
+## Cross-Reference Notes
+
+This spec (Created: 2026-06-23) replaces or extends the following earlier specs:
+
+| Spec | Created | Relationship |
+|------|---------|--------------|
+| `quality-based-encoding-pipeline` | 2026-03-15 (Completed) | **Superseded (config).** Introduced `PipelineConfig` and `ConfigManager`. Both are deleted by this spec. Architecture diagrams there are stale — see this spec for the current `AppConfig` structure. |
+| `pipeline-maturity-refactor` | 2026-03-15 (Completed) | **Superseded (config).** Introduced `PipelineConfig` as the primary config model (with `source_video`, `work_dir`, `force` as fields). All three volatile fields now travel as plain kwargs through `_build_registry` and land as typed fields on `JobPhaseResult`. |
+| `ffv1-lossless-chunking` | 2026-03-15 (Completed) | **Superseded (config field).** Introduced `PipelineConfig.chunking_mode`. That field now lives at `AppConfig.chunking.mode`. |
+| `pipeline-ux-improvements` | 2026-03-15 (Completed) | **No config conflict.** Introduced `alive-progress` bars and crop threading. Not affected by this refactor. |
+| `pipeline-correctness-refactor` | 2026-03-16 (Completed) | **No config conflict.** Operated on `models.py` / `constants.py` / `progress.py`. No `ConfigManager` or `PipelineConfig` changes. |
+| `phase-recovery-refactor` | 2026-03-17 | **No config conflict.** Replaced `ProgressTracker` with filesystem-first state files. Config loading was not changed. |
+| `audio-processing-maturity` | 2026-03-18 (Completed) | **Superseded (config section).** Introduced `audio_output` YAML section and `AudioConversionProfile` / `AudioOutputConfig` dataclasses. All three are replaced: `audio_output` → `AppConfig.audio` (`AudioConfig`), dataclasses → Pydantic models in `app_config.py`. |
+| `phase-object-model` | 2026-03-20 | **Extended.** Established `_build_registry(config, phases)` and the `(config, phases)` constructor pattern. This spec changes `_build_registry` to `(config, source, work_dir, force, cleanup, no_metrics, collector)` and changes `config` type from `PipelineConfig` to `AppConfig`. |
+| `merge-phase-revamp` | 2026-03-19 (Completed) | **Superseded (config reference).** Added `metrics_sampling` to `ConfigManager.get_metrics_sampling()` and `PipelineConfig.metrics_sampling`. Both are deleted; the equivalent is `AppConfig.encoding.metrics_sampling`. |
+| `e2e-pipeline-testing` | 2026-03-15 | **Superseded (test fixtures).** Test fixtures constructing `PipelineConfig(...)` are stale. Use `load_app_config()` + attribute overrides. |
+| `pipeline-metrics-report` | 2026-06-10 (Completed) | **Extended.** Extended `_build_registry` signature with `collector`. This spec further extends it with five volatile kwargs. Phase constructors remain `(config, phases, *, collector)` but receive `AppConfig` instead of `PipelineConfig`. |
+
+---
 
 ## Overview
 

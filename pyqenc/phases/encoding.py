@@ -20,11 +20,9 @@ from typing import TYPE_CHECKING, cast
 
 from alive_progress import config_handler
 
-from pyqenc.config import ConfigManager
 from pyqenc.constants import (
     CHUNKS_DIR,
     DEFAULT_METRICS_SAMPLING,
-    ENCODED_ATTEMPT_GLOB_PATTERN,
     ENCODED_ATTEMPT_NAME_PATTERN,
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
@@ -32,7 +30,6 @@ from pyqenc.constants import (
     METRIC_KEY_QUALITY_MEASURE,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
-    THICK_LINE,
     THRESHOLD_ATTEMPTS_WARNING,
     WARNING_SYMBOL,
 )
@@ -65,17 +62,13 @@ from pyqenc.utils.log_format import (
     fmt_chunk_final,
     fmt_chunk_start,
     fmt_metric_summary,
-    fmt_metric_value,
     log_recovery_line,
 )
 from pyqenc.utils.visualization import QualityEvaluator
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 if TYPE_CHECKING:
-    from pyqenc.models import PipelineConfig
-    from pyqenc.phases.chunking import ChunkingPhase, ChunkingPhaseResult
-    from pyqenc.phases.job import JobPhase, JobPhaseResult
-    from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
+    from pyqenc.app_config import AppConfig
 
 _ENCODING_YAML = "encoding.yaml"
 
@@ -1333,7 +1326,7 @@ async def _encode_chunks_parallel(
 def encode_all_chunks(
     chunks:            list[ChunkMetadata],
     reference_dir:     Path,
-    strategies:        list[str],
+    strategies:        list[Strategy],
     quality_targets:   list[QualityTarget],
     work_dir:          Path,
     collector:         MetricsCollector,
@@ -1358,7 +1351,7 @@ def encode_all_chunks(
     Args:
         chunks:            List of chunks to encode.
         reference_dir:     Directory containing reference chunks (already cropped).
-        strategies:        List of encoding strategy name strings to use.
+        strategies:        List of resolved ``Strategy`` objects to use.
         quality_targets:   Quality targets to meet.
         work_dir:          Working directory for artifacts.
         collector:         Metrics collector for timing and convergence tracking.
@@ -1431,7 +1424,7 @@ def encode_all_chunks(
 
     # --- Step 3: Artifact recovery via _recover_encoding_attempts (Req 3.6) ---
     chunk_ids      = [c.chunk_id for c in chunks]
-    strategy_names = [s if isinstance(s, str) else s.name for s in strategies]
+    strategy_names = [s.name for s in strategies]
     phase_recovery = _recover_encoding_attempts(work_dir, chunk_ids, strategy_names)
 
     if dry_run:
@@ -1446,9 +1439,6 @@ def encode_all_chunks(
         result.reused_count = complete_count
         return result
 
-    # Resolve Strategy objects (with codec) for the parallel worker
-    resolved_strategies: list[Strategy] = ConfigManager().resolve_strategies(strategy_names)
-
     # Create encoder
     encoder = ChunkEncoder(
         quality_evaluator = QualityEvaluator(work_dir),
@@ -1462,8 +1452,8 @@ def encode_all_chunks(
 
     # Run parallel encoding — COMPLETE pairs are skipped inside _encode_chunks_parallel
     logger.debug("Starting parallel encoding with %d workers", max_parallel)
-    total_seconds = sum(c.end_timestamp - c.start_timestamp for c in chunks) * len(resolved_strategies)
-    with ProgressBar(total_seconds, title="Encoding", total_count=len(chunks) * len(resolved_strategies)) as advance:
+    total_seconds = sum(c.end_timestamp - c.start_timestamp for c in chunks) * len(strategies)
+    with ProgressBar(total_seconds, title="Encoding", total_count=len(chunks) * len(strategies)) as advance:
         # Update the bar for completed chunks
         chunks_by_id = {c.chunk_id: c for c in chunks}
         for r in phase_recovery.pairs.values():
@@ -1476,7 +1466,7 @@ def encode_all_chunks(
                 encoder         = encoder,
                 chunks          = chunks,
                 reference_dir   = reference_dir,
-                strategies      = resolved_strategies,
+                strategies      = strategies,
                 quality_targets = quality_targets,
                 max_parallel    = max_parallel,
                 force           = force,
@@ -1551,7 +1541,7 @@ class EncodingPhase:
 
     def __init__(
         self,
-        config:    "PipelineConfig",
+        config:    "AppConfig",
         phases:    "dict[type[Phase], Phase] | None" = None,
         *,
         collector: "MetricsCollector",
@@ -1560,11 +1550,11 @@ class EncodingPhase:
         from pyqenc.phases.job import JobPhase as _JobPhase
         from pyqenc.phases.optimization import OptimizationPhase as _OptimizationPhase
 
-        self._config:       "PipelineConfig"            = config
+        self._config:       "AppConfig"                 = config
         self._collector:    "MetricsCollector"          = collector
-        self._job:          "_JobPhase | None"          = cast("_JobPhase",          phases[_JobPhase])          if phases else None
-        self._chunking:     "_ChunkingPhase | None"     = cast("_ChunkingPhase",     phases[_ChunkingPhase])     if phases else None
-        self._optimization: "_OptimizationPhase | None" = cast("_OptimizationPhase", phases[_OptimizationPhase]) if phases else None
+        self._job:          "_JobPhase | None"          = cast("_JobPhase",          phases.get(_JobPhase))          if phases else None
+        self._chunking:     "_ChunkingPhase | None"     = cast("_ChunkingPhase",     phases.get(_ChunkingPhase))     if phases else None
+        self._optimization: "_OptimizationPhase | None" = cast("_OptimizationPhase", phases.get(_OptimizationPhase)) if phases else None
         self.params:        "EncodingParams | None"     = None
         self.result:        "EncodingPhaseResult | None" = None
         self.quality_labels: dict[str, str]             = {}
@@ -1651,7 +1641,7 @@ class EncodingPhase:
         logger.info("Strategies:  %s", ", ".join(s.name for s in strategies) if strategies else "none")
         if crop:
             logger.info("Crop:        %s", crop)
-        logger.info("Targets:     %s", ", ".join(f"{t.metric}-{t.statistic}≥{t.value}" for t in self._config.quality_targets))
+        logger.info("Targets:     %s", ", ".join(f"{t.metric}-{t.statistic}≥{t.value}" for t in self._job.result.config.encoding.resolved_targets))
 
         complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
         pending_count  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
@@ -1750,7 +1740,7 @@ class EncodingPhase:
         Returns:
             List of ``EncodedArtifact`` objects.
         """
-        work_dir = self._config.work_dir
+        work_dir = self._job.result.work_dir  # type: ignore[union-attr]
         enc_dir  = work_dir / ENCODING_WORKSPACE_DIR
         out_dir  = work_dir / ENCODED_OUTPUT_DIR
         yaml_path = work_dir / _ENCODING_YAML
@@ -1776,7 +1766,7 @@ class EncodingPhase:
                 # Crop mismatch: requires --force to proceed
                 crop_changed = persisted_enc.crop != crop
                 if crop_changed:
-                    if self._config.force:
+                    if force_wipe:
                         logger.warning(
                             "Crop params changed since last encoding run "
                             "(persisted=%s, current=%s) — --force: deleting encoding artifacts",
@@ -1870,7 +1860,7 @@ class EncodingPhase:
         Returns:
             ``EncodingPhaseResult`` after encoding.
         """
-        work_dir = self._config.work_dir
+        work_dir = self._job.result.work_dir  # type: ignore[union-attr]
 
         # Resolve chunks and strategies from dependencies
         chunking_result     = self._chunking.result  # type: ignore[union-attr]
@@ -1908,18 +1898,18 @@ class EncodingPhase:
         enc_result = encode_all_chunks(
             chunks           = chunks,
             reference_dir    = reference_dir,
-            strategies       = strategy_names,
-            quality_targets  = self._config.quality_targets,
+            strategies       = strategies,
+            quality_targets  = self._job.result.config.encoding.resolved_targets,  # type: ignore[union-attr]
             work_dir         = work_dir,
             collector        = self._collector,
-            max_parallel     = self._config.max_parallel,
-            force            = self._config.force,
+            max_parallel     = self._job.result.config.encoding.max_parallel,  # type: ignore[union-attr]
+            force            = self._job.result.force_wipe,  # type: ignore[union-attr]
             dry_run          = False,
             crop_params      = crop,
             encoding_yaml    = encoding_yaml,
-            cleanup_level    = self._config.cleanup,
-            visual_hash      = self._config.visual_hash,
-            metrics_sampling = self._config.metrics_sampling,
+            cleanup_level    = self._job.result.cleanup,  # type: ignore[union-attr]
+            visual_hash      = self._job.result.config.encoding.visual_hash,  # type: ignore[union-attr]
+            metrics_sampling = self._job.result.config.encoding.metrics_sampling,  # type: ignore[union-attr]
         )
 
         if enc_result.outcome == PhaseOutcome.FAILED:

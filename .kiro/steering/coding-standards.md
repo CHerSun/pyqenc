@@ -6,6 +6,7 @@
 - All functions, classes and class members MUST BE type-hinted.
 - We do not keep legacy code for the sake of tests or backwards compatibility. Project is in pre-alpha state, there's no public api yet. Code cleanness is paramount over the legacy compatibility.
 - Type-hinting using newer rules: `int|None` instead of `Optional[int]`, newer generic classes without imports from `typing` where possible.
+- Use top-level imports. In-place (local) imports are only acceptable when top-level imports are not possible, e.g. to break circular dependencies.
 - Use our `ProgressBar` for progress display to the end user for long tasks.
 - For any artifacts use .tmp-then-rename protocol for atomicity and consistency enforcement.
 - For subprocess cmd building use type hint `list[str|os.PathLike]` and supply `Path` typed variables directly (without converting to `str`).

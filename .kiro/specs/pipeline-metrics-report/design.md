@@ -23,6 +23,12 @@ Despite the name overlap, `unified-metrics-visualization` covers video quality m
 
 `pyqenc/utils/disk_space.py` estimates required space *before* the pipeline runs (pre-flight check). This spec's `_measure_space()` in `metrics.py` measures actual space *during/after* the run (reporting). Complementary, not overlapping.
 
+### Relation to `config-refactor` (2026-06-23)
+
+`config-refactor` extends `_build_registry` further: the signature changes from `(config: PipelineConfig, collector: MetricsCollector)` to `(config: AppConfig, source: Path, work_dir: Path, force: bool, cleanup: CleanupLevel, no_metrics: bool, collector: MetricsCollector)`. The architecture diagrams in this spec showing `PipelineConfig` flowing into `_build_registry` are stale — the type is now `AppConfig`. Phase constructors stay `(config, phases, *, collector)` but receive `AppConfig` instead of `PipelineConfig`. The `no_metrics` volatile flag (passed to `_build_registry`) controls whether `YamlMetricsCollector` or `NoOpMetricsCollector` is constructed — the logic described here is unchanged, only the flag source changes (from `PipelineConfig.no_metrics` to a plain kwarg).
+
+---
+
 ## Overview
 
 This feature adds a `MetricsCollector` component that is injected into every phase constructor and accumulates wall-clock timing, disk space, and CRF convergence data throughout a pipeline run. The data is persisted incrementally to `metrics.yaml` in the work directory root using the `.tmp`-then-rename atomic write protocol. The report survives interruptions and resumes across runs.

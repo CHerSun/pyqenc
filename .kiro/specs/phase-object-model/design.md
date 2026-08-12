@@ -4,6 +4,16 @@
 
 - Created: 2026-03-20
 
+## Cross-Reference Notes
+
+**Note (2026-06-23 — extended by `config-refactor`):** The `config-refactor` spec (Created: 2026-06-23) changes the `_build_registry` signature and the type flowing into phases:
+
+- `_build_registry(config: PipelineConfig, collector: MetricsCollector)` → `_build_registry(config: AppConfig, source: Path, work_dir: Path, force: bool, cleanup: CleanupLevel, no_metrics: bool, collector: MetricsCollector)`. The five new kwargs are volatile per-run parameters; they are forwarded only to `JobPhase` and stored as typed fields on `JobPhaseResult`.
+- All phases now receive `AppConfig` instead of `PipelineConfig`. The architecture diagram in this spec showing `PipelineConfig → Orchestrator` is stale; it should read `AppConfig → _build_registry`.
+- `phase-object-model` established the `(config, phases)` constructor pattern. `pipeline-metrics-report` extended it to `(config, phases, *, collector)`. `config-refactor` keeps that signature but changes `config` from `PipelineConfig` to `AppConfig`.
+
+---
+
 ## Overview
 
 This refactor restructures the pipeline from a collection of standalone functions driven by a monolithic orchestrator into a graph of self-contained `Phase` objects. Each phase owns its dependencies, artifact enumeration, recovery, invalidation, execution, and logging. The orchestrator becomes a thin driver that builds the phase registry and iterates it.

@@ -19,14 +19,12 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
+from pyqenc.app_config import load_app_config
 from pyqenc.models import (
-    ChunkingMode,
     CleanupLevel,
     CropParams,
     PhaseOutcome,
-    PipelineConfig,
     QualityTarget,
-    Strategy,
     VideoMetadata,
 )
 from pyqenc.phases.job import JobPhase, JobPhaseResult
@@ -37,10 +35,8 @@ from pyqenc.state import JobState
 # Helpers
 # ---------------------------------------------------------------------------
 
-from pyqenc.config import ConfigManager
-
 _QUALITY_TARGETS = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
-_STRATEGY        = ConfigManager().resolve_strategies(["slow+h265-aq"])[0]
+_APP_CONFIG      = load_app_config()
 
 
 def _make_source(tmp_path: Path, size: int = 1024) -> Path:
@@ -50,33 +46,23 @@ def _make_source(tmp_path: Path, size: int = 1024) -> Path:
     return src
 
 
-def _make_config(
-    tmp_path: Path,
-    source: Path,
-    force: bool = False,
-    crop_params: CropParams | None = None,
-) -> PipelineConfig:
-    return PipelineConfig(
-        source_video    = source,
-        work_dir        = tmp_path / "work",
-        quality_targets = _QUALITY_TARGETS,
-        strategies      = [_STRATEGY],
-        optimize        = False,
-        cleanup         = CleanupLevel.NONE,
-        chunking_mode   = ChunkingMode.LOSSLESS,
-        force           = force,
-        crop_params     = crop_params,
-    )
-
-
 def _make_phase(
     tmp_path: Path,
     source: Path,
     force: bool = False,
     crop_params: CropParams | None = None,
 ) -> JobPhase:
-    config = _make_config(tmp_path, source, force=force, crop_params=crop_params)
-    return JobPhase(config, collector=MagicMock())
+    config = _APP_CONFIG.model_copy(deep=True)
+    config.encoding.crop_params = crop_params
+    return JobPhase(
+        config,
+        source     = source,
+        work_dir   = tmp_path / "work",
+        force      = force,
+        cleanup    = CleanupLevel.NONE,
+        no_metrics = True,
+        collector  = MagicMock(),
+    )
 
 
 def _persist_job(work_dir: Path, source: Path, file_size: int | None = None) -> None:

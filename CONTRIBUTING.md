@@ -53,12 +53,12 @@ pyqenc/
 │   ├── quality.py              # Quality evaluation
 │   ├── default_config.yaml     # Built-in default config
 │   ├── phases/                 # Phase implementations
-│   │   ├── audio.py                # Phase 5 - audio works
+│   │   ├── audio.py                # Phase 2 - audio processing
 │   │   ├── chunking.py             # Phase 3 - scene detection & chunking
-│   │   ├── encoding.py             # Phase 4 - encoding of chunks
+│   │   ├── encoding.py             # Phase 5 - encoding of chunks
 │   │   ├── extraction.py           # Phase 1 - extraction
 │   │   ├── merge.py                # Phase 6 - merging back videos
-│   │   └── optimization.py         # Phase 2 - optimization [optional] - best strategy search
+│   │   └── optimization.py         # Phase 4 - optimization [optional] - best strategy search
 │   └── utils/                  # Utility modules
 │       ├── cleanup.py              # Automatic cleanup routines
 │       ├── disk_space.py           # Required disk space estimations
@@ -177,10 +177,10 @@ The pipeline follows a phased architecture where each phase:
 
 0. **Job**: starting point for all runs, ensures we are working with expected source and detects black borders.
 1. **Extraction**: Extract video/audio streams.
-2. **Chunking**: Split video stream into scene-based chunks.
-3. **Optimization** (optional): Test strategies to find the optimal one.
-4. **Encoding**: Encode chunks with CRF adjustment to meet quality targets per scene.
-5. **Audio**: Process audio with day/night normalization and different downmixing strategies.
+2. **Audio**: Process audio with day/night normalization and different downmixing strategies.
+3. **Chunking**: Split video stream into scene-based chunks.
+4. **Optimization** (optional): Test strategies to find the optimal one.
+5. **Encoding**: Encode chunks with CRF adjustment to meet quality targets per scene.
 6. **Merge**: Concatenate winning encoded chunks into the final video streams.
 7. To merge video and audio streams is on the end-user, as we don't know what exactly he wants. Current include/exclude/keep patterns are not clear enough to make the decision.
 

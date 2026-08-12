@@ -4,6 +4,18 @@
 
 - Created: 2026-06-11
 
+## Cross-Reference Notes
+
+**Note (2026-06-23 — superseded in part by `config-refactor`):** The `config-refactor` spec (Created: 2026-06-23) makes several of this spec's bug conditions moot:
+
+- **Bug Condition: deferred `ConfigManager` import in `audio.py` / `optimization.py`** — `ConfigManager` is deleted entirely by `config-refactor`. The deferred import and its runtime usage are gone with it.
+- **Bug Condition: `AudioConversionProfile.bitrate` field consolidation** — `AudioConversionProfile` is moved to `app_config.py` as a Pydantic model with no `bitrate` field. `base_bitrate` now lives at `AppConfig.audio.audio_base_bitrate`. The scaling logic remains in exactly one place.
+- **Bug Condition: `AudioOutputConfig` field structure** — `AudioOutputConfig` is deleted; its responsibilities are absorbed by `AppConfig.audio: AudioConfig`.
+- **Bug Condition: `ConfigManager.get_audio_output_config()`** — method gone; audio config is accessed directly via `AppConfig.audio.*`.
+- The remaining non-config cleanup items (import hygiene, `__all__`, `getattr` on typed dataclasses, `Phase` ABC, etc.) are unaffected by `config-refactor`.
+
+---
+
 ## Overview
 
 The pyqenc codebase has accumulated fourteen categories of structural defects during

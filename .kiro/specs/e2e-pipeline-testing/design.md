@@ -2,6 +2,16 @@
 
 - Created: 2026-03-15
 
+## Cross-Reference Notes
+
+**Note (2026-06-23 — superseded by `config-refactor`):** The `config-refactor` spec (Created: 2026-06-23) replaces the config infrastructure this spec assumes:
+
+- Test fixtures constructing `PipelineConfig(...)` directly are stale. `PipelineConfig` is deleted. The correct pattern is `load_app_config()` followed by direct attribute overrides, then calling `_build_registry(config, source=..., work_dir=..., ...)`.
+- `ChunkingMode` is no longer a field on `PipelineConfig`. It lives at `AppConfig.chunking.mode`.
+- `PipelineOrchestrator(config, tracker, config_manager)` — `config_manager` no longer exists; `tracker` was removed by `phase-object-model`. The orchestrator now receives a pre-built registry.
+
+---
+
 ## Overview
 
 This document describes the design for fixing all failing tests and validating the pyqenc pipeline end-to-end after the `ffv1-lossless-chunking` implementation. There are four distinct categories of failures to address, plus a manual CLI test plan.

@@ -145,7 +145,7 @@ debugging.  This is an internal mechanics flag — separate from user-facing cle
 settings — because artifact recovery is based on the sidecar YAML (which stores the
 full ``MetricStats`` snapshot) rather than the raw logs."""
 
-# Config file locations (used by ConfigManager and the `config` subcommand)
+# Config file locations (used by load_app_config and the `config` subcommand)
 CONFIG_FILENAME_CWD  = "pyqenc.yaml"
 """Config filename searched in the current working directory."""
 CONFIG_FILENAME_HOME = "config.yaml"

@@ -203,48 +203,39 @@ def test_resume_bad_file_starts_fresh(
 
 from unittest.mock import MagicMock
 
+from pyqenc.app_config import AppConfig, load_app_config
 from pyqenc.metrics import NoOpMetricsCollector
-from pyqenc.models import (
-    ChunkingMode,
-    CleanupLevel,
-    PipelineConfig,
-    QualityTarget,
-    Strategy,
-)
 
 
-def _make_pipeline_config(tmp_path: Path) -> PipelineConfig:
-    """Return a minimal ``PipelineConfig`` for phase constructor tests."""
-    source = tmp_path / "source.mkv"
-    source.write_bytes(b"\x00" * 64)
-    return PipelineConfig(
-        source_video    = source,
-        work_dir        = tmp_path / "work",
-        quality_targets = [],
-        strategies      = [],
-        optimize        = False,
-        max_parallel    = 1,
-        include         = None,
-        exclude         = None,
-        cleanup         = CleanupLevel.NONE,
-        chunking_mode   = ChunkingMode.LOSSLESS,
-        force           = False,
-    )
+def _make_app_config() -> AppConfig:
+    """Return a minimal ``AppConfig`` for phase constructor tests."""
+    return load_app_config()
 
 
 def test_job_phase_stores_collector(tmp_path: Path) -> None:
     """JobPhase must store the injected collector as self._collector."""
     from pyqenc.phases.job import JobPhase
-    config    = _make_pipeline_config(tmp_path)
+    from pyqenc.models import CleanupLevel
+    config    = _make_app_config()
     collector = NoOpMetricsCollector()
-    phase     = JobPhase(config, collector=collector)
+    source    = tmp_path / "source.mkv"
+    source.write_bytes(b"\x00" * 64)
+    phase     = JobPhase(
+        config,
+        collector  = collector,
+        source     = source,
+        work_dir   = tmp_path / "work",
+        force      = False,
+        cleanup    = CleanupLevel.NONE,
+        no_metrics = False,
+    )
     assert phase._collector is collector
 
 
 def test_extraction_phase_stores_collector(tmp_path: Path) -> None:
     """ExtractionPhase must store the injected collector as self._collector."""
     from pyqenc.phases.extraction import ExtractionPhase
-    config    = _make_pipeline_config(tmp_path)
+    config    = _make_app_config()
     collector = NoOpMetricsCollector()
     phase     = ExtractionPhase(config, collector=collector)
     assert phase._collector is collector
@@ -253,7 +244,7 @@ def test_extraction_phase_stores_collector(tmp_path: Path) -> None:
 def test_chunking_phase_stores_collector(tmp_path: Path) -> None:
     """ChunkingPhase must store the injected collector as self._collector."""
     from pyqenc.phases.chunking import ChunkingPhase
-    config    = _make_pipeline_config(tmp_path)
+    config    = _make_app_config()
     collector = NoOpMetricsCollector()
     phase     = ChunkingPhase(config, collector=collector)
     assert phase._collector is collector
@@ -262,7 +253,7 @@ def test_chunking_phase_stores_collector(tmp_path: Path) -> None:
 def test_optimization_phase_stores_collector(tmp_path: Path) -> None:
     """OptimizationPhase must store the injected collector as self._collector."""
     from pyqenc.phases.optimization import OptimizationPhase
-    config    = _make_pipeline_config(tmp_path)
+    config    = _make_app_config()
     collector = NoOpMetricsCollector()
     phase     = OptimizationPhase(config, collector=collector)
     assert phase._collector is collector
@@ -271,7 +262,7 @@ def test_optimization_phase_stores_collector(tmp_path: Path) -> None:
 def test_encoding_phase_stores_collector(tmp_path: Path) -> None:
     """EncodingPhase must store the injected collector as self._collector."""
     from pyqenc.phases.encoding import EncodingPhase
-    config    = _make_pipeline_config(tmp_path)
+    config    = _make_app_config()
     collector = NoOpMetricsCollector()
     phase     = EncodingPhase(config, collector=collector)
     assert phase._collector is collector
@@ -280,7 +271,7 @@ def test_encoding_phase_stores_collector(tmp_path: Path) -> None:
 def test_audio_phase_stores_collector(tmp_path: Path) -> None:
     """AudioPhase must store the injected collector as self._collector."""
     from pyqenc.phases.audio import AudioPhase
-    config    = _make_pipeline_config(tmp_path)
+    config    = _make_app_config()
     collector = NoOpMetricsCollector()
     phase     = AudioPhase(config, collector=collector)
     assert phase._collector is collector
@@ -289,7 +280,7 @@ def test_audio_phase_stores_collector(tmp_path: Path) -> None:
 def test_merge_phase_stores_collector(tmp_path: Path) -> None:
     """MergePhase must store the injected collector as self._collector."""
     from pyqenc.phases.merge import MergePhase
-    config    = _make_pipeline_config(tmp_path)
+    config    = _make_app_config()
     collector = NoOpMetricsCollector()
     phase     = MergePhase(config, collector=collector)
     assert phase._collector is collector

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
 
 from alive_progress import alive_bar, config_handler
@@ -327,7 +328,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pyqenc.metrics import MetricsCollector
-    from pyqenc.models import PipelineConfig
     from pyqenc.phase import Phase, PhaseResult
     from pyqenc.phases.extraction import ExtractionPhase
     from pyqenc.phases.job import JobPhase, JobPhaseResult
@@ -412,7 +412,7 @@ class ChunkingPhase:
 
     def __init__(
         self,
-        config:    "PipelineConfig",
+        config:    "AppConfig",
         phases:    "dict[type[Phase], Phase] | None" = None,
         *,
         collector: "MetricsCollector",
@@ -424,9 +424,9 @@ class ChunkingPhase:
 
         self._config    = config
         self._collector: "MetricsCollector" = collector
-        self._job:        "_JobPhase | None"        = cast(_JobPhase,        phases[_JobPhase])        if phases else None
-        self._extraction: "_ExtractionPhase | None" = cast(_ExtractionPhase, phases[_ExtractionPhase]) if phases else None
-        self.params       = ChunkingParams(chunking_mode=config.chunking_mode.value, scenes=[])
+        self._job:        "_JobPhase | None"        = cast(_JobPhase,        phases.get(_JobPhase))        if phases else None
+        self._extraction: "_ExtractionPhase | None" = cast(_ExtractionPhase, phases.get(_ExtractionPhase)) if phases else None
+        self.params       = ChunkingParams(chunking_mode=config.chunking.mode.value, scenes=[])
         self.result:      "ChunkingPhaseResult | None" = None
         self.dependencies: "list[Phase]"            = [d for d in [self._job, self._extraction] if d is not None]
         # Set by _recover() when a chunking-mode mismatch is detected
@@ -500,7 +500,7 @@ class ChunkingPhase:
         force_wipe = getattr(job_result, "force_wipe", False)
 
         # Key parameters
-        logger.info("Mode:  %s", self._config.chunking_mode.value)
+        logger.info("Mode:  %s", self._job.result.config.chunking.mode.value)  # type: ignore[union-attr]
 
         from pyqenc.metrics import MetricKey as _MetricKey
         with self._collector.time(_MetricKey.RECOVERY):
@@ -616,7 +616,7 @@ class ChunkingPhase:
         Returns:
             List of ``ChunkArtifact`` objects.
         """
-        work_dir   = self._config.work_dir
+        work_dir   = self._job.result.work_dir  # type: ignore[union-attr]
         chunks_dir = work_dir / CHUNKS_DIR
         yaml_path  = work_dir / _CHUNKING_YAML
 
@@ -656,7 +656,7 @@ class ChunkingPhase:
             persisted_mode = chunking_params.chunking_mode
             current_mode   = self.params.chunking_mode
             if persisted_mode is not None and persisted_mode != current_mode:
-                if self._config.force and execute:
+                if self._job.result.force_wipe and execute:  # type: ignore[union-attr]
                     logger.warning(
                         "Chunking mode changed (%s → %s) — --force: wiping chunks/ and downstream artifacts",
                         persisted_mode, current_mode,
@@ -757,7 +757,7 @@ class ChunkingPhase:
             ``ChunkingPhaseResult`` after chunking.
         """
         from pyqenc.metrics import MetricKey
-        work_dir   = self._config.work_dir
+        work_dir   = self._job.result.work_dir  # type: ignore[union-attr]
         chunks_dir = work_dir / CHUNKS_DIR
         chunks_dir.mkdir(parents=True, exist_ok=True)
 
@@ -777,7 +777,7 @@ class ChunkingPhase:
         job_state  = getattr(job_result, "job", None)
         if job_state is None:
             from pyqenc.state import JobState as _JobState
-            job_state = _JobState(source=VideoMetadata(path=self._config.source_video))
+            job_state = _JobState(source=VideoMetadata(path=job_result.source))
         video_meta = job_state.source
 
         # Use recovered scene boundaries or run detection
@@ -793,8 +793,8 @@ class ChunkingPhase:
                     with self._collector.time(MetricKey.CHUNKING, "scene_detect"):
                         boundaries = detect_scenes(
                             video_meta       = video_meta,
-                            scene_threshold  = 27.0,
-                            min_scene_length = 15,
+                            scene_threshold  = self._job.result.config.chunking.scene_threshold,  # type: ignore[union-attr]
+                            min_scene_length = self._job.result.config.chunking.min_scene_length,  # type: ignore[union-attr]
                         )
                 self.params.scenes = boundaries
                 self.params.save(work_dir / _CHUNKING_YAML)
@@ -830,7 +830,7 @@ class ChunkingPhase:
                         output_dir    = chunks_dir,
                         boundaries    = boundaries,
                         recovery      = recovery_obj,
-                        chunking_mode = self._config.chunking_mode,
+                        chunking_mode = self._job.result.config.chunking.mode,  # type: ignore[union-attr]
                         collector     = self._collector,
                     )
         except Exception as exc:
@@ -870,7 +870,7 @@ class ChunkingPhase:
         if video_meta is not None:
             return video_meta.path
         # Fallback: scan extracted/ for a .mkv file
-        extracted_dir = self._config.work_dir / EXTRACTED_DIR
+        extracted_dir = self._job.result.work_dir / EXTRACTED_DIR  # type: ignore[union-attr]
         if extracted_dir.exists():
             for f in sorted(extracted_dir.glob("*.mkv")):
                 if not f.name.endswith(TEMP_SUFFIX):

@@ -29,13 +29,11 @@ from pyqenc.constants import (
 )
 from pyqenc.metrics import (
     METRICS_YAML_FILENAME,
-    NoOpMetricsCollector,
-    YamlMetricsCollector,
-    flush_active_collector,
+    MetricsCollector,
     register_active_collector,
 )
-from pyqenc.models import CleanupLevel, PhaseOutcome, PipelineConfig
-from pyqenc.phase import Phase, PhaseResult, _build_registry
+from pyqenc.models import CleanupLevel, PhaseOutcome
+from pyqenc.phase import Phase, PhaseResult
 
 logger = logging.getLogger(__name__)
 
@@ -70,26 +68,40 @@ class PipelineResult:
 # ---------------------------------------------------------------------------
 
 class PipelineOrchestrator:
-    """Thin driver that constructs and runs phase objects in execution order.
+    """Thin driver that iterates pre-built phase objects in execution order.
 
-    Constructs the appropriate :class:`MetricsCollector` based on
-    ``config.no_metrics``, registers signal handlers and an ``atexit`` hook
-    for graceful metrics flushing on abnormal exit, and calls
-    ``collector.flush(partial=False)`` after all phases complete successfully.
+    The registry and collector are constructed by the caller (``cli.py`` /
+    ``api.py``) before being passed here.  The orchestrator only iterates,
+    logs, and manages the metrics flush lifecycle.
 
     Args:
-        config: Full pipeline configuration shared by all phases.
+        registry:   Ordered phase registry produced by ``_build_registry``.
+        collector:  Metrics collector for timing instrumentation and flush.
+        no_metrics: When ``True``, skip writing ``metrics.yaml`` at the end.
+        work_dir:   Pipeline work directory (used to log the metrics path).
+        cleanup:    Artifact retention policy for post-pipeline cleanup.
     """
 
-    def __init__(self, config: PipelineConfig) -> None:
-        self.config = config
+    def __init__(
+        self,
+        registry:   dict[type[Phase], Phase],
+        collector:  MetricsCollector,
+        *,
+        no_metrics: bool,
+        work_dir:   Path,
+        cleanup:    CleanupLevel,
+    ) -> None:
+        self._registry   = registry
+        self._collector  = collector
+        self._no_metrics = no_metrics
+        self._work_dir   = work_dir
+        self._cleanup    = cleanup
 
     def run(self, dry_run: bool = True) -> PipelineResult:
         """Execute the pipeline by iterating phase objects in registry order.
 
-        Builds the phase registry, then calls ``phase.run(dry_run)`` on each
-        phase in insertion order.  Stops on the first ``FAILED`` or (in dry-run
-        mode) ``DRY_RUN`` outcome.
+        Calls ``phase.run(dry_run)`` on each phase in insertion order.
+        Stops on the first ``FAILED`` or (in dry-run mode) ``DRY_RUN`` outcome.
 
         Args:
             dry_run: When ``True``, phases report what work would be done
@@ -98,25 +110,12 @@ class PipelineOrchestrator:
         Returns:
             ``PipelineResult`` summarising the run.
         """
-        # --- Metrics collector construction (Req 1.1, 1.6, 6.3, 8.2, 8.3) ---
-        collector: MetricsCollector
-        if self.config.no_metrics:
-            collector = NoOpMetricsCollector()
-        else:
-            collector = YamlMetricsCollector(
-                work_dir   = self.config.work_dir,
-                force_wipe = self.config.force,
-            )
-            register_active_collector(collector)
-
-        registry = _build_registry(self.config, collector)
-
         phases_executed:     list[str] = []
         phases_reused:       list[str] = []
         phases_needing_work: list[str] = []
         output_files:        list[Path] = []
 
-        phases = list(registry.values())
+        phases = list(self._registry.values())
 
         for phase in phases:
             result: PhaseResult = phase.run(dry_run=dry_run)
@@ -144,7 +143,7 @@ class PipelineOrchestrator:
                     phase.name,
                     result.error or result.message,
                 )
-                if not self.config.no_metrics:
+                if not self._no_metrics:
                     register_active_collector(None)
                 return PipelineResult(
                     success             = False,
@@ -168,16 +167,16 @@ class PipelineOrchestrator:
         logger.info(THICK_LINE)
 
         # Final metrics flush on successful completion (Req 5.4, 5.5, 8.3)
-        if not self.config.no_metrics:
+        if not self._no_metrics:
             if not dry_run:
-                collector.flush()
-                metrics_path = self.config.work_dir / METRICS_YAML_FILENAME
+                self._collector.flush()
+                metrics_path = self._work_dir / METRICS_YAML_FILENAME
                 logger.info("Metrics written to: %s", metrics_path)
             register_active_collector(None)
 
         # Post-pipeline full cleanup (Req 12.4, 12.5)
-        if not dry_run and self.config.cleanup >= CleanupLevel.ALL:
-            _run_post_pipeline_cleanup(self.config.work_dir, registry)
+        if not dry_run and self._cleanup >= CleanupLevel.ALL:
+            _run_post_pipeline_cleanup(self._work_dir, self._registry)
 
         return PipelineResult(
             success             = True,

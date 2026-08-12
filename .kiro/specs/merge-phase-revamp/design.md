@@ -10,6 +10,7 @@
 | Spec | Created | Relationship |
 |------|---------|--------------|
 | `pts-preservation` | 2026-04-29 (Completed) | **Supersedes this spec in part.** `pts-preservation` replaces the ffmpeg concat demuxer path introduced here (the `concat_<safe_name>.txt` file and the `_execute_merge` ffmpeg concat logic) with `mkvmerge` + a JSON options file. The Python string concatenation bug (`"+genpts"` missing comma) that was introduced by this spec is fixed by `pts-preservation` Requirement 7, even though the ffmpeg concat path becomes dead code after the switch. |
+| `config-refactor` | 2026-06-23 | **Supersedes config references.** This spec added `metrics_sampling` to `ConfigManager.get_metrics_sampling()` and `PipelineConfig.metrics_sampling`. Both `ConfigManager` and `PipelineConfig` are deleted by `config-refactor`. The equivalent setting is now `AppConfig.encoding.metrics_sampling`. The `--metrics-sampling` CLI flag survives; it is applied as `config.encoding.metrics_sampling = value` after `load_app_config()`. |
 
 ---
 

@@ -12,14 +12,13 @@ import logging
 import os
 import re
 import subprocess
-from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum, IntEnum
 from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import (  # noqa: F401 (ConfigDict used in PipelineConfig)
+from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
@@ -28,8 +27,6 @@ from pydantic import (  # noqa: F401 (ConfigDict used in PipelineConfig)
 )
 
 from pyqenc.constants import (
-    DEFAULT_MAX_PARALLEL,
-    DEFAULT_METRICS_SAMPLING,
     DOWN_ARROW,
     LEFT_ARROW,
     RIGHT_ARROW,
@@ -39,7 +36,7 @@ from pyqenc.constants import (
 )
 
 if TYPE_CHECKING:
-    from pyqenc.phases.extraction import VideoStream
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -929,70 +926,3 @@ class CropParams(BaseModel):
                 f"Invalid crop format: '{crop_str}'. Expected 2 or 4 values "
                 f"(e.g., '140 140' or '140 140 0 0')"
             )
-
-
-# ---------------------------------------------------------------------------
-# Pipeline configuration
-# ---------------------------------------------------------------------------
-
-class PipelineConfig(BaseModel):
-    """Configuration for complete pipeline execution.
-
-    Attributes:
-        source_video:       Path to source video file.
-        work_dir:           Working directory for intermediate files.
-        quality_targets:    List of quality targets to meet.
-        strategies:         List of encoding strategies to use.
-        optimize:           Whether to search for optimal strategy.
-        max_parallel:       Maximum concurrent encoding processes.
-        metrics_sampling:   Frame subsampling for metric calculation.
-        log_level:          Logging level (debug, info, warning, critical).
-        crop_params:        Manual crop parameters (``None`` for auto-detect).
-        include:            Regex pattern to include streams (applied to all stream types).
-        exclude:            Regex pattern to exclude streams (applied to all stream types).
-        cleanup:            Cleanup level controlling intermediate file retention.
-        chunking_mode:      Chunking strategy — lossless FFV1 (default) or stream-copy remux.
-        force:              When True alongside execute mode, delete all artifacts and reset state
-                            when a source-file mismatch is detected, then continue with the new source.
-        audio_convert:      Regex pattern selecting processed audio files to convert to the final
-                            delivery format. Overrides ``audio_output.convert_filter`` from config.
-        audio_codec:        Override audio codec for all conversion profiles (e.g. ``'aac'``).
-        audio_base_bitrate: Base bitrate for 2.0 stereo conversion (e.g. ``'192k'``). Bitrates for
-                            other channel layouts are scaled proportionally by channel count.
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    source_video:       Path
-    work_dir:           Path
-    quality_targets:    list[QualityTarget]
-    strategies:         list[Strategy]
-    optimize:           bool              = False
-    """Whether to search for optimal strategy (optimization phase)."""
-    max_parallel:       int               = DEFAULT_MAX_PARALLEL
-    """Maximum concurrent encoding processes."""
-    metrics_sampling:   int               = DEFAULT_METRICS_SAMPLING
-    """Frame subsampling for metric calculation. 10 is the default - good tradeoff between speed and accuracy."""
-    log_level:          str               = "info"
-    crop_params:        CropParams | None = None
-    include:            str | None        = None
-    exclude:            str | None        = None
-    cleanup:            CleanupLevel      = CleanupLevel.NONE
-    chunking_mode:      ChunkingMode      = ChunkingMode.LOSSLESS
-    """Which chunking mode to use - lossless FFV1 reencoding (default) or stream-copy remux (bad, but cheaper)."""
-    force:                       bool              = False
-    """A flag indicating whether user agrees to force actions, like forced cleanup."""
-    audio_convert:               str | None        = None
-    audio_codec:                 str | None        = None
-    audio_base_bitrate:          str | None        = None
-    strategy_selection_tolerance: float            = 5.0
-    """Tolerance percentage for strategy selection (default 5%).
-
-    Strategies whose total encoded size is within this percentage of the best
-    strategy's size are also selected as optimal.  ``0.0`` means exactly one
-    strategy is selected.
-    """
-    visual_hash:                 bool              = True
-    """Whether to display extra visual cue for encoding logging."""
-    no_metrics:                  bool              = False
-    """When True, suppress metrics.yaml output (NoOpMetricsCollector is used)."""

@@ -24,8 +24,8 @@ from pyqenc.models import CleanupLevel, PhaseOutcome, Strategy
 from pyqenc.state import ArtifactState
 
 if TYPE_CHECKING:
+    from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
-    from pyqenc.models import PipelineConfig
 
 __all__ = [
     "ArtifactState",
@@ -187,29 +187,44 @@ class Phase(Protocol):
 # ---------------------------------------------------------------------------
 
 def _build_registry(
-    config:    "PipelineConfig",
-    collector: "MetricsCollector",
+    config:     "AppConfig",
+    source:     Path,
+    work_dir:   Path,
+    force:      bool,
+    cleanup:    CleanupLevel,
+    no_metrics: bool,
+    collector:  "MetricsCollector",
 ) -> dict[type[Phase], Phase]:
     """Construct all phase objects in execution order and wire their dependencies.
 
-    Each phase is constructed with ``(config, registry, collector)`` so it can
-    resolve typed references to its dependencies directly in ``__init__``.  The
-    registry is a plain ``dict`` keyed by phase *class* (not instance),
+    ``JobPhase`` receives all volatile per-run parameters (``source``,
+    ``work_dir``, ``force``, ``cleanup``, ``no_metrics``) as plain kwargs and
+    stores them on ``JobPhaseResult`` so all downstream phases can read them
+    via ``self._job.result.*``.  All other phases are constructed with only
+    ``(config, registry, collector=collector)`` — they never receive volatile
+    args directly.
+
+    The registry is a plain ``dict`` keyed by phase *class* (not instance),
     preserving insertion order (Python 3.7+).
 
     Execution order matches the pipeline dependency graph:
 
     1. ``JobPhase``          — no dependencies
     2. ``ExtractionPhase``   — depends on Job
-    3. ``ChunkingPhase``     — depends on Job, Extraction
-    4. ``OptimizationPhase`` — depends on Job, Chunking
-    5. ``EncodingPhase``     — depends on Job, Chunking, Optimization
-    6. ``AudioPhase``        — depends on Job, Extraction
+    3. ``AudioPhase``        — depends on Job, Extraction
+    4. ``ChunkingPhase``     — depends on Job, Extraction
+    5. ``OptimizationPhase`` — depends on Job, Chunking
+    6. ``EncodingPhase``     — depends on Job, Chunking, Optimization
     7. ``MergePhase``        — depends on Job, Encoding, Audio
 
     Args:
-        config:    Full pipeline configuration shared by all phases.
-        collector: Metrics collector injected into every phase constructor.
+        config:     Full validated application configuration.
+        source:     Resolved path to the source video file.
+        work_dir:   Working directory for all pipeline artifacts.
+        force:      When ``True``, wipe existing artifacts before running.
+        cleanup:    Artifact retention policy applied after encoding.
+        no_metrics: When ``True``, skip writing ``metrics.yaml`` files.
+        collector:  Metrics collector injected into every phase constructor.
 
     Returns:
         Ordered ``dict[type[Phase], Phase]`` mapping each phase class to its
@@ -227,16 +242,26 @@ def _build_registry(
 
     registry: dict[type[Phase], Phase] = {}
 
-    # Construct in execution order — each phase receives the partially-built
-    # registry and the shared collector so it can store typed references to
-    # already-constructed dependencies directly in __init__.
+    # JobPhase receives all volatile kwargs — it stores them on JobPhaseResult
+    # so downstream phases can access them via self._job.result.*.
+    registry[JobPhase] = JobPhase(
+        config, registry,
+        source     = source,
+        work_dir   = work_dir,
+        force      = force,
+        cleanup    = cleanup,
+        no_metrics = no_metrics,
+        collector  = collector,
+    )
+
+    # All other phases receive only (config, registry, collector=collector).
+    # They read volatile values from self._job.result.* at runtime.
     for cls in [
-        JobPhase,
         ExtractionPhase,
+        AudioPhase,
         ChunkingPhase,
         OptimizationPhase,
         EncodingPhase,
-        AudioPhase,
         MergePhase,
     ]:
         registry[cls] = cls(config, registry, collector=collector)  # type: ignore[call-arg]

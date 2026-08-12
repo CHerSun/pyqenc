@@ -80,49 +80,70 @@
 #   - libsvt-AV1 with ffmpeg: https://gitlab.com/AOMediaCodec/SVT-AV1/-/blob/master/Docs/Ffmpeg.md
 
 
-# DEFAULT TARGETS
-# ---------------
-# - These quality targets are used when user gave no targets.
-# - Each target is a string in "metric-stat:value" format (e.g. "vmaf-min:94").
-# - All metrics are scaled to 0-100 range (e.g. ssim-min:94 means raw SSIM ≥ 0.94, PSNR infinity is clipped to 100).
-#
-# Supported metrics: vmaf, ssim, psnr, vif
-# Supported statistics: min, med, max, p05, p25, p75, p95
-#
-# NOTE: read quality-targeting.md docs for detailed explanation of choosing metrics and statistics.
+# ENCODING CONFIGURATION
+# ----------------------
+# Controls quality targets, strategy selection, and encoding runtime settings.
 
-# Targets for nearly visually lossless quality (aka visually transparent). These targets are quite strict, but they ensure that the output is very close to the original,
-# with minimal perceptible quality loss. Adjusting these targets can allow for more aggressive compression at the cost of potential quality degradation.
-# A step of 1.0 is quite a significant change, so even small adjustments can have a noticeable impact on the output.
-# When tuning these targets the recommended way is to do full-encoding. Check the resulting quality and logs on the most limiting metric - then adjust in 0.5 steps.
-default_targets:
-  - "vif-med:92.0"   # this is a helper to control film grain retention. 92-94 should be really good. Higher values consume a lot of bandwidth. Lower values allow to save more bits.
-  - "vif-min:88.0"   # a min safeguard against too low values.
-  - "vmaf-p05:95.0"  # A p05 instead of median. Median has some issues with reachability on certain types of chunks. 95-97 give really good quality.
-  - "vmaf-min:92.0"  # a min safeguard against too low values.
-  - "psnr-med:45.0"  # PSNR values 50-60 are considered to be visually lossless. ~44-46 should produce good quality retention.
-  - "psnr-min:42.0"  # a min safeguard against too low values
-  - "ssim-med:98.0"  # SSIM score is very non-linear, strongly compressed towards 100.0. Visually lossless is considered to be around 98.5-99.
-  - "ssim-min:95.0"  # a min safeguard against too low values
+encoding:
+  # quality_targets --- quality targets used when user gave no targets.
+  # Each target is a string in "metric-stat:value" format (e.g. "vmaf-min:94").
+  # All metrics are scaled to 0-100 range (e.g. ssim-min:94 means raw SSIM ≥ 0.94, PSNR infinity is clipped to 100).
+  #
+  # Supported metrics: vmaf, ssim, psnr, vif
+  # Supported statistics: min, med, max, p05, p25, p75, p95
+  #
+  # NOTE: read quality-targeting.md docs for detailed explanation of choosing metrics and statistics.
+  #
+  # Targets for nearly visually lossless quality (aka visually transparent). These targets are quite strict, but they ensure that the output is very close to the original,
+  # with minimal perceptible quality loss. Adjusting these targets can allow for more aggressive compression at the cost of potential quality degradation.
+  # A step of 1.0 is quite a significant change, so even small adjustments can have a noticeable impact on the output.
+  # When tuning these targets the recommended way is to do full-encoding. Check the resulting quality and logs on the most limiting metric - then adjust in 0.5 steps.
+  quality_targets:
+    - "vif-med:92.0"   # this is a helper to control film grain retention. 92-94 should be really good. Higher values consume a lot of bandwidth. Lower values allow to save more bits.
+    - "vif-min:88.0"   # a min safeguard against too low values.
+    - "vmaf-p05:95.0"  # A p05 instead of median. Median has some issues with reachability on certain types of chunks. 95-97 give really good quality.
+    - "vmaf-min:92.0"  # a min safeguard against too low values.
+    - "psnr-med:45.0"  # PSNR values 50-60 are considered to be visually lossless. ~44-46 should produce good quality retention.
+    - "psnr-min:42.0"  # a min safeguard against too low values
+    - "ssim-med:98.0"  # SSIM score is very non-linear, strongly compressed towards 100.0. Visually lossless is considered to be around 98.5-99.
+    - "ssim-min:95.0"  # a min safeguard against too low values
 
-# DEFAULT STRATEGIES
-# ------------------
-# These strategies are used when --strategies is not specified on the command line.
-# The pipeline will test these strategies and select the optimal one (smallest file size
-# while meeting quality targets), unless --all-strategies flag is used.
-#
-# By default the most compatible ones are enabled - H.264 and H.265 CPU encoding.
-# GPU strategies are disabled by default due to hardware-encoding requirements (GPU, drivers, ffmpeg support, etc).
-# AV1 is disabled by default due to worser hardware decoding support, which can cause playback issues on older devices.
-default_strategies:
-  - "veryslow+h264*"  # All h264 profiles with veryslow preset
-  - "slow+h265*"      # All h265 profiles with slow preset
-  # - "4+av1*"          # AV1 presets - untuned and grain-tuned. NOTE: AV1 HW decoding support in appliances is quite limited, test it.
-  # - "4+fgs-av1*"      # AV1 FGS = Film Grain Synthesis. NOTE: FGS is not about quality preservation, it is about saving bitrate by simulating quality preservation. DO NOT target VIF metric.
-  # - "p7+nvenc-h265-10bit-cq"   # NVENC CQ profile with the highest quality preset. Needs NVidia GPU support.
-  # - "any+vulkan*"     # All Vulkan profiles. Needs GPU to support Vulkan and Vulkan SDK installed and ffmpeg built with vulkan support (default since recently).
-                        # NOTE: Current Vulkan implementation only supports the most simple QP control, which often gives subpar results, compared to nvenc encoder.
-                        # NOTE: GPU strategies are disabled by default. You can target them manually via console flags.
+  # strategies --- used when --strategies is not specified on the command line.
+  # The pipeline will test these strategies and select the optimal one (smallest file size
+  # while meeting quality targets), unless --all-strategies flag is used.
+  #
+  # By default the most compatible ones are enabled - H.264 and H.265 CPU encoding.
+  # GPU strategies are disabled by default due to hardware-encoding requirements (GPU, drivers, ffmpeg support, etc).
+  # AV1 is disabled by default due to worser hardware decoding support, which can cause playback issues on older devices.
+  strategies:
+    - "veryslow+h264*"  # All h264 profiles with veryslow preset
+    - "slow+h265*"      # All h265 profiles with slow preset
+    # - "4+av1*"          # AV1 presets - untuned and grain-tuned. NOTE: AV1 HW decoding support in appliances is quite limited, test it.
+    # - "4+fgs-av1*"      # AV1 FGS = Film Grain Synthesis. NOTE: FGS is not about quality preservation, it is about saving bitrate by simulating quality preservation. DO NOT target VIF metric.
+    # - "p7+nvenc-h265-10bit-cq"   # NVENC CQ profile with the highest quality preset. Needs NVidia GPU support.
+    # - "any+vulkan*"     # All Vulkan profiles. Needs GPU to support Vulkan and Vulkan SDK installed and ffmpeg built with vulkan support (default since recently).
+                          # NOTE: Current Vulkan implementation only supports the most simple QP control, which often gives subpar results, compared to nvenc encoder.
+                          # NOTE: GPU strategies are disabled by default. You can target them manually via console flags.
+
+  # optimize --- whether to run the strategy optimisation phase (select the best strategy per chunk).
+  # Set to false to encode with all strategies instead.
+  optimize: true
+
+  # max_parallel --- maximum number of concurrent encoding processes.
+  max_parallel: 1
+
+  # metrics_sampling --- measure every N-th frame.
+  # Default (and min): 1 (every frame is measured, slowest but most precise).
+  # Optimal: 3 (recommended balance of speed and precision; could speed up encoding by ~10% total, but less precise).
+  # NOTE: Values above 10 are not recommended due to high measurement volatility with negligible performance gain.
+  metrics_sampling: 1
+
+  # visual_hash --- whether to display emoji visual hash in chunk logs for quick visual identification.
+  visual_hash: true
+
+  # strategy_selection_tolerance --- tolerance percentage when selecting the optimal strategy.
+  # A strategy is considered equivalent if its size is within this percentage of the best.
+  strategy_selection_tolerance: 5.0
 
 # CODEC DEFINITIONS
 # -----------------
@@ -164,6 +185,8 @@ codecs:
       - "libx264"
       - "-preset"
       - "{preset}"
+      - "-x264-params"
+      - "profile=high:level=5.1:sps-id=0" # Attempt to fix problems with varying codec_private_data between chunks. High + 5.1 should be enough and widely compatible. This is specific to h.264.
       - "-crf"
       - "{quality}"
       - "-vf"
@@ -419,12 +442,12 @@ profiles:
   h265-aq:
     codec: h265-10bit
     description: "h.265 10-bit with adaptive quantization tuning for better quality distribution towards grains and darker areas"
-    extra_args: ["-x265-params", "aq-mode=3:aq-strength=0.8"]
+    extra_args: ["-x265-params", "aq-mode=3:aq-strength=1.2"]
 
   h265-anime:
     codec: h265-10bit
     description: "h.265 10-bit optimized for anime content with reduced blocking and enhanced detail. Purpose is to retain fine details and crisp edges."
-    extra_args: ["-x265-params", "aq-mode=2:psy-rd=1.0:deblock=-1,-1"]
+    extra_args: ["-x265-params", "no-sao=1:no-strong-intra-smoothing=1:aq-mode=3:psy-rd=2.0:psy-rdoq=1.0"]
 
   # HEVC NVENC (GPU) Profiles
   # --------------------------
@@ -493,15 +516,49 @@ profiles:
     extra_args: ["-svtav1-params", "film-grain=30:film-grain-denoise=1"]
     # film-grain=30 → enables film grain synthesis with a high grain (max 50)
 
-# AUDIO OUTPUT CONFIGURATION
-# --------------------------
+# EXTRACTION CONFIGURATION
+# ------------------------
+# Unified include/exclude regex patterns applied to ALL stream types (video, audio, subtitles, chapters) during the extraction phase.
+#
+# - include --- Regex matched against the would-be output filename of each stream. Only matching streams are extracted.
+#   Default: null = include all streams.
+# - exclude --- Regex matched against the would-be output filename of each stream. Matching streams are skipped even if they also match include.
+#   Default: null = exclude no streams.  Exclusion takes precedence over inclusion.
+#
+# NOTE: those values are only applied if user didn't supply filters on the pyqenc run. Could be useful if you often filter the same things.
+
+extraction:
+  include: null
+  exclude: null
+
+# CHUNKING CONFIGURATION
+# ----------------------
+# Controls how the source video is split into chunks for parallel encoding.
+#
+# - mode --- Chunking strategy: "lossless" re-encodes each chunk to FFV1 all-intra for frame-perfect boundaries (default);
+#   "remux" stream-copies for speed at the cost of snapping to the nearest I-frame.
+# - scene_threshold --- Minimum content-change score (0.0–1.0) for the scene detector to declare a scene boundary.
+#   Lower values make the detector more sensitive. Default: 0.3.
+# - min_scene_length --- Minimum number of frames a scene must contain before it is eligible to be split off as a separate chunk.
+#   Default: 24.
+
+chunking:
+  mode: lossless
+  scene_threshold: 0.3
+  min_scene_length: 24
+
+# AUDIO CONFIGURATION
+# -------------------
 # Controls which processed audio files are converted to the final delivery format (AAC) and what codec/bitrate profile is used per channel layout.
 #
 # - convert_filter --- Regex pattern matched against the output filename. Any file whose name matches is passed to the ConversionStrategy finalizer.
 #   The default value matches all normalized outputs (norm, 2.0 std/night/nboost, dynaudnorm).
 # - profiles --- map of channel-layout key to codec/bitrate/extension settings. For granular control of output codecs.
 #   The default is to use AAC codec with 96Kbps per channel (192 for stereo).
-audio_output:
+# - audio_codec --- when set, overrides the codec of every profile for this run. null = use each profile's own codec.
+# - audio_base_bitrate --- when set, overrides the bitrate of every profile for this run. null = use each profile's own bitrate.
+
+audio:
   convert_filter: "^(norm|dynaudnorm|2\\.0 (std|night|nboost)) ←"
   profiles:
     "2.0":
@@ -516,31 +573,5 @@ audio_output:
       codec: aac
       bitrate: 768k
       extension: .aac
-
-# METRICS CONFIGURATION
-# ---------------------
-# Controls quality metrics measurement behavior.
-#
-# - sampling --- Metrics sampling factor — measure every N-th frame.
-#   Default (and min): 1 (every frame is measured, slowest but most precise).
-#   Optimal: 3 (recommended balance of speed and precision; could speed up encoding by ~10% total, but less precise).
-#
-# NOTE: Values above 10 are not recommended due to high measurement volatility with negligible performance gain.
-
-metrics:
-  sampling: 1
-
-# STREAMS FILTERING CONFIGURATION
-# -------------------------------
-# Unified include/exclude regex patterns applied to ALL stream types (video, audio, subtitles, chapters) during the extraction phase.
-#
-# - include --- Regex matched against the would-be output filename of each stream. Only matching streams are extracted.
-#   Default: null = include all streams.
-# - exclude --- Regex matched against the would-be output filename of each stream. Matching streams are skipped even if they also match include.
-#   Default: null = exclude no streams.  Exclusion takes precedence over inclusion.
-#
-# NOTE: those values are only applied if user didn't supply filters on the pyqenc run. Could be useful if you often filter the same things.
-
-streams:
-  include: null
-  exclude: null
+  audio_codec: null
+  audio_base_bitrate: null

@@ -199,10 +199,16 @@ class TestTimestampArtifactRecoveryComplete:
         collector.time.return_value.__enter__ = MagicMock(return_value=None)
         collector.time.return_value.__exit__  = MagicMock(return_value=False)
 
+        mock_job = MagicMock()
+        mock_job.result.work_dir                      = tmp_path
+        mock_job.result.source                        = source
+        mock_job.result.config.extraction.include     = None
+        mock_job.result.config.extraction.exclude     = None
+
         phase = ExtractionPhase.__new__(ExtractionPhase)
         phase._config    = config
         phase._collector = collector
-        phase._job       = None
+        phase._job       = mock_job
         phase.params     = MagicMock()
         phase.params.include = None
         phase.params.exclude = None
@@ -252,10 +258,16 @@ class TestTimestampArtifactRecoveryAbsent:
         collector.time.return_value.__enter__ = MagicMock(return_value=None)
         collector.time.return_value.__exit__  = MagicMock(return_value=False)
 
+        mock_job = MagicMock()
+        mock_job.result.work_dir                      = tmp_path
+        mock_job.result.source                        = source
+        mock_job.result.config.extraction.include     = None
+        mock_job.result.config.extraction.exclude     = None
+
         phase = ExtractionPhase.__new__(ExtractionPhase)
         phase._config    = config
         phase._collector = collector
-        phase._job       = None
+        phase._job       = mock_job
         phase.params     = MagicMock()
         phase.params.include = None
         phase.params.exclude = None
@@ -321,10 +333,16 @@ class TestTimestampArtifactForceWipe:
         collector.time.return_value.__enter__ = MagicMock(return_value=None)
         collector.time.return_value.__exit__  = MagicMock(return_value=False)
 
+        mock_job = MagicMock()
+        mock_job.result.work_dir                      = tmp_path
+        mock_job.result.source                        = source
+        mock_job.result.config.extraction.include     = None
+        mock_job.result.config.extraction.exclude     = None
+
         phase = ExtractionPhase.__new__(ExtractionPhase)
         phase._config    = config
         phase._collector = collector
-        phase._job       = None
+        phase._job       = mock_job
         phase.params     = MagicMock()
         phase.params.include = None
         phase.params.exclude = None
@@ -432,10 +450,16 @@ class TestMergeFailsWithoutTimestamps:
         collector.time.return_value.__enter__ = MagicMock(return_value=None)
         collector.time.return_value.__exit__  = MagicMock(return_value=False)
 
+        mock_job = MagicMock()
+        mock_job.result.work_dir                      = tmp_path
+        mock_job.result.source                        = source
+        mock_job.result.config.extraction.include     = None
+        mock_job.result.config.extraction.exclude     = None
+
         phase = ExtractionPhase.__new__(ExtractionPhase)
         phase._config    = config
         phase._collector = collector
-        phase._job       = None
+        phase._job       = mock_job
         phase.params     = MagicMock()
         phase.params.include = None
         phase.params.exclude = None
@@ -496,10 +520,16 @@ class TestExtractionCommandCorrectness:
         collector.time.return_value.__enter__ = MagicMock(return_value=None)
         collector.time.return_value.__exit__  = MagicMock(return_value=False)
 
+        mock_job = MagicMock()
+        mock_job.result.work_dir                      = tmp_path
+        mock_job.result.source                        = source
+        mock_job.result.config.extraction.include     = None
+        mock_job.result.config.extraction.exclude     = None
+
         phase = ExtractionPhase.__new__(ExtractionPhase)
         phase._config    = config
         phase._collector = collector
-        phase._job       = None
+        phase._job       = mock_job
         phase.params     = MagicMock()
         phase.params.include = None
         phase.params.exclude = None
@@ -662,10 +692,16 @@ class TestFfmpegStreamExtraction:
         collector.time.return_value.__enter__ = MagicMock(return_value=None)
         collector.time.return_value.__exit__  = MagicMock(return_value=False)
 
+        mock_job = MagicMock()
+        mock_job.result.work_dir                      = tmp_path
+        mock_job.result.source                        = source
+        mock_job.result.config.extraction.include     = None
+        mock_job.result.config.extraction.exclude     = None
+
         phase = ExtractionPhase.__new__(ExtractionPhase)
         phase._config    = config
         phase._collector = collector
-        phase._job       = None
+        phase._job       = mock_job
         phase.params     = MagicMock()
         phase.params.include = None
         phase.params.exclude = None

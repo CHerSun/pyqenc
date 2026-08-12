@@ -16,43 +16,50 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from pyqenc.app_config import AppConfig, load_app_config
 from pyqenc.metrics import MetricsCollector, NoOpMetricsCollector, MetricKey
-from pyqenc.config import ConfigManager as _ConfigManager
 from pyqenc.models import (
-    ChunkingMode,
     CleanupLevel,
     CropParams,
-    PipelineConfig,
     Strategy,
     VideoMetadata,
 )
 
-_STRATEGY_SLOW_H265 = _ConfigManager().resolve_strategies(["slow+h265"])[0]
-_STRATEGY_H265_AQ   = _ConfigManager().resolve_strategies(["slow+h265-aq"])[0]
+_SHARED_APP_CONFIG: AppConfig = load_app_config()
+
+# Resolve a couple of known strategies once at module level for use in tests.
+_resolved = _SHARED_APP_CONFIG.encoding.resolved_strategies
+_STRATEGY_SLOW_H265 = next((s for s in _resolved if s.preset == "slow" and "h265" in s.profile and "aq" not in s.profile), _resolved[0])
+_STRATEGY_H265_AQ   = next((s for s in _resolved if "h265" in s.profile and "aq" in s.profile), _resolved[min(1, len(_resolved) - 1)])
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_config(tmp_path: Path, *, crop_params: CropParams | None = None) -> PipelineConfig:
-    """Return a minimal ``PipelineConfig`` with a stub source file."""
+def _make_config(tmp_path: Path, *, crop_params: CropParams | None = None) -> AppConfig:
+    """Return an ``AppConfig`` with optional crop_params applied as override.
+
+    Uses the bundled default config; ``crop_params`` is assigned directly when
+    provided to simulate a CLI ``--crop`` override.
+    """
+    config = load_app_config()
+    if crop_params is not None:
+        config.encoding.crop_params = crop_params
+    return config
+
+
+def _make_volatile(tmp_path: Path) -> dict:
+    """Return a minimal dict of volatile kwargs for phases that require them."""
     source = tmp_path / "source.mkv"
     source.write_bytes(b"\x00" * 64)
-    return PipelineConfig(
-        source_video    = source,
-        work_dir        = tmp_path / "work",
-        quality_targets = [],
-        strategies      = [],
-        optimize        = False,
-        max_parallel    = 1,
-        include         = None,
-        exclude         = None,
-        cleanup         = CleanupLevel.NONE,
-        chunking_mode   = ChunkingMode.LOSSLESS,
-        force           = False,
-        crop_params     = crop_params,
-    )
+    return {
+        "source":     source,
+        "work_dir":   tmp_path / "work",
+        "force":      False,
+        "cleanup":    CleanupLevel.NONE,
+        "no_metrics": False,
+    }
 
 
 def _spy_collector() -> MagicMock:
@@ -95,11 +102,12 @@ class TestJobPhaseTiming:
         """
         from pyqenc.phases.job import JobPhase
 
-        config    = _make_config(tmp_path)
+        config   = _make_config(tmp_path)
+        volatile = _make_volatile(tmp_path)
         collector = _spy_collector()
-        phase     = JobPhase(config, collector=collector)
+        phase    = JobPhase(config, collector=collector, **volatile)
 
-        stub_vm = _stub_video_metadata(config.source_video)
+        stub_vm = _stub_video_metadata(volatile["source"])
 
         # Patch VideoMetadata so no real ffprobe/ffmpeg calls happen.
         # Patch detect_crop_parameters to return a zero-crop immediately.
@@ -127,15 +135,16 @@ class TestJobPhaseTiming:
         from pyqenc.phases.job import JobPhase
         from pyqenc.state import JobState
 
-        config    = _make_config(tmp_path)
+        config   = _make_config(tmp_path)
+        volatile = _make_volatile(tmp_path)
         collector = _spy_collector()
-        phase     = JobPhase(config, collector=collector)
+        phase    = JobPhase(config, collector=collector, **volatile)
 
         # Pre-create a valid job.yaml so the phase takes the REUSED path.
-        config.work_dir.mkdir(parents=True, exist_ok=True)
-        stub_vm = _stub_video_metadata(config.source_video)
+        volatile["work_dir"].mkdir(parents=True, exist_ok=True)
+        stub_vm = _stub_video_metadata(volatile["source"])
         job = JobState(source=stub_vm, crop=CropParams())
-        job.save(config.work_dir / "job.yaml")
+        job.save(volatile["work_dir"] / "job.yaml")
 
         with (
             patch("pyqenc.phases.job.log_disk_space_info"),
@@ -156,11 +165,12 @@ class TestJobPhaseTiming:
         """
         from pyqenc.phases.job import JobPhase
 
-        config    = _make_config(tmp_path)  # crop_params=None → auto-detect path
+        config   = _make_config(tmp_path)  # crop_params=None → auto-detect path
+        volatile = _make_volatile(tmp_path)
         collector = _spy_collector()
-        phase     = JobPhase(config, collector=collector)
+        phase    = JobPhase(config, collector=collector, **volatile)
 
-        stub_vm = _stub_video_metadata(config.source_video)
+        stub_vm = _stub_video_metadata(volatile["source"])
 
         with (
             patch("pyqenc.phases.job.VideoMetadata", return_value=stub_vm),
@@ -186,11 +196,12 @@ class TestJobPhaseTiming:
         """
         from pyqenc.phases.job import JobPhase
 
-        config    = _make_config(tmp_path, crop_params=CropParams(top=140, bottom=140))
+        config   = _make_config(tmp_path, crop_params=CropParams(top=140, bottom=140))
+        volatile = _make_volatile(tmp_path)
         collector = _spy_collector()
-        phase     = JobPhase(config, collector=collector)
+        phase    = JobPhase(config, collector=collector, **volatile)
 
-        stub_vm = _stub_video_metadata(config.source_video)
+        stub_vm = _stub_video_metadata(volatile["source"])
 
         with (
             patch("pyqenc.phases.job.VideoMetadata", return_value=stub_vm),
@@ -217,15 +228,16 @@ class TestJobPhaseTiming:
         from pyqenc.phases.job import JobPhase
         from pyqenc.state import JobState
 
-        config    = _make_config(tmp_path)  # no manual crop
+        config   = _make_config(tmp_path)  # no manual crop
+        volatile = _make_volatile(tmp_path)
         collector = _spy_collector()
-        phase     = JobPhase(config, collector=collector)
+        phase    = JobPhase(config, collector=collector, **volatile)
 
         # Pre-create job.yaml with a cached crop — phase will load it and skip detect.
-        config.work_dir.mkdir(parents=True, exist_ok=True)
-        stub_vm = _stub_video_metadata(config.source_video)
+        volatile["work_dir"].mkdir(parents=True, exist_ok=True)
+        stub_vm = _stub_video_metadata(volatile["source"])
         job = JobState(source=stub_vm, crop=CropParams(top=100, bottom=100))
-        job.save(config.work_dir / "job.yaml")
+        job.save(volatile["work_dir"] / "job.yaml")
 
         with (
             patch("pyqenc.phases.job.log_disk_space_info"),
@@ -244,11 +256,12 @@ class TestJobPhaseTiming:
         """
         from pyqenc.phases.job import JobPhase
 
-        config    = _make_config(tmp_path)
+        config   = _make_config(tmp_path)
+        volatile = _make_volatile(tmp_path)
         collector = NoOpMetricsCollector()
-        phase     = JobPhase(config, collector=collector)
+        phase    = JobPhase(config, collector=collector, **volatile)
 
-        stub_vm = _stub_video_metadata(config.source_video)
+        stub_vm = _stub_video_metadata(volatile["source"])
 
         with (
             patch("pyqenc.phases.job.VideoMetadata", return_value=stub_vm),
@@ -267,16 +280,33 @@ class TestJobPhaseTiming:
 class TestExtractionPhaseTiming:
     """Integration tests for ``ExtractionPhase`` timing instrumentation (Req 6.5)."""
 
-    def _make_job_result(self) -> "JobPhaseResult":
+    def _make_job_result(self, tmp_path: Path | None = None) -> "JobPhaseResult":
         """Return a minimal complete ``JobPhaseResult`` stub."""
         from pyqenc.phases.job import JobPhaseResult
         from pyqenc.models import PhaseOutcome
-        return JobPhaseResult(
+        from pathlib import Path as _Path
+        import tempfile as _tempfile
+
+        # Use a real source path so result.source.name works in phase code.
+        if tmp_path is None:
+            _td = _Path(_tempfile.mkdtemp())
+            source = _td / "source.mkv"
+        else:
+            source = tmp_path / "source.mkv"
+        if not source.exists():
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(b"\x00" * 64)
+
+        result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             artifacts  = [],
             message    = "ok",
             force_wipe = False,
         )
+        result.source   = source                          # type: ignore[attr-defined]
+        result.work_dir = source.parent / "work"          # type: ignore[attr-defined]
+        result.config   = _make_config(source.parent)     # type: ignore[attr-defined]
+        return result
 
     def _make_phase(
         self,
@@ -289,7 +319,7 @@ class TestExtractionPhaseTiming:
 
         config   = _make_config(tmp_path)
         job_mock = MagicMock(spec=JobPhase)
-        job_mock.result = self._make_job_result()
+        job_mock.result = self._make_job_result(tmp_path)
 
         phase = ExtractionPhase(config, collector=collector)
         phase._job = job_mock  # type: ignore[assignment]
@@ -340,7 +370,7 @@ class TestExtractionPhaseTiming:
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        extracted_dir = phase._config.work_dir / "extracted"
+        extracted_dir = tmp_path / "work" / "extracted"
         extracted_dir.mkdir(parents=True, exist_ok=True)
 
         absent_path = extracted_dir / "sub_0_eng.srt"
@@ -431,7 +461,10 @@ class TestChunkingPhaseTiming:
             message    = "ok",
             force_wipe = False,
         )
-        result.job = job_state  # type: ignore[attr-defined]
+        result.job      = job_state           # type: ignore[attr-defined]
+        result.source   = source              # type: ignore[attr-defined]
+        result.work_dir = tmp_path / "work"   # type: ignore[attr-defined]
+        result.config   = _make_config(tmp_path)  # type: ignore[attr-defined]
         return result
 
     def _make_extraction_result(self, tmp_path: Path) -> "ExtractionPhaseResult":
@@ -460,7 +493,8 @@ class TestChunkingPhaseTiming:
         from pyqenc.phases.job import JobPhase
 
         config = _make_config(tmp_path)
-        config.work_dir.mkdir(parents=True, exist_ok=True)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
 
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
@@ -695,8 +729,9 @@ class TestAudioPhaseTiming:
         source.write_bytes(b"\x00" * 64)
         stub_vm = _stub_video_metadata(source)
 
-        config = _make_config(tmp_path)
-        config.work_dir.mkdir(parents=True, exist_ok=True)
+        config   = _make_config(tmp_path)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
 
         job_state = JobState(source=stub_vm, crop=CropParams())
         job_result = JobPhaseResult(
@@ -705,7 +740,10 @@ class TestAudioPhaseTiming:
             message    = "ok",
             force_wipe = False,
         )
-        job_result.job = job_state  # type: ignore[attr-defined]
+        job_result.job      = job_state   # type: ignore[attr-defined]
+        job_result.source   = source      # type: ignore[attr-defined]
+        job_result.work_dir = work_dir    # type: ignore[attr-defined]
+        job_result.config   = config      # type: ignore[attr-defined]
 
         extraction_result = ExtractionPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
@@ -833,7 +871,7 @@ class TestAudioPhaseTiming:
 class TestOptimizationPhaseTiming:
     """Integration tests for ``OptimizationPhase`` timing instrumentation (Req 6.5)."""
 
-    def _make_job_result(self, tmp_path: Path) -> "JobPhaseResult":
+    def _make_job_result(self, tmp_path: Path, *, config: "AppConfig | None" = None) -> "JobPhaseResult":
         """Return a minimal complete ``JobPhaseResult`` stub."""
         from pyqenc.models import PhaseOutcome
         from pyqenc.phases.job import JobPhaseResult
@@ -850,7 +888,10 @@ class TestOptimizationPhaseTiming:
             message    = "ok",
             force_wipe = False,
         )
-        result.job = job_state  # type: ignore[attr-defined]
+        result.job      = job_state                                    # type: ignore[attr-defined]
+        result.source   = source                                       # type: ignore[attr-defined]
+        result.work_dir = tmp_path / "work"                            # type: ignore[attr-defined]
+        result.config   = config if config is not None else _make_config(tmp_path)  # type: ignore[attr-defined]
         return result
 
     def _make_chunking_result(self, tmp_path: Path) -> "ChunkingPhaseResult":
@@ -879,18 +920,25 @@ class TestOptimizationPhaseTiming:
         optimize:  bool = True,
     ) -> "OptimizationPhase":
         """Return an ``OptimizationPhase`` with pre-wired job and chunking dependencies."""
-        from pyqenc.models import Strategy
         from pyqenc.phases.chunking import ChunkingPhase
         from pyqenc.phases.job import JobPhase
         from pyqenc.phases.optimization import OptimizationPhase
 
         config = _make_config(tmp_path)
-        config.work_dir.mkdir(parents=True, exist_ok=True)
-        config.optimize   = optimize  # type: ignore[attr-defined]
-        config.strategies = [_STRATEGY_SLOW_H265, _STRATEGY_H265_AQ]  # type: ignore[attr-defined]
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        config.encoding.optimize   = optimize
+        config.encoding.strategies = [
+            s.raw if hasattr(s, "raw") else f"{s.preset}+{s.profile}"
+            for s in [_STRATEGY_SLOW_H265, _STRATEGY_H265_AQ]
+        ]
+        # Reset resolved caches so they re-resolve from the updated strategy strings.
+        config.encoding._resolved_targets   = None
+        config.encoding._resolved_strategies = None
+        config.encoding.resolve(config.codecs, config.profiles)
 
         job_mock = MagicMock(spec=JobPhase)
-        job_mock.result = self._make_job_result(tmp_path)
+        job_mock.result = self._make_job_result(tmp_path, config=config)
 
         chunking_mock = MagicMock(spec=ChunkingPhase)
         chunking_mock.result = self._make_chunking_result(tmp_path)
@@ -915,16 +963,16 @@ class TestOptimizationPhaseTiming:
         # tolerance_pct and metrics_sampling must match config defaults so the
         # full-reuse path (step 4) is taken rather than falling through to encodes.
         persisted = OptimizationParams(
-            crop             = CropParams(),
+            crop             = None,
             test_chunks      = ["chunk_0"],
             strategy_results = [
                 StrategyTestResult(strategy_name=strategy.name, total_size=1024),
                 StrategyTestResult(strategy_name=_STRATEGY_H265_AQ.name, total_size=512),
             ],
-            tolerance_pct    = 5.0,   # matches PipelineConfig.strategy_selection_tolerance default
+            tolerance_pct    = 5.0,   # matches AppConfig.encoding.strategy_selection_tolerance default
             selected         = [strategy.name],
             quality_targets  = [],
-            metrics_sampling = 3,     # matches PipelineConfig.metrics_sampling default
+            metrics_sampling = 1,     # matches AppConfig.encoding.metrics_sampling default
         )
 
         # All results cached with matching tolerance → reuse path (step 4 in run())
@@ -1084,7 +1132,7 @@ class TestOptimizationPhaseTiming:
             tolerance_pct    = 0.0,
             selected         = [strategy.name],
             quality_targets  = [],
-            metrics_sampling = 3,
+            metrics_sampling = 1,
         )
 
         with patch.object(OptimizationParams, "load", return_value=persisted):
@@ -1118,7 +1166,10 @@ class TestEncodingPhaseTiming:
             message    = "ok",
             force_wipe = False,
         )
-        result.job = job_state  # type: ignore[attr-defined]
+        result.job      = job_state           # type: ignore[attr-defined]
+        result.source   = source              # type: ignore[attr-defined]
+        result.work_dir = tmp_path / "work"   # type: ignore[attr-defined]
+        result.config   = _make_config(tmp_path)  # type: ignore[attr-defined]
         return result
 
     def _make_chunking_result(self, tmp_path: Path) -> "ChunkingPhaseResult":
@@ -1165,8 +1216,9 @@ class TestEncodingPhaseTiming:
         from pyqenc.phases.job import JobPhase
         from pyqenc.phases.optimization import OptimizationPhase
 
-        config = _make_config(tmp_path)
-        config.work_dir.mkdir(parents=True, exist_ok=True)
+        config   = _make_config(tmp_path)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
 
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
@@ -1416,7 +1468,10 @@ class TestMergePhaseTiming:
             message    = "ok",
             force_wipe = False,
         )
-        result.job = job_state  # type: ignore[attr-defined]
+        result.job      = job_state           # type: ignore[attr-defined]
+        result.source   = source              # type: ignore[attr-defined]
+        result.work_dir = tmp_path / "work"   # type: ignore[attr-defined]
+        result.config   = _make_config(tmp_path)  # type: ignore[attr-defined]
         return result
 
     def _make_encoding_result(self, tmp_path: Path) -> "EncodingPhaseResult":
@@ -1467,11 +1522,12 @@ class TestMergePhaseTiming:
         from pyqenc.phases.merge import MergePhase
         from pyqenc.models import PhaseOutcome
 
-        config = _make_config(tmp_path)
-        config.work_dir.mkdir(parents=True, exist_ok=True)
+        config   = _make_config(tmp_path)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
 
         # Create a real timestamps.txt so timestamps_path.exists() passes
-        ts_file = config.work_dir / "extracted" / "timestamps.txt"
+        ts_file = work_dir / "extracted" / "timestamps.txt"
         ts_file.parent.mkdir(parents=True, exist_ok=True)
         ts_file.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
 
@@ -1579,7 +1635,7 @@ class TestMergePhaseTiming:
 
         Validates: Requirements 6.5
         """
-        from pyqenc.models import CleanupLevel, ChunkingMode, QualityTarget
+        from pyqenc.models import PhaseOutcome
         from pyqenc.phases.merge import MergeArtifact, MergePhase
         from pyqenc.state import ArtifactState
         from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
@@ -1589,21 +1645,9 @@ class TestMergePhaseTiming:
         # Build config with a quality target so _measure_quality branch is entered
         source = tmp_path / "source.mkv"
         source.write_bytes(b"\x00" * 64)
-        config = PipelineConfig(
-            source_video    = source,
-            work_dir        = tmp_path / "work",
-            quality_targets = [QualityTarget(metric="psnr", statistic="mean", value=40.0)],
-            strategies      = [],
-            optimize        = False,
-            max_parallel    = 1,
-            include         = None,
-            exclude         = None,
-            cleanup         = CleanupLevel.NONE,
-            chunking_mode   = ChunkingMode.LOSSLESS,
-            force           = False,
-            crop_params     = None,
-        )
-        config.work_dir.mkdir(parents=True, exist_ok=True)
+        config = _make_config(tmp_path)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
 
         from pyqenc.phases.audio import AudioPhase
         from pyqenc.phases.encoding import EncodingPhase
@@ -1611,7 +1655,7 @@ class TestMergePhaseTiming:
         from pyqenc.phases.job import JobPhase
         from pyqenc.models import PhaseOutcome
 
-        ts_file = config.work_dir / "extracted" / "timestamps.txt"
+        ts_file = work_dir / "extracted" / "timestamps.txt"
         ts_file.parent.mkdir(parents=True, exist_ok=True)
         ts_file.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
 
@@ -1809,9 +1853,6 @@ class TestMetricKeySmoke:
 
         Validates: Requirements 8.1, 8.3, 8.4
         """
-        from pyqenc.config import ConfigManager
-
-        # Build a Strategy directly via Pydantic to test the field_validator
         from pyqenc.models import CodecConfig, Strategy
         from decimal import Decimal
 

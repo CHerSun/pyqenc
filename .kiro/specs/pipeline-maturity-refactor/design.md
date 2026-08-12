@@ -3,6 +3,16 @@
 - Created: 2026-03-15
 - Completed: 2026-03-15
 
+## Cross-Reference Notes
+
+**Note (2026-06-23 — superseded in part by `config-refactor`):** The `config-refactor` spec (Created: 2026-06-23) replaces the `PipelineConfig`-based architecture described here:
+
+- The `VideoMetadata` / `ChunkVideoMetadata` Pydantic hierarchy and `ProgressTracker` changes in this spec are unaffected.
+- `PipelineConfig` (introduced by this spec as the configuration model) is deleted. Its volatile runtime fields (`source_video`, `work_dir`, `force`) now travel as plain kwargs through `_build_registry` and land as typed fields on `JobPhaseResult`. Its config fields are replaced by `AppConfig` sub-models.
+- The signal/atexit flush registered in this spec for `ProgressTracker` was superseded first by `phase-recovery-refactor` (state files) and later by `pipeline-metrics-report` (SIGINT → `collector.flush(partial=True)`).
+
+---
+
 ## Overview
 
 This refactor matures five interconnected areas of the pyqenc codebase without changing external behavior:

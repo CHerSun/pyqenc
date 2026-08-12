@@ -51,8 +51,9 @@ from pyqenc.utils.log_format import (
 from pyqenc.utils.visualization import QualityEvaluator
 
 if TYPE_CHECKING:
+    from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
-    from pyqenc.models import PipelineConfig
+    from pyqenc.phases.encoding import ChunkEncoder
 
 config_handler.set_global(enrich_print=False)  # type: ignore
 logger = logging.getLogger(__name__)
@@ -103,7 +104,7 @@ class OptimizationPhase:
 
     def __init__(
         self,
-        config:    "PipelineConfig",
+        config:    "AppConfig",
         phases:    "dict[type[Phase], Phase] | None" = None,
         *,
         collector: "MetricsCollector",
@@ -113,8 +114,8 @@ class OptimizationPhase:
 
         self._config    = config
         self._collector: "MetricsCollector" = collector
-        self._job:      "_JobPhase | None"      = cast("_JobPhase",      phases[_JobPhase])      if phases else None
-        self._chunking: "_ChunkingPhase | None" = cast("_ChunkingPhase", phases[_ChunkingPhase]) if phases else None
+        self._job:      "_JobPhase | None"      = cast("_JobPhase",      phases.get(_JobPhase))      if phases else None
+        self._chunking: "_ChunkingPhase | None" = cast("_ChunkingPhase", phases.get(_ChunkingPhase)) if phases else None
         self.result:    "OptimizationPhaseResult | None" = None
         self.dependencies: "list[Phase]" = [d for d in [self._job, self._chunking] if d is not None]
 
@@ -136,11 +137,11 @@ class OptimizationPhase:
         if self.result is not None:
             return self.result
 
-        if not self._config.strategies:
+        if not self._job.result.config.encoding.resolved_strategies:
             raise RuntimeError("no strategies configured")
 
         # All-strategies mode: no artifacts, just return all strategies. Triggered by either flag or single strategy given (noting to optimize)
-        if not self._config.optimize or len(self._config.strategies) == 1:
+        if not self._job.result.config.encoding.optimize or len(self._job.result.config.encoding.resolved_strategies) == 1:
             self.result = self._all_strategies_result()
             return self.result
 
@@ -149,7 +150,7 @@ class OptimizationPhase:
             self.result = dep_result
             return self.result
 
-        opt_yaml  = self._config.work_dir / _OPTIMIZATION_YAML
+        opt_yaml  = self._job.result.work_dir / _OPTIMIZATION_YAML
         persisted = OptimizationParams.load(opt_yaml)
 
         if persisted is None or not persisted.strategy_results:
@@ -161,8 +162,8 @@ class OptimizationPhase:
                 strategy_results    = [],
             )
         else:
-            current_targets  = _targets_as_strings(self._config.quality_targets)
-            current_sampling = self._config.metrics_sampling
+            current_targets  = _targets_as_strings(self._job.result.config.encoding.resolved_targets)
+            current_sampling = self._job.result.config.encoding.metrics_sampling
             params_stale = (
                 (persisted.quality_targets and persisted.quality_targets != current_targets)
                 or (persisted.metrics_sampling is not None and persisted.metrics_sampling != current_sampling)
@@ -177,11 +178,11 @@ class OptimizationPhase:
                     strategy_results    = [],
                 )
             else:
-                selected = self._apply_tolerance(persisted.strategy_results, self._config.strategy_selection_tolerance)
+                selected = self._apply_tolerance(persisted.strategy_results, self._job.result.config.encoding.strategy_selection_tolerance)
                 self.result = OptimizationPhaseResult(
                     outcome             = PhaseOutcome.REUSED,
                     artifacts           = [Artifact(
-                        path  = self._config.work_dir / _OPTIMIZATION_YAML,
+                        path  = self._job.result.work_dir / _OPTIMIZATION_YAML,
                         state = ArtifactState.COMPLETE,
                     )],
                     message             = f"optimization.yaml loaded — {len(selected)} strategy(ies) selected",
@@ -217,24 +218,24 @@ class OptimizationPhase:
         Returns:
             ``OptimizationPhaseResult`` with ``selected_strategies`` set.
         """
-        if not self._config.strategies:
+        if not self._job.result.config.encoding.resolved_strategies:
             raise RuntimeError("no strategies configured")
 
         # All-strategies mode: no artifacts, just return all strategies. Triggered by either flag or single strategy given (noting to optimize)
-        if not self._config.optimize or len(self._config.strategies) == 1:
+        if not self._job.result.config.encoding.optimize or len(self._job.result.config.encoding.resolved_strategies) == 1:
             self.result = self._run_all_strategies(dry_run=dry_run)
             return self.result
 
-        work_dir  = self._config.work_dir
+        work_dir  = self._job.result.work_dir
         opt_yaml  = work_dir / _OPTIMIZATION_YAML
-        tolerance = self._config.strategy_selection_tolerance
+        tolerance = self._job.result.config.encoding.strategy_selection_tolerance
 
         # Step 1: load persisted optimization params (before dependency check so
         # tolerance re-application can short-circuit without needing live phases)
         persisted = OptimizationParams.load(opt_yaml)
 
-        current_targets  = _targets_as_strings(self._config.quality_targets)
-        current_sampling = self._config.metrics_sampling
+        current_targets  = _targets_as_strings(self._job.result.config.encoding.resolved_targets)
+        current_sampling = self._job.result.config.encoding.metrics_sampling
 
         # Step 2: quality-target / metrics_sampling change detection — must happen before
         # tolerance re-application so we don't skip re-encoding when params changed.
@@ -257,7 +258,7 @@ class OptimizationPhase:
                 )
             # Wipe encoded/ for every strategy — contents are hard-linked attempts
             # and result sidecars; EncodingPhase will re-discover from encoding/.
-            _wipe_encoded_dir(work_dir, self._config.strategies)
+            _wipe_encoded_dir(work_dir, self._job.result.config.encoding.resolved_strategies)
             # Treat all cached strategy results as stale — force re-encoding
             persisted = OptimizationParams(
                 crop             = persisted.crop,
@@ -274,12 +275,12 @@ class OptimizationPhase:
         if (
             persisted is not None
             and persisted.strategy_results
-            and len(persisted.strategy_results) == len(self._config.strategies)
+            and len(persisted.strategy_results) == len(self._job.result.config.encoding.resolved_strategies)
             and persisted.tolerance_pct != tolerance
             and not params_changed
         ):
             emit_phase_banner("OPTIMIZATION", logger)
-            logger.info("Strategies:  %s", ", ".join(s.name for s in self._config.strategies))
+            logger.info("Strategies:  %s", ", ".join(s.name for s in self._job.result.config.encoding.resolved_strategies))
             logger.info("Tolerance:   %.1f%%", tolerance)
             logger.info(
                 "All strategy results cached; tolerance changed (%.1f%% → %.1f%%) — re-selecting without re-encoding",
@@ -314,12 +315,12 @@ class OptimizationPhase:
         if (
             persisted is not None
             and persisted.strategy_results
-            and len(persisted.strategy_results) == len(self._config.strategies)
+            and len(persisted.strategy_results) == len(self._job.result.config.encoding.resolved_strategies)
             and persisted.tolerance_pct == tolerance
             and not params_changed
         ):
             emit_phase_banner("OPTIMIZATION", logger)
-            logger.info("Strategies:  %s", ", ".join(s.name for s in self._config.strategies))
+            logger.info("Strategies:  %s", ", ".join(s.name for s in self._job.result.config.encoding.resolved_strategies))
             logger.info("Tolerance:   %.1f%%", tolerance)
             with self._collector.time(MetricKey.RECOVERY):
                 selected = persisted.selected or self._apply_tolerance(persisted.strategy_results, tolerance)
@@ -339,8 +340,8 @@ class OptimizationPhase:
 
         # From here on we need live dependencies (for crop params and chunks)
         emit_phase_banner("OPTIMIZATION", logger)
-        logger.info("Strategies:  %s", ", ".join(s.name for s in self._config.strategies))
-        logger.info("Tolerance:   %.1f%%", self._config.strategy_selection_tolerance)
+        logger.info("Strategies:  %s", ", ".join(s.name for s in self._job.result.config.encoding.resolved_strategies))
+        logger.info("Tolerance:   %.1f%%", self._job.result.config.encoding.strategy_selection_tolerance)
 
         dep_result = self._ensure_dependencies(execute=True)
         if dep_result is not None:
@@ -362,7 +363,7 @@ class OptimizationPhase:
 
         if persisted is not None and persisted.strategy_results:
             if persisted.crop != crop:
-                if self._config.force:
+                if job_result.force_wipe:
                     logger.warning(
                         "Crop params changed since last optimization run "
                         "(persisted=%s, current=%s) — --force: deleting optimization artifacts",
@@ -387,7 +388,7 @@ class OptimizationPhase:
                 cached_results[r.strategy_name] = r
 
         strategies_to_test = [
-            s for s in self._config.strategies
+            s for s in self._job.result.config.encoding.resolved_strategies
             if s.name not in cached_results
         ]
         complete_count = len(cached_results)
@@ -436,7 +437,7 @@ class OptimizationPhase:
         ).save(opt_yaml)
 
         # Step 10: run test encodes for all pending strategies in parallel (unified pool)
-        encoder       = _make_encoder(work_dir, self._collector, crop, self._config.visual_hash, self._config.metrics_sampling)
+        encoder       = _make_encoder(work_dir, self._collector, crop, self._job.result.config.encoding.visual_hash, self._job.result.config.encoding.metrics_sampling)
         reference_dir = work_dir / CHUNKS_DIR
 
         from pyqenc.phases.encoding import (
@@ -465,8 +466,8 @@ class OptimizationPhase:
                     chunks            = test_chunks,
                     reference_dir     = reference_dir,
                     strategies        = strategies_to_test,
-                    quality_targets   = self._config.quality_targets,
-                    max_parallel      = self._config.max_parallel,
+                    quality_targets   = self._job.result.config.encoding.resolved_targets,
+                    max_parallel      = self._job.result.config.encoding.max_parallel,
                     force             = False,
                     collector         = self._collector,
                     phase_recovery    = phase_recovery,
@@ -476,7 +477,6 @@ class OptimizationPhase:
             advance(0, AdvanceState.COMPLETE)
 
         # Derive per-strategy results from encoded output
-        import yaml as _yaml
         new_results: list[StrategyTestResult] = []
         for strategy in strategies_to_test:
             file_sizes: list[float] = []
@@ -531,10 +531,10 @@ class OptimizationPhase:
             selected_names: Strategy display names from ``_apply_tolerance``.
 
         Returns:
-            Matching ``Strategy`` objects from ``self._config.strategies``,
+            Matching ``Strategy`` objects from ``self._job.result.config.encoding.resolved_strategies``,
             preserving the order of *selected_names*.
         """
-        by_name = {s.name: s for s in self._config.strategies}
+        by_name = {s.name: s for s in self._job.result.config.encoding.resolved_strategies}
         return [by_name[n] for n in selected_names if n in by_name]
 
     def _all_strategies_result(self) -> "OptimizationPhaseResult":
@@ -543,7 +543,7 @@ class OptimizationPhase:
             outcome             = PhaseOutcome.REUSED,
             artifacts           = [],
             message             = "all-strategies mode — skipping optimization",
-            selected_strategies = list(self._config.strategies),
+            selected_strategies = list(self._job.result.config.encoding.resolved_strategies),
             strategy_results    = [],
         )
 
@@ -562,10 +562,10 @@ class OptimizationPhase:
         Returns:
             ``OptimizationPhaseResult`` with all configured strategies selected.
         """
-        work_dir         = self._config.work_dir
+        work_dir         = self._job.result.work_dir
         opt_yaml         = work_dir / _OPTIMIZATION_YAML
-        current_targets  = _targets_as_strings(self._config.quality_targets)
-        current_sampling = self._config.metrics_sampling
+        current_targets  = _targets_as_strings(self._job.result.config.encoding.resolved_targets)
+        current_sampling = self._job.result.config.encoding.metrics_sampling
 
         if not dry_run:
             persisted = OptimizationParams.load(opt_yaml)
@@ -581,7 +581,7 @@ class OptimizationPhase:
                     "All-strategies mode: quality targets or metrics_sampling changed"
                     " — wiping encoded/ dirs"
                 )
-                _wipe_encoded_dir(work_dir, self._config.strategies)
+                _wipe_encoded_dir(work_dir, self._job.result.config.encoding.resolved_strategies)
             elif persisted is not None:
                 logger.debug(
                     "All-strategies mode: params unchanged (sampling=%s, targets=%s) — encoded/ kept",
@@ -595,7 +595,7 @@ class OptimizationPhase:
                 test_chunks      = [],
                 strategy_results = [],
                 tolerance_pct    = 0.0,
-                selected         = [s.name for s in self._config.strategies],
+                selected         = [s.name for s in self._job.result.config.encoding.resolved_strategies],
                 quality_targets  = current_targets,
                 metrics_sampling = current_sampling,
             ).save(opt_yaml)
@@ -604,7 +604,7 @@ class OptimizationPhase:
             outcome             = PhaseOutcome.REUSED,
             artifacts           = [],
             message             = "all-strategies mode — skipping optimization",
-            selected_strategies = list(self._config.strategies),
+            selected_strategies = list(self._job.result.config.encoding.resolved_strategies),
             strategy_results    = [],
         )
 
@@ -741,7 +741,7 @@ def _targets_as_strings(quality_targets: "list[QualityTarget]") -> list[str]:
     """Serialise *quality_targets* to ``"metric-statistic:value"`` strings.
 
     Args:
-        quality_targets: Quality targets from ``PipelineConfig``.
+        quality_targets: Quality targets from :class:`~pyqenc.app_config.AppConfig`.
 
     Returns:
         Sorted list of strings like ``["vmaf-min:93.0"]``.

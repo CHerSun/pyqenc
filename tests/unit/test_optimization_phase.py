@@ -17,16 +17,15 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from pyqenc.config import ConfigManager
+from pyqenc.app_config import load_app_config
 from pyqenc.models import (
-    ChunkingMode,
     CleanupLevel,
     CropParams,
     PhaseOutcome,
-    PipelineConfig,
     QualityTarget,
     Strategy,
 )
+from pyqenc.phases.job import JobPhase
 from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.state import OptimizationParams, StrategyTestResult
 
@@ -37,34 +36,70 @@ from pyqenc.state import OptimizationParams, StrategyTestResult
 
 _QUALITY_TARGETS = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
 
-_cm = ConfigManager()
-_S1, _S2, _S3 = _cm.resolve_strategies(["slow+h265-aq", "slow+h265", "veryslow+h265-aq"])
+_APP_CONFIG = load_app_config()
+
+# Resolve a few specific strategies for use in tests.
+_ALL_STRATEGIES = _APP_CONFIG.encoding.resolved_strategies
+_STRATEGY_MAP = {s.name: s for s in _ALL_STRATEGIES}
+
+# Pick 3 well-known strategies that exist in the default config.
+_S1 = next(s for s in _ALL_STRATEGIES if s.preset == "slow" and s.profile == "h265-aq")
+_S2 = next(s for s in _ALL_STRATEGIES if s.preset == "slow" and s.profile == "h265")
+_S3 = next(s for s in _ALL_STRATEGIES if s.preset == "slow" and s.profile == "h265-anime")
 
 
-def _make_config(
+def _make_job_phase(
     tmp_path: Path,
     strategies: list[Strategy],
     optimize: bool = True,
     tolerance: float = 5.0,
     force: bool = False,
-) -> PipelineConfig:
+) -> tuple[JobPhase, Path]:
+    """Create and run a JobPhase so that result is populated for downstream phases."""
     src = tmp_path / "source.mkv"
     src.write_bytes(b"\x00" * 1024)
-    return PipelineConfig(
-        source_video                 = src,
-        work_dir                     = tmp_path / "work",
-        quality_targets              = _QUALITY_TARGETS,
-        strategies                   = strategies,
-        optimize                     = optimize,
-        cleanup                      = CleanupLevel.NONE,
-        chunking_mode                = ChunkingMode.LOSSLESS,
-        force                        = force,
-        strategy_selection_tolerance = tolerance,
+    work_dir = tmp_path / "work"
+
+    config = _APP_CONFIG.model_copy(deep=True)
+    # Set quality targets as raw strings
+    config.encoding.quality_targets = ["vmaf-min:93.0"]
+    # Set strategy pattern strings matching the requested strategies
+    config.encoding.strategies = [f"{s.preset}+{s.profile}" for s in strategies]
+    config.encoding.optimize = optimize
+    config.encoding.strategy_selection_tolerance = tolerance
+    # Reset resolved caches so they get re-resolved from new strings
+    config.encoding._resolved_targets   = None
+    config.encoding._resolved_strategies = None
+    config.encoding.resolve(config.codecs, config.profiles)
+
+    job = JobPhase(
+        config,
+        source     = src,
+        work_dir   = work_dir,
+        force      = force,
+        cleanup    = CleanupLevel.NONE,
+        no_metrics = True,
+        collector  = MagicMock(),
     )
+    job.run(dry_run=False)
+    return job, work_dir
 
 
-def _make_phase(config: PipelineConfig) -> OptimizationPhase:
-    return OptimizationPhase(config, phases=None, collector=MagicMock())
+def _make_phase(
+    tmp_path: Path,
+    strategies: list[Strategy],
+    optimize: bool = True,
+    tolerance: float = 5.0,
+    force: bool = False,
+) -> tuple[OptimizationPhase, Path]:
+    """Create an OptimizationPhase with a pre-run JobPhase wired in."""
+    from pyqenc.phases.job import JobPhase as _JP
+
+    job, work_dir = _make_job_phase(tmp_path, strategies, optimize=optimize, tolerance=tolerance, force=force)
+    phases = {_JP: job}
+    config = job._config  # already resolved AppConfig
+    phase = OptimizationPhase(config, phases=phases, collector=MagicMock())
+    return phase, work_dir
 
 
 def _persist_optimization(
@@ -151,22 +186,19 @@ class TestToleranceReapplication:
     def test_reapplication_returns_reused_outcome(self, tmp_path: Path) -> None:
         """When all results cached and tolerance changed, outcome is REUSED."""
         strategies = [_S1, _S2, _S3]
-        config = _make_config(tmp_path, strategies, tolerance=10.0)
-        work_dir = config.work_dir
+        phase, work_dir = _make_phase(tmp_path, strategies, tolerance=10.0)
+        source = phase._job._source  # type: ignore[union-attr]
 
-        # Persist results with old tolerance
         results = _make_results([100, 104, 120])
         _persist_optimization(
             work_dir  = work_dir,
-            source    = config.source_video,
+            source    = source,
             strategy_results = results,
-            tolerance_pct    = 5.0,   # old tolerance
+            tolerance_pct    = 5.0,
             selected         = [_S1.name, _S2.name],
         )
 
-        phase = _make_phase(config)
         result = phase.run(dry_run=False)
-
         assert result.outcome == PhaseOutcome.REUSED
         assert result.is_complete is True
 
@@ -174,21 +206,19 @@ class TestToleranceReapplication:
         """Re-application selects strategies based on new tolerance, not old."""
         strategies = [_S1, _S2, _S3]
         # New tolerance is 25% — should include S3 (20% above best)
-        config = _make_config(tmp_path, strategies, tolerance=25.0)
-        work_dir = config.work_dir
+        phase, work_dir = _make_phase(tmp_path, strategies, tolerance=25.0)
+        source = phase._job._source  # type: ignore[union-attr]
 
         results = _make_results([100, 104, 120])
         _persist_optimization(
             work_dir         = work_dir,
-            source           = config.source_video,
+            source           = source,
             strategy_results = results,
-            tolerance_pct    = 5.0,   # old tolerance — only S1, S2 selected
+            tolerance_pct    = 5.0,
             selected         = [_S1.name, _S2.name],
         )
 
-        phase = _make_phase(config)
         result = phase.run(dry_run=False)
-
         assert _S1 in result.selected_strategies
         assert _S2 in result.selected_strategies
         assert _S3 in result.selected_strategies
@@ -196,22 +226,20 @@ class TestToleranceReapplication:
     def test_reapplication_persists_new_tolerance(self, tmp_path: Path) -> None:
         """After re-application, optimization.yaml is updated with the new tolerance."""
         strategies = [_S1, _S2, _S3]
-        config = _make_config(tmp_path, strategies, tolerance=10.0)
-        work_dir = config.work_dir
+        phase, work_dir = _make_phase(tmp_path, strategies, tolerance=10.0)
+        source = phase._job._source  # type: ignore[union-attr]
 
         results = _make_results([100, 104, 120])
         _persist_optimization(
             work_dir         = work_dir,
-            source           = config.source_video,
+            source           = source,
             strategy_results = results,
             tolerance_pct    = 5.0,
             selected         = [_S1.name, _S2.name],
         )
 
-        phase = _make_phase(config)
         phase.run(dry_run=False)
 
-        # Read back the persisted file
         persisted = OptimizationParams.load(work_dir / "optimization.yaml")
         assert persisted is not None
         assert persisted.tolerance_pct == 10.0
@@ -219,53 +247,48 @@ class TestToleranceReapplication:
     def test_no_reapplication_when_tolerance_unchanged(self, tmp_path: Path) -> None:
         """When tolerance is unchanged and all results cached, outcome is REUSED (fast path)."""
         strategies = [_S1, _S2, _S3]
-        config = _make_config(tmp_path, strategies, tolerance=5.0)
-        work_dir = config.work_dir
+        phase, work_dir = _make_phase(tmp_path, strategies, tolerance=5.0)
+        source = phase._job._source  # type: ignore[union-attr]
 
         results = _make_results([100, 104, 120])
         _persist_optimization(
             work_dir         = work_dir,
-            source           = config.source_video,
+            source           = source,
             strategy_results = results,
-            tolerance_pct    = 5.0,   # same tolerance
+            tolerance_pct    = 5.0,
             selected         = [_S1.name, _S2.name],
         )
 
-        phase = _make_phase(config)
         result = phase.run(dry_run=False)
-
         assert result.outcome == PhaseOutcome.REUSED
         assert result.is_complete is True
-        # Selected strategies should match the cached selection
         assert _S1 in result.selected_strategies
         assert _S2 in result.selected_strategies
 
     def test_reapplication_zero_tolerance_selects_one(self, tmp_path: Path) -> None:
         """Changing tolerance to 0% selects exactly the best strategy."""
         strategies = [_S1, _S2, _S3]
-        config = _make_config(tmp_path, strategies, tolerance=0.0)
-        work_dir = config.work_dir
+        phase, work_dir = _make_phase(tmp_path, strategies, tolerance=0.0)
+        source = phase._job._source  # type: ignore[union-attr]
 
         results = _make_results([100, 104, 120])
         _persist_optimization(
             work_dir         = work_dir,
-            source           = config.source_video,
+            source           = source,
             strategy_results = results,
             tolerance_pct    = 5.0,
             selected         = [_S1.name, _S2.name],
         )
 
-        phase = _make_phase(config)
         result = phase.run(dry_run=False)
-
         assert len(result.selected_strategies) == 1
         assert result.selected_strategies[0] == _S1
 
     def test_partial_results_not_reapplied(self, tmp_path: Path) -> None:
         """Re-application only triggers when ALL strategies have cached results."""
         strategies = [_S1, _S2, _S3]
-        config = _make_config(tmp_path, strategies, tolerance=10.0)
-        work_dir = config.work_dir
+        phase, work_dir = _make_phase(tmp_path, strategies, tolerance=10.0)
+        source = phase._job._source  # type: ignore[union-attr]
 
         # Only 2 of 3 strategies have results
         partial_results = [
@@ -274,13 +297,12 @@ class TestToleranceReapplication:
         ]
         _persist_optimization(
             work_dir         = work_dir,
-            source           = config.source_video,
+            source           = source,
             strategy_results = partial_results,
             tolerance_pct    = 5.0,
             selected         = [_S1.name, _S2.name],
         )
 
-        phase = _make_phase(config)
         result = phase.run(dry_run=False)
         assert result.outcome != PhaseOutcome.REUSED or len(result.strategy_results) == 3
 
@@ -294,24 +316,21 @@ class TestAllStrategiesMode:
 
     def test_returns_all_configured_strategies(self, tmp_path: Path) -> None:
         strategies = [_S1, _S2, _S3]
-        config = _make_config(tmp_path, strategies, optimize=False)
-        phase = _make_phase(config)
+        phase, _ = _make_phase(tmp_path, strategies, optimize=False)
         result = phase.run(dry_run=False)
 
         assert result.is_complete is True
         assert sorted(s.name for s in result.selected_strategies) == sorted(s.name for s in strategies)
 
     def test_no_strategy_results_in_all_strategies_mode(self, tmp_path: Path) -> None:
-        config = _make_config(tmp_path, [_S1, _S2], optimize=False)
-        phase = _make_phase(config)
+        phase, _ = _make_phase(tmp_path, [_S1, _S2], optimize=False)
         result = phase.run(dry_run=False)
 
         assert result.strategy_results == []
 
     def test_scan_returns_all_strategies_silently(self, tmp_path: Path) -> None:
         strategies = [_S1, _S2]
-        config = _make_config(tmp_path, strategies, optimize=False)
-        phase = _make_phase(config)
+        phase, _ = _make_phase(tmp_path, strategies, optimize=False)
         result = phase.scan()
 
         assert result.is_complete is True

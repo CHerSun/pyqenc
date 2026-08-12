@@ -19,17 +19,22 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pyqenc.metrics import MetricsCollector, MetricKey
 from pyqenc.models import (
+    CleanupLevel,
     CropParams,
     PhaseOutcome,
-    PipelineConfig,
     VideoMetadata,
 )
 from pyqenc.phase import Artifact, Phase, PhaseResult
 from pyqenc.state import ArtifactState, JobState
 from pyqenc.utils.disk_space import log_disk_space_info
+
+if TYPE_CHECKING:
+    from pyqenc.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +56,21 @@ class JobPhaseResult(PhaseResult):
         force_wipe: ``True`` when ``--force`` was provided and a source mismatch
                     was detected; downstream phases must delete their own output
                     directories and phase parameter YAMLs before proceeding.
+        config:     Full validated application configuration.
+        work_dir:   Working directory for all pipeline artifacts.
+        source:     Resolved path to the source video file.
+        cleanup:    Artifact retention policy applied after encoding.
+        no_metrics: When ``True``, skip writing ``metrics.yaml`` files.
     """
 
-    job:        JobState | None = field(default=None)
+    job:        JobState | None  = field(default=None)
     crop:       CropParams | None = field(default=None)
-    force_wipe: bool = field(default=False)
+    force_wipe: bool              = field(default=False)
+    config:     "AppConfig | None" = field(default=None)
+    work_dir:   Path | None       = field(default=None)
+    source:     Path | None       = field(default=None)
+    cleanup:    CleanupLevel      = field(default=CleanupLevel.NONE)
+    no_metrics: bool              = field(default=False)
 
 
 # ---------------------------------------------------------------------------
@@ -70,8 +85,14 @@ class JobPhase:
     intro logging.
 
     Args:
-        config:  Full pipeline configuration.
-        phases:  Phase registry (unused — ``JobPhase`` has no dependencies).
+        config:     Full validated application configuration.
+        phases:     Phase registry (unused — ``JobPhase`` has no dependencies).
+        source:     Resolved path to the source video file.
+        work_dir:   Working directory for all pipeline artifacts.
+        force:      When ``True``, wipe existing artifacts on source mismatch.
+        cleanup:    Artifact retention policy applied after encoding.
+        no_metrics: When ``True``, skip writing ``metrics.yaml`` files.
+        collector:  Metrics collector for timing instrumentation.
     """
 
     name: str = "job"
@@ -79,13 +100,23 @@ class JobPhase:
 
     def __init__(
         self,
-        config:    PipelineConfig,
-        phases:    dict[type[Phase], Phase] | None = None,
+        config:     "AppConfig",
+        phases:     dict[type[Phase], Phase] | None = None,
         *,
-        collector: "MetricsCollector",
+        source:     Path,
+        work_dir:   Path,
+        force:      bool,
+        cleanup:    CleanupLevel,
+        no_metrics: bool,
+        collector:  "MetricsCollector",
     ) -> None:
-        self._config:    PipelineConfig    = config
-        self._collector: "MetricsCollector" = collector
+        self._config:     "AppConfig"      = config
+        self._source:     Path             = source
+        self._work_dir:   Path             = work_dir
+        self._force:      bool             = force
+        self._cleanup:    CleanupLevel     = cleanup
+        self._no_metrics: bool             = no_metrics
+        self._collector:  "MetricsCollector" = collector
         self.result: JobPhaseResult | None = None
         # JobPhase has no dependencies; phases registry is accepted but unused.
 
@@ -103,31 +134,41 @@ class JobPhase:
         if self.result is not None:
             return self.result
 
-        job = JobState.load(self._config.work_dir / _JOB_YAML_FILENAME)
+        job = JobState.load(self._work_dir / _JOB_YAML_FILENAME)
 
         if job is None:
             result = JobPhaseResult(
                 outcome   = PhaseOutcome.DRY_RUN,
                 artifacts = [Artifact(
-                    path  = self._config.work_dir / _JOB_YAML_FILENAME,
+                    path  = self._work_dir / _JOB_YAML_FILENAME,
                     state = ArtifactState.ABSENT,
                 )],
                 message    = "job.yaml not found",
                 job        = None,
                 crop       = None,
                 force_wipe = False,
+                config     = self._config,
+                work_dir   = self._work_dir,
+                source     = self._source,
+                cleanup    = self._cleanup,
+                no_metrics = self._no_metrics,
             )
         else:
             result = JobPhaseResult(
                 outcome   = PhaseOutcome.REUSED,
                 artifacts = [Artifact(
-                    path  = self._config.work_dir / _JOB_YAML_FILENAME,
+                    path  = self._work_dir / _JOB_YAML_FILENAME,
                     state = ArtifactState.COMPLETE,
                 )],
                 message    = "job.yaml loaded",
                 job        = job,
                 crop       = job.crop,
                 force_wipe = False,
+                config     = self._config,
+                work_dir   = self._work_dir,
+                source     = self._source,
+                cleanup    = self._cleanup,
+                no_metrics = self._no_metrics,
             )
 
         self.result = result
@@ -161,16 +202,16 @@ class JobPhase:
         # already populated → pixel-based estimate). Fall back to a bare instance on first run
         # (file_size_bytes is the only field needed for the multiplier fallback — one stat() call).
         if not dry_run:
-            existing_job = JobState.load(self._config.work_dir / _JOB_YAML_FILENAME)
+            existing_job = JobState.load(self._work_dir / _JOB_YAML_FILENAME)
             video        = existing_job.source if existing_job is not None \
-                           else VideoMetadata(path=self._config.source_video)
-            n_strategies = len(self._config.strategies)
+                           else VideoMetadata(path=self._source)
+            n_strategies = len(self._config.encoding.resolved_strategies)
             log_disk_space_info(
                 video          = video,
-                work_dir       = self._config.work_dir,
-                min_strategies = 1 if (self._config.optimize or n_strategies == 0) else n_strategies,
+                work_dir       = self._work_dir,
+                min_strategies = 1 if (self._config.encoding.optimize or n_strategies == 0) else n_strategies,
                 max_strategies = max(1, n_strategies),
-                chunking_mode  = self._config.chunking_mode,
+                chunking_mode  = self._config.chunking.mode,
             )
             # Insufficient space. Previously we stopped here, but now I don't want to block, just notify the user.
             #if not sufficient:
@@ -197,24 +238,34 @@ class JobPhase:
                 job        = None,
                 crop       = None,
                 force_wipe = False,
+                config     = self._config,
+                work_dir   = self._work_dir,
+                source     = self._source,
+                cleanup    = self._cleanup,
+                no_metrics = self._no_metrics,
             )
             self.result = result
             return result
 
         # Dry-run: if job.yaml absent, report DRY_RUN
         if dry_run:
-            existing = JobState.load(self._config.work_dir / _JOB_YAML_FILENAME)
+            existing = JobState.load(self._work_dir / _JOB_YAML_FILENAME)
             if existing is None:
                 result = JobPhaseResult(
                     outcome   = PhaseOutcome.DRY_RUN,
                     artifacts = [Artifact(
-                        path  = self._config.work_dir / _JOB_YAML_FILENAME,
+                        path  = self._work_dir / _JOB_YAML_FILENAME,
                         state = ArtifactState.ABSENT,
                     )],
                     message    = "Would create job.yaml",
                     job        = None,
                     crop       = None,
                     force_wipe = False,
+                    config     = self._config,
+                    work_dir   = self._work_dir,
+                    source     = self._source,
+                    cleanup    = self._cleanup,
+                    no_metrics = self._no_metrics,
                 )
                 self.result = result
                 return result
@@ -222,19 +273,24 @@ class JobPhase:
             result = JobPhaseResult(
                 outcome   = PhaseOutcome.REUSED,
                 artifacts = [Artifact(
-                    path  = self._config.work_dir / _JOB_YAML_FILENAME,
+                    path  = self._work_dir / _JOB_YAML_FILENAME,
                     state = ArtifactState.COMPLETE,
                 )],
                 message    = "job.yaml already up to date",
                 job        = existing,
                 crop       = existing.crop,
                 force_wipe = False,
+                config     = self._config,
+                work_dir   = self._work_dir,
+                source     = self._source,
+                cleanup    = self._cleanup,
+                no_metrics = self._no_metrics,
             )
             self.result = result
             return result
 
         # Check whether job.yaml existed before we create/update it
-        did_work = (JobState.load(self._config.work_dir / _JOB_YAML_FILENAME) is None) or force_wipe
+        did_work = (JobState.load(self._work_dir / _JOB_YAML_FILENAME) is None) or force_wipe
 
         # Execute mode: create/update job.yaml (force fresh write on force_wipe)
         job = self._create_or_update_job(force=force_wipe)
@@ -244,23 +300,28 @@ class JobPhase:
 
         # Persist updated job state (with crop)
         job.crop = crop
-        job.save(self._config.work_dir / _JOB_YAML_FILENAME)
+        job.save(self._work_dir / _JOB_YAML_FILENAME)
 
         if did_work:
-            logger.debug("Job initialised: %s", self._config.work_dir / _JOB_YAML_FILENAME)
+            logger.debug("Job initialised: %s", self._work_dir / _JOB_YAML_FILENAME)
         else:
             logger.debug("Job: reusing existing job.yaml")
 
         result = JobPhaseResult(
             outcome   = PhaseOutcome.COMPLETED if did_work else PhaseOutcome.REUSED,
             artifacts = [Artifact(
-                path  = self._config.work_dir / _JOB_YAML_FILENAME,
+                path  = self._work_dir / _JOB_YAML_FILENAME,
                 state = ArtifactState.COMPLETE,
             )],
             message    = "job.yaml initialised" if did_work else "job.yaml already up to date",
             job        = job,
             crop       = crop,
             force_wipe = force_wipe,
+            config     = self._config,
+            work_dir   = self._work_dir,
+            source     = self._source,
+            cleanup    = self._cleanup,
+            no_metrics = self._no_metrics,
         )
         self.result = result
         return result
@@ -279,7 +340,7 @@ class JobPhase:
             - ``failed=True`` when a mismatch was detected without ``--force``
               in execute mode; caller should return ``FAILED``.
         """
-        existing = JobState.load(self._config.work_dir / _JOB_YAML_FILENAME)
+        existing = JobState.load(self._work_dir / _JOB_YAML_FILENAME)
         if existing is None:
             return False, False
 
@@ -299,7 +360,7 @@ class JobPhase:
             )
             return False, False
 
-        if self._config.force:
+        if self._force:
             logger.warning(
                 "Source file mismatch detected (--force — downstream phases will wipe their own artifacts): %s",
                 mismatch_desc,
@@ -328,12 +389,12 @@ class JobPhase:
         mismatches: list[tuple[str, object, object]] = []
         persisted = existing.source
 
-        if persisted.path.resolve() != self._config.source_video.resolve():
-            mismatches.append(("path", str(persisted.path), str(self._config.source_video)))
+        if persisted.path.resolve() != self._source.resolve():
+            mismatches.append(("path", str(persisted.path), str(self._source)))
             return mismatches
 
         try:
-            current_size = self._config.source_video.stat().st_size
+            current_size = self._source.stat().st_size
         except OSError:
             current_size = None
 
@@ -342,7 +403,7 @@ class JobPhase:
                 mismatches.append(("file_size_bytes", persisted._file_size_bytes, current_size))
 
         if not mismatches and persisted._resolution is not None:
-            live_meta = VideoMetadata(path=self._config.source_video)
+            live_meta = VideoMetadata(path=self._source)
             current_res = live_meta.resolution
             if current_res is not None and current_res != persisted._resolution:
                 mismatches.append(("resolution", persisted._resolution, current_res))
@@ -363,12 +424,12 @@ class JobPhase:
                    stale and must be replaced.
         """
         if not force:
-            existing = JobState.load(self._config.work_dir / _JOB_YAML_FILENAME)
+            existing = JobState.load(self._work_dir / _JOB_YAML_FILENAME)
             if existing is not None:
                 logger.debug("Loaded existing job.yaml")
                 return existing
 
-        source = VideoMetadata(path=self._config.source_video)
+        source = VideoMetadata(path=self._source)
         # Eagerly probe all fields so they are persisted in job.yaml
         with self._collector.time(MetricKey.JOB):
             with self._collector.time(MetricKey.JOB, "probe"):
@@ -394,8 +455,8 @@ class JobPhase:
         from pyqenc.utils.crop import detect_crop_parameters
 
         # 1. Manual override from config
-        if self._config.crop_params is not None:
-            c = self._config.crop_params
+        if self._config.encoding.crop_params is not None:
+            c = self._config.encoding.crop_params
             logger.info(f"Cropping: {c.display()} (manual)")
             return c
 
@@ -407,7 +468,7 @@ class JobPhase:
 
         # 3. Auto-detect
         logger.info("Cropping: detecting black borders...")
-        source = VideoMetadata(path=self._config.source_video)
+        source = VideoMetadata(path=self._source)
         with self._collector.time(MetricKey.JOB):
             with self._collector.time(MetricKey.JOB, "crop_detect"):
                 crop = detect_crop_parameters(source)

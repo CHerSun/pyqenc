@@ -32,24 +32,34 @@ from pyqenc.state import ArtifactState
 
 def _make_merge_phase(tmp_path: Path) -> MergePhase:
     """Build a minimal MergePhase with mocked dependencies."""
-    config = MagicMock()
-    config.work_dir         = tmp_path
-    config.source_video     = tmp_path / "source.mkv"
-    config.quality_targets  = []
-    config.metrics_sampling = 1
+    # Build a job result mock that supplies the fields _execute_merge reads via
+    # self._job.result.* (after the config-refactor migration).
+    job_result = MagicMock()
+    job_result.work_dir   = tmp_path
+    job_result.source     = tmp_path / "source.mkv"
+    job_result.force_wipe = False
+    job_result.crop       = None
+    job_result.job        = None
+    # Encoding config sub-mock
+    encoding_config = MagicMock()
+    encoding_config.resolved_targets  = []
+    encoding_config.metrics_sampling  = 1
+    job_result.config.encoding = encoding_config
+
+    job = MagicMock()
+    job.result = job_result
 
     collector = MagicMock()
     collector.time.return_value.__enter__ = MagicMock(return_value=None)
     collector.time.return_value.__exit__  = MagicMock(return_value=False)
 
     phase = MergePhase.__new__(MergePhase)
-    phase._config    = config
+    phase._config    = MagicMock()   # kept for type consistency; values come from _job.result
     phase._collector = collector
-    phase._job       = None
+    phase._job       = job
     phase._extraction = None
     phase._encoding  = None
     phase._audio     = None
-    phase.params     = MagicMock()
     phase.result     = None
     phase.dependencies = []
     return phase
@@ -220,14 +230,10 @@ class TestMkvmergeOptionsFileLifecycle:
         encoding.quality_labels = {}
         phase._encoding = encoding
 
-        # Wire job result
-        job_result = MagicMock()
-        job_result.force_wipe = False
-        job_result.crop = None
-        job_result.job = None
-        job = MagicMock()
-        job.result = job_result
-        phase._job = job
+        # _make_merge_phase already wires _job with work_dir / source / config.encoding
+        # — just ensure crop/job fields are set on the existing result
+        phase._job.result.crop = None
+        phase._job.result.job  = None
 
         return phase
 
@@ -346,13 +352,10 @@ class TestMergeFailsWithoutTimestamps:
         encoding.quality_labels = {}
         phase._encoding = encoding
 
-        job_result = MagicMock()
-        job_result.force_wipe = False
-        job_result.crop = None
-        job_result.job = None
-        job = MagicMock()
-        job.result = job_result
-        phase._job = job
+        # _make_merge_phase already wires _job with work_dir / source / config.encoding
+        # — just ensure crop/job fields are set on the existing result
+        phase._job.result.crop = None
+        phase._job.result.job  = None
 
         return phase
 

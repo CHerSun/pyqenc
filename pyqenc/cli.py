@@ -6,8 +6,12 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import psutil
+
+if TYPE_CHECKING:
+    from pyqenc.app_config import AppConfig
 
 import pyqenc
 from pyqenc.constants import (
@@ -21,8 +25,6 @@ from pyqenc.models import (
     ChunkingMode,
     CleanupLevel,
     CropParams,
-    PipelineConfig,
-    QualityTarget,
 )
 from pyqenc.state import ArtifactState
 from pyqenc.utils.log_format import fmt_key_value_table
@@ -37,28 +39,30 @@ def _set_process_priority() -> None:
     try:
         psutil.Process().nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if sys.platform == "win32" else 10)
         logger.debug("Process priority set to below normal")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(f"Failed to set process priority: {e}")
 
 
 def _parse_quality_targets(targets_str: str) -> list[str]:
-    """Parse comma-separated quality targets, i.e. "vmaf-min:95,ssim-med:98" into a list of strings"""
+    """Parse comma-separated quality targets, i.e. "vmaf-min:95,ssim-med:98" into a list of strings."""
     return [t.strip() for t in targets_str.split(",") if t.strip()]
 
 
 def _parse_strategies(strategies_str: str | None) -> list[str] | None:
-    """Parse comma-separated encoding strategies, i.e. "slow+h265-aq,veryslow+h264-anime" into a list of strings. None meaning use defaults, while empty string means all combinations."""
+    """Parse comma-separated encoding strategies into a list of strings.
+
+    Returns ``None`` meaning "use defaults from config", or a list where an
+    empty string element means "all combinations".
+    """
     if strategies_str is None:
         return None
-
     if strategies_str.strip() == "":
-        return [""]  # Empty string means all combinations
-
+        return [""]
     return [s.strip() for s in strategies_str.split(",") if s.strip()]
 
 
 def _parse_cleanup_level(cleanup_value: str | None) -> CleanupLevel:
-    """Parse the --cleanup flag value into a ``CleanupLevel``. None for no cleanup, "" for intermediate, "all" for all.
+    """Parse the --cleanup flag value into a ``CleanupLevel``.
 
     Raises:
         argparse.ArgumentTypeError: If the value is not recognised.
@@ -74,22 +78,65 @@ def _parse_cleanup_level(cleanup_value: str | None) -> CleanupLevel:
     )
 
 
+def _resolve_crop_params(args: argparse.Namespace) -> CropParams | None:
+    """Parse crop parameters from CLI args into a ``CropParams`` instance.
+
+    Returns:
+        An explicit ``CropParams`` (including empty/no-op) if ``--crop`` was given.
+        ``None`` as a sentinel meaning "auto-resolve from job.yaml".
+
+    Raises:
+        ValueError: On bad ``--crop`` format.
+    """
+    crop_str = getattr(args, "crop", None)
+    if crop_str:
+        return CropParams.parse(crop_str)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Argument group helpers
+# ---------------------------------------------------------------------------
+
 def _add_base_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add arguments universal to ALL subcommands (including measure)."""
-    parser.add_argument("--work-dir", type=LongPath, default=LongPath("."), help="Working directory for intermediate files and state (default: .)")
-    parser.add_argument("--log-level", choices=["debug", "info", "warning", "critical"], default="info", help="Logging level (default: info)")
+    """Add arguments universal to ALL subcommands."""
+    parser.add_argument(
+        "--work-dir",
+        type=LongPath,
+        default=LongPath("."),
+        help="Working directory for intermediate files and state (default: .)",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=["debug", "info", "warning", "critical"],
+        default="info",
+        help="Logging level (default: info)",
+    )
 
 
 def _add_pipeline_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add arguments specific to pipeline phases (NOT used by measure)."""
-    parser.add_argument("-y", "--execute", action="store_true", default=False, help="Execute phases (default: dry-run). Without this flag only a dry-run is performed.")
-    parser.add_argument("--cleanup", nargs="?", const="intermediate", metavar="all", help=(
+    """Add arguments common to all pipeline-phase subcommands (not used by measure/config)."""
+    parser.add_argument(
+        "-y", "--execute",
+        action="store_true",
+        default=False,
+        help="Execute phases (default: dry-run). Without this flag only a dry-run is performed.",
+    )
+    parser.add_argument(
+        "--cleanup",
+        nargs="?",
+        const="intermediate",
+        metavar="all",
+        help=(
             "Cleanup level for intermediate files. "
             "--cleanup (no argument): delete workspace files per artifact after completion. "
             "--cleanup all: also delete remaining intermediate directories after full pipeline success."
         ),
     )
-    parser.add_argument("--force", action="store_true", help=(
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
             "When a source-file mismatch is detected in execute mode (-y), "
             "delete all intermediate artifacts and reset state, then continue "
             "with the new source file. Has no effect without -y."
@@ -100,6 +147,59 @@ def _add_pipeline_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         default=False,
         help="Suppress process metrics.yaml output (pipeline run stats). Does not affect quality metrics measurements.",
+    )
+
+
+def _add_filter_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add stream filter arguments (used by subcommands that depend on ExtractionPhase)."""
+    parser.add_argument(
+        "--include",
+        type=str,
+        help="Regex pattern to include streams across all types (e.g. '.*eng.*')",
+    )
+    parser.add_argument(
+        "--exclude",
+        type=str,
+        help="Regex pattern to exclude streams across all types (e.g. 'attachment')",
+    )
+
+
+def _add_crop_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add crop arguments (used by subcommands that depend on ExtractionPhase)."""
+    parser.add_argument(
+        "--crop",
+        type=str,
+        metavar="PARAMS",
+        help=(
+            "Manual crop parameters: 'top bottom' or 'top bottom left right'. "
+            "Use '0 0' to disable automatic black border detection and cropping."
+        ),
+    )
+
+
+def _add_chunking_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add chunking arguments (used by subcommands that depend on ChunkingPhase)."""
+    parser.add_argument(
+        "--chunking",
+        choices=["ffv1", "remux"],
+        default="ffv1",
+        metavar="CHUNKING_METHOD",
+        help=(
+            "Chunking method: 'ffv1' (default) re-encodes chunks to FFV1 lossless for frame-perfect boundaries; "
+            "'remux' uses stream-copy for faster chunking and smaller intermediate files but boundaries snap to the nearest I-frame."
+        ),
+    )
+    parser.add_argument(
+        "--scene-threshold",
+        type=float,
+        default=0.3,
+        help="Scene detection sensitivity 0.0-1.0 (default: 0.3)",
+    )
+    parser.add_argument(
+        "--min-scene-length",
+        type=int,
+        default=24,
+        help="Minimum frames per chunk (default: 24)",
     )
 
 
@@ -115,11 +215,7 @@ _QUALITY_TARGET_HELP: str = (
 
 
 def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add quality-related arguments.
-
-    Args:
-        parser: Argument parser to add arguments to
-    """
+    """Add quality/encoding arguments (used by subcommands that depend on EncodingPhase)."""
     parser.add_argument(
         "--targets",
         type=str,
@@ -132,31 +228,33 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         "--strategies",
         type=str,
         default=None,
-        help="Encoding strategies (e.g., 'slow+h265-aq,veryslow+h264-anime'). "
-             "If not specified, uses default from config file. "
-             "Use empty string '' for all combinations."
+        help=(
+            "Encoding strategies (e.g., 'slow+h265-aq,veryslow+h264-anime'). "
+            "If not specified, uses default from config file. "
+            "Use empty string '' for all combinations."
+        ),
     )
     parser.add_argument(
         "--all-strategies",
         action="store_true",
-        help="Disable optimization phase and produce output for all strategies (default: picks the best strategy during optimization)"
+        help="Disable optimization phase and produce output for all strategies.",
     )
     parser.add_argument(
         "--max-parallel",
         type=int,
         default=DEFAULT_MAX_PARALLEL,
-        help=f"Maximum concurrent encoding processes (default: {DEFAULT_MAX_PARALLEL}). Don't set this high, ffmpeg knows how to scale too."
+        help=f"Maximum concurrent encoding processes (default: {DEFAULT_MAX_PARALLEL}).",
     )
     parser.add_argument(
         "--sampling",
         type=int,
-        default=None, # None will get replaced with config value, if its present
+        default=None,
         metavar="N",
         dest="metrics_sampling",
         help=(
             "Frame sampling factor for quality metrics measurement: measure every N-th frame. "
-            f"Min: 1 (every frame measured). Default: None (use config value or {DEFAULT_METRICS_SAMPLING}). Directly affects reliability of metrics. A tradeoff between precision and speed. "
-            "Values above 20 are not recommended due to measurement volatility. 1 gives the highest precision but lowest speed. 2-4 are a good compromise. 5-10 start to become unreliable.."
+            f"Min: 1 (every frame measured). Default: None (use config value or {DEFAULT_METRICS_SAMPLING}). "
+            "Directly affects reliability of metrics. Values above 20 are not recommended."
         ),
     )
     parser.add_argument(
@@ -166,29 +264,8 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_filter_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add stream filter arguments.
-
-    Args:
-        parser: Argument parser to add arguments to
-    """
-    parser.add_argument(
-        "--include",
-        type=str,
-        help="Regex pattern to include streams across all types (e.g. '.*eng.*')"
-    )
-    parser.add_argument(
-        "--exclude",
-        type=str,
-        help="Regex pattern to exclude streams across all types (e.g. 'attachment')"
-    )
-
 def _add_audio_convert_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add audio conversion arguments for the audio output phase.
-
-    Args:
-        parser: Argument parser to add arguments to
-    """
+    """Add audio conversion arguments (used by subcommands that depend on AudioPhase)."""
     parser.add_argument(
         "--audio-convert",
         type=str,
@@ -218,76 +295,107 @@ def _add_audio_convert_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_crop_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add crop-related arguments.
+# ---------------------------------------------------------------------------
+# Config assembly helper
+# ---------------------------------------------------------------------------
 
-    Args:
-        parser: Argument parser to add arguments to
-    """
-    parser.add_argument(
-        "--crop",
-        type=str,
-        metavar="PARAMS",
-        help=(
-            "Manual crop parameters: 'top bottom' or 'top bottom left right'. "
-            "Use '0 0' to disable automatic black border detection and cropping."
-        ),
-    )
+def _build_config(args: argparse.Namespace) -> "AppConfig":
+    """Load app config and apply all CLI overrides present in *args*.
 
-
-def _resolve_crop_params(args: argparse.Namespace) -> CropParams | None:
-    """Parse crop parameters from CLI args into a CropParams instance.
+    Only attributes that are actually defined on *args* are applied, so the
+    same helper works correctly for every subcommand regardless of which
+    argument groups were added to its parser.
 
     Returns:
-        An explicit ``CropParams`` (including empty/no-op) if ``--crop`` was given.
-        ``None`` as a sentinel meaning "auto-resolve from job.yaml" (handled by the phase layer).
-
-    Raises:
-        ValueError: On bad ``--crop`` format. Caller should catch and log critical.
+        Fully assembled ``AppConfig`` with CLI overrides applied and strategies
+        resolved.
     """
-    crop_str = getattr(args, "crop", None)
-    if crop_str:
-        return CropParams.parse(crop_str)
-    return None
+    from pyqenc.app_config import load_app_config
+
+    config = load_app_config()
+
+    # --- extraction ---
+    if getattr(args, "include", None) is not None:
+        config.extraction.include = args.include
+    if getattr(args, "exclude", None) is not None:
+        config.extraction.exclude = args.exclude
+
+    # --- chunking ---
+    chunking_val = getattr(args, "chunking", None)
+    if chunking_val is not None:
+        config.chunking.mode = (
+            ChunkingMode.REMUX if chunking_val == ChunkingMode.REMUX.value
+            else ChunkingMode.LOSSLESS
+        )
+    if getattr(args, "scene_threshold", None) is not None:
+        config.chunking.scene_threshold = args.scene_threshold
+    if getattr(args, "min_scene_length", None) is not None:
+        config.chunking.min_scene_length = args.min_scene_length
+
+    # --- encoding / quality ---
+    quality_target_str = getattr(args, "quality_target", None)
+    if quality_target_str is not None:
+        config.encoding.quality_targets = _parse_quality_targets(quality_target_str)
+
+    strategies = _parse_strategies(getattr(args, "strategies", None))
+    if strategies is not None:
+        config.encoding.strategies = strategies
+
+    if getattr(args, "all_strategies", False):
+        config.encoding.optimize = False
+
+    max_parallel = getattr(args, "max_parallel", None)
+    if max_parallel is not None:
+        config.encoding.max_parallel = max_parallel
+
+    metrics_sampling = getattr(args, "metrics_sampling", None)
+    if metrics_sampling is not None:
+        config.encoding.metrics_sampling = metrics_sampling
+
+    no_visual_hash = getattr(args, "no_visual_hash", False)
+    config.encoding.visual_hash = not no_visual_hash
+
+    # --- audio ---
+    if getattr(args, "audio_convert", None) is not None:
+        config.audio.convert_filter = args.audio_convert
+    if getattr(args, "audio_codec", None) is not None:
+        config.audio.audio_codec = args.audio_codec
+    if getattr(args, "audio_bitrate", None) is not None:
+        config.audio.audio_base_bitrate = args.audio_bitrate
+
+    # Re-resolve strategies so resolved_strategies reflects all overrides.
+    config.encoding.resolve(config.codecs, config.profiles)
+
+    return config
 
 
-def _create_auto_subcommand(subparsers) -> None:
-    """Create the 'auto' subcommand for full pipeline execution.
+# ---------------------------------------------------------------------------
+# Subcommand definitions
+# ---------------------------------------------------------------------------
 
-    Args:
-        subparsers: Subparsers object to add command to
-    """
-    auto_parser = subparsers.add_parser(
+def _create_auto_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    """Create the 'auto' subcommand for full pipeline execution."""
+    p = subparsers.add_parser(
         "auto",
-        help="Execute complete pipeline from extraction to final merge"
+        help="Execute complete pipeline from extraction to final merge",
     )
-    auto_parser.add_argument(
-        "source",
-        type=Path,
-        help="Source MKV video file"
-    )
-    _add_base_arguments(auto_parser)
-    _add_pipeline_arguments(auto_parser)
-    _add_quality_arguments(auto_parser)
-    _add_filter_arguments(auto_parser)
-    _add_crop_arguments(auto_parser)
-    _add_audio_convert_arguments(auto_parser)
-    auto_parser.add_argument(
-        "--chunking",
-        choices=["ffv1", "remux"],
-        default="ffv1",
-        metavar="CHUNKING_METHOD",
-        help=(
-            "Chunking method: 'ffv1' (default) re-encodes chunks to FFV1 lossless for frame-perfect boundaries; "
-            "'remux' uses stream-copy for faster chunking and smaller intermediate files but boundaries snap to the nearest I-frame."
-        ),
-    )
-    auto_parser.set_defaults(func=_cmd_auto)
+    p.add_argument("source", type=Path, help="Source MKV video file")
+    _add_base_arguments(p)
+    _add_pipeline_arguments(p)
+    _add_filter_arguments(p)
+    _add_crop_arguments(p)
+    _add_chunking_arguments(p)
+    _add_quality_arguments(p)
+    _add_audio_convert_arguments(p)
+    p.set_defaults(func=_cmd_auto)
 
 
-def _create_extract_subcommand(subparsers) -> None:
-    """Create the 'extract' subcommand for stream extraction."""
-    p = subparsers.add_parser("extract", help="Extract video and audio streams from source MKV")
+def _create_extract_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    """Create the 'extract' subcommand (runs up to and including ExtractionPhase)."""
+    p = subparsers.add_parser(
+        "extract",
+        help="Extract video and audio streams from source MKV",
+    )
     p.add_argument("source", type=Path, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
@@ -296,155 +404,122 @@ def _create_extract_subcommand(subparsers) -> None:
     p.set_defaults(func=_cmd_extract)
 
 
-def _create_chunk_subcommand(subparsers) -> None:
-    """Create the 'chunk' subcommand for video chunking."""
-    p = subparsers.add_parser("chunk", help="Split extracted video into scene-based chunks")
+def _create_chunk_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    """Create the 'chunk' subcommand (runs up to and including ChunkingPhase)."""
+    p = subparsers.add_parser(
+        "chunk",
+        help="Split extracted video into scene-based chunks",
+    )
     p.add_argument("source", type=Path, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
-    p.add_argument("--scene-threshold", type=float, default=0.3,
-                   help="Scene detection sensitivity 0.0-1.0 (default: 0.3)")
-    p.add_argument("--min-scene-length", type=int, default=24,
-                   help="Minimum frames per chunk (default: 24)")
-    p.add_argument(
-        "--chunking",
-        choices=["ffv1", "remux"],
-        default="ffv1",
-        metavar="CHUNKING_METHOD",
-        help=(
-            "Chunking method: 'ffv1' (default) re-encodes chunks to FFV1 lossless for frame-perfect boundaries; "
-            "'remux' uses stream-copy for faster chunking and smaller intermediate files but boundaries snap to the nearest I-frame."
-        ),
-    )
+    _add_filter_arguments(p)
+    _add_crop_arguments(p)
+    _add_chunking_arguments(p)
     p.set_defaults(func=_cmd_chunk)
 
 
-def _create_encode_subcommand(subparsers) -> None:
-    """Create the 'encode' subcommand for chunk encoding."""
-    p = subparsers.add_parser("encode", help="Encode chunks to meet quality targets")
+def _create_encode_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    """Create the 'encode' subcommand (runs up to and including EncodingPhase)."""
+    p = subparsers.add_parser(
+        "encode",
+        help="Encode chunks to meet quality targets",
+    )
     p.add_argument("source", type=Path, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
+    _add_filter_arguments(p)
+    _add_crop_arguments(p)
+    _add_chunking_arguments(p)
     _add_quality_arguments(p)
     p.set_defaults(func=_cmd_encode)
 
 
-def _create_audio_subcommand(subparsers) -> None:
-    """Create the 'audio' subcommand for audio processing."""
-    p = subparsers.add_parser("audio", help="Process audio streams with normalization")
+def _create_audio_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    """Create the 'audio' subcommand (runs up to and including AudioPhase)."""
+    p = subparsers.add_parser(
+        "audio",
+        help="Process audio streams with normalization",
+    )
     p.add_argument("source", type=Path, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
+    _add_filter_arguments(p)
+    _add_crop_arguments(p)
     _add_audio_convert_arguments(p)
     p.set_defaults(func=_cmd_audio)
 
 
-def _create_merge_subcommand(subparsers) -> None:
-    """Create the 'merge' subcommand for final video merging."""
-    p = subparsers.add_parser("merge", help="Merge encoded chunks and audio into final MKV files")
+def _create_merge_subcommand(subparsers: argparse._SubParsersAction) -> None:
+    """Create the 'merge' subcommand (runs up to and including MergePhase)."""
+    p = subparsers.add_parser(
+        "merge",
+        help="Merge encoded chunks and audio into final MKV files",
+    )
     p.add_argument("source", type=Path, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
-    p.add_argument(
-        "--sampling",
-        type=int,
-        default=None,
-        metavar="N",
-        dest="metrics_sampling",
-        help=(
-            "Frame sampling factor for quality metrics measurement: measure every N-th frame. "
-            f"Min: 1 (every frame measured). Default: None (use config value or {DEFAULT_METRICS_SAMPLING})."
-        ),
-    )
+    _add_filter_arguments(p)
+    _add_crop_arguments(p)
+    _add_chunking_arguments(p)
+    _add_quality_arguments(p)
+    _add_audio_convert_arguments(p)
     p.set_defaults(func=_cmd_merge)
 
 
+# ---------------------------------------------------------------------------
+# Command handlers
+# ---------------------------------------------------------------------------
+
 def _cmd_auto(args: argparse.Namespace) -> int:
-    """Execute the 'auto' subcommand.
-
-    Args:
-        args: Parsed command-line arguments
-
-    Returns:
-        Exit code (0 for success, non-zero for failure)
-    """
+    """Execute the 'auto' subcommand."""
     from pyqenc.api import run_pipeline
-    from pyqenc.config import ConfigManager
 
     logger.info("Starting automatic pipeline execution...")
     logger.info("")
 
-    # Parse execution-related flags
-    execute = args.execute
-    cleanup = _parse_cleanup_level(args.cleanup)
-    # Parse strategies
-    strategies = _parse_strategies(args.strategies)
-    # Parse quality targets — fall back to config defaults when not specified on CLI
-    config_manager = ConfigManager()
-    raw_targets = _parse_quality_targets(args.quality_target) if args.quality_target \
-                  else config_manager.get_default_targets()
-    try:
-        quality_targets = [QualityTarget.parse(t) for t in raw_targets]
-    except ValueError as e:
-        logger.critical(f"Invalid quality target: {e}")
-        return 1
-    # Parse crop parameters
     try:
         crop_params = _resolve_crop_params(args)
     except ValueError as e:
         logger.critical(f"Invalid crop parameters: {e}")
         return 1
 
-    # Resolve metrics sampling: CLI arg takes precedence over config file
-    metrics_sampling = args.metrics_sampling if args.metrics_sampling is not None \
-                       else config_manager.get_metrics_sampling()
+    config  = _build_config(args)
+    execute = args.execute
+    cleanup = _parse_cleanup_level(args.cleanup)
 
-    # Resolve strategy patterns → typed Strategy objects
-    resolved_strategies = config_manager.resolve_strategies(strategies)
+    if crop_params is not None:
+        config.encoding.crop_params = crop_params
 
-    # Aggregate into a key/value table and print it
+    # Build display values from resolved config
+    strategies     = _parse_strategies(getattr(args, "strategies", None))
+    resolved_strats = config.encoding.resolved_strategies
     strategy_display = (
         "using defaults from config file" if strategies is None
-        else "all combinations" if strategies == [""]
-        else ", ".join(s.name for s in resolved_strategies)
+        else "all combinations"            if strategies == [""]
+        else ", ".join(s.name for s in resolved_strats)
     )
     kv_to_show = {
-        "Source:":        args.source,
+        "Source:":         args.source,
         "Work directory:": args.work_dir,
-        "Cropping:":      f"manual ({crop_params})" if crop_params else "automatic",
-        "Strategies:":    strategy_display,
-        "Targets:":       ", ".join(str(t) for t in quality_targets),
-        "Work mode:":     "DRY-RUN (no changes will be made)" if not execute else "EXECUTE",
+        "Cropping:":       f"manual ({crop_params})" if crop_params else "automatic",
+        "Strategies:":     strategy_display,
+        "Targets:":        ", ".join(str(t) for t in config.encoding.resolved_targets),
+        "Work mode:":      "DRY-RUN (no changes will be made)" if not execute else "EXECUTE",
     }
     fmt_key_value_table(kv_to_show)
     logger.info("")
 
-    # Create pipeline configuration
-    config = PipelineConfig(
-        source_video=args.source,
-        work_dir=args.work_dir,
-        quality_targets=quality_targets,
-        strategies=resolved_strategies,
-        optimize=not args.all_strategies,  # optimize unless --all-strategies requested
-        max_parallel=args.max_parallel,
-        log_level=args.log_level,
-        include=args.include,
-        exclude=args.exclude,
-        crop_params=crop_params,
-        cleanup=cleanup,
-        chunking_mode=ChunkingMode.REMUX if args.chunking == ChunkingMode.REMUX.value else ChunkingMode.LOSSLESS,
-        force=args.force if hasattr(args, "force") else False,
-        audio_convert=args.audio_convert,
-        audio_codec=args.audio_codec,
-        audio_base_bitrate=args.audio_bitrate,
-        metrics_sampling=metrics_sampling,
-        visual_hash=not args.no_visual_hash,
-        no_metrics=args.no_metrics,
-    )
-
-    # Execute pipeline
     try:
-        result = run_pipeline(config, dry_run=not execute)
+        result = run_pipeline(
+            config     = config,
+            source     = args.source,
+            work_dir   = args.work_dir,
+            force      = args.force,
+            cleanup    = cleanup,
+            no_metrics = args.no_metrics,
+            dry_run    = not execute,
+        )
         if result.success:
             logger.info(f"{SUCCESS_SYMBOL_MAJOR} Pipeline completed successfully")
             return 0
@@ -454,6 +529,7 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         logger.critical(f"{FAILURE_SYMBOL_MAJOR} Pipeline execution failed: {e}", exc_info=True)
         return 1
 
+
 def _cmd_extract(args: argparse.Namespace) -> int:
     """Execute the 'extract' subcommand."""
     from pyqenc.api import extract_streams
@@ -462,19 +538,26 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     logger.info(f"Source: {args.source}")
 
     try:
-        _resolve_crop_params(args)  # validate format early; crop is stored in job.yaml by the job phase
+        crop_params = _resolve_crop_params(args)
     except ValueError as e:
         logger.critical(f"Invalid crop parameters: {e}")
         return 1
 
+    config  = _build_config(args)
+    cleanup = _parse_cleanup_level(args.cleanup)
+
+    if crop_params is not None:
+        config.encoding.crop_params = crop_params
+
     try:
         result = extract_streams(
-            source_video = args.source,
-            work_dir     = args.work_dir,
-            include      = getattr(args, "include", None),
-            exclude      = getattr(args, "exclude", None),
-            force        = args.force,
-            dry_run      = not args.execute,
+            config     = config,
+            source     = args.source,
+            work_dir   = args.work_dir,
+            force      = args.force,
+            cleanup    = cleanup,
+            no_metrics = args.no_metrics,
+            dry_run    = not args.execute,
         )
         if result.is_complete:
             logger.info("Extraction completed successfully")
@@ -489,22 +572,31 @@ def _cmd_extract(args: argparse.Namespace) -> int:
 def _cmd_chunk(args: argparse.Namespace) -> int:
     """Execute the 'chunk' subcommand."""
     from pyqenc.api import chunk_video
-    from pyqenc.models import ChunkingMode
 
     logger.info("Starting video chunking")
     logger.info(f"Source: {args.source}")
 
-    chunking_mode = ChunkingMode.REMUX if args.chunking == ChunkingMode.REMUX.value else ChunkingMode.LOSSLESS
+    try:
+        crop_params = _resolve_crop_params(args)
+    except ValueError as e:
+        logger.critical(f"Invalid crop parameters: {e}")
+        return 1
+
+    config  = _build_config(args)
+    cleanup = _parse_cleanup_level(args.cleanup)
+
+    if crop_params is not None:
+        config.encoding.crop_params = crop_params
 
     try:
         result = chunk_video(
-            source_video     = args.source,
-            work_dir         = args.work_dir,
-            scene_threshold  = args.scene_threshold,
-            min_scene_length = args.min_scene_length,
-            chunking_mode    = chunking_mode,
-            force            = args.force,
-            dry_run          = not args.execute,
+            config     = config,
+            source     = args.source,
+            work_dir   = args.work_dir,
+            force      = args.force,
+            cleanup    = cleanup,
+            no_metrics = args.no_metrics,
+            dry_run    = not args.execute,
         )
         if result.is_complete:
             logger.info("Chunking completed successfully")
@@ -519,29 +611,31 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
 def _cmd_encode(args: argparse.Namespace) -> int:
     """Execute the 'encode' subcommand."""
     from pyqenc.api import encode_chunks
-    from pyqenc.config import ConfigManager
 
     logger.info("Starting chunk encoding")
     logger.info(f"Source: {args.source}")
 
-    _quality_target_strs = _parse_quality_targets(args.quality_target) if args.quality_target \
-                           else ConfigManager().get_default_targets()
-    strategies = _parse_strategies(args.strategies)
+    try:
+        crop_params = _resolve_crop_params(args)
+    except ValueError as e:
+        logger.critical(f"Invalid crop parameters: {e}")
+        return 1
 
-    # Resolve metrics sampling: CLI arg takes precedence over config file
-    metrics_sampling = args.metrics_sampling if args.metrics_sampling is not None \
-                       else ConfigManager().get_metrics_sampling()
+    config  = _build_config(args)
+    cleanup = _parse_cleanup_level(args.cleanup)
+
+    if crop_params is not None:
+        config.encoding.crop_params = crop_params
 
     try:
         result = encode_chunks(
-            source_video     = args.source,
-            work_dir         = args.work_dir,
-            strategies       = strategies or [],
-            quality_targets  = _quality_target_strs,
-            max_parallel     = args.max_parallel,
-            force            = args.force,
-            dry_run          = not args.execute,
-            metrics_sampling = metrics_sampling,
+            config     = config,
+            source     = args.source,
+            work_dir   = args.work_dir,
+            force      = args.force,
+            cleanup    = cleanup,
+            no_metrics = args.no_metrics,
+            dry_run    = not args.execute,
         )
         if result.is_complete:
             logger.info("Encoding completed successfully")
@@ -561,13 +655,26 @@ def _cmd_audio(args: argparse.Namespace) -> int:
     logger.info(f"Source: {args.source}")
 
     try:
+        crop_params = _resolve_crop_params(args)
+    except ValueError as e:
+        logger.critical(f"Invalid crop parameters: {e}")
+        return 1
+
+    config  = _build_config(args)
+    cleanup = _parse_cleanup_level(args.cleanup)
+
+    if crop_params is not None:
+        config.encoding.crop_params = crop_params
+
+    try:
         result = process_audio(
-            source_video       = args.source,
-            work_dir           = args.work_dir,
-            audio_convert      = getattr(args, "audio_convert", None),
-            audio_codec        = getattr(args, "audio_codec", None),
-            audio_base_bitrate = getattr(args, "audio_bitrate", None),
-            dry_run            = not args.execute,
+            config     = config,
+            source     = args.source,
+            work_dir   = args.work_dir,
+            force      = args.force,
+            cleanup    = cleanup,
+            no_metrics = args.no_metrics,
+            dry_run    = not args.execute,
         )
         if result.is_complete:
             logger.info("Audio processing completed successfully")
@@ -582,24 +689,34 @@ def _cmd_audio(args: argparse.Namespace) -> int:
 def _cmd_merge(args: argparse.Namespace) -> int:
     """Execute the 'merge' subcommand."""
     from pyqenc.api import merge_final
-    from pyqenc.config import ConfigManager
 
     logger.info("Starting final merge")
     logger.info(f"Source: {args.source}")
 
-    # Resolve metrics sampling: CLI arg takes precedence over config file
-    metrics_sampling = args.metrics_sampling if args.metrics_sampling is not None \
-                       else ConfigManager().get_metrics_sampling()
+    try:
+        crop_params = _resolve_crop_params(args)
+    except ValueError as e:
+        logger.critical(f"Invalid crop parameters: {e}")
+        return 1
+
+    config  = _build_config(args)
+    cleanup = _parse_cleanup_level(args.cleanup)
+
+    if crop_params is not None:
+        config.encoding.crop_params = crop_params
 
     try:
         result = merge_final(
-            source_video     = args.source,
-            work_dir         = args.work_dir,
-            dry_run          = not args.execute,
-            metrics_sampling = metrics_sampling,
+            config     = config,
+            source     = args.source,
+            work_dir   = args.work_dir,
+            force      = args.force,
+            cleanup    = cleanup,
+            no_metrics = args.no_metrics,
+            dry_run    = not args.execute,
         )
         if result.is_complete:
-            completed = [a for a in result.merged if a.state == ArtifactState.COMPLETE]
+            completed = [a for a in result.artifacts if a.state == ArtifactState.COMPLETE]
             if completed:
                 logger.info(f"Merge completed successfully: {len(completed)} file(s)")
                 for artifact in completed:
@@ -614,7 +731,11 @@ def _cmd_merge(args: argparse.Namespace) -> int:
         return 1
 
 
-def _create_config_subcommand(subparsers) -> None:
+# ---------------------------------------------------------------------------
+# Config subcommand
+# ---------------------------------------------------------------------------
+
+def _create_config_subcommand(subparsers: argparse._SubParsersAction) -> None:
     """Create the 'config' subcommand for copying configuration files."""
     p = subparsers.add_parser(
         "config",
@@ -643,6 +764,12 @@ def _create_config_subcommand(subparsers) -> None:
         help="Execute the copy (default: dry-run, only announce).",
     )
     p.add_argument(
+        "--work-dir",
+        type=LongPath,
+        default=LongPath("."),
+        help="Working directory (default: .)",
+    )
+    p.add_argument(
         "--log-level",
         choices=["debug", "info", "warning", "critical"],
         default="info",
@@ -655,14 +782,13 @@ def _cmd_config(args: argparse.Namespace) -> int:
     """Execute the 'config' subcommand."""
     import shutil
 
-    from pyqenc.config import find_config_source
+    from pyqenc.app_config import load_app_config
     from pyqenc.constants import (
         CONFIG_DIR_HOME,
         CONFIG_FILENAME_CWD,
         CONFIG_FILENAME_HOME,
     )
 
-    # Resolve target path
     if args.target_dir is None:
         target = Path.home() / CONFIG_DIR_HOME / CONFIG_FILENAME_HOME
     else:
@@ -672,42 +798,30 @@ def _cmd_config(args: argparse.Namespace) -> int:
         else:
             target = target_dir / CONFIG_FILENAME_HOME
 
-    # Find source
-    try:
-        source = find_config_source()
-    except FileNotFoundError as e:
-        logger.critical("Cannot locate any config file: %s", e)
-        return 1
-
-    source = source.resolve()
-    target = target.resolve()
+    _config = load_app_config()
+    source  = _config._source_paths[-1].resolve()  # type: ignore[attr-defined]
+    target  = target.resolve()
 
     logger.debug("Config source resolved to: %s", source)
     logger.debug("Config target resolved to: %s", target)
 
-    # Guard: source == target
     if source == target:
-        logger.error(
-            "Source and target are the same file (%s) — nothing to do.", source
-        )
+        logger.error("Source and target are the same file (%s) — nothing to do.", source)
         return 1
 
-    execute: bool = args.execute
-
-    if not execute:
+    if not args.execute:
         logger.info("DRY-RUN: would copy config")
         logger.info("  from: %s", source)
         logger.info("    to: %s", target)
         logger.info("Run with -y / --execute to apply.")
         return 0
 
-    # Execute copy (.tmp-then-rename for atomicity)
     tmp = target.with_suffix(target.suffix + ".tmp")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, tmp)
         tmp.rename(target)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.critical("Failed to copy config: %s", e)
         tmp.unlink(missing_ok=True)
         return 1
@@ -718,9 +832,16 @@ def _cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
-def _create_measure_subcommand(subparsers) -> None:
+# ---------------------------------------------------------------------------
+# Measure subcommand
+# ---------------------------------------------------------------------------
+
+def _create_measure_subcommand(subparsers: argparse._SubParsersAction) -> None:
     """Create the 'measure' subcommand for standalone quality measurement."""
-    p = subparsers.add_parser("measure", help="Measure quality metrics between source and encoded video(s)")
+    p = subparsers.add_parser(
+        "measure",
+        help="Measure quality metrics between source and encoded video(s)",
+    )
     p.add_argument(
         "source",
         type=Path,
@@ -744,13 +865,13 @@ def _create_measure_subcommand(subparsers) -> None:
     p.add_argument(
         "--sampling",
         type=int,
-        default=None, # None will get replaced with config value, if its present
+        default=None,
         metavar="N",
         dest="metrics_sampling",
         help=(
             "Frame sampling factor for quality metrics measurement: measure every N-th frame. "
-            f"Min: 1 (every frame measured). Default: None (use config value or {DEFAULT_METRICS_SAMPLING}). Directly affects reliability of metrics. A tradeoff between precision and speed. "
-            "Values above 20 are not recommended due to measurement volatility. 1 gives the highest precision but lowest speed. 2-4 are a good compromise. 5-10 start to become unreliable.."
+            f"Min: 1 (every frame measured). Default: None (use config value or {DEFAULT_METRICS_SAMPLING}). "
+            "Directly affects reliability of metrics. A tradeoff between precision and speed."
         ),
     )
     p.add_argument(
@@ -793,7 +914,7 @@ def _create_measure_subcommand(subparsers) -> None:
 def _cmd_measure(args: argparse.Namespace) -> int:
     """Execute the 'measure' subcommand."""
     from pyqenc.api import measure_quality
-    from pyqenc.config import ConfigManager
+    from pyqenc.app_config import load_app_config
 
     try:
         crop_params = _resolve_crop_params(args)
@@ -801,9 +922,11 @@ def _cmd_measure(args: argparse.Namespace) -> int:
         logger.critical(f"Invalid crop parameters: {e}")
         return 1
 
-    # Resolve metrics sampling: CLI arg takes precedence over config file
-    metrics_sampling = args.metrics_sampling if args.metrics_sampling is not None \
-                       else ConfigManager().get_metrics_sampling()
+    _config          = load_app_config()
+    metrics_sampling = (
+        args.metrics_sampling if args.metrics_sampling is not None
+        else _config.encoding.metrics_sampling
+    )
 
     try:
         measure_quality(
@@ -829,13 +952,16 @@ def _cmd_measure(args: argparse.Namespace) -> int:
         return 1
 
 
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
 def main() -> int:
     """Main CLI entry point.
 
     Returns:
         Exit code (0 for success, non-zero for failure)
     """
-    # Create main parser
     parser = argparse.ArgumentParser(
         prog="pyqenc",
         description="Quality-based video encoding pipeline with automatic cropping",
@@ -866,33 +992,33 @@ Examples:
   # Multiple strategies
   pyqenc auto source.mkv --strategies slow+h265-aq,veryslow+h264 -y
 
-  # Keep intermediate files after completion (default)
-  pyqenc auto source.mkv -y
-
   # Delete CRF attempt files as each chunk completes
   pyqenc auto source.mkv -y --cleanup
 
   # Delete all intermediate directories after full pipeline success
   pyqenc auto source.mkv -y --cleanup all
-        """
+
+  # Run only up to audio processing (extracts first if needed)
+  pyqenc audio source.mkv -y
+
+  # Run only up to extraction with custom stream filters
+  pyqenc extract source.mkv --include ".*eng.*" -y
+        """,
     )
 
-    # Add version flag
     parser.add_argument(
         "--version",
         action="version",
-        version=f"%(prog)s {pyqenc.__version__}"
+        version=f"%(prog)s {pyqenc.__version__}",
     )
 
-    # Create subparsers
     subparsers = parser.add_subparsers(
         title="subcommands",
         description="Available pipeline phases",
         dest="subcommand",
-        required=True
+        required=True,
     )
 
-    # Add subcommands
     _create_auto_subcommand(subparsers)
     _create_extract_subcommand(subparsers)
     _create_chunk_subcommand(subparsers)
@@ -902,18 +1028,13 @@ Examples:
     _create_config_subcommand(subparsers)
     _create_measure_subcommand(subparsers)
 
-    # Parse arguments
     args = parser.parse_args()
 
-    # Setup logging
     setup_logging(args.log_level)
     logger.info("Welcome to pyqenc v%s", pyqenc.__version__)
 
-    # Set process priority
     _set_process_priority()
 
-    # Install SIGINT handler early so CTRL+C always triggers immediate exit,
-    # overriding asyncio's default handler which swallows the first keypress.
     import signal
 
     from pyqenc.metrics import flush_active_collector
@@ -928,7 +1049,6 @@ Examples:
 
     signal.signal(signal.SIGINT, _sigint_handler)
 
-    # Execute subcommand
     return args.func(args)
 
 

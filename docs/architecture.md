@@ -77,10 +77,10 @@ flowchart TD
 | ---------------- | ----------------------- | -------------------------------------------- | --------------------------------------------------------------------- |
 | **Job**          | `PipelineConfig`        | `job.yaml`                                   | `job.yaml`                                                            |
 | **Extraction**   | Source video            | `extracted/` streams                         | `extraction.yaml`                                                     |
+| **Audio**        | Extracted audio streams | `audio/` normalized/converted files          | `audio.yaml`                                                          |
 | **Chunking**     | Extracted video stream  | `chunks/` FFV1 or remux chunks               | `chunking.yaml`                                                       |
 | **Optimization** | Chunks + strategies     | `optimization.yaml` with optimal strategy    | `optimization.yaml`                                                   |
 | **Encoding**     | Chunks + strategies     | `encoding/` attempts,<br> `encoded/` winners | • `encoding.yaml`, <br> • per-attempt `.yaml`, <br> • per-win `.yaml` |
-| **Audio**        | Extracted audio streams | `audio/` normalized/converted files          | `audio.yaml`                                                          |
 | **Merge**        | Encoded chunks + audio  | `final/` MKV file(s)                         | `merge.yaml`                                                          |
 
 > NOTE: Originally the intention was to merge both audio and video during Merge phase, but audio selection is an opinionated process, so I've decided to only merge the videos, leaving the final step for the end user and MKVmerge GUI.

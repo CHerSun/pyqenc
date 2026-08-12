@@ -33,8 +33,8 @@ from pyqenc.state import ArtifactState, ExtractionParams
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 
 if TYPE_CHECKING:
+    from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
-    from pyqenc.models import PipelineConfig
     from pyqenc.phases.job import JobPhase, JobPhaseResult
 
 logger = logging.getLogger(__name__)
@@ -548,8 +548,8 @@ from pyqenc.state import ArtifactState, ExtractionParams
 from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
 
 if TYPE_CHECKING:
+    from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
-    from pyqenc.models import PipelineConfig
     from pyqenc.phases.job import JobPhase, JobPhaseResult
 
 _EXTRACTION_YAML_NAME = "extraction.yaml"
@@ -738,7 +738,7 @@ class ExtractionPhase:
 
     def __init__(
         self,
-        config:    "PipelineConfig",
+        config:    "AppConfig",
         phases:    "dict[type[Phase], Phase] | None" = None,
         *,
         collector: "MetricsCollector",
@@ -747,8 +747,8 @@ class ExtractionPhase:
 
         self._config    = config
         self._collector: "MetricsCollector" = collector
-        self._job:    "_JobPhase | None"          = cast("_JobPhase", phases[_JobPhase]) if phases else None
-        self.params   = ExtractionParams(include=config.include, exclude=config.exclude)
+        self._job:    "_JobPhase | None"          = cast("_JobPhase", phases.get(_JobPhase)) if phases else None
+        self.params   = ExtractionParams(include=config.extraction.include, exclude=config.extraction.exclude)
         self.result:  ExtractionPhaseResult | None = None
         self.dependencies: list[Phase] = [self._job] if self._job is not None else []
 
@@ -821,13 +821,13 @@ class ExtractionPhase:
         force_wipe = getattr(job_result, "force_wipe", False)
 
         # Key parameters
-        logger.info("Source:   %s", self._config.source_video.name)
-        if self._config.include or self._config.exclude:
+        logger.info("Source:   %s", self._job.result.source.name)  # type: ignore[union-attr]
+        if self._job.result.config.extraction.include or self._job.result.config.extraction.exclude:  # type: ignore[union-attr]
             logger.info("Filter:")
-            if self._config.include:
-                logger.info("  Include:  %s", self._config.include)
-            if self._config.exclude:
-                logger.info("  Exclude:  %s", self._config.exclude)
+            if self._job.result.config.extraction.include:  # type: ignore[union-attr]
+                logger.info("  Include:  %s", self._job.result.config.extraction.include)  # type: ignore[union-attr]
+            if self._job.result.config.extraction.exclude:  # type: ignore[union-attr]
+                logger.info("  Exclude:  %s", self._job.result.config.extraction.exclude)  # type: ignore[union-attr]
 
         from pyqenc.metrics import MetricKey
         with self._collector.time(MetricKey.RECOVERY):
@@ -943,7 +943,7 @@ class ExtractionPhase:
         Returns:
             ``(artifacts, primary_video_meta, audio_meta_list)`` tuple.
         """
-        work_dir      = self._config.work_dir
+        work_dir      = self._job.result.work_dir  # type: ignore[union-attr]
         extracted_dir = work_dir / EXTRACTED_DIR
         yaml_path     = work_dir / _EXTRACTION_YAML_NAME
 
@@ -973,11 +973,11 @@ class ExtractionPhase:
         if not extracted_dir.exists():
             # Nothing extracted yet — build ABSENT artifact list for all expected streams
             try:
-                extractor = MKVTrackExtractor(str(self._config.source_video))
+                extractor = MKVTrackExtractor(str(self._job.result.source))  # type: ignore[union-attr]
                 selected  = streams_filter_plain_regex(
                     extractor.tracks,
-                    include_pattern = self._config.include,
-                    exclude_pattern = self._config.exclude,
+                    include_pattern = self._job.result.config.extraction.include,  # type: ignore[union-attr]
+                    exclude_pattern = self._job.result.config.extraction.exclude,  # type: ignore[union-attr]
                 )
                 _log_stream_table(extractor.tracks, selected, set(),
                                   timestamps_path=extracted_dir / TIMESTAMPS_FILENAME)
@@ -1007,11 +1007,11 @@ class ExtractionPhase:
         if not all_files:
             # Dir exists but is empty — build ABSENT artifact list for all expected streams
             try:
-                extractor = MKVTrackExtractor(str(self._config.source_video))
+                extractor = MKVTrackExtractor(str(self._job.result.source))  # type: ignore[union-attr]
                 selected  = streams_filter_plain_regex(
                     extractor.tracks,
-                    include_pattern = self._config.include,
-                    exclude_pattern = self._config.exclude,
+                    include_pattern = self._job.result.config.extraction.include,  # type: ignore[union-attr]
+                    exclude_pattern = self._job.result.config.extraction.exclude,  # type: ignore[union-attr]
                 )
                 _log_stream_table(extractor.tracks, selected, set(),
                                   timestamps_path=extracted_dir / TIMESTAMPS_FILENAME)
@@ -1036,15 +1036,15 @@ class ExtractionPhase:
 
         # Build extractor to know what files are expected under current filters
         try:
-            extractor = MKVTrackExtractor(str(self._config.source_video))
+            extractor = MKVTrackExtractor(str(self._job.result.source))  # type: ignore[union-attr]
         except Exception as exc:
             logger.critical("Failed to analyse source video: %s", exc)
             return [], None, []
 
         selected_tracks = streams_filter_plain_regex(
             extractor.tracks,
-            include_pattern = self._config.include,
-            exclude_pattern = self._config.exclude,
+            include_pattern = self._job.result.config.extraction.include,  # type: ignore[union-attr]
+            exclude_pattern = self._job.result.config.extraction.exclude,  # type: ignore[union-attr]
         )
         expected_names = {t.display_name() for t in selected_tracks}
 
@@ -1122,11 +1122,11 @@ class ExtractionPhase:
         Returns:
             ``ExtractionPhaseResult`` after extraction.
         """
-        work_dir      = self._config.work_dir
+        work_dir      = self._job.result.work_dir  # type: ignore[union-attr]
         extracted_dir = work_dir / EXTRACTED_DIR
         extracted_dir.mkdir(parents=True, exist_ok=True)
 
-        source = self._config.source_video
+        source = self._job.result.source  # type: ignore[union-attr]
         if not source.exists():
             err = f"Source video not found: {source}"
             logger.critical(err)
@@ -1148,8 +1148,8 @@ class ExtractionPhase:
 
         selected_tracks = streams_filter_plain_regex(
             extractor.tracks,
-            include_pattern = self._config.include,
-            exclude_pattern = self._config.exclude,
+            include_pattern = self._job.result.config.extraction.include,  # type: ignore[union-attr]
+            exclude_pattern = self._job.result.config.extraction.exclude,  # type: ignore[union-attr]
         )
 
         video_tracks: list[VideoStream] = [t for t in selected_tracks if t.codec_type == "video"]  # type: ignore[assignment]
