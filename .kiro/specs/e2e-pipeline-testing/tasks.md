@@ -20,13 +20,13 @@
 
 
 
-  - Execute: `uv run pyqenc auto "D:\_current\О чём говорят мужчины Blu-Ray (1080p) (1).mkv" --work-dir "D:\_current\pyqenc1" -y --keep-all --log-level info`
+  - Execute: `uv run pyqenc auto "D:\_encoding\movie.mkv" --work-dir "D:\_encoding\pyqenc" -y --keep-all --log-level info`
   - Verify exit code 0
   - Verify crop parameters detected and logged (e.g. `Detected black borders: ...`)
-  - Verify `D:\_current\pyqenc1\chunks\` contains chunk `.mkv` files
-  - Verify `D:\_current\pyqenc1\encoded\` contains encoded attempt files under a strategy subfolder
-  - Verify `D:\_current\pyqenc1\audio\` contains audio files
-  - Verify `D:\_current\pyqenc1\final\output_*.mkv` exists
+  - Verify `D:\_encoding\pyqenc\chunks\` contains chunk `.mkv` files
+  - Verify `D:\_encoding\pyqenc\encoded\` contains encoded attempt files under a strategy subfolder
+  - Verify `D:\_encoding\pyqenc\audio\` contains audio files
+  - Verify `D:\_encoding\pyqenc\final\output_*.mkv` exists
   - Fix any bugs encountered before proceeding to next scenario
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
 
@@ -71,8 +71,8 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6_
 
 - [ ] 9. Run Scenario 3 — Chunking partial restart (scenes in state, no chunk files)
-  - Delete all files in `D:\_current\pyqenc1\chunks\` (keep `progress.json` intact)
-  - Also delete `D:\_current\pyqenc1\encoded\` and `D:\_current\pyqenc1\final\` so encoding and merge re-run
+  - Delete all files in `D:\_encoding\pyqenc\chunks\` (keep `progress.json` intact)
+  - Also delete `D:\_encoding\pyqenc\encoded\` and `D:\_encoding\pyqenc\final\` so encoding and merge re-run
   - Re-run the same command as Scenario 1
   - Verify log contains "Scene boundaries already in state (N) -- skipping detection."
   - Verify chunks are re-split from persisted boundaries
@@ -83,8 +83,8 @@
 
 - [ ] 10. Run Scenario 4 — Encoding partial restart (half chunks encoded)
   - Starting from a fully completed Scenario 1 state
-  - Delete encoded files for approximately half the chunks from `D:\_current\pyqenc1\encoded\<strategy>\`
-  - Delete `D:\_current\pyqenc1\final\` so merge re-runs
+  - Delete encoded files for approximately half the chunks from `D:\_encoding\pyqenc\encoded\<strategy>\`
+  - Delete `D:\_encoding\pyqenc\final\` so merge re-runs
   - Re-run the same command as Scenario 1
   - Verify log reports count of reused chunks and count needing encoding
   - Verify only the deleted chunks are re-encoded (not the ones still present)

@@ -15,8 +15,6 @@ if TYPE_CHECKING:
 
 import pyqenc
 from pyqenc.constants import (
-    DEFAULT_MAX_PARALLEL,
-    DEFAULT_METRICS_SAMPLING,
     DEFAULT_SCREENSHOT_COUNT,
     FAILURE_SYMBOL_MAJOR,
     SUCCESS_SYMBOL_MAJOR,
@@ -49,16 +47,25 @@ def _parse_quality_targets(targets_str: str) -> list[str]:
 
 
 def _parse_strategies(strategies_str: str | None) -> list[str] | None:
-    """Parse comma-separated encoding strategies into a list of strings.
+    """Parse comma-separated encoding strategies into a list of pattern strings.
 
-    Returns ``None`` meaning "use defaults from config", or a list where an
-    empty string element means "all combinations".
+    Returns ``None`` meaning "use defaults from config", or a non-empty list
+    of pattern strings to pass to the strategy expander.
+
+    Raises:
+        ValueError: If the strategies string is empty or contains only whitespace
+            (an empty profile part is invalid in the pattern syntax).
     """
     if strategies_str is None:
         return None
-    if strategies_str.strip() == "":
-        return [""]
-    return [s.strip() for s in strategies_str.split(",") if s.strip()]
+    stripped = strategies_str.strip()
+    if not stripped:
+        raise ValueError(
+            "Empty --strategies value is not allowed. "
+            "Omit --strategies to use the defaults from config, "
+            "or use '*' to select all profiles with their default presets."
+        )
+    return [s.strip() for s in stripped.split(",") if s.strip()]
 
 
 def _parse_cleanup_level(cleanup_value: str | None) -> CleanupLevel:
@@ -180,26 +187,27 @@ def _add_crop_arguments(parser: argparse.ArgumentParser) -> None:
 def _add_chunking_arguments(parser: argparse.ArgumentParser) -> None:
     """Add chunking arguments (used by subcommands that depend on ChunkingPhase)."""
     parser.add_argument(
-        "--chunking",
-        choices=["ffv1", "remux"],
-        default="ffv1",
-        metavar="CHUNKING_METHOD",
+        "--chunking-mode",
+        choices=["lossless", "remux"],
+        default=None,
+        dest="chunking_mode",
+        metavar="CHUNKING_MODE",
         help=(
-            "Chunking method: 'ffv1' (default) re-encodes chunks to FFV1 lossless for frame-perfect boundaries; "
+            "Chunking method: 'lossless' (default) re-encodes chunks to FFV1 for frame-perfect boundaries; "
             "'remux' uses stream-copy for faster chunking and smaller intermediate files but boundaries snap to the nearest I-frame."
         ),
     )
     parser.add_argument(
         "--scene-threshold",
         type=float,
-        default=0.3,
-        help="Scene detection sensitivity 0.0-1.0 (default: 0.3)",
+        default=None,
+        help="Scene detection sensitivity 0.0-1.0 (default: from config)",
     )
     parser.add_argument(
         "--min-scene-length",
         type=int,
-        default=24,
-        help="Minimum frames per chunk (default: 24)",
+        default=None,
+        help="Minimum frames per chunk (default: from config)",
     )
 
 
@@ -221,7 +229,7 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         metavar="QUALITY_TARGETS",
-        dest="quality_target",
+        dest="targets",
         help=_QUALITY_TARGET_HELP,
     )
     parser.add_argument(
@@ -229,21 +237,26 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         help=(
-            "Encoding strategies (e.g., 'slow+h265-aq,veryslow+h264-anime'). "
-            "If not specified, uses default from config file. "
-            "Use empty string '' for all combinations."
+            "Encoding strategies as comma-separated profile[+preset] patterns "
+            "(e.g. 'h265*', 'h265-aq+slow,h264+veryslow'). "
+            "Profile part is required; preset part is optional — omit it to use "
+            "each codec's default preset. Use '*' for all profiles with their "
+            "default presets, or '*+*' for all profiles with all presets. "
+            "If not specified, uses defaults from config file."
         ),
     )
     parser.add_argument(
-        "--all-strategies",
+        "--no-optimize",
         action="store_true",
+        dest="no_optimize",
         help="Disable optimization phase and produce output for all strategies.",
     )
     parser.add_argument(
-        "--max-parallel",
+        "--concurrency",
         type=int,
-        default=DEFAULT_MAX_PARALLEL,
-        help=f"Maximum concurrent encoding processes (default: {DEFAULT_MAX_PARALLEL}).",
+        default=None,
+        dest="concurrency",
+        help="Maximum concurrent encoding processes (default: from config).",
     )
     parser.add_argument(
         "--sampling",
@@ -253,7 +266,7 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         dest="metrics_sampling",
         help=(
             "Frame sampling factor for quality metrics measurement: measure every N-th frame. "
-            f"Min: 1 (every frame measured). Default: None (use config value or {DEFAULT_METRICS_SAMPLING}). "
+            "Min: 1 (every frame measured). Default: from config. "
             "Directly affects reliability of metrics. Values above 20 are not recommended."
         ),
     )
@@ -261,37 +274,6 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         "--no-visual-hash",
         action="store_true",
         help="Disable emoji visual hash prefix on chunk log lines (default: enabled).",
-    )
-
-
-def _add_audio_convert_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add audio conversion arguments (used by subcommands that depend on AudioPhase)."""
-    parser.add_argument(
-        "--audio-convert",
-        type=str,
-        default=None,
-        metavar="REGEX",
-        help=(
-            "Regex pattern selecting processed audio files to convert to the final delivery format. "
-            "Overrides the config-derived audio_output.convert_filter for this run."
-        ),
-    )
-    parser.add_argument(
-        "--audio-codec",
-        type=str,
-        default=None,
-        metavar="CODEC",
-        help="Override the audio codec for all conversion profiles in this run (e.g. 'aac').",
-    )
-    parser.add_argument(
-        "--audio-bitrate",
-        type=str,
-        default=None,
-        metavar="BITRATE",
-        help=(
-            "Base bitrate for 2.0 stereo conversion (e.g. '192k'). "
-            "Bitrates for other channel layouts are scaled proportionally by channel count."
-        ),
     )
 
 
@@ -321,7 +303,7 @@ def _build_config(args: argparse.Namespace) -> "AppConfig":
         config.extraction.exclude = args.exclude
 
     # --- chunking ---
-    chunking_val = getattr(args, "chunking", None)
+    chunking_val = getattr(args, "chunking_mode", None)
     if chunking_val is not None:
         config.chunking.mode = (
             ChunkingMode.REMUX if chunking_val == ChunkingMode.REMUX.value
@@ -333,35 +315,27 @@ def _build_config(args: argparse.Namespace) -> "AppConfig":
         config.chunking.min_scene_length = args.min_scene_length
 
     # --- encoding / quality ---
-    quality_target_str = getattr(args, "quality_target", None)
+    quality_target_str = getattr(args, "targets", None)
     if quality_target_str is not None:
-        config.encoding.quality_targets = _parse_quality_targets(quality_target_str)
+        config.encoding.targets = _parse_quality_targets(quality_target_str)
 
     strategies = _parse_strategies(getattr(args, "strategies", None))
     if strategies is not None:
         config.encoding.strategies = strategies
 
-    if getattr(args, "all_strategies", False):
+    if getattr(args, "no_optimize", False):
         config.encoding.optimize = False
 
-    max_parallel = getattr(args, "max_parallel", None)
-    if max_parallel is not None:
-        config.encoding.max_parallel = max_parallel
+    concurrency = getattr(args, "concurrency", None)
+    if concurrency is not None:
+        config.encoding.concurrency = concurrency
 
     metrics_sampling = getattr(args, "metrics_sampling", None)
     if metrics_sampling is not None:
-        config.encoding.metrics_sampling = metrics_sampling
+        config.measurement.sampling = metrics_sampling
 
     no_visual_hash = getattr(args, "no_visual_hash", False)
     config.encoding.visual_hash = not no_visual_hash
-
-    # --- audio ---
-    if getattr(args, "audio_convert", None) is not None:
-        config.audio.convert_filter = args.audio_convert
-    if getattr(args, "audio_codec", None) is not None:
-        config.audio.audio_codec = args.audio_codec
-    if getattr(args, "audio_bitrate", None) is not None:
-        config.audio.audio_base_bitrate = args.audio_bitrate
 
     # Re-resolve strategies so resolved_strategies reflects all overrides.
     config.encoding.resolve(config.codecs, config.profiles)
@@ -386,7 +360,6 @@ def _create_auto_subcommand(subparsers: argparse._SubParsersAction) -> None:
     _add_crop_arguments(p)
     _add_chunking_arguments(p)
     _add_quality_arguments(p)
-    _add_audio_convert_arguments(p)
     p.set_defaults(func=_cmd_auto)
 
 
@@ -446,7 +419,6 @@ def _create_audio_subcommand(subparsers: argparse._SubParsersAction) -> None:
     _add_pipeline_arguments(p)
     _add_filter_arguments(p)
     _add_crop_arguments(p)
-    _add_audio_convert_arguments(p)
     p.set_defaults(func=_cmd_audio)
 
 
@@ -463,7 +435,6 @@ def _create_merge_subcommand(subparsers: argparse._SubParsersAction) -> None:
     _add_crop_arguments(p)
     _add_chunking_arguments(p)
     _add_quality_arguments(p)
-    _add_audio_convert_arguments(p)
     p.set_defaults(func=_cmd_merge)
 
 
@@ -488,15 +459,11 @@ def _cmd_auto(args: argparse.Namespace) -> int:
     execute = args.execute
     cleanup = _parse_cleanup_level(args.cleanup)
 
-    if crop_params is not None:
-        config.encoding.crop_params = crop_params
-
     # Build display values from resolved config
     strategies     = _parse_strategies(getattr(args, "strategies", None))
     resolved_strats = config.encoding.resolved_strategies
     strategy_display = (
         "using defaults from config file" if strategies is None
-        else "all combinations"            if strategies == [""]
         else ", ".join(s.name for s in resolved_strats)
     )
     kv_to_show = {
@@ -512,13 +479,14 @@ def _cmd_auto(args: argparse.Namespace) -> int:
 
     try:
         result = run_pipeline(
-            config     = config,
-            source     = args.source,
-            work_dir   = args.work_dir,
-            force      = args.force,
-            cleanup    = cleanup,
-            no_metrics = args.no_metrics,
-            dry_run    = not execute,
+            config      = config,
+            source      = args.source,
+            work_dir    = args.work_dir,
+            force       = args.force,
+            cleanup     = cleanup,
+            no_metrics  = args.no_metrics,
+            dry_run     = not execute,
+            crop_params = crop_params,
         )
         if result.success:
             logger.info(f"{SUCCESS_SYMBOL_MAJOR} Pipeline completed successfully")
@@ -546,18 +514,16 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     config  = _build_config(args)
     cleanup = _parse_cleanup_level(args.cleanup)
 
-    if crop_params is not None:
-        config.encoding.crop_params = crop_params
-
     try:
         result = extract_streams(
-            config     = config,
-            source     = args.source,
-            work_dir   = args.work_dir,
-            force      = args.force,
-            cleanup    = cleanup,
-            no_metrics = args.no_metrics,
-            dry_run    = not args.execute,
+            config      = config,
+            source      = args.source,
+            work_dir    = args.work_dir,
+            force       = args.force,
+            cleanup     = cleanup,
+            no_metrics  = args.no_metrics,
+            dry_run     = not args.execute,
+            crop_params = crop_params,
         )
         if result.is_complete:
             logger.info("Extraction completed successfully")
@@ -585,18 +551,16 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
     config  = _build_config(args)
     cleanup = _parse_cleanup_level(args.cleanup)
 
-    if crop_params is not None:
-        config.encoding.crop_params = crop_params
-
     try:
         result = chunk_video(
-            config     = config,
-            source     = args.source,
-            work_dir   = args.work_dir,
-            force      = args.force,
-            cleanup    = cleanup,
-            no_metrics = args.no_metrics,
-            dry_run    = not args.execute,
+            config      = config,
+            source      = args.source,
+            work_dir    = args.work_dir,
+            force       = args.force,
+            cleanup     = cleanup,
+            no_metrics  = args.no_metrics,
+            dry_run     = not args.execute,
+            crop_params = crop_params,
         )
         if result.is_complete:
             logger.info("Chunking completed successfully")
@@ -624,18 +588,16 @@ def _cmd_encode(args: argparse.Namespace) -> int:
     config  = _build_config(args)
     cleanup = _parse_cleanup_level(args.cleanup)
 
-    if crop_params is not None:
-        config.encoding.crop_params = crop_params
-
     try:
         result = encode_chunks(
-            config     = config,
-            source     = args.source,
-            work_dir   = args.work_dir,
-            force      = args.force,
-            cleanup    = cleanup,
-            no_metrics = args.no_metrics,
-            dry_run    = not args.execute,
+            config      = config,
+            source      = args.source,
+            work_dir    = args.work_dir,
+            force       = args.force,
+            cleanup     = cleanup,
+            no_metrics  = args.no_metrics,
+            dry_run     = not args.execute,
+            crop_params = crop_params,
         )
         if result.is_complete:
             logger.info("Encoding completed successfully")
@@ -663,18 +625,16 @@ def _cmd_audio(args: argparse.Namespace) -> int:
     config  = _build_config(args)
     cleanup = _parse_cleanup_level(args.cleanup)
 
-    if crop_params is not None:
-        config.encoding.crop_params = crop_params
-
     try:
         result = process_audio(
-            config     = config,
-            source     = args.source,
-            work_dir   = args.work_dir,
-            force      = args.force,
-            cleanup    = cleanup,
-            no_metrics = args.no_metrics,
-            dry_run    = not args.execute,
+            config      = config,
+            source      = args.source,
+            work_dir    = args.work_dir,
+            force       = args.force,
+            cleanup     = cleanup,
+            no_metrics  = args.no_metrics,
+            dry_run     = not args.execute,
+            crop_params = crop_params,
         )
         if result.is_complete:
             logger.info("Audio processing completed successfully")
@@ -702,18 +662,16 @@ def _cmd_merge(args: argparse.Namespace) -> int:
     config  = _build_config(args)
     cleanup = _parse_cleanup_level(args.cleanup)
 
-    if crop_params is not None:
-        config.encoding.crop_params = crop_params
-
     try:
         result = merge_final(
-            config     = config,
-            source     = args.source,
-            work_dir   = args.work_dir,
-            force      = args.force,
-            cleanup    = cleanup,
-            no_metrics = args.no_metrics,
-            dry_run    = not args.execute,
+            config      = config,
+            source      = args.source,
+            work_dir    = args.work_dir,
+            force       = args.force,
+            cleanup     = cleanup,
+            no_metrics  = args.no_metrics,
+            dry_run     = not args.execute,
+            crop_params = crop_params,
         )
         if result.is_complete:
             completed = [a for a in result.artifacts if a.state == ArtifactState.COMPLETE]
@@ -870,7 +828,7 @@ def _create_measure_subcommand(subparsers: argparse._SubParsersAction) -> None:
         dest="metrics_sampling",
         help=(
             "Frame sampling factor for quality metrics measurement: measure every N-th frame. "
-            f"Min: 1 (every frame measured). Default: None (use config value or {DEFAULT_METRICS_SAMPLING}). "
+            "Min: 1 (every frame measured). Default: from config. "
             "Directly affects reliability of metrics. A tradeoff between precision and speed."
         ),
     )
@@ -925,7 +883,7 @@ def _cmd_measure(args: argparse.Namespace) -> int:
     _config          = load_app_config()
     metrics_sampling = (
         args.metrics_sampling if args.metrics_sampling is not None
-        else _config.encoding.metrics_sampling
+        else _config.measurement.sampling
     )
 
     try:
@@ -975,13 +933,13 @@ Examples:
   pyqenc auto source.mkv -y
 
   # Custom quality target and strategies
-  pyqenc auto source.mkv --targets vmaf-min:95 --strategies slow+h265-aq -y
+  pyqenc auto source.mkv --targets vmaf-min:95 --strategies h265-aq -y
 
-  # Use all strategy combinations
-  pyqenc auto source.mkv --strategies "" -y
+  # Use all profiles with their default presets
+  pyqenc auto source.mkv --strategies "*" -y
 
   # Disable optimization (encode all strategies)
-  pyqenc auto source.mkv --all-strategies -y
+  pyqenc auto source.mkv --no-optimize -y
 
   # Disable automatic cropping
   pyqenc auto source.mkv --crop "0 0" -y
@@ -990,7 +948,7 @@ Examples:
   pyqenc auto source.mkv --crop "140 140" -y
 
   # Multiple strategies
-  pyqenc auto source.mkv --strategies slow+h265-aq,veryslow+h264 -y
+  pyqenc auto source.mkv --strategies h265-aq,h264 -y
 
   # Delete CRF attempt files as each chunk completes
   pyqenc auto source.mkv -y --cleanup

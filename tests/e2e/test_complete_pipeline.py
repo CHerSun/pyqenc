@@ -26,32 +26,31 @@ def _make_orchestrator(
     quality_targets: list[str] | None = None,
 ) -> PipelineOrchestrator:
     """Build a PipelineOrchestrator for testing using the new AppConfig-based API."""
-    config = load_app_config()
+    config = load_app_config(default_only=True)
     config.encoding.optimize = optimize
     if strategies is not None:
         config.encoding.strategies = strategies
-        config.encoding._resolved_strategies = None
+        config.encoding._resolved_strategies = None  # noqa: SLF001
     if quality_targets is not None:
-        config.encoding.quality_targets = quality_targets
-        config.encoding._resolved_targets = None
+        config.encoding.targets = quality_targets
+        config.encoding._resolved_targets = None  # noqa: SLF001
     if quality_targets is not None or strategies is not None:
-        config.encoding._resolved_targets   = None
-        config.encoding._resolved_strategies = None
+        config.encoding._resolved_targets    = None  # noqa: SLF001
+        config.encoding._resolved_strategies = None  # noqa: SLF001
         config.encoding.resolve(config.codecs, config.profiles)
-    if crop_params is not None:
-        config.encoding.crop_params = crop_params
 
     work_dir  = tmp_path / "work"
     collector = MagicMock()
 
     registry = _build_registry(
-        config     = config,
-        source     = source_video,
-        work_dir   = work_dir,
-        force      = False,
-        cleanup    = CleanupLevel.NONE,
-        no_metrics = True,
-        collector  = collector,
+        config      = config,
+        source      = source_video,
+        work_dir    = work_dir,
+        force       = False,
+        cleanup     = CleanupLevel.NONE,
+        no_metrics  = True,
+        collector   = collector,
+        crop_params = crop_params,
     )
 
     return PipelineOrchestrator(
@@ -229,7 +228,7 @@ class TestPipelineValidation:
         from pydantic import ValidationError
         from pyqenc.app_config import AppConfig, load_app_config
 
-        config_dict = load_app_config().model_dump()
+        config_dict = load_app_config(default_only=True).model_dump()
         config_dict["encoding"]["strategies"] = ["invalid+nonexistent"]
         with pytest.raises((ValidationError, ValueError)):
             AppConfig.model_validate(config_dict)

@@ -136,7 +136,7 @@
   - Test dry-run warning, execute critical stop, `--force` wipe-and-continue
   - _Requirements: 1.2_
 
-- [ ] 11. Run full automatic pipeline and ensure new logic is working, phase parameters and sidecars of all types are created. `uv run pyqenc auto` onto `"D:\_current\О чём говорят мужчины Blu-Ray (1080p) (1).mkv"` file using `D:\_current\pyqenc1` workdir and `-y` flag. No pipes - they break alive_progress. Check warnings. Check duration-based reporting. Check full plain run. If reruns are needed - check phase recovery. Sleep & watch the process output every 5 minutes.
+- [ ] 11. Run full automatic pipeline and ensure new logic is working, phase parameters and sidecars of all types are created. `uv run pyqenc auto` onto `"D:\_encoding\movie.mkv"` file using `D:\_encoding\pyqenc` workdir and `-y` flag. No pipes - they break alive_progress. Check warnings. Check duration-based reporting. Check full plain run. If reruns are needed - check phase recovery. Sleep & watch the process output every 5 minutes.
 
 
 

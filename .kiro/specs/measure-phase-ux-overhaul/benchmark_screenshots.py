@@ -30,14 +30,14 @@ from pathlib import Path
 # Configuration
 # ---------------------------------------------------------------------------
 
-SOURCE_VIDEO:   Path       = Path(r"D:\_current\pyqenc1\measure\(1).mkv")
+SOURCE_VIDEO:   Path       = Path(r"D:\_encoding\pyqenc\measure\(1).mkv")
 TARGET_VIDEOS:  list[Path] = [
-    Path(r"D:\_current\pyqenc1\measure\(1.1) slow_h265.mkv"),
-    Path(r"D:\_current\pyqenc1\measure\(1.1) any_vulkan_hevc-10bit.mkv"),
+    Path(r"D:\_encoding\pyqenc\measure\(1.1) slow_h265.mkv"),
+    Path(r"D:\_encoding\pyqenc\measure\(1.1) any_vulkan_hevc-10bit.mkv"),
 ]
-FULL_MOVIE:     Path       = Path(r"D:\_current\О чём говорят мужчины Blu-Ray (1080p).mkv")
+FULL_MOVIE:     Path       = Path(r"D:\_encoding\movie.mkv")
 SCREENSHOT_COUNT: int      = 20
-OUTPUT_DIR:     Path       = Path(r"D:\_current\pyqenc1\measure\benchmark_screenshots")
+OUTPUT_DIR:     Path       = Path(r"D:\_encoding\pyqenc\measure\benchmark_screenshots")
 RESULTS_FILE:   Path       = Path(__file__).parent / "benchmark_results.md"
 
 # ---------------------------------------------------------------------------
@@ -354,8 +354,8 @@ def _write_results(all_results: list[dict]) -> None:
         "Compare PNG files across strategies for the same video:",
         "```",
         "# PowerShell — compare A1 vs A2 for source video",
-        r"$a1 = Get-ChildItem 'D:\_current\pyqenc1\measure\benchmark_screenshots\(1)_strategy_a1\*.png'",
-        r"$a2 = Get-ChildItem 'D:\_current\pyqenc1\measure\benchmark_screenshots\(1)_strategy_a2\*.png'",
+        r"$a1 = Get-ChildItem 'D:\_encoding\pyqenc\measure\benchmark_screenshots\(1)_strategy_a1\*.png'",
+        r"$a2 = Get-ChildItem 'D:\_encoding\pyqenc\measure\benchmark_screenshots\(1)_strategy_a2\*.png'",
         "for ($i=0; $i -lt $a1.Count; $i++) {",
         "    $h1 = (Get-FileHash $a1[$i] -Algorithm SHA256).Hash",
         "    $h2 = (Get-FileHash $a2[$i] -Algorithm SHA256).Hash",

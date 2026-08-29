@@ -24,6 +24,7 @@ from pydantic import (
     Field,
     PrivateAttr,
     field_validator,
+    model_validator,
 )
 
 from pyqenc.constants import (
@@ -351,6 +352,9 @@ class CodecConfig(BaseModel):
     Attributes:
         name:            Codec identifier (e.g., ``'h264-8bit'``, ``'h265-10bit'``).
         default_quality: Default quality parameter value for this codec.
+        default_preset:  Default preset used when a strategy pattern omits the preset part
+                         (e.g. ``'h265*'`` expands using each codec's ``default_preset``).
+                         Must be one of the values in ``presets``.
         quality_range:   Valid quality range as ``(first, last)`` tuple stored in config order.
                          ``quality_range[0]`` is always the *better* end (lower CRF = better quality,
                          higher bitrate = better quality).  For CRF/CQ/QP codecs use ``[0, 51]``
@@ -380,12 +384,27 @@ class CodecConfig(BaseModel):
 
     name:                str
     default_quality:     Decimal
+    default_preset:      str
     quality_range:       tuple[Decimal, Decimal]
     quality_label:       str            = "CRF"
     quality_granularity: Decimal        = Decimal("0.5")
     quality_max_step:    Decimal|None   = None
     encoder_args:        list[str]      = Field(default_factory=list)
     presets:             list[str]      = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_default_preset(self) -> "CodecConfig":
+        """Ensure ``default_preset`` is a member of ``presets``.
+
+        Raises:
+            ValueError: If ``default_preset`` is not in the ``presets`` list.
+        """
+        if self.default_preset not in self.presets:
+            raise ValueError(
+                f"Codec '{self.name}': default_preset '{self.default_preset}' "
+                f"is not in the presets list {self.presets}."
+            )
+        return self
 
     @property
     def quality_better(self) -> Decimal:

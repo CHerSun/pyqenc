@@ -36,7 +36,7 @@ from pyqenc.state import JobState
 # ---------------------------------------------------------------------------
 
 _QUALITY_TARGETS = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
-_APP_CONFIG      = load_app_config()
+_APP_CONFIG      = load_app_config(default_only=True)
 
 
 def _make_source(tmp_path: Path, size: int = 1024) -> Path:
@@ -53,15 +53,15 @@ def _make_phase(
     crop_params: CropParams | None = None,
 ) -> JobPhase:
     config = _APP_CONFIG.model_copy(deep=True)
-    config.encoding.crop_params = crop_params
     return JobPhase(
         config,
-        source     = source,
-        work_dir   = tmp_path / "work",
-        force      = force,
-        cleanup    = CleanupLevel.NONE,
-        no_metrics = True,
-        collector  = MagicMock(),
+        source      = source,
+        work_dir    = tmp_path / "work",
+        force       = force,
+        cleanup     = CleanupLevel.NONE,
+        no_metrics  = True,
+        collector   = MagicMock(),
+        crop_params = crop_params,
     )
 
 

@@ -19,7 +19,6 @@ from typing import Callable, Literal
 import matplotlib
 
 from pyqenc.constants import (
-    DEFAULT_METRICS_SAMPLING,
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
@@ -1261,7 +1260,7 @@ class QualityEvaluator:
         reference:        Path,
         ref_crop:         CropParams,
         output_prefix:    str,
-        metrics_sampling: int                            = DEFAULT_METRICS_SAMPLING,
+        metrics_sampling: int                            = 3,
         bar_advance:      Callable[[float], None] | None = None,
         duration_seconds: float                          = 0.0,
         width:            int                            = 0,

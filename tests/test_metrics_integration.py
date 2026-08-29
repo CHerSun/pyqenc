@@ -25,7 +25,7 @@ from pyqenc.models import (
     VideoMetadata,
 )
 
-_SHARED_APP_CONFIG: AppConfig = load_app_config()
+_SHARED_APP_CONFIG: AppConfig = load_app_config(default_only=True)
 
 # Resolve a couple of known strategies once at module level for use in tests.
 _resolved = _SHARED_APP_CONFIG.encoding.resolved_strategies
@@ -37,16 +37,13 @@ _STRATEGY_H265_AQ   = next((s for s in _resolved if "h265" in s.profile and "aq"
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_config(tmp_path: Path, *, crop_params: CropParams | None = None) -> AppConfig:
-    """Return an ``AppConfig`` with optional crop_params applied as override.
+def _make_config(tmp_path: Path) -> AppConfig:
+    """Return an ``AppConfig`` loaded from the bundled default (no modifications).
 
-    Uses the bundled default config; ``crop_params`` is assigned directly when
-    provided to simulate a CLI ``--crop`` override.
+    Uses ``default_only=True`` so tests are not affected by any developer-local
+    config files.
     """
-    config = load_app_config()
-    if crop_params is not None:
-        config.encoding.crop_params = crop_params
-    return config
+    return load_app_config(default_only=True)
 
 
 def _make_volatile(tmp_path: Path) -> dict:
@@ -196,10 +193,10 @@ class TestJobPhaseTiming:
         """
         from pyqenc.phases.job import JobPhase
 
-        config   = _make_config(tmp_path, crop_params=CropParams(top=140, bottom=140))
-        volatile = _make_volatile(tmp_path)
+        config    = _make_config(tmp_path)
+        volatile  = _make_volatile(tmp_path)
         collector = _spy_collector()
-        phase    = JobPhase(config, collector=collector, **volatile)
+        phase     = JobPhase(config, collector=collector, crop_params=CropParams(top=140, bottom=140), **volatile)
 
         stub_vm = _stub_video_metadata(volatile["source"])
 

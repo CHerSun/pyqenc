@@ -152,7 +152,7 @@ This refactor replaces `ConfigManager` + `PipelineConfig` with `AppConfig` (laye
   - [x] 16.5 Run `uv run python -m pytest` and `uv run ruff check pyqenc/` to confirm zero references to deleted types remain
 
 - [x] 17. End-to-end smoke test
-  - [x] 17.1 Run `uv run pyqenc auto D:\_current\orig.mkv --work-dir D:\_current` (dry-run, no `-y`) and confirm it exits 0 with coherent dry-run plan log
+  - [x] 17.1 Run `uv run pyqenc auto D:\_encoding\orig.mkv --work-dir D:\_encoding` (dry-run, no `-y`) and confirm it exits 0 with coherent dry-run plan log
   - [x] 17.2 Confirm `uv run pyqenc config .` still prints the correct dry-run output
 
 - [x] 18. Update spec cross-references and mark completed

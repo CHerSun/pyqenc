@@ -36,7 +36,7 @@ from pyqenc.state import OptimizationParams, StrategyTestResult
 
 _QUALITY_TARGETS = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
 
-_APP_CONFIG = load_app_config()
+_APP_CONFIG = load_app_config(default_only=True)
 
 # Resolve a few specific strategies for use in tests.
 _ALL_STRATEGIES = _APP_CONFIG.encoding.resolved_strategies
@@ -62,11 +62,11 @@ def _make_job_phase(
 
     config = _APP_CONFIG.model_copy(deep=True)
     # Set quality targets as raw strings
-    config.encoding.quality_targets = ["vmaf-min:93.0"]
+    config.encoding.targets = ["vmaf-min:93.0"]
     # Set strategy pattern strings matching the requested strategies
     config.encoding.strategies = [f"{s.preset}+{s.profile}" for s in strategies]
     config.encoding.optimize = optimize
-    config.encoding.strategy_selection_tolerance = tolerance
+    config.encoding.optimize_tolerance = tolerance
     # Reset resolved caches so they get re-resolved from new strings
     config.encoding._resolved_targets   = None
     config.encoding._resolved_strategies = None

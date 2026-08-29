@@ -18,7 +18,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pyqenc.constants import DEFAULT_METRICS_SAMPLING, DEFAULT_SCREENSHOT_COUNT
+from pyqenc.constants import DEFAULT_SCREENSHOT_COUNT
 from pyqenc.metrics import (
     NoOpMetricsCollector,
     YamlMetricsCollector,
@@ -51,10 +51,11 @@ def _run_phase(
     work_dir:    Path,
     phase_class: type[Phase],
     *,
-    force:       bool        = False,
-    cleanup:     CleanupLevel = CleanupLevel.NONE,
-    no_metrics:  bool        = False,
-    dry_run:     bool        = False,
+    force:       bool             = False,
+    cleanup:     CleanupLevel     = CleanupLevel.NONE,
+    no_metrics:  bool             = False,
+    dry_run:     bool             = False,
+    crop_params: CropParams | None = None,
 ) -> PhaseResult:
     """Build the registry, run the target phase, and return its result.
 
@@ -70,6 +71,8 @@ def _run_phase(
         cleanup:     Artifact retention policy for intermediate files.
         no_metrics:  When ``True``, skip writing ``metrics.yaml``.
         dry_run:     Report only — no files written.
+        crop_params: Optional manual crop override; ``None`` falls back to
+                     cached value in ``job.yaml``, then auto-detection.
 
     Returns:
         ``PhaseResult`` (or typed subclass) produced by the target phase.
@@ -85,13 +88,14 @@ def _run_phase(
 
     collector = NoOpMetricsCollector()
     registry  = _build_registry(
-        config     = config,
-        source     = source,
-        work_dir   = work_dir,
-        force      = force,
-        cleanup    = cleanup,
-        no_metrics = no_metrics,
-        collector  = collector,
+        config      = config,
+        source      = source,
+        work_dir    = work_dir,
+        force       = force,
+        cleanup     = cleanup,
+        no_metrics  = no_metrics,
+        collector   = collector,
+        crop_params = crop_params,
     )
     phase = registry[phase_class]
     return phase.run(dry_run=dry_run)  # type: ignore[return-value]
@@ -106,10 +110,11 @@ def run_pipeline(
     source:     Path,
     work_dir:   Path,
     *,
-    force:      bool         = False,
-    cleanup:    CleanupLevel = CleanupLevel.NONE,
-    no_metrics: bool         = False,
-    dry_run:    bool         = True,
+    force:       bool             = False,
+    cleanup:     CleanupLevel     = CleanupLevel.NONE,
+    no_metrics:  bool             = False,
+    dry_run:     bool             = True,
+    crop_params: CropParams | None = None,
 ) -> PipelineResult:
     """Execute the complete end-to-end pipeline (all phases).
 
@@ -121,6 +126,8 @@ def run_pipeline(
         cleanup:    Artifact retention policy for intermediate files.
         no_metrics: When ``True``, skip writing ``metrics.yaml``.
         dry_run:    If ``True``, only report what would be done (default: ``True``).
+        crop_params: Optional manual crop override; ``None`` falls back to
+                     cached value in ``job.yaml``, then auto-detection.
 
     Returns:
         ``PipelineResult`` with execution summary.
@@ -143,13 +150,14 @@ def run_pipeline(
         register_active_collector(collector)
 
     registry = _build_registry(
-        config     = config,
-        source     = source,
-        work_dir   = work_dir,
-        force      = force,
-        cleanup    = cleanup,
-        no_metrics = no_metrics,
-        collector  = collector,
+        config      = config,
+        source      = source,
+        work_dir    = work_dir,
+        force       = force,
+        cleanup     = cleanup,
+        no_metrics  = no_metrics,
+        collector   = collector,
+        crop_params = crop_params,
     )
 
     orchestrator = PipelineOrchestrator(
@@ -167,10 +175,11 @@ def extract_streams(
     source:   Path,
     work_dir: Path,
     *,
-    force:      bool         = False,
-    cleanup:    CleanupLevel = CleanupLevel.NONE,
-    no_metrics: bool         = False,
-    dry_run:    bool         = False,
+    force:       bool             = False,
+    cleanup:     CleanupLevel     = CleanupLevel.NONE,
+    no_metrics:  bool             = False,
+    dry_run:     bool             = False,
+    crop_params: CropParams | None = None,
 ) -> "ExtractionPhaseResult":
     """Run the pipeline up to and including the extraction phase.
 
@@ -186,6 +195,8 @@ def extract_streams(
         cleanup:    Artifact retention policy for intermediate files.
         no_metrics: When ``True``, skip writing ``metrics.yaml``.
         dry_run:    Report only — no files written.
+        crop_params: Optional manual crop override; ``None`` falls back to
+                     cached value in ``job.yaml``, then auto-detection.
 
     Returns:
         ``ExtractionPhaseResult`` from the phase.
@@ -200,10 +211,11 @@ def extract_streams(
         source,
         work_dir,
         ExtractionPhase,
-        force      = force,
-        cleanup    = cleanup,
-        no_metrics = no_metrics,
-        dry_run    = dry_run,
+        force       = force,
+        cleanup     = cleanup,
+        no_metrics  = no_metrics,
+        dry_run     = dry_run,
+        crop_params = crop_params,
     )
 
 
@@ -212,10 +224,11 @@ def chunk_video(
     source:   Path,
     work_dir: Path,
     *,
-    force:      bool         = False,
-    cleanup:    CleanupLevel = CleanupLevel.NONE,
-    no_metrics: bool         = False,
-    dry_run:    bool         = False,
+    force:       bool             = False,
+    cleanup:     CleanupLevel     = CleanupLevel.NONE,
+    no_metrics:  bool             = False,
+    dry_run:     bool             = False,
+    crop_params: CropParams | None = None,
 ) -> "ChunkingPhaseResult":
     """Run the pipeline up to and including the chunking phase.
 
@@ -230,6 +243,8 @@ def chunk_video(
         cleanup:    Artifact retention policy for intermediate files.
         no_metrics: When ``True``, skip writing ``metrics.yaml``.
         dry_run:    Report only — no files written.
+        crop_params: Optional manual crop override; ``None`` falls back to
+                     cached value in ``job.yaml``, then auto-detection.
 
     Returns:
         ``ChunkingPhaseResult`` from the phase.
@@ -245,10 +260,11 @@ def chunk_video(
         source,
         work_dir,
         ChunkingPhase,
-        force      = force,
-        cleanup    = cleanup,
-        no_metrics = no_metrics,
-        dry_run    = dry_run,
+        force       = force,
+        cleanup     = cleanup,
+        no_metrics  = no_metrics,
+        dry_run     = dry_run,
+        crop_params = crop_params,
     )
 
 
@@ -257,10 +273,11 @@ def process_audio(
     source:   Path,
     work_dir: Path,
     *,
-    force:      bool         = False,
-    cleanup:    CleanupLevel = CleanupLevel.NONE,
-    no_metrics: bool         = False,
-    dry_run:    bool         = False,
+    force:       bool             = False,
+    cleanup:     CleanupLevel     = CleanupLevel.NONE,
+    no_metrics:  bool             = False,
+    dry_run:     bool             = False,
+    crop_params: CropParams | None = None,
 ) -> "AudioPhaseResult":
     """Run the pipeline up to and including the audio processing phase.
 
@@ -275,6 +292,8 @@ def process_audio(
         cleanup:    Artifact retention policy for intermediate files.
         no_metrics: When ``True``, skip writing ``metrics.yaml``.
         dry_run:    Report only — no files written.
+        crop_params: Optional manual crop override; ``None`` falls back to
+                     cached value in ``job.yaml``, then auto-detection.
 
     Returns:
         ``AudioPhaseResult`` from the phase.
@@ -289,10 +308,11 @@ def process_audio(
         source,
         work_dir,
         AudioPhase,
-        force      = force,
-        cleanup    = cleanup,
-        no_metrics = no_metrics,
-        dry_run    = dry_run,
+        force       = force,
+        cleanup     = cleanup,
+        no_metrics  = no_metrics,
+        dry_run     = dry_run,
+        crop_params = crop_params,
     )
 
 
@@ -301,10 +321,11 @@ def encode_chunks(
     source:   Path,
     work_dir: Path,
     *,
-    force:      bool         = False,
-    cleanup:    CleanupLevel = CleanupLevel.NONE,
-    no_metrics: bool         = False,
-    dry_run:    bool         = False,
+    force:       bool             = False,
+    cleanup:     CleanupLevel     = CleanupLevel.NONE,
+    no_metrics:  bool             = False,
+    dry_run:     bool             = False,
+    crop_params: CropParams | None = None,
 ) -> "EncodingPhaseResult":
     """Run the pipeline up to and including the encoding phase.
 
@@ -320,6 +341,8 @@ def encode_chunks(
         cleanup:    Artifact retention policy for intermediate files.
         no_metrics: When ``True``, skip writing ``metrics.yaml``.
         dry_run:    Report only — no files written.
+        crop_params: Optional manual crop override; ``None`` falls back to
+                     cached value in ``job.yaml``, then auto-detection.
 
     Returns:
         ``EncodingPhaseResult`` from the phase.
@@ -335,10 +358,11 @@ def encode_chunks(
         source,
         work_dir,
         EncodingPhase,
-        force      = force,
-        cleanup    = cleanup,
-        no_metrics = no_metrics,
-        dry_run    = dry_run,
+        force       = force,
+        cleanup     = cleanup,
+        no_metrics  = no_metrics,
+        dry_run     = dry_run,
+        crop_params = crop_params,
     )
 
 
@@ -347,10 +371,11 @@ def merge_final(
     source:   Path,
     work_dir: Path,
     *,
-    force:      bool         = False,
-    cleanup:    CleanupLevel = CleanupLevel.NONE,
-    no_metrics: bool         = False,
-    dry_run:    bool         = False,
+    force:       bool             = False,
+    cleanup:     CleanupLevel     = CleanupLevel.NONE,
+    no_metrics:  bool             = False,
+    dry_run:     bool             = False,
+    crop_params: CropParams | None = None,
 ) -> "MergePhaseResult":
     """Run the pipeline up to and including the merge phase.
 
@@ -366,6 +391,8 @@ def merge_final(
         cleanup:    Artifact retention policy for intermediate files.
         no_metrics: When ``True``, skip writing ``metrics.yaml``.
         dry_run:    Report only — no files written.
+        crop_params: Optional manual crop override; ``None`` falls back to
+                     cached value in ``job.yaml``, then auto-detection.
 
     Returns:
         ``MergePhaseResult`` from the phase.
@@ -380,10 +407,11 @@ def merge_final(
         source,
         work_dir,
         MergePhase,
-        force      = force,
-        cleanup    = cleanup,
-        no_metrics = no_metrics,
-        dry_run    = dry_run,
+        force       = force,
+        cleanup     = cleanup,
+        no_metrics  = no_metrics,
+        dry_run     = dry_run,
+        crop_params = crop_params,
     )
 
 
@@ -392,7 +420,7 @@ def measure_quality(
     work_dir:                 Path,
     target_videos:            list[Path]        | None = None,
     crop_params:              CropParams | None = None,
-    metrics_sampling:         int               = DEFAULT_METRICS_SAMPLING,
+    metrics_sampling:         int               = 3,
     screenshot_count:         int | None        = DEFAULT_SCREENSHOT_COUNT,
     screenshot_interval:      str | None        = None,
     width:                    int | None        = None,

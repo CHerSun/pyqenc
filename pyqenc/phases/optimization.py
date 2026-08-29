@@ -29,7 +29,6 @@ from alive_progress import config_handler
 
 from pyqenc.constants import (
     CHUNKS_DIR,
-    DEFAULT_METRICS_SAMPLING,
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
 )
@@ -163,7 +162,7 @@ class OptimizationPhase:
             )
         else:
             current_targets  = _targets_as_strings(self._job.result.config.encoding.resolved_targets)
-            current_sampling = self._job.result.config.encoding.metrics_sampling
+            current_sampling = self._job.result.config.measurement.sampling
             params_stale = (
                 (persisted.quality_targets and persisted.quality_targets != current_targets)
                 or (persisted.metrics_sampling is not None and persisted.metrics_sampling != current_sampling)
@@ -178,7 +177,7 @@ class OptimizationPhase:
                     strategy_results    = [],
                 )
             else:
-                selected = self._apply_tolerance(persisted.strategy_results, self._job.result.config.encoding.strategy_selection_tolerance)
+                selected = self._apply_tolerance(persisted.strategy_results, self._job.result.config.encoding.optimize_tolerance)
                 self.result = OptimizationPhaseResult(
                     outcome             = PhaseOutcome.REUSED,
                     artifacts           = [Artifact(
@@ -228,14 +227,14 @@ class OptimizationPhase:
 
         work_dir  = self._job.result.work_dir
         opt_yaml  = work_dir / _OPTIMIZATION_YAML
-        tolerance = self._job.result.config.encoding.strategy_selection_tolerance
+        tolerance = self._job.result.config.encoding.optimize_tolerance
 
         # Step 1: load persisted optimization params (before dependency check so
         # tolerance re-application can short-circuit without needing live phases)
         persisted = OptimizationParams.load(opt_yaml)
 
         current_targets  = _targets_as_strings(self._job.result.config.encoding.resolved_targets)
-        current_sampling = self._job.result.config.encoding.metrics_sampling
+        current_sampling = self._job.result.config.measurement.sampling
 
         # Step 2: quality-target / metrics_sampling change detection — must happen before
         # tolerance re-application so we don't skip re-encoding when params changed.
@@ -341,7 +340,7 @@ class OptimizationPhase:
         # From here on we need live dependencies (for crop params and chunks)
         emit_phase_banner("OPTIMIZATION", logger)
         logger.info("Strategies:  %s", ", ".join(s.name for s in self._job.result.config.encoding.resolved_strategies))
-        logger.info("Tolerance:   %.1f%%", self._job.result.config.encoding.strategy_selection_tolerance)
+        logger.info("Tolerance:   %.1f%%", self._job.result.config.encoding.optimize_tolerance)
 
         dep_result = self._ensure_dependencies(execute=True)
         if dep_result is not None:
@@ -437,7 +436,7 @@ class OptimizationPhase:
         ).save(opt_yaml)
 
         # Step 10: run test encodes for all pending strategies in parallel (unified pool)
-        encoder       = _make_encoder(work_dir, self._collector, crop, self._job.result.config.encoding.visual_hash, self._job.result.config.encoding.metrics_sampling)
+        encoder       = _make_encoder(work_dir, self._collector, crop, self._job.result.config.encoding.visual_hash, self._job.result.config.measurement.sampling)
         reference_dir = work_dir / CHUNKS_DIR
 
         from pyqenc.phases.encoding import (
@@ -467,7 +466,7 @@ class OptimizationPhase:
                     reference_dir     = reference_dir,
                     strategies        = strategies_to_test,
                     quality_targets   = self._job.result.config.encoding.resolved_targets,
-                    max_parallel      = self._job.result.config.encoding.max_parallel,
+                    max_parallel      = self._job.result.config.encoding.concurrency,
                     force             = False,
                     collector         = self._collector,
                     phase_recovery    = phase_recovery,
@@ -565,7 +564,7 @@ class OptimizationPhase:
         work_dir         = self._job.result.work_dir
         opt_yaml         = work_dir / _OPTIMIZATION_YAML
         current_targets  = _targets_as_strings(self._job.result.config.encoding.resolved_targets)
-        current_sampling = self._job.result.config.encoding.metrics_sampling
+        current_sampling = self._job.result.config.measurement.sampling
 
         if not dry_run:
             persisted = OptimizationParams.load(opt_yaml)
@@ -857,7 +856,7 @@ def _make_encoder(
     collector:        MetricsCollector,
     crop_params:      CropParams | None,
     visual_hash:      bool = True,
-    metrics_sampling: int  = DEFAULT_METRICS_SAMPLING,
+    metrics_sampling: int  = 3,
 ) -> "ChunkEncoder":
     """Construct a ``ChunkEncoder`` for test encodes.
 

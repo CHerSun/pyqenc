@@ -1,0 +1,922 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "1.1 Delete `DEFAULT_MAX_PARALLEL` from `pyqenc/constants.py` and its docstring": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540834908
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540852904
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786541303102
+      }
+    ],
+    "1.2 Delete `DEFAULT_METRICS_SAMPLING` from `pyqenc/constants.py` and its docstring": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540835575
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786541306649
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786541841901
+      }
+    ],
+    "1.3 Verify no remaining callers: search for `DEFAULT_MAX_PARALLEL` and `DEFAULT_METRICS_SAMPLING` across the codebase; any remaining use is a bug to fix before proceeding": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540835917
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786541845313
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786542753307
+      }
+    ],
+    "2.1 Add `MeasurementConfig(BaseModel)` with `sampling: int` — no default (required); add docstring": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540836128
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786542766275
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543573027
+      }
+    ],
+    "2.2 Update `EncodingConfig`: rename `quality_targets` → `targets`; rename `max_parallel` → `concurrency`; rename `strategy_selection_tolerance` → `optimize_tolerance`; remove `metrics_sampling`; remove `crop_params`; **no** `measurement` field here; remove all Python defaults from value-bearing fields (`= True`, `= 5.0`, etc.) — make them required; update all docstrings": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540836430
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543580560
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543587666
+      }
+    ],
+    "2.3 Update `EncodingConfig.resolve()` and all internal references within `app_config.py` to use new field names": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540836540
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543591576
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543600058
+      }
+    ],
+    "2.4 Replace `AudioConfig` entirely: remove `convert_filter`, `profiles`, `audio_codec`, `audio_base_bitrate`; add `convert_pattern: str`, `codec: str`, `bitrate_per_channel: str`, `extension: str` — all required (no Python defaults); update docstring": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540837266
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543611415
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543623982
+      }
+    ],
+    "2.5 Delete `AudioConversionProfile` class from `app_config.py`": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540837458
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543629797
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543633838
+      }
+    ],
+    "2.6 Add `measurement: MeasurementConfig` as a **top-level** required field on `AppConfig` (no `Field(default_factory=...)`); make all `AppConfig` sub-model fields required; `ExtractionConfig` sentinel fields (`include: str | None = None`, `exclude: str | None = None`) stay as-is": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540837882
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543638769
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543643181
+      }
+    ],
+    "2.7 Update `AppConfig` docstring to reference new field names and note required-field semantics": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540838191
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543647252
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543652287
+      }
+    ],
+    "2.8 Remove `DEFAULT_MAX_PARALLEL` and `DEFAULT_METRICS_SAMPLING` imports from `app_config.py`": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540838345
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543656251
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543672235
+      }
+    ],
+    "3.1 Remove all profile lookup logic (`config.audio.profiles`, `AudioConversionProfile` references)": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540838537
+      },
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543689038
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786563408211
+      }
+    ],
+    "3.2 Read `config.audio.codec`, `config.audio.extension` directly for conversion output": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540838743
+      },
+      {
+        "executionId": "27195412-8ba8-494c-8dc5-939a3e627f56",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786545023588
+      },
+      {
+        "executionId": "27195412-8ba8-494c-8dc5-939a3e627f56",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786545605230
+      }
+    ],
+    "3.3 Implement bitrate scaling: parse `config.audio.bitrate_per_channel` (strip `k`/`K` suffix, parse int, multiply by channel count from stream filename tags, re-append `k`); handle `2.0`/`stereo` → ×2, `5.1` → ×6, `7.1` → ×8": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540838982
+      },
+      {
+        "executionId": "27195412-8ba8-494c-8dc5-939a3e627f56",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786545613615
+      },
+      {
+        "executionId": "27195412-8ba8-494c-8dc5-939a3e627f56",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786545689447
+      }
+    ],
+    "3.4 Replace `config.audio.convert_filter` → `config.audio.convert_pattern`": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540839298
+      },
+      {
+        "executionId": "27195412-8ba8-494c-8dc5-939a3e627f56",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786545709652
+      },
+      {
+        "executionId": "27195412-8ba8-494c-8dc5-939a3e627f56",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786548534283
+      }
+    ],
+    "3.5 Replace `config.audio.audio_codec` and `config.audio.audio_base_bitrate` references with `config.audio.codec` and the computed bitrate": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540839483
+      },
+      {
+        "executionId": "27195412-8ba8-494c-8dc5-939a3e627f56",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786548542001
+      },
+      {
+        "executionId": "27195412-8ba8-494c-8dc5-939a3e627f56",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786556405969
+      }
+    ],
+    "4.1 Replace `config.encoding.quality_targets` → `config.encoding.targets` in all phase files (`optimization.py`, `encoding.py`, `merge.py`, and any other that reads quality targets)": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540839653
+      },
+      {
+        "executionId": "27195412-8ba8-494c-8dc5-939a3e627f56",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786556412445
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786563409494
+      }
+    ],
+    "4.2 Replace `config.encoding.max_parallel` → `config.encoding.concurrency` in `encoding.py` (and any other phase)": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540839934
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786561056813
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786563410864
+      }
+    ],
+    "4.3 Replace `config.encoding.metrics_sampling` → `config.measurement.sampling` in all phase files (`optimization.py`, `encoding.py`, `merge.py`, `measure.py`, any others)": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540840100
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786563417572
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786565690737
+      }
+    ],
+    "4.4 Replace `config.encoding.strategy_selection_tolerance` → `config.encoding.optimize_tolerance` in `optimization.py` and any other reader": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540840245
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786565710597
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786565801644
+      }
+    ],
+    "4.5 Replace `config.encoding.crop_params` (or `self._job.result.config.encoding.crop_params`) → `self._job.result.crop` in all phase files": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540840536
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786565820452
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786568215722
+      }
+    ],
+    "5.1 Remove any code reading `self._config.encoding.crop_params`; read crop from `self._crop_params` stored at construction (already arrives via `JobPhaseResult.crop`)": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540840696
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786568224829
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786568346692
+      }
+    ],
+    "5.2 Confirm `JobPhaseResult.crop` is populated correctly from the volatile value (no change needed if already wired; verify only)": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540840841
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786568350847
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786568405931
+      }
+    ],
+    "6.1 Add `crop_params: CropParams | None = None` parameter to `_build_registry`": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540841029
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786568429538
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786569598220
+      }
+    ],
+    "6.2 Forward `crop_params` to the `JobPhase` constructor call": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540841287
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786569602813
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786569607349
+      }
+    ],
+    "7.1 Rename `--chunking` → `--chunking-mode`, dest `chunking` → `chunking_mode`; update help text": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540841730
+      },
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786569645129
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570062052
+      }
+    ],
+    "7.2 Rename `--all-strategies` → `--no-optimize`, dest `all_strategies` → `no_optimize`; update help text": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540841949
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570066466
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570102219
+      }
+    ],
+    "7.3 Rename `--max-parallel` → `--concurrency`, dest `max_parallel` → `concurrency`; change `default=DEFAULT_MAX_PARALLEL` → `default=None`; update help text": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540842148
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570107746
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570151191
+      }
+    ],
+    "7.4 Update `--targets` dest from `quality_target` to `targets`": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540842366
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570155781
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570187433
+      }
+    ],
+    "7.5 Change `--scene-threshold` and `--min-scene-length` to `default=None` (currently repeat config values)": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540842467
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570191161
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570226160
+      }
+    ],
+    "7.6 Delete `_add_audio_convert_arguments()` function": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540842546
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570230120
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570251281
+      }
+    ],
+    "7.7 Remove `_add_audio_convert_arguments()` call from every subcommand that had it (`auto`, `audio`, `merge`)": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540842615
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570255227
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570301454
+      }
+    ],
+    "7.8 In `_build_config()`: update all config assignment paths to new names; remove audio override block (`audio_convert`, `audio_codec`, `audio_bitrate`); update `--sampling` assignment to `config.measurement.sampling`; update `--no-optimize` handling (was `--all-strategies`); update `--concurrency` (was `--max-parallel`); update `--chunking-mode` (was `--chunking`); update `--targets` dest reference; update `--scene-threshold` and `--min-scene-length` guards to check `is not None`": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540842691
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570305683
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570369434
+      }
+    ],
+    "7.9 Move `crop_params` resolution out of `_build_config()`; in each command handler that uses `--crop`, pass `crop_params` as kwarg to `_build_registry` instead of assigning to config": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540842780
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570375154
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570423428
+      }
+    ],
+    "7.10 Remove `DEFAULT_MAX_PARALLEL` and `DEFAULT_METRICS_SAMPLING` imports from `cli.py`": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540842880
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786570427315
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571153687
+      }
+    ],
+    "8.1 Rewrite with revised structure: all settings present, comments short and inline, no multi-paragraph block headers": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540842948
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571159944
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571367626
+      }
+    ],
+    "8.2 `encoding.quality_targets` → `encoding.targets`": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540843027
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571378402
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571383018
+      }
+    ],
+    "8.3 `encoding.max_parallel` → `encoding.concurrency`": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540843228
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571388987
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571396877
+      }
+    ],
+    "8.4 `encoding.metrics_sampling` → top-level `measurement.sampling` section (same level as `encoding:`, not nested inside it)": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540843298
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571402071
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571407866
+      }
+    ],
+    "8.5 `encoding.strategy_selection_tolerance` → `encoding.optimize_tolerance`": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540843386
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571412315
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571417893
+      }
+    ],
+    "8.6 `audio` section: replace profiles/audio_codec/audio_base_bitrate with `convert_pattern`, `codec`, `bitrate_per_channel`, `extension`": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540843452
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571424858
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571428982
+      }
+    ],
+    "8.7 Confirm all `AppConfig` fields (including `MeasurementConfig.sampling`) are present with their defaults; confirm no `crop_params` entry": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540843558
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571433211
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571437548
+      }
+    ],
+    "8.8 Shorten strategy pattern syntax guide to the 6 essential examples inline in the commented-out strategy list": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540843616
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571443507
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571446927
+      }
+    ],
+    "8.9 Retain codec and profile sections with existing inline comments (they are already well-commented)": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540843689
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571453067
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571456568
+      }
+    ],
+    "9.1 Update existing `AppConfig` round-trip and property-based tests to use new field names (`targets`, `concurrency`, `optimize_tolerance`, `measurement.sampling` as top-level `config.measurement.sampling`)": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540843768
+      },
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571464276
+      },
+      {
+        "executionId": "56380e63-6b73-4080-88d1-23204a1553d6",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786621067498
+      },
+      {
+        "executionId": "56380e63-6b73-4080-88d1-23204a1553d6",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786621764128
+      }
+    ],
+    "9.2 Add unit test for audio bitrate scaling: given `bitrate_per_channel=\"96k\"`, verify 2.0 → `\"192k\"`, 5.1 → `\"576k\"`, 7.1 → `\"768k\"`, `stereo` → `\"192k\"` — bug condition: wrong channel count multiplier or incorrect string parsing": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540843833
+      },
+      {
+        "executionId": "56380e63-6b73-4080-88d1-23204a1553d6",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786621769258
+      },
+      {
+        "executionId": "56380e63-6b73-4080-88d1-23204a1553d6",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786621775040
+      }
+    ],
+    "9.3 Add unit test verifying `AppConfig.model_validate({})` raises `ValidationError` — bug condition: Python defaults silently masking missing YAML keys": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540843919
+      },
+      {
+        "executionId": "56380e63-6b73-4080-88d1-23204a1553d6",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786621779146
+      },
+      {
+        "executionId": "56380e63-6b73-4080-88d1-23204a1553d6",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786621782936
+      }
+    ],
+    "9.4 Run `uv run python -m pytest` and confirm all tests pass": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540843997
+      },
+      {
+        "executionId": "56380e63-6b73-4080-88d1-23204a1553d6",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786621786672
+      },
+      {
+        "executionId": "56380e63-6b73-4080-88d1-23204a1553d6",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786621790306
+      }
+    ],
+    "10.1 Run `uv run pyqenc auto \"D:\\_encoding\\movie.mkv\" --work-dir D:\\_encoding\\pyqenc` (dry-run, no `-y`) and confirm exit 0 with coherent log output": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540844097
+      },
+      {
+        "executionId": "56380e63-6b73-4080-88d1-23204a1553d6",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786621795971
+      }
+    ],
+    "10.2 Run `uv run pyqenc config .` and confirm it reflects new field names in the displayed config": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540844262
+      }
+    ],
+    "10.3 Review this spec against `config-refactor` and other related specs; update `config-refactor/design.md` cross-reference table to note fields superseded by this spec": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540844341
+      }
+    ],
+    "10.4 Set `Completed:` date in `design.md`, `requirements.md`, and `tasks.md`": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786540844434
+      }
+    ],
+    "1. Delete `DEFAULT_MAX_PARALLEL` and `DEFAULT_METRICS_SAMPLING` from `constants.py`": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786542753418
+      }
+    ],
+    "2. Restructure `app_config.py` — rename fields, add `MeasurementConfig`, make value-bearing fields required": [
+      {
+        "executionId": "c7ef67a1-6389-4129-936c-af74e4d53ab6",
+        "chatSessionId": "sess_4ca2af23-2e16-4c64-a7c7-c5c56e577e8a",
+        "timestamp": 1786543672464
+      }
+    ],
+    "3. Update `pyqenc/phases/audio.py` — flat `AudioConfig` and bitrate scaling": [
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786563408390
+      }
+    ],
+    "4. Update all other phases — field renames": [
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786568216260
+      }
+    ],
+    "5. Update `pyqenc/phases/job.py` — remove `crop_params` from config path": [
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786568406391
+      }
+    ],
+    "6. Update `pyqenc/phase.py` — thread `crop_params` as volatile kwarg": [
+      {
+        "executionId": "7e6e49ab-a3f3-40dd-bc6d-862ddbc5d311",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786569607492
+      }
+    ],
+    "7. Update `pyqenc/cli.py` — rename args, remove audio CLI args, fix `default=None`": [
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571153853
+      }
+    ],
+    "8. Rewrite `pyqenc/default_config.yaml`": [
+      {
+        "executionId": "30bdfcb8-c754-41e9-9e07-a497e1b52586",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786571456725
+      }
+    ],
+    "9. Add/update tests for the changed areas": [
+      {
+        "executionId": "56380e63-6b73-4080-88d1-23204a1553d6",
+        "chatSessionId": "sess_ac0984c7-a5b8-4a60-bb47-3a2524068796",
+        "timestamp": 1786621790485
+      }
+    ]
+  }
+}

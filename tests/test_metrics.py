@@ -209,7 +209,7 @@ from pyqenc.metrics import NoOpMetricsCollector
 
 def _make_app_config() -> AppConfig:
     """Return a minimal ``AppConfig`` for phase constructor tests."""
-    return load_app_config()
+    return load_app_config(default_only=True)
 
 
 def test_job_phase_stores_collector(tmp_path: Path) -> None:

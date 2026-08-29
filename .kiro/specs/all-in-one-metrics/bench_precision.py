@@ -24,7 +24,7 @@ from pyqenc.utils.visualization import (
 )
 from pyqenc.quality import MetricType
 
-CWD        = Path(r"D:\_current\pyqenc1\measure")
+CWD        = Path(r"D:\_encoding\pyqenc\measure")
 VIF_SOURCE = MetricType.VMAF
 FACTORS    = [1, 3, 10]
 STAT_KEYS  = ["min", "p05", "p25", "med", "p75", "p95", "max", "std"]

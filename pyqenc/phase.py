@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from pyqenc.models import CleanupLevel, PhaseOutcome, Strategy
+from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, Strategy
 from pyqenc.state import ArtifactState
 
 if TYPE_CHECKING:
@@ -187,22 +187,23 @@ class Phase(Protocol):
 # ---------------------------------------------------------------------------
 
 def _build_registry(
-    config:     "AppConfig",
-    source:     Path,
-    work_dir:   Path,
-    force:      bool,
-    cleanup:    CleanupLevel,
-    no_metrics: bool,
-    collector:  "MetricsCollector",
+    config:      "AppConfig",
+    source:      Path,
+    work_dir:    Path,
+    force:       bool,
+    cleanup:     CleanupLevel,
+    no_metrics:  bool,
+    collector:   "MetricsCollector",
+    crop_params: CropParams | None = None,
 ) -> dict[type[Phase], Phase]:
     """Construct all phase objects in execution order and wire their dependencies.
 
     ``JobPhase`` receives all volatile per-run parameters (``source``,
-    ``work_dir``, ``force``, ``cleanup``, ``no_metrics``) as plain kwargs and
-    stores them on ``JobPhaseResult`` so all downstream phases can read them
-    via ``self._job.result.*``.  All other phases are constructed with only
-    ``(config, registry, collector=collector)`` — they never receive volatile
-    args directly.
+    ``work_dir``, ``force``, ``cleanup``, ``no_metrics``, ``crop_params``) as
+    plain kwargs and stores them on ``JobPhaseResult`` so all downstream phases
+    can read them via ``self._job.result.*``.  All other phases are constructed
+    with only ``(config, registry, collector=collector)`` — they never receive
+    volatile args directly.
 
     The registry is a plain ``dict`` keyed by phase *class* (not instance),
     preserving insertion order (Python 3.7+).
@@ -218,13 +219,16 @@ def _build_registry(
     7. ``MergePhase``        — depends on Job, Encoding, Audio
 
     Args:
-        config:     Full validated application configuration.
-        source:     Resolved path to the source video file.
-        work_dir:   Working directory for all pipeline artifacts.
-        force:      When ``True``, wipe existing artifacts before running.
-        cleanup:    Artifact retention policy applied after encoding.
-        no_metrics: When ``True``, skip writing ``metrics.yaml`` files.
-        collector:  Metrics collector injected into every phase constructor.
+        config:      Full validated application configuration.
+        source:      Resolved path to the source video file.
+        work_dir:    Working directory for all pipeline artifacts.
+        force:       When ``True``, wipe existing artifacts before running.
+        cleanup:     Artifact retention policy applied after encoding.
+        no_metrics:  When ``True``, skip writing ``metrics.yaml`` files.
+        collector:   Metrics collector injected into every phase constructor.
+        crop_params: Optional manual crop override forwarded to ``JobPhase``;
+                     ``None`` falls back to cached value in ``job.yaml``, then
+                     auto-detection.
 
     Returns:
         Ordered ``dict[type[Phase], Phase]`` mapping each phase class to its
@@ -246,12 +250,13 @@ def _build_registry(
     # so downstream phases can access them via self._job.result.*.
     registry[JobPhase] = JobPhase(
         config, registry,
-        source     = source,
-        work_dir   = work_dir,
-        force      = force,
-        cleanup    = cleanup,
-        no_metrics = no_metrics,
-        collector  = collector,
+        source      = source,
+        work_dir    = work_dir,
+        force       = force,
+        cleanup     = cleanup,
+        no_metrics  = no_metrics,
+        collector   = collector,
+        crop_params = crop_params,
     )
 
     # All other phases receive only (config, registry, collector=collector).

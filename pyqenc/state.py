@@ -565,32 +565,32 @@ class MeasureSidecar(BaseModel):
 class AudioParams(BaseModel):
     """Phase parameter file model for audio processing (``audio.yaml``).
 
-    Stores the codec and base bitrate that were active when audio processing
-    last ran.  These are Type B config values — they affect the *content* of
-    produced AAC files and must be tracked across runs so that a codec or
-    bitrate change triggers re-processing.
+    Stores the codec and per-channel bitrate that were active when audio
+    processing last ran.  These are Type B config values — they affect the
+    *content* of produced delivery files and must be tracked across runs so
+    that a codec or bitrate change triggers re-processing.
 
-    ``audio_convert`` (the convert filter) is intentionally excluded: it is a
+    ``convert_pattern`` (the convert filter) is intentionally excluded: it is a
     Type A input — ``AudioEngine.build_plan()`` with the current filter already
     defines the expected terminal outputs, so no cross-run tracking is needed.
     """
 
-    audio_codec:        str | None = None
-    audio_base_bitrate: str | None = None
+    codec:               str | None = None
+    bitrate_per_channel: str | None = None
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
         return {
-            "audio_codec":        self.audio_codec,
-            "audio_base_bitrate": self.audio_base_bitrate,
+            "codec":               self.codec,
+            "bitrate_per_channel": self.bitrate_per_channel,
         }
 
     @classmethod
     def from_yaml_dict(cls, data: dict) -> "AudioParams":
         """Restore from a dict loaded from ``audio.yaml``."""
         return cls(
-            audio_codec        = data.get("audio_codec"),
-            audio_base_bitrate = data.get("audio_base_bitrate"),
+            codec               = data.get("codec"),
+            bitrate_per_channel = data.get("bitrate_per_channel"),
         )
 
     @classmethod

@@ -10,9 +10,9 @@ from pyqenc.models import CropParams
 from pyqenc.quality import MetricType, run_metric
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg_async
 
-REF       = Path(r"D:\_current\pyqenc1\measure\(1).mkv")
-DIST      = Path(r"D:\_current\pyqenc1\measure\(1.1) any_vulkan_hevc-10bit.mkv")
-CWD       = Path(r"D:\_current\pyqenc1\measure")
+REF       = Path(r"D:\_encoding\pyqenc\measure\(1).mkv")
+DIST      = Path(r"D:\_encoding\pyqenc\measure\(1.1) any_vulkan_hevc-10bit.mkv")
+CWD       = Path(r"D:\_encoding\pyqenc\measure")
 CROP_REF  = CropParams(top=22, bottom=22, left=0, right=0)
 CROP_DIST = CropParams(top=0,  bottom=0,  left=0, right=0)
 FACTORS   = [1, 10]

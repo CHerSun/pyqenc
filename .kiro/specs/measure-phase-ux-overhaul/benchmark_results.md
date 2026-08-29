@@ -45,7 +45,7 @@ Exactness: A1 vs C — 19/20 match, 1/20 differ ⚠ (see analysis below)
 
 ## Full movie (own positions)
 
-### О чём говорят мужчины Blu-Ray (1080p).mkv — 5792.1s (1.61h), 24fps, step=6619
+### movie.mkv — 5792.1s (1.61h), 24fps, step=6619
 
 | Strategy | Time (s) | % of duration | Meets target (≤1930.7s) | Captured |
 |---|---|---|---|---|

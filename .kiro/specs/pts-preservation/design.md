@@ -568,7 +568,7 @@ Each test is tagged with a comment referencing the design property:
 
 ### Integration tests
 
-Integration tests run against the sample video (`D:\_current\О чём говорят мужчины Blu-Ray (1080p) (1).mkv`) in the configured work directory:
+Integration tests run against the sample video (`D:\_encoding\movie.mkv`) in the configured work directory:
 
 - Full pipeline run verifying `timestamps.txt` is produced.
 - Full pipeline run verifying the merged output has matching frame count.

@@ -102,7 +102,7 @@ Currently `_measure_quality` passes `output_dir / f"metrics_{safe_strategy}"` as
 **Design:**
 
 - `_measure_quality` receives `final_result: Path` (the output MKV).
-- Intermediate artifacts dir: `output_dir / final_result.stem` (e.g. `final/О чём говорят мужчины Blu-Ray (1080p) (1) slow_h265/`)
+- Intermediate artifacts dir: `output_dir / final_result.stem` (e.g. `final/movie slow_h265/`)
 - Plot path: `output_dir / f"{final_result.stem}.png"` — passed explicitly via `plot_path` to `evaluate_chunk`.
 - Sidecar path: `output_dir / f"{final_result.stem}.yaml"` — already handled by `_sidecar_path(output_file)` since `output_file` is the final result.
 - The `evaluate_chunk` signature already accepts `plot_path: Path | None`; no signature change needed there.
@@ -190,7 +190,7 @@ For the "savings" column, the most meaningful reference is the extracted video s
 MERGE SUMMARY
 ══════════════════════════════════════════════════════════════════════════
   Strategy  : slow_h265
-  Output    : О чём говорят мужчины Blu-Ray (1080p) (1) slow_h265.mkv
+  Output    : movie.mkv
   Size      : 4 231.4 MB  (saved 77.0% vs 18 420.0 MB reference)
   Targets   : vmaf-min≥85 → 91.2 ✔   ssim-min≥95 → 96.1 ✔
 ══════════════════════════════════════════════════════════════════════════

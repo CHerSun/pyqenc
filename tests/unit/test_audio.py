@@ -1,9 +1,10 @@
-"""Unit tests for new audio processing components.
+"""Unit tests for audio processing components.
 
 Covers:
 - Strategy check() methods (matching and non-matching filenames)
 - AudioEngine.build_plan() graph shape
-- ConversionStrategy profile selection and CBR bitrate scaling
+- ConversionStrategy plan() path construction
+- _scale_bitrate() channel-count multiplier and string parsing
 - _two_pass_loudnorm loudnorm JSON parsing (mocked run_ffmpeg_async)
 - streams_filter_plain_regex() with include-only, exclude-only, and combined patterns
 """
@@ -12,7 +13,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -24,7 +25,6 @@ from pyqenc.constants import (
     TIME_SEPARATOR_MS,
 )
 from pyqenc.phases.audio import (
-    AudioConversionProfile,
     AudioEngine,
     ConversionStrategy,
     DownmixStrategy51to20NBoost,
@@ -33,8 +33,10 @@ from pyqenc.phases.audio import (
     DownmixStrategy71to51,
     DynaudnormStrategy,
     NormStrategy,
+    _scale_bitrate,
     _two_pass_loudnorm,
 )
+from pyqenc.app_config import load_app_config
 from pyqenc.phases.extraction import streams_filter_plain_regex
 from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
 
@@ -52,12 +54,12 @@ def _stem(layout: str) -> str:
     return f"#02 ID=2 (audio-ac3) lang=rus ch={layout} start=0.028"
 
 
-def _default_profiles() -> dict[str, AudioConversionProfile]:
-    return {
-        "2.0": AudioConversionProfile(codec="aac", bitrate="192k", extension=".aac"),
-        "5.1": AudioConversionProfile(codec="aac", bitrate="512k", extension=".aac"),
-        "7.1": AudioConversionProfile(codec="aac", bitrate="768k", extension=".aac"),
-    }
+_AUDIO_CFG = load_app_config(default_only=True).audio
+
+
+def _flat_conv_strategy() -> ConversionStrategy:
+    """Return a ConversionStrategy using the current flat API."""
+    return ConversionStrategy(codec="aac", bitrate_per_channel="96k", extension=".m4a")
 
 
 # ---------------------------------------------------------------------------
@@ -91,9 +93,9 @@ class TestDownmixStrategy51to20Check:
 
     def setup_method(self) -> None:
         self.strategies = [
-            DownmixStrategy51to20Std(),
-            DownmixStrategy51to20Night(),
-            DownmixStrategy51to20NBoost(),
+            DownmixStrategy51to20Std(_AUDIO_CFG),
+            DownmixStrategy51to20Night(_AUDIO_CFG),
+            DownmixStrategy51to20NBoost(_AUDIO_CFG),
         ]
 
     def test_matches_51_tag(self) -> None:
@@ -125,9 +127,11 @@ class TestDownmixStrategy51to20Check:
         p = _path(name)
         for s in self.strategies:
             assert s.check(p) is False, f"{s.strategy_short} should reject 2.0 std output"
+
+
 class TestNormStrategyCheck:
     def setup_method(self) -> None:
-        self.s = NormStrategy()
+        self.s = NormStrategy(_AUDIO_CFG)
 
     def test_matches_plain_51_source(self) -> None:
         assert self.s.check(_path(f"{_stem('5.1')}.mka")) is True
@@ -182,9 +186,41 @@ class TestDynaudnormStrategyCheck:
 
 class TestConversionStrategyCheck:
     def test_always_false(self) -> None:
-        s = ConversionStrategy(profiles=_default_profiles())
+        s = _flat_conv_strategy()
         assert s.check(_path("anything.flac")) is False
         assert s.check(_path(f"norm {AUDIO_STEM_SEPARATOR} {_stem('5.1')}.flac")) is False
+
+
+# ---------------------------------------------------------------------------
+# _scale_bitrate — channel count multiplier and string parsing
+# ---------------------------------------------------------------------------
+
+class TestScaleBitrateChannelCounts:
+    """Bug condition: wrong channel count multiplier or incorrect string parsing in _scale_bitrate."""
+
+    def test_20_layout_doubles_base(self) -> None:
+        """2.0 layout has 2 channels → 96k × 2 = 192k."""
+        assert _scale_bitrate("96k", _path(f"{_stem('2.0')}.flac")) == "192k"
+
+    def test_stereo_layout_doubles_base(self) -> None:
+        """stereo alias resolves to 2 channels → 96k × 2 = 192k."""
+        assert _scale_bitrate("96k", _path(f"{_stem('stereo')}.flac")) == "192k"
+
+    def test_51_layout_multiplies_by_six(self) -> None:
+        """5.1 layout has 6 channels → 96k × 6 = 576k."""
+        assert _scale_bitrate("96k", _path(f"{_stem('5.1')}.flac")) == "576k"
+
+    def test_71_layout_multiplies_by_eight(self) -> None:
+        """7.1 layout has 8 channels → 96k × 8 = 768k."""
+        assert _scale_bitrate("96k", _path(f"{_stem('7.1')}.flac")) == "768k"
+
+    def test_unknown_layout_defaults_to_stereo(self) -> None:
+        """Unknown layout tag falls back to the stereo (2-channel) default."""
+        assert _scale_bitrate("96k", _path("unknown_layout.flac")) == "192k"
+
+    def test_uppercase_k_suffix_is_accepted(self) -> None:
+        """Upper-case K suffix (e.g. "96K") is parsed the same as lower-case."""
+        assert _scale_bitrate("96K", _path(f"{_stem('5.1')}.flac")) == "576k"
 
 
 # ---------------------------------------------------------------------------
@@ -195,24 +231,24 @@ class TestStrategyShortAndOutputPath:
     def test_strategy_shorts(self) -> None:
         _dot = TIME_SEPARATOR_MS   # ASCII dot is sanitized at construction time
         assert DownmixStrategy71to51().strategy_short == f"5{_dot}1"
-        assert DownmixStrategy51to20Std().strategy_short == f"2{_dot}0 std"
-        assert DownmixStrategy51to20Night().strategy_short == f"2{_dot}0 night"
-        assert DownmixStrategy51to20NBoost().strategy_short == f"2{_dot}0 nboost"
-        assert NormStrategy().strategy_short == "norm"
+        assert DownmixStrategy51to20Std(_AUDIO_CFG).strategy_short == f"2{_dot}0 std"
+        assert DownmixStrategy51to20Night(_AUDIO_CFG).strategy_short == f"2{_dot}0 night"
+        assert DownmixStrategy51to20NBoost(_AUDIO_CFG).strategy_short == f"2{_dot}0 nboost"
+        assert NormStrategy(_AUDIO_CFG).strategy_short == "norm"
         assert DynaudnormStrategy().strategy_short == "dynaudnorm"
-        assert ConversionStrategy(profiles=_default_profiles()).strategy_short == "aac"
+        assert _flat_conv_strategy().strategy_short == "aac"
 
     def test_output_path_naming(self) -> None:
-        s = NormStrategy()
+        s = NormStrategy(_AUDIO_CFG)
         source = _path(f"{_stem('5.1')}.mka")
         out = s.output_path(source)
         assert out.name == f"norm {AUDIO_STEM_SEPARATOR} {_stem('5.1')}.flac"
 
     def test_output_path_custom_extension(self) -> None:
-        s = ConversionStrategy(profiles=_default_profiles())
+        s = _flat_conv_strategy()
         source = _path(f"norm {AUDIO_STEM_SEPARATOR} {_stem('5.1')}.flac")
-        out = s.output_path(source, extension="aac")
-        assert out.name == f"aac {AUDIO_STEM_SEPARATOR} norm {AUDIO_STEM_SEPARATOR} {_stem('5.1')}.aac"
+        out = s.output_path(source, extension="m4a")
+        assert out.name == f"aac {AUDIO_STEM_SEPARATOR} norm {AUDIO_STEM_SEPARATOR} {_stem('5.1')}.m4a"
 
 
 # ---------------------------------------------------------------------------
@@ -221,8 +257,8 @@ class TestStrategyShortAndOutputPath:
 
 class TestAudioEngineDuplicateShort:
     def test_raises_on_duplicate(self) -> None:
-        s1 = NormStrategy()
-        s2 = NormStrategy()  # same strategy_short = "norm"
+        s1 = NormStrategy(_AUDIO_CFG)
+        s2 = NormStrategy(_AUDIO_CFG)  # same strategy_short = "norm"
         with pytest.raises(ValueError, match="Duplicate strategy_short"):
             AudioEngine(strategies=[s1, s2])
 
@@ -230,13 +266,13 @@ class TestAudioEngineDuplicateShort:
         # ConversionStrategy has short "aac"; create a fake one with same short
         class _FakeAac(NormStrategy):
             def __init__(self) -> None:
-                super().__init__()
+                super().__init__(_AUDIO_CFG)
                 self.strategy_short = "aac"
 
         with pytest.raises(ValueError, match="Duplicate strategy_short"):
             AudioEngine(
                 strategies=[_FakeAac()],
-                finalizer=ConversionStrategy(profiles=_default_profiles()),
+                finalizer=_flat_conv_strategy(),
             )
 
 
@@ -260,13 +296,13 @@ class TestAudioEngineBuildPlan:
         return AudioEngine(
             strategies=[
                 DownmixStrategy71to51(),
-                DownmixStrategy51to20Std(),
-                DownmixStrategy51to20Night(),
-                DownmixStrategy51to20NBoost(),
-                NormStrategy(),
+                DownmixStrategy51to20Std(_AUDIO_CFG),
+                DownmixStrategy51to20Night(_AUDIO_CFG),
+                DownmixStrategy51to20NBoost(_AUDIO_CFG),
+                NormStrategy(_AUDIO_CFG),
                 DynaudnormStrategy(),
             ],
-            finalizer=ConversionStrategy(profiles=_default_profiles()),
+            finalizer=_flat_conv_strategy(),
         )
 
     def test_51_source_graph(self, tmp_path: Path) -> None:
@@ -373,84 +409,6 @@ class TestAudioEngineBuildPlan:
 
 
 # ---------------------------------------------------------------------------
-# ConversionStrategy — profile selection and CBR bitrate scaling
-# ---------------------------------------------------------------------------
-
-class TestConversionStrategyProfileSelection:
-    def setup_method(self) -> None:
-        self.s = ConversionStrategy(profiles=_default_profiles())
-
-    def test_selects_20_profile(self) -> None:
-        source = _path(f"norm {AUDIO_STEM_SEPARATOR} {_stem('2.0')}.flac")
-        profile = self.s._select_profile(source)
-        assert profile.bitrate == "192k"
-        assert profile.codec   == "aac"
-
-    def test_selects_51_profile(self) -> None:
-        source = _path(f"norm {AUDIO_STEM_SEPARATOR} {_stem('5.1')}.flac")
-        profile = self.s._select_profile(source)
-        assert profile.bitrate == "512k"
-
-    def test_selects_71_profile(self) -> None:
-        source = _path(f"5{TIME_SEPARATOR_MS}1 {AUDIO_STEM_SEPARATOR} {_stem('7.1')}.flac")
-        profile = self.s._select_profile(source)
-        assert profile.bitrate == "768k"
-
-    def test_fallback_to_20_with_warning(self, caplog: pytest.LogCaptureFixture) -> None:
-        import logging
-        source = _path("unknown_layout.flac")
-        with caplog.at_level(logging.WARNING):
-            profile = self.s._select_profile(source)
-        assert profile.bitrate == "192k"
-        assert any("falling back" in r.message.lower() for r in caplog.records)
-
-    def test_plan_uses_profile_extension(self) -> None:
-        source = _path(f"norm {AUDIO_STEM_SEPARATOR} {_stem('2.0')}.flac")
-        out = self.s.plan(source)
-        assert out.suffix == ".aac"
-
-
-class TestConversionStrategyBitrateScaling:
-    def test_no_override_uses_profile_bitrate(self) -> None:
-        s = ConversionStrategy(profiles=_default_profiles())
-        source = _path(f"norm {AUDIO_STEM_SEPARATOR} {_stem('5.1')}.flac")
-        profile = s._select_profile(source)
-        bitrate = s._resolve_bitrate(source, profile)
-        assert bitrate == "512k"
-
-    def test_base_override_scales_for_stereo(self) -> None:
-        s = ConversionStrategy(profiles=_default_profiles(), base_bitrate_override="192k")
-        source = _path(f"norm {AUDIO_STEM_SEPARATOR} {_stem('2.0')}.flac")
-        profile = s._select_profile(source)
-        bitrate = s._resolve_bitrate(source, profile)
-        assert bitrate == "192k"  # 192 * 2/2 = 192
-
-    def test_base_override_scales_for_51(self) -> None:
-        s = ConversionStrategy(profiles=_default_profiles(), base_bitrate_override="192k")
-        source = _path(f"norm {AUDIO_STEM_SEPARATOR} {_stem('5.1')}.flac")
-        profile = s._select_profile(source)
-        bitrate = s._resolve_bitrate(source, profile)
-        assert bitrate == "576k"  # 192 * 6/2 = 576
-
-    def test_base_override_scales_for_71(self) -> None:
-        s = ConversionStrategy(profiles=_default_profiles(), base_bitrate_override="192k")
-        source = _path(f"5{TIME_SEPARATOR_MS}1 {AUDIO_STEM_SEPARATOR} {_stem('7.1')}.flac")
-        profile = s._select_profile(source)
-        bitrate = s._resolve_bitrate(source, profile)
-        assert bitrate == "768k"  # 192 * 8/2 = 768
-
-    def test_invalid_override_falls_back_to_profile(self, caplog: pytest.LogCaptureFixture) -> None:
-        import logging
-        s = ConversionStrategy(profiles=_default_profiles(), base_bitrate_override="notanumber")
-        source = _path(f"norm {AUDIO_STEM_SEPARATOR} {_stem('5.1')}.flac")
-        profile = s._select_profile(source)
-        with caplog.at_level(logging.WARNING):
-            bitrate = s._resolve_bitrate(source, profile)
-        assert bitrate == "512k"
-        assert any("cannot parse" in r.message.lower() for r in caplog.records)
-
-
-# ---------------------------------------------------------------------------
 # _two_pass_loudnorm — loudnorm JSON parsing (mocked run_ffmpeg_async)
 # ---------------------------------------------------------------------------
 
@@ -461,14 +419,6 @@ _SAMPLE_LOUDNORM_JSON = {
     "input_thresh": "-33.5",
     "target_offset": "0.5",
 }
-
-_SAMPLE_STDERR_WITH_JSON = [
-    "ffmpeg version 6.0",
-    "[Parsed_loudnorm_0 @ 0x...] {",
-    json.dumps(_SAMPLE_LOUDNORM_JSON),
-    "}",
-    "size=N/A time=00:01:00.00 bitrate=N/A",
-]
 
 # Flatten the JSON into a single line as ffmpeg actually outputs it
 _SAMPLE_STDERR_FLAT = [
@@ -672,3 +622,4 @@ class TestStreamsFilterPlainRegex:
     def test_no_match_include_returns_empty(self) -> None:
         result = self._filter(include=r"nonexistent_codec")
         assert result == []
+

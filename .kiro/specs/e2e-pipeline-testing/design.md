@@ -100,7 +100,7 @@ All manual scenarios use the real source video and work directory. The `--remux-
 #### Scenario 1 — Full run, lossless mode (default)
 
 ```sh
-uv run pyqenc auto "D:\_current\О чём говорят мужчины Blu-Ray (1080p) (1).mkv" --work-dir "D:\_current\pyqenc1" -y --keep-all --log-level info
+uv run pyqenc auto "D:\_encoding\movie.mkv" --work-dir "D:\_encoding\pyqenc" -y --keep-all --log-level info
 ```
 
 Verify: exit 0, log contains "Chunking mode: lossless FFV1", chunks exist, final output exists.
@@ -108,7 +108,7 @@ Verify: exit 0, log contains "Chunking mode: lossless FFV1", chunks exist, final
 #### Scenario 2 — Full run, remux mode
 
 ```sh
-uv run pyqenc auto "D:\_current\О чём говорят мужчины Blu-Ray (1080p) (1).mkv" --work-dir "D:\_current\pyqenc1" -y --keep-all --log-level info --remux-chunking
+uv run pyqenc auto "D:\_encoding\movie.mkv" --work-dir "D:\_encoding\pyqenc" -y --keep-all --log-level info --remux-chunking
 ```
 
 Verify: exit 0, log contains "Chunking mode: remux", chunks exist, final output exists.
@@ -120,12 +120,12 @@ Verify: each phase logs reuse message, no new ffmpeg invocations, exit 0.
 
 #### Scenario 4 — Chunking partial restart (scenes in state, no chunk files)
 
-Delete `D:\_current\pyqenc1\chunks\`, `encoded\`, `final\`. Keep `progress.json`.
+Delete `D:\_encoding\pyqenc\chunks\`, `encoded\`, `final\`. Keep `progress.json`.
 Re-run scenario 2 command.
 Verify: log contains "Scene boundaries already in state (N) -- skipping detection.", chunks re-split, encoding and merge complete, exit 0.
 
 #### Scenario 5 — Encoding partial restart (half chunks encoded)
 
-From completed scenario 2 state, delete ~half the files in `D:\_current\pyqenc1\encoded\<strategy>\` and delete `final\`.
+From completed scenario 2 state, delete ~half the files in `D:\_encoding\pyqenc\encoded\<strategy>\` and delete `final\`.
 Re-run scenario 2 command.
 Verify: log reports reused chunk count and encoding count, only deleted chunks re-encoded, merge completes, exit 0.

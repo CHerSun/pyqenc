@@ -13,9 +13,6 @@ TIMEOUT_SECONDS_MAX = 3600
 THRESHOLD_ATTEMPTS_WARNING = 10
 """Threshold for warning about excessive encoding attempts."""
 
-DEFAULT_MAX_PARALLEL = 1
-"""Default maximum number of concurrent encoding processes."""
-
 TEMP_SUFFIX = ".tmp"
 """A suffix to append to temporary files during processing. This helps avoid confusion with final output files and allows for easy cleanup of incomplete files."""
 
@@ -135,8 +132,6 @@ separators used in chunk filenames — producing e.g. ``01꞉02꞉03․456``.
 # Measure defaults
 DEFAULT_SCREENSHOT_COUNT  = 20
 """Default number of screenshots captured from each video."""
-DEFAULT_METRICS_SAMPLING  = 3
-"""Default frame subsampling factor for metric computation."""
 KEEP_RAW_METRICS_FILES    = False
 """When ``False`` (default), raw metric log files (``.psnr.log``, ``.ssim.log``,
 ``.vmaf.json``), their ``.stats`` sidecars, and the containing metrics subdirectory

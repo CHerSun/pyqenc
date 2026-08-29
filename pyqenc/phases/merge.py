@@ -571,7 +571,7 @@ class MergePhase:
         if self._job is not None and self._job.result is not None:
             return MergeParams(
                 quality_targets  = _targets_as_strings(self._job.result.config.encoding.resolved_targets),  # type: ignore[union-attr]
-                metrics_sampling = self._job.result.config.encoding.metrics_sampling,  # type: ignore[union-attr]
+                metrics_sampling = self._job.result.config.measurement.sampling,  # type: ignore[union-attr]
             )
         # Fallback: empty params before job result is available
         return MergeParams(quality_targets=[], metrics_sampling=1)
@@ -1049,7 +1049,7 @@ class MergePhase:
                                 ref_crop         = crop,
                                 quality_targets  = self._job.result.config.encoding.resolved_targets,  # type: ignore[union-attr]
                                 output_dir       = final_dir,
-                                metrics_sampling = self._job.result.config.encoding.metrics_sampling,  # type: ignore[union-attr]
+                                metrics_sampling = self._job.result.config.measurement.sampling,  # type: ignore[union-attr]
                             )
                     except Exception as exc:
                         logger.warning("  Could not measure quality: %s", exc)
@@ -1125,7 +1125,7 @@ class MergePhase:
             source_stem        = source_stem,
             source_size_bytes  = _safe_file_size(source_video.path) if source_video else 0,
             quality_targets    = self._job.result.config.encoding.resolved_targets,  # type: ignore[union-attr]
-            metrics_sampling   = self._job.result.config.encoding.metrics_sampling,  # type: ignore[union-attr]
+            metrics_sampling   = self._job.result.config.measurement.sampling,  # type: ignore[union-attr]
         )
         if failed_strategies and not final_artifacts:
             return _failed("All strategy merges failed")

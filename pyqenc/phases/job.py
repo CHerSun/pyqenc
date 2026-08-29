@@ -85,14 +85,16 @@ class JobPhase:
     intro logging.
 
     Args:
-        config:     Full validated application configuration.
-        phases:     Phase registry (unused — ``JobPhase`` has no dependencies).
-        source:     Resolved path to the source video file.
-        work_dir:   Working directory for all pipeline artifacts.
-        force:      When ``True``, wipe existing artifacts on source mismatch.
-        cleanup:    Artifact retention policy applied after encoding.
-        no_metrics: When ``True``, skip writing ``metrics.yaml`` files.
-        collector:  Metrics collector for timing instrumentation.
+        config:      Full validated application configuration.
+        phases:      Phase registry (unused — ``JobPhase`` has no dependencies).
+        source:      Resolved path to the source video file.
+        work_dir:    Working directory for all pipeline artifacts.
+        force:       When ``True``, wipe existing artifacts on source mismatch.
+        cleanup:     Artifact retention policy applied after encoding.
+        no_metrics:  When ``True``, skip writing ``metrics.yaml`` files.
+        collector:   Metrics collector for timing instrumentation.
+        crop_params: Optional manual crop override; ``None`` falls back to
+                     cached value in ``job.yaml``, then auto-detection.
     """
 
     name: str = "job"
@@ -103,21 +105,23 @@ class JobPhase:
         config:     "AppConfig",
         phases:     dict[type[Phase], Phase] | None = None,
         *,
-        source:     Path,
-        work_dir:   Path,
-        force:      bool,
-        cleanup:    CleanupLevel,
-        no_metrics: bool,
-        collector:  "MetricsCollector",
+        source:      Path,
+        work_dir:    Path,
+        force:       bool,
+        cleanup:     CleanupLevel,
+        no_metrics:  bool,
+        collector:   "MetricsCollector",
+        crop_params: CropParams | None = None,
     ) -> None:
-        self._config:     "AppConfig"      = config
-        self._source:     Path             = source
-        self._work_dir:   Path             = work_dir
-        self._force:      bool             = force
-        self._cleanup:    CleanupLevel     = cleanup
-        self._no_metrics: bool             = no_metrics
-        self._collector:  "MetricsCollector" = collector
-        self.result: JobPhaseResult | None = None
+        self._config:      "AppConfig"        = config
+        self._source:      Path               = source
+        self._work_dir:    Path               = work_dir
+        self._force:       bool               = force
+        self._cleanup:     CleanupLevel       = cleanup
+        self._no_metrics:  bool               = no_metrics
+        self._collector:   "MetricsCollector" = collector
+        self._crop_params: CropParams | None  = crop_params
+        self.result: JobPhaseResult | None    = None
         # JobPhase has no dependencies; phases registry is accepted but unused.
 
     # ------------------------------------------------------------------
@@ -454,9 +458,9 @@ class JobPhase:
         """
         from pyqenc.utils.crop import detect_crop_parameters
 
-        # 1. Manual override from config
-        if self._config.encoding.crop_params is not None:
-            c = self._config.encoding.crop_params
+        # 1. Manual override from crop_params
+        if self._crop_params is not None:
+            c = self._crop_params
             logger.info(f"Cropping: {c.display()} (manual)")
             return c
 

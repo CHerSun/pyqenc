@@ -676,7 +676,7 @@ class TestDeepMergeLayerPriorityOrdering:
 # For any valid AppConfig instance, serialising it to a dict via model_dump()
 # and feeding that dict back through AppConfig.model_validate() must produce
 # an equivalent AppConfig (same field values throughout the model tree), with
-# encoding.quality_targets and encoding.strategies preserved as their raw
+# encoding.targets and encoding.strategies preserved as their raw
 # string forms so that re-validation triggers resolution again correctly.
 #
 # Bug this catches: if model_dump() accidentally serialises resolved private
@@ -691,7 +691,7 @@ from pyqenc.app_config import AppConfig, load_app_config
 
 # Load once at module import time — avoids per-example disk I/O when each
 # Hypothesis example mutates a copy of this base config.
-_BASE_CONFIG: AppConfig = load_app_config()
+_BASE_CONFIG: AppConfig = load_app_config(default_only=True)
 
 
 class TestAppConfigRoundTrip:
@@ -706,14 +706,14 @@ class TestAppConfigRoundTrip:
 
     @given(
         optimize=st.booleans(),
-        max_parallel=st.integers(min_value=1, max_value=16),
-        metrics_sampling=st.integers(min_value=1, max_value=20),
+        concurrency=st.integers(min_value=1, max_value=16),
+        measurement_sampling=st.integers(min_value=1, max_value=20),
         visual_hash=st.booleans(),
-        strategy_selection_tolerance=st.floats(
+        optimize_tolerance=st.floats(
             min_value=0.0, max_value=50.0, allow_nan=False, allow_infinity=False
         ),
-        audio_codec=st.one_of(st.none(), st.sampled_from(["aac", "libopus", "flac"])),
-        audio_base_bitrate=st.one_of(st.none(), st.sampled_from(["128k", "192k", "320k"])),
+        audio_codec=st.sampled_from(["aac", "libopus", "flac"]),
+        audio_bitrate_per_channel=st.sampled_from(["64k", "96k", "128k", "192k"]),
         extraction_include=st.one_of(st.none(), st.text(min_size=1, max_size=30)),
         extraction_exclude=st.one_of(st.none(), st.text(min_size=1, max_size=30)),
         chunking_scene_threshold=st.floats(
@@ -725,12 +725,12 @@ class TestAppConfigRoundTrip:
     def test_scalar_fields_survive_round_trip(
         self,
         optimize: bool,
-        max_parallel: int,
-        metrics_sampling: int,
+        concurrency: int,
+        measurement_sampling: int,
         visual_hash: bool,
-        strategy_selection_tolerance: float,
-        audio_codec: str | None,
-        audio_base_bitrate: str | None,
+        optimize_tolerance: float,
+        audio_codec: str,
+        audio_bitrate_per_channel: str,
         extraction_include: str | None,
         extraction_exclude: str | None,
         chunking_scene_threshold: float,
@@ -751,20 +751,20 @@ class TestAppConfigRoundTrip:
         config = _BASE_CONFIG.model_copy(deep=True)
 
         # Apply Hypothesis-generated mutations to simple scalar fields.
-        config.encoding.optimize                     = optimize
-        config.encoding.max_parallel                 = max_parallel
-        config.encoding.metrics_sampling             = metrics_sampling
-        config.encoding.visual_hash                  = visual_hash
-        config.encoding.strategy_selection_tolerance = strategy_selection_tolerance
-        config.audio.audio_codec                     = audio_codec
-        config.audio.audio_base_bitrate              = audio_base_bitrate
-        config.extraction.include                    = extraction_include
-        config.extraction.exclude                    = extraction_exclude
-        config.chunking.scene_threshold              = chunking_scene_threshold
-        config.chunking.min_scene_length             = chunking_min_scene_length
+        config.encoding.optimize          = optimize
+        config.encoding.concurrency       = concurrency
+        config.measurement.sampling       = measurement_sampling
+        config.encoding.visual_hash       = visual_hash
+        config.encoding.optimize_tolerance = optimize_tolerance
+        config.audio.codec                = audio_codec
+        config.audio.bitrate_per_channel  = audio_bitrate_per_channel
+        config.extraction.include         = extraction_include
+        config.extraction.exclude         = extraction_exclude
+        config.chunking.scene_threshold   = chunking_scene_threshold
+        config.chunking.min_scene_length  = chunking_min_scene_length
 
         # Perform the round-trip.
-        dumped      = config.model_dump()
+        dumped        = config.model_dump()
         round_tripped = AppConfig.model_validate(dumped)
 
         # Verify every mutated scalar field survived the round-trip.
@@ -773,35 +773,35 @@ class TestAppConfigRoundTrip:
             f"  expected : {optimize!r}\n"
             f"  got      : {round_tripped.encoding.optimize!r}"
         )
-        assert round_tripped.encoding.max_parallel == max_parallel, (
-            f"encoding.max_parallel changed during round-trip.\n"
-            f"  expected : {max_parallel!r}\n"
-            f"  got      : {round_tripped.encoding.max_parallel!r}"
+        assert round_tripped.encoding.concurrency == concurrency, (
+            f"encoding.concurrency changed during round-trip.\n"
+            f"  expected : {concurrency!r}\n"
+            f"  got      : {round_tripped.encoding.concurrency!r}"
         )
-        assert round_tripped.encoding.metrics_sampling == metrics_sampling, (
-            f"encoding.metrics_sampling changed during round-trip.\n"
-            f"  expected : {metrics_sampling!r}\n"
-            f"  got      : {round_tripped.encoding.metrics_sampling!r}"
+        assert round_tripped.measurement.sampling == measurement_sampling, (
+            f"measurement.sampling changed during round-trip.\n"
+            f"  expected : {measurement_sampling!r}\n"
+            f"  got      : {round_tripped.measurement.sampling!r}"
         )
         assert round_tripped.encoding.visual_hash == visual_hash, (
             f"encoding.visual_hash changed during round-trip.\n"
             f"  expected : {visual_hash!r}\n"
             f"  got      : {round_tripped.encoding.visual_hash!r}"
         )
-        assert round_tripped.encoding.strategy_selection_tolerance == strategy_selection_tolerance, (
-            f"encoding.strategy_selection_tolerance changed during round-trip.\n"
-            f"  expected : {strategy_selection_tolerance!r}\n"
-            f"  got      : {round_tripped.encoding.strategy_selection_tolerance!r}"
+        assert round_tripped.encoding.optimize_tolerance == optimize_tolerance, (
+            f"encoding.optimize_tolerance changed during round-trip.\n"
+            f"  expected : {optimize_tolerance!r}\n"
+            f"  got      : {round_tripped.encoding.optimize_tolerance!r}"
         )
-        assert round_tripped.audio.audio_codec == audio_codec, (
-            f"audio.audio_codec changed during round-trip.\n"
+        assert round_tripped.audio.codec == audio_codec, (
+            f"audio.codec changed during round-trip.\n"
             f"  expected : {audio_codec!r}\n"
-            f"  got      : {round_tripped.audio.audio_codec!r}"
+            f"  got      : {round_tripped.audio.codec!r}"
         )
-        assert round_tripped.audio.audio_base_bitrate == audio_base_bitrate, (
-            f"audio.audio_base_bitrate changed during round-trip.\n"
-            f"  expected : {audio_base_bitrate!r}\n"
-            f"  got      : {round_tripped.audio.audio_base_bitrate!r}"
+        assert round_tripped.audio.bitrate_per_channel == audio_bitrate_per_channel, (
+            f"audio.bitrate_per_channel changed during round-trip.\n"
+            f"  expected : {audio_bitrate_per_channel!r}\n"
+            f"  got      : {round_tripped.audio.bitrate_per_channel!r}"
         )
         assert round_tripped.extraction.include == extraction_include, (
             f"extraction.include changed during round-trip.\n"
@@ -870,7 +870,7 @@ class TestAppConfigRoundTrip:
         **Validates: Requirements 3.1, 11.1, 11.2**
         """
         config = _BASE_CONFIG.model_copy(deep=True)
-        config.encoding.quality_targets = quality_targets
+        config.encoding.targets = quality_targets
         config.encoding.strategies      = strategies
 
         # Force re-resolution to populate the private caches.
@@ -882,10 +882,10 @@ class TestAppConfigRoundTrip:
         round_tripped = AppConfig.model_validate(dumped)
 
         # quality_targets and strategies must survive as their raw string lists.
-        assert round_tripped.encoding.quality_targets == quality_targets, (
-            f"encoding.quality_targets did not survive round-trip as raw strings.\n"
+        assert round_tripped.encoding.targets == quality_targets, (
+            f"encoding.targets did not survive round-trip as raw strings.\n"
             f"  expected : {quality_targets!r}\n"
-            f"  got      : {round_tripped.encoding.quality_targets!r}"
+            f"  got      : {round_tripped.encoding.targets!r}"
         )
         assert round_tripped.encoding.strategies == strategies, (
             f"encoding.strategies did not survive round-trip as raw strings.\n"
@@ -920,20 +920,21 @@ class TestAppConfigRoundTrip:
         dumped        = config.model_dump()
         round_tripped = AppConfig.model_validate(dumped)
 
-        assert round_tripped.encoding.quality_targets   == config.encoding.quality_targets
+        assert round_tripped.encoding.targets          == config.encoding.targets
         assert round_tripped.encoding.strategies        == config.encoding.strategies
         assert round_tripped.encoding.optimize          == config.encoding.optimize
-        assert round_tripped.encoding.max_parallel      == config.encoding.max_parallel
-        assert round_tripped.encoding.metrics_sampling  == config.encoding.metrics_sampling
+        assert round_tripped.encoding.concurrency       == config.encoding.concurrency
+        assert round_tripped.measurement.sampling       == config.measurement.sampling
         assert round_tripped.encoding.visual_hash       == config.encoding.visual_hash
         assert round_tripped.extraction.include         == config.extraction.include
         assert round_tripped.extraction.exclude         == config.extraction.exclude
         assert round_tripped.chunking.mode              == config.chunking.mode
         assert round_tripped.chunking.scene_threshold   == config.chunking.scene_threshold
         assert round_tripped.chunking.min_scene_length  == config.chunking.min_scene_length
-        assert round_tripped.audio.convert_filter       == config.audio.convert_filter
-        assert round_tripped.audio.audio_codec          == config.audio.audio_codec
-        assert round_tripped.audio.audio_base_bitrate   == config.audio.audio_base_bitrate
+        assert round_tripped.audio.convert_pattern      == config.audio.convert_pattern
+        assert round_tripped.audio.codec                 == config.audio.codec
+        assert round_tripped.audio.bitrate_per_channel   == config.audio.bitrate_per_channel
+        assert round_tripped.audio.extension             == config.audio.extension
         assert set(round_tripped.codecs.keys())         == set(config.codecs.keys())
         assert set(round_tripped.profiles.keys())       == set(config.profiles.keys())
 
@@ -1398,7 +1399,7 @@ class TestValidationErrorOnInvalidStrings:
         return _BASE_CONFIG.model_dump()
 
     def test_invalid_quality_target_metric_raises_validation_error(self) -> None:
-        """AppConfig rejects a quality_targets entry with an unknown metric name.
+        """AppConfig rejects a targets entry with an unknown metric name.
 
         Bug condition: if QualityTarget.parse() does not validate the metric name,
         an invalid string like "badmetric-min:95" would be stored silently and
@@ -1409,7 +1410,7 @@ class TestValidationErrorOnInvalidStrings:
         """
         data = self._base_dict()
         # "badmetric" is not a valid MetricType value (valid: vmaf, ssim, psnr, vif)
-        data["encoding"]["quality_targets"] = ["badmetric-min:95"]
+        data["encoding"]["targets"] = ["badmetric-min:95"]
 
         import pytest
         with pytest.raises(ValidationError) as exc_info:
@@ -1417,14 +1418,14 @@ class TestValidationErrorOnInvalidStrings:
 
         # The error must mention the offending field or value
         error_str = str(exc_info.value)
-        assert "badmetric" in error_str.lower() or "quality_targets" in error_str.lower() or "encoding" in error_str.lower(), (
+        assert "badmetric" in error_str.lower() or "targets" in error_str.lower() or "encoding" in error_str.lower(), (
             "ValidationError was raised but does not identify the offending "
-            f"'badmetric' metric or the quality_targets field.\n"
+            f"'badmetric' metric or the targets field.\n"
             f"  error: {error_str}"
         )
 
     def test_invalid_quality_target_statistic_raises_validation_error(self) -> None:
-        """AppConfig rejects a quality_targets entry with an unknown statistic name.
+        """AppConfig rejects a targets entry with an unknown statistic name.
 
         Bug condition: if QualityTarget.parse() does not validate the statistic,
         a target like "vmaf-badstat:95" would be accepted silently even though
@@ -1435,16 +1436,16 @@ class TestValidationErrorOnInvalidStrings:
         """
         data = self._base_dict()
         # "badstat" is not among the valid stats (min, med, median, max, p05, p25, p75, p95)
-        data["encoding"]["quality_targets"] = ["vmaf-badstat:95"]
+        data["encoding"]["targets"] = ["vmaf-badstat:95"]
 
         import pytest
         with pytest.raises(ValidationError) as exc_info:
             AppConfig.model_validate(data)
 
         error_str = str(exc_info.value)
-        assert "badstat" in error_str.lower() or "quality_targets" in error_str.lower() or "encoding" in error_str.lower(), (
+        assert "badstat" in error_str.lower() or "targets" in error_str.lower() or "encoding" in error_str.lower(), (
             "ValidationError was raised but does not identify the offending "
-            f"'badstat' statistic or the quality_targets field.\n"
+            f"'badstat' statistic or the targets field.\n"
             f"  error: {error_str}"
         )
 
@@ -1517,7 +1518,7 @@ class TestValidationErrorOnInvalidStrings:
 # Calling load_app_config() without any home/cwd config files present must
 # return a fully valid AppConfig with non-empty resolved_strategies,
 # non-empty resolved_targets, non-empty codecs and profiles dicts, and a
-# non-empty audio.convert_filter string.
+# non-empty audio.convert_pattern string.
 #
 # Bug this catches:
 #   - If load_app_config() fails when optional config files are absent,
@@ -1558,7 +1559,7 @@ class TestLoadAppConfigWithBundledDefault:
         """load_app_config() returns a config with at least one resolved quality target.
 
         Bug condition: if the bundled default_config.yaml has an empty
-        encoding.quality_targets list, encoding phases would silently accept
+        encoding.targets list, encoding phases would silently accept
         any quality and produce maximally compressed (low quality) output
         rather than reporting the missing target configuration.
 
@@ -1623,10 +1624,10 @@ class TestLoadAppConfigWithBundledDefault:
             "define at least one profile."
         )
 
-    def test_audio_convert_filter_is_non_empty_string(self) -> None:
-        """load_app_config() returns a config with a non-empty audio.convert_filter.
+    def test_audio_convert_pattern_is_non_empty_string(self) -> None:
+        """load_app_config() returns a config with a non-empty audio.convert_pattern.
 
-        Bug condition: if audio.convert_filter is empty or None, the audio
+        Bug condition: if audio.convert_pattern is empty or None, the audio
         conversion phase would match no files and silently skip all audio
         conversion — users would get video-only output with no indication
         that audio processing was skipped.
@@ -1634,10 +1635,48 @@ class TestLoadAppConfigWithBundledDefault:
         **Validates: Requirements 1.2, 11.1**
         """
         config = load_app_config()
-        assert isinstance(config.audio.convert_filter, str), (
-            f"audio.convert_filter is not a string; got: {type(config.audio.convert_filter)!r}"
+        assert isinstance(config.audio.convert_pattern, str), (
+            f"audio.convert_pattern is not a string; got: {type(config.audio.convert_pattern)!r}"
         )
-        assert len(config.audio.convert_filter) > 0, (
-            "load_app_config() returned a config with an empty audio.convert_filter. "
-            "The bundled default must define a non-empty convert_filter regex."
+        assert len(config.audio.convert_pattern) > 0, (
+            "load_app_config() returned a config with an empty audio.convert_pattern. "
+            "The bundled default must define a non-empty convert_pattern regex."
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 9.3: AppConfig.model_validate({}) raises ValidationError
+#
+# Passing an empty dict to model_validate() must raise a ValidationError
+# because all AppConfig fields are required — no Python-level defaults exist.
+#
+# Bug this catches: Python defaults silently masking missing YAML keys —
+# if any required field has a Python default fallback, model_validate({})
+# would succeed and an invalid config could be constructed silently.
+#
+# **Validates: Requirements 2.6, 2.7**
+# ---------------------------------------------------------------------------
+
+
+class TestAppConfigRequiresAllFields:
+    """Task 9.3: AppConfig.model_validate({}) raises ValidationError.
+
+    **Validates: Requirements 2.6, 2.7**
+    """
+
+    def test_empty_dict_raises_validation_error(self) -> None:
+        """AppConfig.model_validate({}) must raise ValidationError.
+
+        Bug condition: Python defaults silently masking missing YAML keys.
+        If any required top-level field (encoding, chunking, audio, measurement,
+        etc.) has a Python-level default, model_validate({}) would succeed and
+        produce a partially-initialised config that could cause confusing errors
+        deep in the pipeline instead of a clear startup failure.
+
+        **Validates: Requirements 2.6, 2.7**
+        """
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            AppConfig.model_validate({})

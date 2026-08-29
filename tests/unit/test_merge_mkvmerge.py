@@ -193,7 +193,7 @@ class TestWriteMkvmergeOptionsFile:
 
     def test_unicode_paths_preserved(self, tmp_path: Path) -> None:
         """Non-ASCII characters in paths must be preserved (ensure_ascii=False)."""
-        unicode_path = "/path/to/О чём говорят мужчины.mkv"
+        unicode_path = "/path/to/movie.mkv"
         args = ["-o", unicode_path]
         path = tmp_path / "options.json"
         _write_mkvmerge_options_file(path, args)

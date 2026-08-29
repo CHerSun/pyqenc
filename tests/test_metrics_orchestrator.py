@@ -158,7 +158,7 @@ class TestCollectorConstruction:
         work_dir = tmp_path / "work"
         work_dir.mkdir(parents=True, exist_ok=True)
 
-        config = load_app_config()
+        config = load_app_config(default_only=True)
 
         constructed: list[MetricsCollector] = []
 
@@ -185,7 +185,7 @@ class TestCollectorConstruction:
         work_dir = tmp_path / "work"
         work_dir.mkdir(parents=True, exist_ok=True)
 
-        config = load_app_config()
+        config = load_app_config(default_only=True)
 
         constructed: list[MetricsCollector] = []
 

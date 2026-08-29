@@ -166,6 +166,93 @@ async def _two_pass_loudnorm(
     logger.info("loudnorm complete: %s", output.name)
 
 
+_VOLUMEDETECT_RE = re.compile(r"max_volume:\s*([-\d.]+)\s*dB")
+"""Regex to extract the max_volume reading from ``volumedetect`` stderr output."""
+
+
+async def _two_pass_peaknorm(
+    source:           Path,
+    output:           Path,
+    peak_target_dbfs: float,
+    extra_filters:    list[str] | None = None,
+) -> None:
+    """Run a 2-pass peak normalisation, optionally with prepended filters.
+
+    Pass 1 measures the true peak via ``volumedetect``, running the full filter
+    chain (extra_filters + volumedetect) with a null output.
+    Pass 2 appends a ``volume`` filter to shift the peak to *peak_target_dbfs*
+    and writes the output FLAC file via the ``.tmp``-then-rename protocol.
+
+    No resampling is performed — the output preserves the source sample rate
+    and bit depth exactly.
+
+    Args:
+        source:           Input audio file.
+        output:           Intended output FLAC path.
+        peak_target_dbfs: Target peak level in dBFS (e.g. ``-1.0``).
+        extra_filters:    Optional list of ffmpeg audio filter strings to prepend
+                          before the ``volumedetect`` / ``volume`` filter
+                          (e.g. a downmix filter).  ``None`` means no extra filters.
+
+    Raises:
+        RuntimeError: If pass 1 does not produce a parseable ``max_volume`` line.
+        RuntimeError: If pass 2 ffmpeg command fails.
+    """
+    filters_prefix = list(extra_filters) if extra_filters else []
+
+    # ------------------------------------------------------------------
+    # Pass 1 — measure peak via volumedetect (no output file)
+    # ------------------------------------------------------------------
+    analysis_filter = ",".join(filters_prefix + ["volumedetect"])
+    pass1_cmd: list[str | os.PathLike] = [
+        "ffmpeg",
+        "-i",  source,
+        "-af", analysis_filter,
+        "-f",  "null",
+        "-",
+    ]
+    logger.debug("peaknorm pass 1: %s", source.name)
+    pass1_result = await run_ffmpeg_async(pass1_cmd, output_file=None)
+
+    stderr_text = "\n".join(pass1_result.stderr_lines)
+    match = _VOLUMEDETECT_RE.search(stderr_text)
+    if not match:
+        raise RuntimeError(
+            f"peaknorm pass 1 did not produce a parseable max_volume line for {source.name!r}. "
+            f"ffmpeg exit code: {pass1_result.returncode}"
+        )
+
+    max_volume_db = float(match.group(1))
+    gain_db       = peak_target_dbfs - max_volume_db
+    logger.debug(
+        "peaknorm pass 1: max_volume=%.2f dB, target=%.2f dBFS, gain=%.2f dB",
+        max_volume_db, peak_target_dbfs, gain_db,
+    )
+
+    # ------------------------------------------------------------------
+    # Pass 2 — apply gain → output FLAC
+    # ------------------------------------------------------------------
+    volume_filter = f"volume={gain_db:.4f}dB"
+    pass2_filter  = ",".join(filters_prefix + [volume_filter])
+    pass2_cmd: list[str | os.PathLike] = [
+        "ffmpeg",
+        "-i",    source,
+        "-af",   pass2_filter,
+        "-c:a",  _INTERMEDIATE_CODEC,
+        output,
+    ]
+    logger.debug("peaknorm pass 2: %s → %s", source.name, output.name)
+    pass2_result = await run_ffmpeg_async(pass2_cmd, output_file=output)
+
+    if not pass2_result.success:
+        raise RuntimeError(
+            f"peaknorm pass 2 failed for {source.name!r} "
+            f"(exit code {pass2_result.returncode})"
+        )
+
+    logger.info("peaknorm complete: %s", output.name)
+
+
 # ---------------------------------------------------------------------------
 # BaseStrategy
 # ---------------------------------------------------------------------------
@@ -205,25 +292,6 @@ class BaseStrategy(ABC):
 
 
 # ---------------------------------------------------------------------------
-# AudioConversionProfile
-# ---------------------------------------------------------------------------
-
-@dataclass
-class AudioConversionProfile:
-    """Codec/bitrate/extension profile for the final delivery conversion step.
-
-    Attributes:
-        codec:     ffmpeg audio codec name (e.g. ``"aac"``).
-        bitrate:   Target bitrate string (e.g. ``"192k"``).
-        extension: Output file extension including the leading dot (e.g. ``".aac"``).
-    """
-
-    codec:     str
-    bitrate:   str
-    extension: str
-
-
-# ---------------------------------------------------------------------------
 # Channel-count lookup (used by ConversionStrategy for bitrate scaling)
 # ---------------------------------------------------------------------------
 
@@ -234,6 +302,48 @@ _CHANNEL_COUNTS: dict[str, int] = {
     "ch=7.1":    8,
 }
 """Maps channel layout tags to their channel count for proportional bitrate scaling."""
+
+
+def _scale_bitrate(bitrate_per_channel: str, source: Path) -> str:
+    """Derive the total bitrate for *source* from a per-channel bitrate string.
+
+    Reads the channel layout tag embedded in *source*'s filename (e.g. ``ch=5.1``)
+    and multiplies the per-channel rate by the corresponding channel count.
+
+    Args:
+        bitrate_per_channel: Per-channel bitrate string, e.g. ``"96k"``.
+                             The trailing ``k``/``K`` suffix is stripped, the integer
+                             multiplied by the channel count, and ``k`` re-appended.
+        source:              Audio file whose name contains the channel layout tag.
+
+    Returns:
+        Total bitrate string (e.g. ``"576k"`` for 5.1 + 96k/ch).
+        Falls back to ``bitrate_per_channel`` unchanged if parsing fails or
+        no recognised layout tag is found in the filename.
+    """
+    # Determine channel count from filename tag
+    ch_count = 2  # default: stereo
+    for tag, count in _CHANNEL_COUNTS.items():
+        if tag in source.name:
+            ch_count = count
+            break
+
+    # Parse the numeric part (strip k/K suffix)
+    raw = bitrate_per_channel.lower()
+    if raw.endswith("k"):
+        try:
+            kbps = int(raw[:-1])
+            return f"{kbps * ch_count}k"
+        except ValueError:
+            logger.warning("Cannot parse bitrate_per_channel %r; using as-is", bitrate_per_channel)
+    elif raw.endswith("m"):
+        try:
+            kbps = int(float(raw[:-1]) * 1000)
+            return f"{kbps * ch_count}k"
+        except ValueError:
+            logger.warning("Cannot parse bitrate_per_channel %r; using as-is", bitrate_per_channel)
+
+    return bitrate_per_channel
 
 
 def _filename_prefix(source: Path) -> str:
@@ -312,15 +422,16 @@ class DownmixStrategy71to51(BaseStrategy):
 # ---------------------------------------------------------------------------
 
 class DownmixStrategy51to20Std(BaseStrategy):
-    """5.1 → 2.0 standard downmix + EBU R128 normalisation (2-pass).
+    """5.1 → 2.0 standard downmix + peak normalisation (2-pass).
 
     Uses ffmpeg's default downmix matrix (``-ac 2``), which ignores the LFE channel.
     """
 
     _FILTER: str = "aresample=matrix_encoding=dplii,pan=stereo|FL=FL+0.707*FC+0.707*BL|FR=FR+0.707*FC+0.707*BR"
 
-    def __init__(self) -> None:
+    def __init__(self, audio_cfg: AudioConfig) -> None:
         super().__init__(name="5.1→2.0 Std Downmix+Norm", strategy_short="2.0 std")
+        self._audio_cfg = audio_cfg
 
     def check(self, source: Path) -> bool:
         """Return True for raw 5.1 sources or the direct 7.1→5.1 downmix output."""
@@ -332,12 +443,12 @@ class DownmixStrategy51to20Std(BaseStrategy):
     def execute(self, source: Path, output: Path, dry_run: bool) -> None:
         if dry_run:
             return
-        asyncio.run(_two_pass_loudnorm(source, output, extra_filters=[self._FILTER]))
+        asyncio.run(_two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs, extra_filters=[self._FILTER]))
 
     async def execute_async(self, source: Path, output: Path, dry_run: bool) -> None:
         if dry_run:
             return
-        await _two_pass_loudnorm(source, output, extra_filters=[self._FILTER])
+        await _two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs, extra_filters=[self._FILTER])
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +456,7 @@ class DownmixStrategy51to20Std(BaseStrategy):
 # ---------------------------------------------------------------------------
 
 class DownmixStrategy51to20Night(BaseStrategy):
-    """5.1 → 2.0 night-mode downmix + EBU R128 normalisation (2-pass).
+    """5.1 → 2.0 night-mode downmix + peak normalisation (2-pass).
 
     Incorporates the LFE channel mildly (0.5× gain) for better bass reproduction
     at low listening volumes.
@@ -357,8 +468,9 @@ class DownmixStrategy51to20Night(BaseStrategy):
         "|FR=FR+0.707*FC+0.5*LFE+0.707*BR"
     )
 
-    def __init__(self) -> None:
+    def __init__(self, audio_cfg: AudioConfig) -> None:
         super().__init__(name="5.1→2.0 Night Downmix+Norm", strategy_short="2.0 night")
+        self._audio_cfg = audio_cfg
 
     def check(self, source: Path) -> bool:
         """Return True for raw 5.1 sources or the direct 7.1→5.1 downmix output."""
@@ -370,12 +482,12 @@ class DownmixStrategy51to20Night(BaseStrategy):
     def execute(self, source: Path, output: Path, dry_run: bool) -> None:
         if dry_run:
             return
-        asyncio.run(_two_pass_loudnorm(source, output, extra_filters=[self._FILTER]))
+        asyncio.run(_two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs, extra_filters=[self._FILTER]))
 
     async def execute_async(self, source: Path, output: Path, dry_run: bool) -> None:
         if dry_run:
             return
-        await _two_pass_loudnorm(source, output, extra_filters=[self._FILTER])
+        await _two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs, extra_filters=[self._FILTER])
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +495,7 @@ class DownmixStrategy51to20Night(BaseStrategy):
 # ---------------------------------------------------------------------------
 
 class DownmixStrategy51to20NBoost(BaseStrategy):
-    """5.1 → 2.0 night-mode boosted downmix + EBU R128 normalisation (2-pass).
+    """5.1 → 2.0 night-mode boosted downmix + peak normalisation (2-pass).
 
     Incorporates the LFE channel with a stronger boost (0.9× gain) for
     pronounced bass at low listening volumes.
@@ -395,8 +507,9 @@ class DownmixStrategy51to20NBoost(BaseStrategy):
         "|FR=FR+0.707*FC+0.9*LFE+0.707*BR"
     )
 
-    def __init__(self) -> None:
+    def __init__(self, audio_cfg: AudioConfig) -> None:
         super().__init__(name="5.1→2.0 NBoost Downmix+Norm", strategy_short="2.0 nboost")
+        self._audio_cfg = audio_cfg
 
     def check(self, source: Path) -> bool:
         """Return True for raw 5.1 sources or the direct 7.1→5.1 downmix output."""
@@ -408,12 +521,12 @@ class DownmixStrategy51to20NBoost(BaseStrategy):
     def execute(self, source: Path, output: Path, dry_run: bool) -> None:
         if dry_run:
             return
-        asyncio.run(_two_pass_loudnorm(source, output, extra_filters=[self._FILTER]))
+        asyncio.run(_two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs, extra_filters=[self._FILTER]))
 
     async def execute_async(self, source: Path, output: Path, dry_run: bool) -> None:
         if dry_run:
             return
-        await _two_pass_loudnorm(source, output, extra_filters=[self._FILTER])
+        await _two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs, extra_filters=[self._FILTER])
 
 
 # ---------------------------------------------------------------------------
@@ -421,14 +534,15 @@ class DownmixStrategy51to20NBoost(BaseStrategy):
 # ---------------------------------------------------------------------------
 
 class NormStrategy(BaseStrategy):
-    """Standalone EBU R128 static normalisation (2-pass, no downmix).
+    """Standalone peak normalisation (2-pass, no downmix).
 
     Applied to any source that has not yet been normalised — i.e. whose filename
     does not start with any of the ``NORMALISED_PREFIXES``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, audio_cfg: AudioConfig) -> None:
         super().__init__(name="EBU R128 Norm", strategy_short="norm")
+        self._audio_cfg = audio_cfg
 
     def check(self, source: Path) -> bool:
         """Return True for raw extracted sources or the 7.1→5.1 downmix output that have not been normalised.
@@ -447,12 +561,12 @@ class NormStrategy(BaseStrategy):
     def execute(self, source: Path, output: Path, dry_run: bool) -> None:
         if dry_run:
             return
-        asyncio.run(_two_pass_loudnorm(source, output))
+        asyncio.run(_two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs))
 
     async def execute_async(self, source: Path, output: Path, dry_run: bool) -> None:
         if dry_run:
             return
-        await _two_pass_loudnorm(source, output)
+        await _two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs)
 
 
 # ---------------------------------------------------------------------------
@@ -524,109 +638,67 @@ class DynaudnormStrategy(BaseStrategy):
 # ---------------------------------------------------------------------------
 
 class ConversionStrategy(BaseStrategy):
-    """Profile-aware final delivery conversion to AAC (or other codec).
+    """Flat final delivery conversion to the configured codec/extension.
 
-    Selects the conversion profile by matching the channel layout tag present
-    in the source filename.  Falls back to the ``"2.0"`` profile with a warning
-    when no layout tag matches.
-
-    CBR mode is enforced unconditionally via ``-b:a <bitrate>`` (no ``-vbr``).
+    The target bitrate is derived at execution time by multiplying
+    ``bitrate_per_channel`` by the channel count read from the source filename.
+    CBR mode is enforced unconditionally via ``-b:a <bitrate>``.
     """
-
-    _DEFAULT_PROFILE_KEY: str = "2.0"
 
     def __init__(
         self,
-        profiles:              dict[str, AudioConversionProfile],
-        base_bitrate_override: str | None = None,
+        codec:               str,
+        bitrate_per_channel: str,
+        extension:           str,
     ) -> None:
         """
         Args:
-            profiles:              Map of channel-layout key → :class:`AudioConversionProfile`.
-                                   Must contain at least a ``"2.0"`` fallback entry.
-            base_bitrate_override: When set, treat this as the base bitrate for 2.0 stereo
-                                   and scale proportionally for other channel counts.
+            codec:               ffmpeg audio codec name (e.g. ``"aac"``).
+            bitrate_per_channel: Per-channel bitrate string (e.g. ``"96k"``).
+                                 Scaled at runtime by channel count.
+            extension:           Output file extension (e.g. ``".m4a"`` or ``"m4a"``).
         """
-        super().__init__(name="AAC Conversion", strategy_short="aac")
-        self.profiles              = profiles
-        self.base_bitrate_override = base_bitrate_override
+        super().__init__(name="Audio Conversion", strategy_short=codec)
+        self._codec               = codec
+        self._bitrate_per_channel = bitrate_per_channel
+        self._extension           = extension
 
     def check(self, source: Path) -> bool:
         """Always returns False — applied via keep/convert filter only."""
         return False
 
     def plan(self, source: Path) -> Path:
-        profile = self._select_profile(source)
-        return self.output_path(source, extension=profile.extension.lstrip("."))
+        return self.output_path(source, extension=self._extension.lstrip("."))
 
     def execute(self, source: Path, output: Path, dry_run: bool) -> None:
         if dry_run:
             return
-        profile = self._select_profile(source)
-        bitrate = self._resolve_bitrate(source, profile)
+        bitrate = _scale_bitrate(self._bitrate_per_channel, source)
         cmd: list[str | os.PathLike] = [
             "ffmpeg",
             "-i",   source,
-            "-c:a", profile.codec,
+            "-c:a", self._codec,
             "-b:a", bitrate,
             output,
         ]
         result = run_ffmpeg(cmd, output_file=output)
         if not result.success:
-            raise RuntimeError(f"AAC conversion failed for {source.name!r}")
+            raise RuntimeError(f"Audio conversion failed for {source.name!r}")
 
     async def execute_async(self, source: Path, output: Path, dry_run: bool) -> None:
         if dry_run:
             return
-        profile = self._select_profile(source)
-        bitrate = self._resolve_bitrate(source, profile)
+        bitrate = _scale_bitrate(self._bitrate_per_channel, source)
         cmd: list[str | os.PathLike] = [
             "ffmpeg",
             "-i",   source,
-            "-c:a", profile.codec,
+            "-c:a", self._codec,
             "-b:a", bitrate,
             output,
         ]
         result = await run_ffmpeg_async(cmd, output_file=output)
         if not result.success:
-            raise RuntimeError(f"AAC conversion failed for {source.name!r}")
-
-    def _select_profile(self, source: Path) -> AudioConversionProfile:
-        """Select the conversion profile by scanning the source filename for a channel layout tag."""
-        for layout_key in self.profiles:
-            if f"ch={layout_key}" in source.name:
-                return self.profiles[layout_key]
-        logger.warning(
-            "No channel layout tag matched in %r; falling back to '%s' profile",
-            source.name, self._DEFAULT_PROFILE_KEY,
-        )
-        return self.profiles[self._DEFAULT_PROFILE_KEY]
-
-    def _resolve_bitrate(self, source: Path, profile: AudioConversionProfile) -> str:
-        """Resolve the effective bitrate, scaling from base override when supplied."""
-        if self.base_bitrate_override is None:
-            return profile.bitrate
-
-        # Parse base bitrate (e.g. "192k" → 192)
-        base_str = self.base_bitrate_override.lower().rstrip("k")
-        try:
-            base_kbps = int(base_str)
-        except ValueError:
-            logger.warning(
-                "Cannot parse base_bitrate_override %r; using profile bitrate %r",
-                self.base_bitrate_override, profile.bitrate,
-            )
-            return profile.bitrate
-
-        # Determine channel count from source filename
-        source_channels = 2  # default to stereo
-        for tag, count in _CHANNEL_COUNTS.items():
-            if tag in source.name:
-                source_channels = count
-                break
-
-        scaled_kbps = int(base_kbps * source_channels / 2)
-        return f"{scaled_kbps}k"
+            raise RuntimeError(f"Audio conversion failed for {source.name!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -793,14 +865,14 @@ class SynchronousRunner:
         self,
         engine:    AudioEngine,
         plan:      PlanResult,
-        collector: "MetricsCollector | None" = None,
+        collector: MetricsCollector | None = None,
     ) -> None:
         self._engine:          AudioEngine = engine
         self._found_files:     int         = plan.found_files
         self._skipped_files:   int         = plan.skipped_files
         self.tasks:            list[Task]  = plan.tasks
         self._started:         bool        = False
-        self._collector:       "MetricsCollector | None" = collector
+        self._collector:       MetricsCollector | None = collector
 
     def process(self, dry_run: bool) -> PlanExecutionResult:
         """Execute the plan.  May only be called once.
@@ -958,41 +1030,33 @@ class AudioResult:
 
 
 def process_audio_streams(
-    audio_files:        list[Path],
-    output_dir:         Path,
-    force:              bool       = False,
-    dry_run:            bool       = False,
-    audio_convert:      str | None = None,
-    audio_codec:        str | None = None,
-    audio_base_bitrate: str | None = None,
-    audio_profiles:     "dict[str, AppAudioConversionProfile] | None" = None,
-    collector:          "MetricsCollector | None" = None,
+    audio_files: list[Path],
+    output_dir:  Path,
+    audio_cfg:   AudioConfig,
+    force:       bool                      = False,
+    dry_run:     bool                      = False,
+    collector:   MetricsCollector | None = None,
 ) -> AudioResult:
-    """Process audio files through the full strategy graph and convert to AAC delivery files.
+    """Process audio files through the full strategy graph and convert to the delivery format.
 
     Applies the complete audio processing graph:
     - 7.1 → 5.1 downmix (single-pass)
-    - 5.1 → 2.0 std / night / nboost downmix + EBU R128 (2-pass each)
-    - norm (EBU R128 only, 2-pass, for any non-normalised source)
+    - 5.1 → 2.0 std / night / nboost downmix + peak normalisation (2-pass each)
+    - norm (peak normalisation only, 2-pass, for any non-normalised source)
     - dynaudnorm (dynamic normalisation on top of any normalised output)
-    - AAC conversion finalizer (applied to files matching the convert filter)
+    - Delivery conversion finalizer (applied to files matching *convert_pattern*)
 
     Args:
-        audio_files:        Extracted audio files to process.
-        output_dir:         Directory for processed audio output.
-        force:              Re-process even when output files already exist.
-        dry_run:            Report status only; do not perform actual processing.
-        audio_convert:      Regex pattern selecting processed audio files to convert to the
-                            final delivery format. Acts as the effective convert filter when
-                            provided; must not be ``None`` when ``audio_profiles`` is supplied.
-        audio_codec:        Override audio codec for all conversion profiles (e.g. ``'aac'``).
-        audio_base_bitrate: Base bitrate for 2.0 stereo conversion (e.g. ``'192k'``). Bitrates
-                            for other channel layouts are scaled proportionally by channel count.
-        audio_profiles:     Pydantic ``AudioConversionProfile`` map from ``AppConfig.audio.profiles``.
-                            Required — caller must supply the profiles from ``self._job.result.config.audio``.
+        audio_files: Extracted audio files to process.
+        output_dir:  Directory for processed audio output.
+        audio_cfg:   Full audio configuration; supplies codec, bitrate, extension,
+                     convert pattern, and peak normalisation target.
+        force:       Re-process even when output files already exist.
+        dry_run:     Report status only; do not perform actual processing.
+        collector:   Optional metrics collector.
 
     Returns:
-        :class:`AudioResult` with paths to all produced AAC delivery files.
+        :class:`AudioResult` with paths to all produced delivery files.
 
     Requirements:
         7.1, 7.2, 9.2, 9.3
@@ -1000,47 +1064,18 @@ def process_audio_streams(
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # --- Build effective profiles from caller-supplied AppConfig profiles ---
-        if audio_profiles is None:
-            raise ValueError("audio_profiles must be supplied to process_audio_streams")
-
-        # Build effective profiles: start from caller-supplied profiles, apply codec/bitrate overrides
-        effective_profiles: dict[str, AudioConversionProfile] = {}
-        for layout, profile in audio_profiles.items():
-            effective_codec   = audio_codec or profile.codec
-            effective_bitrate = profile.bitrate
-            if audio_base_bitrate:
-                # Scale from the supplied base (2.0 stereo = 2 channels)
-                base_str = audio_base_bitrate.lower().rstrip("k")
-                try:
-                    base_kbps = int(base_str)
-                    ch_count  = _CHANNEL_COUNTS.get(f"ch={layout}", 2)
-                    effective_bitrate = f"{int(base_kbps * ch_count / 2)}k"
-                except ValueError:
-                    logger.warning(
-                        "Cannot parse audio_base_bitrate %r; using config bitrate %r for layout %r",
-                        audio_base_bitrate, profile.bitrate, layout,
-                    )
-            effective_profiles[layout] = AudioConversionProfile(
-                codec     = effective_codec,
-                bitrate   = effective_bitrate,
-                extension = profile.extension,
-            )
-
-        # Effective convert filter comes from the caller (audio_convert parameter)
-        if not audio_convert:
-            raise ValueError("audio_convert (convert_filter) must be supplied to process_audio_streams")
-        effective_convert_filter = audio_convert
+        ext             = audio_cfg.extension.lstrip(".")
+        convert_pattern = audio_cfg.convert_pattern
 
         # --- Reuse check ---
         if not force:
-            existing_aac = sorted(output_dir.glob("*.aac"))
-            if existing_aac:
-                logger.info("Reusing existing processed audio: %d AAC file(s)", len(existing_aac))
+            existing = sorted(output_dir.glob(f"*.{ext}"))
+            if existing:
+                logger.info("Reusing existing processed audio: %d %s file(s)", len(existing), ext)
                 if dry_run:
                     logger.info("[DRY-RUN] Audio processing: Complete (reusing existing files)")
                 return AudioResult(
-                    output_files = existing_aac,
+                    output_files = existing,
                     reused       = True,
                     needs_work   = False,
                     success      = True,
@@ -1049,13 +1084,10 @@ def process_audio_streams(
         # --- Dry-run ---
         if dry_run:
             logger.info("[DRY-RUN] Would process %d audio files", len(audio_files))
-            # Build and display the plan without executing
             _build_and_display_dry_run_plan(
-                audio_files            = audio_files,
-                output_dir             = output_dir,
-                effective_profiles     = effective_profiles,
-                effective_convert_filter = effective_convert_filter,
-                audio_base_bitrate     = audio_base_bitrate,
+                audio_files = audio_files,
+                output_dir  = output_dir,
+                audio_cfg   = audio_cfg,
             )
             return AudioResult(
                 output_files = [],
@@ -1098,27 +1130,11 @@ def process_audio_streams(
                 error        = "Failed to convert audio files to FLAC",
             )
 
-        # --- Instantiate all strategies ---
-        aac_finalizer = ConversionStrategy(
-            profiles              = effective_profiles,
-            base_bitrate_override = audio_base_bitrate,
-        )
-        engine = AudioEngine(
-            strategies = [
-                DownmixStrategy71to51(),
-                DownmixStrategy51to20Std(),
-                DownmixStrategy51to20Night(),
-                DownmixStrategy51to20NBoost(),
-                NormStrategy(),
-                DynaudnormStrategy(),
-            ],
-            finalizer = aac_finalizer,
-        )
-
-        # --- Build and execute the unified plan ---
+        # --- Build engine and execute the unified plan ---
+        engine = _build_audio_engine(audio_cfg)
         plan = engine.build_plan(
             directory      = output_dir,
-            convert_filter = effective_convert_filter,
+            convert_filter = convert_pattern,
         )
         logger.debug("Audio pipeline plan: %d tasks", len(plan.tasks))
 
@@ -1130,9 +1146,9 @@ def process_audio_streams(
         if exec_result.failed:
             logger.warning("Audio pipeline had %d failure(s)", exec_result.failed)
 
-        # --- Collect all produced AAC delivery files ---
-        output_files = sorted(output_dir.glob("*.aac"))
-        logger.info("Audio processing complete: %d AAC delivery file(s)", len(output_files))
+        # --- Collect all produced delivery files ---
+        output_files = sorted(output_dir.glob(f"*.{ext}"))
+        logger.info("Audio processing complete: %d %s delivery file(s)", len(output_files), ext)
 
         return AudioResult(
             output_files = output_files,
@@ -1153,43 +1169,22 @@ def process_audio_streams(
 
 
 def _build_and_display_dry_run_plan(
-    audio_files:             list[Path],
-    output_dir:              Path,
-    effective_profiles:      dict[str, AudioConversionProfile],
-    effective_convert_filter: str,
-    audio_base_bitrate:      str | None,
+    audio_files: list[Path],
+    output_dir:  Path,
+    audio_cfg:   AudioConfig,
 ) -> None:
     """Build and print the audio processing plan for dry-run mode (no execution).
 
     Args:
-        audio_files:              Source audio files.
-        output_dir:               Output directory (used as plan root).
-        effective_profiles:       Resolved conversion profiles.
-        effective_convert_filter: Compiled convert-filter regex string.
-        audio_base_bitrate:       Base bitrate override (passed to ConversionStrategy).
+        audio_files: Source audio files.
+        output_dir:  Output directory (used as plan root).
+        audio_cfg:   Full audio configuration.
     """
-    aac_finalizer = ConversionStrategy(
-        profiles              = effective_profiles,
-        base_bitrate_override = audio_base_bitrate,
-    )
-    engine = AudioEngine(
-        strategies = [
-            DownmixStrategy71to51(),
-            DownmixStrategy51to20Std(),
-            DownmixStrategy51to20Night(),
-            DownmixStrategy51to20NBoost(),
-            NormStrategy(),
-            DynaudnormStrategy(),
-        ],
-        finalizer = aac_finalizer,
-    )
-    # Temporarily copy source files into output_dir so build_plan can discover them
-    # (they may not exist yet in dry-run mode — use the actual extracted files directly
-    # by scanning the parent directory for .mka files matching audio_files).
+    engine = _build_audio_engine(audio_cfg)
     # We build the plan against the output_dir; if it's empty we show a placeholder.
     plan = engine.build_plan(
         directory      = output_dir,
-        convert_filter = effective_convert_filter,
+        convert_filter = audio_cfg.convert_pattern,
     )
     if plan.tasks:
         runner = SynchronousRunner(engine, plan)
@@ -1208,8 +1203,7 @@ from dataclasses import dataclass as _dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pyqenc.app_config import AppConfig
-    from pyqenc.app_config import AudioConversionProfile as AppAudioConversionProfile
+    from pyqenc.app_config import AppConfig, AudioConfig
     from pyqenc.metrics import MetricsCollector
     from pyqenc.phase import Phase, PhaseResult
     from pyqenc.phases.extraction import ExtractionPhase
@@ -1255,56 +1249,29 @@ class AudioPhaseResult(PhaseResult):
             self.audio_files = []
 
 
-def _build_audio_engine(
-    audio_codec:        str | None,
-    audio_base_bitrate: str | None,
-    profiles:           "dict[str, AppAudioConversionProfile]",
-) -> AudioEngine:
-    """Build an ``AudioEngine`` with the standard strategy set and AAC finalizer.
-
-    Uses the caller-supplied profiles (from ``AppConfig.audio.profiles``) with
-    optional codec/bitrate overrides.  This is the same engine used by
-    ``process_audio_streams`` and ``AudioPhase._recover()`` so that plan
-    evaluation is consistent.
+def _build_audio_engine(audio_cfg: AudioConfig) -> AudioEngine:
+    """Build an ``AudioEngine`` with the standard strategy set and delivery finalizer.
 
     Args:
-        audio_codec:        Override codec for all conversion profiles.
-        audio_base_bitrate: Override base bitrate for 2.0 stereo (scaled for other layouts).
-        profiles:           Pydantic ``AudioConversionProfile`` map from ``AppConfig.audio.profiles``.
+        audio_cfg: Full audio configuration; supplies codec, bitrate, extension,
+                   and peak normalisation target to the strategy set.
 
     Returns:
         Configured :class:`AudioEngine` instance.
     """
-    effective_profiles: dict[str, AudioConversionProfile] = {}
-    for layout, profile in profiles.items():
-        effective_codec   = audio_codec or profile.codec
-        effective_bitrate = profile.bitrate
-        if audio_base_bitrate:
-            base_str = audio_base_bitrate.lower().rstrip("k")
-            try:
-                base_kbps = int(base_str)
-                ch_count  = _CHANNEL_COUNTS.get(f"ch={layout}", 2)
-                effective_bitrate = f"{int(base_kbps * ch_count / 2)}k"
-            except ValueError:
-                pass
-        effective_profiles[layout] = AudioConversionProfile(
-            codec     = effective_codec,
-            bitrate   = effective_bitrate,
-            extension = profile.extension,
-        )
-
     return AudioEngine(
         strategies=[
             DownmixStrategy71to51(),
-            DownmixStrategy51to20Std(),
-            DownmixStrategy51to20Night(),
-            DownmixStrategy51to20NBoost(),
-            NormStrategy(),
+            DownmixStrategy51to20Std(audio_cfg),
+            DownmixStrategy51to20Night(audio_cfg),
+            DownmixStrategy51to20NBoost(audio_cfg),
+            NormStrategy(audio_cfg),
             DynaudnormStrategy(),
         ],
         finalizer=ConversionStrategy(
-            profiles              = effective_profiles,
-            base_bitrate_override = audio_base_bitrate,
+            codec               = audio_cfg.codec,
+            bitrate_per_channel = audio_cfg.bitrate_per_channel,
+            extension           = audio_cfg.extension,
         ),
     )
 
@@ -1324,29 +1291,29 @@ class AudioPhase:
 
     def __init__(
         self,
-        config:    "AppConfig",
-        phases:    "dict[type[Phase], Phase] | None" = None,
+        config:    AppConfig,
+        phases:    dict[type[Phase], Phase] | None = None,
         *,
-        collector: "MetricsCollector",
+        collector: MetricsCollector,
     ) -> None:
         from typing import cast
 
         from pyqenc.phases.extraction import ExtractionPhase as _ExtractionPhase
         from pyqenc.phases.job import JobPhase as _JobPhase
 
-        self._config:     "AppConfig"                = config
-        self._collector:  "MetricsCollector"         = collector
-        self._job:        "_JobPhase | None"          = cast(_JobPhase,        phases.get(_JobPhase))        if phases else None
-        self._extraction: "_ExtractionPhase | None"  = cast(_ExtractionPhase, phases.get(_ExtractionPhase)) if phases else None
-        self.params       = AudioParams(audio_codec=config.audio.audio_codec, audio_base_bitrate=config.audio.audio_base_bitrate)
-        self.result:      "AudioPhaseResult | None"  = None
-        self.dependencies: "list[Phase]"             = [d for d in [self._job, self._extraction] if d is not None]
+        self._config:     AppConfig                = config
+        self._collector:  MetricsCollector         = collector
+        self._job:        _JobPhase | None          = cast(_JobPhase,        phases.get(_JobPhase))        if phases else None
+        self._extraction: _ExtractionPhase | None  = cast(_ExtractionPhase, phases.get(_ExtractionPhase)) if phases else None
+        self.params       = AudioParams(codec=config.audio.codec, bitrate_per_channel=config.audio.bitrate_per_channel)
+        self.result:      AudioPhaseResult | None  = None
+        self.dependencies: list[Phase]             = [d for d in [self._job, self._extraction] if d is not None]
 
     # ------------------------------------------------------------------
     # Public Phase interface
     # ------------------------------------------------------------------
 
-    def scan(self) -> "AudioPhaseResult":
+    def scan(self) -> AudioPhaseResult:
         """Classify existing audio artifacts without executing any work.
 
         Returns:
@@ -1375,7 +1342,7 @@ class AudioPhase:
         )
         return self.result
 
-    def run(self, dry_run: bool = False) -> "AudioPhaseResult":
+    def run(self, dry_run: bool = False) -> AudioPhaseResult:
         """Recover, process pending audio files, cache result.
 
         Sequence:
@@ -1405,12 +1372,12 @@ class AudioPhase:
 
         # Key parameters
         audio_cfg = self._job.result.config.audio  # type: ignore[union-attr]
-        if audio_cfg.convert_filter:
-            logger.info("Convert filter:  %s", audio_cfg.convert_filter)
-        if audio_cfg.audio_codec:
-            logger.info("Codec:           %s", audio_cfg.audio_codec)
-        if audio_cfg.audio_base_bitrate:
-            logger.info("Base bitrate:    %s", audio_cfg.audio_base_bitrate)
+        if audio_cfg.convert_pattern:
+            logger.info("Convert pattern: %s", audio_cfg.convert_pattern)
+        if audio_cfg.codec:
+            logger.info("Codec:           %s", audio_cfg.codec)
+        if audio_cfg.bitrate_per_channel:
+            logger.info("Bitrate/channel: %s", audio_cfg.bitrate_per_channel)
 
         from pyqenc.metrics import MetricKey
 
@@ -1461,7 +1428,7 @@ class AudioPhase:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _ensure_dependencies(self, execute: bool) -> "AudioPhaseResult | None":
+    def _ensure_dependencies(self, execute: bool) -> AudioPhaseResult | None:
         """Scan/run dependencies if they have no cached result; fail fast if incomplete.
 
         Args:
@@ -1542,11 +1509,7 @@ class AudioPhase:
         terminal_outputs: set[str] = set()
 
         if audio_dir.exists():
-            engine = _build_audio_engine(
-                audio_codec        = self._job.result.config.audio.audio_codec,        # type: ignore[union-attr]
-                audio_base_bitrate = self._job.result.config.audio.audio_base_bitrate, # type: ignore[union-attr]
-                profiles           = self._job.result.config.audio.profiles,           # type: ignore[union-attr]
-            )
+            engine = _build_audio_engine(self._job.result.config.audio)  # type: ignore[union-attr]
             plan = engine.build_plan(
                 directory      = audio_dir,
                 convert_filter = effective_convert_filter,
@@ -1555,7 +1518,7 @@ class AudioPhase:
             terminal_outputs = {
                 t.output.name
                 for t in plan.tasks
-                if t.strategy.strategy_short == "aac"
+                if t.strategy.strategy_short == self._job.result.config.audio.codec  # type: ignore[union-attr]
             }
 
         # Step 4: load audio.yaml and detect codec/bitrate changes
@@ -1566,8 +1529,8 @@ class AudioPhase:
         if codec_changed:
             logger.debug(
                 "audio.yaml codec/bitrate changed (%s/%s → %s/%s) — marking all artifacts STALE",
-                persisted.audio_codec,        self.params.audio_codec,        # type: ignore[union-attr]
-                persisted.audio_base_bitrate, self.params.audio_base_bitrate,
+                persisted.codec,               self.params.codec,               # type: ignore[union-attr]
+                persisted.bitrate_per_channel, self.params.bitrate_per_channel,
             )
 
         # Step 5: classify artifacts
@@ -1608,8 +1571,8 @@ class AudioPhase:
         return artifacts
 
     def _effective_convert_filter(self) -> str:
-        """Return the effective convert filter from job result config."""
-        return self._job.result.config.audio.convert_filter  # type: ignore[union-attr]
+        """Return the effective convert pattern from job result config."""
+        return self._job.result.config.audio.convert_pattern  # type: ignore[union-attr]
 
     def _build_absent_artifacts(self) -> list[AudioArtifact]:
         """Build a list of ABSENT artifacts from ExtractionPhase audio results.
@@ -1623,21 +1586,23 @@ class AudioPhase:
         work_dir  = self._job.result.work_dir  # type: ignore[union-attr]
         audio_dir = work_dir / AUDIO_OUTPUT_DIR
 
+        ext = self._config.audio.extension.lstrip(".")
+
         if not audio_meta:
             # No audio tracks — return a single sentinel absent artifact so
             # pending_count > 0 and the phase still runs (it will produce nothing).
-            return [AudioArtifact(path=audio_dir / "placeholder.aac", state=ArtifactState.ABSENT)]
+            return [AudioArtifact(path=audio_dir / f"placeholder.{ext}", state=ArtifactState.ABSENT)]
 
         return [
             AudioArtifact(
-                path        = audio_dir / (m.path.stem + ".aac"),
+                path        = audio_dir / f"{m.path.stem}.{ext}",
                 state       = ArtifactState.ABSENT,
                 source_path = m.path,
             )
             for m in audio_meta
         ]
 
-    def _execute_audio(self, artifacts: list[AudioArtifact]) -> "AudioPhaseResult":
+    def _execute_audio(self, artifacts: list[AudioArtifact]) -> AudioPhaseResult:
         """Process pending audio files via ``process_audio_streams``.
 
         Args:
@@ -1667,15 +1632,12 @@ class AudioPhase:
 
         audio_cfg    = self._job.result.config.audio  # type: ignore[union-attr]
         audio_result = process_audio_streams(
-            audio_files        = source_files,
-            output_dir         = audio_dir,
-            force              = False,
-            dry_run            = False,
-            audio_convert      = audio_cfg.convert_filter,
-            audio_codec        = audio_cfg.audio_codec,
-            audio_base_bitrate = audio_cfg.audio_base_bitrate,
-            audio_profiles     = audio_cfg.profiles,
-            collector          = self._collector,
+            audio_files = source_files,
+            output_dir  = audio_dir,
+            audio_cfg   = audio_cfg,
+            force       = False,
+            dry_run     = False,
+            collector   = self._collector,
         )
 
         if not audio_result.success:
@@ -1684,16 +1646,17 @@ class AudioPhase:
             return _failed(err)
 
         # Re-scan audio_dir to build final artifact list
-        final_aac = sorted(audio_dir.glob("*.aac"))
+        ext         = audio_cfg.extension.lstrip(".")
+        final_files = sorted(audio_dir.glob(f"*.{ext}"))
         final_artifacts = [
             AudioArtifact(path=f, state=ArtifactState.COMPLETE)
-            for f in final_aac
+            for f in final_files
         ]
 
         complete_count = len(final_artifacts)
         logger.info(
-            "%s Audio complete: %d AAC delivery file(s) produced",
-            SUCCESS_SYMBOL_MINOR, complete_count,
+            "%s Audio complete: %d %s delivery file(s) produced",
+            SUCCESS_SYMBOL_MINOR, complete_count, ext,
         )
         logger.info(THICK_LINE)
 
@@ -1706,8 +1669,8 @@ class AudioPhase:
         return AudioPhaseResult(
             outcome     = PhaseOutcome.COMPLETED,
             artifacts   = final_artifacts,
-            message     = f"produced {complete_count} AAC file(s)",
-            audio_files = final_aac,
+            message     = f"produced {complete_count} {ext} file(s)",
+            audio_files = final_files,
         )
 
 

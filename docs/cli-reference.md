@@ -44,9 +44,9 @@ Applies to all subcommands.
 | Option                     | Description                                                                              | Default                                                  |
 | -------------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------- |
 | `--quality-target TARGETS` | Quality targets (see [Quality Target Format](#quality-target-format))                    | `vif-med:92.0,vmaf-p05:95.0,psnr-med:45.0,ssim-med:98.0` |
-| `--strategies STRATEGIES`  | Encoding strategies (see [Strategy Format](#strategy-format))                            | `veryslow+h264*,slow+h265*`                              |
-| `--all-strategies`         | Disable optimization — produce output for all strategies                                 | `False` (optimization enabled)                           |
-| `--max-parallel N`         | Maximum concurrent encoding processes. Increase only if you see CPU cores underutilized. | `1`                                                      |
+| `--strategies STRATEGIES`  | Encoding strategies (see [Strategy Format](#strategy-format))                            | from config (`h264*,h265*`)                              |
+| `--no-optimize`            | Disable optimization — produce output for all strategies                                 | `False` (optimization enabled)                           |
+| `--concurrency N`          | Maximum concurrent encoding processes. Increase only if you see CPU cores underutilized. | `1`                                                      |
 
 ### Cropping
 
@@ -144,49 +144,67 @@ Config search order (first found wins):
 
 ## Strategy Format
 
-**Format:** `preset+profile[,preset+profile,...]`
+**Format:** `profile[+preset][,profile[+preset],...]`
 
-### Presets
+A strategy combines a profile (the encoding configuration) with a preset (the encoder speed/quality tradeoff). The profile part is required; the preset part is optional — omit it to use each codec's configured `default_preset`.
 
-Presets are defined in the codec itself, we only use them.
+### Profiles
 
-**h.264** and **h.265** codecs define profiles as: `ultrafast`, `superfast`, `veryfast`, `faster`, `fast`, `medium`, `slow`, `slower`, `veryslow`, `placebo`, with `placebo` being the max quality one.
+Profiles define the codec and optional extra encoder tuning. Each profile references a codec and may add extra ffmpeg arguments.
 
-Presets are not the same between codecs, even though they use the same naming. For h.264 you might want `veryslow` - it still has acceptable speed normally and gives good benefits. For h.265 `veryslow` is painfully slow, normally you'd go for `slow` for h.265.
+**Built-in profiles:**
 
-**nvenc** defines codecs as: `p1`...`p7` with `p7` being the max quality one.
+| Profile                  | Codec        | Description                                                              |
+| ------------------------ | ------------ | ------------------------------------------------------------------------ |
+| `h264`                   | h264-8bit    | h.264 8-bit, no extra tuning                                             |
+| `h265`                   | h265-10bit   | h.265 10-bit, no extra tuning                                            |
+| `h265-aq`                | h265-10bit   | h.265 10-bit with adaptive quantization (crisper, better dark area detail) |
+| `h265-anime`             | h265-10bit   | h.265 10-bit optimized for anime (crisp edges, reduced blocking)         |
+| `nvenc-h265-10bit-cq`    | nvenc CQ     | HEVC NVENC GPU encoding — CQ mode. Requires NVIDIA GPU.                  |
+| `nvenc-h265-10bit-vbr`   | nvenc VBR    | HEVC NVENC GPU encoding — multipass VBR mode. Not recommended.           |
+| `vulkan-h265-10bit-qp`   | vulkan QP    | HEVC Vulkan GPU encoding — QP mode. Strongly not recommended.            |
+| `av1`                    | av1-10bit    | AV1 10-bit, no extra tuning                                              |
+| `av1-grain`              | av1-10bit    | AV1 10-bit tuned to preserve original grain                              |
+| `fgs-av1-light/medium/high` | av1-10bit | AV1 10-bit with Film Grain Synthesis at varying strength                 |
 
-### Built-in Profiles
+Additional profiles can be defined in the configuration file. Profile names must not contain `+`.
 
-| Profile      | Description                                                         |
-| ------------ | ------------------------------------------------------------------- |
-| `h264`       | h.264 8-bit                                                         |
-| `h265`       | h.265 10-bit                                                        |
-| `h265-aq`    | h.265 10-bit with adaptive quantization (crisper, better dark area detail) |
-| `h265-anime` | h.265 10-bit optimized for anime content                                   |
-
-Additional profiles can be defined in the configuration file.
+> NOTE: There is no default h264 10-bit profile — h.264 is not well-suited for 10-bit. Similarly, there is no h.265 8-bit profile — h.265 is tuned for 10-bit and should be used even with an 8-bit source.
 
 > NOTE: Currently there's no color space management implemented. You need to control that yourself.
 
-> NOTE: There's no default h264 for 10-bit encoding profile - this is intentional, h.264 isn't the best choice for 10-bit. Similarly, there's no 8-bit profile for h.265 - the codec is tuned for 10-bit, 10-bit should be used even if your source is 8-bit.
+### Presets
 
-### Wildcard Support
+Presets control encoder speed vs quality tradeoff and are defined per codec. Each codec declares a `default_preset` used when the preset is omitted from a strategy pattern.
+
+**h.264 / h.265:** `ultrafast`, `superfast`, `veryfast`, `faster`, `fast`, `medium`, `slow`, `slower`, `veryslow`, `placebo`
+- h.264 default: `veryslow` (affordable on modern CPUs, good benefit)
+- h.265 default: `slow` (veryslow is too slow for most use cases)
+
+**nvenc (GPU):** `p1`…`p7` — default: `p7` (highest quality; speed difference between presets is negligible on modern GPUs)
+
+**AV1 (SVT-AV1):** `0`…`13` — default: `3` (good speed/quality balance; `2`+ recommended for grain retention profiles)
+
+### Pattern Syntax
 
 ```sh
---strategies slow+h265*          # All h265 profiles with slow preset
---strategies slow                # All profiles with slow preset
---strategies +h265-aq            # All presets with h265-aq profile
---strategies slow+h265*,veryslow+h264
+--strategies h265-aq               # h265-aq with its default preset (slow)
+--strategies h265*                 # all h265* profiles with their default presets
+--strategies h265-aq+slow          # h265-aq with explicit slow preset
+--strategies h265*+slow            # all h265* profiles with slow preset
+--strategies h265*+*               # all h265* profiles with all their presets
+--strategies "*"                   # all profiles with their default presets
+--strategies "*+*"                 # all profiles with all presets
+--strategies h265-aq,h264          # multiple patterns, comma-separated
 ```
 
-> NOTE: Some shells require quoting for wildcards: `"slow+h265*"`
+> NOTE: Some shells require quoting for wildcards and asterisks: `"h265*"`, `"*"`, `"*+*"`
 
 ### Optimization Phase
 
-By default, pyqenc tests all specified strategies on ~1% of chunks (minimum 3, from the middle 80% of the video), then encodes the full video using only the strategy(ies) with the smallest output size that still meets quality targets. Strategies within 5% (`Tolerance`) of the best size are also selected.
+By default, pyqenc tests all specified strategies on ~1% of chunks (minimum 3, from the middle 80% of the video), then encodes the full video using only the strategy(ies) with the smallest output size that still meets quality targets. Strategies within 5% (`optimize_tolerance`) of the best size are also selected.
 
-Use `--all-strategies` to skip optimization and produce one output per strategy.
+Use `--no-optimize` to skip optimization and produce one output per strategy.
 
 ---
 
