@@ -842,11 +842,11 @@ class TestAppConfigRoundTrip:
         ),
         strategies=st.lists(
             st.sampled_from([
-                "slow+h265",
-                "slow+h265-aq",
-                "slow+h265-anime",
-                "veryslow+h264",
-                "medium+h265",
+                "h265+slow",
+                "h265-aq+slow",
+                "h265-anime+slow",
+                "h264+veryslow",
+                "h265+medium",
             ]),
             min_size=1,
             max_size=5,
@@ -961,16 +961,16 @@ class TestAppConfigRoundTrip:
 from pyqenc.models import Strategy
 
 # Known valid strategy patterns from the bundled default config.
-# These are concrete (non-wildcard) preset+profile pairs that are guaranteed
+# These are concrete (non-wildcard) profile+preset pairs that are guaranteed
 # to resolve to exactly one Strategy each against the bundled codecs/profiles.
 _VALID_STRATEGY_PATTERNS: list[str] = [
-    "slow+h265",
-    "slow+h265-aq",
-    "slow+h265-anime",
-    "veryslow+h264",
-    "medium+h265",
-    "medium+h265-aq",
-    "slower+h265",
+    "h265+slow",
+    "h265-aq+slow",
+    "h265-anime+slow",
+    "h264+veryslow",
+    "h265+medium",
+    "h265-aq+medium",
+    "h265+slower",
 ]
 
 # Hypothesis strategy: pick a non-empty subset of known valid patterns (unique,
@@ -1129,10 +1129,10 @@ class TestStrategyResolutionDeterministicAndIdempotent:
 
         # Every resolved strategy must carry one of the (preset, profile) pairs
         # that come from the given patterns.  Since the patterns are all explicit
-        # "preset+profile" strings (no wildcards), each must map to exactly one
+        # "profile+preset" strings (no wildcards), each must map to exactly one
         # Strategy.  Build the expected (preset, profile) pairs by splitting.
         expected_pairs: list[tuple[str, str]] = [
-            (pat.split("+")[0], pat.split("+")[1]) for pat in strategy_patterns
+            (pat.split("+")[1], pat.split("+")[0]) for pat in strategy_patterns
         ]
 
         actual_pairs: list[tuple[str, str]] = [
@@ -1292,9 +1292,9 @@ class TestStrategyDeduplicationByPresetProfile:
         # keeping only the first time each pair is seen.
         all_pairs_in_order: list[tuple[str, str]] = []
         for pat in patterns:
-            # Each pattern in _VALID_STRATEGY_PATTERNS is "preset+profile" —
-            # split directly to get the expected pair.
-            preset_part, profile_part = pat.split("+", 1)
+            # Each pattern in _VALID_STRATEGY_PATTERNS is "profile+preset" —
+            # split and swap to get the (preset, profile) pair stored in Strategy.
+            profile_part, preset_part = pat.split("+", 1)
             all_pairs_in_order.append((preset_part, profile_part))
 
         seen_expected: set[tuple[str, str]] = set()
@@ -1334,11 +1334,11 @@ class TestStrategyDeduplicationByPresetProfile:
         """
         config = _BASE_CONFIG.model_copy(deep=True)
 
-        # "slow+h265*" expands to all profiles whose name starts with "h265":
+        # "h265*+slow" expands to all profiles whose name starts with "h265":
         # e.g. h265, h265-aq, h265-anime (depending on default_config.yaml).
-        # "slow+h265" also expands to exactly ("slow", "h265").
+        # "h265+slow" also expands to exactly ("slow", "h265").
         # Any profile that matches both patterns would be a duplicate.
-        config.encoding.strategies = ["slow+h265*", "slow+h265", "slow+h265-aq"]
+        config.encoding.strategies = ["h265*+slow", "h265+slow", "h265-aq+slow"]
 
         config.encoding._resolved_targets    = None  # noqa: SLF001
         config.encoding._resolved_strategies = None  # noqa: SLF001
@@ -1359,10 +1359,10 @@ class TestStrategyDeduplicationByPresetProfile:
             )
             seen.add(pair)
 
-        # ("slow", "h265") must appear because "slow+h265*" includes it.
+        # ("slow", "h265") must appear because "h265*+slow" includes it.
         assert ("slow", "h265") in seen, (
             "Expected ('slow', 'h265') to be in resolved_strategies after "
-            "'slow+h265*' pattern, but it was not found.\n"
+            "'h265*+slow' pattern, but it was not found.\n"
             f"  resolved pairs: {actual_pairs!r}"
         )
 
@@ -1462,7 +1462,7 @@ class TestValidationErrorOnInvalidStrings:
         """
         data = self._base_dict()
         # "nonexistent-profile" does not exist in the bundled profiles dict
-        data["encoding"]["strategies"] = ["slow+nonexistent-profile"]
+        data["encoding"]["strategies"] = ["nonexistent-profile+slow"]
 
         import pytest
         with pytest.raises(ValidationError) as exc_info:
@@ -1493,7 +1493,7 @@ class TestValidationErrorOnInvalidStrings:
         data = self._base_dict()
         # "badpreset" is not in h265-10bit codec's presets list
         # "h265" is a known profile that uses the h265-10bit codec
-        data["encoding"]["strategies"] = ["badpreset+h265"]
+        data["encoding"]["strategies"] = ["h265+badpreset"]
 
         import pytest
         with pytest.raises(ValidationError) as exc_info:
@@ -1549,7 +1549,7 @@ class TestLoadAppConfigWithBundledDefault:
 
         **Validates: Requirements 1.1, 1.2**
         """
-        config = load_app_config()
+        config = load_app_config(default_only=True)
         assert isinstance(config, AppConfig), (
             f"load_app_config() did not return an AppConfig instance; "
             f"got: {type(config)!r}"
@@ -1565,7 +1565,7 @@ class TestLoadAppConfigWithBundledDefault:
 
         **Validates: Requirements 1.2, 1.3**
         """
-        config = load_app_config()
+        config = load_app_config(default_only=True)
         targets = config.encoding.resolved_targets
         assert len(targets) > 0, (
             "load_app_config() returned a config with no resolved quality targets. "
@@ -1584,7 +1584,7 @@ class TestLoadAppConfigWithBundledDefault:
 
         **Validates: Requirements 1.2, 1.3**
         """
-        config = load_app_config()
+        config = load_app_config(default_only=True)
         strategies = config.encoding.resolved_strategies
         assert len(strategies) > 0, (
             "load_app_config() returned a config with no resolved strategies. "
@@ -1601,7 +1601,7 @@ class TestLoadAppConfigWithBundledDefault:
 
         **Validates: Requirements 1.2**
         """
-        config = load_app_config()
+        config = load_app_config(default_only=True)
         assert len(config.codecs) > 0, (
             "load_app_config() returned a config with no codec definitions. "
             "AppConfig.codecs must not be empty — the bundled default must "
@@ -1617,7 +1617,7 @@ class TestLoadAppConfigWithBundledDefault:
 
         **Validates: Requirements 1.2**
         """
-        config = load_app_config()
+        config = load_app_config(default_only=True)
         assert len(config.profiles) > 0, (
             "load_app_config() returned a config with no profile definitions. "
             "AppConfig.profiles must not be empty — the bundled default must "
@@ -1634,7 +1634,7 @@ class TestLoadAppConfigWithBundledDefault:
 
         **Validates: Requirements 1.2, 11.1**
         """
-        config = load_app_config()
+        config = load_app_config(default_only=True)
         assert isinstance(config.audio.convert_pattern, str), (
             f"audio.convert_pattern is not a string; got: {type(config.audio.convert_pattern)!r}"
         )

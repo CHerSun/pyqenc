@@ -926,7 +926,7 @@ class TestOptimizationPhaseTiming:
         work_dir.mkdir(parents=True, exist_ok=True)
         config.encoding.optimize   = optimize
         config.encoding.strategies = [
-            s.raw if hasattr(s, "raw") else f"{s.preset}+{s.profile}"
+            s.raw if hasattr(s, "raw") else f"{s.profile}+{s.preset}"
             for s in [_STRATEGY_SLOW_H265, _STRATEGY_H265_AQ]
         ]
         # Reset resolved caches so they re-resolve from the updated strategy strings.
@@ -1856,8 +1856,10 @@ class TestMetricKeySmoke:
         codec = CodecConfig(
             name="h265-8bit",
             default_quality=Decimal("28"),
+            default_preset="slow",
             quality_range=(Decimal("0"), Decimal("51")),
             encoder_args=["-i", "{input}", "-c:v", "libx265", "-crf", "{quality}", "{input}"],
+            presets=["slow"],
         )
         strategy = Strategy(preset="h265.fast", profile="slow.2", codec=codec, profile_args=[])
         assert "." not in strategy.name, (

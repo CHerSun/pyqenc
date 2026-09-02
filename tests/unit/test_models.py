@@ -105,6 +105,7 @@ class TestStrategy:
         codec = CodecConfig(
             name            = "h265-10bit",
             default_quality = 20.0,
+            default_preset  = "slow",
             quality_range   = (0.0, 51.0),
             encoder_args    = [
                 "-i", "{input}",
@@ -115,6 +116,7 @@ class TestStrategy:
                 "-pix_fmt", "yuv420p10le",
                 "{profile_args}",
             ],
+            presets         = ["slow"],
         )
 
         strategy = Strategy(
@@ -152,6 +154,7 @@ class TestStrategy:
         codec = CodecConfig(
             name            = "hevc-nvenc-10bit",
             default_quality = 28.0,
+            default_preset  = "p7",
             quality_range   = (1.0, 51.0),
             quality_label   = "CQ",
             encoder_args    = [
@@ -163,6 +166,7 @@ class TestStrategy:
                 "-pix_fmt", "p010le",
                 "{profile_args}",
             ],
+            presets         = ["p7"],
         )
         strategy = Strategy(preset="p7", profile="hevc-nvenc-hq", codec=codec, profile_args=["-tune:v", "hq"])
 

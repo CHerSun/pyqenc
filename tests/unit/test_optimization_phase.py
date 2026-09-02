@@ -64,7 +64,7 @@ def _make_job_phase(
     # Set quality targets as raw strings
     config.encoding.targets = ["vmaf-min:93.0"]
     # Set strategy pattern strings matching the requested strategies
-    config.encoding.strategies = [f"{s.preset}+{s.profile}" for s in strategies]
+    config.encoding.strategies = [f"{s.profile}+{s.preset}" for s in strategies]
     config.encoding.optimize = optimize
     config.encoding.optimize_tolerance = tolerance
     # Reset resolved caches so they get re-resolved from new strings

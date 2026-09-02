@@ -673,8 +673,10 @@ _ASCII_DOT = "."
 _MINIMAL_CODEC = CodecConfig(
     name            = "test-codec",
     default_quality = "18",
+    default_preset  = "slow",
     quality_range   = ("0", "51"),
     encoder_args    = ["-i", "{input}", "-crf", "{quality}", "-preset", "{preset}", "{output}"],
+    presets         = ["slow"],
 )
 
 _st_name_with_dots = st.text(

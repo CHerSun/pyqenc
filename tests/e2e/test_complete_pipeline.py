@@ -73,7 +73,7 @@ class TestCompletePipeline:
         orchestrator = _make_orchestrator(
             tmp_path,
             source_video,
-            strategies      = ["fast+h265-default"],
+            strategies      = ["h265+fast"],
             quality_targets = ["vmaf-min:90.0"],
             optimize        = False,
         )
@@ -86,7 +86,7 @@ class TestCompletePipeline:
         orchestrator = _make_orchestrator(
             tmp_path,
             source_video,
-            strategies      = ["fast+h265-default"],
+            strategies      = ["h265+fast"],
             quality_targets = ["vmaf-min:90.0"],
             optimize        = False,
             crop_params     = CropParams(top=100, bottom=100, left=0, right=0),
@@ -100,7 +100,7 @@ class TestCompletePipeline:
         orchestrator = _make_orchestrator(
             tmp_path,
             source_video,
-            strategies      = ["fast+h265-default"],
+            strategies      = ["h265+fast"],
             quality_targets = ["vmaf-min:90.0"],
             optimize        = False,
         )
@@ -114,7 +114,7 @@ class TestCompletePipeline:
         orchestrator1 = _make_orchestrator(
             tmp_path,
             source_video,
-            strategies      = ["fast+h265-default"],
+            strategies      = ["h265+fast"],
             quality_targets = ["vmaf-min:90.0"],
             optimize        = False,
         )
@@ -124,7 +124,7 @@ class TestCompletePipeline:
         orchestrator2 = _make_orchestrator(
             tmp_path,
             source_video,
-            strategies      = ["fast+h265-default"],
+            strategies      = ["h265+fast"],
             quality_targets = ["vmaf-min:90.0"],
             optimize        = False,
         )
@@ -138,7 +138,7 @@ class TestCompletePipeline:
         orchestrator1 = _make_orchestrator(
             tmp_path,
             source_video,
-            strategies      = ["fast+h265-default"],
+            strategies      = ["h265+fast"],
             quality_targets = ["vmaf-min:90.0"],
             optimize        = False,
         )
@@ -148,7 +148,7 @@ class TestCompletePipeline:
         orchestrator2 = _make_orchestrator(
             tmp_path,
             source_video,
-            strategies      = ["fast+h265-default", "medium+h265-aq"],
+            strategies      = ["h265+fast", "h265-aq+medium"],
             quality_targets = ["vmaf-min:90.0"],
             optimize        = False,
         )
@@ -162,7 +162,7 @@ class TestCompletePipeline:
         orchestrator1 = _make_orchestrator(
             tmp_path,
             source_video,
-            strategies      = ["fast+h265-default"],
+            strategies      = ["h265+fast"],
             quality_targets = ["vmaf-min:85.0"],
             optimize        = False,
         )
@@ -172,7 +172,7 @@ class TestCompletePipeline:
         orchestrator2 = _make_orchestrator(
             tmp_path,
             source_video,
-            strategies      = ["fast+h265-default"],
+            strategies      = ["h265+fast"],
             quality_targets = ["vmaf-min:95.0"],
             optimize        = False,
         )
@@ -185,7 +185,7 @@ class TestCompletePipeline:
         orchestrator = _make_orchestrator(
             tmp_path,
             source_video,
-            strategies      = ["fast+h265-default"],
+            strategies      = ["h265+fast"],
             quality_targets = ["vmaf-min:90.0"],
             optimize        = False,
         )
@@ -198,7 +198,7 @@ class TestCompletePipeline:
         orchestrator = _make_orchestrator(
             tmp_path,
             source_video,
-            strategies      = ["fast+h265-default"],
+            strategies      = ["h265+fast"],
             quality_targets = ["vmaf-min:90.0"],
             optimize        = False,
             crop_params     = CropParams(),
@@ -217,7 +217,7 @@ class TestPipelineValidation:
         orchestrator = _make_orchestrator(
             tmp_path,
             nonexistent_video,
-            strategies      = ["fast+h265-default"],
+            strategies      = ["h265+fast"],
             quality_targets = ["vmaf-min:90.0"],
             optimize        = False,
         )

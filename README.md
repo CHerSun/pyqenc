@@ -81,11 +81,11 @@ This also means you can change your mind mid-way: adjust quality targets, add a 
 
 ### Best strategy search
 
-An encoding *strategy* is a combination of codec preset and profile (e.g. `slow+h265-aq`). Different strategies produce different size/quality tradeoffs.
+An encoding *strategy* is a combination of a profile and a codec preset (e.g. `h265-aq+slow`). Different strategies produce different size/quality tradeoffs.
 
 By default, pyqenc tests all specified strategies on ~1% of chunks first, then encodes the full video using only the ones with the smallest output that still meets your quality targets. You get the best result without encoding the whole movie multiple times.
 
-Use `--all-strategies` to skip optimization and produce one output per strategy — useful when you want to compare results side by side.
+Use `--no-optimize` to skip optimization and produce one output per strategy — useful when you want to compare results side by side.
 
 ---
 
@@ -115,7 +115,7 @@ Results are written under the working directory:
 AV1 profiles are also included in the default config, but not enabled by default. If you want to target AV1 codec specifically you can:
 
 ```sh
-pyqenc auto movie.mkv --strategies 4+av1* -y
+pyqenc auto movie.mkv --strategies "av1*" -y
 ```
 
 This will test all defined AV1 profiles and select the optimal ones for the full encoding.
@@ -185,7 +185,7 @@ Config search order (first found wins): `./pyqenc.yaml` → `~/.config/pyqenc/co
 
 **Slow encoding** — try a faster codec or faster codec preset (`fast`, `medium`). If CPU is not fully utilized - add `--max-parallel 2` or higher. OR switch to GPU-encoding. All options reduce resulting quality or increase output size, effective encoding is slow.
 
-**Strategy wildcard not expanding** — some shells require quoting: `"slow+h265*"`. Use dry-run to verify expansion. Verify that the config does have wanted profiles.
+**Strategy wildcard not expanding** — some shells require quoting: `"h265*"`. Use dry-run to verify expansion. Verify that the config does have the wanted profiles.
 
 **Debug logging** — add `--log-level debug` to any command for detailed output.
 

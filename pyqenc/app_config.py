@@ -168,7 +168,7 @@ class EncodingConfig(BaseModel):
 
     Attributes:
         targets:            Raw quality target strings (e.g. ``"vmaf-min:95"``).
-        strategies:         Raw strategy pattern strings (e.g. ``"slow+h265*"``).
+        strategies:         Raw strategy pattern strings (e.g. ``"h265*"``).
         optimize:           Whether to run the strategy optimisation phase.
         concurrency:        Maximum concurrent encoding processes.
         optimize_tolerance: Tolerance percentage for strategy selection.
