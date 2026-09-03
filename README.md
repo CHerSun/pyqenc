@@ -194,7 +194,7 @@ Config search order (first found wins): `./pyqenc.yaml` → `~/.config/pyqenc/co
 ## 📚 Further reading
 
 - [CLI Reference](docs/cli-reference.md) — all options, quality target format, strategy format
-- [Quality Targeting Guide](docs/quality-targeting.md) — metric pitfalls, recommended targets, VIF vs VMAF
+- [Quality Targeting Guide](docs/quality-targeting.md) — metric pitfalls, recommended targets, VIF vs VMAF, narrowing the quality search range
 - [Sample Comparison](docs/sample-comparison.md) — pyqenc vs BSEncode side-by-side
 - [Architecture](docs/architecture.md) — pipeline internals
 
