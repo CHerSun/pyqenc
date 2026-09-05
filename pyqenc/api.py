@@ -273,16 +273,16 @@ def process_audio(
     source:   Path,
     work_dir: Path,
     *,
-    force:       bool             = False,
-    cleanup:     CleanupLevel     = CleanupLevel.NONE,
-    no_metrics:  bool             = False,
-    dry_run:     bool             = False,
-    crop_params: CropParams | None = None,
+    force:      bool         = False,
+    cleanup:    CleanupLevel = CleanupLevel.NONE,
+    no_metrics: bool         = False,
+    dry_run:    bool         = False,
 ) -> "AudioPhaseResult":
     """Run the pipeline up to and including the audio processing phase.
 
     Runs ``JobPhase``, runs ``ExtractionPhase``, then runs ``AudioPhase``.
-    All upstream phases are executed (not merely scanned).
+    All upstream phases are executed (not merely scanned).  Video extraction
+    is skipped because ``ProbePhase`` is not included in the audio-only registry.
 
     Args:
         config:     Fully assembled application configuration.
@@ -292,8 +292,6 @@ def process_audio(
         cleanup:    Artifact retention policy for intermediate files.
         no_metrics: When ``True``, skip writing ``metrics.yaml``.
         dry_run:    Report only — no files written.
-        crop_params: Optional manual crop override; ``None`` falls back to
-                     cached value in ``job.yaml``, then auto-detection.
 
     Returns:
         ``AudioPhaseResult`` from the phase.
@@ -301,19 +299,27 @@ def process_audio(
     Raises:
         FileNotFoundError: If source video does not exist.
     """
-    from pyqenc.phases.audio import AudioPhase
+    if not source.exists():
+        raise FileNotFoundError(f"Source video not found: {source}")
 
-    return _run_phase(  # type: ignore[return-value]
-        config,
-        source,
-        work_dir,
-        AudioPhase,
-        force       = force,
-        cleanup     = cleanup,
-        no_metrics  = no_metrics,
-        dry_run     = dry_run,
-        crop_params = crop_params,
+    work_dir = LongPath(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    collector = NoOpMetricsCollector()
+    registry  = _build_registry(
+        config         = config,
+        source         = source,
+        work_dir       = work_dir,
+        force          = force,
+        cleanup        = cleanup,
+        no_metrics     = no_metrics,
+        collector      = collector,
+        video_required = False,
     )
+
+    from pyqenc.phases.audio import AudioPhase
+    phase = registry[AudioPhase]
+    return phase.run(dry_run=dry_run)  # type: ignore[return-value]
 
 
 def encode_chunks(

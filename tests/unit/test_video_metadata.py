@@ -74,43 +74,6 @@ class TestProbeMetadataCalledOnce:
         assert call_count == 1
 
 
-# ---------------------------------------------------------------------------
-# _probe_frame_count called exactly once
-# ---------------------------------------------------------------------------
-
-class TestProbeFrameCountCalledOnce:
-    def test_frame_count_probe_called_once(self):
-        """_probe_frame_count is called exactly once even on repeated access."""
-        meta = _make_meta()
-
-        call_count = 0
-
-        def fake_probe_fc() -> None:
-            nonlocal call_count
-            call_count += 1
-            meta._frame_count = 129600
-
-        with patch.object(meta, "_probe_frame_count", side_effect=fake_probe_fc):
-            _ = meta.frame_count
-            _ = meta.frame_count
-            _ = meta.frame_count
-
-        assert call_count == 1
-
-    def test_fps_access_does_not_trigger_frame_count_probe(self):
-        """Accessing fps must NOT trigger _probe_frame_count."""
-        meta = _make_meta()
-
-        def fake_probe_meta() -> None:
-            meta._fps = 24.0
-            meta._duration_seconds = 5400.0
-            meta._resolution = "1920x1080"
-
-        with patch.object(meta, "_probe_metadata", side_effect=fake_probe_meta):
-            with patch.object(meta, "_probe_frame_count") as mock_fc:
-                _ = meta.fps
-                assert mock_fc.call_count == 0
-
 
 # ---------------------------------------------------------------------------
 # populate_from_ffprobe fills fields without triggering a probe
@@ -121,11 +84,9 @@ class TestPopulateFromFfprobe:
         """populate_from_ffprobe fills backing fields; no probe is triggered."""
         meta = _make_meta()
 
-        with patch.object(meta, "_probe_metadata") as mock_pm, \
-             patch.object(meta, "_probe_frame_count") as mock_fc:
+        with patch.object(meta, "_probe_metadata") as mock_pm:
             meta.populate_from_ffprobe(_FFPROBE_DATA)
             assert mock_pm.call_count == 0
-            assert mock_fc.call_count == 0
 
         assert meta._duration_seconds == pytest.approx(5400.0)
         assert meta._fps == pytest.approx(24.0)
@@ -183,7 +144,6 @@ class TestRoundTrip:
         """model_dump_full -> model_validate_full preserves all cached private fields."""
         meta = _make_meta()
         meta._duration_seconds = 5400.0
-        meta._frame_count      = 129600
         meta._fps              = 24.0
         meta._resolution       = "1920x1080"
 
@@ -191,7 +151,6 @@ class TestRoundTrip:
         restored = VideoMetadata.model_validate_full(dumped)
 
         assert restored._duration_seconds == pytest.approx(5400.0)
-        assert restored._frame_count      == 129600
         assert restored._fps              == pytest.approx(24.0)
         assert restored._resolution       == "1920x1080"
 
@@ -199,20 +158,16 @@ class TestRoundTrip:
         """After model_validate_full, property access does not trigger any probe."""
         meta = _make_meta()
         meta._duration_seconds = 5400.0
-        meta._frame_count      = 129600
         meta._fps              = 24.0
         meta._resolution       = "1920x1080"
 
         restored = VideoMetadata.model_validate_full(meta.model_dump_full())
 
-        with patch.object(restored, "_probe_metadata") as mock_pm, \
-             patch.object(restored, "_probe_frame_count") as mock_fc:
+        with patch.object(restored, "_probe_metadata") as mock_pm:
             assert restored.duration_seconds == pytest.approx(5400.0)
-            assert restored.frame_count      == 129600
             assert restored.fps              == pytest.approx(24.0)
             assert restored.resolution       == "1920x1080"
             assert mock_pm.call_count == 0
-            assert mock_fc.call_count == 0
 
     def test_chunk_video_metadata_round_trip(self):
         """ChunkMetadata round-trip preserves chunk_id and cached fields."""
@@ -221,15 +176,15 @@ class TestRoundTrip:
             chunk_id="chunk.000000-000319",
             start_timestamp=0.0,
             end_timestamp=13.33,
+            frame_count=320,
         )
-        chunk._frame_count = 320
-        chunk._fps         = 24.0
-        chunk._resolution  = "1920x800"
+        chunk._fps        = 24.0
+        chunk._resolution = "1920x800"
 
         dumped   = chunk.model_dump_full()
         restored = ChunkMetadata.model_validate_full(dumped)
 
         assert restored.chunk_id    == "chunk.000000-000319"
-        assert restored._frame_count == 320
+        assert restored.frame_count == 320
         assert restored._fps         == pytest.approx(24.0)
         assert restored._resolution  == "1920x800"

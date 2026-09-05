@@ -5,7 +5,11 @@
 - Created: 2026-03-15
 - Completed: 2026-03-15
 
-## Introduction
+## Cross-Spec Notes
+
+### Superseded by `probe-phase-refactor` (2026-09-01) — VideoMetadata.frame_count
+
+**Requirement 1 AC 1 / Glossary** — `VideoMetadata` SHALL hold `frame_count: int | None` as a transparent lazy-loaded property. This is superseded: `frame_count` has been **removed from `VideoMetadata`** entirely. It now lives on `ExtendedVideoMetadata` as a required plain `int` field. The slow null-encode probe is an explicit method call (`probe_extended()`) on `VideoMetadata`, not a property — so it can never be triggered accidentally. The `pipeline-maturity-refactor` definition of `VideoMetadata` as holding `frame_count` is no longer accurate.
 
 This document specifies requirements for maturing the pyqenc pipeline codebase. The work covers four interconnected areas: (1) consolidating all video metadata into proper typed classes and eliminating bare `Path` usage for intermediate data; (2) making `ProgressTracker` accept typed status updates and ensuring it is flushed on crash or external kill; (3) splitting scene detection into two independently resumable sub-phases; (4) fixing scene detection correctness issues; and (5) removing the legacy module tree entirely, integrating any still-needed logic into the main codebase.
 

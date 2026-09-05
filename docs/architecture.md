@@ -53,7 +53,7 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    subgraph Job["Job (job.yaml — source binding, crop params)"]
+    subgraph Job["Job (job.yaml — source binding)"]
         EX["Extraction\nextracted/ streams"]
         CH["Chunking\nchunks/ scene splits"]
         OP["Optimization\noptimization.yaml\n(optional)"]
@@ -152,10 +152,11 @@ flowchart LR
 
 | File                 | Contents                                                                |
 | -------------------- | ----------------------------------------------------------------------- |
-| `job.yaml`           | Source path, size, duration, fps, resolution, frame count, crop params  |
+| `job.yaml`           | Source path, size, duration, fps, resolution                            |
+| `probe.yaml`         | Frame count, crop params                                                |
 | `chunking.yaml`      | Scene boundaries (frame index + timestamp per chunk)                    |
 | `optimization.yaml`  | Test chunk IDs, per-strategy results, selected optimal strategy         |
-| `encoding.yaml`      | Crop params active during encoding                                      |
+| `encoding.yaml`      | Probe state (crop params + frame count) active during encoding          |
 | `audio.yaml`         | Audio codec and base bitrate                                            |
 | `<chunk>.yaml`       | Chunk duration, frame count, fps, resolution                            |
 | `<attempt>.yaml`     | Quality value, targets met, all measured metrics                        |
@@ -397,7 +398,7 @@ Running VMAF, SSIM, PSNR, and VIF in separate ffmpeg passes is ~4× slower and r
 
 ### Automatic crop detection
 
-Crop is detected once during the Job phase using ffmpeg's `cropdetect` filter across multiple sampled frames. The same crop parameters are stored in `job.yaml` and applied consistently across all subsequent phases. Crop is applied during encoding only — chunks remain uncropped for remux compatibility.
+Crop is detected once during the Probe phase using ffmpeg's `cropdetect` filter across multiple sampled frames. The same crop parameters are stored in `probe.yaml` and applied consistently across all subsequent phases. Crop is applied during encoding only — chunks remain uncropped for remux compatibility.
 
 ### Pipeline parallelism default of 1
 

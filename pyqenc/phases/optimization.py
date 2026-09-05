@@ -41,7 +41,12 @@ from pyqenc.models import (
     Strategy,
 )
 from pyqenc.phase import Artifact, Phase, PhaseResult
-from pyqenc.state import ArtifactState, OptimizationParams, StrategyTestResult
+from pyqenc.state import (
+    ArtifactState,
+    OptimizationParams,
+    ProbeState,
+    StrategyTestResult,
+)
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.log_format import (
     emit_phase_banner,
@@ -103,26 +108,28 @@ class OptimizationPhase:
 
     def __init__(
         self,
-        config:    "AppConfig",
-        phases:    "dict[type[Phase], Phase] | None" = None,
+        config:    AppConfig,
+        phases:    dict[type[Phase], Phase] | None = None,
         *,
-        collector: "MetricsCollector",
+        collector: MetricsCollector,
     ) -> None:
         from pyqenc.phases.chunking import ChunkingPhase as _ChunkingPhase
         from pyqenc.phases.job import JobPhase as _JobPhase
+        from pyqenc.phases.probe import ProbePhase as _ProbePhase
 
         self._config    = config
-        self._collector: "MetricsCollector" = collector
-        self._job:      "_JobPhase | None"      = cast("_JobPhase",      phases.get(_JobPhase))      if phases else None
-        self._chunking: "_ChunkingPhase | None" = cast("_ChunkingPhase", phases.get(_ChunkingPhase)) if phases else None
-        self.result:    "OptimizationPhaseResult | None" = None
-        self.dependencies: "list[Phase]" = [d for d in [self._job, self._chunking] if d is not None]
+        self._collector: MetricsCollector = collector
+        self._job:      _JobPhase | None      = cast(_JobPhase,      phases.get(_JobPhase))      if phases else None
+        self._probe:    _ProbePhase | None    = cast(_ProbePhase,    phases.get(_ProbePhase))    if phases else None
+        self._chunking: _ChunkingPhase | None = cast(_ChunkingPhase, phases.get(_ChunkingPhase)) if phases else None
+        self.result:    OptimizationPhaseResult | None = None
+        self.dependencies: list[Phase] = [d for d in [self._job, self._probe, self._chunking] if d is not None]
 
     # ------------------------------------------------------------------
     # Public Phase interface
     # ------------------------------------------------------------------
 
-    def scan(self) -> "OptimizationPhaseResult":
+    def scan(self) -> OptimizationPhaseResult:
         """Classify existing optimization artifacts without executing any work.
 
         In all-strategies mode, returns all configured strategies immediately.
@@ -191,7 +198,7 @@ class OptimizationPhase:
 
         return self.result
 
-    def run(self, dry_run: bool = False) -> "OptimizationPhaseResult":
+    def run(self, dry_run: bool = False) -> OptimizationPhaseResult:
         """Recover, run test encodes if needed, cache and return result.
 
         In all-strategies mode, returns all configured strategies immediately
@@ -260,7 +267,7 @@ class OptimizationPhase:
             _wipe_encoded_dir(work_dir, self._job.result.config.encoding.resolved_strategies)
             # Treat all cached strategy results as stale — force re-encoding
             persisted = OptimizationParams(
-                crop             = persisted.crop,
+                probe            = persisted.probe,
                 test_chunks      = persisted.test_chunks,
                 strategy_results = [],
                 tolerance_pct    = persisted.tolerance_pct,
@@ -288,7 +295,7 @@ class OptimizationPhase:
             with self._collector.time(MetricKey.RECOVERY):
                 selected = self._apply_tolerance(persisted.strategy_results, tolerance)
                 OptimizationParams(
-                    crop             = persisted.crop,
+                    probe            = persisted.probe,
                     test_chunks      = persisted.test_chunks,
                     strategy_results = persisted.strategy_results,
                     tolerance_pct    = tolerance,
@@ -347,33 +354,38 @@ class OptimizationPhase:
             self.result = dep_result
             return self.result
 
-        job_result = self._job.result  # type: ignore[union-attr]
-        force_wipe = getattr(job_result, "force_wipe", False)
-        crop       = getattr(job_result, "crop", None)
+        job_result   = self._job.result  # type: ignore[union-attr]
+        probe_result = self._probe.result  # type: ignore[union-attr]
+        force_wipe   = getattr(job_result, "force_wipe", False)
+        crop         = probe_result.crop
+        current_probe = ProbeState(
+            frame_count = probe_result.source.frame_count if probe_result.source else 0,
+            crop        = crop if crop else None,
+        )
 
         # Step 5: force-wipe
         if force_wipe:
             self._wipe_artifacts(work_dir)
             persisted = None
 
-        # Step 6: crop mismatch check (reload persisted after potential wipe)
+        # Step 6: probe mismatch check (reload persisted after potential wipe)
         if persisted is None:
             persisted = OptimizationParams.load(opt_yaml)
 
         if persisted is not None and persisted.strategy_results:
-            if persisted.crop != crop:
+            if persisted.probe != current_probe:
                 if job_result.force_wipe:
                     logger.warning(
-                        "Crop params changed since last optimization run "
+                        "Probe params changed since last optimization run "
                         "(persisted=%s, current=%s) — --force: deleting optimization artifacts",
-                        persisted.crop, crop,
+                        persisted.probe, current_probe,
                     )
                     self._wipe_artifacts(work_dir)
                     persisted = None
                 else:
                     err = (
-                        "Crop params changed since last optimization run "
-                        f"(persisted={persisted.crop}, current={crop}). "
+                        "Probe params changed since last optimization run "
+                        f"(persisted={persisted.probe}, current={current_probe}). "
                         "Re-run with --force to delete stale optimization artifacts and continue."
                     )
                     logger.critical(err)
@@ -426,7 +438,7 @@ class OptimizationPhase:
 
         # Persist test chunk selection early (before encoding starts)
         OptimizationParams(
-            crop             = crop,
+            probe            = current_probe,
             test_chunks      = [c.chunk_id for c in test_chunks],
             strategy_results = list(cached_results.values()),
             tolerance_pct    = tolerance,
@@ -496,7 +508,7 @@ class OptimizationPhase:
 
         # Persist final state with current quality targets and sampling
         OptimizationParams(
-            crop             = crop,
+            probe            = current_probe,
             test_chunks      = [c.chunk_id for c in test_chunks],
             strategy_results = final_results,
             tolerance_pct    = tolerance,
@@ -536,7 +548,7 @@ class OptimizationPhase:
         by_name = {s.name: s for s in self._job.result.config.encoding.resolved_strategies}
         return [by_name[n] for n in selected_names if n in by_name]
 
-    def _all_strategies_result(self) -> "OptimizationPhaseResult":
+    def _all_strategies_result(self) -> OptimizationPhaseResult:
         """Return all configured strategies silently (all-strategies mode, scan path)."""
         return OptimizationPhaseResult(
             outcome             = PhaseOutcome.REUSED,
@@ -546,7 +558,7 @@ class OptimizationPhase:
             strategy_results    = [],
         )
 
-    def _run_all_strategies(self, dry_run: bool) -> "OptimizationPhaseResult":
+    def _run_all_strategies(self, dry_run: bool) -> OptimizationPhaseResult:
         """Handle all-strategies mode in ``run()``.
 
         Always writes ``optimization.yaml`` with ``strategy_results=[]`` and the
@@ -590,7 +602,7 @@ class OptimizationPhase:
             # Always write optimization.yaml with current targets and sampling
             work_dir.mkdir(parents=True, exist_ok=True)
             OptimizationParams(
-                crop             = None,
+                probe            = None,
                 test_chunks      = [],
                 strategy_results = [],
                 tolerance_pct    = 0.0,
@@ -607,7 +619,7 @@ class OptimizationPhase:
             strategy_results    = [],
         )
 
-    def _ensure_dependencies(self, execute: bool) -> "OptimizationPhaseResult | None":
+    def _ensure_dependencies(self, execute: bool) -> OptimizationPhaseResult | None:
         """Scan/run dependencies if they have no cached result; fail fast if incomplete.
 
         Args:
@@ -628,6 +640,20 @@ class OptimizationPhase:
         if not self._job.result.is_complete:  # type: ignore[union-attr]
             err = "JobPhase did not complete successfully"
             logger.critical(err)
+            return _failed(err)
+
+        if self._probe is None:
+            return _failed("OptimizationPhase requires ProbePhase")
+
+        if self._probe.result is None:
+            if execute:
+                self._probe.run()
+            else:
+                self._probe.scan()
+
+        if not self._probe.result.is_complete:  # type: ignore[union-attr]
+            err = "ProbePhase did not complete successfully"
+            logger.warning(err)
             return _failed(err)
 
         if self._chunking is None:
@@ -736,7 +762,7 @@ class OptimizationPhase:
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
-def _targets_as_strings(quality_targets: "list[QualityTarget]") -> list[str]:
+def _targets_as_strings(quality_targets: list[QualityTarget]) -> list[str]:
     """Serialise *quality_targets* to ``"metric-statistic:value"`` strings.
 
     Args:
@@ -748,7 +774,7 @@ def _targets_as_strings(quality_targets: "list[QualityTarget]") -> list[str]:
     return sorted(f"{t.metric}-{t.statistic}:{t.value}" for t in quality_targets)
 
 
-def _wipe_encoded_dir(work_dir: Path, strategies: "list[Strategy]") -> None:
+def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
     """Delete the entire ``encoded/<strategy>/`` directory for each strategy.
 
     All contents are hard-linked winning attempts and result sidecars — no
@@ -799,7 +825,7 @@ def _wipe_encoded_dir(work_dir: Path, strategies: "list[Strategy]") -> None:
             logger.warning("Could not wipe encoded dir %s: %s", strategy_dir, exc)
 
 
-def _failed(error: str) -> "OptimizationPhaseResult":
+def _failed(error: str) -> OptimizationPhaseResult:
     """Return a ``FAILED`` ``OptimizationPhaseResult`` with the given error."""
     return OptimizationPhaseResult(
         outcome             = PhaseOutcome.FAILED,
@@ -857,7 +883,7 @@ def _make_encoder(
     crop_params:      CropParams | None,
     visual_hash:      bool = True,
     metrics_sampling: int  = 3,
-) -> "ChunkEncoder":
+) -> ChunkEncoder:
     """Construct a ``ChunkEncoder`` for test encodes.
 
     Args:

@@ -41,8 +41,8 @@ from pyqenc.constants import (
 )
 from pyqenc.models import CropParams, PhaseOutcome, QualityTarget, VideoMetadata
 from pyqenc.phase import Artifact, ArtifactState, Phase, PhaseResult
-from pyqenc.state import MergeParams, MergeStrategySummary
-from pyqenc.utils.ffmpeg_runner import get_frame_count, run_ffmpeg
+from pyqenc.state import MergeParams, MergeStrategySummary, ProbeState
+from pyqenc.utils.ffmpeg_runner import get_frame_count
 from pyqenc.utils.log_format import (
     emit_phase_banner,
     fmt_key_value_table,
@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     )
     from pyqenc.phases.extraction import ExtractionPhase
     from pyqenc.phases.job import JobPhase
+    from pyqenc.phases.probe import ProbePhase
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +149,7 @@ def _safe_file_size(path: Path) -> int:
 
 
 def _build_strategy_summaries(
-    artifacts:         list["MergeArtifact"],
+    artifacts:         list[MergeArtifact],
     source_video_path: Path | None,
 ) -> tuple[int, list[MergeStrategySummary]]:
     """Build per-strategy summary rows and source size from completed artifacts.
@@ -437,7 +438,7 @@ def _log_merge_summary_from_params(
 
 
 def _collect_crf_data(
-    encoded:     "list[EncodedArtifact]",
+    encoded:     list[EncodedArtifact],
     strategy:    str,
 ) -> list[tuple[float, float, Decimal]]:
     """Extract ``(start_seconds, end_seconds, crf)`` tuples for winning chunks of *strategy*.
@@ -534,25 +535,27 @@ class MergePhase:
 
     def __init__(
         self,
-        config:    "AppConfig",
-        phases:    "dict[type[Phase], Phase] | None" = None,
+        config:    AppConfig,
+        phases:    dict[type[Phase], Phase] | None = None,
         *,
-        collector: "MetricsCollector",
+        collector: MetricsCollector,
     ) -> None:
         from pyqenc.phases.audio import AudioPhase
         from pyqenc.phases.encoding import EncodingPhase
         from pyqenc.phases.extraction import ExtractionPhase
         from pyqenc.phases.job import JobPhase
+        from pyqenc.phases.probe import ProbePhase
 
-        self._config:     "AppConfig"              = config
-        self._collector:  "MetricsCollector"       = collector
+        self._config:     AppConfig              = config
+        self._collector:  MetricsCollector       = collector
         self._job:        JobPhase | None          = cast(JobPhase,        phases[JobPhase])        if phases else None
         self._extraction: ExtractionPhase | None   = cast(ExtractionPhase, phases[ExtractionPhase]) if phases else None
+        self._probe:      ProbePhase | None        = cast("ProbePhase",    phases.get(ProbePhase))  if phases else None
         self._encoding:   EncodingPhase | None     = cast(EncodingPhase,   phases[EncodingPhase])   if phases else None
         self._audio:      AudioPhase | None        = cast(AudioPhase,      phases[AudioPhase])      if phases else None
-        self.result:      "MergePhaseResult | None"   = None
-        self.dependencies: "list[Phase]"              = [
-            d for d in [self._job, self._extraction, self._encoding, self._audio]
+        self.result:      MergePhaseResult | None   = None
+        self.dependencies: list[Phase]              = [
+            d for d in [self._job, self._extraction, self._probe, self._encoding, self._audio]
             if d is not None
         ]
 
@@ -561,17 +564,26 @@ class MergePhase:
     # ------------------------------------------------------------------
 
     @property
-    def params(self) -> "MergeParams":
-        """Current merge params derived from the job result config.
+    def params(self) -> MergeParams:
+        """Current merge params derived from the job result config and probe result.
 
-        Built at runtime from ``self._job.result`` so the values are always
-        current (e.g. after CLI overrides) rather than snapshotted at
-        construction time.
+        Built at runtime from ``self._job.result`` and ``self._probe.result``
+        so the values are always current (e.g. after CLI overrides) rather than
+        snapshotted at construction time.
         """
+        probe: ProbeState | None = None
+        if self._probe is not None and self._probe.result is not None:
+            probe_result = self._probe.result
+            probe = ProbeState(
+                frame_count = probe_result.source.frame_count if probe_result.source else 0,
+                crop        = probe_result.crop if probe_result.crop else None,
+            )
+
         if self._job is not None and self._job.result is not None:
             return MergeParams(
                 quality_targets  = _targets_as_strings(self._job.result.config.encoding.resolved_targets),  # type: ignore[union-attr]
                 metrics_sampling = self._job.result.config.measurement.sampling,  # type: ignore[union-attr]
+                probe            = probe,
             )
         # Fallback: empty params before job result is available
         return MergeParams(quality_targets=[], metrics_sampling=1)
@@ -580,7 +592,7 @@ class MergePhase:
     # Public Phase interface
     # ------------------------------------------------------------------
 
-    def scan(self) -> "MergePhaseResult":
+    def scan(self) -> MergePhaseResult:
         """Classify existing merge artifacts without executing any work.
 
         Returns:
@@ -608,7 +620,7 @@ class MergePhase:
         )
         return self.result
 
-    def run(self, dry_run: bool = False) -> "MergePhaseResult":
+    def run(self, dry_run: bool = False) -> MergePhaseResult:
         """Recover, merge pending strategies, cache and return result.
 
         Sequence:
@@ -691,7 +703,7 @@ class MergePhase:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _ensure_dependencies(self, execute: bool) -> "MergePhaseResult | None":
+    def _ensure_dependencies(self, execute: bool) -> MergePhaseResult | None:
         """Scan/run dependencies if they have no cached result; fail fast if incomplete.
 
         Args:
@@ -727,6 +739,18 @@ class MergePhase:
             err = "ExtractionPhase did not complete successfully"
             logger.critical(err)
             return _failed(err)
+
+        if self._probe is not None:
+            if self._probe.result is None:
+                if execute:
+                    self._probe.run()
+                else:
+                    self._probe.scan()
+
+            if not self._probe.result.is_complete:  # type: ignore[union-attr]
+                err = "ProbePhase did not complete successfully"
+                logger.warning(err)
+                return _failed(err)
 
         if self._encoding is None:
             return _failed("MergePhase requires EncodingPhase")
@@ -806,6 +830,11 @@ class MergePhase:
             if persisted is not None and persisted != self.params:
                 targets_changed  = bool(persisted.quality_targets) and persisted.quality_targets != self.params.quality_targets
                 sampling_changed = persisted.metrics_sampling is not None and persisted.metrics_sampling != self.params.metrics_sampling
+                probe_changed    = (
+                    persisted.probe is not None
+                    and self.params.probe is not None
+                    and persisted.probe != self.params.probe
+                )
                 if targets_changed or sampling_changed:
                     logger.info(
                         "Merge params changed (%s) — deleting merge sidecars to re-measure quality",
@@ -817,6 +846,16 @@ class MergePhase:
                             logger.debug("Deleted stale merge sidecar: %s", sidecar.name)
                         except OSError as exc:
                             logger.warning("Could not delete merge sidecar %s: %s", sidecar.name, exc)
+                    merge_yaml.unlink(missing_ok=True)
+                elif probe_changed:
+                    logger.warning(
+                        "Probe params changed since last merge run "
+                        "(persisted=%s, current=%s) — deleting merge artifacts to re-merge",
+                        persisted.probe, self.params.probe,
+                    )
+                    if final_dir.exists():
+                        shutil.rmtree(final_dir)
+                        logger.debug("Probe mismatch: deleted %s", final_dir)
                     merge_yaml.unlink(missing_ok=True)
 
         # Step 3: clean up .tmp files (execute mode only)
@@ -903,7 +942,7 @@ class MergePhase:
                 seen[strategy_name] = safe_name
         return list(seen.items())
 
-    def _execute_merge(self, artifacts: list[MergeArtifact]) -> "MergePhaseResult":
+    def _execute_merge(self, artifacts: list[MergeArtifact]) -> MergePhaseResult:
         """Merge pending strategies by concatenating encoded chunks.
 
         Args:
@@ -919,10 +958,13 @@ class MergePhase:
         final_dir.mkdir(parents=True, exist_ok=True)
 
         job_result = self._job.result  # type: ignore[union-attr]
-        crop       = getattr(job_result, "crop", None)
+        probe_result = self._probe.result if self._probe is not None else None
+        crop: CropParams | None = probe_result.crop if probe_result is not None else None
         job        = getattr(job_result, "job", None)
         source_video: VideoMetadata | None = getattr(job, "source", None) if job else None
-        source_frame_count: int | None = source_video.frame_count if source_video else None
+        source_frame_count: int = (
+            probe_result.source.frame_count if (probe_result is not None and probe_result.source) else 0
+        )
         source_stem = self._job.result.source.stem  # type: ignore[union-attr]
 
         # Build encoded_chunks dict from EncodingPhase result
@@ -1023,7 +1065,7 @@ class MergePhase:
                 frame_count_ok:    bool       = False
                 try:
                     frame_count = get_frame_count(output_file)
-                    if source_frame_count is not None:
+                    if source_frame_count > 0:
                         if frame_count != source_frame_count:
                             diff = frame_count - source_frame_count
                             logger.warning(
@@ -1140,6 +1182,7 @@ class MergePhase:
             MergeParams(
                 quality_targets    = self.params.quality_targets,
                 metrics_sampling   = self.params.metrics_sampling,
+                probe              = self.params.probe,
                 source_stem        = source_stem,
                 source_size_bytes  = source_size_bytes,
                 strategy_summaries = strategy_summaries,

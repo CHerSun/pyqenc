@@ -38,7 +38,6 @@ def _make_merge_phase(tmp_path: Path) -> MergePhase:
     job_result.work_dir   = tmp_path
     job_result.source     = tmp_path / "source.mkv"
     job_result.force_wipe = False
-    job_result.crop       = None
     job_result.job        = None
     # Encoding config sub-mock
     encoding_config = MagicMock()
@@ -60,6 +59,7 @@ def _make_merge_phase(tmp_path: Path) -> MergePhase:
     phase._extraction = None
     phase._encoding  = None
     phase._audio     = None
+    phase._probe     = None
     phase.result     = None
     phase.dependencies = []
     return phase
@@ -231,8 +231,7 @@ class TestMkvmergeOptionsFileLifecycle:
         phase._encoding = encoding
 
         # _make_merge_phase already wires _job with work_dir / source / config.encoding
-        # — just ensure crop/job fields are set on the existing result
-        phase._job.result.crop = None
+        # — just ensure job field is set on the existing result
         phase._job.result.job  = None
 
         return phase
@@ -353,8 +352,7 @@ class TestMergeFailsWithoutTimestamps:
         phase._encoding = encoding
 
         # _make_merge_phase already wires _job with work_dir / source / config.encoding
-        # — just ensure crop/job fields are set on the existing result
-        phase._job.result.crop = None
+        # — just ensure job field is set on the existing result
         phase._job.result.job  = None
 
         return phase

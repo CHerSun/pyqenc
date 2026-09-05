@@ -1,13 +1,16 @@
 """Unit tests for core data models."""
 
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
 from pyqenc.models import (
     CodecConfig,
     CropParams,
+    ExtendedVideoMetadata,
     QualityTarget,
     Strategy,
+    VideoMetadata,
 )
 
 
@@ -55,16 +58,16 @@ class TestCropParams:
     """Tests for CropParams parsing and conversion."""
 
     def test_parse_two_values(self):
-        """Test parsing crop with 2 values (top/bottom only)."""
-        crop = CropParams.parse("140 140")
+        """Test parsing crop with 2 comma-separated values (top/bottom only)."""
+        crop = CropParams.parse("140,140")
         assert crop.top == 140
         assert crop.bottom == 140
         assert crop.left == 0
         assert crop.right == 0
 
     def test_parse_four_values(self):
-        """Test parsing crop with 4 values (all sides)."""
-        crop = CropParams.parse("140 140 10 10")
+        """Test parsing crop with 4 comma-separated values (all sides)."""
+        crop = CropParams.parse("140,140,10,10")
         assert crop.top == 140
         assert crop.bottom == 140
         assert crop.left == 10
@@ -76,7 +79,15 @@ class TestCropParams:
             CropParams.parse("140")
 
         with pytest.raises(ValueError, match="Invalid crop format"):
-            CropParams.parse("140 140 10")
+            CropParams.parse("140,140,10")
+
+    def test_parse_old_space_format_raises(self):
+        """Old space-separated format must no longer be accepted."""
+        with pytest.raises(ValueError, match="Invalid crop format"):
+            CropParams.parse("140 140")
+
+        with pytest.raises(ValueError, match="Invalid crop format"):
+            CropParams.parse("140 140 10 10")
 
     def test_is_empty(self):
         """Test is_empty detection."""
@@ -92,9 +103,108 @@ class TestCropParams:
         assert filter_str == "crop=iw-20:ih-280:10:140"
 
     def test_str_representation(self):
-        """Test string representation."""
+        """Test string representation uses comma-separated format."""
         crop = CropParams(top=140, bottom=140, left=10, right=10)
-        assert str(crop) == "140 140 10 10"
+        assert str(crop) == "140,140,10,10"
+
+
+class TestExtendedVideoMetadataFromBase:
+    """Tests for ExtendedVideoMetadata.from_base()."""
+
+    def _make_populated_meta(self) -> VideoMetadata:
+        """Return a VideoMetadata with all private fields populated."""
+        meta = VideoMetadata(path=Path("/fake/source.mkv"))
+        meta._duration_seconds = 5400.0
+        meta._fps              = 24.0
+        meta._fps_fraction     = Fraction(24, 1)
+        meta._resolution       = "1920x1080"
+        meta._pix_fmt          = "yuv420p10le"
+        meta._file_size_bytes  = 12_345_678
+        return meta
+
+    def test_returns_extended_video_metadata_type(self):
+        """from_base() must return an ExtendedVideoMetadata instance, not a plain VideoMetadata.
+
+        Bug: if from_base() returned the wrong type, downstream frame_count accesses would fail.
+        """
+        meta = self._make_populated_meta()
+        extended = ExtendedVideoMetadata.from_base(meta, frame_count=1440)
+        assert isinstance(extended, ExtendedVideoMetadata)
+
+    def test_frame_count_set_correctly(self):
+        """from_base() must set frame_count to the supplied value.
+
+        Bug: frame_count could be silently zeroed or omitted if from_base()
+        didn't pass it through model_validate_full correctly.
+        """
+        meta = self._make_populated_meta()
+        extended = ExtendedVideoMetadata.from_base(meta, frame_count=1440)
+        assert extended.frame_count == 1440
+
+    def test_frame_count_zero_sentinel(self):
+        """from_base() with frame_count=0 must store 0 as the 'unknown' sentinel.
+
+        Bug: a 0 sentinel could be overwritten by a default value or guard clause.
+        """
+        meta = self._make_populated_meta()
+        extended = ExtendedVideoMetadata.from_base(meta, frame_count=0)
+        assert extended.frame_count == 0
+
+    def test_all_cached_private_fields_copied(self):
+        """from_base() must copy all cached private fields from the base VideoMetadata.
+
+        Bug: if from_base() didn't transfer private attrs, properties would
+        re-trigger lazy probes and potentially lose data.
+        """
+        meta = self._make_populated_meta()
+        extended = ExtendedVideoMetadata.from_base(meta, frame_count=1440)
+
+        assert extended._duration_seconds == pytest.approx(5400.0)
+        assert extended._fps              == pytest.approx(24.0)
+        assert extended._fps_fraction     == Fraction(24, 1)
+        assert extended._resolution       == "1920x1080"
+        assert extended._pix_fmt          == "yuv420p10le"
+        assert extended._file_size_bytes  == 12_345_678
+
+    def test_path_preserved(self):
+        """from_base() must preserve the source path.
+
+        Bug: path could be lost during model_dump_full/model_validate_full round-trip.
+        """
+        meta = self._make_populated_meta()
+        extended = ExtendedVideoMetadata.from_base(meta, frame_count=100)
+        assert extended.path == Path("/fake/source.mkv")
+
+    def test_no_probe_triggered_on_property_access(self):
+        """Properties on the returned ExtendedVideoMetadata must not re-probe.
+
+        Bug: if private fields weren't transferred, any property access would
+        trigger a real ffprobe subprocess call.
+        """
+        from unittest.mock import patch
+
+        meta = self._make_populated_meta()
+        extended = ExtendedVideoMetadata.from_base(meta, frame_count=1440)
+
+        with patch.object(extended, "_probe_metadata") as mock_probe:
+            _ = extended.duration_seconds
+            _ = extended.fps
+            _ = extended.resolution
+            assert mock_probe.call_count == 0
+
+    def test_uncached_base_fields_remain_none(self):
+        """from_base() with a bare VideoMetadata transfers only what was cached.
+
+        Bug: uncached fields should stay None; they shouldn't be fabricated.
+        """
+        meta = VideoMetadata(path=Path("/fake/source.mkv"))
+        # Don't populate anything
+        extended = ExtendedVideoMetadata.from_base(meta, frame_count=42)
+
+        assert extended._duration_seconds is None
+        assert extended._fps              is None
+        assert extended._resolution       is None
+        assert extended.frame_count       == 42
 
 
 class TestStrategy:

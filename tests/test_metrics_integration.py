@@ -20,7 +20,6 @@ from pyqenc.app_config import AppConfig, load_app_config
 from pyqenc.metrics import MetricsCollector, NoOpMetricsCollector, MetricKey
 from pyqenc.models import (
     CleanupLevel,
-    CropParams,
     Strategy,
     VideoMetadata,
 )
@@ -81,7 +80,6 @@ def _stub_video_metadata(source: Path) -> VideoMetadata:
     vm._duration_seconds = 120.0
     vm._fps              = 24.0
     vm._resolution       = "1920x1080"
-    vm._frame_count      = 2880
     return vm
 
 
@@ -107,10 +105,8 @@ class TestJobPhaseTiming:
         stub_vm = _stub_video_metadata(volatile["source"])
 
         # Patch VideoMetadata so no real ffprobe/ffmpeg calls happen.
-        # Patch detect_crop_parameters to return a zero-crop immediately.
         with (
             patch("pyqenc.phases.job.VideoMetadata", return_value=stub_vm),
-            patch("pyqenc.utils.crop.detect_crop_parameters", return_value=CropParams()),
             patch("pyqenc.phases.job.log_disk_space_info"),
         ):
             phase.run()
@@ -140,7 +136,7 @@ class TestJobPhaseTiming:
         # Pre-create a valid job.yaml so the phase takes the REUSED path.
         volatile["work_dir"].mkdir(parents=True, exist_ok=True)
         stub_vm = _stub_video_metadata(volatile["source"])
-        job = JobState(source=stub_vm, crop=CropParams())
+        job = JobState(source=stub_vm)
         job.save(volatile["work_dir"] / "job.yaml")
 
         with (
@@ -151,99 +147,6 @@ class TestJobPhaseTiming:
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
         assert MetricKey.JOB not in time_keys_called, (
             f"Expected JOB_PROBE NOT called on reuse, but got: {time_keys_called}"
-        )
-
-    def test_job_crop_detect_recorded_when_no_cache(self, tmp_path: Path) -> None:
-        """``time(JOB_CROP_DETECT)`` must be called when auto-detect runs.
-
-        Auto-detect runs when neither manual crop nor cached crop is available.
-
-        Validates: Requirements 6.5
-        """
-        from pyqenc.phases.job import JobPhase
-
-        config   = _make_config(tmp_path)  # crop_params=None → auto-detect path
-        volatile = _make_volatile(tmp_path)
-        collector = _spy_collector()
-        phase    = JobPhase(config, collector=collector, **volatile)
-
-        stub_vm = _stub_video_metadata(volatile["source"])
-
-        with (
-            patch("pyqenc.phases.job.VideoMetadata", return_value=stub_vm),
-            patch("pyqenc.utils.crop.detect_crop_parameters", return_value=CropParams()),
-            patch("pyqenc.phases.job.log_disk_space_info"),
-        ):
-            phase.run()
-
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.JOB in time_keys_called, (
-            f"Expected MetricKey.JOB in time() calls, got: {time_keys_called}"
-        )
-
-    def test_job_crop_detect_not_recorded_for_manual_crop(self, tmp_path: Path) -> None:
-        """With manual crop, only probe timing calls are made — no crop_detect calls.
-
-        After migration to two-tier keys, probe emits two calls:
-        ``time(MetricKey.JOB)`` (top-level wall-clock) and
-        ``time(MetricKey.JOB, "probe")`` (dotted sub-operation).
-        Crop-detect emits ``time(MetricKey.JOB, "crop_detect")`` — which must NOT appear.
-
-        Validates: Requirements 6.5
-        """
-        from pyqenc.phases.job import JobPhase
-
-        config    = _make_config(tmp_path)
-        volatile  = _make_volatile(tmp_path)
-        collector = _spy_collector()
-        phase     = JobPhase(config, collector=collector, crop_params=CropParams(top=140, bottom=140), **volatile)
-
-        stub_vm = _stub_video_metadata(volatile["source"])
-
-        with (
-            patch("pyqenc.phases.job.VideoMetadata", return_value=stub_vm),
-            patch("pyqenc.phases.job.log_disk_space_info"),
-        ):
-            phase.run()
-
-        job_key_calls = [call for call in collector.time.call_args_list if call.args[0] == MetricKey.JOB]
-        # Probe emits 2 calls: top-level + dotted "probe"; crop_detect must NOT appear.
-        crop_detect_calls = [c for c in job_key_calls if c.args[1:] == ("crop_detect",)]
-        assert not crop_detect_calls, (
-            f"Expected no crop_detect calls for manual crop, got: {crop_detect_calls}"
-        )
-        probe_calls = [c for c in job_key_calls if c.args[1:] == ("probe",)]
-        assert len(probe_calls) == 1, (
-            f"Expected exactly 1 dotted probe call for manual crop, got: {probe_calls}"
-        )
-
-    def test_job_crop_detect_not_recorded_for_cached_crop(self, tmp_path: Path) -> None:
-        """``time(JOB_CROP_DETECT)`` must NOT be called when crop is cached in job.yaml.
-
-        Validates: Requirements 6.5
-        """
-        from pyqenc.phases.job import JobPhase
-        from pyqenc.state import JobState
-
-        config   = _make_config(tmp_path)  # no manual crop
-        volatile = _make_volatile(tmp_path)
-        collector = _spy_collector()
-        phase    = JobPhase(config, collector=collector, **volatile)
-
-        # Pre-create job.yaml with a cached crop — phase will load it and skip detect.
-        volatile["work_dir"].mkdir(parents=True, exist_ok=True)
-        stub_vm = _stub_video_metadata(volatile["source"])
-        job = JobState(source=stub_vm, crop=CropParams(top=100, bottom=100))
-        job.save(volatile["work_dir"] / "job.yaml")
-
-        with (
-            patch("pyqenc.phases.job.log_disk_space_info"),
-        ):
-            phase.run()
-
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.JOB not in time_keys_called, (
-            f"Expected JOB_CROP_DETECT NOT called for cached crop, got: {time_keys_called}"
         )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
@@ -262,7 +165,6 @@ class TestJobPhaseTiming:
 
         with (
             patch("pyqenc.phases.job.VideoMetadata", return_value=stub_vm),
-            patch("pyqenc.utils.crop.detect_crop_parameters", return_value=CropParams()),
             patch("pyqenc.phases.job.log_disk_space_info"),
         ):
             result = phase.run()
@@ -450,7 +352,7 @@ class TestChunkingPhaseTiming:
         source = tmp_path / "source.mkv"
         source.write_bytes(b"\x00" * 64)
         stub_vm = _stub_video_metadata(source)
-        job_state = JobState(source=stub_vm, crop=CropParams())
+        job_state = JobState(source=stub_vm)
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
@@ -611,9 +513,8 @@ class TestChunkingPhaseTiming:
         phase._recovered_scenes = cached_boundaries  # type: ignore[attr-defined]
 
         stub_chunk = MagicMock(spec=ChunkMetadata)
-        stub_chunk.path       = tmp_path / "chunk.mkv"
         stub_chunk.chunk_id   = "chunk_0"
-        stub_chunk._frame_count = 100
+        stub_chunk.frame_count = 100
 
         with (
             patch.object(ChunkingPhase, "_recover", return_value=[]),
@@ -730,7 +631,7 @@ class TestAudioPhaseTiming:
         work_dir = tmp_path / "work"
         work_dir.mkdir(parents=True, exist_ok=True)
 
-        job_state = JobState(source=stub_vm, crop=CropParams())
+        job_state = JobState(source=stub_vm)
         job_result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             artifacts  = [],
@@ -877,7 +778,7 @@ class TestOptimizationPhaseTiming:
         source = tmp_path / "source.mkv"
         source.write_bytes(b"\x00" * 64)
         stub_vm = _stub_video_metadata(source)
-        job_state = JobState(source=stub_vm, crop=CropParams())
+        job_state = JobState(source=stub_vm)
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
@@ -960,7 +861,7 @@ class TestOptimizationPhaseTiming:
         # tolerance_pct and metrics_sampling must match config defaults so the
         # full-reuse path (step 4) is taken rather than falling through to encodes.
         persisted = OptimizationParams(
-            crop             = None,
+            probe            = None,
             test_chunks      = ["chunk_0"],
             strategy_results = [
                 StrategyTestResult(strategy_name=strategy.name, total_size=1024),
@@ -1120,7 +1021,7 @@ class TestOptimizationPhaseTiming:
 
         strategy = _STRATEGY_SLOW_H265
         persisted = OptimizationParams(
-            crop             = CropParams(),
+            probe            = None,
             test_chunks      = ["chunk_0"],
             strategy_results = [
                 StrategyTestResult(strategy_name=strategy.name, total_size=1024),
@@ -1155,7 +1056,7 @@ class TestEncodingPhaseTiming:
         source = tmp_path / "source.mkv"
         source.write_bytes(b"\x00" * 64)
         stub_vm = _stub_video_metadata(source)
-        job_state = JobState(source=stub_vm, crop=CropParams())
+        job_state = JobState(source=stub_vm)
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
@@ -1207,11 +1108,13 @@ class TestEncodingPhaseTiming:
         tmp_path:  Path,
         collector: MagicMock,
     ) -> "EncodingPhase":
-        """Return an ``EncodingPhase`` with pre-wired job, chunking, and optimization deps."""
+        """Return an ``EncodingPhase`` with pre-wired job, probe, chunking, and optimization deps."""
+        from pyqenc.models import CropParams, PhaseOutcome
         from pyqenc.phases.chunking import ChunkingPhase
         from pyqenc.phases.encoding import EncodingPhase
         from pyqenc.phases.job import JobPhase
         from pyqenc.phases.optimization import OptimizationPhase
+        from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 
         config   = _make_config(tmp_path)
         work_dir = tmp_path / "work"
@@ -1219,6 +1122,16 @@ class TestEncodingPhaseTiming:
 
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
+
+        probe_result = ProbePhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            artifacts = [],
+            message   = "ok",
+            source    = None,
+            crop      = CropParams(),
+        )
+        probe_mock = MagicMock(spec=ProbePhase)
+        probe_mock.result = probe_result
 
         chunking_mock = MagicMock(spec=ChunkingPhase)
         chunking_mock.result = self._make_chunking_result(tmp_path)
@@ -1228,6 +1141,7 @@ class TestEncodingPhaseTiming:
 
         phase = EncodingPhase(config, collector=collector)
         phase._job          = job_mock           # type: ignore[assignment]
+        phase._probe        = probe_mock         # type: ignore[assignment]
         phase._chunking     = chunking_mock      # type: ignore[assignment]
         phase._optimization = optimization_mock  # type: ignore[assignment]
         return phase
@@ -1457,7 +1371,7 @@ class TestMergePhaseTiming:
         source = tmp_path / "source.mkv"
         source.write_bytes(b"\x00" * 64)
         stub_vm = _stub_video_metadata(source)
-        job_state = JobState(source=stub_vm, crop=CropParams())
+        job_state = JobState(source=stub_vm)
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,

@@ -1,0 +1,1667 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "Remove `_frame_count: int | None` `PrivateAttr` from `VideoMetadata`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527946535
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528015553
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528078244
+      }
+    ],
+    "Remove `frame_count` `@property` from `VideoMetadata`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527956327
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528083489
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528111175
+      }
+    ],
+    "Remove `_probe_frame_count()` method from `VideoMetadata`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527957115
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528115039
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528150954
+      }
+    ],
+    "Remove `_probe_frame_count_async()` method from `VideoMetadata`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527958223
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528154692
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528213473
+      }
+    ],
+    "Remove `frame_count` serialization from `VideoMetadata.model_dump_full()`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527959096
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528519213
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528766888
+      }
+    ],
+    "Remove `frame_count` deserialization from `VideoMetadata.model_validate_full()`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527959923
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528770911
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528775303
+      }
+    ],
+    "Verify no remaining references to `video_meta.frame_count` or `video_meta._frame_count` on plain `VideoMetadata` instances (grep check)": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527962890
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528780759
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528802605
+      }
+    ],
+    "Add `ExtendedVideoMetadata(VideoMetadata)` to `pyqenc/models.py` with `frame_count: int` field": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527963898
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528807138
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529046192
+      }
+    ],
+    "Implement `ExtendedVideoMetadata.from_base(base, frame_count)` classmethod using `base.model_dump_full()` + `cls.model_validate_full()` — refactor-proof, no manual attr enumeration": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527964704
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529050792
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529055753
+      }
+    ],
+    "Override `model_dump_full()` to include `frame_count`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527965829
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529060260
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529065117
+      }
+    ],
+    "Override `model_validate_full()` to restore `frame_count`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527966981
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529069561
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529073833
+      }
+    ],
+    "Add to public exports in `models.py` as needed": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527968448
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529078343
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529082974
+      }
+    ],
+    "Change `ChunkMetadata` to extend `ExtendedVideoMetadata` instead of `VideoMetadata`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527969030
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529088167
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529557160
+      }
+    ],
+    "Update `ChunkMetadata.model_validate_full()` to handle `frame_count`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527972440
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529562314
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529566653
+      }
+    ],
+    "Update ChunkingPhase `ChunkMetadata` construction: `frame_count=split_result.frame_count or 0`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527976281
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529571086
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529576583
+      }
+    ],
+    "Replace warning at chunking line 290 with check on `frame_count == 0`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527977337
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529581958
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529587318
+      }
+    ],
+    "Update chunking validation sum: `sum(c.frame_count for c in chunks)` (no `or 0` guard needed now)": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527977780
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529592489
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529597662
+      }
+    ],
+    "Add `probe_extended(self) -> ExtendedVideoMetadata` method to `VideoMetadata` in `pyqenc/models.py`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527978040
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529604459
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529972488
+      }
+    ],
+    "Defer `run_ffmpeg` import inside the method body (avoids circular import)": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527978506
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529977664
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529982671
+      }
+    ],
+    "Log `info` before ffmpeg call: `\"Counting source frames: {self.path.name}\"`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527978863
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529987040
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529992504
+      }
+    ],
+    "Use `run_ffmpeg()` (sync) for the null-encode": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527979255
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788529997787
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530002724
+      }
+    ],
+    "Return `ExtendedVideoMetadata.from_base(self, frame_count=result.frame_count)` on success": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527979731
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530007073
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530012240
+      }
+    ],
+    "Return `ExtendedVideoMetadata.from_base(self, frame_count=0)` with warning on failure": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527979973
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530017586
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530022738
+      }
+    ],
+    "Confirm `utils/probe.py` is NOT created": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527980281
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530027222
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530031403
+      }
+    ],
+    "Add `ProbeState(BaseModel)` to `pyqenc/state.py` with `frame_count: int` and `crop: CropParams | None`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527980697
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530039213
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530426064
+      }
+    ],
+    "Implement `ProbeState.to_yaml_dict()`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527981046
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530431300
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530436444
+      }
+    ],
+    "Implement `ProbeState.from_yaml_dict()`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527981448
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530440261
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530443708
+      }
+    ],
+    "Implement `ProbeState.load(path) -> ProbeState | None`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527981822
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530447143
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530450668
+      }
+    ],
+    "Implement `ProbeState.save(path)` with `.tmp`-then-rename protocol": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527982065
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530454239
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530457837
+      }
+    ],
+    "Create `pyqenc/phases/probe.py`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527982430
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788530462351
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788541228083
+      }
+    ],
+    "Define `ProbePhaseResult(PhaseResult)` with `source: ExtendedVideoMetadata | None` and `crop: CropParams`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527983406
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788541235012
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788541239841
+      }
+    ],
+    "Implement `ProbePhase` class with `JobPhase` and `ExtractionPhase` dependencies": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527983628
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788541245894
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788541251625
+      }
+    ],
+    "Implement `ProbePhase.scan()`: load `probe.yaml` → `COMPLETE`; absent → `ABSENT`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527983846
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788541257383
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788541265123
+      }
+    ],
+    "Return `FAILED` when no video extracted; log at `error` level; set `source=None`, `crop=CropParams()`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527984239
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788541270444
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788541275919
+      }
+    ],
+    "Skip if `probe.yaml` has both values and no explicit `--crop` (return `REUSED`)": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527984447
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788541281217
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788541289685
+      }
+    ],
+    "Resolve crop: manual → cached → `detect_crop_parameters()` on extracted video": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527984898
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788541296669
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788541305055
+      }
+    ],
+    "Resolve frame count: cached → `job_result.job.source.probe_extended()`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527985162
+      },
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788541309891
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788592129286
+      }
+    ],
+    "Write `probe.yaml` via `.tmp`-then-rename": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527985413
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788542390099
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788542436716
+      }
+    ],
+    "Return `COMPLETED` with `ProbePhaseResult`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527985644
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788542444117
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788542471075
+      }
+    ],
+    "Add `ProbePhase` to public imports if needed": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527985879
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788542479227
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788542510346
+      }
+    ],
+    "Add `ProbePhase` import (deferred) in `phase.py`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527986078
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788542536616
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788542572140
+      }
+    ],
+    "Add `video_required: bool = True` parameter to `_build_registry()`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527986281
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788542581891
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788543959223
+      }
+    ],
+    "Insert `registry[ProbePhase]` between `ExtractionPhase` and `AudioPhase` in `_build_registry()` (only when registry is for a video-capable subcommand; `audio` subcommand does not include `ProbePhase`)": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527986555
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788543969911
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788543998518
+      }
+    ],
+    "Forward `video_required` to `ExtractionPhase` constructor": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527986790
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788544010458
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788544181119
+      }
+    ],
+    "Move `crop_params` kwarg from `JobPhase` constructor call to `ProbePhase` constructor call": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527987289
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788544191819
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788544232946
+      }
+    ],
+    "Pass `video_required=False` from `process_audio()` / `audio` subcommand path in `api.py`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527987631
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788544242784
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788544277475
+      }
+    ],
+    "Update `_build_registry()` docstring to reflect new phase order and parameters": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527988046
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788544286119
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788544310350
+      }
+    ],
+    "Remove `crop_params` constructor parameter from `JobPhase.__init__()`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527988339
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788544321489
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788544964348
+      }
+    ],
+    "Remove `_resolve_crop()` method from `JobPhase`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527988771
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788544974539
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788544999465
+      }
+    ],
+    "Remove `crop` field from `JobPhaseResult`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527989105
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788545009104
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788545033326
+      }
+    ],
+    "Remove `_ = source.frame_count` line from `_create_or_update_job()`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527989569
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788545045595
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788545367560
+      }
+    ],
+    "Add `logger.info(\"Probing source metadata: %s\", source.path.name)` before the probe block (first-run path only)": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527989947
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788545379359
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788545401402
+      }
+    ],
+    "Add fast-field self-heal: after loading existing `JobState`, if `fps is None or fps <= 0`, re-run `_probe_metadata()` and save": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527990155
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788545409804
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788545435166
+      }
+    ],
+    "Remove `crop` field from `JobState` in `state.py`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527990373
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788545445252
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548498945
+      }
+    ],
+    "Update `JobState.to_yaml_dict()` to not emit `crop`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527990823
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548511743
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548551360
+      }
+    ],
+    "Update `JobState.from_yaml_dict()` to not read `crop` (silently ignore if present in old files)": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527991036
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548559179
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548563779
+      }
+    ],
+    "Add `video_required: bool = True` constructor parameter to `ExtractionPhase`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527991255
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548572101
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548896411
+      }
+    ],
+    "Store as `self._video_required`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527991636
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548904987
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548909608
+      }
+    ],
+    "When `video_required=False`: skip video and timestamp extraction unconditionally; log at `debug` that video is skipped by pipeline mode": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527991872
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548917255
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548922572
+      }
+    ],
+    "When `video_required=True` and `video_tracks` is empty: remove hard-error block; add `info` log `\"No video tracks selected — skipping video extraction\"`; continue with audio/subtitle/chapter/attachment extraction": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527992172
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548932364
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548937885
+      }
+    ],
+    "Gate timestamp extraction on `video_tracks` being non-empty in both cases": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527992371
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548946985
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548952020
+      }
+    ],
+    "Gate video stream extraction loop on `video_tracks` being non-empty in both cases": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527992602
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548959811
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548964413
+      }
+    ],
+    "Verify audio/subtitle/chapter/attachment extraction continues normally in both no-video cases": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527992980
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548971949
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548976926
+      }
+    ],
+    "`state.py` — `OptimizationParams`: replace `crop: CropParams | None` with `probe: ProbeState | None`; update `to_yaml_dict()`, `from_yaml_dict()`, serialization": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527993420
+      },
+      {
+        "executionId": "4e4704f5-f1a9-4963-b447-fdce53ebb323",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788548984508
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788595871081
+      }
+    ],
+    "`state.py` — `EncodingParams`: replace `crop: CropParams | None` with `probe: ProbeState | None`; update serialization": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527993756
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788595878731
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788597520699
+      }
+    ],
+    "`state.py` — `MergeParams`: add `probe: ProbeState | None`; update serialization": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527994038
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788597529450
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788597854861
+      }
+    ],
+    "`OptimizationPhase`: add `ProbePhase` dependency; replace `getattr(job_result, \"crop\", None)` with `probe_result.crop`; replace crop mismatch check with `persisted.probe != current_probe`; update `_ensure_dependencies()` log for ProbePhase failure to use `warning` level": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527994686
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788597862841
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788597893322
+      }
+    ],
+    "`EncodingPhase`: add `ProbePhase` dependency; replace crop source and mismatch check the same way; `warning`-level log for dependency cascade": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527994963
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788597901475
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788597952008
+      }
+    ],
+    "`MergePhase`: add `ProbePhase` dependency; replace crop source; replace `source_video.frame_count` with `probe_result.source.frame_count if probe_result.source else 0`; add probe mismatch detection with warning log; `warning`-level log for dependency cascade": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527995529
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788597960844
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788597967851
+      }
+    ],
+    "`PipelineOrchestrator`: add final summary log at `error` level when any phase returned `FAILED`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527995755
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788597976196
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788597982332
+      }
+    ],
+    "`models.py` — `CropParams.parse()`: split on `\",\"` instead of whitespace": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527996121
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788598300467
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600227538
+      }
+    ],
+    "`models.py` — `CropParams.parse()` docstring: update format description, examples (`\"140,140\"`, `\"140,140,0,0\"`), and error message": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527996489
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600237307
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600241934
+      }
+    ],
+    "`models.py` — `CropParams.__str__()`: use `f\"{self.top},{self.bottom},{self.left},{self.right}\"`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527997254
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600251349
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600558829
+      }
+    ],
+    "`cli.py` — `_add_crop_arguments()` help text: `'top bottom'` → `'top,bottom'`; `'0 0'` → `'0,0'`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527997497
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600568256
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600574492
+      }
+    ],
+    "`cli.py` — `_add_crop_arguments()` metavar: `PARAMS` → `CROP`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527997713
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600579194
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600584574
+      }
+    ],
+    "`cli.py` — epilog/example at line 945: `--crop \"0 0\"` → `--crop \"0,0\"`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527997906
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600592936
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600597668
+      }
+    ],
+    "`measure.py` lines 511, 522 — \"Did you mean\" suggestions: `{top} {bottom}` → `{top},{bottom}`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527998284
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600603360
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600608685
+      }
+    ],
+    "`docs/cli-reference.md` — all crop format references: `\"top bottom\"` → `\"top,bottom\"`, `\"0 0\"` → `\"0,0\"`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527998737
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600614787
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600619784
+      }
+    ],
+    "`docs/architecture.md` — update crop section: crop detection moves to ProbePhase (not Job phase); stored in `probe.yaml` (not `job.yaml`); update the architecture table and the \"Automatic crop detection\" section accordingly": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527999045
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600624565
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600628974
+      }
+    ],
+    "Remove `_add_crop_arguments(p)` call from `_create_audio_subcommand()`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527999272
+      },
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788600638087
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788601830830
+      }
+    ],
+    "Remove `crop_params = _resolve_crop_params(args)` from `_cmd_audio()`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788527999795
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788601839292
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788601844677
+      }
+    ],
+    "Remove `crop_params=crop_params` kwarg from `process_audio()` call in `_cmd_audio()`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528000296
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788601850014
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788601855221
+      }
+    ],
+    "Update `process_audio()` in `api.py` to remove `crop_params` parameter": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528000656
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788601862542
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788601867573
+      }
+    ],
+    "Remove `await source_meta._probe_frame_count_async()` call from MeasurePhase": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528001080
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788602179261
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788602272704
+      }
+    ],
+    "Remove `source_meta._frame_count` private attr access from MeasurePhase": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528001494
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788602285536
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788602290583
+      }
+    ],
+    "Ensure the interval-mode fallback path (when frame_count is unavailable) is reached naturally": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528001739
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788602598339
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788602604076
+      }
+    ],
+    "Verify MeasurePhase tests still pass with the fallback-only path": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528001894
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788602609447
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788602614616
+      }
+    ],
+    "Update `test_job_phase.py`: remove crop-related assertions; update metadata probe expectations": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528002011
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788602625089
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788605493602
+      }
+    ],
+    "Update `test_metrics_integration.py`: remove `detect_crop_parameters` patch; update to use `ProbePhase`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528002179
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788605620923
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788605775318
+      }
+    ],
+    "Update `test_pts_preservation_properties.py`: remove `job_result.crop` mock field": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528002293
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788605830820
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788605939376
+      }
+    ],
+    "Update `test_merge_mkvmerge.py`: remove `job_result.crop` mock field; add `probe_result` mock": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528002407
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788606065795
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788606152739
+      }
+    ],
+    "Add unit tests for `ExtendedVideoMetadata.from_base()`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528002602
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788606303503
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788608676147
+      }
+    ],
+    "Add unit tests for `ProbeState` load/save round-trip": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528002821
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788608805579
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788608965631
+      }
+    ],
+    "Add unit tests for `CropParams.parse()` with comma format; verify old space format raises `ValueError`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528003045
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788609115517
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788609310023
+      }
+    ],
+    "Add unit tests for `ProbePhase.run()`: skip path (no video), cache hit path, full detection path": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528004337
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788609383016
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788609591697
+      }
+    ],
+    "Check `phase-object-model` spec — JobPhase crop detection was a requirement there; note supersession": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528004596
+      },
+      {
+        "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788609924208
+      }
+    ],
+    "Check `pipeline-maturity-refactor` and `pipeline-correctness-refactor` specs for any crop/frame_count references": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528004781
+      }
+    ],
+    "Add cross-spec summary table to top of this spec's `requirements.md` and `design.md`": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528004996
+      }
+    ],
+    "Add a note to `phase-object-model` requirements about crop detection being superseded": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528005905
+      }
+    ],
+    "Update `Completed:` date in both spec files": [
+      {
+        "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788528006271
+      }
+    ],
+    "Implement `ProbePhase.run()`:": [
+      {
+        "executionId": "cdeb441d-0fad-4d1f-aaf2-292c574c4720",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788592131888
+      }
+    ]
+  }
+}

@@ -72,29 +72,6 @@ def _run_ffprobe_streams(path: Path) -> dict | None:
         return None
 
 
-def _run_ffmpeg_null(path: Path) -> tuple[int | None, list[str]]:
-    """Run ``ffmpeg -c copy -f null`` and return ``(frame_count, stderr_lines)``.
-
-    Returns ``(None, stderr_lines)`` on failure.
-    """
-    from pyqenc.utils.ffmpeg_runner import (
-        run_ffmpeg,  # deferred to avoid circular import
-    )
-
-    cmd: list[str | os.PathLike] = [
-        "ffmpeg",
-        "-i",   path,
-        "-map", "0:v:0",
-        "-c",   "copy",
-        "-f",   "null",
-        "-",
-    ]
-    try:
-        result = run_ffmpeg(cmd, output_file=None)
-        return result.frame_count, result.stderr_lines
-    except Exception:
-        return None, []
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -468,24 +445,23 @@ class CodecConfig(BaseModel):
 class VideoMetadata(BaseModel):
     """Metadata about a video file with transparent lazy-loading.
 
-    Probe-derived fields (``duration_seconds``, ``fps``, ``resolution``,
-    ``frame_count``) are exposed as properties backed by ``PrivateAttr``
-    fields.  On first access each property triggers the appropriate probe
-    call and caches the result so subsequent accesses are free.
+    Fast-probe fields (``duration_seconds``, ``fps``, ``fps_fraction``,
+    ``resolution``, ``pix_fmt``, ``file_size_bytes``) are exposed as
+    properties backed by ``PrivateAttr`` fields.  On first access each
+    property triggers ``_probe_metadata()`` and caches the result so
+    subsequent accesses are free.
 
-    Two probe strategies are used:
+    Only one probe strategy is used here:
 
     * ``_probe_metadata()`` — fast ``ffprobe -show_streams -show_format``
-      (~175 ms).  Populates ``duration_seconds``, ``fps``, and
-      ``resolution`` in a single call.
-    * ``_probe_frame_count()`` — slower ``ffmpeg -c copy -f null``
-      (~2-3 s).  Populates ``frame_count`` and opportunistically fills
-      ``duration_seconds`` / ``fps`` / ``resolution`` from stderr if they
-      are still ``None``.
+      (~175 ms).  Populates ``duration_seconds``, ``fps``, ``fps_fraction``,
+      ``resolution``, and ``pix_fmt`` in a single call.
 
-    Callers never need to know whether a value was cached or freshly
-    fetched.  Pass the same instance through all phases to reuse cached
-    values.
+    Frame count is intentionally absent — it requires a slow null-encode
+    (seconds to ~15 minutes on large UHD sources) and is provided by
+    ``probe_extended()``, which returns an ``ExtendedVideoMetadata``.
+
+    Pass the same instance through all phases to reuse cached values.
 
     Attributes:
         path: Path to the video file.
@@ -497,7 +473,6 @@ class VideoMetadata(BaseModel):
 
     # Backing fields — populated lazily or via populate_from_* helpers.
     _duration_seconds: float    | None = PrivateAttr(default=None)
-    _frame_count:      int      | None = PrivateAttr(default=None)
     _fps:              float    | None = PrivateAttr(default=None)
     _fps_fraction:     Fraction | None = PrivateAttr(default=None)
     _resolution:       str      | None = PrivateAttr(default=None)
@@ -544,13 +519,6 @@ class VideoMetadata(BaseModel):
         return self._pix_fmt
 
     @property
-    def frame_count(self) -> int | None:
-        """Total frame count; probed via null-encode on first access (~2-3 s)."""
-        if self._frame_count is None:
-            self._probe_frame_count()
-        return self._frame_count
-
-    @property
     def file_size_bytes(self) -> int | None:
         """File size in bytes; read from filesystem on first access."""
         if self._file_size_bytes is None:
@@ -575,50 +543,30 @@ class VideoMetadata(BaseModel):
             return
         self.populate_from_ffprobe(data)
 
-    def _probe_frame_count(self) -> None:
-        """Populate frame_count via ``ffmpeg -c copy -f null``.
+    def probe_extended(self) -> "ExtendedVideoMetadata":
+        """Run the slow null-encode probe and return an ExtendedVideoMetadata.
 
-        Also opportunistically fills duration/fps/resolution from stderr
-        if they are still ``None``.
+        Runs ``ffmpeg -i {path} -map 0:v:0 -c copy -f null -`` to count frames.
+        This can take seconds to ~15 minutes on large UHD sources.
+        Call only when frame count is genuinely needed and the cost is acceptable.
+
+        Returns:
+            ``ExtendedVideoMetadata`` with frame_count populated (0 on failure).
         """
-        frame_count, stderr_lines = _run_ffmpeg_null(self.path)
-        if frame_count is None:
-            logger.warning("Could not determine frame count for %s", self.path)
-        else:
-            self._frame_count = frame_count
-        # Opportunistically fill remaining fields from stderr
-        if self._duration_seconds is None or self._fps is None or self._resolution is None:
-            self.populate_from_ffmpeg_output(stderr_lines)
+        from pyqenc.utils.ffmpeg_runner import run_ffmpeg  # deferred — circular import
 
-    async def _probe_frame_count_async(self) -> None:
-        """Async variant of ``_probe_frame_count`` — safe to call from a running event loop.
-
-        Uses ``run_ffmpeg_async`` directly to avoid the sync-in-async deadlock.
-        Also opportunistically fills duration/fps/resolution from stderr.
-        """
-        import os as _os
-
-        from pyqenc.utils.ffmpeg_runner import run_ffmpeg_async
-
-        cmd: list[str | _os.PathLike] = [
-            "ffmpeg",
-            "-i",   self.path,
-            "-map", "0:v:0",
-            "-c",   "copy",
-            "-f",   "null",
-            "-",
+        logger.info("Counting source frames: %s", self.path.name)
+        cmd: list[str | os.PathLike] = [
+            "ffmpeg", "-i", self.path,
+            "-map", "0:v:0", "-c", "copy", "-f", "null", "-",
         ]
-        try:
-            result = await run_ffmpeg_async(cmd, output_file=None)
-            if result.frame_count is None:
-                logger.warning("Could not determine frame count for %s", self.path)
-            else:
-                self._frame_count = result.frame_count
-            if self._duration_seconds is None or self._fps is None or self._resolution is None:
-                self.populate_from_ffmpeg_output(result.stderr_lines)
-        except Exception as exc:
-            logger.warning("Async frame count probe failed for %s: %s", self.path, exc)
-
+        result = run_ffmpeg(cmd, output_file=None)
+        if result.frame_count is None:
+            logger.warning(
+                "Could not determine frame count for %s — using 0", self.path.name
+            )
+            return ExtendedVideoMetadata.from_base(self, frame_count=0)
+        return ExtendedVideoMetadata.from_base(self, frame_count=result.frame_count)
 
     def populate_from_ffprobe(self, data: dict) -> None:
         """Fill backing fields from a pre-parsed ffprobe JSON dict.
@@ -688,24 +636,12 @@ class VideoMetadata(BaseModel):
 
             Duration: 01:30:00.04, start: 0.000000, bitrate: ...
             Stream #0:0: Video: ..., 1920x1080, 24 fps, ...
-            frame=  196 fps= 66 q=-0.0 Lsize= ...
 
         Only fills fields that are currently ``None``.
 
         Args:
             stderr_lines: Lines from ffmpeg stderr.
         """
-        # Parse frame count from the last "frame=N" progress line (reverse scan).
-        if self._frame_count is None:
-            for line in reversed(stderr_lines):
-                m = re.search(r"frame=\s*(\d+)", line)
-                if m:
-                    try:
-                        self._frame_count = int(m.group(1))
-                    except (ValueError, TypeError):
-                        pass
-                    break
-
         for line in stderr_lines:
             # Duration line: "  Duration: HH:MM:SS.ss, ..."
             if self._duration_seconds is None:
@@ -753,7 +689,6 @@ class VideoMetadata(BaseModel):
         #  - allows to omit None fields.
         for key, value in [
             ("duration_seconds", self._duration_seconds),
-            ("frame_count",      self._frame_count),
             ("fps",              self._fps),
             ("resolution",       self._resolution),
             ("pix_fmt",          self._pix_fmt),
@@ -772,7 +707,6 @@ class VideoMetadata(BaseModel):
         # Manual private fields deserialization override:
         #  - allows not to trigger lazy-loading properties, while properly restoring the state.
         instance._duration_seconds = data.get("duration_seconds")
-        instance._frame_count      = data.get("frame_count")
         instance._fps              = data.get("fps")
         instance._resolution       = data.get("resolution")
         instance._pix_fmt          = data.get("pix_fmt")
@@ -783,8 +717,71 @@ class VideoMetadata(BaseModel):
         return instance
 
 
-class ChunkMetadata(VideoMetadata):
-    """VideoMetadata for a video chunk, adding timestamp-based identification.
+class ExtendedVideoMetadata(VideoMetadata):
+    """VideoMetadata with a guaranteed frame count.
+
+    Only constructed when ``frame_count`` is already known — either from
+    ``ProbePhase`` (source) or from ffmpeg progress output (chunks).
+    Never triggers a probe on construction.
+
+    The sentinel value ``0`` means "could not determine" — no valid video
+    has zero frames.
+
+    Attributes:
+        frame_count: Number of frames; required, ``0`` means unknown.
+    """
+
+    frame_count: int
+
+    @classmethod
+    def from_base(
+        cls,
+        base:        VideoMetadata,
+        frame_count: int,
+    ) -> "ExtendedVideoMetadata":
+        """Construct from an existing ``VideoMetadata`` plus a known frame count.
+
+        Transfers all cached private attrs from ``base`` via
+        ``base.model_dump_full()`` / ``cls.model_validate_full()`` so the
+        method is automatically correct when ``VideoMetadata`` gains new
+        fields — no manual attr enumeration needed here.
+
+        Args:
+            base:        Source ``VideoMetadata`` instance (cached state is copied).
+            frame_count: Known frame count; use ``0`` when count is unavailable.
+
+        Returns:
+            A new ``ExtendedVideoMetadata`` with all cached attrs from ``base``
+            and the supplied ``frame_count``.
+        """
+        data = base.model_dump_full()
+        data["frame_count"] = frame_count
+        return cls.model_validate_full(data)
+
+    def model_dump_full(self) -> dict:
+        """Serialize including ``frame_count`` and all inherited cached private fields."""
+        base = super().model_dump_full()
+        base["frame_count"] = self.frame_count
+        return base
+
+    @classmethod
+    def model_validate_full(cls, data: dict) -> "ExtendedVideoMetadata":
+        """Restore an ``ExtendedVideoMetadata`` from a ``model_dump_full()`` dict."""
+        instance = cls.model_validate(data)
+        # Restore inherited private backing fields — mirrors VideoMetadata.model_validate_full().
+        instance._duration_seconds = data.get("duration_seconds")
+        instance._fps              = data.get("fps")
+        instance._resolution       = data.get("resolution")
+        instance._pix_fmt          = data.get("pix_fmt")
+        instance._file_size_bytes  = data.get("file_size_bytes")
+        fps_frac = data.get("fps_fraction")
+        if isinstance(fps_frac, list) and len(fps_frac) == 2:
+            instance._fps_fraction = Fraction(int(fps_frac[0]), int(fps_frac[1]))
+        return instance
+
+
+class ChunkMetadata(ExtendedVideoMetadata):
+    """ExtendedVideoMetadata for a video chunk, adding timestamp-based identification.
 
     The ``chunk_id`` is derived from the timestamp range using
     ``_chunk_name_duration(start_timestamp, end_timestamp)``.
@@ -798,21 +795,6 @@ class ChunkMetadata(VideoMetadata):
     chunk_id:        str
     start_timestamp: float
     end_timestamp:   float
-
-    @classmethod
-    def model_validate_full(cls, data: dict) -> "ChunkMetadata":
-        """Restore a ``ChunkMetadata`` from a ``model_dump_full()`` dict."""
-        instance = cls.model_validate(data)
-        instance._duration_seconds = data.get("duration_seconds")
-        instance._frame_count      = data.get("frame_count")
-        instance._fps              = data.get("fps")
-        instance._resolution       = data.get("resolution")
-        instance._pix_fmt          = data.get("pix_fmt")
-        instance._file_size_bytes  = data.get("file_size_bytes")
-        fps_frac = data.get("fps_fraction")
-        if isinstance(fps_frac, list) and len(fps_frac) == 2:
-            instance._fps_fraction = Fraction(int(fps_frac[0]), int(fps_frac[1]))
-        return instance
 
 
 # ---------------------------------------------------------------------------
@@ -900,7 +882,7 @@ class CropParams(BaseModel):
 
     def __str__(self) -> str:
         """String representation for storage and display."""
-        return f"{self.top} {self.bottom} {self.left} {self.right}"
+        return f"{self.top},{self.bottom},{self.left},{self.right}"
 
     def display(self) -> str:
         """String representation for display."""
@@ -908,15 +890,15 @@ class CropParams(BaseModel):
 
     @staticmethod
     def parse(crop_str: str) -> "CropParams":
-        """Parse from string format.
+        """Parse from comma-separated string format.
 
-        Accepts 2 or 4 values:
+        Accepts 2 or 4 comma-separated values:
 
-        - 2 values: ``top bottom`` (left and right default to 0)
-        - 4 values: ``top bottom left right``
+        - 2 values: ``top,bottom`` (left and right default to 0)
+        - 4 values: ``top,bottom,left,right``
 
         Args:
-            crop_str: Crop string like ``"140 140"`` or ``"140 140 0 0"``.
+            crop_str: Crop string like ``"140,140"`` or ``"140,140,0,0"``.
 
         Returns:
             CropParams instance.
@@ -925,12 +907,12 @@ class CropParams(BaseModel):
             ValueError: If format is invalid.
 
         Examples:
-            >>> CropParams.parse("140 140")
+            >>> CropParams.parse("140,140")
             CropParams(top=140, bottom=140, left=0, right=0)
-            >>> CropParams.parse("140 140 0 0")
+            >>> CropParams.parse("140,140,0,0")
             CropParams(top=140, bottom=140, left=0, right=0)
         """
-        parts = crop_str.split()
+        parts = crop_str.split(",")
         if len(parts) == 2:
             return CropParams(top=int(parts[0]), bottom=int(parts[1]), left=0, right=0)
         elif len(parts) == 4:
@@ -942,6 +924,6 @@ class CropParams(BaseModel):
             )
         else:
             raise ValueError(
-                f"Invalid crop format: '{crop_str}'. Expected 2 or 4 values "
-                f"(e.g., '140 140' or '140 140 0 0')"
+                f"Invalid crop format: '{crop_str}'. Expected 2 or 4 comma-separated values "
+                f"(e.g., '140,140' or '140,140,0,0')"
             )

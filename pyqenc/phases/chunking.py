@@ -183,7 +183,7 @@ def split_chunks(
     recovery:      ChunkingRecovery,
     chunking_mode: ChunkingMode = ChunkingMode.LOSSLESS,
     *,
-    collector:     "MetricsCollector",
+    collector:     MetricsCollector,
 ) -> list[ChunkMetadata]:
     """Split the source video into chunks using scene boundaries.
 
@@ -264,10 +264,11 @@ def split_chunks(
             logger.debug("Splitting chunk %s (%.3fs)", stem, duration)
 
             chunk_meta = ChunkMetadata(
-                path=chunk_file,
-                chunk_id=stem,
-                start_timestamp=start_ts,
-                end_timestamp=end_ts,
+                path            = chunk_file,
+                chunk_id        = stem,
+                start_timestamp = start_ts,
+                end_timestamp   = end_ts,
+                frame_count     = 0,
             )
             split_result = run_ffmpeg(cmd, output_file=chunk_file, video_meta=chunk_meta)
 
@@ -284,10 +285,11 @@ def split_chunks(
                 advance(end_ts - start_ts)
                 continue
 
-            # Set duration from the known timestamp range
+            # Set duration and frame count from the known range / ffmpeg output
             chunk_meta._duration_seconds = end_ts - start_ts
+            chunk_meta.frame_count = split_result.frame_count or 0
 
-            if chunk_meta._frame_count is None:
+            if chunk_meta.frame_count == 0:
                 logger.warning("Frame count not found in ffmpeg output for chunk %s", stem)
 
             # Write chunk sidecar (Req 5.5)
@@ -329,19 +331,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pyqenc.metrics import MetricsCollector
     from pyqenc.phase import Phase, PhaseResult
-    from pyqenc.phases.extraction import ExtractionPhase
-    from pyqenc.phases.job import JobPhase, JobPhaseResult
 
 from pyqenc.constants import (
     CHUNKS_DIR,
     EXTRACTED_DIR,
     TEMP_SUFFIX,
     THICK_LINE,
-    THIN_LINE,
 )
-from pyqenc.models import PhaseOutcome
 from pyqenc.phase import Artifact, Phase, PhaseResult
-from pyqenc.state import ArtifactState, ChunkingParams
 from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
 
 _CHUNKING_YAML     = "chunking.yaml"
@@ -412,10 +409,10 @@ class ChunkingPhase:
 
     def __init__(
         self,
-        config:    "AppConfig",
-        phases:    "dict[type[Phase], Phase] | None" = None,
+        config:    AppConfig,
+        phases:    dict[type[Phase], Phase] | None = None,
         *,
-        collector: "MetricsCollector",
+        collector: MetricsCollector,
     ) -> None:
         from typing import cast
 
@@ -423,12 +420,12 @@ class ChunkingPhase:
         from pyqenc.phases.job import JobPhase as _JobPhase
 
         self._config    = config
-        self._collector: "MetricsCollector" = collector
-        self._job:        "_JobPhase | None"        = cast(_JobPhase,        phases.get(_JobPhase))        if phases else None
-        self._extraction: "_ExtractionPhase | None" = cast(_ExtractionPhase, phases.get(_ExtractionPhase)) if phases else None
+        self._collector: MetricsCollector = collector
+        self._job:        _JobPhase | None        = cast(_JobPhase,        phases.get(_JobPhase))        if phases else None
+        self._extraction: _ExtractionPhase | None = cast(_ExtractionPhase, phases.get(_ExtractionPhase)) if phases else None
         self.params       = ChunkingParams(chunking_mode=config.chunking.mode.value, scenes=[])
-        self.result:      "ChunkingPhaseResult | None" = None
-        self.dependencies: "list[Phase]"            = [d for d in [self._job, self._extraction] if d is not None]
+        self.result:      ChunkingPhaseResult | None = None
+        self.dependencies: list[Phase]            = [d for d in [self._job, self._extraction] if d is not None]
         # Set by _recover() when a chunking-mode mismatch is detected
         self._mode_mismatch_error:    str  = ""
         self._mode_changed_force_wipe: bool = False
@@ -437,7 +434,7 @@ class ChunkingPhase:
     # Public Phase interface
     # ------------------------------------------------------------------
 
-    def scan(self) -> "ChunkingPhaseResult":
+    def scan(self) -> ChunkingPhaseResult:
         """Classify existing chunk artifacts without executing any work.
 
         Returns:
@@ -471,7 +468,7 @@ class ChunkingPhase:
         )
         return self.result
 
-    def run(self, dry_run: bool = False) -> "ChunkingPhaseResult":
+    def run(self, dry_run: bool = False) -> ChunkingPhaseResult:
         """Recover, detect scenes if needed, split pending chunks, cache result.
 
         Sequence:
@@ -561,7 +558,7 @@ class ChunkingPhase:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _ensure_dependencies(self, execute: bool) -> "ChunkingPhaseResult | None":
+    def _ensure_dependencies(self, execute: bool) -> ChunkingPhaseResult | None:
         """Scan/run dependencies if they have no cached result; fail fast if incomplete.
 
         Args:
@@ -747,7 +744,7 @@ class ChunkingPhase:
 
         return artifacts
 
-    def _execute_chunking(self, artifacts: list[ChunkArtifact]) -> "ChunkingPhaseResult":
+    def _execute_chunking(self, artifacts: list[ChunkArtifact]) -> ChunkingPhaseResult:
         """Detect scenes if needed and split pending chunks.
 
         Args:
@@ -848,7 +845,7 @@ class ChunkingPhase:
                 state = ArtifactState.COMPLETE,
             ))
 
-        total_frames = sum(c._frame_count or 0 for c in chunk_metas)
+        total_frames = sum(c.frame_count for c in chunk_metas)
         logger.info(
             "%s Chunking complete: %d chunk(s), %d total frames.",
             "✔", len(chunk_metas), total_frames,

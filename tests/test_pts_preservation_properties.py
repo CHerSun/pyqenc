@@ -302,7 +302,6 @@ def test_frame_count_preservation(frame_count: int) -> None:
 
         job_result = MagicMock()
         job_result.force_wipe = False
-        job_result.crop = None
         job_result.job = None
         job_result.work_dir = tmp_path
         job_result.source   = tmp_path / "source.mkv"

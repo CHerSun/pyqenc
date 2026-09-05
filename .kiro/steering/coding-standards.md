@@ -15,6 +15,7 @@
 - Follow DRY. If code is repeated 2-3+ times — make it reusable.
 - Follow rule of three — if there are 3+ similar entities, define a common interface (`Protocol` or base class) to unify the API.
 - Clean, self-explanatory code is preferable over patterns-for-patterns'-sake.
+- Disowned functions are strongly discouraged. Mechanics should be owned by the related class, not written as standalone functions operating on external state.
 
 ## API & Architecture
 
@@ -42,8 +43,8 @@
 
 Detailed logging is a MUST, separated by levels:
 
-- `debug` — hidden by default, implementation details
-- `info` — end-user notifications, progress milestones
+- `debug` — hidden by default, implementation details, internal steps.
+- `info` — end-user notifications, progress milestones, starts of long-running processes.
 - `warning` — non-critical issues that allow continuation
 - `error` — failures that prevent a specific operation but not the whole run
 - `critical` — failures that prevent the program from doing any useful work

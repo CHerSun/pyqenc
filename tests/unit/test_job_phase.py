@@ -22,7 +22,6 @@ import yaml
 from pyqenc.app_config import load_app_config
 from pyqenc.models import (
     CleanupLevel,
-    CropParams,
     PhaseOutcome,
     QualityTarget,
     VideoMetadata,
@@ -50,7 +49,6 @@ def _make_phase(
     tmp_path: Path,
     source: Path,
     force: bool = False,
-    crop_params: CropParams | None = None,
 ) -> JobPhase:
     config = _APP_CONFIG.model_copy(deep=True)
     return JobPhase(
@@ -61,7 +59,6 @@ def _make_phase(
         cleanup     = CleanupLevel.NONE,
         no_metrics  = True,
         collector   = MagicMock(),
-        crop_params = crop_params,
     )
 
 
@@ -182,13 +179,6 @@ class TestJobPhaseRunExecuteNoMismatch:
         result = phase.run(dry_run=False)
         assert result.is_complete is True
         assert result.force_wipe is False
-
-    def test_manual_crop_stored_in_result(self, tmp_path: Path) -> None:
-        src = _make_source(tmp_path)
-        crop = CropParams(top=28, bottom=28, left=0, right=0)
-        phase = _make_phase(tmp_path, src, crop_params=crop)
-        result = phase.run(dry_run=False)
-        assert result.crop == crop
 
 
 # ---------------------------------------------------------------------------

@@ -6,8 +6,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-from os import PathLike
-from pathlib import Path
 
 from pyqenc.models import CropParams, VideoMetadata
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
@@ -46,11 +44,7 @@ def detect_crop_parameters(
         # Distribute samples across the middle 80 % of the video
         start_time  = duration * 0.1
         step        = duration * 0.8 / (sample_count - 1) if sample_count > 1 else 0
-        step_frames = (
-            int(video_file.frame_count * 0.8 / sample_count) if video_file.frame_count
-            else int(step * video_file.fps)                   if video_file.fps
-            else 0
-        )
+        step_frames = int(step * video_file.fps) if video_file.fps else 0
         step_frames = max(min(step_frames, 500), 30)
 
         cmd: list[str | os.PathLike] = [

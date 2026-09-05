@@ -1,0 +1,187 @@
+---
+query: fix errors in your generated diagram Untitled-1
+references:
+  - |+
+    Reference: <skills>
+    Here is a list of skills that contain domain specific knowledge on a variety of topics.
+    Each skill comes with a description of the topic and a file path that contains the detailed instructions.
+    When a user asks you to perform a task that falls within the domain of a skill, use the #tool:read/readFile tool to acquire the full instructions from the file URI.
+    <skill>
+    <name>project-setup-info-local</name>
+    <description>Comprehensive setup steps to help the user create complete project structures in a VS Code workspace; this tool is designed for full project initialization and scaffolding, not for creating individual files. When to use this tool: user wants to create a new complete project from scratch; setting up entire project frameworks (TypeScript projects, React apps, Node.js servers, etc.); initializing Model Context Protocol (MCP) servers with full structure; creating VS Code extensions with proper scaffolding; setting up Next.js, Vite, or other framework-based projects; user asks for "new project", "create a workspace", "set up a [framework] project"; need to establish a complete development environment with dependencies, config files, and folder structure. When NOT to use this tool: creating single files or small code snippets; adding individual files to existing projects; making modifications to existing codebases; user asks to "create a file" or "add a component"; simple code examples or demonstrations; debugging </description>
+    <file>c:\Users\CHerSun\AppData\Local\Programs\Microsoft VS Code\a44adf7f53\resources\app\extensions\copilot\assets\prompts\skills\project-setup-info-local\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>get-search-view-results</name>
+    <description>Get the current search results from the Search view in VS Code</description>
+    <file>c:\Users\CHerSun\AppData\Local\Programs\Microsoft VS Code\a44adf7f53\resources\app\extensions\copilot\assets\prompts\skills\get-search-view-results\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>agent-customization</name>
+    <description>**WORKFLOW SKILL** — Create, update, review, fix, or debug VS Code agent customization files (.instructions.md, .prompt.md, .agent.md, SKILL.md, copilot-instructions.md, AGENTS.md). USE FOR: saving coding preferences; troubleshooting why instructions/skills/agents are ignored or not invoked; configuring applyTo patterns; defining tool restrictions; creating custom agent modes or specialized workflows; packaging domain knowledge; fixing YAML frontmatter syntax. DO NOT USE FOR: general coding questions (use default agent); runtime debugging or error diagnosis; MCP server configuration (use MCP docs directly); VS Code extension development. INVOKES: file system tools (read/write customization files), ask-questions tool (interview user for requirements), subagents for codebase exploration. FOR SINGLE OPERATIONS: For quick YAML frontmatter fixes or creating a single file from a known pattern, edit the file directly — no skill needed.</description>
+    <file>c:\Users\CHerSun\AppData\Local\Programs\Microsoft VS Code\a44adf7f53\resources\app\extensions\copilot\assets\prompts\skills\agent-customization\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>chronicle</name>
+    <description>Analyze Copilot session history for standup reports, usage tips, session search, and session reindexing. Use when the user asks for a standup, daily summary, usage tips, workflow recommendations, wants to search or find past sessions by keyword/file/PR, wants to reindex their session store, or asks about deleting session data.</description>
+    <file>c:\Users\CHerSun\AppData\Local\Programs\Microsoft VS Code\a44adf7f53\resources\app\extensions\copilot\assets\prompts\skills\chronicle\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>summarize-github-issue-pr-notification</name>
+    <description>Summarizes the content of a GitHub issue, pull request (PR), or notification, providing a concise overview of the main points and key details. ALWAYS use the skill when asked to summarize an issue, PR, or notification.</description>
+    <file>c:\Users\CHerSun\.vscode\extensions\github.vscode-pull-request-github-0.164.0\src\lm\skills\summarize-github-issue-pr-notification\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>suggest-fix-issue</name>
+    <description>Given the details of an issue, suggests a fix for the issue.</description>
+    <file>c:\Users\CHerSun\.vscode\extensions\github.vscode-pull-request-github-0.164.0\src\lm\skills\suggest-fix-issue\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>form-github-search-query</name>
+    <description>Forms a GitHub search query based on a natural language query and the type of search (issue or PR). This skill helps users create effective search queries to find relevant issues or pull requests on GitHub.</description>
+    <file>c:\Users\CHerSun\.vscode\extensions\github.vscode-pull-request-github-0.164.0\src\lm\skills\form-github-search-query\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>show-github-search-result</name>
+    <description>Summarizes the results of a GitHub search query in a human friendly markdown table that is easy to read and understand. ALWAYS use this skill when displaying the results of a GitHub search query.</description>
+    <file>c:\Users\CHerSun\.vscode\extensions\github.vscode-pull-request-github-0.164.0\src\lm\skills\show-github-search-result\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>address-pr-comments</name>
+    <description>Address review comments (including Copilot comments) on the active pull request. Use when: responding to PR feedback, fixing review comments, resolving PR threads, implementing requested changes from reviewers, addressing code review, fixing PR issues.</description>
+    <file>c:\Users\CHerSun\.vscode\extensions\github.vscode-pull-request-github-0.164.0\src\lm\skills\address-pr-comments\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>create-pull-request</name>
+    <description>Create a GitHub Pull Request from the current or specified branch. Use when: opening a PR, submitting code for review, creating a draft PR, publishing a branch as a pull request, proposing changes to a repository.</description>
+    <file>c:\Users\CHerSun\.vscode\extensions\github.vscode-pull-request-github-0.164.0\src\lm\skills\create-pull-request\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>python-fact-grounded-coding</name>
+    <description>Use when the user explicitly asks for the Python fact-grounded coding skill, or when a Python coding, debugging, explanation, or bug-fix task should be grounded in verified Pylance facts, runtime values, diagnostics, selected interpreter state, tests, or debugger evidence before changing code or reporting a conclusion.</description>
+    <file>c:\Users\CHerSun\.vscode\extensions\ms-python.vscode-pylance-2026.3.102\skills\python-fact-grounded-coding\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>python-type-inference</name>
+    <description>Use when the user explicitly asks for the Python type inference skill, or when a task needs the single correct type for a specific Python symbol — a function return, parameter, module-level value, or class/instance field — and that type must be verified against real code rather than guessed. This is the shared core used by the type-annotation and stub-writing skills.</description>
+    <file>c:\Users\CHerSun\.vscode\extensions\ms-python.vscode-pylance-2026.3.102\skills\python-type-inference\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>python-add-type-annotations</name>
+    <description>Use when the user explicitly asks for the Python type annotation skill, or when they want to make their own Python source type-safe by adding inline type annotations to one file, a set of files, or a package/workspace in bulk — annotating function return types, parameters, module-level and class-level variables/constants (including dataclass and similar fields), validating diagnostics against a baseline, and reporting newly surfaced type errors.</description>
+    <file>c:\Users\CHerSun\.vscode\extensions\ms-python.vscode-pylance-2026.3.102\skills\python-add-type-annotations\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>python-write-stubs</name>
+    <description>Use when the user explicitly asks for the Python stub-writing skill, wants to create or improve `.pyi` type stubs for a third-party Python package, or needs partial stubs under a workspace `typings/` directory without modifying installed package source. Generates stubs through Pylance, resolves uncertain types with the Python type-inference skill, and validates public API, diagnostics, runtime compatibility, and type completeness.</description>
+    <file>c:\Users\CHerSun\.vscode\extensions\ms-python.vscode-pylance-2026.3.102\skills\python-write-stubs\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>pylance-docs</name>
+    <description>Use when the user explicitly asks for the Pylance docs skill, or when an answer depends on current official Pylance documentation for settings, diagnostics, configuration, troubleshooting, feature behavior, or supported workflows.</description>
+    <file>c:\Users\CHerSun\.vscode\extensions\ms-python.vscode-pylance-2026.3.102\skills\pylance-docs\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>pylance-refactoring</name>
+    <description>Use when the user explicitly asks for the Pylance refactoring skill, or when they want named automated Python refactorings applied to one file, many files, a workspace, a folder subset, or a composed cleanup workflow such as workspace-wide unused-import cleanup, wildcard-import conversion followed by unused-import cleanup, inferred type annotations, or Pylance fix-all.</description>
+    <file>c:\Users\CHerSun\.vscode\extensions\ms-python.vscode-pylance-2026.3.102\skills\pylance-refactoring\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>pylance-python-profiling</name>
+    <description>Use when the user wants to profile Python code with Pylance: capture CPU time (Tachyon), trace calls (sys.monitoring), or memory (Memray); profile a whole run or a specific region between two source locations; add sub-region markers; and explore the resulting profile (hot functions, call trees, time slices). Also use for the 3.15+ interpreter requirement and related error guidance.</description>
+    <file>c:\Users\CHerSun\.vscode\extensions\ms-python.vscode-pylance-2026.3.102\skills\pylance-python-profiling\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>add-python-version-support</name>
+    <description>Guide changes required when a project adds a newer Python version above its current tested ceiling while preserving its existing minimum. Use when asked to support, test, certify, or prepare for a newer Python release at the upper end of the support range without dropping existing runtimes.</description>
+    <file>c:\Users\CHerSun\.vscode\extensions\ms-python.vscode-pylance-2026.3.102\skills\add-python-version-support\SKILL.md</file>
+    </skill>
+    <skill>
+    <name>drop-python-version-support</name>
+    <description>Guide changes required when a project drops one or more oldest supported Python versions and raises its minimum supported version. Use when asked to remove the oldest supported runtimes, raise the minimum Python requirement, modernize code after raising the Python floor, or upgrade/migrate by replacing older runtimes.</description>
+    <file>c:\Users\CHerSun\.vscode\extensions\ms-python.vscode-pylance-2026.3.102\skills\drop-python-version-support\SKILL.md</file>
+    </skill>
+    </skills>
+
+
+    <agents>
+    Here is a list of agents that can be used when running a subagent.
+    Each agent has optionally a description with the agent's purpose and expertise. When asked to run a subagent, choose the most appropriate agent from this list.
+    Use the #tool:agent/runSubagent tool with the agent name to run the subagent.
+    <agent>
+    <name>Explore</name>
+    <description>Fast read-only codebase exploration and Q&amp;A subagent. Prefer over manually chaining multiple search and file-reading operations to avoid cluttering the main conversation. Safe to call in parallel. Specify thoroughness: quick, medium, or thorough.</description>
+    <argumentHint>Describe WHAT you're looking for and desired thoroughness (quick/medium/thorough)</argumentHint>
+    </agent>
+    </agents>
+
+generationTime: 2026-09-05T18:07:42.926Z
+---
+flowchart TD
+    A(["CLI main()"]) --> B["Parse subcommand and arguments"]
+    B --> C{"Command type"}
+
+    C -->|Pipeline command| D["Build AppConfig and apply CLI overrides"]
+    C -->|Measure command| M["Validate source and target videos"]
+
+    D --> E["Resolve crop parameters"]
+    E --> F["Call public API function"]
+    F --> G{"Source exists"}
+
+    G -->|No| H["Log failure and return exit code 1"]
+    G -->|Yes| I["Build phase registry and work directory"]
+
+    I --> J["Execute target phase"]
+    J --> K{"Dependencies complete"}
+
+    K -->|No| H
+    K -->|Yes| L["Run pipeline phase chain"]
+
+    L --> L1["Job phase"]
+    L1 --> L2["Probe and extraction phases"]
+    L2 --> L3["Chunking phase"]
+    L3 --> O["Optimization phase"]
+
+    O --> P{"Optimization enabled"}
+    P -->|No| Q["Select all configured strategies"]
+    P -->|Yes| R{"Cached results valid"}
+
+    R -->|Yes| S["Reuse or reselect cached strategies"]
+    R -->|No| T["Select representative chunks"]
+
+    T --> U["Run strategy test encodes"]
+    U --> V["Compare encoded file sizes"]
+    V --> W["Apply tolerance and persist optimization.yaml"]
+
+    Q --> X["Encoding phase"]
+    S --> X
+    W --> X
+
+    X --> Y["Evaluate chunk quality"]
+    Y --> Y1["Generate PSNR, SSIM, VMAF, and VIF metrics"]
+    Y1 --> Y2["Parse and normalize metric data"]
+    Y2 --> Y3{"Quality targets met"}
+
+    Y3 -->|No| Y4["Adjust quality and repeat encoding attempt"]
+    Y4 --> Y
+    Y3 -->|Yes| Z["Store winning encoded chunks"]
+
+    Z --> AA["Process audio phase"]
+    AA --> AB["Merge encoded chunks and audio"]
+    AB --> AC["Return phase or pipeline result"]
+
+    M --> MD["Run standalone quality measurement"]
+    MD --> ME["Generate metrics and screenshots"]
+    ME --> MF["Create quality plots and return MeasureResult"]
+
+    Y1 -.-> MG["MetricsCollector time() and step()"]
+    MG --> MH{"Flush interval reached"}
+    MH -->|Yes| MI[("metrics.yaml")]
+    MH -->|No| MG
+
+    E -.-> N["Automatic crop detection"]
+    N -.-> NN["ffmpeg cropdetect sampling"]
+
+    J -.-> PR["ProgressBar updates"]
+    J -.-> LG["Log formatting and recovery messages"]
+    I -.-> LP["LongPath filesystem handling"]

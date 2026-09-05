@@ -279,19 +279,22 @@ def _resolve_crop(
 
     1. If *crop_params* is a ``CropParams`` instance (including empty/no-op):
        return it directly — the caller made an explicit choice.
-    2. If *crop_params* is ``None``: attempt to load ``job.yaml`` from
+    2. If *crop_params* is ``None``: attempt to load ``probe.yaml`` from
        *work_dir*.
 
-       - If the file exists, its ``source.path`` matches *source_video*, and
-         it contains crop data: use that crop and log at debug level.
-       - Otherwise: return an empty ``CropParams`` and log at info level.
+       - If the file exists and contains crop data: use that crop and log at
+         debug level.
+       - Otherwise: fall back to ``job.yaml`` source-path validation, then
+         return an empty ``CropParams`` and log at info level.
 
-    ``job.yaml`` is **never** written or modified by this function.
+    Neither ``probe.yaml`` nor ``job.yaml`` is ever written or modified by
+    this function.
 
     Args:
         crop_params:  Explicit crop override, or ``None`` to auto-load.
-        work_dir:     Directory that may contain ``job.yaml``.
-        source_video: Path to the source video (used for source-match check).
+        work_dir:     Directory that may contain ``probe.yaml`` and ``job.yaml``.
+        source_video: Path to the source video (used for job.yaml source-match
+                      check).
 
     Returns:
         Resolved ``CropParams`` (never ``None``).
@@ -300,7 +303,14 @@ def _resolve_crop(
         logger.debug("Using explicit crop params: %s", crop_params)
         return crop_params
 
-    # Auto-load from job.yaml
+    # Prefer probe.yaml — crop is now owned by ProbePhase
+    from pyqenc.state import ProbeState
+    probe = ProbeState.load(work_dir / "probe.yaml")
+    if probe is not None and probe.crop is not None:
+        logger.debug("Loaded crop from probe.yaml: %s", probe.crop)
+        return probe.crop
+
+    # Fall back: validate source via job.yaml, then give up
     job_yaml = work_dir / "job.yaml"
     job = JobState.load(job_yaml)
 
@@ -316,14 +326,8 @@ def _resolve_crop(
         )
         return CropParams()
 
-    if job.crop is None:
-        logger.info(
-            "job.yaml found but contains no crop data — proceeding without crop"
-        )
-        return CropParams()
-
-    logger.debug("Loaded crop from job.yaml: %s", job.crop)
-    return job.crop
+    logger.info("probe.yaml found but contains no crop data — proceeding without crop")
+    return CropParams()
 
 
 # ---------------------------------------------------------------------------
@@ -508,7 +512,7 @@ def _build_resolution_suggestion(
         final_w = tgt_raw_w
         final_h = tgt_raw_h
         return (
-            f"Did you mean: --crop {top} {bottom}? "
+            f"Did you mean: --crop {top},{bottom}? "
             f"This would bring both videos to {final_w}x{final_h} for metric computation."
         )
 
@@ -519,7 +523,7 @@ def _build_resolution_suggestion(
     if scaled_h % 2 != 0:
         scaled_h += 1
     return (
-        f"Did you mean: --crop {top} {bottom} --width {suggested_width}? "
+        f"Did you mean: --crop {top},{bottom} --width {suggested_width}? "
         f"This would bring both videos to {suggested_width}x{scaled_h} for metric computation."
     )
 
@@ -1033,19 +1037,23 @@ async def run_measure(
     # Probe fps first (fast ffprobe call, already triggered by resolution check above)
     source_fps_frac = source_meta.fps_fraction
 
-    # frame_count requires the slow null-encode probe — call async variant to avoid
-    # the sync-in-async deadlock that would occur via the lazy property path.
-    source_frame_count = source_meta._frame_count  # use cached value if already populated
-    if source_frame_count is None:
-        await source_meta._probe_frame_count_async()
-        source_frame_count = source_meta._frame_count
+    # frame_count is only available from ExtendedVideoMetadata (e.g. ProbePhase result).
+    # The standalone measure command does not have it — use duration-based estimate as fallback.
+    source_frame_count: int | None = None
 
-    if source_frame_count is not None and source_fps_frac is not None:
+    if source_fps_frac is not None:
         if screenshot_interval is not None:
+            # Interval mode: use frame count as upper bound when duration is known;
+            # fall back to no upper bound (ffmpeg stops at EOF) when it is not.
+            total_frames_bound: int | None = (
+                int(source_duration * float(source_fps_frac))
+                if source_duration is not None
+                else None
+            )
             positions = compute_screenshot_positions_interval(
                 fps          = source_fps_frac,
                 interval_s   = screenshot_interval,
-                total_frames = source_frame_count,
+                total_frames = total_frames_bound,
                 cap          = effective_screenshot_count,
             )
             logger.debug(
@@ -1053,32 +1061,28 @@ async def run_measure(
                 len(positions.frame_nums), screenshot_interval, positions.fps,
             )
         else:
-            positions = compute_screenshot_positions(
-                total_frames  = source_frame_count,
-                fps           = source_fps_frac,
-                count         = effective_screenshot_count,
-                include_edges = screenshot_include_edges,
-            )
-            logger.debug(
-                "Screenshot positions: %d frames, step=%d, fps=%s",
-                len(positions.frame_nums), positions.step, positions.fps,
-            )
-    elif source_fps_frac is not None and screenshot_interval is not None:
-        # frame_count unknown but fps known — use interval mode with no upper bound
-        positions = compute_screenshot_positions_interval(
-            fps          = source_fps_frac,
-            interval_s   = screenshot_interval,
-            total_frames = None,
-            cap          = effective_screenshot_count,
-        )
-        logger.debug(
-            "Screenshot positions (no frame count): %d frames, interval=%.3fs",
-            len(positions.frame_nums), screenshot_interval,
-        )
+            # Count mode: requires a frame count; derive from duration when available.
+            if source_duration is not None:
+                source_frame_count = int(source_duration * float(source_fps_frac))
+                positions = compute_screenshot_positions(
+                    total_frames  = source_frame_count,
+                    fps           = source_fps_frac,
+                    count         = effective_screenshot_count,
+                    include_edges = screenshot_include_edges,
+                )
+                logger.debug(
+                    "Screenshot positions: %d frames, step=%d, fps=%s",
+                    len(positions.frame_nums), positions.step, positions.fps,
+                )
+            else:
+                logger.error(
+                    "Cannot compute screenshot positions: duration unavailable for source %s"
+                    " — skipping screenshots",
+                    source_video.name,
+                )
     else:
         logger.error(
-            "Cannot compute screenshot positions: %s unavailable for source %s — skipping screenshots",
-            "frame count" if source_frame_count is None else "fps",
+            "Cannot compute screenshot positions: fps unavailable for source %s — skipping screenshots",
             source_video.name,
         )
 

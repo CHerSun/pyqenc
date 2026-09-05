@@ -35,7 +35,6 @@ from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
-    from pyqenc.phases.job import JobPhase, JobPhaseResult
 
 logger = logging.getLogger(__name__)
 
@@ -531,26 +530,17 @@ def _audio_metadata_from_stream(path: Path, track: "AudioStream") -> AudioMetada
 # ExtractionPhase — Phase object (task 5)
 # ---------------------------------------------------------------------------
 
-import shutil
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeAlias, cast
+from typing import TYPE_CHECKING, TypeAlias
 
 from pyqenc.constants import (
     EXTRACTED_DIR,
-    TEMP_SUFFIX,
-    THICK_LINE,
-    THIN_LINE,
-    TIMESTAMPS_FILENAME,
 )
-from pyqenc.models import AudioMetadata, PhaseOutcome, VideoMetadata
-from pyqenc.phase import Artifact, Phase, PhaseResult
-from pyqenc.state import ArtifactState, ExtractionParams
+from pyqenc.models import AudioMetadata
 from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
-    from pyqenc.phases.job import JobPhase, JobPhaseResult
 
 _EXTRACTION_YAML_NAME = "extraction.yaml"
 
@@ -738,19 +728,21 @@ class ExtractionPhase:
 
     def __init__(
         self,
-        config:    "AppConfig",
-        phases:    "dict[type[Phase], Phase] | None" = None,
+        config:         "AppConfig",
+        phases:         "dict[type[Phase], Phase] | None" = None,
         *,
-        collector: "MetricsCollector",
+        video_required: bool              = True,
+        collector:      "MetricsCollector",
     ) -> None:
         from pyqenc.phases.job import JobPhase as _JobPhase
 
-        self._config    = config
-        self._collector: "MetricsCollector" = collector
-        self._job:    "_JobPhase | None"          = cast("_JobPhase", phases.get(_JobPhase)) if phases else None
-        self.params   = ExtractionParams(include=config.extraction.include, exclude=config.extraction.exclude)
-        self.result:  ExtractionPhaseResult | None = None
-        self.dependencies: list[Phase] = [self._job] if self._job is not None else []
+        self._config:         AppConfig                    = config
+        self._collector:      MetricsCollector             = collector
+        self._video_required: bool                           = video_required
+        self._job:            _JobPhase | None             = cast("_JobPhase", phases.get(_JobPhase)) if phases else None
+        self.params:          ExtractionParams               = ExtractionParams(include=config.extraction.include, exclude=config.extraction.exclude)
+        self.result:          ExtractionPhaseResult | None   = None
+        self.dependencies:    list[Phase]                    = [self._job] if self._job is not None else []
 
     # ------------------------------------------------------------------
     # Public Phase interface
@@ -1156,13 +1148,13 @@ class ExtractionPhase:
         audio_tracks: list[AudioStream] = [t for t in selected_tracks if t.codec_type == "audio"]  # type: ignore[assignment]
         other_tracks: list[StreamBase]  = [t for t in selected_tracks if t.codec_type not in ("video", "audio")]
 
-        if not video_tracks:
-            err = "No video streams found matching filters"
-            logger.critical(err)
-            return ExtractionPhaseResult(
-                outcome=PhaseOutcome.FAILED, artifacts=artifacts,
-                message=err, error=err, video=None, audio=[],
-            )
+        if not self._video_required:
+            # Audio-only pipeline mode: skip video and timestamp extraction entirely.
+            logger.debug("Video extraction skipped by pipeline mode (video_required=False)")
+            video_tracks = []
+        elif not video_tracks:
+            # video_required=True but no video tracks match the current filters — not fatal.
+            logger.info("No video tracks selected — skipping video extraction")
 
         # Determine which files are ABSENT (need extraction)
         absent_names = {
@@ -1171,17 +1163,18 @@ class ExtractionPhase:
 
         errors: list[str] = []
 
-        # Extract timestamps unconditionally (not gated by include/exclude filters)
-        timestamps_output = extracted_dir / TIMESTAMPS_FILENAME
-        job_source = getattr(getattr(self._job, "result", None), "job", None)
-        source_duration_s: float | None = job_source.source.duration_seconds if job_source is not None else None
-        duration_ms: int | None = int(source_duration_s * 1000) if source_duration_s is not None else None
-        try:
-            _extract_timestamps(source, video_tracks[0].track_id, timestamps_output, duration_ms=duration_ms)
-        except Exception as exc:
-            err = f"Failed to extract timestamps: {exc}"
-            logger.critical(err)
-            errors.append(err)
+        # Extract timestamps — only meaningful when video tracks are present
+        if video_tracks:
+            timestamps_output = extracted_dir / TIMESTAMPS_FILENAME
+            job_source = getattr(getattr(self._job, "result", None), "job", None)
+            source_duration_s: float | None = job_source.source.duration_seconds if job_source is not None else None
+            duration_ms: int | None = int(source_duration_s * 1000) if source_duration_s is not None else None
+            try:
+                _extract_timestamps(source, video_tracks[0].track_id, timestamps_output, duration_ms=duration_ms)
+            except Exception as exc:
+                err = f"Failed to extract timestamps: {exc}"
+                logger.critical(err)
+                errors.append(err)
 
         # Extract video tracks
         for track in video_tracks:

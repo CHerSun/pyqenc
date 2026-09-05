@@ -160,8 +160,8 @@ class TestSplitChunks:
             chunk_id=chunk_id,
             start_timestamp=0.0,
             end_timestamp=13.33,
+            frame_count=320,
         )
-        existing_chunk._frame_count = 320
 
         recovery = self._make_recovery_with_complete_chunk(tmp_path, chunk_id, existing_chunk)
 

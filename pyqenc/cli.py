@@ -176,10 +176,10 @@ def _add_crop_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--crop",
         type=str,
-        metavar="PARAMS",
+        metavar="CROP",
         help=(
-            "Manual crop parameters: 'top bottom' or 'top bottom left right'. "
-            "Use '0 0' to disable automatic black border detection and cropping."
+            "Manual crop parameters: 'top,bottom' or 'top,bottom,left,right'. "
+            "Use '0,0' to disable automatic black border detection and cropping."
         ),
     )
 
@@ -418,7 +418,6 @@ def _create_audio_subcommand(subparsers: argparse._SubParsersAction) -> None:
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
     _add_filter_arguments(p)
-    _add_crop_arguments(p)
     p.set_defaults(func=_cmd_audio)
 
 
@@ -616,12 +615,6 @@ def _cmd_audio(args: argparse.Namespace) -> int:
     logger.info("Starting audio processing")
     logger.info(f"Source: {args.source}")
 
-    try:
-        crop_params = _resolve_crop_params(args)
-    except ValueError as e:
-        logger.critical(f"Invalid crop parameters: {e}")
-        return 1
-
     config  = _build_config(args)
     cleanup = _parse_cleanup_level(args.cleanup)
 
@@ -634,7 +627,6 @@ def _cmd_audio(args: argparse.Namespace) -> int:
             cleanup     = cleanup,
             no_metrics  = args.no_metrics,
             dry_run     = not args.execute,
-            crop_params = crop_params,
         )
         if result.is_complete:
             logger.info("Audio processing completed successfully")
@@ -942,10 +934,10 @@ Examples:
   pyqenc auto source.mkv --no-optimize -y
 
   # Disable automatic cropping
-  pyqenc auto source.mkv --crop "0 0" -y
+  pyqenc auto source.mkv --crop "0,0" -y
 
   # Manual crop specification
-  pyqenc auto source.mkv --crop "140 140" -y
+  pyqenc auto source.mkv --crop "140,140" -y
 
   # Multiple strategies
   pyqenc auto source.mkv --strategies h265-aq,h264 -y

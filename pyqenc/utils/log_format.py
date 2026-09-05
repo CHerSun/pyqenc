@@ -15,20 +15,17 @@ from __future__ import annotations
 import decimal
 import hashlib
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pyqenc.constants import (
     BRACKET_LEFT,
     BRACKET_RIGHT,
-    FAILURE_SYMBOL_MAJOR,
     FAILURE_SYMBOL_MINOR,
     METRIC_LOG_DECIMAL_PLACES,
     NEUTRAL_INDICATOR_SYMBOL,
     SUCCESS_SYMBOL_MAJOR,
     SUCCESS_SYMBOL_MINOR,
     THICK_LINE,
-    THIN_LINE,
     VISUAL_HASH_EMOJIS_WIDE,
 )
 
@@ -36,7 +33,6 @@ if TYPE_CHECKING:
     from decimal import Decimal
 
     from pyqenc.models import QualityTarget
-    from pyqenc.phases.optimization import StrategyTestResult
 
 logger = logging.getLogger(__name__)
 
@@ -169,13 +165,13 @@ def fmt_chunk(strategy: str, chunk_id: str, msg: str, use_visual_hash: bool = Tr
 def fmt_chunk_start(strategy: str, chunk_id: str, use_visual_hash: bool = True) -> str:
     return fmt_chunk(strategy, chunk_id, "starting ...", use_visual_hash)
 
-def fmt_chunk_attempt_start(strategy: str, chunk_id: str, attempt: int, quality: "Decimal", quality_label: str = "CRF", use_visual_hash: bool = True, quality_padding: int = 4) -> str:
+def fmt_chunk_attempt_start(strategy: str, chunk_id: str, attempt: int, quality: Decimal, quality_label: str = "CRF", use_visual_hash: bool = True, quality_padding: int = 4) -> str:
     return fmt_chunk(strategy, chunk_id, f"starting attempt #{attempt} with {quality_label} {str(quality).rjust(quality_padding)} ...", use_visual_hash)
 
 def fmt_chunk_attempt_result(strategy: str, chunk_id: str, attempt: int, msg: str, use_visual_hash: bool = True) -> str:
     return fmt_chunk(strategy, chunk_id, f"attempt #{attempt}: {msg}", use_visual_hash)
 
-def fmt_chunk_final(strategy: str, chunk_id: str, quality: "Decimal", attempts: int, quality_label: str = "CRF", use_visual_hash: bool = True, quality_padding: int = 4) -> str:
+def fmt_chunk_final(strategy: str, chunk_id: str, quality: Decimal, attempts: int, quality_label: str = "CRF", use_visual_hash: bool = True, quality_padding: int = 4) -> str:
     return fmt_chunk(strategy, chunk_id, f"success {SUCCESS_SYMBOL_MAJOR} with {quality_label} {str(quality).rjust(quality_padding)} after {attempts} attempts", use_visual_hash)
 
 def fmt_key_value_table(kv_to_show: dict[str, str | list | object]) -> None:
@@ -234,7 +230,7 @@ def _fmt_savings(size_bytes: int, reference_size_bytes: int) -> str:
 
 
 def _fmt_target_value(
-    target:      "QualityTarget",
+    target:      QualityTarget,
     metrics:     dict[str, float],
     targets_met: bool | None,
 ) -> str:

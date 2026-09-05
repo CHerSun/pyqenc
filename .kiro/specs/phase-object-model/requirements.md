@@ -10,6 +10,14 @@
 
 `pipeline-metrics-report` extends the `_build_registry` and phase constructor pattern established here. Every phase constructor now takes a required third parameter `collector: MetricsCollector` (after `config` and `phases`). `_build_registry` was updated to accept and thread the collector. Any future phase additions must include this parameter.
 
+### Superseded by `probe-phase-refactor` (2026-09-01) — crop detection
+
+**Requirement 2 (JobPhase) AC 2** — crop resolution (`manual → cached → auto-detect`) has been removed from `JobPhase` entirely. It now lives in **`ProbePhase`**, a new phase inserted between `ExtractionPhase` and `AudioPhase/ChunkingPhase`. `JobPhase` no longer accepts a `crop_params` constructor argument and no longer runs `_resolve_crop()`. Crop is persisted in `probe.yaml` (not `job.yaml`).
+
+**Requirement 2 Glossary** — the `JobPhase` definition as "initialises job.yaml and resolves crop parameters" is outdated; `JobPhase` now only initialises `job.yaml` and probes fast metadata fields.
+
+**Requirement 5 AC 6** — the per-field crop-params mismatch check in `OptimizationPhase` / `EncodingPhase` has been replaced by a `ProbeState` snapshot comparison (`persisted.probe != current_probe`). `MergePhase` also gains probe-mismatch detection (a pre-existing gap, now closed).
+
 ## Introduction
 
 This spec covers a structural refactor of the pipeline to make each phase a self-contained object. Currently phases are standalone functions, job initialisation only runs inside the auto-pipeline, input discovery is inconsistent across modes, and the pipeline always rescans the filesystem even when it just produced the data. The goal is a uniform `Phase` protocol where every phase owns its dependencies, artifact enumeration, recovery, execution, and logging — and the pipeline simply drives phase objects rather than containing phase logic itself.

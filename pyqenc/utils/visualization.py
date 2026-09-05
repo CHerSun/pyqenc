@@ -11,10 +11,11 @@ import json
 import logging
 import uuid
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Literal
 
 import matplotlib
 
@@ -35,9 +36,9 @@ from pyqenc.quality import (
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 
 matplotlib.use("Agg")  # non-interactive backend — safe to call from any thread
+import matplotlib as ticker
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
 import numpy as np
 import pandas as pd
 

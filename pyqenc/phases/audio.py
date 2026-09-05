@@ -22,9 +22,9 @@ import os
 import re
 from abc import ABC, abstractmethod
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 from alive_progress import config_handler
 
@@ -1206,8 +1206,6 @@ if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig, AudioConfig
     from pyqenc.metrics import MetricsCollector
     from pyqenc.phase import Phase, PhaseResult
-    from pyqenc.phases.extraction import ExtractionPhase
-    from pyqenc.phases.job import JobPhase
 
 from pyqenc.constants import (
     AUDIO_OUTPUT_DIR,

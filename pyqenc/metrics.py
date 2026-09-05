@@ -92,10 +92,10 @@ _TEMP_SUFFIX: str = ".tmp"
 # Active collector registry — used by CLI signal handler
 # ---------------------------------------------------------------------------
 
-_active_collector: "MetricsCollector | None" = None
+_active_collector: MetricsCollector | None = None
 
 
-def register_active_collector(collector: "MetricsCollector | None") -> None:
+def register_active_collector(collector: MetricsCollector | None) -> None:
     """Register *collector* as the process-wide active collector.
 
     Called by the orchestrator when it constructs a ``YamlMetricsCollector``
@@ -636,7 +636,7 @@ class YamlMetricsCollector(MetricsCollector):
 
         __slots__ = ("_collector", "_key", "_t0")
 
-        def __init__(self, collector: "YamlMetricsCollector", resolved_key: str) -> None:
+        def __init__(self, collector: YamlMetricsCollector, resolved_key: str) -> None:
             self._collector = collector
             self._key       = resolved_key
             self._t0:  float = 0.0

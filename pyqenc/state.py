@@ -73,22 +73,23 @@ class ArtifactState(Enum):
 # Phase parameter / sidecar data models
 # ---------------------------------------------------------------------------
 
-class JobState(BaseModel):
-    """Stable source video parameters stored in ``job.yaml``.
+class ProbeState(BaseModel):
+    """Sidecar model for ``probe.yaml``.
 
-    Contains only run-invariant metadata — no phase status, no chunk tracking.
-    ``crop_params`` is ``None`` when crop detection has not yet run.
+    Written by ``ProbePhase`` after resolving frame count and crop.  Contains
+    only the delta over ``job.yaml``: ``frame_count`` and ``crop``.  Fast-probe
+    fields (duration, fps, resolution, etc.) are NOT duplicated here.
+
+    ``frame_count=0`` is the sentinel for "could not be determined" — no valid
+    video has zero frames.  ``crop=None`` means no cropping.
     """
 
-    source: VideoMetadata
-    crop:   CropParams | None = None
+    frame_count: int
+    crop:        CropParams | None = None
 
     def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict using ``model_dump_full``."""
-        data = self.source.model_dump_full()
-        # Convert Path to str for YAML serialisation
-        data["path"] = str(data["path"])
-        result: dict = {"source": data}
+        """Serialise to a YAML-friendly dict."""
+        result: dict = {"frame_count": self.frame_count}
         if self.crop is not None:
             result["crop"] = {
                 "top":    self.crop.top,
@@ -99,14 +100,72 @@ class JobState(BaseModel):
         return result
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "JobState":
-        """Restore from a dict loaded from ``job.yaml``."""
+    def from_yaml_dict(cls, data: dict) -> ProbeState:
+        """Restore from a dict loaded from ``probe.yaml``."""
+        raw_crop = data.get("crop")
+        crop = CropParams(**raw_crop) if isinstance(raw_crop, dict) else None
+        return cls(
+            frame_count = int(data["frame_count"]),
+            crop        = crop,
+        )
+
+    @classmethod
+    def load(cls, path: Path) -> Self | None:
+        """Load ``ProbeState`` from *path*.
+
+        Returns:
+            ``ProbeState`` if the file exists and is valid, ``None`` otherwise.
+        """
+        if not path.exists():
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh)
+            return cls.from_yaml_dict(data or {})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not load %s: %s", path, exc)
+            return None
+
+    def save(self, path: Path) -> None:
+        """Write this ``ProbeState`` to *path* atomically.
+
+        Creates parent directories as needed.
+
+        Args:
+            path: Destination YAML file path.
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_yaml_atomic(path, self.to_yaml_dict())
+        logger.debug("Saved %s", path.name)
+
+
+class JobState(BaseModel):
+    """Stable source video parameters stored in ``job.yaml``.
+
+    Contains only run-invariant metadata — no phase status, no chunk tracking.
+    Crop and frame count are owned by ProbePhase and stored in ``probe.yaml``.
+    """
+
+    source: VideoMetadata
+
+    def to_yaml_dict(self) -> dict:
+        """Serialise to a YAML-friendly dict using ``model_dump_full``."""
+        data = self.source.model_dump_full()
+        # Convert Path to str for YAML serialisation
+        data["path"] = str(data["path"])
+        return {"source": data}
+
+    @classmethod
+    def from_yaml_dict(cls, data: dict) -> JobState:
+        """Restore from a dict loaded from ``job.yaml``.
+
+        Any ``crop`` field present in old files is silently ignored — crop
+        is now owned by ``ProbePhase`` and stored in ``probe.yaml``.
+        """
         source_data = data["source"]
         source_data = {**source_data, "path": Path(source_data["path"])}
         source = VideoMetadata.model_validate_full(source_data)
-        raw_crop = data.get("crop")
-        crop = CropParams(**raw_crop) if isinstance(raw_crop, dict) else None
-        return cls(source=source, crop=crop)
+        return cls(source=source)
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
@@ -157,7 +216,7 @@ class ExtractionParams(BaseModel):
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "ExtractionParams":
+    def from_yaml_dict(cls, data: dict) -> ExtractionParams:
         """Restore from a dict loaded from ``extraction.yaml``."""
         return cls(
             include=data.get("include"),
@@ -220,7 +279,7 @@ class ChunkingParams(BaseModel):
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "ChunkingParams":
+    def from_yaml_dict(cls, data: dict) -> ChunkingParams:
         """Restore from a dict loaded from ``chunking.yaml``."""
         scenes = [SceneBoundary(**s) for s in data.get("scenes", [])]
         return cls(
@@ -274,7 +333,7 @@ class StrategyTestResult(BaseModel):
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "StrategyTestResult":
+    def from_yaml_dict(cls, data: dict) -> StrategyTestResult:
         """Restore from a dict loaded from ``optimization.yaml``."""
         return cls(
             strategy_name = str(data["strategy"]),
@@ -285,13 +344,13 @@ class StrategyTestResult(BaseModel):
 class OptimizationParams(BaseModel):
     """Phase parameter file model for optimization (``optimization.yaml``).
 
-    Stores crop params active when optimization ran, selected test chunk IDs,
+    Stores the probe state active when optimization ran, selected test chunk IDs,
     per-strategy test results, the tolerance used, the selected strategies,
     the quality targets, and the metrics sampling factor active when the last
     run wrote this file.
 
     Attributes:
-        crop:             Crop params active when optimization ran.
+        probe:            Probe state (crop + frame count) active when optimization ran.
         test_chunks:      Chunk IDs used for test encodes.
         strategy_results: Per-strategy test results ordered by increasing total size.
         tolerance_pct:    Tolerance percentage used when ``selected`` was computed.
@@ -308,7 +367,7 @@ class OptimizationParams(BaseModel):
 
     model_config = {}
 
-    crop:             CropParams | None        = None
+    probe:            ProbeState | None      = None
     test_chunks:      list[str]                = Field(default_factory=list)
     strategy_results: list[StrategyTestResult] = Field(default_factory=list)
     tolerance_pct:    float                    = 0.0
@@ -326,26 +385,22 @@ class OptimizationParams(BaseModel):
             "quality_targets":  self.quality_targets,
             "sampling":         self.metrics_sampling,
         }
-        if self.crop is not None:
-            d["crop"] = {
-                "top":    self.crop.top,
-                "bottom": self.crop.bottom,
-                "left":   self.crop.left,
-                "right":  self.crop.right,
-            }
+        if self.probe is not None:
+            d["probe"] = self.probe.to_yaml_dict()
         return d
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "OptimizationParams":
+    def from_yaml_dict(cls, data: dict) -> OptimizationParams:
         """Restore from a dict loaded from ``optimization.yaml``."""
-        crop = CropParams(**data["crop"]) if data.get("crop") else None
+        probe_data = data.get("probe")
+        probe = ProbeState.from_yaml_dict(probe_data) if probe_data else None
         strategy_results = [
             StrategyTestResult.from_yaml_dict(r)
             for r in data.get("strategy_results", [])
         ]
         raw_sampling = data.get("sampling")
         return cls(
-            crop             = crop,
+            probe            = probe,
             test_chunks      = data.get("test_chunks", []),
             strategy_results = strategy_results,
             tolerance_pct    = float(data.get("tolerance_pct", 0.0)),
@@ -384,24 +439,24 @@ class OptimizationParams(BaseModel):
 class EncodingParams(BaseModel):
     """Phase parameter file model for encoding (``encoding.yaml``).
 
-    Stores crop params active when encoding ran.
+    Stores probe state (crop + frame count) active when encoding ran.
     """
 
-    crop: CropParams | None = None
+    probe: ProbeState | None = None
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
         d: dict = {}
-        if self.crop is not None:
-            d["crop"] = {"top": self.crop.top, "bottom": self.crop.bottom,
-                         "left": self.crop.left, "right": self.crop.right}
+        if self.probe is not None:
+            d["probe"] = self.probe.to_yaml_dict()
         return d
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "EncodingParams":
+    def from_yaml_dict(cls, data: dict) -> EncodingParams:
         """Restore from a dict loaded from ``encoding.yaml``."""
-        crop = CropParams(**data["crop"]) if data.get("crop") else None
-        return cls(crop=crop)
+        probe_data = data.get("probe")
+        probe = ProbeState.from_yaml_dict(probe_data) if probe_data else None
+        return cls(probe=probe)
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
@@ -463,7 +518,7 @@ class MetricsSidecar(BaseModel):
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "MetricsSidecar":
+    def from_yaml_dict(cls, data: dict) -> MetricsSidecar:
         """Restore from a dict loaded from an attempt sidecar YAML."""
         raw_sampling = data.get("sampling")
         return cls(
@@ -502,7 +557,7 @@ class EncodingResultSidecar(BaseModel):
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "EncodingResultSidecar":
+    def from_yaml_dict(cls, data: dict) -> EncodingResultSidecar:
         """Restore from a dict loaded from an encoding result sidecar YAML."""
         return cls(
             winning_attempt = data["winning_attempt"],
@@ -548,7 +603,7 @@ class MeasureSidecar(BaseModel):
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "MeasureSidecar":
+    def from_yaml_dict(cls, data: dict) -> MeasureSidecar:
         """Restore from a dict loaded from a measure sidecar YAML."""
         return cls(
             source_video               = Path(data["source_video"]),
@@ -586,7 +641,7 @@ class AudioParams(BaseModel):
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "AudioParams":
+    def from_yaml_dict(cls, data: dict) -> AudioParams:
         """Restore from a dict loaded from ``audio.yaml``."""
         return cls(
             codec               = data.get("codec"),
@@ -651,7 +706,7 @@ class MergeStrategySummary(BaseModel):
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "MergeStrategySummary":
+    def from_yaml_dict(cls, data: dict) -> MergeStrategySummary:
         """Restore from a dict loaded from ``merge.yaml``."""
         return cls(
             strategy_name   = data["strategy_name"],
@@ -679,6 +734,9 @@ class MergeParams(BaseModel):
         metrics_sampling:   Frame subsampling factor used during quality measurement.
                             ``None`` for files written before this field was added
                             (treated as unknown — no mismatch triggered).
+        probe:              Probe state (crop + frame count) active when merge ran.
+                            ``None`` for files written before this field was added
+                            (treated as unknown — no mismatch triggered).
         source_stem:        Source video filename stem (without extension).
         source_size_bytes:  Size of the source video file in bytes; ``0`` if unknown.
         strategy_summaries: Per-strategy summary rows for summary replay on rerun.
@@ -686,24 +744,30 @@ class MergeParams(BaseModel):
 
     quality_targets:    list[str]                = Field(default_factory=list)
     metrics_sampling:   int | None               = None
+    probe:              ProbeState | None       = None
     source_stem:        str                      = ""
     source_size_bytes:  int                      = 0
     strategy_summaries: list[MergeStrategySummary] = Field(default_factory=list)
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
-        return {
+        d: dict = {
             "quality_targets":    self.quality_targets,
             "sampling":           self.metrics_sampling,
             "source_stem":        self.source_stem,
             "source_size_bytes":  self.source_size_bytes,
             "strategy_summaries": [s.to_yaml_dict() for s in self.strategy_summaries],
         }
+        if self.probe is not None:
+            d["probe"] = self.probe.to_yaml_dict()
+        return d
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "MergeParams":
+    def from_yaml_dict(cls, data: dict) -> MergeParams:
         """Restore from a dict loaded from ``merge.yaml``."""
         raw_sampling = data.get("sampling")
+        probe_data = data.get("probe")
+        probe = ProbeState.from_yaml_dict(probe_data) if probe_data else None
         summaries = [
             MergeStrategySummary.from_yaml_dict(s)
             for s in data.get("strategy_summaries", [])
@@ -711,13 +775,14 @@ class MergeParams(BaseModel):
         return cls(
             quality_targets    = data.get("quality_targets", []),
             metrics_sampling   = int(raw_sampling) if raw_sampling is not None else None,
+            probe              = probe,
             source_stem        = data.get("source_stem", ""),
             source_size_bytes  = int(data.get("source_size_bytes", 0)),
             strategy_summaries = summaries,
         )
 
     @classmethod
-    def load(cls, path: Path) -> "MergeParams | None":
+    def load(cls, path: Path) -> MergeParams | None:
         """Load ``MergeParams`` from *path*.
 
         Returns:
@@ -767,7 +832,7 @@ class ChunkSidecar(BaseModel):
         return data
 
     @classmethod
-    def from_yaml_dict(cls, data: dict, chunk_id: str, path: Path) -> "ChunkSidecar":
+    def from_yaml_dict(cls, data: dict, chunk_id: str, path: Path) -> ChunkSidecar:
         """Restore from a dict loaded from a chunk sidecar YAML.
 
         Args:

@@ -212,8 +212,9 @@ class TestTimestampArtifactRecoveryComplete:
         phase.params     = MagicMock()
         phase.params.include = None
         phase.params.exclude = None
-        phase.result     = None
-        phase.dependencies = []
+        phase.result          = None
+        phase.dependencies    = []
+        phase._video_required = True
         return phase
 
     def test_complete_when_file_exists(self, tmp_path: Path) -> None:
@@ -271,8 +272,9 @@ class TestTimestampArtifactRecoveryAbsent:
         phase.params     = MagicMock()
         phase.params.include = None
         phase.params.exclude = None
-        phase.result     = None
-        phase.dependencies = []
+        phase.result          = None
+        phase.dependencies    = []
+        phase._video_required = True
         return phase
 
     def test_absent_when_no_extracted_dir(self, tmp_path: Path) -> None:
@@ -346,8 +348,9 @@ class TestTimestampArtifactForceWipe:
         phase.params     = MagicMock()
         phase.params.include = None
         phase.params.exclude = None
-        phase.result     = None
-        phase.dependencies = []
+        phase.result          = None
+        phase.dependencies    = []
+        phase._video_required = True
         return phase
 
     def test_force_wipe_removes_timestamps_file(self, tmp_path: Path) -> None:
@@ -463,8 +466,9 @@ class TestMergeFailsWithoutTimestamps:
         phase.params     = MagicMock()
         phase.params.include = None
         phase.params.exclude = None
-        phase.result     = None
-        phase.dependencies = []
+        phase.result          = None
+        phase.dependencies    = []
+        phase._video_required = True
 
         with patch("pyqenc.phases.extraction.MKVTrackExtractor") as mock_extractor_cls:
             mock_extractor = MagicMock()
@@ -533,8 +537,9 @@ class TestExtractionCommandCorrectness:
         phase.params     = MagicMock()
         phase.params.include = None
         phase.params.exclude = None
-        phase.result     = None
-        phase.dependencies = []
+        phase.result          = None
+        phase.dependencies    = []
+        phase._video_required = True
         return phase
 
     def _make_video_artifact(self, tmp_path: Path) -> object:
@@ -705,8 +710,9 @@ class TestFfmpegStreamExtraction:
         phase.params     = MagicMock()
         phase.params.include = None
         phase.params.exclude = None
-        phase.result     = None
-        phase.dependencies = []
+        phase.result          = None
+        phase.dependencies    = []
+        phase._video_required = True
         return phase
 
     def _make_fake_video_track(self) -> MagicMock:

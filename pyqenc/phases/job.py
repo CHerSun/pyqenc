@@ -1,14 +1,13 @@
-"""JobPhase — initialises ``job.yaml`` and resolves crop parameters.
+"""JobPhase — initialises ``job.yaml`` and probes source metadata.
 
 This is the first phase in the pipeline and has no dependencies.  Every other
 phase declares ``JobPhase`` as a dependency so that job-level data (source
-metadata, crop params, force-wipe flag) is always available before any phase
-does real work.
+metadata, force-wipe flag) is always available before any phase does real work.
 
 Responsibilities:
 - Validate the source video against any existing ``job.yaml``.
 - Create or update ``job.yaml`` with current source metadata.
-- Resolve crop parameters (manual → cached → auto-detect).
+- Self-heal stale ``job.yaml`` entries (missing/invalid fps).
 - Propagate ``force_wipe=True`` to downstream phases when ``--force`` is
   provided and a source mismatch is detected.
 - Check available disk space before starting work.
@@ -22,10 +21,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pyqenc.metrics import MetricsCollector, MetricKey
+from pyqenc.metrics import MetricKey, MetricsCollector
 from pyqenc.models import (
     CleanupLevel,
-    CropParams,
     PhaseOutcome,
     VideoMetadata,
 )
@@ -50,9 +48,7 @@ class JobPhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying job-level data for downstream phases.
 
     Attributes:
-        job:        Loaded/created ``JobState`` (source metadata + crop).
-        crop:       Resolved crop parameters; ``None`` only when crop detection
-                    has not yet run (scan mode without an existing ``job.yaml``).
+        job:        Loaded/created ``JobState`` (source metadata).
         force_wipe: ``True`` when ``--force`` was provided and a source mismatch
                     was detected; downstream phases must delete their own output
                     directories and phase parameter YAMLs before proceeding.
@@ -64,9 +60,8 @@ class JobPhaseResult(PhaseResult):
     """
 
     job:        JobState | None  = field(default=None)
-    crop:       CropParams | None = field(default=None)
     force_wipe: bool              = field(default=False)
-    config:     "AppConfig | None" = field(default=None)
+    config:     AppConfig | None = field(default=None)
     work_dir:   Path | None       = field(default=None)
     source:     Path | None       = field(default=None)
     cleanup:    CleanupLevel      = field(default=CleanupLevel.NONE)
@@ -78,7 +73,7 @@ class JobPhaseResult(PhaseResult):
 # ---------------------------------------------------------------------------
 
 class JobPhase:
-    """Phase object that initialises ``job.yaml`` and resolves crop parameters.
+    """Phase object that initialises ``job.yaml`` and probes source metadata.
 
     This phase has no dependencies and is a declared dependency of every other
     phase.  It is the only phase that performs disk-space checking and pipeline
@@ -93,8 +88,6 @@ class JobPhase:
         cleanup:     Artifact retention policy applied after encoding.
         no_metrics:  When ``True``, skip writing ``metrics.yaml`` files.
         collector:   Metrics collector for timing instrumentation.
-        crop_params: Optional manual crop override; ``None`` falls back to
-                     cached value in ``job.yaml``, then auto-detection.
     """
 
     name: str = "job"
@@ -102,7 +95,7 @@ class JobPhase:
 
     def __init__(
         self,
-        config:     "AppConfig",
+        config:     AppConfig,
         phases:     dict[type[Phase], Phase] | None = None,
         *,
         source:      Path,
@@ -110,17 +103,15 @@ class JobPhase:
         force:       bool,
         cleanup:     CleanupLevel,
         no_metrics:  bool,
-        collector:   "MetricsCollector",
-        crop_params: CropParams | None = None,
+        collector:   MetricsCollector,
     ) -> None:
-        self._config:      "AppConfig"        = config
+        self._config:      AppConfig        = config
         self._source:      Path               = source
         self._work_dir:    Path               = work_dir
         self._force:       bool               = force
         self._cleanup:     CleanupLevel       = cleanup
         self._no_metrics:  bool               = no_metrics
-        self._collector:   "MetricsCollector" = collector
-        self._crop_params: CropParams | None  = crop_params
+        self._collector:   MetricsCollector = collector
         self.result: JobPhaseResult | None    = None
         # JobPhase has no dependencies; phases registry is accepted but unused.
 
@@ -149,7 +140,6 @@ class JobPhase:
                 )],
                 message    = "job.yaml not found",
                 job        = None,
-                crop       = None,
                 force_wipe = False,
                 config     = self._config,
                 work_dir   = self._work_dir,
@@ -166,7 +156,6 @@ class JobPhase:
                 )],
                 message    = "job.yaml loaded",
                 job        = job,
-                crop       = job.crop,
                 force_wipe = False,
                 config     = self._config,
                 work_dir   = self._work_dir,
@@ -179,7 +168,7 @@ class JobPhase:
         return result
 
     def run(self, dry_run: bool = False) -> JobPhaseResult:
-        """Validate source, create/update ``job.yaml``, resolve crop parameters.
+        """Validate source, create/update ``job.yaml``, probe metadata.
 
         Sequence:
         1. Emit phase banner.
@@ -191,15 +180,14 @@ class JobPhase:
              ``job.yaml`` and all phase parameter YAMLs, continue.
         4. In dry-run mode: return ``DRY_RUN`` if ``job.yaml`` is absent.
         5. Create/update ``job.yaml`` with current source metadata.
-        6. Resolve crop (manual → cached → detect).
-        7. Cache and return result.
+        6. Cache and return result.
 
         Args:
             dry_run: When ``True``, report what would be done without writing
                      any files.
 
         Returns:
-            ``JobPhaseResult`` with ``job``, ``crop``, and ``force_wipe`` set.
+            ``JobPhaseResult`` with ``job`` and ``force_wipe`` set.
         """
         # Disk space check (execute mode only).
         # Reuse cached VideoMetadata from job.yaml when available (has fps/duration/resolution
@@ -240,7 +228,6 @@ class JobPhase:
                 message   = "Source file mismatch — aborting",
                 error     = "Re-run with --force to wipe existing artifacts and continue.",
                 job        = None,
-                crop       = None,
                 force_wipe = False,
                 config     = self._config,
                 work_dir   = self._work_dir,
@@ -263,7 +250,6 @@ class JobPhase:
                     )],
                     message    = "Would create job.yaml",
                     job        = None,
-                    crop       = None,
                     force_wipe = False,
                     config     = self._config,
                     work_dir   = self._work_dir,
@@ -282,7 +268,6 @@ class JobPhase:
                 )],
                 message    = "job.yaml already up to date",
                 job        = existing,
-                crop       = existing.crop,
                 force_wipe = False,
                 config     = self._config,
                 work_dir   = self._work_dir,
@@ -299,13 +284,6 @@ class JobPhase:
         # Execute mode: create/update job.yaml (force fresh write on force_wipe)
         job = self._create_or_update_job(force=force_wipe)
 
-        # Resolve crop parameters
-        crop = self._resolve_crop(job)
-
-        # Persist updated job state (with crop)
-        job.crop = crop
-        job.save(self._work_dir / _JOB_YAML_FILENAME)
-
         if did_work:
             logger.debug("Job initialised: %s", self._work_dir / _JOB_YAML_FILENAME)
         else:
@@ -319,7 +297,6 @@ class JobPhase:
             )],
             message    = "job.yaml initialised" if did_work else "job.yaml already up to date",
             job        = job,
-            crop       = crop,
             force_wipe = force_wipe,
             config     = self._config,
             work_dir   = self._work_dir,
@@ -418,8 +395,10 @@ class JobPhase:
         """Create or load ``JobState`` with current source metadata.
 
         Probes the source video for all metadata fields and returns a
-        ``JobState`` ready to be persisted.  Crop is NOT set here — that is
-        done by ``_resolve_crop()`` after this call.
+        ``JobState`` ready to be persisted.
+
+        If an existing ``job.yaml`` is loaded and its ``fps`` is missing or
+        invalid, re-probes and saves automatically (self-heal for stale files).
 
         Args:
             force: When ``True``, ignore any existing ``job.yaml`` and build a
@@ -430,50 +409,36 @@ class JobPhase:
         if not force:
             existing = JobState.load(self._work_dir / _JOB_YAML_FILENAME)
             if existing is not None:
-                logger.debug("Loaded existing job.yaml")
+                # Self-heal: re-probe if fast fields are missing or invalid
+                if existing.source._fps is None or existing.source._fps <= 0:
+                    logger.warning(
+                        "job.yaml has missing/invalid fps — re-probing source metadata"
+                    )
+                    self._probe_metadata(existing.source)
+                    existing.save(self._work_dir / _JOB_YAML_FILENAME)
+                else:
+                    logger.debug("Loaded existing job.yaml")
                 return existing
 
         source = VideoMetadata(path=self._source)
-        # Eagerly probe all fields so they are persisted in job.yaml
+        # Eagerly probe all fast fields so they are persisted in job.yaml
+        logger.info("Probing source metadata: %s", source.path.name)
         with self._collector.time(MetricKey.JOB):
             with self._collector.time(MetricKey.JOB, "probe"):
-                _ = source.file_size_bytes
-                _ = source.duration_seconds
-                _ = source.fps
-                _ = source.resolution
-                _ = source.frame_count
+                self._probe_metadata(source)
 
         job = JobState(source=source)
+        job.save(self._work_dir / _JOB_YAML_FILENAME)
         logger.info("Initialized job.yaml for new pipeline run")
         return job
 
-    def _resolve_crop(self, job: JobState) -> CropParams:
-        """Resolve crop parameters: manual → cached → auto-detect.
+    def _probe_metadata(self, source: VideoMetadata) -> None:
+        """Eagerly touch all fast-probe fields on ``source`` to populate them.
 
         Args:
-            job: Current ``JobState`` (may already have ``crop`` set from cache).
-
-        Returns:
-            Resolved ``CropParams`` (all-zero if no borders found).
+            source: ``VideoMetadata`` instance to probe in-place.
         """
-        from pyqenc.utils.crop import detect_crop_parameters
-
-        # 1. Manual override from crop_params
-        if self._crop_params is not None:
-            c = self._crop_params
-            logger.info(f"Cropping: {c.display()} (manual)")
-            return c
-
-        # 2. Cached in job.yaml
-        if job.crop is not None:
-            c = job.crop
-            logger.info(f"Cropping: {c.display()} (cached)")
-            return c
-
-        # 3. Auto-detect
-        logger.info("Cropping: detecting black borders...")
-        source = VideoMetadata(path=self._source)
-        with self._collector.time(MetricKey.JOB):
-            with self._collector.time(MetricKey.JOB, "crop_detect"):
-                crop = detect_crop_parameters(source)
-        return crop
+        _ = source.file_size_bytes
+        _ = source.duration_seconds
+        _ = source.fps
+        _ = source.resolution

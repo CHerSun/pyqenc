@@ -143,6 +143,14 @@ class PipelineOrchestrator:
                     phase.name,
                     result.error or result.message,
                 )
+                logger.error(THICK_LINE)
+                logger.error("Pipeline FAILED at phase: %s", phase.name)
+                logger.error(
+                    "Phases completed: [%s]. Phases reused: [%s].",
+                    ", ".join(phases_executed) if phases_executed else "none",
+                    ", ".join(phases_reused)   if phases_reused   else "none",
+                )
+                logger.error(THICK_LINE)
                 if not self._no_metrics:
                     register_active_collector(None)
                 return PipelineResult(

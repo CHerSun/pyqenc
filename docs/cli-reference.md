@@ -52,7 +52,7 @@ Applies to all subcommands.
 
 | Option            | Description                                                                            | Default     |
 | ----------------- | -------------------------------------------------------------------------------------- | ----------- |
-| `--crop "VALUES"` | Manual crop: `"top bottom"` or `"top bottom left right"`. Use `"0 0"` for no cropping. | Auto-detect |
+| `--crop "VALUES"` | Manual crop: `"top,bottom"` or `"top,bottom,left,right"`. Use `"0,0"` for no cropping. | Auto-detect |
 
 Automatic crop detection uses ffmpeg's `cropdetect` filter. The same crop parameters are applied consistently across all phases. Crop is applied during encoding only — chunks stay uncropped for remux compatibility.
 
@@ -228,4 +228,4 @@ Outputs go under `<work-dir>/measure/`:
 | `--screenshots N`  | Number of screenshots per video                                    | `20`               |
 | `--every INTERVAL` | Screenshot interval (e.g. `"30s"`, `"5m"`) instead of count mode   | —                  |
 | `--width W`        | Scale both videos to width W before metric computation             | no scaling         |
-| `--crop PARAMS`    | Crop parameters (same format as `auto`)                            | auto from job.yaml |
+| `--crop PARAMS`    | Crop parameters (same format as `auto`)                            | auto from probe.yaml |
