@@ -18,13 +18,13 @@ encoding:
     # To increase quality (larger files): raise the most constrained passing target (• in logs).
     # To decrease quality (smaller files): lower the most constrained failing target (✘ in logs).
     - "vmaf-med:96.0"   # 95–97 = high quality. 98+ for visually lossless
-    - "vif-med:93.0"    # grain/texture retention; 92–94 = good; higher = crisper but larger
     - "psnr-med:45.0"   # 44–46 = good; 50+ = near-lossless
     - "ssim-med:98.0"   # 98+ = good; non-linear scale, compressed near 100
-    - "vmaf-min:92.0"   # floor safeguards
-    - "vif-min:88.0"
-    - "psnr-min:42.0"
-    - "ssim-min:95.0"
+    - "vif-med:93.0"    # grain/texture retention; 92–94 = good; higher = crisper but larger
+    - "vmaf-min:93.0"   # --- floor safeguards ---
+    - "psnr-min:43.0"
+    - "ssim-min:96.0"
+    - "vif-min:90.0"
   strategies:
     # Format: "profile[+preset]" — profile is required, preset is optional (omit = codec default).
     # Wildcards: "h265*" = all h265 profiles; "*" = all profiles; "*+*" = all profiles × all presets.
