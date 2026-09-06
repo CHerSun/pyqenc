@@ -200,9 +200,9 @@
 
 ### Task 15 — Review spec against other specs and update cross-spec summaries
 
-- [-] Check `phase-object-model` spec — JobPhase crop detection was a requirement there; note supersession
-- [~] Check `pipeline-maturity-refactor` and `pipeline-correctness-refactor` specs for any crop/frame_count references
-- [~] Add cross-spec summary table to top of this spec's `requirements.md` and `design.md`
-- [~] Add a note to `phase-object-model` requirements about crop detection being superseded
-- [~] Update `Completed:` date in both spec files
+- [x] Check `phase-object-model` spec — JobPhase crop detection was a requirement there; note supersession
+- [x] Check `pipeline-maturity-refactor` and `pipeline-correctness-refactor` specs for any crop/frame_count references
+- [x] Add cross-spec summary table to top of this spec's `requirements.md` and `design.md`
+- [x] Add a note to `phase-object-model` requirements about crop detection being superseded
+- [x] Update `Completed:` date in both spec files
 

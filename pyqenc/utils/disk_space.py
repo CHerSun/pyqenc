@@ -87,31 +87,22 @@ def _parse_resolution(resolution: str) -> tuple[int, int] | None:
 
 
 def _estimate_total_pixels(video: VideoMetadata) -> int | None:
-    """Derive total pixel count via VideoMetadata lazy properties.
+    """Derive total pixel count from resolution and fps * duration.
 
-    Uses cached ``frame_count`` when already available (exact), otherwise
-    approximates from ``fps x duration_seconds`` (fast ffprobe — never triggers
-    the slow null-encode probe).  Properties cache their results on first access.
+    Uses ``fps * duration_seconds`` from fast ffprobe — never triggers the
+    slow null-encode probe.  Properties cache their results on first access.
     Returns ``None`` if insufficient data is available.
     """
     res = _parse_resolution(video.resolution) if video.resolution else None
     if res is None:
         return None
 
-    # Use exact frame count only if already cached — intentionally bypass the
-    # ``frame_count`` property to avoid triggering the slow null-encode probe (~2-3 s).
-    # Falls back to fps * duration below, which is accurate enough for a space estimate.
-    fc = video._frame_count  # noqa: SLF001
-    if fc is None:
-        fps      = video.fps
-        duration = video.duration_seconds
-        if fps is not None and duration is not None and fps > 0:
-            fc = int(fps * duration)
-
-    if fc is None:
+    fps      = video.fps
+    duration = video.duration_seconds
+    if fps is None or duration is None or fps <= 0:
         return None
 
-    return res[0] * res[1] * fc
+    return res[0] * res[1] * int(fps * duration)
 
 
 def estimate_required_space(
@@ -146,7 +137,7 @@ def estimate_required_space(
     Returns:
         Estimated required space in GB.
     """
-    size_bytes = video._file_size_bytes  # noqa: SLF001
+    size_bytes = video._file_size_bytes
     if size_bytes is None:
         size_bytes = video.file_size_bytes  # triggers one stat() if not cached
     if size_bytes is None:
@@ -206,9 +197,10 @@ def check_disk_space(
     Returns:
         ``SpaceEstimate`` with min/max required and available space.
     """
-    source_size_gb  = (video._file_size_bytes or 0) / (1024 ** 3)  # noqa: SLF001
     min_required_gb = estimate_required_space(video, min_strategies, chunking_mode)
     max_required_gb = estimate_required_space(video, max_strategies, chunking_mode)
+    # Read after estimate calls so file_size_bytes is already cached by estimate_required_space
+    source_size_gb  = (video._file_size_bytes or 0) / (1024 ** 3)
     recommended_gb  = max_required_gb * OVERHEAD_TIGHT_MARGIN
 
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -285,3 +277,4 @@ def log_disk_space_info(
     logger.info("")
 
     return estimate.level
+

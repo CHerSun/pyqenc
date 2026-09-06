@@ -1093,8 +1093,9 @@ class ExtractionPhase:
         else:
             artifacts.append(TimestampArtifact(path=timestamps_file, state=ArtifactState.ABSENT))
 
-        # Emit stream table with wanted + present columns
-        _log_stream_table(extractor.tracks, selected_tracks, on_disk_names, timestamps_path=timestamps_file)
+        # Emit stream table — when video_required=False, mark video tracks as not-wanted
+        table_selected = selected_tracks if self._video_required else [t for t in selected_tracks if t.codec_type != "video"]
+        _log_stream_table(extractor.tracks, table_selected, on_disk_names, timestamps_path=timestamps_file if self._video_required else None)
 
         return artifacts, primary_video, audio_list
 

@@ -1626,6 +1626,11 @@
         "executionId": "36304bbb-3152-454f-b144-d71ed21d2016",
         "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
         "timestamp": 1788609924208
+      },
+      {
+        "executionId": "6e10c9e0-1286-45a8-a325-d005ad838f29",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788685810221
       }
     ],
     "Check `pipeline-maturity-refactor` and `pipeline-correctness-refactor` specs for any crop/frame_count references": [
@@ -1633,6 +1638,16 @@
         "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
         "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
         "timestamp": 1788528004781
+      },
+      {
+        "executionId": "6e10c9e0-1286-45a8-a325-d005ad838f29",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788685821478
+      },
+      {
+        "executionId": "6e10c9e0-1286-45a8-a325-d005ad838f29",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788685827837
       }
     ],
     "Add cross-spec summary table to top of this spec's `requirements.md` and `design.md`": [
@@ -1640,6 +1655,16 @@
         "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
         "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
         "timestamp": 1788528004996
+      },
+      {
+        "executionId": "6e10c9e0-1286-45a8-a325-d005ad838f29",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788685834487
+      },
+      {
+        "executionId": "6e10c9e0-1286-45a8-a325-d005ad838f29",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788685841069
       }
     ],
     "Add a note to `phase-object-model` requirements about crop detection being superseded": [
@@ -1647,6 +1672,16 @@
         "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
         "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
         "timestamp": 1788528005905
+      },
+      {
+        "executionId": "6e10c9e0-1286-45a8-a325-d005ad838f29",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788686155579
+      },
+      {
+        "executionId": "6e10c9e0-1286-45a8-a325-d005ad838f29",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788686161969
       }
     ],
     "Update `Completed:` date in both spec files": [
@@ -1654,6 +1689,16 @@
         "executionId": "c07954f5-2cc1-4cbb-81b1-66c90acd579d",
         "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
         "timestamp": 1788528006271
+      },
+      {
+        "executionId": "6e10c9e0-1286-45a8-a325-d005ad838f29",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788686168011
+      },
+      {
+        "executionId": "6e10c9e0-1286-45a8-a325-d005ad838f29",
+        "chatSessionId": "sess_c5cb4021-68f4-4903-af08-7aa6f89fa240",
+        "timestamp": 1788686182494
       }
     ],
     "Implement `ProbePhase.run()`:": [
