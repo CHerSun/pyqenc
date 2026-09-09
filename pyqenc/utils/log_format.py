@@ -28,11 +28,13 @@ from pyqenc.constants import (
     THICK_LINE,
     VISUAL_HASH_EMOJIS_WIDE,
 )
+from pyqenc.state import ArtifactState
 
 if TYPE_CHECKING:
     from decimal import Decimal
 
     from pyqenc.models import QualityTarget
+    from pyqenc.phase import Artifact
 
 logger = logging.getLogger(__name__)
 
@@ -105,36 +107,52 @@ def emit_phase_banner(name: str, log: logging.Logger) -> None:
 
 
 def log_recovery_line(
-    log:      logging.Logger,
-    complete: int,
-    pending:  int,
-    stale:    int = 0,
-    unit:     str = "artifact",
-) -> None:
-    """Emit the standard single-line recovery summary.
+    log:       logging.Logger,
+    artifacts: list[Artifact],
+    unit:      str = "artifact",
+) -> str:
+    """Log the recovery summary and return the same human-readable message.
+
+    Takes the phase's INTERNAL artifact list (pre-filter, including
+    ``wanted=False`` entries) — NOT ``PhaseResult.artifacts`` — because it needs
+    the unwanted count, which is only visible before wanted-filtering.  Derives
+    all five counts itself; callers never compute recovery counts locally.
+
+    The five counts are: ``total`` (all internal artifacts), ``unwanted``
+    (``wanted=False`` over the full list), and ``complete``/``partial``/
+    ``absent`` (counted over the wanted artifacts only).  All five are always
+    shown, even when zero.
+
+    The returned string is the single source of truth for the recovery message:
+    callers assign it directly to ``PhaseResult.message`` rather than building a
+    separate message via a per-phase helper.
 
     Args:
-        log:      Logger instance belonging to the calling phase module.
-        complete: Number of artifacts already complete.
-        pending:  Number of artifacts needing work (ABSENT or ARTIFACT_ONLY).
-        stale:    Number of stale artifacts (present but parameters changed).
-        unit:     Singular noun for the artifact type (e.g. ``"chunk"``,
-                  ``"pair"``, ``"strategy result"``).  Pluralised by appending
-                  ``"s"`` when count ≠ 1.
-    """
-    def _plural(n: int) -> str:
-        return f"{n} {unit}{'s' if n != 1 else ''}"
+        log:       Logger instance belonging to the calling phase module.
+        artifacts: The phase's internal artifact list (including ``wanted=False``
+                   entries).
+        unit:      Singular noun for the artifact type (e.g. ``"chunk"``,
+                   ``"pair"``, ``"strategy result"``).  Reserved for callers that
+                   want a noun other than the default; it does not affect the
+                   counts.
 
-    if pending == 0 and stale == 0:
-        log.info("Recovery: %s complete, 0 pending — reusing", _plural(complete))
-    elif complete == 0 and stale == 0:
-        log.info("Recovery: 0 complete, %s pending — full run needed", _plural(pending))
-    else:
-        parts = [f"{_plural(complete)} complete", f"{_plural(pending)} pending"]
-        if stale:
-            parts.append(f"{stale} stale")
-        suffix = "resuming" if complete > 0 else "full run needed"
-        log.info("Recovery: %s — %s", ", ".join(parts), suffix)
+    Returns:
+        The emitted recovery message, identical to the logged line.
+    """
+    total    = len(artifacts)
+    unwanted = sum(1 for a in artifacts if not a.wanted)
+    complete = sum(1 for a in artifacts if a.wanted and a.state == ArtifactState.COMPLETE)
+    partial  = sum(1 for a in artifacts if a.wanted and a.state == ArtifactState.PARTIAL)
+    absent   = sum(1 for a in artifacts if a.wanted and a.state == ArtifactState.ABSENT)
+
+    suffix  = "resuming" if complete else "full run needed"
+    message = (
+        f"Recovery: {total} total, {unwanted} unwanted"
+        f" — {complete} complete, {partial} partial, {absent} absent"
+        f" — {suffix}"
+    )
+    log.info(message)
+    return message
 
 
 def visual_hash(strategy: str, chunk_id: str) -> str:

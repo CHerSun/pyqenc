@@ -7,10 +7,10 @@ pyqenc is a video/audio re-encoding tool. The primary goal is to **preserve sour
 ## Source Fidelity Principles
 
 - **Frame rate**: Preserve the source frame rate exactly — whether constant (CFR) or variable (VFR). Never force a uniform frame rate unless explicitly requested.
-- **Audio sampling rate**: Preserve the source audio sample rate. Do not resample unless the target codec requires it.
+- **Audio sampling rate**: Preserve the source audio sample rate. Do not resample unless the target codec requires it. Check for filters side-effects which could cause a change.
 - **Color space, bit depth, HDR metadata**: Pass through as-is unless the encoding task explicitly requires a change.
 - **Timestamps and timing**: Preserve source timestamps faithfully, especially for VFR content.
-- **Container properties**: Preserve track order, language tags, titles, and other metadata when muxing.
+- **Container properties**: Preserve metadata as much as possible when muxing final result using pipeline results.
 
 ## ffmpeg Usage Philosophy
 

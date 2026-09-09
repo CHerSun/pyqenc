@@ -1201,7 +1201,7 @@ async def _encode_chunks_parallel(
                         ``step(MetricKey.ENCODING, convergence_update=...)`` is
                         called after each chunk/strategy pair converges.
         phase_recovery: Optional recovery state from ``recover_attempts``; when
-                        provided, ``COMPLETE`` pairs are skipped and ``ARTIFACT_ONLY``
+                        provided, ``COMPLETE`` pairs are skipped and ``PARTIAL``
                         pairs resume from their recovered ``QualitySearch`` state.
         advance:        Optional advance callable from ``ProgressBar``; called with
                         chunk duration in seconds and an ``AdvanceState`` on each
@@ -1345,7 +1345,7 @@ def encode_all_chunks(
     - Pre-validating crop params against ``encoding.yaml`` (Req 3.5)
     - Writing ``encoding.yaml`` with current crop params (Req 2.4)
     - Calling ``recover_attempts`` to classify all ``(chunk, strategy)`` pairs
-    - Skipping ``COMPLETE`` pairs and resuming ``ARTIFACT_ONLY`` pairs
+    - Skipping ``COMPLETE`` pairs and resuming ``PARTIAL`` pairs
     - Parallel encoding of chunks that need work
 
     Args:
@@ -1564,7 +1564,7 @@ class EncodingPhase:
         self.result = EncodingPhaseResult(
             outcome   = outcome,
             artifacts = artifacts,
-            message   = _recovery_message(artifacts),
+            message   = log_recovery_line(logger, artifacts, unit="pair"),
             encoded   = [a for a in artifacts if isinstance(a, EncodedArtifact)],
         )
         return self.result
@@ -1618,9 +1618,8 @@ class EncodingPhase:
             logger.info("Crop:        %s", crop)
         logger.info("Targets:     %s", ", ".join(f"{t.metric}-{t.statistic}≥{t.value}" for t in self._job.result.config.encoding.resolved_targets))
 
-        complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
-        pending_count  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
-        log_recovery_line(logger, complete_count, pending_count, unit="pair")
+        log_recovery_line(logger, artifacts, unit="pair")
+        pending_count = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL))
         # Dry-run path
         if dry_run:
             outcome = PhaseOutcome.REUSED if pending_count == 0 else PhaseOutcome.DRY_RUN
@@ -2005,14 +2004,3 @@ def _enc_failed(error: str) -> "EncodingPhaseResult":
         error     = error,
         encoded   = [],
     )
-
-
-def _recovery_message(artifacts: list[EncodedArtifact]) -> str:
-    """Build a human-readable recovery summary string."""
-    complete = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
-    pending  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
-    if pending == 0:
-        return f"{complete} pair(s) complete — reusing"
-    if complete == 0:
-        return f"{pending} pair(s) pending — full run needed"
-    return f"{complete} pair(s) complete, {pending} pending — resuming"

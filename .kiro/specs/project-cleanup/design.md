@@ -14,6 +14,8 @@
 - **Bug Condition: `ConfigManager.get_audio_output_config()`** — method gone; audio config is accessed directly via `AppConfig.audio.*`.
 - The remaining non-config cleanup items (import hygiene, `__all__`, `getattr` on typed dataclasses, `Phase` ABC, etc.) are unaffected by `config-refactor`.
 
+**Note (2026-09-15 — completed by `artifact-state-refactor`):** This spec's Section 7/8.3 flagged the duplicated `_outcome_from_artifacts` / `_recovery_message` pattern across `audio.py`, `merge.py`, `chunking.py`, and `extraction.py` for consolidation. `artifact-state-refactor` (Created/Completed 2026-09-15) removes all five per-phase `_recovery_message()` helpers and unifies recovery reporting into a single `log_recovery_line()` that takes each phase's internal artifact list and derives all counts itself. It also re-scopes `ArtifactState` to completeness only (removes `STALE`, renames `ARTIFACT_ONLY` → `PARTIAL`, adds `Artifact.wanted`).
+
 ---
 
 ## Overview

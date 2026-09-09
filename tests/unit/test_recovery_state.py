@@ -3,7 +3,7 @@
 Covers:
 - 10.1  ArtifactState classification in _recover_encoding_attempts
          (ABSENT / COMPLETE) based on encoded/ directory presence only.
-         ARTIFACT_ONLY is no longer a recovery state — pairs with attempt
+         PARTIAL is no longer a recovery state — pairs with attempt
          files in encoding/ but no result sidecar in encoded/ are ABSENT.
 - 10.2  write_yaml_atomic: .tmp cleanup on failure; _resolve_tmp_paths
          ValueError when output path not in cmd.

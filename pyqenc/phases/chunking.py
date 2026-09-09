@@ -463,7 +463,7 @@ class ChunkingPhase:
         self.result = ChunkingPhaseResult(
             outcome   = outcome,
             artifacts = artifacts,
-            message   = _recovery_message(artifacts),
+            message   = log_recovery_line(logger, artifacts, unit="chunk"),
             chunks    = chunks,
         )
         return self.result
@@ -514,9 +514,9 @@ class ChunkingPhase:
             job_result.force_wipe = True  # type: ignore[union-attr]
             force_wipe = True
 
+        log_recovery_line(logger, artifacts, unit="chunk")
         complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
-        pending_count  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
-        log_recovery_line(logger, complete_count, pending_count)
+        pending_count  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL))
 
         # Action plan — log scene count and pending work before starting
         recovered_scenes = getattr(self, "_recovered_scenes", [])
@@ -685,10 +685,10 @@ class ChunkingPhase:
         # the authoritative source of truth.  We iterate expected chunks derived
         # from the boundaries and classify each one:
         #   - file + sidecar present  → COMPLETE
-        #   - file present, no sidecar → ARTIFACT_ONLY (pending)
+        #   - file present, no sidecar → PARTIAL (pending)
         #   - file absent              → ABSENT (pending)
-        # Files on disk that are NOT in the expected set are STALE and are ignored
-        # (not added to artifacts, not counted as pending).
+        # Files on disk that are NOT in the expected set are surplus and are
+        # ignored (not added to artifacts, not counted as pending).
         #
         # When no scene boundaries are available yet, fall back to a plain disk
         # scan — scene detection will run during execution to determine boundaries.
@@ -711,9 +711,9 @@ class ChunkingPhase:
                         artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.COMPLETE))
                         logger.debug("Chunk %s: COMPLETE", stem)
                     else:
-                        artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.ARTIFACT_ONLY))
+                        artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.PARTIAL))
                         pending_ids.append(stem)
-                        logger.debug("Chunk %s: ARTIFACT_ONLY (sidecar missing)", stem)
+                        logger.debug("Chunk %s: PARTIAL (sidecar missing)", stem)
                 else:
                     artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.ABSENT))
                     pending_ids.append(stem)
@@ -729,9 +729,9 @@ class ChunkingPhase:
                     artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.COMPLETE))
                     logger.debug("Chunk %s: COMPLETE", stem)
                 else:
-                    artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.ARTIFACT_ONLY))
+                    artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.PARTIAL))
                     pending_ids.append(stem)
-                    logger.debug("Chunk %s: ARTIFACT_ONLY (sidecar missing)", stem)
+                    logger.debug("Chunk %s: PARTIAL (sidecar missing)", stem)
 
         complete_count = len(artifacts) - len(pending_ids)
         logger.debug(
@@ -815,7 +815,7 @@ class ChunkingPhase:
             },
             pending = [
                 a.path.stem for a in artifacts
-                if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY)
+                if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)
             ],
         )
 
@@ -890,12 +890,6 @@ class ChunkingPhase:
 # ---------------------------------------------------------------------------
 # Module-level logging helpers
 # ---------------------------------------------------------------------------
-
-def _recovery_message(artifacts: list[ChunkArtifact]) -> str:
-    complete = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
-    pending  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
-    return f"{complete} complete, {pending} pending"
-
 
 def _failed(error: str) -> ChunkingPhaseResult:
     """Return a ``FAILED`` ``ChunkingPhaseResult`` with the given error."""

@@ -18,6 +18,10 @@
 
 **Requirement 5 AC 6** — the per-field crop-params mismatch check in `OptimizationPhase` / `EncodingPhase` has been replaced by a `ProbeState` snapshot comparison (`persisted.probe != current_probe`). `MergePhase` also gains probe-mismatch detection (a pre-existing gap, now closed).
 
+### Superseded by `artifact-state-refactor` (2026-09-15) — ArtifactState & selection
+
+The four-value `ArtifactState` this spec introduced (`ABSENT`/`ARTIFACT_ONLY`/`STALE`/`COMPLETE`, Requirement 5) is re-scoped to completeness only. `STALE` is removed and selection now lives in a new `Artifact.wanted: bool` field; `ARTIFACT_ONLY` is renamed `PARTIAL`. `pending` therefore reads `state in (ABSENT, PARTIAL)` and no longer includes `STALE`. The Glossary and Requirement 5 descriptions here are outdated on these points — see `artifact-state-refactor` for the current model.
+
 ## Introduction
 
 This spec covers a structural refactor of the pipeline to make each phase a self-contained object. Currently phases are standalone functions, job initialisation only runs inside the auto-pipeline, input discovery is inconsistent across modes, and the pipeline always rescans the filesystem even when it just produced the data. The goal is a uniform `Phase` protocol where every phase owns its dependencies, artifact enumeration, recovery, execution, and logging — and the pipeline simply drives phase objects rather than containing phase logic itself.

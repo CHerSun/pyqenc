@@ -34,7 +34,7 @@ class ChunkRecovery:
     Attributes:
         chunk_id:  Chunk identifier (timestamp-range stem).
         path:      Path to the chunk ``.mkv`` file.
-        state:     ``ABSENT`` / ``ARTIFACT_ONLY`` / ``COMPLETE``.
+        state:     ``ABSENT`` / ``PARTIAL`` / ``COMPLETE``.
         metadata:  ``ChunkMetadata`` loaded from sidecar (``COMPLETE`` only).
     """
 

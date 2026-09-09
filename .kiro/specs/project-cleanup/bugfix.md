@@ -4,6 +4,10 @@
 
 - Created: 2026-06-11
 
+## Cross-Spec Notes
+
+**Completed in part by `artifact-state-refactor` (2026-09-15).** Section 7/8.3 here flagged the duplicated `_outcome_from_artifacts` / `_recovery_message` pattern across the phase files for consolidation. `artifact-state-refactor` removes all five per-phase `_recovery_message()` helpers and unifies recovery reporting into a single `log_recovery_line()`. It also re-scopes `ArtifactState` to completeness only (removes `STALE`, renames `ARTIFACT_ONLY` → `PARTIAL`, adds `Artifact.wanted`).
+
 ## Introduction
 
 The pyqenc project has accumulated code smells, structural inconsistencies, and bloat over a series of rapid feature specs. The project is pre-alpha with no public API commitment, so this is the right moment for a thorough cleanup before the first release. The goal is a codebase that is clean, internally consistent, and free of patterns that will cause pain during future development.

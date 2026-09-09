@@ -12,6 +12,8 @@
 - All phases now receive `AppConfig` instead of `PipelineConfig`. The architecture diagram in this spec showing `PipelineConfig → Orchestrator` is stale; it should read `AppConfig → _build_registry`.
 - `phase-object-model` established the `(config, phases)` constructor pattern. `pipeline-metrics-report` extended it to `(config, phases, *, collector)`. `config-refactor` keeps that signature but changes `config` from `PipelineConfig` to `AppConfig`.
 
+**Note (2026-09-15 — superseded in part by `artifact-state-refactor`):** The four-value `ArtifactState` defined here (`ABSENT`/`ARTIFACT_ONLY`/`STALE`/`COMPLETE`) is re-scoped to completeness only. `STALE` is removed and selection moves to a new `Artifact.wanted: bool` field; `ARTIFACT_ONLY` is renamed `PARTIAL`. Consequently `pending` becomes `state in (ABSENT, PARTIAL)`, and invalidation is expressed as `wanted=False` with the correct completeness rather than `STALE`. The `ArtifactState`/`Artifact`/`pending` definitions in this design are outdated on these points — see `artifact-state-refactor` for the current model.
+
 ---
 
 ## Overview

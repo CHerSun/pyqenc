@@ -2,8 +2,8 @@
 
 This module provides:
 
-- ``ArtifactState`` — four-value enum classifying each artifact's recovery
-  state (``ABSENT`` / ``ARTIFACT_ONLY`` / ``STALE`` / ``COMPLETE``).
+- ``ArtifactState`` — three-value enum classifying each artifact's
+  completeness (``ABSENT`` / ``PARTIAL`` / ``COMPLETE``).
 - Data models: ``JobState``, ``ExtractionParams``, ``ChunkingParams``,
   ``OptimizationParams``, ``EncodingParams``, ``MetricsSidecar``,
   ``EncodingResultSidecar``, ``MeasureSidecar``, ``ChunkSidecar``.
@@ -41,32 +41,36 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class ArtifactState(Enum):
-    """Recovery state of a single pipeline artifact.
+    """Completeness (readiness) of a single pipeline artifact.
 
-    Used throughout recovery logic to classify each artifact and decide what
-    work remains for the current run.
+    Completeness answers one question: are all expected components present, so
+    the artifact is ready to be worked on by later stages?  It is orthogonal to
+    selection — whether the current run *wants* the artifact — which lives on
+    ``Artifact.wanted``, not here.
 
     Attributes:
-        ABSENT:        The artifact file does not exist — not yet produced, or
-                       invalidated by a parameter change.  Recovery action:
-                       produce the artifact and its sidecar.
-        ARTIFACT_ONLY: The artifact file is present and consistent (written via
-                       the ``.tmp`` protocol), but its sidecar is missing or
-                       incomplete.  Recovery action: produce the sidecar only.
-        STALE:         The artifact file and sidecar are present and internally
-                       consistent, but the parameters under which they were
-                       produced no longer match the current run parameters.
-                       Recovery action: re-produce if still needed, or leave on
-                       disk if cleanup level does not permit deletion.
-        COMPLETE:      The artifact file is present and its sidecar is present
-                       and contains all required data.  Recovery action: skip —
-                       no work needed.
+        ABSENT:   The artifact's components are not present.  Either nothing has
+                  been produced yet, or whatever exists is trivially
+                  reproducible with no investment worth protecting.  There is no
+                  separate state for cheaply reproducible leftovers — they are
+                  simply ABSENT.  ``.tmp`` files are NOT PARTIAL — they are
+                  transient crash remnants cleaned up at phase startup before
+                  recovery runs, leaving the artifact ABSENT.
+        PARTIAL:  A protected investment.  Expensive or valuable work is partly
+                  done, but the artifact is NOT yet ready to be worked on by
+                  later stages because a required component is missing; it is
+                  kept to avoid discarding that investment and to allow
+                  resuming.  Examples of this principle: the primary file is
+                  present but its sidecar is missing, or CRF attempts exist but
+                  no winning attempt has been finalised.
+        COMPLETE: All of the artifact's expected components are present, so the
+                  artifact is fully ready to be worked on by later stages
+                  (sidecar present where applicable).
     """
 
-    ABSENT        = "absent"
-    ARTIFACT_ONLY = "artifact_only"
-    STALE         = "stale"
-    COMPLETE      = "complete"
+    ABSENT   = "absent"
+    PARTIAL  = "partial"    # renamed from ARTIFACT_ONLY
+    COMPLETE = "complete"
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +543,7 @@ class EncodingResultSidecar(BaseModel):
     Quality-target tracking is owned exclusively by ``OptimizationPhase`` via
     ``optimization.yaml``.  ``OptimizationPhase`` deletes stale result sidecars
     before ``EncodingPhase`` runs, so ``EncodingPhase._recover()`` simply sees
-    ``ARTIFACT_ONLY`` pairs naturally when targets change.
+    ``PARTIAL`` pairs naturally when targets change.
     """
 
     winning_attempt: str              # filename of the winning attempt .mkv

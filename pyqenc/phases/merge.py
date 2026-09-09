@@ -611,12 +611,14 @@ class MergePhase:
 
         artifacts = self._recover(force_wipe=force_wipe, execute=False)
         outcome   = _outcome_from_artifacts(artifacts, did_work=False)
+        message   = log_recovery_line(logger, artifacts)
+        wanted    = [a for a in artifacts if a.wanted]
 
         self.result = MergePhaseResult(
             outcome   = outcome,
-            artifacts = artifacts,
-            message   = _recovery_message(artifacts),
-            merged    = artifacts,
+            artifacts = wanted,
+            message   = message,
+            merged    = wanted,
         )
         return self.result
 
@@ -660,18 +662,18 @@ class MergePhase:
         with self._collector.time(MetricKey.RECOVERY):
             artifacts = self._recover(force_wipe=force_wipe, execute=True)
 
-        complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
-        pending_count  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
-        log_recovery_line(logger, complete_count, pending_count)
+        message       = log_recovery_line(logger, artifacts)
+        wanted        = [a for a in artifacts if a.wanted]
+        pending_count = sum(1 for a in artifacts if a.wanted and a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL))
 
         # Dry-run path
         if dry_run:
             outcome = PhaseOutcome.REUSED if pending_count == 0 else PhaseOutcome.DRY_RUN
             self.result = MergePhaseResult(
                 outcome   = outcome,
-                artifacts = artifacts,
+                artifacts = wanted,
                 message   = "dry-run",
-                merged    = artifacts,
+                merged    = wanted,
             )
             return self.result
 
@@ -686,9 +688,9 @@ class MergePhase:
                 _log_merge_summary_from_params(persisted, self._job.result.config.encoding.resolved_targets)  # type: ignore[union-attr]
             self.result = MergePhaseResult(
                 outcome   = PhaseOutcome.REUSED,
-                artifacts = artifacts,
-                message   = "all merge artifacts reused",
-                merged    = artifacts,
+                artifacts = wanted,
+                message   = message,
+                merged    = wanted,
             )
             return self.result
 
@@ -768,7 +770,7 @@ class MergePhase:
 
         incomplete = [
             a for a in self._encoding.result.encoded  # type: ignore[union-attr]
-            if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY)
+            if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)
         ]
         if incomplete:
             err = f"EncodingPhase has {len(incomplete)} incomplete artifact(s) — cannot merge"
@@ -797,7 +799,7 @@ class MergePhase:
         Steps:
         1. If ``force_wipe`` and execute: delete ``final/`` and ``merge.yaml``.
         2. Detect quality-target / metrics_sampling change — delete per-output
-           sidecars so stale COMPLETE artifacts are reclassified as ARTIFACT_ONLY
+           sidecars so stale COMPLETE artifacts are reclassified as PARTIAL
            and the merge re-runs with fresh metrics.
         3. Clean up leftover ``.tmp`` files (execute mode only).
         4. Determine expected strategies from ``EncodingPhase.result``.
@@ -824,7 +826,7 @@ class MergePhase:
 
         # Step 2: quality-target / metrics_sampling change detection.
         # When params change, delete all per-output sidecars so every artifact
-        # is reclassified as ARTIFACT_ONLY and the merge re-runs with fresh metrics.
+        # is reclassified as PARTIAL and the merge re-runs with fresh metrics.
         if execute and not force_wipe and final_dir.exists():
             persisted = MergeParams.load(merge_yaml)
             if persisted is not None and persisted != self.params:
@@ -901,10 +903,10 @@ class MergePhase:
                     plot_path     = plot_path,
                 ))
             elif output_file.exists():
-                # ARTIFACT_ONLY — file present but sidecar missing
+                # PARTIAL — file present but sidecar missing
                 artifacts.append(MergeArtifact(
                     path          = output_file,
-                    state         = ArtifactState.ARTIFACT_ONLY,
+                    state         = ArtifactState.PARTIAL,
                     strategy_name = strategy_name,
                 ))
             else:
@@ -1303,17 +1305,6 @@ def _outcome_from_artifacts(
     if all(a.state == ArtifactState.COMPLETE for a in artifacts):
         return PhaseOutcome.REUSED if not did_work else PhaseOutcome.COMPLETED
     return PhaseOutcome.DRY_RUN
-
-
-def _recovery_message(artifacts: list[MergeArtifact]) -> str:
-    """Build a human-readable recovery summary string."""
-    complete = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
-    pending  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
-    if pending == 0:
-        return f"{complete} output(s) complete — reusing"
-    if complete == 0:
-        return f"{pending} output(s) pending — full run needed"
-    return f"{complete} output(s) complete, {pending} pending — resuming"
 
 
 def _failed(error: str) -> MergePhaseResult:

@@ -1328,14 +1328,16 @@ class AudioPhase:
         job_result = self._job.result  # type: ignore[union-attr]
         force_wipe = getattr(job_result, "force_wipe", False)
 
-        artifacts = self._recover(force_wipe=force_wipe, execute=False)
-        audio_files = [a.path for a in artifacts if a.state == ArtifactState.COMPLETE]
-        outcome = _outcome_from_artifacts(artifacts, did_work=False)
+        internal_artifacts = self._recover(force_wipe=force_wipe, execute=False)
+        wanted_artifacts   = [a for a in internal_artifacts if a.wanted]
+        audio_files = [a.path for a in wanted_artifacts if a.state == ArtifactState.COMPLETE]
+        outcome = _outcome_from_artifacts(wanted_artifacts, did_work=False)
+        message = log_recovery_line(logger, internal_artifacts)
 
         self.result = AudioPhaseResult(
             outcome     = outcome,
-            artifacts   = artifacts,
-            message     = _recovery_message(artifacts),
+            artifacts   = wanted_artifacts,
+            message     = message,
             audio_files = audio_files,
         )
         return self.result
@@ -1380,11 +1382,11 @@ class AudioPhase:
         from pyqenc.metrics import MetricKey
 
         with self._collector.time(MetricKey.RECOVERY):
-            artifacts = self._recover(force_wipe=force_wipe, execute=True)
+            internal_artifacts = self._recover(force_wipe=force_wipe, execute=True)
 
-        complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
-        pending_count  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
-        log_recovery_line(logger, complete_count, pending_count)
+        artifacts     = [a for a in internal_artifacts if a.wanted]
+        pending_count = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL))
+        message       = log_recovery_line(logger, internal_artifacts)
 
         # Action plan — log source file count before starting work
         if pending_count > 0:
@@ -1400,7 +1402,7 @@ class AudioPhase:
             self.result = AudioPhaseResult(
                 outcome     = outcome,
                 artifacts   = artifacts,
-                message     = "dry-run",
+                message     = message,
                 audio_files = audio_files,
             )
             return self.result
@@ -1411,7 +1413,7 @@ class AudioPhase:
             self.result = AudioPhaseResult(
                 outcome     = PhaseOutcome.REUSED,
                 artifacts   = artifacts,
-                message     = "all audio artifacts reused",
+                message     = message,
                 audio_files = audio_files,
             )
             return self.result
@@ -1474,8 +1476,10 @@ class AudioPhase:
         3. Build the processing plan from the current convert filter to determine
            expected terminal outputs (AAC delivery files).
         4. Load ``audio.yaml``; detect codec/bitrate changes (Type B config).
-        5. Classify each expected terminal output as ``COMPLETE``, ``STALE``, or ``ABSENT``.
-           Files present in ``audio/`` that are not terminal outputs are ``STALE``.
+        5. Classify each expected terminal output as ``COMPLETE`` (``wanted=True``),
+           ``ABSENT``, or — when the codec/bitrate changed — ``COMPLETE`` with
+           ``wanted=False``. Files present in ``audio/`` that are not terminal
+           outputs are ``COMPLETE`` with ``wanted=False`` (surplus/intermediate).
 
         Args:
             force_wipe: When ``True``, wipe all audio artifacts first.
@@ -1526,7 +1530,7 @@ class AudioPhase:
 
         if codec_changed:
             logger.debug(
-                "audio.yaml codec/bitrate changed (%s/%s → %s/%s) — marking all artifacts STALE",
+                "audio.yaml codec/bitrate changed (%s/%s → %s/%s) — marking all artifacts unwanted (wanted=False)",
                 persisted.codec,               self.params.codec,               # type: ignore[union-attr]
                 persisted.bitrate_per_channel, self.params.bitrate_per_channel,
             )
@@ -1550,17 +1554,19 @@ class AudioPhase:
                 artifacts.append(AudioArtifact(path=path, state=ArtifactState.ABSENT))
             elif params_unknown:
                 # Config unknown — cannot confirm content validity
-                artifacts.append(AudioArtifact(path=path, state=ArtifactState.ARTIFACT_ONLY))
+                artifacts.append(AudioArtifact(path=path, state=ArtifactState.PARTIAL))
             elif codec_changed:
-                # AAC content must be regenerated
-                artifacts.append(AudioArtifact(path=path, state=ArtifactState.STALE))
+                # Produced under the previous codec — no longer wanted this run,
+                # but the file is fully present on disk (COMPLETE).
+                artifacts.append(AudioArtifact(path=path, state=ArtifactState.COMPLETE, wanted=False))
             else:
                 artifacts.append(AudioArtifact(path=path, state=ArtifactState.COMPLETE))
 
-        # Files present but not terminal outputs are STALE (intermediate-only)
+        # Files present but not terminal outputs are surplus/intermediate — not
+        # wanted this run, but fully present on disk (COMPLETE, wanted=False).
         for name, path in existing.items():
             if name not in terminal_outputs:
-                artifacts.append(AudioArtifact(path=path, state=ArtifactState.STALE))
+                artifacts.append(AudioArtifact(path=path, state=ArtifactState.COMPLETE, wanted=False))
 
         # If no terminal outputs were planned and no existing files, fall back to absent
         if not artifacts:
@@ -1686,12 +1692,6 @@ def _outcome_from_artifacts(
     if all(a.state == ArtifactState.COMPLETE for a in artifacts) and artifacts:
         return PhaseOutcome.REUSED if not did_work else PhaseOutcome.COMPLETED
     return PhaseOutcome.DRY_RUN
-
-
-def _recovery_message(artifacts: list[AudioArtifact]) -> str:
-    complete = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
-    pending  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY))
-    return f"{complete} complete, {pending} pending"
 
 
 def _failed(error: str) -> AudioPhaseResult:

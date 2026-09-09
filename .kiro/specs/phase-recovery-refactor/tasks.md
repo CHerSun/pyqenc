@@ -2,6 +2,10 @@
 
 <!-- markdownlint-disable MD024 -->
 
+## Cross-Spec Notes
+
+**Superseded in part by `artifact-state-refactor` (2026-09-15).** The `ArtifactState` enum introduced by this spec (`ABSENT`/`ARTIFACT_ONLY`/`COMPLETE`) is re-scoped to completeness only, with `ARTIFACT_ONLY` renamed `PARTIAL` and selection moved to a new `Artifact.wanted` field. That spec also removes the per-phase `_recovery_message()` helpers and unifies recovery reporting in `log_recovery_line()`. Task references to `ARTIFACT_ONLY` below are historical.
+
 - [x] 1. Add `output_file` parameter to ffmpeg runner and update all callers
 
 

@@ -28,12 +28,12 @@ if TYPE_CHECKING:
     from pyqenc.metrics import MetricsCollector
 
 __all__ = [
-    "ArtifactState",
     "Artifact",
+    "ArtifactState",
+    "CleanupLevel",
+    "Phase",
     "PhaseOutcome",
     "PhaseResult",
-    "Phase",
-    "CleanupLevel",
     "Strategy",
     "_build_registry",
 ]
@@ -56,12 +56,25 @@ class Artifact:
     fields (e.g. ``ChunkArtifact`` adds ``metadata: ChunkMetadata | None``).
 
     Attributes:
-        path:  Path to the primary artifact file on disk.
-        state: Current classification of this artifact.
+        path:   Path to the primary artifact file on disk.
+        state:  Completeness of this artifact.
+        wanted: Whether this artifact is selected by the current run. This is a
+                DERIVED value: it comes from external input — the user's stream
+                filter plus the pipeline mode (e.g. ``video_required``) for
+                extraction, and scene detection for chunking — and is never
+                chosen or mutated by a phase on its own during recovery.
+                Orthogonal to completeness. ``True`` = must be produced if not
+                already ``COMPLETE``. ``False`` = present or expected on disk
+                but not needed this run; it is retained in place unchanged and
+                is not a deletion candidate — deletion only ever happens when
+                the user explicitly sets a cleanup level, applied uniformly.
+                The default ``True`` ensures all existing construction sites
+                are unaffected.
     """
 
-    path:  Path
-    state: ArtifactState
+    path:   Path
+    state:  ArtifactState
+    wanted: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +87,12 @@ class PhaseResult:
 
     Attributes:
         outcome:   High-level outcome of the phase execution.
-        artifacts: All artifacts the phase is responsible for, in any state.
+        artifacts: Wanted artifacts only (``wanted=True``). Phases build a full
+                   internal artifact list in ``_recover()`` covering both
+                   wanted and unwanted entries, then filter to ``wanted=True``
+                   before constructing ``PhaseResult``. ``pending`` and
+                   ``complete`` derive from this list directly, so callers
+                   never need to filter by ``wanted`` themselves.
         message:   Human-readable summary of the phase outcome.
         error:     Error description when ``outcome`` is ``FAILED``; ``None``
                    otherwise.
@@ -108,15 +126,15 @@ class PhaseResult:
     def pending(self) -> list[Artifact]:
         """Artifacts that require active work this run.
 
-        Includes only ``ABSENT`` (must produce) and ``ARTIFACT_ONLY``
-        (sidecar repair needed).  ``STALE`` artifacts are NOT included here —
-        each phase handles stale artifacts in its own ``_recover()`` logic:
-        re-produce if still needed under current parameters, or leave on disk
-        (subject to cleanup level) if no longer needed.
+        Includes only ``ABSENT`` (must produce) and ``PARTIAL`` (protected
+        investment needing the missing component). Since ``artifacts`` already
+        contains only ``wanted=True`` entries, no additional ``wanted``
+        filtering is needed here. Unwanted artifacts are excluded upstream and
+        never reach this property.
         """
         return [
             a for a in self.artifacts
-            if a.state in (ArtifactState.ABSENT, ArtifactState.ARTIFACT_ONLY)
+            if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)
         ]
 
     @property

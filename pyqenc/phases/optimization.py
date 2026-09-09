@@ -303,7 +303,11 @@ class OptimizationPhase:
                     quality_targets  = current_targets,
                     metrics_sampling = current_sampling,
                 ).save(opt_yaml)
-            log_recovery_line(logger, len(persisted.strategy_results), 0, unit="strategy result")
+            log_recovery_line(
+                logger,
+                _strategy_artifacts([r.strategy_name for r in persisted.strategy_results]),
+                unit="strategy result",
+            )
             self._log_optimization_summary(persisted.strategy_results, selected)
             self.result = OptimizationPhaseResult(
                 outcome             = PhaseOutcome.REUSED,
@@ -330,7 +334,11 @@ class OptimizationPhase:
             logger.info("Tolerance:   %.1f%%", tolerance)
             with self._collector.time(MetricKey.RECOVERY):
                 selected = persisted.selected or self._apply_tolerance(persisted.strategy_results, tolerance)
-            log_recovery_line(logger, len(persisted.strategy_results), 0, unit="strategy result")
+            log_recovery_line(
+                logger,
+                _strategy_artifacts([r.strategy_name for r in persisted.strategy_results]),
+                unit="strategy result",
+            )
             self._log_optimization_summary(persisted.strategy_results, selected)
             self.result = OptimizationPhaseResult(
                 outcome             = PhaseOutcome.REUSED,
@@ -402,9 +410,15 @@ class OptimizationPhase:
             s for s in self._job.result.config.encoding.resolved_strategies
             if s.name not in cached_results
         ]
-        complete_count = len(cached_results)
-        pending_count  = len(strategies_to_test)
-        log_recovery_line(logger, complete_count, pending_count, unit="strategy result")
+        pending_count = len(strategies_to_test)
+        log_recovery_line(
+            logger,
+            _strategy_artifacts(
+                complete_names = list(cached_results.keys()),
+                absent_names   = [s.name for s in strategies_to_test],
+            ),
+            unit="strategy result",
+        )
 
         if dry_run:
             self.result = OptimizationPhaseResult(
@@ -565,7 +579,7 @@ class OptimizationPhase:
         current quality targets so that target-change detection works on the next
         run.  If quality targets changed since the last run, deletes all result
         sidecars from ``encoded/`` before returning so ``EncodingPhase`` sees
-        ``ARTIFACT_ONLY`` pairs.
+        ``PARTIAL`` pairs.
 
         Args:
             dry_run: When ``True``, skip writing ``optimization.yaml``.
@@ -761,6 +775,37 @@ class OptimizationPhase:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+def _strategy_artifacts(
+    complete_names: list[str],
+    absent_names:   list[str] | None = None,
+) -> list[Artifact]:
+    """Build a lightweight ``Artifact`` list representing strategy results.
+
+    The optimization phase tracks strategy test results rather than a standard
+    on-disk artifact list, so this adapts them to the artifact model consumed by
+    ``log_recovery_line()`` (which reads only ``.wanted`` and ``.state``). Every
+    strategy result is ``wanted=True``; cached results are ``COMPLETE`` and
+    strategies still needing a test encode are ``ABSENT``. The synthetic path is
+    derived from the strategy name purely for readability.
+
+    Args:
+        complete_names: Names of strategies with cached (finished) results.
+        absent_names:   Names of strategies still requiring a test encode.
+
+    Returns:
+        Combined artifact list, complete entries first then absent entries.
+    """
+    artifacts:  list[Artifact] = [
+        Artifact(path=Path(name), state=ArtifactState.COMPLETE, wanted=True)
+        for name in complete_names
+    ]
+    artifacts += [
+        Artifact(path=Path(name), state=ArtifactState.ABSENT, wanted=True)
+        for name in (absent_names or [])
+    ]
+    return artifacts
+
 
 def _targets_as_strings(quality_targets: list[QualityTarget]) -> list[str]:
     """Serialise *quality_targets* to ``"metric-statistic:value"`` strings.

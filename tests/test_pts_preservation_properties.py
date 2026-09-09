@@ -185,7 +185,8 @@ def test_timestamp_filter_independence(
         f"(include={include_pattern!r}, exclude={exclude_pattern!r})"
     )
 
-    # State must be COMPLETE or ABSENT only — never STALE
+    # State must be COMPLETE or ABSENT only (completeness-only enum; selection
+    # lives on Artifact.wanted, so there is no STALE state to observe here)
     assert ts_artifacts[0].state in (ArtifactState.COMPLETE, ArtifactState.ABSENT), (
         f"TimestampArtifact state must be COMPLETE or ABSENT, got {ts_artifacts[0].state} "
         f"(include={include_pattern!r}, exclude={exclude_pattern!r})"

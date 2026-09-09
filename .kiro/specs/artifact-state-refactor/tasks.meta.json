@@ -1,0 +1,302 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "1.1 Split `ArtifactState` into a completeness-only enum and rename `ARTIFACT_ONLY` → `PARTIAL` project-wide": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908275503
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908289506
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788909043428
+      }
+    ],
+    "1.2 Unify `log_recovery_line()` to derive counts from the internal artifact list": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908276496
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788909048713
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788909466739
+      }
+    ],
+    "2.1 Add `wanted: bool = True` to the `Artifact` base dataclass in `pyqenc/phase.py`": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908276723
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788909471984
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788913276065
+      }
+    ],
+    "2.2 Update `PhaseResult` docstring and verify `pending` reads `PARTIAL`": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908276879
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788913286245
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788913457007
+      }
+    ],
+    "3.1 Rework `_recover()` to enumerate all tracks and assign `wanted` + completeness": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908277008
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788913287294
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788913458113
+      }
+    ],
+    "3.2 Change `_log_stream_table()` signature and derive columns from artifacts": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908277282
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788913471037
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788917225693
+      }
+    ],
+    "3.3 Update `_execute_extraction()` absent-names filter and `run()` recovery counts": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908277581
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788917230019
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788917397992
+      }
+    ],
+    "4.1 Replace `STALE` assignments and update recovery/counts in `pyqenc/phases/audio.py`": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908277693
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788909473350
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788913277424
+      }
+    ],
+    "5.1 Unify recovery reporting and clean up docstrings in `pyqenc/phases/chunking.py`": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908277835
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788909474748
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788913278888
+      }
+    ],
+    "5.2 Unify recovery reporting and clean up docstrings in `pyqenc/phases/merge.py`": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908277993
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788909476148
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788913280272
+      }
+    ],
+    "5.3 Unify recovery reporting and clean up docstrings in `pyqenc/phases/encoding.py`": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908278156
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788909477041
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788913281279
+      }
+    ],
+    "6. Checkpoint - Ensure all tests pass": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908278282
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788974641768
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788974713315
+      }
+    ],
+    "7.1 Update test logic for the STALE removal and old-name mentions": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908278421
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788917417975
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788974712782
+      }
+    ],
+    "8. Final checkpoint - Ensure all tests pass and lint is clean": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908278549
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788974718993
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788990769798
+      }
+    ],
+    "9. Cross-spec review and completion": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788908278747
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788990775156
+      },
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788993516284
+      }
+    ],
+    "1. Establish the completeness/selection foundation": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788909466860
+      }
+    ],
+    "4. Refactor `AudioPhase` recovery and counts": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788913277688
+      }
+    ],
+    "5. Unify recovery reporting and clean up docstrings in chunking, merge, and encoding": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788913281398
+      }
+    ],
+    "2. Add `wanted` selection field to `Artifact` and update `PhaseResult`": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788913457168
+      }
+    ],
+    "3. Refactor `ExtractionPhase` recovery, stream table, and counts": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788917398105
+      }
+    ],
+    "7. Update existing tests and add cross-cutting migration tests": [
+      {
+        "executionId": "d45e8fd1-65b6-4243-aae6-9a0a54f2d4c6",
+        "chatSessionId": "sess_af1eec5b-34d5-48b0-ae7b-b7da680f7f59",
+        "timestamp": 1788974712900
+      }
+    ]
+  }
+}

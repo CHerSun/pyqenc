@@ -2,6 +2,10 @@
 
 <!-- markdownlint-disable MD024 -->
 
+## Cross-Spec Notes
+
+**Completed in part by `artifact-state-refactor` (2026-09-15).** Task 9.3 here planned to consolidate the duplicated `_outcome_from_artifacts` / `_recovery_message` pattern into `phase.py`. `artifact-state-refactor` removes all five per-phase `_recovery_message()` helpers and unifies recovery reporting into a single `log_recovery_line()`, while also re-scoping `ArtifactState` (removes `STALE`, renames `ARTIFACT_ONLY` → `PARTIAL`, adds `Artifact.wanted`).
+
 - [ ] 1. Write bug condition exploration test
   - **Property 1: Bug Condition** - Structural Defects Present in Unfixed Codebase
   - **CRITICAL**: This test MUST FAIL on unfixed code — failure confirms the defects exist
