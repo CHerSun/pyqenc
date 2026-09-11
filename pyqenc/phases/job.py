@@ -128,8 +128,10 @@ class JobPhase:
         3. Detect source mismatch against existing ``job.yaml``.
            - No mismatch or no existing file → continue.
            - Mismatch without ``--force`` → return ``FAILED``.
-           - Mismatch with ``--force`` → set ``force_wipe=True``, delete
-             ``job.yaml`` and all phase parameter YAMLs, continue.
+           - Mismatch with ``--force`` → set ``force_wipe=True`` and continue.
+             ``JobPhase`` deletes nothing here; each downstream phase wipes its
+             own artifacts when it sees ``force_wipe=True``. ``job.yaml`` itself
+             is overwritten with the new source metadata in step 5.
         4. In dry-run mode: return ``PENDING`` if ``job.yaml`` is absent.
         5. Create/update ``job.yaml`` with current source metadata.
         6. Cache and return result.

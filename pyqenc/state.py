@@ -4,7 +4,7 @@ This module provides:
 
 - ``ArtifactState`` — three-value enum classifying each artifact's
   completeness (``ABSENT`` / ``PARTIAL`` / ``COMPLETE``).
-- Data models: ``JobState``, ``ExtractionParams``, ``ChunkingParams``,
+- Data models: ``JobState``, ``ChunkingParams``,
   ``OptimizationParams``, ``EncodingParams``, ``MetricsSidecar``,
   ``EncodingResultSidecar``, ``MeasureSidecar``, ``ChunkSidecar``.
 
@@ -197,59 +197,6 @@ class JobState(BaseModel):
             path: Destination YAML file path.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
-        write_yaml_atomic(path, self.to_yaml_dict())
-        logger.debug("Saved %s", path.name)
-
-
-class ExtractionParams(BaseModel):
-    """Phase parameter file model for extraction (``extraction.yaml``).
-
-    Stores the include/exclude stream filter patterns that were active when
-    extraction last ran.  Used to detect filter changes on subsequent runs
-    and trigger re-extraction when they differ.
-    """
-
-    include: str | None = None
-    exclude: str | None = None
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict."""
-        return {
-            "include": self.include,
-            "exclude": self.exclude,
-        }
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict) -> ExtractionParams:
-        """Restore from a dict loaded from ``extraction.yaml``."""
-        return cls(
-            include=data.get("include"),
-            exclude=data.get("exclude"),
-        )
-
-    @classmethod
-    def load(cls, path: Path) -> Self | None:
-        """Load ``ExtractionParams`` from *path*.
-
-        Returns:
-            ``ExtractionParams`` if the file exists and is valid, ``None`` otherwise.
-        """
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return cls.from_yaml_dict(data or {})
-        except Exception as exc:
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
-
-    def save(self, path: Path) -> None:
-        """Write this ``ExtractionParams`` to *path* atomically.
-
-        Args:
-            path: Destination YAML file path.
-        """
         write_yaml_atomic(path, self.to_yaml_dict())
         logger.debug("Saved %s", path.name)
 

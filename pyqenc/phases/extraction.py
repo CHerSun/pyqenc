@@ -35,7 +35,7 @@ from pyqenc.phase import (
     PhaseResult,
     resolve_dependencies,
 )
-from pyqenc.state import ArtifactState, ExtractionParams
+from pyqenc.state import ArtifactState
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 
 if TYPE_CHECKING:
@@ -536,8 +536,6 @@ if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
 
-_EXTRACTION_YAML_NAME = "extraction.yaml"
-
 
 _SUBTITLE_FFMPEG_FORMAT: dict[str, str] = {
     "srt": "srt",
@@ -734,7 +732,6 @@ class ExtractionPhase:
         self._collector:      MetricsCollector             = collector
         self._video_required: bool                           = video_required
         self._job:            _JobPhase | None             = cast("_JobPhase", phases.get(_JobPhase)) if phases else None
-        self.params:          ExtractionParams               = ExtractionParams(include=config.extraction.include, exclude=config.extraction.exclude)
         self.result:          ExtractionPhaseResult | None   = None
         self.dependencies:    list[Phase]                    = [self._job] if self._job is not None else []
 
@@ -743,17 +740,21 @@ class ExtractionPhase:
     # ------------------------------------------------------------------
 
     def run(self, dry_run: bool = False) -> ExtractionPhaseResult:
-        """Recover, extract pending artifacts, persist ``extraction.yaml``.
+        """Recover and extract pending artifacts.
 
         Sequence:
         1. Emit phase banner.
         2. Ensure dependencies have results (scan if needed).
-        3. Run ``_recover()`` — handles ``force_wipe`` and filter-change detection.
+        3. Run ``_recover()`` — handles ``force_wipe`` and derives wanted artifacts
+           from the current include/exclude filter.
         4. Log recovery result line.
         5. In dry-run mode: return ``PENDING`` if any artifacts are pending.
         6. Extract ``ABSENT`` artifacts; leave unwanted (``wanted=False``) artifacts on disk.
-        7. Persist ``extraction.yaml``.
-        8. Log completion summary.
+        7. Log completion summary.
+
+        Extraction keeps no sidecar: recovery re-probes the source and re-applies
+        the current filter on every run, so a filter change is fully expressed
+        through each artifact's ``wanted`` flag with nothing to persist.
 
         Args:
             dry_run: When ``True``, report what would be done without writing files.
@@ -844,9 +845,8 @@ class ExtractionPhase:
         When ``ctx.deep_cleanup`` is ``True``, deletes this phase's own
         ``extracted/`` directory in full. Every extraction artifact (video,
         audio, subtitles, chapters, attachments, timestamps) is reproducible
-        from the source, so none is exempt from deep cleanup. ``extraction.yaml``
-        is a recovery sidecar and is left in place. Deletion is guarded by an
-        existence check and never raises: any ``OSError`` is caught and logged
+        from the source, so none is exempt from deep cleanup. Deletion is guarded
+        by an existence check and never raises: any ``OSError`` is caught and logged
         as a warning so a cleanup failure never fails the run.
 
         Args:
@@ -924,10 +924,9 @@ class ExtractionPhase:
         """Classify extraction artifacts by enumerating every source track.
 
         Steps:
-        1. If ``force_wipe``: delete ``extracted/`` and ``extraction.yaml``.
+        1. If ``force_wipe``: delete ``extracted/``.
         2. Clean up leftover ``.tmp`` files.
-        3. Load persisted ``extraction.yaml`` (informational; no STALE special case).
-        4. Analyse the source and produce one artifact per ffprobe track, in
+        3. Analyse the source and produce one artifact per ffprobe track, in
            index order. Each artifact carries two orthogonal facts:
            - ``wanted``: whether the current include/exclude filter selects the
              track (and ``False`` for video/timestamp artifacts when
@@ -947,16 +946,11 @@ class ExtractionPhase:
         """
         work_dir      = self._job.result.work_dir  # type: ignore[union-attr]
         extracted_dir = work_dir / EXTRACTED_DIR
-        yaml_path     = work_dir / _EXTRACTION_YAML_NAME
 
         # Step 1: force-wipe
-        if force_wipe:
-            if extracted_dir.exists():
-                shutil.rmtree(extracted_dir)
-                logger.debug("force_wipe: deleted %s", extracted_dir)
-            if yaml_path.exists():
-                yaml_path.unlink()
-                logger.debug("force_wipe: deleted %s", yaml_path)
+        if force_wipe and extracted_dir.exists():
+            shutil.rmtree(extracted_dir)
+            logger.debug("force_wipe: deleted %s", extracted_dir)
 
         # Step 2: clean up .tmp files
         if extracted_dir.exists():
@@ -967,16 +961,13 @@ class ExtractionPhase:
                 except OSError as exc:
                     logger.warning("Could not remove temp file %s: %s", tmp, exc)
 
-        # Step 3: load persisted params.
-        # NOTE: filter changes are no longer a special case. A track excluded
-        # by the current filter simply becomes ``wanted=False``; if its file is
-        # still on disk it surfaces as ``wanted=False, state=COMPLETE`` (there
-        # is no longer a STALE state). The persisted params are still loaded so
-        # future invalidation logic can use them, but recovery derives ``wanted``
-        # purely from the current filter selection.
-        _ = ExtractionParams.load(yaml_path)
+        # Filter changes are not a special case: a track excluded by the current
+        # filter simply becomes ``wanted=False``; if its file is still on disk it
+        # surfaces as ``wanted=False, state=COMPLETE`` (there is no STALE state).
+        # Recovery derives ``wanted`` purely from the current filter selection, so
+        # nothing needs to be persisted between runs.
 
-        # Step 4: analyse the source and enumerate ALL tracks.
+        # Step 3: analyse the source and enumerate ALL tracks.
         try:
             extractor = MKVTrackExtractor(str(self._job.result.source))  # type: ignore[union-attr]
         except Exception as exc:
@@ -1049,7 +1040,7 @@ class ExtractionPhase:
         video_meta:  VideoMetadata | None,
         audio_meta:  list[AudioMetadata],
     ) -> ExtractionPhaseResult:
-        """Extract ABSENT artifacts and persist ``extraction.yaml``.
+        """Extract ABSENT artifacts.
 
         Args:
             artifacts:  Artifact list from ``_recover()``.
@@ -1248,12 +1239,6 @@ class ExtractionPhase:
 
             else:
                 logger.warning("Skipping unknown stream type %s: %s", type(track).__name__, output_file.name)
-
-        # Persist extraction.yaml
-        try:
-            self.params.save(work_dir / _EXTRACTION_YAML_NAME)
-        except Exception as exc:
-            logger.warning("Could not persist extraction.yaml: %s", exc)
 
         # Re-scan to build final typed artifact list and metadata
         final_artifacts: list[ExtractionArtifact] = []
