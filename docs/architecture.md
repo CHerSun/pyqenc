@@ -76,7 +76,7 @@ flowchart TD
 | Phase            | Inputs                  | Outputs                                      | Key sidecar                                                           |
 | ---------------- | ----------------------- | -------------------------------------------- | --------------------------------------------------------------------- |
 | **Job**          | `PipelineConfig`        | `job.yaml`                                   | `job.yaml`                                                            |
-| **Extraction**   | Source video            | `extracted/` streams                         | `extraction.yaml`                                                     |
+| **Extraction**   | Source video            | `extracted/` streams                         | _(none — recovery re-probes source each run)_                        |
 | **Audio**        | Extracted audio streams | `audio/` normalized/converted files          | `audio.yaml`                                                          |
 | **Chunking**     | Extracted video stream  | `chunks/` FFV1 or remux chunks               | `chunking.yaml`                                                       |
 | **Optimization** | Chunks + strategies     | `optimization.yaml` with optimal strategy    | `optimization.yaml`                                                   |

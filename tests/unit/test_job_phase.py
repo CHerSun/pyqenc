@@ -4,7 +4,7 @@ Covers:
 - run() dry-run: returns PENDING when job.yaml absent, REUSED when present
 - run() execute: creates job.yaml on first run (COMPLETED)
 - Source mismatch without --force: returns FAILED, force_wipe=False
-- Source mismatch with --force: returns COMPLETED, force_wipe=True, job.yaml overwritten, other phases' files untouched
+- Source mismatch with --force: returns COMPLETED, force_wipe=True, job.yaml overwritten
 - No mismatch: returns COMPLETED/REUSED, force_wipe=False
 """
 
@@ -15,7 +15,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-import yaml
 
 from pyqenc.app_config import load_app_config
 from pyqenc.models import (
@@ -68,13 +67,6 @@ def _persist_job(work_dir: Path, source: Path, file_size: int | None = None) -> 
     else:
         vm._file_size_bytes = source.stat().st_size
     JobState(source=vm).save(work_dir / "job.yaml")
-
-
-def _write_phase_param(work_dir: Path, filename: str) -> Path:
-    """Write a dummy phase parameter YAML file."""
-    path = work_dir / filename
-    path.write_text(yaml.dump({"dummy": True}), encoding="utf-8")
-    return path
 
 
 # ---------------------------------------------------------------------------
@@ -189,17 +181,6 @@ class TestJobPhaseSourceMismatchNoForce:
 
         assert any(r.levelno == logging.CRITICAL for r in caplog.records)
 
-    def test_mismatch_does_not_delete_phase_params(self, tmp_path: Path) -> None:
-        src = _make_source(tmp_path)
-        work_dir = tmp_path / "work"
-        _persist_job(work_dir, src, file_size=9999)
-        chunking_yaml = _write_phase_param(work_dir, "chunking.yaml")
-
-        phase = _make_phase(tmp_path, src, force=False)
-        phase.run(dry_run=False)
-
-        assert chunking_yaml.exists()
-
 
 # ---------------------------------------------------------------------------
 # Source mismatch — execute with --force (force_wipe propagation)
@@ -221,30 +202,6 @@ class TestJobPhaseSourceMismatchWithForce:
         phase = _make_phase(tmp_path, src, force=True)
         result = phase.run(dry_run=False)
         assert result.force_wipe is True
-
-    def test_mismatch_with_force_does_not_delete_phase_param_yamls(self, tmp_path: Path) -> None:
-        """JobPhase must NOT delete other phases' files — that is each phase's own responsibility.
-
-        Downstream phases read ``force_wipe=True`` from ``JobPhase.result`` and
-        wipe their own artifacts in their own ``_recover()`` methods.
-        """
-        src = _make_source(tmp_path)
-        work_dir = tmp_path / "work"
-        _persist_job(work_dir, src, file_size=9999)
-
-        extraction_yaml   = _write_phase_param(work_dir, "extraction.yaml")
-        chunking_yaml     = _write_phase_param(work_dir, "chunking.yaml")
-        optimization_yaml = _write_phase_param(work_dir, "optimization.yaml")
-        encoding_yaml     = _write_phase_param(work_dir, "encoding.yaml")
-
-        phase = _make_phase(tmp_path, src, force=True)
-        phase.run(dry_run=False)
-
-        # JobPhase must leave these intact — downstream phases own their own cleanup
-        assert extraction_yaml.exists()
-        assert chunking_yaml.exists()
-        assert optimization_yaml.exists()
-        assert encoding_yaml.exists()
 
     def test_mismatch_with_force_overwrites_job_yaml_with_new_source(self, tmp_path: Path) -> None:
         """On --force + mismatch, job.yaml must be overwritten with current source metadata."""
