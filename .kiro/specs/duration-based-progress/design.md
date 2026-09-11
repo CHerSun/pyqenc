@@ -158,4 +158,4 @@ chunk_duration = chunk.end_timestamp - chunk.start_timestamp
 ## Testing Strategy
 
 - No automated tests are required for this purely cosmetic/UX change.
-- Manual verification: run `uv run pyqenc --work-dir D:\_current\pyqenc1 <source>` and confirm the Chunking, Optimization, and Encoding bars show `s` as the unit and that the ETA/throughput values are plausible (seconds-per-second ≈ real-time speed).
+- Manual verification: run `uv run pyqenc --work-dir D:\_encoding\pyqenc <source>` and confirm the Chunking, Optimization, and Encoding bars show `s` as the unit and that the ETA/throughput values are plausible (seconds-per-second ≈ real-time speed).

@@ -3,6 +3,18 @@
 - Created: 2026-03-15
 - Completed: 2026-03-15
 
+## Cross-Reference Notes
+
+**Note (2026-09-09 — superseded in part by `phase-terminal-runner`):** The registry-iterating orchestrator described here is replaced by a slim, phase-agnostic `Runner` that runs a single *target* (terminal) phase; dependency resolution lives in the phases, so the runner never iterates the registry to drive execution. `orchestrator.py` is deleted and its run-level responsibilities (uniform summary, run-scoped metrics collector, deep-cleanup broadcast) move to the `Runner`. See `phase-terminal-runner`.
+
+**Note (2026-06-23 — superseded in part by `config-refactor`):** The `config-refactor` spec (Created: 2026-06-23) replaces the `PipelineConfig`-based architecture described here:
+
+- The `VideoMetadata` / `ChunkVideoMetadata` Pydantic hierarchy and `ProgressTracker` changes in this spec are unaffected.
+- `PipelineConfig` (introduced by this spec as the configuration model) is deleted. Its volatile runtime fields (`source_video`, `work_dir`, `force`) now travel as plain kwargs through `_build_registry` and land as typed fields on `JobPhaseResult`. Its config fields are replaced by `AppConfig` sub-models.
+- The signal/atexit flush registered in this spec for `ProgressTracker` was superseded first by `phase-recovery-refactor` (state files) and later by `pipeline-metrics-report` (SIGINT → `collector.flush(partial=True)`).
+
+---
+
 ## Overview
 
 This refactor matures five interconnected areas of the pyqenc codebase without changing external behavior:

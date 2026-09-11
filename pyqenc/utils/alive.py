@@ -52,7 +52,7 @@ def ProgressBar(
     title: str,
     show_counters: bool = True,
     total_count:   int | None = None,
-) -> Generator[Callable[[int | float, AdvanceState], None], None, None]:
+) -> Generator[Callable[[int | float, AdvanceState], None]]:
     """Context manager that opens an ``alive_bar`` progress bar.
 
     Always uses manual mode (0.0–1.0 fraction, renders as %) when *total* > 0.

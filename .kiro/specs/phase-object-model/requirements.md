@@ -6,9 +6,25 @@
 
 ## Cross-Spec Notes
 
+### Superseded by `phase-terminal-runner` (2026-09-09)
+
+> **Superseded in part by `phase-terminal-runner` (2026-09-09):** `scan()` is removed from the `Phase` protocol and every phase (Req 1 AC 1/3, Req 2 JobPhase AC 3, Req 3 AC 1); `_ensure_dependencies` loses its `execute`/`dep.scan()` branch and always resolves via `dep.run(dry_run=...)` (Req 3 AC 1/5); the `Orchestrator` that drives phases in sequence is deleted and replaced by a slim single-target `Runner` (Glossary "Orchestrator", Req 1/3); `PhaseOutcome.DRY_RUN` is removed in favour of the work-state `PENDING` (Req 1 AC 4); the phase banner moves from the first line of `run()` to after dependency resolution; and post-pipeline `ALL` cleanup moves from the orchestrator into each phase's `finalize(ctx)` hook (Req 12).
+
 ### Superseded by `pipeline-metrics-report` (2026-04-01)
 
 `pipeline-metrics-report` extends the `_build_registry` and phase constructor pattern established here. Every phase constructor now takes a required third parameter `collector: MetricsCollector` (after `config` and `phases`). `_build_registry` was updated to accept and thread the collector. Any future phase additions must include this parameter.
+
+### Superseded by `probe-phase-refactor` (2026-09-01) — crop detection
+
+**Requirement 2 (JobPhase) AC 2** — crop resolution (`manual → cached → auto-detect`) has been removed from `JobPhase` entirely. It now lives in **`ProbePhase`**, a new phase inserted between `ExtractionPhase` and `AudioPhase/ChunkingPhase`. `JobPhase` no longer accepts a `crop_params` constructor argument and no longer runs `_resolve_crop()`. Crop is persisted in `probe.yaml` (not `job.yaml`).
+
+**Requirement 2 Glossary** — the `JobPhase` definition as "initialises job.yaml and resolves crop parameters" is outdated; `JobPhase` now only initialises `job.yaml` and probes fast metadata fields.
+
+**Requirement 5 AC 6** — the per-field crop-params mismatch check in `OptimizationPhase` / `EncodingPhase` has been replaced by a `ProbeState` snapshot comparison (`persisted.probe != current_probe`). `MergePhase` also gains probe-mismatch detection (a pre-existing gap, now closed).
+
+### Superseded by `artifact-state-refactor` (2026-09-15) — ArtifactState & selection
+
+The four-value `ArtifactState` this spec introduced (`ABSENT`/`ARTIFACT_ONLY`/`STALE`/`COMPLETE`, Requirement 5) is re-scoped to completeness only. `STALE` is removed and selection now lives in a new `Artifact.wanted: bool` field; `ARTIFACT_ONLY` is renamed `PARTIAL`. `pending` therefore reads `state in (ABSENT, PARTIAL)` and no longer includes `STALE`. The Glossary and Requirement 5 descriptions here are outdated on these points — see `artifact-state-refactor` for the current model.
 
 ## Introduction
 

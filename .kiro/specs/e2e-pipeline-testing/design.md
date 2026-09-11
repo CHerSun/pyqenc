@@ -2,6 +2,16 @@
 
 - Created: 2026-03-15
 
+## Cross-Reference Notes
+
+**Note (2026-06-23 — superseded by `config-refactor`):** The `config-refactor` spec (Created: 2026-06-23) replaces the config infrastructure this spec assumes:
+
+- Test fixtures constructing `PipelineConfig(...)` directly are stale. `PipelineConfig` is deleted. The correct pattern is `load_app_config()` followed by direct attribute overrides, then calling `_build_registry(config, source=..., work_dir=..., ...)`.
+- `ChunkingMode` is no longer a field on `PipelineConfig`. It lives at `AppConfig.chunking.mode`.
+- `PipelineOrchestrator(config, tracker, config_manager)` — `config_manager` no longer exists; `tracker` was removed by `phase-object-model`. The orchestrator now receives a pre-built registry.
+
+---
+
 ## Overview
 
 This document describes the design for fixing all failing tests and validating the pyqenc pipeline end-to-end after the `ffv1-lossless-chunking` implementation. There are four distinct categories of failures to address, plus a manual CLI test plan.
@@ -90,7 +100,7 @@ All manual scenarios use the real source video and work directory. The `--remux-
 #### Scenario 1 — Full run, lossless mode (default)
 
 ```sh
-uv run pyqenc auto "D:\_current\О чём говорят мужчины Blu-Ray (1080p) (1).mkv" --work-dir "D:\_current\pyqenc1" -y --keep-all --log-level info
+uv run pyqenc auto "D:\_encoding\movie.mkv" --work-dir "D:\_encoding\pyqenc" -y --keep-all --log-level info
 ```
 
 Verify: exit 0, log contains "Chunking mode: lossless FFV1", chunks exist, final output exists.
@@ -98,7 +108,7 @@ Verify: exit 0, log contains "Chunking mode: lossless FFV1", chunks exist, final
 #### Scenario 2 — Full run, remux mode
 
 ```sh
-uv run pyqenc auto "D:\_current\О чём говорят мужчины Blu-Ray (1080p) (1).mkv" --work-dir "D:\_current\pyqenc1" -y --keep-all --log-level info --remux-chunking
+uv run pyqenc auto "D:\_encoding\movie.mkv" --work-dir "D:\_encoding\pyqenc" -y --keep-all --log-level info --remux-chunking
 ```
 
 Verify: exit 0, log contains "Chunking mode: remux", chunks exist, final output exists.
@@ -110,12 +120,12 @@ Verify: each phase logs reuse message, no new ffmpeg invocations, exit 0.
 
 #### Scenario 4 — Chunking partial restart (scenes in state, no chunk files)
 
-Delete `D:\_current\pyqenc1\chunks\`, `encoded\`, `final\`. Keep `progress.json`.
+Delete `D:\_encoding\pyqenc\chunks\`, `encoded\`, `final\`. Keep `progress.json`.
 Re-run scenario 2 command.
 Verify: log contains "Scene boundaries already in state (N) -- skipping detection.", chunks re-split, encoding and merge complete, exit 0.
 
 #### Scenario 5 — Encoding partial restart (half chunks encoded)
 
-From completed scenario 2 state, delete ~half the files in `D:\_current\pyqenc1\encoded\<strategy>\` and delete `final\`.
+From completed scenario 2 state, delete ~half the files in `D:\_encoding\pyqenc\encoded\<strategy>\` and delete `final\`.
 Re-run scenario 2 command.
 Verify: log reports reused chunk count and encoding count, only deleted chunks re-encoded, merge completes, exit 0.

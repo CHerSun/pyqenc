@@ -7,6 +7,10 @@
 
 ## Cross-Spec Notes
 
+### Superseded by `phase-terminal-runner` (2026-09-09) — collector ownership
+
+> **Superseded in part by `phase-terminal-runner` (2026-09-09):** the process-global active-collector registry introduced here (`register_active_collector`, `flush_active_collector`, and the module-level `_active_collector`) is removed. The metrics collector is now **run-scoped and owned by the `Runner`** (one collector per run, threaded into the phase registry). The CLI SIGINT handler flushes via `flush_all_metrics()` — a set-based interrupt-flush registry each `YamlMetricsCollector` self-registers into (symmetric with the ffmpeg `kill_all_ffmpeg` registry) — instead of the single-slot active-collector lookup. Incremental/periodic flush and partial-timer capture on interrupt are preserved.
+
 ### Relation to `phase-object-model` (2026-03-20)
 
 `phase-object-model` established `_build_registry` and the phase constructor pattern (`config`, `phases` registry). This spec extends that pattern by adding a required `collector: MetricsCollector` third parameter to every phase constructor and updating `_build_registry` to accept and thread the collector. The phase constructor signature is now `(config, phases, collector)`.
@@ -22,6 +26,12 @@ Despite the name overlap, `unified-metrics-visualization` covers video quality m
 ### Relation to `disk_space.py` utility
 
 `pyqenc/utils/disk_space.py` estimates required space *before* the pipeline runs (pre-flight check). This spec's `_measure_space()` in `metrics.py` measures actual space *during/after* the run (reporting). Complementary, not overlapping.
+
+### Relation to `config-refactor` (2026-06-23)
+
+`config-refactor` extends `_build_registry` further: the signature changes from `(config: PipelineConfig, collector: MetricsCollector)` to `(config: AppConfig, source: Path, work_dir: Path, force: bool, cleanup: CleanupLevel, no_metrics: bool, collector: MetricsCollector)`. The architecture diagrams in this spec showing `PipelineConfig` flowing into `_build_registry` are stale — the type is now `AppConfig`. Phase constructors stay `(config, phases, *, collector)` but receive `AppConfig` instead of `PipelineConfig`. The `no_metrics` volatile flag (passed to `_build_registry`) controls whether `YamlMetricsCollector` or `NoOpMetricsCollector` is constructed — the logic described here is unchanged, only the flag source changes (from `PipelineConfig.no_metrics` to a plain kwarg).
+
+---
 
 ## Overview
 

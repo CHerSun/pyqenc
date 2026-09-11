@@ -1,8 +1,7 @@
 """Unit tests for JobPhase source mismatch detection and force_wipe propagation.
 
 Covers:
-- scan(): returns REUSED when job.yaml exists, DRY_RUN when absent
-- run() dry-run: returns DRY_RUN when job.yaml absent, REUSED when present
+- run() dry-run: returns PENDING when job.yaml absent, REUSED when present
 - run() execute: creates job.yaml on first run (COMPLETED)
 - Source mismatch without --force: returns FAILED, force_wipe=False
 - Source mismatch with --force: returns COMPLETED, force_wipe=True, job.yaml overwritten, other phases' files untouched
@@ -13,34 +12,27 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-
 from unittest.mock import MagicMock
 
 import pytest
 import yaml
 
+from pyqenc.app_config import load_app_config
 from pyqenc.models import (
-    ChunkingMode,
     CleanupLevel,
-    CropParams,
     PhaseOutcome,
-    PipelineConfig,
     QualityTarget,
-    Strategy,
     VideoMetadata,
 )
-from pyqenc.phases.job import JobPhase, JobPhaseResult
+from pyqenc.phases.job import JobPhase
 from pyqenc.state import JobState
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-from pyqenc.config import ConfigManager
-
 _QUALITY_TARGETS = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
-_STRATEGY        = ConfigManager().resolve_strategies(["slow+h265-aq"])[0]
+_APP_CONFIG      = load_app_config(default_only=True)
 
 
 def _make_source(tmp_path: Path, size: int = 1024) -> Path:
@@ -50,33 +42,21 @@ def _make_source(tmp_path: Path, size: int = 1024) -> Path:
     return src
 
 
-def _make_config(
-    tmp_path: Path,
-    source: Path,
-    force: bool = False,
-    crop_params: CropParams | None = None,
-) -> PipelineConfig:
-    return PipelineConfig(
-        source_video    = source,
-        work_dir        = tmp_path / "work",
-        quality_targets = _QUALITY_TARGETS,
-        strategies      = [_STRATEGY],
-        optimize        = False,
-        cleanup         = CleanupLevel.NONE,
-        chunking_mode   = ChunkingMode.LOSSLESS,
-        force           = force,
-        crop_params     = crop_params,
-    )
-
-
 def _make_phase(
     tmp_path: Path,
     source: Path,
     force: bool = False,
-    crop_params: CropParams | None = None,
 ) -> JobPhase:
-    config = _make_config(tmp_path, source, force=force, crop_params=crop_params)
-    return JobPhase(config, collector=MagicMock())
+    config = _APP_CONFIG.model_copy(deep=True)
+    return JobPhase(
+        config,
+        source      = source,
+        work_dir    = tmp_path / "work",
+        force       = force,
+        cleanup     = CleanupLevel.NONE,
+        no_metrics  = True,
+        collector   = MagicMock(),
+    )
 
 
 def _persist_job(work_dir: Path, source: Path, file_size: int | None = None) -> None:
@@ -98,50 +78,26 @@ def _write_phase_param(work_dir: Path, filename: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# scan()
-# ---------------------------------------------------------------------------
-
-class TestJobPhaseScan:
-    def test_scan_absent_returns_dry_run(self, tmp_path: Path) -> None:
-        src = _make_source(tmp_path)
-        phase = _make_phase(tmp_path, src)
-        result = phase.scan()
-        assert result.outcome == PhaseOutcome.DRY_RUN
-        assert result.is_complete is False
-        assert result.force_wipe is False
-        assert result.job is None
-
-    def test_scan_existing_returns_reused(self, tmp_path: Path) -> None:
-        src = _make_source(tmp_path)
-        phase = _make_phase(tmp_path, src)
-        work_dir = tmp_path / "work"
-        _persist_job(work_dir, src)
-
-        result = phase.scan()
-        assert result.outcome == PhaseOutcome.REUSED
-        assert result.is_complete is True
-        assert result.force_wipe is False
-        assert result.job is not None
-
-    def test_scan_caches_result(self, tmp_path: Path) -> None:
-        src = _make_source(tmp_path)
-        phase = _make_phase(tmp_path, src)
-        r1 = phase.scan()
-        r2 = phase.scan()
-        assert r1 is r2  # same cached object
-
-
-# ---------------------------------------------------------------------------
 # run() dry-run mode
 # ---------------------------------------------------------------------------
 
 class TestJobPhaseRunDryRun:
-    def test_dry_run_absent_returns_dry_run(self, tmp_path: Path) -> None:
+    def test_dry_run_absent_probes_but_writes_no_file(self, tmp_path: Path) -> None:
+        """Dry-run on a fresh work-dir builds the JobState (read-only) without writing job.yaml.
+
+        Bug guarded: if JobPhase returned PENDING (or otherwise not-complete) in
+        dry-run, the whole dry-run pipeline would cascade to "pending at: Job"
+        and never preview any downstream phase — Job is run SETUP, not pipeline
+        work, so a dry-run must proceed past it. Only the job.yaml WRITE is
+        skipped.
+        """
         src = _make_source(tmp_path)
+        work_dir = tmp_path / "work"
         phase = _make_phase(tmp_path, src)
         result = phase.run(dry_run=True)
-        assert result.outcome == PhaseOutcome.DRY_RUN
-        assert result.is_complete is False
+        assert result.is_complete is True
+        assert result.job is not None
+        assert not (work_dir / "job.yaml").exists()
 
     def test_dry_run_existing_returns_reused(self, tmp_path: Path) -> None:
         src = _make_source(tmp_path)
@@ -196,13 +152,6 @@ class TestJobPhaseRunExecuteNoMismatch:
         result = phase.run(dry_run=False)
         assert result.is_complete is True
         assert result.force_wipe is False
-
-    def test_manual_crop_stored_in_result(self, tmp_path: Path) -> None:
-        src = _make_source(tmp_path)
-        crop = CropParams(top=28, bottom=28, left=0, right=0)
-        phase = _make_phase(tmp_path, src, crop_params=crop)
-        result = phase.run(dry_run=False)
-        assert result.crop == crop
 
 
 # ---------------------------------------------------------------------------

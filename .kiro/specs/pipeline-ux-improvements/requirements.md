@@ -5,6 +5,10 @@
 - Created: 2026-03-15
 - Completed: 2026-03-15
 
+## Cross-Spec Notes
+
+> **Superseded in part by `phase-terminal-runner` (2026-09-09):** the crop-propagation work here was hosted on `PipelineOrchestrator` (`_resolve_crop_params`, `_execute_optimization`, `_execute_encoding`). That orchestrator is deleted — execution is now driven by a slim single-target `Runner` and dependencies resolve inside the phases. (Crop resolution itself had already moved to `ProbePhase` in `probe-phase-refactor` (2026-09-01).) The log-formatting, optimization-summary, and `alive_progress` UX improvements are unaffected. This note concerns orchestration only, not phase banners.
+
 ## Introduction
 
 This feature addresses a set of user-experience and correctness improvements to the pyqenc encoding pipeline. The improvements span four areas:

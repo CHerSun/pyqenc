@@ -4,6 +4,10 @@
 
 - Created: 2026-04-29
 
+## Cross-Spec Notes
+
+**Superseded in part by `artifact-state-refactor` (2026-09-15).** The four-value `ArtifactState` referenced here (`ABSENT`/`ARTIFACT_ONLY`/`STALE`/`COMPLETE`) is re-scoped to completeness only: `STALE` is removed (selection moves to a new `Artifact.wanted` field) and `ARTIFACT_ONLY` is renamed `PARTIAL`. `TimestampArtifact` keeps its `COMPLETE`/`ABSENT` pattern and now also carries `wanted`.
+
 ## Overview
 
 Implement PTS preservation across the extraction and merge phases. The work

@@ -13,6 +13,7 @@
 | `merge-phase-revamp` | 2026-03-19 (Completed) | **Superseded in part.** `merge-phase-revamp` introduced the ffmpeg concat demuxer path with the `concat_<safe_name>.txt` file and the `_execute_merge` logic. This spec replaces that concat path entirely with `mkvmerge` + a JSON options file. The bug fixed in Requirement 7 (`"+genpts"` missing comma) was introduced by `merge-phase-revamp`. |
 | `phase-recovery-refactor` | 2026-03-17 | **Extended.** This spec adds `TimestampArtifact` to the extraction phase's artifact set, following the same `COMPLETE`/`ABSENT` recovery pattern established by `phase-recovery-refactor`. The `force_wipe` propagation path is unchanged. |
 | `metrics-two-tier` | 2026-06-15 | **No conflict.** Metrics collection keys (`MetricKey.EXTRACTION`, `MetricKey.MERGE`) are unchanged. The new `_extract_timestamps()` step may be timed under `MetricKey.EXTRACTION` if desired. |
+| `artifact-state-refactor` | 2026-09-15 (Completed) | **Supersedes this spec in part.** This spec's glossary/design reference the four-value `ArtifactState` (`ABSENT`/`ARTIFACT_ONLY`/`STALE`/`COMPLETE`). That enum is re-scoped to completeness only: `STALE` is removed (selection moves to `Artifact.wanted`) and `ARTIFACT_ONLY` is renamed `PARTIAL`. `TimestampArtifact` keeps its `COMPLETE`/`ABSENT` two-state pattern and now also carries `wanted`. |
 
 ---
 
@@ -568,7 +569,7 @@ Each test is tagged with a comment referencing the design property:
 
 ### Integration tests
 
-Integration tests run against the sample video (`D:\_current\О чём говорят мужчины Blu-Ray (1080p) (1).mkv`) in the configured work directory:
+Integration tests run against the sample video (`D:\_encoding\movie.mkv`) in the configured work directory:
 
 - Full pipeline run verifying `timestamps.txt` is produced.
 - Full pipeline run verifying the merged output has matching frame count.

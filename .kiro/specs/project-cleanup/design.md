@@ -4,6 +4,20 @@
 
 - Created: 2026-06-11
 
+## Cross-Reference Notes
+
+**Note (2026-06-23 — superseded in part by `config-refactor`):** The `config-refactor` spec (Created: 2026-06-23) makes several of this spec's bug conditions moot:
+
+- **Bug Condition: deferred `ConfigManager` import in `audio.py` / `optimization.py`** — `ConfigManager` is deleted entirely by `config-refactor`. The deferred import and its runtime usage are gone with it.
+- **Bug Condition: `AudioConversionProfile.bitrate` field consolidation** — `AudioConversionProfile` is moved to `app_config.py` as a Pydantic model with no `bitrate` field. `base_bitrate` now lives at `AppConfig.audio.audio_base_bitrate`. The scaling logic remains in exactly one place.
+- **Bug Condition: `AudioOutputConfig` field structure** — `AudioOutputConfig` is deleted; its responsibilities are absorbed by `AppConfig.audio: AudioConfig`.
+- **Bug Condition: `ConfigManager.get_audio_output_config()`** — method gone; audio config is accessed directly via `AppConfig.audio.*`.
+- The remaining non-config cleanup items (import hygiene, `__all__`, `getattr` on typed dataclasses, `Phase` ABC, etc.) are unaffected by `config-refactor`.
+
+**Note (2026-09-15 — completed by `artifact-state-refactor`):** This spec's Section 7/8.3 flagged the duplicated `_outcome_from_artifacts` / `_recovery_message` pattern across `audio.py`, `merge.py`, `chunking.py`, and `extraction.py` for consolidation. `artifact-state-refactor` (Created/Completed 2026-09-15) removes all five per-phase `_recovery_message()` helpers and unifies recovery reporting into a single `log_recovery_line()` that takes each phase's internal artifact list and derives all counts itself. It also re-scopes `ArtifactState` to completeness only (removes `STALE`, renames `ARTIFACT_ONLY` → `PARTIAL`, adds `Artifact.wanted`).
+
+---
+
 ## Overview
 
 The pyqenc codebase has accumulated fourteen categories of structural defects during

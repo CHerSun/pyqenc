@@ -5,7 +5,11 @@
 - Created: 2026-03-16
 - Completed: 2026-03-16
 
-## Introduction
+## Cross-Spec Notes
+
+### Superseded by `probe-phase-refactor` (2026-09-01) — CropParams flow
+
+**Requirement 2 (all ACs)** — `CropParams` stored on `VideoMetadata.crop_params` and persisted via `PipelineState.source_video.crop_params` is superseded. Crop detection has been moved to **`ProbePhase`** (a new phase between `ExtractionPhase` and `AudioPhase/ChunkingPhase`). Crop is now stored in `probe.yaml` as part of `ProbeState`, not on `VideoMetadata` or `PipelineState`. Downstream phases (`OptimizationPhase`, `EncodingPhase`, `MergePhase`) read crop from `probe_result.crop` via a `ProbePhase` dependency, not from `VideoMetadata.crop_params` or the tracker state. The `Orchestrator` no longer reads `CropParams` from `tracker._state.source_video.crop_params`.
 
 This document specifies requirements for the next maturity pass on the pyqenc pipeline. The work covers seven interconnected areas:
 

@@ -11,6 +11,7 @@
 |------|---------|--------------|
 | `ffmpeg-unified-runner` | 2026-03-17 (Completed) | **Relevant constraint.** The runner receives `list[str \| os.PathLike]` commands. `LongPath` satisfies `os.PathLike` via `__fspath__()`, so it can be passed directly as a path argument. However, ffmpeg does **not** accept `\\?\`-prefixed paths — callers must use `str(path)` (not `os.fspath(path)`) when building the command list for ffmpeg. This distinction (`str()` vs `__fspath__()`) is the central design invariant of this spec. |
 | `windows-long-path` (this spec) | 2026-06-09 | **Supersedes** the partial whack-a-mole fix in `pyqenc/utils/win_path.py`. The `lp_exists` / `lp_rename` / `lp_unlink` helpers and their usage in `measure.py` are removed; `LongPath` replaces them universally. |
+| `config-refactor` | 2026-06-23 | **Updates the `work_dir` path.** The flowchart in this spec shows `work_dir = LongPath(args.work_dir)` being placed into `PipelineConfig.work_dir: Path`. `PipelineConfig` is deleted by `config-refactor`. `work_dir` now travels as a plain volatile kwarg to `_build_registry`, then is stored as a typed `Path` field on `JobPhaseResult`. The `LongPath(args.work_dir)` wrapping in the CLI is unchanged — callers still wrap before passing as the `work_dir` kwarg. |
 
 ---
 

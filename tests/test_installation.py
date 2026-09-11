@@ -42,7 +42,7 @@ def test_auto_subcommand_help():
     assert result.returncode == 0
     assert "--targets" in result.stdout
     assert "--strategies" in result.stdout
-    assert "--all-strategies" in result.stdout
+    assert "--no-optimize" in result.stdout
     assert "--crop" in result.stdout
 
 
@@ -58,11 +58,11 @@ def test_version_info():
 def test_api_importable():
     """Test that public API modules are importable."""
     try:
-        from pyqenc import api, config, models
+        from pyqenc import api, app_config, models
 
         assert api is not None
         assert models is not None
-        assert config is not None
+        assert app_config is not None
     except ImportError as e:
         raise AssertionError(f"Failed to import pyqenc modules: {e}")
 
@@ -86,7 +86,7 @@ def test_no_legacy_imports():
         "pyqenc",
         "pyqenc.api",
         "pyqenc.models",
-        "pyqenc.config",
+        "pyqenc.app_config",
         "pyqenc.cli",
         "pyqenc.orchestrator",
         "pyqenc.progress",

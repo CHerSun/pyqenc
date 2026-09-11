@@ -5,6 +5,18 @@
 Created: 2026-03-18
 Completed: 2026-03-18
 
+## Cross-Reference Notes
+
+**Note (2026-06-23 — superseded in part by `config-refactor`):** The `config-refactor` spec (Created: 2026-06-23) replaces the config infrastructure this spec builds on:
+
+- `ConfigManager` (shown in the architecture diagram as the loader) is **deleted**. Audio config is now loaded by `load_app_config()` and lives at `AppConfig.audio` (`AudioConfig` Pydantic model).
+- The plain-dataclass `AudioConversionProfile` (from `config.py`) is **moved and replaced** by a Pydantic `AudioConversionProfile` in `app_config.py`.
+- `AudioOutputConfig` is gone; its fields (`convert_filter`, `profiles`, `audio_codec`, `audio_base_bitrate`) are now direct fields of `AudioConfig`.
+- The CLI flags `--audio-convert`, `--audio-codec`, `--audio-bitrate` introduced by this spec survive, but are applied as `config.audio.convert_filter = ...` / `config.audio.audio_codec = ...` / `config.audio.audio_base_bitrate = ...` on the `AppConfig` instance after `load_app_config()`.
+- The `streams.include` / `streams.exclude` config keys renamed here (from `-i`/`-x`) are now `extraction.include` / `extraction.exclude` in the `AppConfig` YAML namespace.
+
+---
+
 ## Overview
 
 This document describes the technical design for maturing the audio processing phase in pyqenc. The changes span four areas:

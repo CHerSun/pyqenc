@@ -15,28 +15,26 @@ from __future__ import annotations
 import decimal
 import hashlib
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pyqenc.constants import (
     BRACKET_LEFT,
     BRACKET_RIGHT,
-    FAILURE_SYMBOL_MAJOR,
     FAILURE_SYMBOL_MINOR,
     METRIC_LOG_DECIMAL_PLACES,
     NEUTRAL_INDICATOR_SYMBOL,
     SUCCESS_SYMBOL_MAJOR,
     SUCCESS_SYMBOL_MINOR,
     THICK_LINE,
-    THIN_LINE,
     VISUAL_HASH_EMOJIS_WIDE,
 )
+from pyqenc.state import ArtifactState
 
 if TYPE_CHECKING:
     from decimal import Decimal
 
     from pyqenc.models import QualityTarget
-    from pyqenc.phases.optimization import StrategyTestResult
+    from pyqenc.phase import Artifact
 
 logger = logging.getLogger(__name__)
 
@@ -109,36 +107,52 @@ def emit_phase_banner(name: str, log: logging.Logger) -> None:
 
 
 def log_recovery_line(
-    log:      logging.Logger,
-    complete: int,
-    pending:  int,
-    stale:    int = 0,
-    unit:     str = "artifact",
-) -> None:
-    """Emit the standard single-line recovery summary.
+    log:       logging.Logger,
+    artifacts: list[Artifact],
+    unit:      str = "artifact",
+) -> str:
+    """Log the recovery summary and return the same human-readable message.
+
+    Takes the phase's INTERNAL artifact list (pre-filter, including
+    ``wanted=False`` entries) — NOT ``PhaseResult.artifacts`` — because it needs
+    the unwanted count, which is only visible before wanted-filtering.  Derives
+    all five counts itself; callers never compute recovery counts locally.
+
+    The five counts are: ``total`` (all internal artifacts), ``unwanted``
+    (``wanted=False`` over the full list), and ``complete``/``partial``/
+    ``absent`` (counted over the wanted artifacts only).  All five are always
+    shown, even when zero.
+
+    The returned string is the single source of truth for the recovery message:
+    callers assign it directly to ``PhaseResult.message`` rather than building a
+    separate message via a per-phase helper.
 
     Args:
-        log:      Logger instance belonging to the calling phase module.
-        complete: Number of artifacts already complete.
-        pending:  Number of artifacts needing work (ABSENT or ARTIFACT_ONLY).
-        stale:    Number of stale artifacts (present but parameters changed).
-        unit:     Singular noun for the artifact type (e.g. ``"chunk"``,
-                  ``"pair"``, ``"strategy result"``).  Pluralised by appending
-                  ``"s"`` when count ≠ 1.
-    """
-    def _plural(n: int) -> str:
-        return f"{n} {unit}{'s' if n != 1 else ''}"
+        log:       Logger instance belonging to the calling phase module.
+        artifacts: The phase's internal artifact list (including ``wanted=False``
+                   entries).
+        unit:      Singular noun for the artifact type (e.g. ``"chunk"``,
+                   ``"pair"``, ``"strategy result"``).  Reserved for callers that
+                   want a noun other than the default; it does not affect the
+                   counts.
 
-    if pending == 0 and stale == 0:
-        log.info("Recovery: %s complete, 0 pending — reusing", _plural(complete))
-    elif complete == 0 and stale == 0:
-        log.info("Recovery: 0 complete, %s pending — full run needed", _plural(pending))
-    else:
-        parts = [f"{_plural(complete)} complete", f"{_plural(pending)} pending"]
-        if stale:
-            parts.append(f"{stale} stale")
-        suffix = "resuming" if complete > 0 else "full run needed"
-        log.info("Recovery: %s — %s", ", ".join(parts), suffix)
+    Returns:
+        The emitted recovery message, identical to the logged line.
+    """
+    total    = len(artifacts)
+    unwanted = sum(1 for a in artifacts if not a.wanted)
+    complete = sum(1 for a in artifacts if a.wanted and a.state == ArtifactState.COMPLETE)
+    partial  = sum(1 for a in artifacts if a.wanted and a.state == ArtifactState.PARTIAL)
+    absent   = sum(1 for a in artifacts if a.wanted and a.state == ArtifactState.ABSENT)
+
+    suffix  = "resuming" if complete else "full run needed"
+    message = (
+        f"Recovery: {total} total, {unwanted} unwanted"
+        f" — {complete} complete, {partial} partial, {absent} absent"
+        f" — {suffix}"
+    )
+    log.info(message)
+    return message
 
 
 def visual_hash(strategy: str, chunk_id: str) -> str:
@@ -169,13 +183,13 @@ def fmt_chunk(strategy: str, chunk_id: str, msg: str, use_visual_hash: bool = Tr
 def fmt_chunk_start(strategy: str, chunk_id: str, use_visual_hash: bool = True) -> str:
     return fmt_chunk(strategy, chunk_id, "starting ...", use_visual_hash)
 
-def fmt_chunk_attempt_start(strategy: str, chunk_id: str, attempt: int, quality: "Decimal", quality_label: str = "CRF", use_visual_hash: bool = True, quality_padding: int = 4) -> str:
+def fmt_chunk_attempt_start(strategy: str, chunk_id: str, attempt: int, quality: Decimal, quality_label: str = "CRF", use_visual_hash: bool = True, quality_padding: int = 4) -> str:
     return fmt_chunk(strategy, chunk_id, f"starting attempt #{attempt} with {quality_label} {str(quality).rjust(quality_padding)} ...", use_visual_hash)
 
 def fmt_chunk_attempt_result(strategy: str, chunk_id: str, attempt: int, msg: str, use_visual_hash: bool = True) -> str:
     return fmt_chunk(strategy, chunk_id, f"attempt #{attempt}: {msg}", use_visual_hash)
 
-def fmt_chunk_final(strategy: str, chunk_id: str, quality: "Decimal", attempts: int, quality_label: str = "CRF", use_visual_hash: bool = True, quality_padding: int = 4) -> str:
+def fmt_chunk_final(strategy: str, chunk_id: str, quality: Decimal, attempts: int, quality_label: str = "CRF", use_visual_hash: bool = True, quality_padding: int = 4) -> str:
     return fmt_chunk(strategy, chunk_id, f"success {SUCCESS_SYMBOL_MAJOR} with {quality_label} {str(quality).rjust(quality_padding)} after {attempts} attempts", use_visual_hash)
 
 def fmt_key_value_table(kv_to_show: dict[str, str | list | object]) -> None:
@@ -234,7 +248,7 @@ def _fmt_savings(size_bytes: int, reference_size_bytes: int) -> str:
 
 
 def _fmt_target_value(
-    target:      "QualityTarget",
+    target:      QualityTarget,
     metrics:     dict[str, float],
     targets_met: bool | None,
 ) -> str:

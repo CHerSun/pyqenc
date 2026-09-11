@@ -7,7 +7,6 @@ algorithms for iterative encoding optimization.
 # CHerSun 2026
 
 import logging
-import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
@@ -15,11 +14,10 @@ from enum import Enum
 from os import PathLike
 from pathlib import Path
 from typing import (
-    Iterable,
     TypedDict,
     TypeVar,
-    assert_never,
 )
+from collections.abc import Iterable
 
 import pandas as pd
 

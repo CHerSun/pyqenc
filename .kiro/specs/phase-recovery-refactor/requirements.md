@@ -4,6 +4,12 @@
 
 - Created: 2026-03-17
 
+## Cross-Spec Notes
+
+**Superseded in part by `phase-terminal-runner` (2026-09-09).** The read-only recovery pass this spec exposed through `scan()` is gone: `scan()` is removed from the `Phase` protocol and every phase, and `_ensure_dependencies` loses its `execute` parameter — every dependency is now resolved uniformly via `dep.run(dry_run=...)`. The `execute` parameter on each phase's internal `_recover()` is likewise removed (the old `execute=False` read-only mode had no remaining caller). Recovery itself (filesystem scan, artifact classification, `.tmp` cleanup) is unchanged; only the separate `scan()`/`execute=False` entry point is retired.
+
+**Superseded in part by `artifact-state-refactor` (2026-09-15).** This spec established the `ArtifactState` enum (`ABSENT`/`ARTIFACT_ONLY`/`COMPLETE`) used throughout recovery. `artifact-state-refactor` renames `ARTIFACT_ONLY` → `PARTIAL` and re-scopes the enum to completeness only (selection is carried by a new `Artifact.wanted` field). It also removes the per-phase `_recovery_message()` helpers and unifies recovery reporting in a single `log_recovery_line()`. References to `ARTIFACT_ONLY` below are historical — see `artifact-state-refactor` for the current names.
+
 ## Introduction
 
 This document specifies requirements for refactoring the pipeline's state persistence and per-phase recovery logic. The current `progress.json` file mixes job parameters, source metadata, and phase progress into one large file that is rewritten on every update — making it fragile, hard to read, and difficult to reason about. The refactor replaces it with a small YAML job file (storing only stable job parameters) and per-phase YAML parameter files (storing the stable parameters used when a phase ran, for validation on restart). Encoding artifacts are always written to `.tmp` files first and renamed only on success, so the presence of a final artifact file is proof of its consistency. Each phase always runs and performs a recovery step first — scanning the filesystem, validating artifacts against stored parameters, and determining what work remains. Where recovery logic is shared across phases (notably chunk attempt discovery and CRF history reconstruction), it is extracted into a reusable utility.

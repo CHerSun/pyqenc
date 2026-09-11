@@ -53,7 +53,7 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    subgraph Job["Job (job.yaml — source binding, crop params)"]
+    subgraph Job["Job (job.yaml — source binding)"]
         EX["Extraction\nextracted/ streams"]
         CH["Chunking\nchunks/ scene splits"]
         OP["Optimization\noptimization.yaml\n(optional)"]
@@ -77,10 +77,10 @@ flowchart TD
 | ---------------- | ----------------------- | -------------------------------------------- | --------------------------------------------------------------------- |
 | **Job**          | `PipelineConfig`        | `job.yaml`                                   | `job.yaml`                                                            |
 | **Extraction**   | Source video            | `extracted/` streams                         | `extraction.yaml`                                                     |
+| **Audio**        | Extracted audio streams | `audio/` normalized/converted files          | `audio.yaml`                                                          |
 | **Chunking**     | Extracted video stream  | `chunks/` FFV1 or remux chunks               | `chunking.yaml`                                                       |
 | **Optimization** | Chunks + strategies     | `optimization.yaml` with optimal strategy    | `optimization.yaml`                                                   |
 | **Encoding**     | Chunks + strategies     | `encoding/` attempts,<br> `encoded/` winners | • `encoding.yaml`, <br> • per-attempt `.yaml`, <br> • per-win `.yaml` |
-| **Audio**        | Extracted audio streams | `audio/` normalized/converted files          | `audio.yaml`                                                          |
 | **Merge**        | Encoded chunks + audio  | `final/` MKV file(s)                         | `merge.yaml`                                                          |
 
 > NOTE: Originally the intention was to merge both audio and video during Merge phase, but audio selection is an opinionated process, so I've decided to only merge the videos, leaving the final step for the end user and MKVmerge GUI.
@@ -152,10 +152,11 @@ flowchart LR
 
 | File                 | Contents                                                                |
 | -------------------- | ----------------------------------------------------------------------- |
-| `job.yaml`           | Source path, size, duration, fps, resolution, frame count, crop params  |
+| `job.yaml`           | Source path, size, duration, fps, resolution                            |
+| `probe.yaml`         | Frame count, crop params                                                |
 | `chunking.yaml`      | Scene boundaries (frame index + timestamp per chunk)                    |
 | `optimization.yaml`  | Test chunk IDs, per-strategy results, selected optimal strategy         |
-| `encoding.yaml`      | Crop params active during encoding                                      |
+| `encoding.yaml`      | Probe state (crop params + frame count) active during encoding          |
 | `audio.yaml`         | Audio codec and base bitrate                                            |
 | `<chunk>.yaml`       | Chunk duration, frame count, fps, resolution                            |
 | `<attempt>.yaml`     | Quality value, targets met, all measured metrics                        |
@@ -397,7 +398,7 @@ Running VMAF, SSIM, PSNR, and VIF in separate ffmpeg passes is ~4× slower and r
 
 ### Automatic crop detection
 
-Crop is detected once during the Job phase using ffmpeg's `cropdetect` filter across multiple sampled frames. The same crop parameters are stored in `job.yaml` and applied consistently across all subsequent phases. Crop is applied during encoding only — chunks remain uncropped for remux compatibility.
+Crop is detected once during the Probe phase using ffmpeg's `cropdetect` filter across multiple sampled frames. The same crop parameters are stored in `probe.yaml` and applied consistently across all subsequent phases. Crop is applied during encoding only — chunks remain uncropped for remux compatibility.
 
 ### Pipeline parallelism default of 1
 

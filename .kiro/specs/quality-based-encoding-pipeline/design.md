@@ -3,6 +3,17 @@
 - Created: 2026-03-15
 - Completed: 2026-03-15
 
+## Cross-Reference Notes
+
+**Note (2026-06-23 — superseded by `config-refactor`):** The `config-refactor` spec (Created: 2026-06-23) replaces all config infrastructure introduced or referenced by this spec:
+
+- `PipelineConfig` is **deleted** from `models.py`. Its fields are now distributed across `AppConfig` sub-models: encoding fields → `AppConfig.encoding`, stream filter fields → `AppConfig.extraction`, chunking mode → `AppConfig.chunking`, audio fields → `AppConfig.audio`, volatile runtime fields (`source_video`, `work_dir`, `force`) → plain kwargs through `_build_registry`, then stored as typed fields on `JobPhaseResult`.
+- `ConfigManager` is **deleted** from `config.py`. Config loading is now done by `load_app_config()` in `app_config.py`, which deep-merges three YAML layers.
+- `ProgressTracker` (referenced in this spec) was later removed by `phase-object-model` and replaced by the Phase object model.
+- The `Config[uration Manager]` class shown in architecture diagrams in this spec no longer exists. See `config-refactor` design.md for the current `AppConfig` structure.
+
+---
+
 ## Overview
 
 The quality-based encoding pipeline is a comprehensive video processing system that orchestrates extraction, scene-based chunking, quality-targeted encoding, audio processing, and final merging of video files. The system supports multiple codecs (h.264 8-bit, h.265 10-bit) and is designed to achieve user-specified quality targets while optimizing file size through iterative CRF adjustment.

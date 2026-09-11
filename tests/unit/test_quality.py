@@ -164,6 +164,7 @@ class TestCodecConfigQualityLogPadding:
         codec = CodecConfig(
             name="test-crf",
             default_quality=Decimal("18"),
+            default_preset="slow",
             quality_range=(Decimal("0"), Decimal("51")),
             quality_granularity=Decimal("0.5"),
             encoder_args=["-i", "{input}", "{quality}"],
@@ -176,6 +177,7 @@ class TestCodecConfigQualityLogPadding:
         codec = CodecConfig(
             name="test-vbr",
             default_quality=Decimal("50"),
+            default_preset="slow",
             quality_range=(Decimal("0"), Decimal("100")),
             quality_granularity=Decimal("0.1"),
             encoder_args=["-i", "{input}", "{quality}"],
@@ -188,6 +190,7 @@ class TestCodecConfigQualityLogPadding:
         codec = CodecConfig(
             name="test-qp",
             default_quality=Decimal("32"),
+            default_preset="slow",
             quality_range=(Decimal("0"), Decimal("63")),
             quality_granularity=Decimal("1"),
             encoder_args=["-i", "{input}", "{quality}"],

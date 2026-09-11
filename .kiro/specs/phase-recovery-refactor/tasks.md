@@ -2,6 +2,10 @@
 
 <!-- markdownlint-disable MD024 -->
 
+## Cross-Spec Notes
+
+**Superseded in part by `artifact-state-refactor` (2026-09-15).** The `ArtifactState` enum introduced by this spec (`ABSENT`/`ARTIFACT_ONLY`/`COMPLETE`) is re-scoped to completeness only, with `ARTIFACT_ONLY` renamed `PARTIAL` and selection moved to a new `Artifact.wanted` field. That spec also removes the per-phase `_recovery_message()` helpers and unifies recovery reporting in `log_recovery_line()`. Task references to `ARTIFACT_ONLY` below are historical.
+
 - [x] 1. Add `output_file` parameter to ffmpeg runner and update all callers
 
 
@@ -136,7 +140,7 @@
   - Test dry-run warning, execute critical stop, `--force` wipe-and-continue
   - _Requirements: 1.2_
 
-- [ ] 11. Run full automatic pipeline and ensure new logic is working, phase parameters and sidecars of all types are created. `uv run pyqenc auto` onto `"D:\_current\О чём говорят мужчины Blu-Ray (1080p) (1).mkv"` file using `D:\_current\pyqenc1` workdir and `-y` flag. No pipes - they break alive_progress. Check warnings. Check duration-based reporting. Check full plain run. If reruns are needed - check phase recovery. Sleep & watch the process output every 5 minutes.
+- [ ] 11. Run full automatic pipeline and ensure new logic is working, phase parameters and sidecars of all types are created. `uv run pyqenc auto` onto `"D:\_encoding\movie.mkv"` file using `D:\_encoding\pyqenc` workdir and `-y` flag. No pipes - they break alive_progress. Check warnings. Check duration-based reporting. Check full plain run. If reruns are needed - check phase recovery. Sleep & watch the process output every 5 minutes.
 
 
 

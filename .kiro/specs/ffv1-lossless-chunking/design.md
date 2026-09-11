@@ -3,6 +3,16 @@
 - Created: 2026-03-15
 - Completed: 2026-03-15
 
+## Cross-Reference Notes
+
+**Note (2026-06-23 — superseded by `config-refactor`):** The `config-refactor` spec (Created: 2026-06-23) replaces the `PipelineConfig.chunking_mode` field introduced by this spec:
+
+- `PipelineConfig` is deleted. The `chunking_mode: ChunkingMode` field now lives at `AppConfig.chunking.mode`.
+- The CLI `--chunking` flag survives, but is applied via `config.chunking.mode = ChunkingMode.REMUX if args.chunking == "remux" else ChunkingMode.LOSSLESS` rather than being set on `PipelineConfig`.
+- The `FFV1_VIDEO_ARGS` constant and `split_chunks_from_state` signature (`chunking_mode` parameter) are unaffected.
+
+---
+
 ## Overview
 
 Chunk splitting currently uses `ffmpeg -c copy` with input-side `-ss`, which snaps each chunk's start to the nearest I-frame before the requested timestamp. With FFV1 `-g 1` every output frame is an I-frame, so the split is frame-perfect. The re-encode happens per-chunk during splitting — no intermediate whole-file FFV1 copy is created, so there is no double storage overhead.

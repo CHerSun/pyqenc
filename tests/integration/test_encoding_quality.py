@@ -169,12 +169,12 @@ class TestEncodeChunkQualitySearchV2Integration:
         return chunk
 
     def test_encode_chunk_uses_qualitysearchv2(self, tmp_path: Path) -> None:
-        """encode_chunk instantiates QualitySearchV2 (verified via source inspection)."""
+        """encode_chunk instantiates QualitySearchV3 (verified via source inspection)."""
         import inspect
         from pyqenc.phases.encoding import ChunkEncoder
 
         src = inspect.getsource(ChunkEncoder.encode_chunk)
-        assert "QualitySearchV2" in src
+        assert "QualitySearchV3" in src
         assert "QualitySearch(" not in src, "encode_chunk must not use legacy QualitySearch directly"
 
     @pytest.mark.skip(reason="ChunkEncoder constructor signature changed (collector arg added); needs update")

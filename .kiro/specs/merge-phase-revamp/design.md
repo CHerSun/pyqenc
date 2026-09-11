@@ -10,6 +10,7 @@
 | Spec | Created | Relationship |
 |------|---------|--------------|
 | `pts-preservation` | 2026-04-29 (Completed) | **Supersedes this spec in part.** `pts-preservation` replaces the ffmpeg concat demuxer path introduced here (the `concat_<safe_name>.txt` file and the `_execute_merge` ffmpeg concat logic) with `mkvmerge` + a JSON options file. The Python string concatenation bug (`"+genpts"` missing comma) that was introduced by this spec is fixed by `pts-preservation` Requirement 7, even though the ffmpeg concat path becomes dead code after the switch. |
+| `config-refactor` | 2026-06-23 | **Supersedes config references.** This spec added `metrics_sampling` to `ConfigManager.get_metrics_sampling()` and `PipelineConfig.metrics_sampling`. Both `ConfigManager` and `PipelineConfig` are deleted by `config-refactor`. The equivalent setting is now `AppConfig.encoding.metrics_sampling`. The `--metrics-sampling` CLI flag survives; it is applied as `config.encoding.metrics_sampling = value` after `load_app_config()`. |
 
 ---
 
@@ -101,7 +102,7 @@ Currently `_measure_quality` passes `output_dir / f"metrics_{safe_strategy}"` as
 **Design:**
 
 - `_measure_quality` receives `final_result: Path` (the output MKV).
-- Intermediate artifacts dir: `output_dir / final_result.stem` (e.g. `final/О чём говорят мужчины Blu-Ray (1080p) (1) slow_h265/`)
+- Intermediate artifacts dir: `output_dir / final_result.stem` (e.g. `final/movie slow_h265/`)
 - Plot path: `output_dir / f"{final_result.stem}.png"` — passed explicitly via `plot_path` to `evaluate_chunk`.
 - Sidecar path: `output_dir / f"{final_result.stem}.yaml"` — already handled by `_sidecar_path(output_file)` since `output_file` is the final result.
 - The `evaluate_chunk` signature already accepts `plot_path: Path | None`; no signature change needed there.
@@ -189,7 +190,7 @@ For the "savings" column, the most meaningful reference is the extracted video s
 MERGE SUMMARY
 ══════════════════════════════════════════════════════════════════════════
   Strategy  : slow_h265
-  Output    : О чём говорят мужчины Blu-Ray (1080p) (1) slow_h265.mkv
+  Output    : movie.mkv
   Size      : 4 231.4 MB  (saved 77.0% vs 18 420.0 MB reference)
   Targets   : vmaf-min≥85 → 91.2 ✔   ssim-min≥95 → 96.1 ✔
 ══════════════════════════════════════════════════════════════════════════

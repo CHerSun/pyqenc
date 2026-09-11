@@ -2,8 +2,8 @@
 
 This module provides:
 
-- ``ArtifactState`` — four-value enum classifying each artifact's recovery
-  state (``ABSENT`` / ``ARTIFACT_ONLY`` / ``STALE`` / ``COMPLETE``).
+- ``ArtifactState`` — three-value enum classifying each artifact's
+  completeness (``ABSENT`` / ``PARTIAL`` / ``COMPLETE``).
 - Data models: ``JobState``, ``ExtractionParams``, ``ChunkingParams``,
   ``OptimizationParams``, ``EncodingParams``, ``MetricsSidecar``,
   ``EncodingResultSidecar``, ``MeasureSidecar``, ``ChunkSidecar``.
@@ -41,54 +41,59 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class ArtifactState(Enum):
-    """Recovery state of a single pipeline artifact.
+    """Completeness (readiness) of a single pipeline artifact.
 
-    Used throughout recovery logic to classify each artifact and decide what
-    work remains for the current run.
+    Completeness answers one question: are all expected components present, so
+    the artifact is ready to be worked on by later stages?  It is orthogonal to
+    selection — whether the current run *wants* the artifact — which lives on
+    ``Artifact.wanted``, not here.
 
     Attributes:
-        ABSENT:        The artifact file does not exist — not yet produced, or
-                       invalidated by a parameter change.  Recovery action:
-                       produce the artifact and its sidecar.
-        ARTIFACT_ONLY: The artifact file is present and consistent (written via
-                       the ``.tmp`` protocol), but its sidecar is missing or
-                       incomplete.  Recovery action: produce the sidecar only.
-        STALE:         The artifact file and sidecar are present and internally
-                       consistent, but the parameters under which they were
-                       produced no longer match the current run parameters.
-                       Recovery action: re-produce if still needed, or leave on
-                       disk if cleanup level does not permit deletion.
-        COMPLETE:      The artifact file is present and its sidecar is present
-                       and contains all required data.  Recovery action: skip —
-                       no work needed.
+        ABSENT:   The artifact's components are not present.  Either nothing has
+                  been produced yet, or whatever exists is trivially
+                  reproducible with no investment worth protecting.  There is no
+                  separate state for cheaply reproducible leftovers — they are
+                  simply ABSENT.  ``.tmp`` files are NOT PARTIAL — they are
+                  transient crash remnants cleaned up at phase startup before
+                  recovery runs, leaving the artifact ABSENT.
+        PARTIAL:  A protected investment.  Expensive or valuable work is partly
+                  done, but the artifact is NOT yet ready to be worked on by
+                  later stages because a required component is missing; it is
+                  kept to avoid discarding that investment and to allow
+                  resuming.  Examples of this principle: the primary file is
+                  present but its sidecar is missing, or CRF attempts exist but
+                  no winning attempt has been finalised.
+        COMPLETE: All of the artifact's expected components are present, so the
+                  artifact is fully ready to be worked on by later stages
+                  (sidecar present where applicable).
     """
 
-    ABSENT        = "absent"
-    ARTIFACT_ONLY = "artifact_only"
-    STALE         = "stale"
-    COMPLETE      = "complete"
+    ABSENT   = "absent"
+    PARTIAL  = "partial"    # renamed from ARTIFACT_ONLY
+    COMPLETE = "complete"
 
 
 # ---------------------------------------------------------------------------
 # Phase parameter / sidecar data models
 # ---------------------------------------------------------------------------
 
-class JobState(BaseModel):
-    """Stable source video parameters stored in ``job.yaml``.
+class ProbeState(BaseModel):
+    """Sidecar model for ``probe.yaml``.
 
-    Contains only run-invariant metadata — no phase status, no chunk tracking.
-    ``crop_params`` is ``None`` when crop detection has not yet run.
+    Written by ``ProbePhase`` after resolving frame count and crop.  Contains
+    only the delta over ``job.yaml``: ``frame_count`` and ``crop``.  Fast-probe
+    fields (duration, fps, resolution, etc.) are NOT duplicated here.
+
+    ``frame_count=0`` is the sentinel for "could not be determined" — no valid
+    video has zero frames.  ``crop=None`` means no cropping.
     """
 
-    source: VideoMetadata
-    crop:   CropParams | None = None
+    frame_count: int
+    crop:        CropParams | None = None
 
     def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict using ``model_dump_full``."""
-        data = self.source.model_dump_full()
-        # Convert Path to str for YAML serialisation
-        data["path"] = str(data["path"])
-        result: dict = {"source": data}
+        """Serialise to a YAML-friendly dict."""
+        result: dict = {"frame_count": self.frame_count}
         if self.crop is not None:
             result["crop"] = {
                 "top":    self.crop.top,
@@ -99,14 +104,72 @@ class JobState(BaseModel):
         return result
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "JobState":
-        """Restore from a dict loaded from ``job.yaml``."""
+    def from_yaml_dict(cls, data: dict) -> ProbeState:
+        """Restore from a dict loaded from ``probe.yaml``."""
+        raw_crop = data.get("crop")
+        crop = CropParams(**raw_crop) if isinstance(raw_crop, dict) else None
+        return cls(
+            frame_count = int(data["frame_count"]),
+            crop        = crop,
+        )
+
+    @classmethod
+    def load(cls, path: Path) -> Self | None:
+        """Load ``ProbeState`` from *path*.
+
+        Returns:
+            ``ProbeState`` if the file exists and is valid, ``None`` otherwise.
+        """
+        if not path.exists():
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh)
+            return cls.from_yaml_dict(data or {})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not load %s: %s", path, exc)
+            return None
+
+    def save(self, path: Path) -> None:
+        """Write this ``ProbeState`` to *path* atomically.
+
+        Creates parent directories as needed.
+
+        Args:
+            path: Destination YAML file path.
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_yaml_atomic(path, self.to_yaml_dict())
+        logger.debug("Saved %s", path.name)
+
+
+class JobState(BaseModel):
+    """Stable source video parameters stored in ``job.yaml``.
+
+    Contains only run-invariant metadata — no phase status, no chunk tracking.
+    Crop and frame count are owned by ProbePhase and stored in ``probe.yaml``.
+    """
+
+    source: VideoMetadata
+
+    def to_yaml_dict(self) -> dict:
+        """Serialise to a YAML-friendly dict using ``model_dump_full``."""
+        data = self.source.model_dump_full()
+        # Convert Path to str for YAML serialisation
+        data["path"] = str(data["path"])
+        return {"source": data}
+
+    @classmethod
+    def from_yaml_dict(cls, data: dict) -> JobState:
+        """Restore from a dict loaded from ``job.yaml``.
+
+        Any ``crop`` field present in old files is silently ignored — crop
+        is now owned by ``ProbePhase`` and stored in ``probe.yaml``.
+        """
         source_data = data["source"]
         source_data = {**source_data, "path": Path(source_data["path"])}
         source = VideoMetadata.model_validate_full(source_data)
-        raw_crop = data.get("crop")
-        crop = CropParams(**raw_crop) if isinstance(raw_crop, dict) else None
-        return cls(source=source, crop=crop)
+        return cls(source=source)
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
@@ -157,7 +220,7 @@ class ExtractionParams(BaseModel):
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "ExtractionParams":
+    def from_yaml_dict(cls, data: dict) -> ExtractionParams:
         """Restore from a dict loaded from ``extraction.yaml``."""
         return cls(
             include=data.get("include"),
@@ -220,7 +283,7 @@ class ChunkingParams(BaseModel):
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "ChunkingParams":
+    def from_yaml_dict(cls, data: dict) -> ChunkingParams:
         """Restore from a dict loaded from ``chunking.yaml``."""
         scenes = [SceneBoundary(**s) for s in data.get("scenes", [])]
         return cls(
@@ -274,7 +337,7 @@ class StrategyTestResult(BaseModel):
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "StrategyTestResult":
+    def from_yaml_dict(cls, data: dict) -> StrategyTestResult:
         """Restore from a dict loaded from ``optimization.yaml``."""
         return cls(
             strategy_name = str(data["strategy"]),
@@ -285,13 +348,13 @@ class StrategyTestResult(BaseModel):
 class OptimizationParams(BaseModel):
     """Phase parameter file model for optimization (``optimization.yaml``).
 
-    Stores crop params active when optimization ran, selected test chunk IDs,
+    Stores the probe state active when optimization ran, selected test chunk IDs,
     per-strategy test results, the tolerance used, the selected strategies,
     the quality targets, and the metrics sampling factor active when the last
     run wrote this file.
 
     Attributes:
-        crop:             Crop params active when optimization ran.
+        probe:            Probe state (crop + frame count) active when optimization ran.
         test_chunks:      Chunk IDs used for test encodes.
         strategy_results: Per-strategy test results ordered by increasing total size.
         tolerance_pct:    Tolerance percentage used when ``selected`` was computed.
@@ -308,7 +371,7 @@ class OptimizationParams(BaseModel):
 
     model_config = {}
 
-    crop:             CropParams | None        = None
+    probe:            ProbeState | None      = None
     test_chunks:      list[str]                = Field(default_factory=list)
     strategy_results: list[StrategyTestResult] = Field(default_factory=list)
     tolerance_pct:    float                    = 0.0
@@ -326,26 +389,22 @@ class OptimizationParams(BaseModel):
             "quality_targets":  self.quality_targets,
             "sampling":         self.metrics_sampling,
         }
-        if self.crop is not None:
-            d["crop"] = {
-                "top":    self.crop.top,
-                "bottom": self.crop.bottom,
-                "left":   self.crop.left,
-                "right":  self.crop.right,
-            }
+        if self.probe is not None:
+            d["probe"] = self.probe.to_yaml_dict()
         return d
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "OptimizationParams":
+    def from_yaml_dict(cls, data: dict) -> OptimizationParams:
         """Restore from a dict loaded from ``optimization.yaml``."""
-        crop = CropParams(**data["crop"]) if data.get("crop") else None
+        probe_data = data.get("probe")
+        probe = ProbeState.from_yaml_dict(probe_data) if probe_data else None
         strategy_results = [
             StrategyTestResult.from_yaml_dict(r)
             for r in data.get("strategy_results", [])
         ]
         raw_sampling = data.get("sampling")
         return cls(
-            crop             = crop,
+            probe            = probe,
             test_chunks      = data.get("test_chunks", []),
             strategy_results = strategy_results,
             tolerance_pct    = float(data.get("tolerance_pct", 0.0)),
@@ -384,24 +443,24 @@ class OptimizationParams(BaseModel):
 class EncodingParams(BaseModel):
     """Phase parameter file model for encoding (``encoding.yaml``).
 
-    Stores crop params active when encoding ran.
+    Stores probe state (crop + frame count) active when encoding ran.
     """
 
-    crop: CropParams | None = None
+    probe: ProbeState | None = None
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
         d: dict = {}
-        if self.crop is not None:
-            d["crop"] = {"top": self.crop.top, "bottom": self.crop.bottom,
-                         "left": self.crop.left, "right": self.crop.right}
+        if self.probe is not None:
+            d["probe"] = self.probe.to_yaml_dict()
         return d
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "EncodingParams":
+    def from_yaml_dict(cls, data: dict) -> EncodingParams:
         """Restore from a dict loaded from ``encoding.yaml``."""
-        crop = CropParams(**data["crop"]) if data.get("crop") else None
-        return cls(crop=crop)
+        probe_data = data.get("probe")
+        probe = ProbeState.from_yaml_dict(probe_data) if probe_data else None
+        return cls(probe=probe)
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
@@ -463,7 +522,7 @@ class MetricsSidecar(BaseModel):
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "MetricsSidecar":
+    def from_yaml_dict(cls, data: dict) -> MetricsSidecar:
         """Restore from a dict loaded from an attempt sidecar YAML."""
         raw_sampling = data.get("sampling")
         return cls(
@@ -484,7 +543,7 @@ class EncodingResultSidecar(BaseModel):
     Quality-target tracking is owned exclusively by ``OptimizationPhase`` via
     ``optimization.yaml``.  ``OptimizationPhase`` deletes stale result sidecars
     before ``EncodingPhase`` runs, so ``EncodingPhase._recover()`` simply sees
-    ``ARTIFACT_ONLY`` pairs naturally when targets change.
+    ``PARTIAL`` pairs naturally when targets change.
     """
 
     winning_attempt: str              # filename of the winning attempt .mkv
@@ -502,7 +561,7 @@ class EncodingResultSidecar(BaseModel):
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "EncodingResultSidecar":
+    def from_yaml_dict(cls, data: dict) -> EncodingResultSidecar:
         """Restore from a dict loaded from an encoding result sidecar YAML."""
         return cls(
             winning_attempt = data["winning_attempt"],
@@ -548,7 +607,7 @@ class MeasureSidecar(BaseModel):
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "MeasureSidecar":
+    def from_yaml_dict(cls, data: dict) -> MeasureSidecar:
         """Restore from a dict loaded from a measure sidecar YAML."""
         return cls(
             source_video               = Path(data["source_video"]),
@@ -565,32 +624,32 @@ class MeasureSidecar(BaseModel):
 class AudioParams(BaseModel):
     """Phase parameter file model for audio processing (``audio.yaml``).
 
-    Stores the codec and base bitrate that were active when audio processing
-    last ran.  These are Type B config values — they affect the *content* of
-    produced AAC files and must be tracked across runs so that a codec or
-    bitrate change triggers re-processing.
+    Stores the codec and per-channel bitrate that were active when audio
+    processing last ran.  These are Type B config values — they affect the
+    *content* of produced delivery files and must be tracked across runs so
+    that a codec or bitrate change triggers re-processing.
 
-    ``audio_convert`` (the convert filter) is intentionally excluded: it is a
+    ``convert_pattern`` (the convert filter) is intentionally excluded: it is a
     Type A input — ``AudioEngine.build_plan()`` with the current filter already
     defines the expected terminal outputs, so no cross-run tracking is needed.
     """
 
-    audio_codec:        str | None = None
-    audio_base_bitrate: str | None = None
+    codec:               str | None = None
+    bitrate_per_channel: str | None = None
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
         return {
-            "audio_codec":        self.audio_codec,
-            "audio_base_bitrate": self.audio_base_bitrate,
+            "codec":               self.codec,
+            "bitrate_per_channel": self.bitrate_per_channel,
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "AudioParams":
+    def from_yaml_dict(cls, data: dict) -> AudioParams:
         """Restore from a dict loaded from ``audio.yaml``."""
         return cls(
-            audio_codec        = data.get("audio_codec"),
-            audio_base_bitrate = data.get("audio_base_bitrate"),
+            codec               = data.get("codec"),
+            bitrate_per_channel = data.get("bitrate_per_channel"),
         )
 
     @classmethod
@@ -651,7 +710,7 @@ class MergeStrategySummary(BaseModel):
         }
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "MergeStrategySummary":
+    def from_yaml_dict(cls, data: dict) -> MergeStrategySummary:
         """Restore from a dict loaded from ``merge.yaml``."""
         return cls(
             strategy_name   = data["strategy_name"],
@@ -679,6 +738,9 @@ class MergeParams(BaseModel):
         metrics_sampling:   Frame subsampling factor used during quality measurement.
                             ``None`` for files written before this field was added
                             (treated as unknown — no mismatch triggered).
+        probe:              Probe state (crop + frame count) active when merge ran.
+                            ``None`` for files written before this field was added
+                            (treated as unknown — no mismatch triggered).
         source_stem:        Source video filename stem (without extension).
         source_size_bytes:  Size of the source video file in bytes; ``0`` if unknown.
         strategy_summaries: Per-strategy summary rows for summary replay on rerun.
@@ -686,24 +748,30 @@ class MergeParams(BaseModel):
 
     quality_targets:    list[str]                = Field(default_factory=list)
     metrics_sampling:   int | None               = None
+    probe:              ProbeState | None       = None
     source_stem:        str                      = ""
     source_size_bytes:  int                      = 0
     strategy_summaries: list[MergeStrategySummary] = Field(default_factory=list)
 
     def to_yaml_dict(self) -> dict:
         """Serialise to a YAML-friendly dict."""
-        return {
+        d: dict = {
             "quality_targets":    self.quality_targets,
             "sampling":           self.metrics_sampling,
             "source_stem":        self.source_stem,
             "source_size_bytes":  self.source_size_bytes,
             "strategy_summaries": [s.to_yaml_dict() for s in self.strategy_summaries],
         }
+        if self.probe is not None:
+            d["probe"] = self.probe.to_yaml_dict()
+        return d
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> "MergeParams":
+    def from_yaml_dict(cls, data: dict) -> MergeParams:
         """Restore from a dict loaded from ``merge.yaml``."""
         raw_sampling = data.get("sampling")
+        probe_data = data.get("probe")
+        probe = ProbeState.from_yaml_dict(probe_data) if probe_data else None
         summaries = [
             MergeStrategySummary.from_yaml_dict(s)
             for s in data.get("strategy_summaries", [])
@@ -711,13 +779,14 @@ class MergeParams(BaseModel):
         return cls(
             quality_targets    = data.get("quality_targets", []),
             metrics_sampling   = int(raw_sampling) if raw_sampling is not None else None,
+            probe              = probe,
             source_stem        = data.get("source_stem", ""),
             source_size_bytes  = int(data.get("source_size_bytes", 0)),
             strategy_summaries = summaries,
         )
 
     @classmethod
-    def load(cls, path: Path) -> "MergeParams | None":
+    def load(cls, path: Path) -> MergeParams | None:
         """Load ``MergeParams`` from *path*.
 
         Returns:
@@ -767,7 +836,7 @@ class ChunkSidecar(BaseModel):
         return data
 
     @classmethod
-    def from_yaml_dict(cls, data: dict, chunk_id: str, path: Path) -> "ChunkSidecar":
+    def from_yaml_dict(cls, data: dict, chunk_id: str, path: Path) -> ChunkSidecar:
         """Restore from a dict loaded from a chunk sidecar YAML.
 
         Args:

@@ -10,6 +10,10 @@
 
 `pipeline-metrics-report` extends the `_build_registry` and phase constructor pattern established here. Every phase constructor now takes a required third parameter `collector: MetricsCollector` (after `config` and `phases`). `_build_registry` was updated to accept and thread the collector. Any future phase additions must include this parameter.
 
+### Superseded by `artifact-state-refactor` (2026-09-15)
+
+Task 1.1 here added `STALE` to `ArtifactState`. `artifact-state-refactor` removes `STALE` and re-scopes the enum to completeness only (`ABSENT`/`PARTIAL`/`COMPLETE`), moving selection to a new `Artifact.wanted` field and renaming `ARTIFACT_ONLY` → `PARTIAL`. The `STALE`-related tasks in this plan are now historical.
+
 - [x] 1. Core types and protocol
 
 

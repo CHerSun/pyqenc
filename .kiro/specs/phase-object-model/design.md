@@ -4,6 +4,20 @@
 
 - Created: 2026-03-20
 
+## Cross-Reference Notes
+
+**Note (2026-09-09 — superseded in part by `phase-terminal-runner`):** The `Phase` protocol's `scan()` method is removed (dependency resolution always goes through `dep.run(dry_run=...)`; `_ensure_dependencies` loses its `execute` parameter); the registry-iterating `Orchestrator` is replaced by a slim single-target `Runner` (`orchestrator.py` deleted); `PhaseOutcome.DRY_RUN` is replaced by the work-state `PENDING` (run mode is owned by the runner via `dry_run`); the phase banner moves to after dependency resolution (emitted once, only before actual work); and orchestrator-driven post-pipeline `ALL` cleanup moves into each phase via a new `Phase.finalize(ctx)` hook. See `phase-terminal-runner` for the current execution model.
+
+**Note (2026-06-23 — extended by `config-refactor`):** The `config-refactor` spec (Created: 2026-06-23) changes the `_build_registry` signature and the type flowing into phases:
+
+- `_build_registry(config: PipelineConfig, collector: MetricsCollector)` → `_build_registry(config: AppConfig, source: Path, work_dir: Path, force: bool, cleanup: CleanupLevel, no_metrics: bool, collector: MetricsCollector)`. The five new kwargs are volatile per-run parameters; they are forwarded only to `JobPhase` and stored as typed fields on `JobPhaseResult`.
+- All phases now receive `AppConfig` instead of `PipelineConfig`. The architecture diagram in this spec showing `PipelineConfig → Orchestrator` is stale; it should read `AppConfig → _build_registry`.
+- `phase-object-model` established the `(config, phases)` constructor pattern. `pipeline-metrics-report` extended it to `(config, phases, *, collector)`. `config-refactor` keeps that signature but changes `config` from `PipelineConfig` to `AppConfig`.
+
+**Note (2026-09-15 — superseded in part by `artifact-state-refactor`):** The four-value `ArtifactState` defined here (`ABSENT`/`ARTIFACT_ONLY`/`STALE`/`COMPLETE`) is re-scoped to completeness only. `STALE` is removed and selection moves to a new `Artifact.wanted: bool` field; `ARTIFACT_ONLY` is renamed `PARTIAL`. Consequently `pending` becomes `state in (ABSENT, PARTIAL)`, and invalidation is expressed as `wanted=False` with the correct completeness rather than `STALE`. The `ArtifactState`/`Artifact`/`pending` definitions in this design are outdated on these points — see `artifact-state-refactor` for the current model.
+
+---
+
 ## Overview
 
 This refactor restructures the pipeline from a collection of standalone functions driven by a monolithic orchestrator into a graph of self-contained `Phase` objects. Each phase owns its dependencies, artifact enumeration, recovery, invalidation, execution, and logging. The orchestrator becomes a thin driver that builds the phase registry and iterates it.

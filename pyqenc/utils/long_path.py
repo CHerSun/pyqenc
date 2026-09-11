@@ -9,7 +9,7 @@ _EXT_PREFIX: str  = chr(92) * 2 + "?" + chr(92)   # \\?\  (4 chars)
 _MAX_PATH:   int  = 260                             # Windows MAX_PATH limit
 
 
-class LongPath(type(Path())):
+class LongPath(type(Path())): # Platform-specific path type
     """A pathlib.Path subclass that transparently enables Windows extended-length paths.
 
     On Windows, ``os.fspath(long_path)`` (and therefore all Python file I/O,
@@ -71,7 +71,7 @@ class LongPath(type(Path())):
         """
         return super().__str__()
 
-    def __truediv__(self, key: str | Path) -> "LongPath":
+    def __truediv__(self, key: str | Path) -> LongPath:
         """Extend path with ``/`` operator, preserving ``LongPath`` type.
 
         Args:
@@ -82,7 +82,7 @@ class LongPath(type(Path())):
         """
         return LongPath(super().__truediv__(key))
 
-    def __rtruediv__(self, key: str | Path) -> "LongPath":
+    def __rtruediv__(self, key: str | Path) -> LongPath:
         """Support ``str / LongPath`` composition, preserving ``LongPath`` type.
 
         Args:

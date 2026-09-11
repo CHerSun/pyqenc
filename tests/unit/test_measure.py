@@ -292,29 +292,49 @@ class TestResolveCrop:
 
     # --- None with no job.yaml ---
 
-    def test_none_no_job_yaml_returns_empty_crop(self, tmp_path: Path, caplog) -> None:
-        """None with no job.yaml returns empty CropParams and logs info."""
+    def test_none_no_probe_yaml_returns_empty_crop(self, tmp_path: Path, caplog) -> None:
+        """None with no probe.yaml (and no job.yaml) returns empty CropParams and logs info."""
         with caplog.at_level(logging.INFO, logger="pyqenc.phases.measure"):
             result = _resolve_crop(None, tmp_path, tmp_path / "source.mkv")
         assert result == CropParams()
         assert any("No job.yaml" in r.message for r in caplog.records)
 
-    # --- None with matching job.yaml ---
+    # --- None with probe.yaml containing crop ---
 
-    def test_none_matching_job_yaml_returns_crop(self, tmp_path: Path) -> None:
-        """None with a job.yaml whose source matches returns the stored crop."""
-        source = tmp_path / "source.mkv"
+    def test_none_probe_yaml_with_crop_returns_crop(self, tmp_path: Path) -> None:
+        """None with a probe.yaml containing crop returns that crop without reading job.yaml."""
+        from pyqenc.state import ProbeState
+
         expected_crop = CropParams(top=138, bottom=138, left=0, right=0)
+        probe = ProbeState(frame_count=1000, crop=expected_crop)
+        probe.save(tmp_path / "probe.yaml")
+
+        result = _resolve_crop(None, tmp_path, tmp_path / "source.mkv")
+        assert result == expected_crop
+
+    # --- None with probe.yaml but no crop (falls back to job.yaml source check) ---
+
+    def test_none_probe_yaml_no_crop_falls_back_to_job_yaml(self, tmp_path: Path, caplog) -> None:
+        """None with probe.yaml (no crop) and non-matching job.yaml returns empty CropParams."""
+        from pyqenc.state import ProbeState
+
+        # probe.yaml exists but has no crop
+        probe = ProbeState(frame_count=500, crop=None)
+        probe.save(tmp_path / "probe.yaml")
+
+        source = tmp_path / "source.mkv"
+        other  = tmp_path / "other.mkv"
 
         mock_job = MagicMock()
-        mock_job.source.path = source
-        mock_job.crop = expected_crop
+        mock_job.source.path = other
 
         with patch("pyqenc.phases.measure.JobState") as mock_cls:
             mock_cls.load.return_value = mock_job
-            result = _resolve_crop(None, tmp_path, source)
+            with caplog.at_level(logging.INFO, logger="pyqenc.phases.measure"):
+                result = _resolve_crop(None, tmp_path, source)
 
-        assert result == expected_crop
+        assert result == CropParams()
+        assert any("does not match" in r.message for r in caplog.records)
 
     # --- None with non-matching source in job.yaml ---
 
@@ -325,7 +345,6 @@ class TestResolveCrop:
 
         mock_job = MagicMock()
         mock_job.source.path = other
-        mock_job.crop = CropParams(top=50, bottom=50, left=0, right=0)
 
         with patch("pyqenc.phases.measure.JobState") as mock_cls:
             mock_cls.load.return_value = mock_job
@@ -335,15 +354,14 @@ class TestResolveCrop:
         assert result == CropParams()
         assert any("does not match" in r.message for r in caplog.records)
 
-    # --- None with job.yaml that has no crop data ---
+    # --- None with job.yaml that has matching source but no crop in probe.yaml ---
 
-    def test_none_job_yaml_no_crop_returns_empty(self, tmp_path: Path, caplog) -> None:
-        """None with a matching job.yaml but crop=None returns empty CropParams."""
+    def test_none_no_crop_in_probe_yaml_returns_empty(self, tmp_path: Path, caplog) -> None:
+        """None with matching job.yaml but no crop in probe.yaml returns empty CropParams."""
         source = tmp_path / "source.mkv"
 
         mock_job = MagicMock()
         mock_job.source.path = source
-        mock_job.crop = None
 
         with patch("pyqenc.phases.measure.JobState") as mock_cls:
             mock_cls.load.return_value = mock_job

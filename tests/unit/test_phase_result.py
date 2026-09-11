@@ -1,10 +1,16 @@
 """Unit tests for PhaseResult derived properties.
 
 Covers:
-- ``is_complete``: True for COMPLETED/REUSED, False for FAILED/DRY_RUN
+- ``is_complete``: True for COMPLETED/REUSED, False for FAILED/PENDING
 - ``complete``:    Filters artifacts to COMPLETE state only
-- ``pending``:     Filters artifacts to ABSENT/ARTIFACT_ONLY/STALE states
+- ``pending``:     Filters artifacts to ABSENT/PARTIAL states
 - ``did_work``:    True only for COMPLETED outcome
+
+Selection (``wanted``) is orthogonal to completeness: phases filter their
+internal artifact list to ``wanted=True`` before constructing ``PhaseResult``,
+so an unwanted artifact (the replacement for the former ``STALE`` state — now
+``wanted=False`` with completeness ``COMPLETE``) never appears in
+``PhaseResult.artifacts``, ``pending``, or ``complete``.
 """
 
 from __future__ import annotations
@@ -22,14 +28,23 @@ from pyqenc.state import ArtifactState
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _artifact(state: ArtifactState) -> Artifact:
-    return Artifact(path=Path("/fake/path"), state=state)
+def _artifact(state: ArtifactState, wanted: bool = True) -> Artifact:
+    return Artifact(path=Path("/fake/path"), state=state, wanted=wanted)
 
 
 def _result(outcome: PhaseOutcome, states: list[ArtifactState] = ()) -> PhaseResult:
     return PhaseResult(
         outcome=outcome,
         artifacts=[_artifact(s) for s in states],
+        message="test",
+    )
+
+
+def _result_from_artifacts(outcome: PhaseOutcome, artifacts: list[Artifact]) -> PhaseResult:
+    """Build a PhaseResult the way a phase does: only wanted artifacts are exposed."""
+    return PhaseResult(
+        outcome=outcome,
+        artifacts=[a for a in artifacts if a.wanted],
         message="test",
     )
 
@@ -48,8 +63,8 @@ class TestIsComplete:
     def test_failed_is_not_complete(self) -> None:
         assert _result(PhaseOutcome.FAILED).is_complete is False
 
-    def test_dry_run_is_not_complete(self) -> None:
-        assert _result(PhaseOutcome.DRY_RUN).is_complete is False
+    def test_pending_is_not_complete(self) -> None:
+        assert _result(PhaseOutcome.PENDING).is_complete is False
 
 
 # ---------------------------------------------------------------------------
@@ -84,12 +99,16 @@ class TestPendingProperty:
         assert len(result.pending) == 1
 
     def test_artifact_only_is_pending(self) -> None:
-        result = _result(PhaseOutcome.FAILED, [ArtifactState.ARTIFACT_ONLY])
+        result = _result(PhaseOutcome.FAILED, [ArtifactState.PARTIAL])
         assert len(result.pending) == 1
 
-    def test_stale_is_not_pending(self) -> None:
-        """STALE artifacts are handled by phase-specific logic, not via pending."""
-        result = _result(PhaseOutcome.FAILED, [ArtifactState.STALE])
+    def test_unwanted_artifact_is_not_pending(self) -> None:
+        """A former-STALE artifact (now wanted=False, COMPLETE) is filtered out
+        before PhaseResult is built, so it never surfaces as pending."""
+        result = _result_from_artifacts(PhaseOutcome.FAILED, [
+            _artifact(ArtifactState.COMPLETE, wanted=False),
+        ])
+        assert result.artifacts == []
         assert result.pending == []
 
     def test_complete_is_not_pending(self) -> None:
@@ -97,14 +116,18 @@ class TestPendingProperty:
         assert result.pending == []
 
     def test_mixed_states(self) -> None:
-        result = _result(PhaseOutcome.COMPLETED, [
-            ArtifactState.COMPLETE,
-            ArtifactState.ABSENT,
-            ArtifactState.STALE,
-            ArtifactState.ARTIFACT_ONLY,
+        """Unwanted artifacts (former STALE) are excluded before construction;
+        only wanted artifacts contribute to pending/complete."""
+        result = _result_from_artifacts(PhaseOutcome.COMPLETED, [
+            _artifact(ArtifactState.COMPLETE),
+            _artifact(ArtifactState.ABSENT),
+            _artifact(ArtifactState.COMPLETE, wanted=False),  # former STALE
+            _artifact(ArtifactState.PARTIAL),
         ])
-        assert len(result.pending) == 2   # only ABSENT + ARTIFACT_ONLY
+        assert len(result.artifacts) == 3           # unwanted one is excluded
+        assert len(result.pending) == 2             # only ABSENT + PARTIAL
         assert len(result.complete) == 1
+        assert all(a.wanted for a in result.artifacts)
 
 
 # ---------------------------------------------------------------------------
@@ -121,5 +144,5 @@ class TestDidWork:
     def test_failed_did_not_work(self) -> None:
         assert _result(PhaseOutcome.FAILED).did_work is False
 
-    def test_dry_run_did_not_work(self) -> None:
-        assert _result(PhaseOutcome.DRY_RUN).did_work is False
+    def test_pending_did_not_work(self) -> None:
+        assert _result(PhaseOutcome.PENDING).did_work is False

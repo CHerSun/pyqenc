@@ -5,6 +5,10 @@
 - Created: 2026-04-29
 - Completed: 2026-04-29
 
+## Cross-Spec Notes
+
+**Superseded in part by `artifact-state-refactor` (2026-09-15).** This spec's glossary describes the four-value `ArtifactState` (`ABSENT`/`ARTIFACT_ONLY`/`STALE`/`COMPLETE`). That enum is re-scoped to completeness only: `STALE` is removed (selection now lives in a new `Artifact.wanted` field) and `ARTIFACT_ONLY` is renamed `PARTIAL`. The `TimestampArtifact` requirements here are unchanged in spirit — it stays `COMPLETE`/`ABSENT` (never `STALE`) and now also carries `wanted`.
+
 ## Introduction
 
 The pyqenc pipeline produces a final merged MKV whose PTS (Presentation Timestamps)
