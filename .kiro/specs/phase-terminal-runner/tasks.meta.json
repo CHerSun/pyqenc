@@ -1,0 +1,320 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "1.1 Rename the enum member and make it mode-free": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037110775
+      },
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037124911
+      },
+      {
+        "executionId": "72034f12-d05b-49fd-bebc-67a20c2d182f",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037509999
+      }
+    ],
+    "1.2 Make outcome-derivation helpers and `is_complete` mode-free": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037110964
+      },
+      {
+        "executionId": "72034f12-d05b-49fd-bebc-67a20c2d182f",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037516885
+      },
+      {
+        "executionId": "72034f12-d05b-49fd-bebc-67a20c2d182f",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037702223
+      }
+    ],
+    "2.1 Add `FinalizeContext` and update the `Phase` protocol in `pyqenc/phase.py`": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037111074
+      },
+      {
+        "executionId": "72034f12-d05b-49fd-bebc-67a20c2d182f",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037706249
+      },
+      {
+        "executionId": "72034f12-d05b-49fd-bebc-67a20c2d182f",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037860473
+      }
+    ],
+    "2.2 Add the shared `resolve_dependencies` helper in `pyqenc/phase.py`": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037111217
+      },
+      {
+        "executionId": "72034f12-d05b-49fd-bebc-67a20c2d182f",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037864990
+      },
+      {
+        "executionId": "72034f12-d05b-49fd-bebc-67a20c2d182f",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789040175058
+      }
+    ],
+    "3.1 Establish the uniform `run()` order and `_ensure_dependencies` wrapper per phase": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037111326
+      },
+      {
+        "executionId": "72034f12-d05b-49fd-bebc-67a20c2d182f",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789040179281
+      },
+      {
+        "executionId": "72034f12-d05b-49fd-bebc-67a20c2d182f",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789045404413
+      }
+    ],
+    "3.2 Move each phase banner to after dependency resolution, emitted once": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037111429
+      },
+      {
+        "executionId": "72034f12-d05b-49fd-bebc-67a20c2d182f",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789045431628
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789056807375
+      }
+    ],
+    "3.3 Restructure `OptimizationPhase` skip/banner ordering": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037111555
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789056811505
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789056899950
+      }
+    ],
+    "3.4 Update `MergePhase` to obtain encoding state via `run()` not `scan()`": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037111657
+      }
+    ],
+    "4.1 Implement rolling intermediate cleanup inside phase `run()`": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037111835
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789056990919
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789057145631
+      }
+    ],
+    "4.2 Implement `finalize(ctx)` on every phase": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037111971
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789057149619
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789057404768
+      }
+    ],
+    "5.1 Add `RunResult` and `Runner` in `pyqenc/runner.py`": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037112071
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789057409485
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789064558868
+      }
+    ],
+    "5.2 Implement the uniform summary and cleanup gating in `Runner`": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037112195
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789064565594
+      }
+    ],
+    "5.3 Delete `pyqenc/orchestrator.py`": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037112301
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789064658074
+      }
+    ],
+    "6.1 Remove the process-global active-collector registry from `pyqenc/metrics.py`": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037112399
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789064664057
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789070221063
+      }
+    ],
+    "7.1 Rebuild `pyqenc/api.py` around a shared `_drive` builder returning `RunResult`": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037112499
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789070226712
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789071151879
+      }
+    ],
+    "7.2 Update `pyqenc/cli.py` handlers and the SIGINT path": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037112608
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789071156825
+      }
+    ],
+    "9.1 Run the full quality gate and a real dry-run/execute smoke check": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037112738
+      }
+    ],
+    "10.1 Reconcile this spec against related specs and record superseded items": [
+      {
+        "executionId": "d68c6ff4-a287-4bbc-a0ad-2cfe06071d29",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037112933
+      }
+    ],
+    "1. Decompose `PhaseOutcome`: work-state only (`DRY_RUN` → `PENDING`)": [
+      {
+        "executionId": "72034f12-d05b-49fd-bebc-67a20c2d182f",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789037702361
+      }
+    ],
+    "2. `Phase` protocol: remove `scan()`, add `finalize(ctx)` and `FinalizeContext`": [
+      {
+        "executionId": "72034f12-d05b-49fd-bebc-67a20c2d182f",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789040175205
+      }
+    ],
+    "3.4 Bring `MergePhase` to the uniform `_recover`-driven pattern (no `scan()`, no driving another phase's `run()`)": [
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789056905053
+      },
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789056985960
+      }
+    ],
+    "3. Rewrite every phase to the uniform `run()` skeleton (remove `scan()`, add `finalize`)": [
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789056986239
+      }
+    ],
+    "4. Add rolling `INTERMEDIATE` cleanup and `finalize(ctx)` deep cleanup to each phase": [
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789057404864
+      }
+    ],
+    "5. Create the `Runner` and delete `orchestrator.py`": [
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789064658181
+      }
+    ],
+    "6. De-globalise metrics": [
+      {
+        "executionId": "bc44e0a8-6e9d-4374-ae5f-28824adbe23b",
+        "chatSessionId": "sess_c135a04f-3dfb-4769-9d84-314bec1b1d91",
+        "timestamp": 1789070221297
+      }
+    ]
+  }
+}

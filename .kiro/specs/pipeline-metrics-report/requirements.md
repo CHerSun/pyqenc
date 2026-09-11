@@ -7,6 +7,10 @@
 
 ## Cross-Spec Notes
 
+### Superseded by `phase-terminal-runner` (2026-09-09) — collector ownership
+
+> **Superseded in part by `phase-terminal-runner` (2026-09-09):** the process-global active-collector registry introduced here (`register_active_collector`, `flush_active_collector`, and the module-level `_active_collector`) is removed. The metrics collector is now **run-scoped and owned by the `Runner`** (one collector per run, threaded into the phase registry). The CLI SIGINT handler flushes via `flush_all_metrics()` — a set-based interrupt-flush registry each `YamlMetricsCollector` self-registers into (symmetric with the ffmpeg `kill_all_ffmpeg` registry) — instead of the single-slot active-collector lookup. Incremental/periodic flush and partial-timer capture on interrupt are preserved.
+
 ### Relation to `phase-object-model` (2026-03-20)
 
 `phase-object-model` established `_build_registry` and the phase constructor pattern (`config`, `phases` registry). This spec extends that pattern by adding a required `collector: MetricsCollector` third parameter to every phase constructor and updating `_build_registry` to accept and thread the collector. The phase constructor signature is now `(config, phases, collector)`.

@@ -40,7 +40,13 @@ from pyqenc.models import (
     QualityTarget,
     Strategy,
 )
-from pyqenc.phase import Artifact, Phase, PhaseResult
+from pyqenc.phase import (
+    Artifact,
+    FinalizeContext,
+    Phase,
+    PhaseResult,
+    resolve_dependencies,
+)
 from pyqenc.state import (
     ArtifactState,
     OptimizationParams,
@@ -129,75 +135,6 @@ class OptimizationPhase:
     # Public Phase interface
     # ------------------------------------------------------------------
 
-    def scan(self) -> OptimizationPhaseResult:
-        """Classify existing optimization artifacts without executing any work.
-
-        In all-strategies mode, returns all configured strategies immediately.
-        In optimization mode, loads ``optimization.yaml`` and classifies the
-        cached results.  If quality targets changed since the last run, returns
-        ``DRY_RUN`` to signal that ``run()`` must be called.
-
-        Returns:
-            ``OptimizationPhaseResult`` with current artifact state.
-        """
-        if self.result is not None:
-            return self.result
-
-        if not self._job.result.config.encoding.resolved_strategies:
-            raise RuntimeError("no strategies configured")
-
-        # All-strategies mode: no artifacts, just return all strategies. Triggered by either flag or single strategy given (noting to optimize)
-        if not self._job.result.config.encoding.optimize or len(self._job.result.config.encoding.resolved_strategies) == 1:
-            self.result = self._all_strategies_result()
-            return self.result
-
-        dep_result = self._ensure_dependencies(execute=False)
-        if dep_result is not None:
-            self.result = dep_result
-            return self.result
-
-        opt_yaml  = self._job.result.work_dir / _OPTIMIZATION_YAML
-        persisted = OptimizationParams.load(opt_yaml)
-
-        if persisted is None or not persisted.strategy_results:
-            self.result = OptimizationPhaseResult(
-                outcome             = PhaseOutcome.DRY_RUN,
-                artifacts           = [],
-                message             = "optimization.yaml not found or empty",
-                selected_strategies = [],
-                strategy_results    = [],
-            )
-        else:
-            current_targets  = _targets_as_strings(self._job.result.config.encoding.resolved_targets)
-            current_sampling = self._job.result.config.measurement.sampling
-            params_stale = (
-                (persisted.quality_targets and persisted.quality_targets != current_targets)
-                or (persisted.metrics_sampling is not None and persisted.metrics_sampling != current_sampling)
-            )
-            if params_stale:
-                # Quality targets or metrics_sampling changed — work needed; run() will invalidate encoded/ sidecars
-                self.result = OptimizationPhaseResult(
-                    outcome             = PhaseOutcome.DRY_RUN,
-                    artifacts           = [],
-                    message             = "quality targets or metrics_sampling changed — re-run needed",
-                    selected_strategies = [],
-                    strategy_results    = [],
-                )
-            else:
-                selected = self._apply_tolerance(persisted.strategy_results, self._job.result.config.encoding.optimize_tolerance)
-                self.result = OptimizationPhaseResult(
-                    outcome             = PhaseOutcome.REUSED,
-                    artifacts           = [Artifact(
-                        path  = self._job.result.work_dir / _OPTIMIZATION_YAML,
-                        state = ArtifactState.COMPLETE,
-                    )],
-                    message             = f"optimization.yaml loaded — {len(selected)} strategy(ies) selected",
-                    selected_strategies = self._resolve_selected(selected),
-                    strategy_results    = persisted.strategy_results,
-                )
-
-        return self.result
-
     def run(self, dry_run: bool = False) -> OptimizationPhaseResult:
         """Recover, run test encodes if needed, cache and return result.
 
@@ -224,12 +161,23 @@ class OptimizationPhase:
         Returns:
             ``OptimizationPhaseResult`` with ``selected_strategies`` set.
         """
+        # In-run memoization guard (Property 1): return cached result verbatim.
+        if self.result is not None:
+            return self.result
+
         if not self._job.result.config.encoding.resolved_strategies:
             raise RuntimeError("no strategies configured")
 
         # All-strategies mode: no artifacts, just return all strategies. Triggered by either flag or single strategy given (noting to optimize)
         if not self._job.result.config.encoding.optimize or len(self._job.result.config.encoding.resolved_strategies) == 1:
             self.result = self._run_all_strategies(dry_run=dry_run)
+            return self.result
+
+        # Resolve dependencies BEFORE any banner or work (uniform skeleton): a
+        # FAILED/PENDING dependency short-circuits here with NO banner (Req 8.1).
+        dep_result = self._ensure_dependencies(dry_run=dry_run)
+        if dep_result is not None:
+            self.result = dep_result
             return self.result
 
         work_dir  = self._job.result.work_dir
@@ -276,6 +224,15 @@ class OptimizationPhase:
                 metrics_sampling = persisted.metrics_sampling,
             )
 
+        # Emit the banner exactly once, now that dependencies are confirmed
+        # complete and the phase is about to do work (cached-reuse,
+        # tolerance-reapply, or a real test-encode all count as work; Req 8.3,
+        # 8.5). The skip path (_run_all_strategies) and the FAILED/PENDING
+        # dependency short-circuit have already returned above with no banner.
+        emit_phase_banner("OPTIMIZATION", logger)
+        logger.info("Strategies:  %s", ", ".join(s.name for s in self._job.result.config.encoding.resolved_strategies))
+        logger.info("Tolerance:   %.1f%%", tolerance)
+
         # Step 3: tolerance re-application — all results cached, only tolerance changed
         # This is a pure read-from-cache operation; no dependencies needed.
         if (
@@ -285,9 +242,6 @@ class OptimizationPhase:
             and persisted.tolerance_pct != tolerance
             and not params_changed
         ):
-            emit_phase_banner("OPTIMIZATION", logger)
-            logger.info("Strategies:  %s", ", ".join(s.name for s in self._job.result.config.encoding.resolved_strategies))
-            logger.info("Tolerance:   %.1f%%", tolerance)
             logger.info(
                 "All strategy results cached; tolerance changed (%.1f%% → %.1f%%) — re-selecting without re-encoding",
                 persisted.tolerance_pct, tolerance,
@@ -329,9 +283,6 @@ class OptimizationPhase:
             and persisted.tolerance_pct == tolerance
             and not params_changed
         ):
-            emit_phase_banner("OPTIMIZATION", logger)
-            logger.info("Strategies:  %s", ", ".join(s.name for s in self._job.result.config.encoding.resolved_strategies))
-            logger.info("Tolerance:   %.1f%%", tolerance)
             with self._collector.time(MetricKey.RECOVERY):
                 selected = persisted.selected or self._apply_tolerance(persisted.strategy_results, tolerance)
             log_recovery_line(
@@ -350,16 +301,6 @@ class OptimizationPhase:
                 selected_strategies = self._resolve_selected(selected),
                 strategy_results    = persisted.strategy_results,
             )
-            return self.result
-
-        # From here on we need live dependencies (for crop params and chunks)
-        emit_phase_banner("OPTIMIZATION", logger)
-        logger.info("Strategies:  %s", ", ".join(s.name for s in self._job.result.config.encoding.resolved_strategies))
-        logger.info("Tolerance:   %.1f%%", self._job.result.config.encoding.optimize_tolerance)
-
-        dep_result = self._ensure_dependencies(execute=True)
-        if dep_result is not None:
-            self.result = dep_result
             return self.result
 
         job_result   = self._job.result  # type: ignore[union-attr]
@@ -422,7 +363,7 @@ class OptimizationPhase:
 
         if dry_run:
             self.result = OptimizationPhaseResult(
-                outcome             = PhaseOutcome.DRY_RUN if pending_count > 0 else PhaseOutcome.REUSED,
+                outcome             = PhaseOutcome.PENDING if pending_count > 0 else PhaseOutcome.REUSED,
                 artifacts           = [],
                 message             = "dry-run",
                 selected_strategies = [],
@@ -545,6 +486,21 @@ class OptimizationPhase:
         )
         return self.result
 
+    def finalize(self, ctx: FinalizeContext) -> None:
+        """Perform end-of-run housekeeping for the optimization phase.
+
+        ``OptimizationPhase`` owns only ``optimization.yaml`` — a
+        recovery/parameter sidecar that must survive for reruns. Its test
+        encodes live under ``encoding/`` and ``encoded/``, which are owned and
+        deleted by ``EncodingPhase.finalize()``. Optimization therefore has no
+        deep artifacts of its own to remove — a safe no-op regardless of
+        ``ctx.deep_cleanup``.
+
+        Args:
+            ctx: Pre-resolved end-of-run decisions from the runner.
+        """
+        return
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -633,56 +589,36 @@ class OptimizationPhase:
             strategy_results    = [],
         )
 
-    def _ensure_dependencies(self, execute: bool) -> OptimizationPhaseResult | None:
-        """Scan/run dependencies if they have no cached result; fail fast if incomplete.
+    def _ensure_dependencies(self, dry_run: bool) -> OptimizationPhaseResult | None:
+        """Resolve dependencies via the shared walk; fail fast if incomplete.
 
         Args:
-            execute: When ``True``, call ``dep.run()`` for deps without a cached result.
+            dry_run: Propagated unchanged to each dependency's ``run()``.
 
         Returns:
-            A ``FAILED`` result if any dependency is not complete; ``None`` otherwise.
+            A ``FAILED`` result if any dependency failed, a ``PENDING`` result
+            if any dependency is legitimately pending (dry-run only), or
+            ``None`` when all dependencies are complete and the phase may
+            proceed.
         """
         if self._job is None:
             return _failed("OptimizationPhase requires JobPhase")
-
-        if self._job.result is None:
-            if execute:
-                self._job.run()
-            else:
-                self._job.scan()
-
-        if not self._job.result.is_complete:  # type: ignore[union-attr]
-            err = "JobPhase did not complete successfully"
-            logger.critical(err)
-            return _failed(err)
-
         if self._probe is None:
             return _failed("OptimizationPhase requires ProbePhase")
-
-        if self._probe.result is None:
-            if execute:
-                self._probe.run()
-            else:
-                self._probe.scan()
-
-        if not self._probe.result.is_complete:  # type: ignore[union-attr]
-            err = "ProbePhase did not complete successfully"
-            logger.warning(err)
-            return _failed(err)
-
         if self._chunking is None:
             return _failed("OptimizationPhase requires ChunkingPhase")
 
-        if self._chunking.result is None:
-            if execute:
-                self._chunking.run()
-            else:
-                self._chunking.scan()
-
-        if not self._chunking.result.is_complete:  # type: ignore[union-attr]
-            err = "ChunkingPhase did not complete successfully"
-            logger.critical(err)
+        status = resolve_dependencies(self, dry_run=dry_run)
+        if status.failed:
+            names = ", ".join(n.capitalize() for n in status.failed)
+            err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
+            logger.error(err)
             return _failed(err)
+        if status.pending:
+            names = ", ".join(n.capitalize() for n in status.pending)
+            msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
+            logger.info(msg)
+            return _pending(msg)
 
         return None
 
@@ -877,6 +813,23 @@ def _failed(error: str) -> OptimizationPhaseResult:
         artifacts           = [],
         message             = error,
         error               = error,
+        selected_strategies = [],
+        strategy_results    = [],
+    )
+
+
+def _pending(reason: str) -> OptimizationPhaseResult:
+    """Return a ``PENDING`` ``OptimizationPhaseResult`` with the given reason.
+
+    Used when a dependency is legitimately pending during a dry-run preview:
+    the phase cannot preview its own work, so it chains ``PENDING`` without an
+    error.
+    """
+    return OptimizationPhaseResult(
+        outcome             = PhaseOutcome.PENDING,
+        artifacts           = [],
+        message             = reason,
+        error               = None,
         selected_strategies = [],
         strategy_results    = [],
     )

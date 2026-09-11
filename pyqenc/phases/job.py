@@ -27,7 +27,7 @@ from pyqenc.models import (
     PhaseOutcome,
     VideoMetadata,
 )
-from pyqenc.phase import Artifact, Phase, PhaseResult
+from pyqenc.phase import Artifact, FinalizeContext, Phase, PhaseResult
 from pyqenc.state import ArtifactState, JobState
 from pyqenc.utils.disk_space import log_disk_space_info
 
@@ -119,54 +119,6 @@ class JobPhase:
     # Public Phase interface
     # ------------------------------------------------------------------
 
-    def scan(self) -> JobPhaseResult:
-        """Load existing ``job.yaml`` without running crop detection or writing files.
-
-        Returns:
-            ``JobPhaseResult`` with ``force_wipe=False``; ``is_complete`` is
-            ``True`` when ``job.yaml`` exists and the source path matches.
-        """
-        if self.result is not None:
-            return self.result
-
-        job = JobState.load(self._work_dir / _JOB_YAML_FILENAME)
-
-        if job is None:
-            result = JobPhaseResult(
-                outcome   = PhaseOutcome.DRY_RUN,
-                artifacts = [Artifact(
-                    path  = self._work_dir / _JOB_YAML_FILENAME,
-                    state = ArtifactState.ABSENT,
-                )],
-                message    = "job.yaml not found",
-                job        = None,
-                force_wipe = False,
-                config     = self._config,
-                work_dir   = self._work_dir,
-                source     = self._source,
-                cleanup    = self._cleanup,
-                no_metrics = self._no_metrics,
-            )
-        else:
-            result = JobPhaseResult(
-                outcome   = PhaseOutcome.REUSED,
-                artifacts = [Artifact(
-                    path  = self._work_dir / _JOB_YAML_FILENAME,
-                    state = ArtifactState.COMPLETE,
-                )],
-                message    = "job.yaml loaded",
-                job        = job,
-                force_wipe = False,
-                config     = self._config,
-                work_dir   = self._work_dir,
-                source     = self._source,
-                cleanup    = self._cleanup,
-                no_metrics = self._no_metrics,
-            )
-
-        self.result = result
-        return result
-
     def run(self, dry_run: bool = False) -> JobPhaseResult:
         """Validate source, create/update ``job.yaml``, probe metadata.
 
@@ -178,7 +130,7 @@ class JobPhase:
            - Mismatch without ``--force`` → return ``FAILED``.
            - Mismatch with ``--force`` → set ``force_wipe=True``, delete
              ``job.yaml`` and all phase parameter YAMLs, continue.
-        4. In dry-run mode: return ``DRY_RUN`` if ``job.yaml`` is absent.
+        4. In dry-run mode: return ``PENDING`` if ``job.yaml`` is absent.
         5. Create/update ``job.yaml`` with current source metadata.
         6. Cache and return result.
 
@@ -189,6 +141,10 @@ class JobPhase:
         Returns:
             ``JobPhaseResult`` with ``job`` and ``force_wipe`` set.
         """
+        # In-run memoization guard (Property 1): return cached result verbatim.
+        if self.result is not None:
+            return self.result
+
         # Disk space check (execute mode only).
         # Reuse cached VideoMetadata from job.yaml when available (has fps/duration/resolution
         # already populated → pixel-based estimate). Fall back to a bare instance on first run
@@ -238,51 +194,13 @@ class JobPhase:
             self.result = result
             return result
 
-        # Dry-run: if job.yaml absent, report DRY_RUN
-        if dry_run:
-            existing = JobState.load(self._work_dir / _JOB_YAML_FILENAME)
-            if existing is None:
-                result = JobPhaseResult(
-                    outcome   = PhaseOutcome.DRY_RUN,
-                    artifacts = [Artifact(
-                        path  = self._work_dir / _JOB_YAML_FILENAME,
-                        state = ArtifactState.ABSENT,
-                    )],
-                    message    = "Would create job.yaml",
-                    job        = None,
-                    force_wipe = False,
-                    config     = self._config,
-                    work_dir   = self._work_dir,
-                    source     = self._source,
-                    cleanup    = self._cleanup,
-                    no_metrics = self._no_metrics,
-                )
-                self.result = result
-                return result
-            # job.yaml exists and source matches — reused
-            result = JobPhaseResult(
-                outcome   = PhaseOutcome.REUSED,
-                artifacts = [Artifact(
-                    path  = self._work_dir / _JOB_YAML_FILENAME,
-                    state = ArtifactState.COMPLETE,
-                )],
-                message    = "job.yaml already up to date",
-                job        = existing,
-                force_wipe = False,
-                config     = self._config,
-                work_dir   = self._work_dir,
-                source     = self._source,
-                cleanup    = self._cleanup,
-                no_metrics = self._no_metrics,
-            )
-            self.result = result
-            return result
-
         # Check whether job.yaml existed before we create/update it
         did_work = (JobState.load(self._work_dir / _JOB_YAML_FILENAME) is None) or force_wipe
 
-        # Execute mode: create/update job.yaml (force fresh write on force_wipe)
-        job = self._create_or_update_job(force=force_wipe)
+        # Create/update job.yaml (force fresh write on force_wipe). In dry-run the
+        # JobState is still built (source probed, cached values loaded) so the
+        # pipeline preview can proceed — only the job.yaml WRITE is skipped.
+        job = self._create_or_update_job(force=force_wipe, dry_run=dry_run)
 
         if did_work:
             logger.debug("Job initialised: %s", self._work_dir / _JOB_YAML_FILENAME)
@@ -306,6 +224,18 @@ class JobPhase:
         )
         self.result = result
         return result
+
+    def finalize(self, ctx: FinalizeContext) -> None:
+        """Perform end-of-run housekeeping for the job phase.
+
+        ``JobPhase`` owns only ``job.yaml`` — a recovery/parameter sidecar that
+        must survive for reruns — so it has no deep artifacts to remove. This is
+        a safe no-op regardless of ``ctx.deep_cleanup``.
+
+        Args:
+            ctx: Pre-resolved end-of-run decisions from the runner.
+        """
+        return
 
     def _check_source_mismatch(self, dry_run: bool) -> tuple[bool, bool]:
         """Check for source mismatch against existing ``job.yaml``.
@@ -391,20 +321,26 @@ class JobPhase:
 
         return mismatches
 
-    def _create_or_update_job(self, force: bool = False) -> JobState:
+    def _create_or_update_job(self, force: bool = False, dry_run: bool = False) -> JobState:
         """Create or load ``JobState`` with current source metadata.
 
         Probes the source video for all metadata fields and returns a
-        ``JobState`` ready to be persisted.
+        ``JobState``. Persisting to ``job.yaml`` is the only write and is
+        skipped when ``dry_run`` is ``True`` — the in-memory ``JobState`` is
+        still fully built (source probed, cached values loaded and self-healed)
+        so a dry-run pipeline preview can proceed.
 
         If an existing ``job.yaml`` is loaded and its ``fps`` is missing or
-        invalid, re-probes and saves automatically (self-heal for stale files).
+        invalid, it re-probes; the self-heal write is likewise gated by
+        ``dry_run``.
 
         Args:
-            force: When ``True``, ignore any existing ``job.yaml`` and build a
-                   fresh ``JobState`` from the current source file.  Used when
-                   ``--force`` detected a source mismatch — the old metadata is
-                   stale and must be replaced.
+            force:   When ``True``, ignore any existing ``job.yaml`` and build a
+                     fresh ``JobState`` from the current source file.  Used when
+                     ``--force`` detected a source mismatch — the old metadata is
+                     stale and must be replaced.
+            dry_run: When ``True``, skip every ``job.yaml`` write; the returned
+                     ``JobState`` is identical to what would have been persisted.
         """
         if not force:
             existing = JobState.load(self._work_dir / _JOB_YAML_FILENAME)
@@ -415,21 +351,24 @@ class JobPhase:
                         "job.yaml has missing/invalid fps — re-probing source metadata"
                     )
                     self._probe_metadata(existing.source)
-                    existing.save(self._work_dir / _JOB_YAML_FILENAME)
+                    if not dry_run:
+                        existing.save(self._work_dir / _JOB_YAML_FILENAME)
                 else:
                     logger.debug("Loaded existing job.yaml")
                 return existing
 
         source = VideoMetadata(path=self._source)
-        # Eagerly probe all fast fields so they are persisted in job.yaml
+        # Eagerly probe all fast fields (read-only) so the JobState is complete
+        # and, in execute mode, persisted in job.yaml.
         logger.info("Probing source metadata: %s", source.path.name)
         with self._collector.time(MetricKey.JOB):
             with self._collector.time(MetricKey.JOB, "probe"):
                 self._probe_metadata(source)
 
         job = JobState(source=source)
-        job.save(self._work_dir / _JOB_YAML_FILENAME)
-        logger.info("Initialized job.yaml for new pipeline run")
+        if not dry_run:
+            job.save(self._work_dir / _JOB_YAML_FILENAME)
+            logger.info("Initialized job.yaml for new pipeline run")
         return job
 
     def _probe_metadata(self, source: VideoMetadata) -> None:

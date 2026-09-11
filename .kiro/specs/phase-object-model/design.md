@@ -6,6 +6,8 @@
 
 ## Cross-Reference Notes
 
+**Note (2026-09-09 — superseded in part by `phase-terminal-runner`):** The `Phase` protocol's `scan()` method is removed (dependency resolution always goes through `dep.run(dry_run=...)`; `_ensure_dependencies` loses its `execute` parameter); the registry-iterating `Orchestrator` is replaced by a slim single-target `Runner` (`orchestrator.py` deleted); `PhaseOutcome.DRY_RUN` is replaced by the work-state `PENDING` (run mode is owned by the runner via `dry_run`); the phase banner moves to after dependency resolution (emitted once, only before actual work); and orchestrator-driven post-pipeline `ALL` cleanup moves into each phase via a new `Phase.finalize(ctx)` hook. See `phase-terminal-runner` for the current execution model.
+
 **Note (2026-06-23 — extended by `config-refactor`):** The `config-refactor` spec (Created: 2026-06-23) changes the `_build_registry` signature and the type flowing into phases:
 
 - `_build_registry(config: PipelineConfig, collector: MetricsCollector)` → `_build_registry(config: AppConfig, source: Path, work_dir: Path, force: bool, cleanup: CleanupLevel, no_metrics: bool, collector: MetricsCollector)`. The five new kwargs are volatile per-run parameters; they are forwarded only to `JobPhase` and stored as typed fields on `JobPhaseResult`.

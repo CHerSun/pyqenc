@@ -43,7 +43,13 @@ from pyqenc.models import (
     Strategy,
     VideoMetadata,
 )
-from pyqenc.phase import Artifact, Phase, PhaseResult
+from pyqenc.phase import (
+    Artifact,
+    FinalizeContext,
+    Phase,
+    PhaseResult,
+    resolve_dependencies,
+)
 from pyqenc.quality import QualitySearchV3
 from pyqenc.state import (
     ArtifactState,
@@ -1541,34 +1547,6 @@ class EncodingPhase:
     # Public Phase interface
     # ------------------------------------------------------------------
 
-    def scan(self) -> "EncodingPhaseResult":
-        """Classify existing encoding artifacts without executing any work.
-
-        Returns:
-            ``EncodingPhaseResult`` with all artifacts classified.
-        """
-        if self.result is not None:
-            return self.result
-
-        dep_result = self._ensure_dependencies(execute=False)
-        if dep_result is not None:
-            self.result = dep_result
-            return self.result
-
-        job_result = self._job.result  # type: ignore[union-attr]
-        force_wipe = getattr(job_result, "force_wipe", False)
-
-        artifacts = self._recover(force_wipe=force_wipe, execute=False)
-        outcome   = self._outcome_from_artifacts(artifacts, did_work=False)
-
-        self.result = EncodingPhaseResult(
-            outcome   = outcome,
-            artifacts = artifacts,
-            message   = log_recovery_line(logger, artifacts, unit="pair"),
-            encoded   = [a for a in artifacts if isinstance(a, EncodedArtifact)],
-        )
-        return self.result
-
     def run(self, dry_run: bool = False) -> "EncodingPhaseResult":
         """Recover, encode pending pairs, cache and return result.
 
@@ -1577,7 +1555,7 @@ class EncodingPhase:
         2. Ensure dependencies have results.
         3. Run ``_recover()`` — handles ``force_wipe`` and crop mismatch.
         4. Log recovery result line.
-        5. In dry-run mode: return ``DRY_RUN`` if any pairs are pending.
+        5. In dry-run mode: return ``PENDING`` if any pairs are pending.
         6. Encode pending pairs via ``encode_all_chunks``.
         7. Log phase completion summary.
 
@@ -1587,14 +1565,18 @@ class EncodingPhase:
         Returns:
             ``EncodingPhaseResult`` with all artifacts ``COMPLETE`` on success.
         """
-        emit_phase_banner("ENCODING", logger)
+        # In-run memoization guard (Property 1): return cached result verbatim.
+        if self.result is not None:
+            return self.result
 
-        logger.info("Scanning for existing artifacts...")
-
-        dep_result = self._ensure_dependencies(execute=True)
+        dep_result = self._ensure_dependencies(dry_run=dry_run)
         if dep_result is not None:
             self.result = dep_result
             return self.result
+
+        emit_phase_banner("ENCODING", logger)
+
+        logger.info("Scanning for existing artifacts...")
 
         from pyqenc.metrics import MetricKey
 
@@ -1605,7 +1587,7 @@ class EncodingPhase:
 
         # Key parameters — strategies come from OptimizationPhase after deps are resolved
         with self._collector.time(MetricKey.RECOVERY):
-            artifacts = self._recover(force_wipe=force_wipe, execute=True)
+            artifacts = self._recover(force_wipe=force_wipe)
 
         # Log key parameters now that dependencies are resolved
         opt_result = self._optimization.result if self._optimization else None  # type: ignore[union-attr]
@@ -1622,7 +1604,7 @@ class EncodingPhase:
         pending_count = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL))
         # Dry-run path
         if dry_run:
-            outcome = PhaseOutcome.REUSED if pending_count == 0 else PhaseOutcome.DRY_RUN
+            outcome = PhaseOutcome.REUSED if pending_count == 0 else PhaseOutcome.PENDING
             self.result = EncodingPhaseResult(
                 outcome   = outcome,
                 artifacts = artifacts,
@@ -1646,84 +1628,86 @@ class EncodingPhase:
         self.result = result
         return result
 
+    def finalize(self, ctx: FinalizeContext) -> None:
+        """Perform end-of-run housekeeping for the encoding phase.
+
+        When ``ctx.deep_cleanup`` is ``True``, deletes this phase's own
+        ``encoding/`` (CRF-search attempt workspace) and ``encoded/`` (finalized
+        winning-attempt) directories. Both are consumables the merge phase has
+        already drawn from and are reproducible from the chunks. ``encoding.yaml``
+        is a recovery sidecar and is left in place. Each directory is deleted
+        independently, guarded by an existence check; any ``OSError`` is caught
+        per directory and logged as a warning so a cleanup failure never fails
+        the run.
+
+        Args:
+            ctx: Pre-resolved end-of-run decisions from the runner.
+        """
+        if not ctx.deep_cleanup:
+            return
+        if self._job is None or self._job.result is None:
+            return
+        work_dir = self._job.result.work_dir
+        for target in (work_dir / ENCODING_WORKSPACE_DIR, work_dir / ENCODED_OUTPUT_DIR):
+            if target.exists():
+                try:
+                    _shutil.rmtree(target)
+                    logger.debug("deep cleanup: deleted %s", target)
+                except OSError as exc:
+                    logger.warning("deep cleanup: could not delete %s: %s", target, exc)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _ensure_dependencies(self, execute: bool) -> "EncodingPhaseResult | None":
-        """Scan/run dependencies if they have no cached result; fail fast if incomplete."""
+    def _ensure_dependencies(self, dry_run: bool) -> "EncodingPhaseResult | None":
+        """Resolve dependencies via the shared walk; fail fast if incomplete.
+
+        Args:
+            dry_run: Propagated unchanged to each dependency's ``run()``.
+
+        Returns:
+            A ``FAILED`` result if any dependency failed, a ``PENDING`` result
+            if any dependency is legitimately pending (dry-run only), or
+            ``None`` when all dependencies are complete and the phase may
+            proceed.
+        """
         if self._job is None:
             return _enc_failed("EncodingPhase requires JobPhase")
-
-        if self._job.result is None:
-            if execute:
-                self._job.run()
-            else:
-                self._job.scan()
-
-        if not self._job.result.is_complete:  # type: ignore[union-attr]
-            err = "JobPhase did not complete successfully"
-            logger.critical(err)
-            return _enc_failed(err)
-
         if self._probe is None:
             return _enc_failed("EncodingPhase requires ProbePhase")
-
-        if self._probe.result is None:
-            if execute:
-                self._probe.run()
-            else:
-                self._probe.scan()
-
-        if not self._probe.result.is_complete:  # type: ignore[union-attr]
-            err = "ProbePhase did not complete successfully"
-            logger.warning(err)
-            return _enc_failed(err)
-
         if self._chunking is None:
             return _enc_failed("EncodingPhase requires ChunkingPhase")
-
-        if self._chunking.result is None:
-            if execute:
-                self._chunking.run()
-            else:
-                self._chunking.scan()
-
-        if not self._chunking.result.is_complete:  # type: ignore[union-attr]
-            err = "ChunkingPhase did not complete successfully"
-            logger.critical(err)
-            return _enc_failed(err)
-
         if self._optimization is None:
             return _enc_failed("EncodingPhase requires OptimizationPhase")
 
-        if self._optimization.result is None:
-            if execute:
-                self._optimization.run()
-            else:
-                self._optimization.scan()
-
-        if not self._optimization.result.is_complete:  # type: ignore[union-attr]
-            err = "OptimizationPhase did not complete successfully"
-            logger.critical(err)
+        status = resolve_dependencies(self, dry_run=dry_run)
+        if status.failed:
+            names = ", ".join(n.capitalize() for n in status.failed)
+            err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
+            logger.error(err)
             return _enc_failed(err)
+        if status.pending:
+            names = ", ".join(n.capitalize() for n in status.pending)
+            msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
+            logger.info(msg)
+            return _enc_pending(msg)
 
         return None
 
-    def _recover(self, force_wipe: bool, execute: bool) -> list[EncodedArtifact]:
+    def _recover(self, force_wipe: bool) -> list[EncodedArtifact]:
         """Classify ``(chunk, strategy)`` pairs and handle force-wipe / crop mismatch.
 
         Steps:
-        1. If ``force_wipe`` and execute: delete ``encoding/``, ``encoded/``,
+        1. If ``force_wipe``: delete ``encoding/``, ``encoded/``,
            and ``encoding.yaml``.
         2. Check crop mismatch against ``encoding.yaml``.
-        3. Clean up leftover ``.tmp`` files (execute mode only).
+        3. Clean up leftover ``.tmp`` files.
         4. Call ``_recover_encoding_attempts`` to classify all pairs.
         5. Re-evaluate ``COMPLETE`` pairs against current quality targets.
 
         Args:
             force_wipe: When ``True``, wipe all encoding artifacts first.
-            execute:    When ``True``, wipe and cleanup are performed.
 
         Returns:
             List of ``EncodedArtifact`` objects.
@@ -1734,7 +1718,7 @@ class EncodingPhase:
         yaml_path = work_dir / _ENCODING_YAML
 
         # Step 1: force-wipe
-        if force_wipe and execute:
+        if force_wipe:
             for d in (enc_dir, out_dir):
                 if d.exists():
                     _shutil.rmtree(d)
@@ -1744,7 +1728,7 @@ class EncodingPhase:
                 logger.debug("force_wipe: deleted %s", yaml_path)
 
         # Step 2: probe mismatch check
-        if execute and not force_wipe:
+        if not force_wipe:
             persisted_enc = EncodingParams.load(yaml_path)
             job_result    = self._job.result    # type: ignore[union-attr]
             probe_result  = self._probe.result  # type: ignore[union-attr]
@@ -1785,8 +1769,8 @@ class EncodingPhase:
                             strategy = "",
                         )]
 
-        # Step 3: clean up .tmp files (execute mode only)
-        if execute and enc_dir.exists():
+        # Step 3: clean up .tmp files
+        if enc_dir.exists():
             for tmp in enc_dir.rglob(f"*{TEMP_SUFFIX}"):
                 try:
                     tmp.unlink()
@@ -1988,7 +1972,7 @@ class EncodingPhase:
             return PhaseOutcome.FAILED
         if all(a.state == ArtifactState.COMPLETE for a in artifacts):
             return PhaseOutcome.COMPLETED if did_work else PhaseOutcome.REUSED
-        return PhaseOutcome.DRY_RUN
+        return PhaseOutcome.PENDING
 
 
 # ---------------------------------------------------------------------------
@@ -2002,5 +1986,21 @@ def _enc_failed(error: str) -> "EncodingPhaseResult":
         artifacts = [],
         message   = error,
         error     = error,
+        encoded   = [],
+    )
+
+
+def _enc_pending(reason: str) -> "EncodingPhaseResult":
+    """Return a ``PENDING`` ``EncodingPhaseResult`` with the given reason.
+
+    Used when a dependency is legitimately pending during a dry-run preview:
+    the phase cannot preview its own work, so it chains ``PENDING`` without an
+    error.
+    """
+    return EncodingPhaseResult(
+        outcome   = PhaseOutcome.PENDING,
+        artifacts = [],
+        message   = reason,
+        error     = None,
         encoded   = [],
     )

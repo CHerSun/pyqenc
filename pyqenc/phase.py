@@ -2,15 +2,22 @@
 
 This module defines the structural backbone of the phase object model:
 
-- ``ArtifactState``  — re-exported from ``state`` for convenience.
-- ``Artifact``       — base dataclass for all phase output artifacts.
-- ``PhaseOutcome``   — re-exported from ``models`` for convenience.
-- ``PhaseResult``    — result returned by every phase's ``scan()`` / ``run()``.
-- ``Phase``          — ``Protocol`` that every phase class must satisfy.
-- ``CleanupLevel``   — re-exported from ``models`` for convenience.
-- ``Strategy``       — re-exported from ``models`` for convenience.
+- ``ArtifactState``   — re-exported from ``state`` for convenience.
+- ``Artifact``        — base dataclass for all phase output artifacts.
+- ``PhaseOutcome``    — re-exported from ``models`` for convenience.
+- ``PhaseResult``     — result returned by every phase's ``run()``.
+- ``FinalizeContext`` — pre-resolved end-of-run decisions passed to ``finalize``.
+- ``Phase``           — ``Protocol`` that every phase class must satisfy.
+- ``CleanupLevel``    — re-exported from ``models`` for convenience.
+- ``Strategy``        — re-exported from ``models`` for convenience.
 - ``_build_registry`` — factory that constructs all phase objects in execution
                         order, wires their dependencies, and returns the registry.
+
+Every phase has a single execution entry point, ``run()``: it resolves
+dependencies, recovers on-disk artifacts, executes any pending work, and caches
+its ``PhaseResult``. A separate ``finalize(ctx)`` hook lets each phase perform
+end-of-run housekeeping — today, deleting its own artifacts when the runner's
+pre-resolved ``FinalizeContext.deep_cleanup`` flag is set.
 """
 # CHerSun 2026
 
@@ -31,11 +38,14 @@ __all__ = [
     "Artifact",
     "ArtifactState",
     "CleanupLevel",
+    "DependencyStatus",
+    "FinalizeContext",
     "Phase",
     "PhaseOutcome",
     "PhaseResult",
     "Strategy",
     "_build_registry",
+    "resolve_dependencies",
 ]
 
 
@@ -83,7 +93,7 @@ class Artifact:
 
 @dataclass
 class PhaseResult:
-    """Result returned by a phase's ``scan()`` or ``run()`` method.
+    """Result returned by a phase's ``run()`` method.
 
     Attributes:
         outcome:   High-level outcome of the phase execution.
@@ -147,6 +157,31 @@ class PhaseResult:
 
 
 # ---------------------------------------------------------------------------
+# FinalizeContext
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class FinalizeContext:
+    """Pre-resolved end-of-run decisions computed once by the runner.
+
+    The runner resolves every end-of-run decision a single time and passes the
+    result here as a plain flag. Phases read the flag directly in
+    ``finalize()`` and never re-derive it from the cleanup level plus the
+    terminal indicator. This keeps the decision logic in one place (the runner)
+    and lets future end-of-run concerns add fields without changing the
+    ``finalize`` signature or touching any phase's decision logic.
+
+    Attributes:
+        deep_cleanup: ``True`` only when the run succeeded AND it was not a
+                      dry-run AND the target was the terminal-most phase AND the
+                      requested cleanup level was ``ALL``. When set, a phase
+                      deletes its own consumable artifacts in ``finalize()``.
+    """
+
+    deep_cleanup: bool
+
+
+# ---------------------------------------------------------------------------
 # Phase Protocol
 # ---------------------------------------------------------------------------
 
@@ -154,50 +189,128 @@ class PhaseResult:
 class Phase(Protocol):
     """Common interface that every pipeline phase must implement.
 
-    The orchestrator and CLI drive phases exclusively through this protocol,
-    without knowing any phase-specific internals.
+    The runner and CLI drive phases exclusively through this protocol, without
+    knowing any phase-specific internals. Each phase has a single execution
+    entry point, ``run()``; ``finalize()`` handles end-of-run housekeeping.
 
     Attributes:
         name:         Human-readable phase name used in logs and banners.
         dependencies: Ordered list of phase objects this phase depends on.
-        result:       Cached result from the last ``scan()`` or ``run()`` call;
-                      ``None`` if neither has been called yet.
+        result:       Cached result from the last ``run()`` call; ``None`` if
+                      ``run()`` has not been called yet.
     """
 
     name:         str
     dependencies: list[Phase]
     result:       PhaseResult | None
 
-    def scan(self) -> PhaseResult:
-        """Enumerate and classify current artifacts without executing any work.
-
-        Calls ``dep.scan()`` on each dependency that has no cached result,
-        checks ``dep.result.is_complete``, then classifies this phase's own
-        artifacts.  No files are written or deleted.
-
-        Returns:
-            ``PhaseResult`` with all artifacts classified; cached in
-            ``self.result``.
-        """
-        ...
-
     def run(self, dry_run: bool = False) -> PhaseResult:
-        """Recover, execute pending work, cache and return result.
+        """Resolve dependencies, recover, execute pending work, cache and return.
 
-        Calls ``dep.scan()`` on each dependency that has no cached result,
-        checks ``dep.result.is_complete``, runs ``_recover()`` internally,
-        then executes work for all pending artifacts.
+        Returns any cached ``self.result`` verbatim (in-run memoization). On a
+        fresh call it resolves each dependency via ``dep.run(dry_run=...)``,
+        emits the phase banner, runs ``_recover()`` internally, then executes
+        work for all pending artifacts. On an already-complete phase this is
+        side-effect-free and returns ``REUSED``.
 
         Args:
             dry_run: When ``True``, report what work would be done without
-                     executing it; return ``DRY_RUN`` outcome if any work is
-                     pending.
+                     executing it; return a ``PENDING`` outcome when any wanted
+                     work remains.
 
         Returns:
-            ``PhaseResult`` with all artifacts ``COMPLETE`` on success, or
-            ``FAILED`` / ``DRY_RUN`` otherwise; cached in ``self.result``.
+            ``PhaseResult`` with all artifacts ``COMPLETE`` on success
+            (``COMPLETED`` / ``REUSED``), or ``PENDING`` / ``FAILED``
+            otherwise; cached in ``self.result``.
         """
         ...
+
+    def finalize(self, ctx: FinalizeContext) -> None:
+        """Perform end-of-run housekeeping for this phase.
+
+        Called by the runner after a successful, non-dry-run execution. Its
+        sole current responsibility is deep cleanup: when
+        ``ctx.deep_cleanup`` is ``True``, the phase deletes only its **own**
+        artifacts. It never touches another phase's artifacts, and a cleanup
+        failure never fails the run.
+
+        Args:
+            ctx: Pre-resolved end-of-run decisions from the runner.
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Shared dependency resolution
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class DependencyStatus:
+    """Outcome of resolving a phase's dependencies (see ``resolve_dependencies``).
+
+    Splits non-complete dependencies into two distinct buckets so callers can
+    react differently:
+
+    - ``failed``  is a genuine error condition — the dependency reported
+      ``FAILED`` or produced no result at all. The dependent phase must chain
+      ``FAILED`` and log at ERROR.
+    - ``pending`` means the dependency has legitimate work remaining but has not
+      failed. This only ever occurs during a dry-run preview (in execute mode a
+      dependency runs its work and never stays ``PENDING``). The dependent phase
+      chains ``PENDING`` and logs at INFO — a dry-run cannot be previewed past a
+      dependency whose work has not been performed yet.
+
+    Both lists are in dependency order.
+
+    Attributes:
+        failed:  Names of deps whose outcome is ``FAILED`` or whose result is
+                 missing.
+        pending: Names of deps whose outcome is ``PENDING`` (dry-run only).
+    """
+
+    failed:  list[str]
+    pending: list[str]
+
+
+def resolve_dependencies(phase: Phase, *, dry_run: bool) -> DependencyStatus:
+    """Resolve every dependency of ``phase`` and classify which did not complete.
+
+    This is the single, uniform dependency walk shared by every phase (Req 2):
+    for each dependency in ``phase.dependencies`` (in order), it triggers the
+    dependency's ``run(dry_run=...)`` when that dependency has no cached result
+    yet, then classifies the dependency's outcome. A dependency is bucketed as:
+
+    - ``failed``  when it still has no result, or its cached outcome is
+      ``FAILED`` — a genuine error.
+    - ``pending`` when its cached outcome is ``PENDING`` — legitimate remaining
+      work, only possible in a dry-run preview.
+
+    A dependency that is ``is_complete`` (``COMPLETED`` / ``REUSED``) is in
+    neither bucket and the phase may proceed.
+
+    Because a dependency with an existing cached result is never re-run, the
+    in-run memoization guarantee holds: each dependency resolves at most once
+    per registry instance regardless of how many phases depend on it.
+
+    Args:
+        phase:   The phase whose dependencies should be resolved.
+        dry_run: Propagated unchanged to each dependency's ``run()``.
+
+    Returns:
+        A ``DependencyStatus`` with the failed and pending dependency names in
+        dependency order. When both lists are empty all dependencies are
+        complete and the phase may proceed with its own work.
+    """
+    failed:  list[str] = []
+    pending: list[str] = []
+    for dep in phase.dependencies:
+        if dep.result is None:
+            dep.run(dry_run=dry_run)
+        if dep.result is None or dep.result.outcome is PhaseOutcome.FAILED:
+            failed.append(dep.name)
+        elif dep.result.outcome is PhaseOutcome.PENDING:
+            pending.append(dep.name)
+    return DependencyStatus(failed=failed, pending=pending)
 
 
 # ---------------------------------------------------------------------------

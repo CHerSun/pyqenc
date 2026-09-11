@@ -27,7 +27,13 @@ from pyqenc.models import (
     PhaseOutcome,
     VideoMetadata,
 )
-from pyqenc.phase import Artifact, Phase, PhaseResult
+from pyqenc.phase import (
+    Artifact,
+    FinalizeContext,
+    Phase,
+    PhaseResult,
+    resolve_dependencies,
+)
 from pyqenc.state import ArtifactState, ProbeState
 
 if TYPE_CHECKING:
@@ -110,56 +116,6 @@ class ProbePhase:
     # Public Phase interface
     # ------------------------------------------------------------------
 
-    def scan(self) -> ProbePhaseResult:
-        """Classify current probe state without running any slow operations.
-
-        Loads ``probe.yaml`` if present and builds a ``COMPLETE`` result from
-        the cached values.  Returns ``ABSENT`` when the file is missing.
-
-        Returns:
-            ``ProbePhaseResult`` — ``COMPLETE`` when ``probe.yaml`` exists,
-            ``ABSENT`` (as ``DRY_RUN`` outcome) otherwise.  Never runs ffmpeg
-            or crop detection.
-        """
-        if self.result is not None:
-            return self.result
-
-        dep_result = self._ensure_dependencies(execute=False)
-        if dep_result is not None:
-            self.result = dep_result
-            return self.result
-
-        job_result       = self._job.result         # type: ignore[union-attr]
-        probe_yaml_path  = job_result.work_dir / _PROBE_YAML_NAME  # type: ignore[operator]
-        probe_state      = ProbeState.load(probe_yaml_path)
-
-        probe_artifact = Artifact(path=probe_yaml_path, state=ArtifactState.ABSENT)
-
-        if probe_state is None:
-            self.result = ProbePhaseResult(
-                outcome   = PhaseOutcome.DRY_RUN,
-                artifacts = [probe_artifact],
-                message   = "probe.yaml not found",
-                source    = None,
-                crop      = CropParams(),
-            )
-            return self.result
-
-        # probe.yaml exists — build ExtendedVideoMetadata from cached values
-        probe_artifact.state = ArtifactState.COMPLETE
-        source_vm    = self._get_source_vm(job_result)
-        extended_vm  = ExtendedVideoMetadata.from_base(source_vm, frame_count=probe_state.frame_count)
-        crop         = probe_state.crop or CropParams()
-
-        self.result = ProbePhaseResult(
-            outcome   = PhaseOutcome.REUSED,
-            artifacts = [probe_artifact],
-            message   = "probe.yaml loaded",
-            source    = extended_vm,
-            crop      = crop,
-        )
-        return self.result
-
     def run(self, dry_run: bool = False) -> ProbePhaseResult:
         """Resolve crop and frame count, persist ``probe.yaml``, return result.
 
@@ -181,13 +137,17 @@ class ProbePhase:
         Returns:
             ``ProbePhaseResult`` on success; ``FAILED`` when no video was extracted.
         """
-        from pyqenc.utils.log_format import emit_phase_banner
-        emit_phase_banner("PROBE", logger)
+        # In-run memoization guard (Property 1): return cached result verbatim.
+        if self.result is not None:
+            return self.result
 
-        dep_result = self._ensure_dependencies(execute=True)
+        dep_result = self._ensure_dependencies(dry_run=dry_run)
         if dep_result is not None:
             self.result = dep_result
             return self.result
+
+        from pyqenc.utils.log_format import emit_phase_banner
+        emit_phase_banner("PROBE", logger)
 
         job_result        = self._job.result        # type: ignore[union-attr]
         extraction_result = self._extraction.result # type: ignore[union-attr]
@@ -236,7 +196,7 @@ class ProbePhase:
         # Dry-run: report what would be done
         if dry_run:
             self.result = ProbePhaseResult(
-                outcome   = PhaseOutcome.DRY_RUN,
+                outcome   = PhaseOutcome.PENDING,
                 artifacts = [Artifact(path=probe_yaml_path, state=ArtifactState.ABSENT)],
                 message   = "dry-run: probe not yet complete",
                 source    = None,
@@ -274,20 +234,33 @@ class ProbePhase:
         )
         return self.result
 
+    def finalize(self, ctx: FinalizeContext) -> None:
+        """Perform end-of-run housekeeping for the probe phase.
+
+        ``ProbePhase`` owns only ``probe.yaml`` — a recovery/parameter sidecar
+        that must survive for reruns — so it has no deep artifacts to remove.
+        This is a safe no-op regardless of ``ctx.deep_cleanup``.
+
+        Args:
+            ctx: Pre-resolved end-of-run decisions from the runner.
+        """
+        return
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _ensure_dependencies(self, execute: bool) -> ProbePhaseResult | None:
-        """Scan or run dependencies; fail fast when they are incomplete.
+    def _ensure_dependencies(self, dry_run: bool) -> ProbePhaseResult | None:
+        """Resolve dependencies via the shared walk; fail fast when incomplete.
 
         Args:
-            execute: When ``True``, call ``dep.run()`` on un-run dependencies;
-                     when ``False``, call ``dep.scan()``.
+            dry_run: Propagated unchanged to each dependency's ``run()``.
 
         Returns:
-            A ``FAILED`` ``ProbePhaseResult`` if any dependency is incomplete;
-            ``None`` otherwise.
+            A ``FAILED`` ``ProbePhaseResult`` if any dependency failed, a
+            ``PENDING`` result if any dependency is legitimately pending
+            (dry-run only), or ``None`` when all dependencies are complete and
+            the phase may proceed.
         """
         if self._job is None or self._extraction is None:
             err = "ProbePhase requires JobPhase and ExtractionPhase dependencies"
@@ -300,16 +273,11 @@ class ProbePhase:
                 crop      = CropParams(),
             )
 
-        for dep in (self._job, self._extraction):
-            if dep.result is None:
-                if execute:
-                    dep.run()
-                else:
-                    dep.scan()
-
-        if not self._job.result.is_complete:  # type: ignore[union-attr]
-            err = "JobPhase did not complete successfully"
-            logger.warning("ProbePhase skipping: %s", err)
+        status = resolve_dependencies(self, dry_run=dry_run)
+        if status.failed:
+            names = ", ".join(n.capitalize() for n in status.failed)
+            err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
+            logger.error(err)
             return ProbePhaseResult(
                 outcome   = PhaseOutcome.FAILED,
                 artifacts = [],
@@ -318,15 +286,15 @@ class ProbePhase:
                 source    = None,
                 crop      = CropParams(),
             )
-
-        if not self._extraction.result.is_complete:  # type: ignore[union-attr]
-            err = "ExtractionPhase did not complete successfully"
-            logger.warning("ProbePhase skipping: %s", err)
+        if status.pending:
+            names = ", ".join(n.capitalize() for n in status.pending)
+            msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
+            logger.info(msg)
             return ProbePhaseResult(
-                outcome   = PhaseOutcome.FAILED,
+                outcome   = PhaseOutcome.PENDING,
                 artifacts = [],
-                message   = err,
-                error     = err,
+                message   = msg,
+                error     = None,
                 source    = None,
                 crop      = CropParams(),
             )

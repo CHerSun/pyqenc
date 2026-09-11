@@ -8,6 +8,7 @@
 
 | Spec | Created | Relationship |
 |------|---------|--------------|
+| `phase-terminal-runner` | 2026-09-09 | **Supersedes this spec in part.** The read-only `scan()` recovery pass is removed from the `Phase` protocol and every phase; `_ensure_dependencies` loses its `execute` parameter and always resolves dependencies via `dep.run(dry_run=...)`; and the `execute` parameter on each phase's `_recover()` is removed (its `execute=False` read-only mode had no remaining caller). The recovery mechanics established here (filesystem scan, artifact classification, `.tmp` cleanup, `force_wipe` propagation) are otherwise unchanged. |
 | `pts-preservation` | 2026-04-29 (Completed) | **Extends this spec.** `pts-preservation` adds `TimestampArtifact` to the extraction phase's artifact set, following the `COMPLETE`/`ABSENT` recovery pattern established here. The `force_wipe` propagation path is unchanged. `TimestampArtifact` uses only `COMPLETE` and `ABSENT` states (no `STALE`) — consistent with the two-state pattern used for artifacts that have no run-variable parameters affecting their validity. |
 | `artifact-state-refactor` | 2026-09-15 (Completed) | **Supersedes this spec in part.** The `ArtifactState` enum established here (`ABSENT`/`ARTIFACT_ONLY`/`COMPLETE`) is re-scoped to completeness only: `ARTIFACT_ONLY` is renamed `PARTIAL`. That spec also removes the per-phase `_recovery_message()` helpers and unifies recovery reporting into `log_recovery_line()`, taking each phase's internal artifact list and deriving all counts itself. |
 

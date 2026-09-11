@@ -6,6 +6,10 @@
 
 ## Cross-Spec Notes
 
+### Superseded by `phase-terminal-runner` (2026-09-09)
+
+> **Superseded in part by `phase-terminal-runner` (2026-09-09):** `scan()` is removed from the `Phase` protocol and every phase (Req 1 AC 1/3, Req 2 JobPhase AC 3, Req 3 AC 1); `_ensure_dependencies` loses its `execute`/`dep.scan()` branch and always resolves via `dep.run(dry_run=...)` (Req 3 AC 1/5); the `Orchestrator` that drives phases in sequence is deleted and replaced by a slim single-target `Runner` (Glossary "Orchestrator", Req 1/3); `PhaseOutcome.DRY_RUN` is removed in favour of the work-state `PENDING` (Req 1 AC 4); the phase banner moves from the first line of `run()` to after dependency resolution; and post-pipeline `ALL` cleanup moves from the orchestrator into each phase's `finalize(ctx)` hook (Req 12).
+
 ### Superseded by `pipeline-metrics-report` (2026-04-01)
 
 `pipeline-metrics-report` extends the `_build_registry` and phase constructor pattern established here. Every phase constructor now takes a required third parameter `collector: MetricsCollector` (after `config` and `phases`). `_build_registry` was updated to accept and thread the collector. Any future phase additions must include this parameter.

@@ -1214,7 +1214,13 @@ from pyqenc.constants import (
     THICK_LINE,
 )
 from pyqenc.models import AudioMetadata, PhaseOutcome
-from pyqenc.phase import Artifact, Phase, PhaseResult
+from pyqenc.phase import (
+    Artifact,
+    FinalizeContext,
+    Phase,
+    PhaseResult,
+    resolve_dependencies,
+)
 from pyqenc.state import ArtifactState, AudioParams
 from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
 
@@ -1311,48 +1317,18 @@ class AudioPhase:
     # Public Phase interface
     # ------------------------------------------------------------------
 
-    def scan(self) -> AudioPhaseResult:
-        """Classify existing audio artifacts without executing any work.
-
-        Returns:
-            ``AudioPhaseResult`` with all artifacts classified.
-        """
-        if self.result is not None:
-            return self.result
-
-        dep_result = self._ensure_dependencies(execute=False)
-        if dep_result is not None:
-            self.result = dep_result
-            return self.result
-
-        job_result = self._job.result  # type: ignore[union-attr]
-        force_wipe = getattr(job_result, "force_wipe", False)
-
-        internal_artifacts = self._recover(force_wipe=force_wipe, execute=False)
-        wanted_artifacts   = [a for a in internal_artifacts if a.wanted]
-        audio_files = [a.path for a in wanted_artifacts if a.state == ArtifactState.COMPLETE]
-        outcome = _outcome_from_artifacts(wanted_artifacts, did_work=False)
-        message = log_recovery_line(logger, internal_artifacts)
-
-        self.result = AudioPhaseResult(
-            outcome     = outcome,
-            artifacts   = wanted_artifacts,
-            message     = message,
-            audio_files = audio_files,
-        )
-        return self.result
-
     def run(self, dry_run: bool = False) -> AudioPhaseResult:
         """Recover, process pending audio files, cache result.
 
         Sequence:
-        1. Emit phase banner.
-        2. Ensure dependencies have results (scan if needed).
-        3. Run ``_recover()`` — handles ``force_wipe``.
-        4. Log recovery result line.
-        5. In dry-run mode: return ``DRY_RUN`` if any artifacts are pending.
-        6. Process pending audio files.
-        7. Log completion summary.
+        1. In-run memoization guard.
+        2. Ensure dependencies have results.
+        3. Emit phase banner.
+        4. Run ``_recover()`` — handles ``force_wipe``.
+        5. Log recovery result line.
+        6. In dry-run mode: return ``PENDING`` if any artifacts are pending.
+        7. Process pending audio files.
+        8. Log completion summary.
 
         Args:
             dry_run: When ``True``, report what would be done without writing files.
@@ -1360,12 +1336,16 @@ class AudioPhase:
         Returns:
             ``AudioPhaseResult`` with all artifacts ``COMPLETE`` on success.
         """
-        emit_phase_banner("AUDIO", logger)
+        # In-run memoization guard (Property 1): return cached result verbatim.
+        if self.result is not None:
+            return self.result
 
-        dep_result = self._ensure_dependencies(execute=True)
+        dep_result = self._ensure_dependencies(dry_run=dry_run)
         if dep_result is not None:
             self.result = dep_result
             return self.result
+
+        emit_phase_banner("AUDIO", logger)
 
         job_result = self._job.result  # type: ignore[union-attr]
         force_wipe = getattr(job_result, "force_wipe", False)
@@ -1382,7 +1362,7 @@ class AudioPhase:
         from pyqenc.metrics import MetricKey
 
         with self._collector.time(MetricKey.RECOVERY):
-            internal_artifacts = self._recover(force_wipe=force_wipe, execute=True)
+            internal_artifacts = self._recover(force_wipe=force_wipe)
 
         artifacts     = [a for a in internal_artifacts if a.wanted]
         pending_count = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL))
@@ -1397,7 +1377,7 @@ class AudioPhase:
 
         # Dry-run path
         if dry_run:
-            outcome     = PhaseOutcome.REUSED if pending_count == 0 else PhaseOutcome.DRY_RUN
+            outcome     = PhaseOutcome.REUSED if pending_count == 0 else PhaseOutcome.PENDING
             audio_files = [a.path for a in artifacts if a.state == ArtifactState.COMPLETE]
             self.result = AudioPhaseResult(
                 outcome     = outcome,
@@ -1424,55 +1404,60 @@ class AudioPhase:
         self.result = result
         return result
 
+    def finalize(self, ctx: FinalizeContext) -> None:
+        """Perform end-of-run housekeeping for the audio phase.
+
+        The processed audio files under ``audio/`` are delivery outputs kept
+        even under ``ALL`` cleanup, and ``audio.yaml`` is a recovery sidecar
+        that must survive reruns. ``AudioPhase`` therefore has no deep artifacts
+        to remove — a safe no-op regardless of ``ctx.deep_cleanup``.
+
+        Args:
+            ctx: Pre-resolved end-of-run decisions from the runner.
+        """
+        return
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _ensure_dependencies(self, execute: bool) -> AudioPhaseResult | None:
-        """Scan/run dependencies if they have no cached result; fail fast if incomplete.
+    def _ensure_dependencies(self, dry_run: bool) -> AudioPhaseResult | None:
+        """Resolve dependencies via the shared walk; fail fast if incomplete.
 
         Args:
-            execute: When ``True``, call ``dep.run()`` for deps without a cached result.
+            dry_run: Propagated unchanged to each dependency's ``run()``.
 
         Returns:
-            A ``FAILED`` result if any dependency is not complete; ``None`` otherwise.
+            A ``FAILED`` result if any dependency failed, a ``PENDING`` result
+            if any dependency is legitimately pending (dry-run only), or
+            ``None`` when all dependencies are complete and the phase may
+            proceed.
         """
         if self._job is None:
             return _failed("AudioPhase requires JobPhase")
-
-        if self._job.result is None:
-            if execute:
-                self._job.run()
-            else:
-                self._job.scan()
-
-        if not self._job.result.is_complete:  # type: ignore[union-attr]
-            err = "JobPhase did not complete successfully"
-            logger.critical(err)
-            return _failed(err)
-
         if self._extraction is None:
             return _failed("AudioPhase requires ExtractionPhase")
 
-        if self._extraction.result is None:
-            if execute:
-                self._extraction.run()
-            else:
-                self._extraction.scan()
-
-        if not self._extraction.result.is_complete:  # type: ignore[union-attr]
-            err = "ExtractionPhase did not complete successfully"
-            logger.critical(err)
+        status = resolve_dependencies(self, dry_run=dry_run)
+        if status.failed:
+            names = ", ".join(n.capitalize() for n in status.failed)
+            err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
+            logger.error(err)
             return _failed(err)
+        if status.pending:
+            names = ", ".join(n.capitalize() for n in status.pending)
+            msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
+            logger.info(msg)
+            return _pending(msg)
 
         return None
 
-    def _recover(self, force_wipe: bool, execute: bool) -> list[AudioArtifact]:
+    def _recover(self, force_wipe: bool) -> list[AudioArtifact]:
         """Classify audio artifacts and handle force-wipe.
 
         Steps:
-        1. If ``force_wipe`` and execute: delete ``audio/``.
-        2. Clean up leftover ``.tmp`` files (execute mode only).
+        1. If ``force_wipe``: delete ``audio/``.
+        2. Clean up leftover ``.tmp`` files.
         3. Build the processing plan from the current convert filter to determine
            expected terminal outputs (AAC delivery files).
         4. Load ``audio.yaml``; detect codec/bitrate changes (Type B config).
@@ -1483,7 +1468,6 @@ class AudioPhase:
 
         Args:
             force_wipe: When ``True``, wipe all audio artifacts first.
-            execute:    When ``True``, wipe and ``.tmp`` cleanup are performed.
 
         Returns:
             List of ``AudioArtifact`` objects.
@@ -1492,13 +1476,13 @@ class AudioPhase:
         audio_dir = work_dir / AUDIO_OUTPUT_DIR
 
         # Step 1: force-wipe
-        if force_wipe and execute:
+        if force_wipe:
             if audio_dir.exists():
                 shutil.rmtree(audio_dir)
                 logger.debug("force_wipe: deleted %s", audio_dir)
 
-        # Step 2: clean up .tmp files (execute mode only)
-        if execute and audio_dir.exists():
+        # Step 2: clean up .tmp files
+        if audio_dir.exists():
             for tmp in audio_dir.glob(f"*{TEMP_SUFFIX}"):
                 try:
                     tmp.unlink()
@@ -1688,10 +1672,10 @@ def _outcome_from_artifacts(
 ) -> PhaseOutcome:
     """Derive ``PhaseOutcome`` from artifact states."""
     if any(a.state == ArtifactState.ABSENT for a in artifacts):
-        return PhaseOutcome.DRY_RUN
+        return PhaseOutcome.PENDING
     if all(a.state == ArtifactState.COMPLETE for a in artifacts) and artifacts:
         return PhaseOutcome.REUSED if not did_work else PhaseOutcome.COMPLETED
-    return PhaseOutcome.DRY_RUN
+    return PhaseOutcome.PENDING
 
 
 def _failed(error: str) -> AudioPhaseResult:
@@ -1701,5 +1685,21 @@ def _failed(error: str) -> AudioPhaseResult:
         artifacts   = [],
         message     = error,
         error       = error,
+        audio_files = [],
+    )
+
+
+def _pending(reason: str) -> AudioPhaseResult:
+    """Return a ``PENDING`` ``AudioPhaseResult`` with the given reason.
+
+    Used when a dependency is legitimately pending during a dry-run preview:
+    the phase cannot preview its own work, so it chains ``PENDING`` without an
+    error.
+    """
+    return AudioPhaseResult(
+        outcome     = PhaseOutcome.PENDING,
+        artifacts   = [],
+        message     = reason,
+        error       = None,
         audio_files = [],
     )

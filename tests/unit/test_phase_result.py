@@ -1,7 +1,7 @@
 """Unit tests for PhaseResult derived properties.
 
 Covers:
-- ``is_complete``: True for COMPLETED/REUSED, False for FAILED/DRY_RUN
+- ``is_complete``: True for COMPLETED/REUSED, False for FAILED/PENDING
 - ``complete``:    Filters artifacts to COMPLETE state only
 - ``pending``:     Filters artifacts to ABSENT/PARTIAL states
 - ``did_work``:    True only for COMPLETED outcome
@@ -63,8 +63,8 @@ class TestIsComplete:
     def test_failed_is_not_complete(self) -> None:
         assert _result(PhaseOutcome.FAILED).is_complete is False
 
-    def test_dry_run_is_not_complete(self) -> None:
-        assert _result(PhaseOutcome.DRY_RUN).is_complete is False
+    def test_pending_is_not_complete(self) -> None:
+        assert _result(PhaseOutcome.PENDING).is_complete is False
 
 
 # ---------------------------------------------------------------------------
@@ -144,5 +144,5 @@ class TestDidWork:
     def test_failed_did_not_work(self) -> None:
         assert _result(PhaseOutcome.FAILED).did_work is False
 
-    def test_dry_run_did_not_work(self) -> None:
-        assert _result(PhaseOutcome.DRY_RUN).did_work is False
+    def test_pending_did_not_work(self) -> None:
+        assert _result(PhaseOutcome.PENDING).did_work is False

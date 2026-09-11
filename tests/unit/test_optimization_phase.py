@@ -11,11 +11,7 @@ Covers requirement 7.7:
 from __future__ import annotations
 
 from pathlib import Path
-
 from unittest.mock import MagicMock
-
-import pytest
-import yaml
 
 from pyqenc.app_config import load_app_config
 from pyqenc.models import (
@@ -26,9 +22,8 @@ from pyqenc.models import (
     Strategy,
 )
 from pyqenc.phases.job import JobPhase
-from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
+from pyqenc.phases.optimization import OptimizationPhase
 from pyqenc.state import OptimizationParams, StrategyTestResult
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -92,13 +87,47 @@ def _make_phase(
     tolerance: float = 5.0,
     force: bool = False,
 ) -> tuple[OptimizationPhase, Path]:
-    """Create an OptimizationPhase with a pre-run JobPhase wired in."""
+    """Create an OptimizationPhase with pre-run Job/Probe/Chunking deps wired in.
+
+    OptimizationPhase depends on Job, Probe, and Chunking; the uniform run()
+    skeleton resolves those dependencies (via the shared walk) BEFORE any
+    cached-reuse/tolerance branch. So the registry must carry all three with a
+    completed result — each is a real phase instance whose public ``result`` is
+    pre-set to a COMPLETED typed result (the walk then treats them as already
+    run without mocking phase internals).
+    """
+    from pyqenc.phase import Artifact
+    from pyqenc.phases.chunking import ChunkingPhase as _CP
+    from pyqenc.phases.chunking import ChunkingPhaseResult
     from pyqenc.phases.job import JobPhase as _JP
+    from pyqenc.phases.probe import ProbePhase as _PP
+    from pyqenc.phases.probe import ProbePhaseResult
+    from pyqenc.state import ArtifactState
 
     job, work_dir = _make_job_phase(tmp_path, strategies, optimize=optimize, tolerance=tolerance, force=force)
-    phases = {_JP: job}
     config = job._config  # already resolved AppConfig
-    phase = OptimizationPhase(config, phases=phases, collector=MagicMock())
+    phases: dict[type, object] = {_JP: job}
+
+    probe = _PP(config, phases, collector=MagicMock(), crop_params=None)  # type: ignore[arg-type]
+    probe.result = ProbePhaseResult(
+        outcome   = PhaseOutcome.COMPLETED,
+        artifacts = [Artifact(path=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
+        message   = "probe complete",
+        source    = None,
+        crop      = CropParams(),
+    )
+    phases[_PP] = probe
+
+    chunking = _CP(config, phases, collector=MagicMock())  # type: ignore[arg-type]
+    chunking.result = ChunkingPhaseResult(
+        outcome   = PhaseOutcome.COMPLETED,
+        artifacts = [Artifact(path=work_dir / "chunks", state=ArtifactState.COMPLETE)],
+        message   = "chunking complete",
+        chunks    = [],
+    )
+    phases[_CP] = chunking
+
+    phase = OptimizationPhase(config, phases=phases, collector=MagicMock())  # type: ignore[arg-type]
     return phase, work_dir
 
 
@@ -327,11 +356,3 @@ class TestAllStrategiesMode:
         result = phase.run(dry_run=False)
 
         assert result.strategy_results == []
-
-    def test_scan_returns_all_strategies_silently(self, tmp_path: Path) -> None:
-        strategies = [_S1, _S2]
-        phase, _ = _make_phase(tmp_path, strategies, optimize=False)
-        result = phase.scan()
-
-        assert result.is_complete is True
-        assert sorted(s.name for s in result.selected_strategies) == sorted(s.name for s in strategies)

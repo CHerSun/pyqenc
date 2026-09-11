@@ -24,7 +24,6 @@ from pyqenc.models import (
     CleanupLevel,
     CropParams,
 )
-from pyqenc.state import ArtifactState
 from pyqenc.utils.log_format import fmt_key_value_table
 from pyqenc.utils.logging import setup_logging
 from pyqenc.utils.long_path import LongPath
@@ -524,7 +523,7 @@ def _cmd_extract(args: argparse.Namespace) -> int:
             dry_run     = not args.execute,
             crop_params = crop_params,
         )
-        if result.is_complete:
+        if result.success:
             logger.info("Extraction completed successfully")
             return 0
         logger.critical(f"Extraction failed: {result.error}")
@@ -561,7 +560,7 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
             dry_run     = not args.execute,
             crop_params = crop_params,
         )
-        if result.is_complete:
+        if result.success:
             logger.info("Chunking completed successfully")
             return 0
         logger.critical(f"Chunking failed: {result.error}")
@@ -598,7 +597,7 @@ def _cmd_encode(args: argparse.Namespace) -> int:
             dry_run     = not args.execute,
             crop_params = crop_params,
         )
-        if result.is_complete:
+        if result.success:
             logger.info("Encoding completed successfully")
             return 0
         logger.critical(f"Encoding failed: {result.error}")
@@ -628,7 +627,7 @@ def _cmd_audio(args: argparse.Namespace) -> int:
             no_metrics  = args.no_metrics,
             dry_run     = not args.execute,
         )
-        if result.is_complete:
+        if result.success:
             logger.info("Audio processing completed successfully")
             return 0
         logger.critical(f"Audio processing failed: {result.error}")
@@ -665,12 +664,12 @@ def _cmd_merge(args: argparse.Namespace) -> int:
             dry_run     = not args.execute,
             crop_params = crop_params,
         )
-        if result.is_complete:
-            completed = [a for a in result.artifacts if a.state == ArtifactState.COMPLETE]
-            if completed:
-                logger.info(f"Merge completed successfully: {len(completed)} file(s)")
-                for artifact in completed:
-                    logger.info(f"  {artifact.path}")
+        if result.success:
+            files = result.output_files
+            if files:
+                logger.info(f"Merge completed successfully: {len(files)} file(s)")
+                for path in files:
+                    logger.info(f"  {path}")
             else:
                 logger.info("Merge completed (no new files created)")
             return 0
@@ -987,13 +986,13 @@ Examples:
 
     import signal
 
-    from pyqenc.metrics import flush_active_collector
+    from pyqenc.metrics import flush_all_metrics
     from pyqenc.utils.ffmpeg_runner import kill_all_ffmpeg
 
     def _sigint_handler(signum: int, frame: object) -> None:
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         kill_all_ffmpeg()
-        flush_active_collector()
+        flush_all_metrics()
         logger.warning("Cancelled by user.")
         os._exit(130)
 

@@ -1,72 +1,181 @@
 """Unit tests for mkvmerge integration in MergePhase.
 
+Observable-behavior only: the two module-level pure helpers
+(``_build_mkvmerge_options`` / ``_write_mkvmerge_options_file``) are exercised
+directly as public functions, and the phase-level behaviors (options-file
+lifecycle, timestamps-required guard) are driven through a REAL ``MergePhase``
+built via its real constructor and a real phase registry whose Job / Extraction
+/ Probe / Encoding / Audio dependencies carry pre-set COMPLETED typed results,
+then run through the public ``merge.run(dry_run=False)`` entry point. Only the
+external shell-outs are mocked: mkvmerge (``subprocess.run``) and the
+frame-count check (``get_frame_count``) — boundaries, never phase internals. No
+``__new__``, no private ``_execute_merge`` / ``_collect_encoded_chunks`` calls,
+no private-attr poking.
+
 Covers:
-- 7.2  _build_mkvmerge_options: single chunk, multiple chunks, timestamps placement
-- 7.3  _write_mkvmerge_options_file: JSON written atomically
-- 7.4  _execute_merge: options file deleted on success, retained on failure
-- 7.4  _execute_merge: fails with clear message when timestamps_path is None
-- 7.5  concat_cmd bug fix: "+genpts" and "-y" are separate elements
+- _build_mkvmerge_options: single chunk, multiple chunks, timestamps placement
+- _write_mkvmerge_options_file: JSON written atomically
+- Options file deleted on success, retained on failure (via run())
+- Merge fails with a clear message when timestamps_path is None / missing (via run())
 """
 
 from __future__ import annotations
 
 import json
-import subprocess
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
+from pyqenc.app_config import load_app_config
+from pyqenc.constants import EXTRACTED_DIR, FINAL_OUTPUT_DIR, TIMESTAMPS_FILENAME
+from pyqenc.metrics import NoOpMetricsCollector
+from pyqenc.models import (
+    CleanupLevel,
+    ExtendedVideoMetadata,
+    PhaseOutcome,
+    VideoMetadata,
+)
+from pyqenc.phase import Artifact, Phase
+from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
+from pyqenc.phases.encoding import (
+    EncodedArtifact,
+    EncodingPhase,
+    EncodingPhaseResult,
+)
+from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
+from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.merge import (
-    MergeArtifact,
     MergePhase,
     _build_mkvmerge_options,
     _write_mkvmerge_options_file,
 )
-from pyqenc.state import ArtifactState
+from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
+from pyqenc.state import ArtifactState, JobState
+
+_APP_CONFIG = load_app_config(default_only=True)
+
+# The single strategy under test and its filesystem-safe form.
+_STRATEGY  = "slow+h265"
+_SAFE_NAME = _STRATEGY.replace(":", "_")
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Real-construction helper
 # ---------------------------------------------------------------------------
 
-def _make_merge_phase(tmp_path: Path) -> MergePhase:
-    """Build a minimal MergePhase with mocked dependencies."""
-    # Build a job result mock that supplies the fields _execute_merge reads via
-    # self._job.result.* (after the config-refactor migration).
-    job_result = MagicMock()
-    job_result.work_dir   = tmp_path
-    job_result.source     = tmp_path / "source.mkv"
-    job_result.force_wipe = False
-    job_result.job        = None
-    # Encoding config sub-mock
-    encoding_config = MagicMock()
-    encoding_config.resolved_targets  = []
-    encoding_config.metrics_sampling  = 1
-    job_result.config.encoding = encoding_config
+def _make_source_vm(path: Path) -> VideoMetadata:
+    """Return a VideoMetadata with fast-probe fields pre-populated (no probing)."""
+    meta = VideoMetadata(path=path)
+    meta._duration_seconds = 3600.0
+    meta._fps              = 24.0
+    meta._resolution       = "1920x1080"
+    return meta
 
-    job = MagicMock()
-    job.result = job_result
 
-    collector = MagicMock()
-    collector.time.return_value.__enter__ = MagicMock(return_value=None)
-    collector.time.return_value.__exit__  = MagicMock(return_value=False)
+def _make_merge_phase(
+    work_dir:        Path,
+    source:          Path,
+    chunk:           Path,
+    *,
+    timestamps_path: Path | None,
+    frame_count:     int = 100,
+) -> MergePhase:
+    """Build a REAL ``MergePhase`` via its real constructor and a real registry.
 
-    phase = MergePhase.__new__(MergePhase)
-    phase._config    = MagicMock()   # kept for type consistency; values come from _job.result
-    phase._collector = collector
-    phase._job       = job
-    phase._extraction = None
-    phase._encoding  = None
-    phase._audio     = None
-    phase._probe     = None
-    phase.result     = None
-    phase.dependencies = []
-    return phase
+    Every dependency (Job / Extraction / Probe / Encoding / Audio) is a real
+    phase instance whose public ``result`` is pre-set to a COMPLETED typed
+    result, so the shared dependency walk is a no-op and ``merge.run()`` reaches
+    its own recovery + merge work without any internal mocking. The encoding
+    result carries a real COMPLETE ``EncodedArtifact`` for ``chunk`` so the real
+    ``_collect_encoded_chunks`` reads it. ``resolved_targets`` is empty (default
+    config) so quality measurement is skipped — no extra shell-out.
+
+    Args:
+        work_dir:        Pipeline work directory.
+        source:          Source video path.
+        chunk:           A real encoded chunk file on disk.
+        timestamps_path: Timestamps file for the ExtractionPhase result; may be
+                         ``None`` (or a missing path) to exercise the guard.
+        frame_count:     Source frame count recorded by the ProbePhase result.
+    """
+    collector = NoOpMetricsCollector()
+    config    = _APP_CONFIG.model_copy(deep=True)
+    source_vm = _make_source_vm(source)
+
+    job = JobPhase(
+        config, None,
+        source     = source,
+        work_dir   = work_dir,
+        force      = False,
+        cleanup    = CleanupLevel.NONE,
+        no_metrics = True,
+        collector  = collector,
+    )
+    job.result = JobPhaseResult(
+        outcome    = PhaseOutcome.COMPLETED,
+        artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
+        message    = "job complete",
+        job        = JobState(source=source_vm),
+        force_wipe = False,
+        config     = config,
+        work_dir   = work_dir,
+        source     = source,
+    )
+
+    registry: dict[type[Phase], Phase] = {JobPhase: job}
+
+    extraction = ExtractionPhase(config, registry, video_required=True, collector=collector)
+    ts_artifacts = (
+        [Artifact(path=timestamps_path, state=ArtifactState.COMPLETE)]
+        if timestamps_path is not None
+        else []
+    )
+    extraction.result = ExtractionPhaseResult(
+        outcome         = PhaseOutcome.COMPLETED,
+        artifacts       = ts_artifacts,
+        message         = "extraction complete",
+        video           = source_vm,
+        timestamps_path = timestamps_path,
+    )
+    registry[ExtractionPhase] = extraction
+
+    probe = ProbePhase(config, registry, collector=collector, crop_params=None)
+    probe.result = ProbePhaseResult(
+        outcome   = PhaseOutcome.COMPLETED,
+        artifacts = [Artifact(path=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
+        message   = "probe complete",
+        source    = ExtendedVideoMetadata.from_base(source_vm, frame_count=frame_count),
+    )
+    registry[ProbePhase] = probe
+
+    encoding = EncodingPhase(config, registry, collector=collector)
+    encoding.result = EncodingPhaseResult(
+        outcome   = PhaseOutcome.COMPLETED,
+        artifacts = [],
+        message   = "encoding complete",
+        encoded   = [EncodedArtifact(
+            path     = chunk,
+            state    = ArtifactState.COMPLETE,
+            chunk_id = "chunk1",
+            strategy = _STRATEGY,
+        )],
+    )
+    registry[EncodingPhase] = encoding
+
+    audio = AudioPhase(config, registry, collector=collector)
+    audio.result = AudioPhaseResult(
+        outcome     = PhaseOutcome.COMPLETED,
+        artifacts   = [],
+        message     = "audio complete",
+        audio_files = [],
+    )
+    registry[AudioPhase] = audio
+
+    return MergePhase(config, registry, collector=collector)
 
 
 # ---------------------------------------------------------------------------
-# 7.2  _build_mkvmerge_options
+# _build_mkvmerge_options
 # ---------------------------------------------------------------------------
 
 class TestBuildMkvmergeOptions:
@@ -165,7 +274,7 @@ class TestBuildMkvmergeOptions:
 
 
 # ---------------------------------------------------------------------------
-# 7.3  _write_mkvmerge_options_file
+# _write_mkvmerge_options_file
 # ---------------------------------------------------------------------------
 
 class TestWriteMkvmergeOptionsFile:
@@ -203,320 +312,190 @@ class TestWriteMkvmergeOptionsFile:
 
 
 # ---------------------------------------------------------------------------
-# 7.4  _execute_merge: options file lifecycle
+# Options-file lifecycle (driven through run())
 # ---------------------------------------------------------------------------
 
 class TestMkvmergeOptionsFileLifecycle:
-    """Options file is deleted on success and retained on failure."""
+    """The concat options file is deleted on success and retained on failure.
 
-    def _make_phase_with_extraction(
-        self, tmp_path: Path, timestamps_path: Path | None
-    ) -> MergePhase:
-        """Build a MergePhase with a mocked ExtractionPhase result."""
-        phase = _make_merge_phase(tmp_path)
+    Driven through the public ``merge.run(dry_run=False)`` surface against a
+    real MergePhase; only mkvmerge (``subprocess.run``) and ``get_frame_count``
+    are mocked.
+    """
 
-        extraction_result = MagicMock()
-        extraction_result.timestamps_path = timestamps_path
+    def test_options_file_deleted_on_success(self) -> None:
+        """Bug guarded: a leftover ``concat_*.json`` after a SUCCESSFUL merge
+        would pollute ``final/`` and mislead recovery into thinking a merge is
+        mid-flight. On success the options file must be gone.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            work_dir = tmp_path / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            source = tmp_path / "source.mkv"
+            source.write_bytes(b"\x00" * 64)
 
-        extraction = MagicMock()
-        extraction.result = extraction_result
-        phase._extraction = extraction
+            ts_file = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+            ts_file.parent.mkdir(parents=True, exist_ok=True)
+            ts_file.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
 
-        # Wire encoding result with one complete artifact
-        encoding_result = MagicMock()
-        encoding_result.encoded = []
-        encoding = MagicMock()
-        encoding.result = encoding_result
-        encoding.quality_labels = {}
-        phase._encoding = encoding
+            chunk = work_dir / "chunk1.mkv"
+            chunk.write_bytes(b"\x00" * 64)
 
-        # _make_merge_phase already wires _job with work_dir / source / config.encoding
-        # — just ensure job field is set on the existing result
-        phase._job.result.job  = None
+            merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=ts_file)
 
-        return phase
+            final_dir    = work_dir / FINAL_OUTPUT_DIR
+            output_file  = final_dir / f"{source.stem} {_SAFE_NAME}.mkv"
+            options_file = final_dir / f"concat_{_SAFE_NAME}.json"
 
-    def test_options_file_deleted_on_success(self, tmp_path: Path) -> None:
-        """Options file must be deleted after a successful mkvmerge run."""
-        from pyqenc.constants import FINAL_OUTPUT_DIR
+            def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
+                # Options file must exist at the moment mkvmerge is invoked.
+                assert options_file.exists(), "Options file must exist when mkvmerge is called"
+                output_file.write_bytes(b"\x00" * 128)
+                result = MagicMock()
+                result.returncode = 0
+                result.stderr = ""
+                return result
 
-        final_dir = tmp_path / FINAL_OUTPUT_DIR
-        final_dir.mkdir(parents=True, exist_ok=True)
+            with (
+                patch("pyqenc.phases.merge.subprocess.run", side_effect=fake_subprocess_run),
+                patch("pyqenc.phases.merge.get_frame_count", return_value=100),
+            ):
+                result = merge.run(dry_run=False)
 
-        ts_file = tmp_path / "timestamps.txt"
-        ts_file.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
+            assert result.outcome == PhaseOutcome.COMPLETED, (
+                f"Expected COMPLETED, got {result.outcome} (error={result.error!r})"
+            )
+            assert not options_file.exists(), (
+                "Options file must be deleted after a successful merge"
+            )
 
-        chunk = tmp_path / "chunk1.mkv"
-        chunk.write_bytes(b"\x00" * 64)
+    def test_options_file_retained_on_failure(self) -> None:
+        """Bug guarded: discarding the ``concat_*.json`` when mkvmerge FAILS
+        would destroy the exact argument list needed to reproduce/debug the
+        failure. On failure the options file must remain on disk.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            work_dir = tmp_path / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            source = tmp_path / "source.mkv"
+            source.write_bytes(b"\x00" * 64)
 
-        output_file = final_dir / "source slow+h265.mkv"
+            ts_file = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+            ts_file.parent.mkdir(parents=True, exist_ok=True)
+            ts_file.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
 
-        phase = self._make_phase_with_extraction(tmp_path, ts_file)
+            chunk = work_dir / "chunk1.mkv"
+            chunk.write_bytes(b"\x00" * 64)
 
-        artifact = MergeArtifact(
-            path          = output_file,
-            state         = ArtifactState.ABSENT,
-            strategy_name = "slow+h265",
-        )
+            merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=ts_file)
 
-        # Mock _collect_encoded_chunks to return our chunk
-        phase._collect_encoded_chunks = MagicMock(  # type: ignore[method-assign]
-            return_value={"chunk1": {"slow+h265": chunk}}
-        )
+            final_dir    = work_dir / FINAL_OUTPUT_DIR
+            options_file = final_dir / f"concat_{_SAFE_NAME}.json"
 
-        options_file = final_dir / "concat_slow+h265.json"
+            def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
+                result = MagicMock()
+                result.returncode = 1
+                result.stderr = "mkvmerge: error: something went wrong"
+                return result
 
-        def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
-            # Verify options file exists when mkvmerge is called
-            assert options_file.exists(), "Options file must exist when mkvmerge is called"
-            # Create the output file to simulate success
-            output_file.write_bytes(b"\x00" * 128)
-            result = MagicMock()
-            result.returncode = 0
-            result.stderr = ""
-            return result
+            with patch("pyqenc.phases.merge.subprocess.run", side_effect=fake_subprocess_run):
+                result = merge.run(dry_run=False)
 
-        with (
-            patch("pyqenc.phases.merge.subprocess.run", side_effect=fake_subprocess_run),
-            patch("pyqenc.phases.merge.get_frame_count", return_value=100),
-        ):
-            phase._execute_merge([artifact])  # type: ignore[attr-defined]
-
-        assert not options_file.exists(), "Options file must be deleted after successful merge"
-
-    def test_options_file_retained_on_failure(self, tmp_path: Path) -> None:
-        """Options file must be retained after a failed mkvmerge run."""
-        from pyqenc.constants import FINAL_OUTPUT_DIR
-
-        final_dir = tmp_path / FINAL_OUTPUT_DIR
-        final_dir.mkdir(parents=True, exist_ok=True)
-
-        ts_file = tmp_path / "timestamps.txt"
-        ts_file.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
-
-        chunk = tmp_path / "chunk1.mkv"
-        chunk.write_bytes(b"\x00" * 64)
-
-        output_file = final_dir / "source slow+h265.mkv"
-
-        phase = self._make_phase_with_extraction(tmp_path, ts_file)
-
-        artifact = MergeArtifact(
-            path          = output_file,
-            state         = ArtifactState.ABSENT,
-            strategy_name = "slow+h265",
-        )
-
-        phase._collect_encoded_chunks = MagicMock(  # type: ignore[method-assign]
-            return_value={"chunk1": {"slow+h265": chunk}}
-        )
-
-        options_file = final_dir / "concat_slow+h265.json"
-
-        def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
-            result = MagicMock()
-            result.returncode = 1
-            result.stderr = "mkvmerge: error: something went wrong"
-            return result
-
-        with patch("pyqenc.phases.merge.subprocess.run", side_effect=fake_subprocess_run):
-            phase._execute_merge([artifact])  # type: ignore[attr-defined]
-
-        assert options_file.exists(), "Options file must be retained after failed merge"
+            assert result.outcome == PhaseOutcome.FAILED, (
+                f"Expected FAILED, got {result.outcome}"
+            )
+            assert options_file.exists(), (
+                "Options file must be retained after a failed merge"
+            )
 
 
 # ---------------------------------------------------------------------------
-# 7.4  _execute_merge: fails when timestamps_path is None
+# Timestamps required (driven through run())
 # ---------------------------------------------------------------------------
 
 class TestMergeFailsWithoutTimestamps:
-    """When timestamps_path is None or missing, merge must fail with a clear message."""
+    """When ``timestamps_path`` is None or points to a missing file, the merge
+    must fail rather than silently producing output without PTS restoration.
 
-    def _make_phase_with_timestamps(
-        self, tmp_path: Path, timestamps_path: Path | None
-    ) -> MergePhase:
-        phase = _make_merge_phase(tmp_path)
+    Driven through the public ``merge.run(dry_run=False)`` surface.
+    """
 
-        extraction_result = MagicMock()
-        extraction_result.timestamps_path = timestamps_path
+    def test_merge_fails_when_timestamps_path_is_none(self) -> None:
+        """Bug guarded: merging without timestamps would drop PTS restoration,
+        breaking source-fidelity for VFR content. A ``None`` timestamps path
+        must yield a FAILED result.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            work_dir = tmp_path / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            source = tmp_path / "source.mkv"
+            source.write_bytes(b"\x00" * 64)
 
-        extraction = MagicMock()
-        extraction.result = extraction_result
-        phase._extraction = extraction
+            chunk = work_dir / "chunk1.mkv"
+            chunk.write_bytes(b"\x00" * 64)
 
-        encoding_result = MagicMock()
-        encoding_result.encoded = []
-        encoding = MagicMock()
-        encoding.result = encoding_result
-        encoding.quality_labels = {}
-        phase._encoding = encoding
+            merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=None)
 
-        # _make_merge_phase already wires _job with work_dir / source / config.encoding
-        # — just ensure job field is set on the existing result
-        phase._job.result.job  = None
+            with patch("pyqenc.phases.merge.subprocess.run") as mock_run:
+                result = merge.run(dry_run=False)
+                mock_run.assert_not_called()
 
-        return phase
+            assert result.outcome == PhaseOutcome.FAILED, (
+                f"Expected FAILED when timestamps_path is None, got {result.outcome}"
+            )
 
-    def test_merge_fails_when_timestamps_path_is_none(self, tmp_path: Path) -> None:
-        """timestamps_path=None → strategy is skipped (added to failed_strategies)."""
-        from pyqenc.constants import FINAL_OUTPUT_DIR
-        from pyqenc.models import PhaseOutcome
+    def test_merge_fails_when_timestamps_file_missing(self) -> None:
+        """Bug guarded: a stale timestamps path that no longer exists on disk
+        must not be trusted — merging would fail at the mkvmerge boundary or
+        drop PTS. A missing timestamps file must yield a FAILED result.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            work_dir = tmp_path / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            source = tmp_path / "source.mkv"
+            source.write_bytes(b"\x00" * 64)
 
-        final_dir = tmp_path / FINAL_OUTPUT_DIR
-        final_dir.mkdir(parents=True, exist_ok=True)
+            # Path that does NOT exist on disk.
+            missing_ts = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
 
-        chunk = tmp_path / "chunk1.mkv"
-        chunk.write_bytes(b"\x00" * 64)
+            chunk = work_dir / "chunk1.mkv"
+            chunk.write_bytes(b"\x00" * 64)
 
-        output_file = final_dir / "source slow+h265.mkv"
+            merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=missing_ts)
 
-        phase = self._make_phase_with_timestamps(tmp_path, timestamps_path=None)
+            with patch("pyqenc.phases.merge.subprocess.run") as mock_run:
+                result = merge.run(dry_run=False)
+                mock_run.assert_not_called()
 
-        artifact = MergeArtifact(
-            path          = output_file,
-            state         = ArtifactState.ABSENT,
-            strategy_name = "slow+h265",
-        )
+            assert result.outcome == PhaseOutcome.FAILED, (
+                f"Expected FAILED when timestamps file is missing, got {result.outcome}"
+            )
 
-        phase._collect_encoded_chunks = MagicMock(  # type: ignore[method-assign]
-            return_value={"chunk1": {"slow+h265": chunk}}
-        )
+    def test_merge_fails_message_mentions_failure(self) -> None:
+        """Bug guarded: a silent/empty failure message would leave the user with
+        no signal about WHY the merge failed. The failure result must carry a
+        message or error mentioning the failure/timestamps.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            work_dir = tmp_path / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            source = tmp_path / "source.mkv"
+            source.write_bytes(b"\x00" * 64)
 
-        result = phase._execute_merge([artifact])  # type: ignore[attr-defined]
+            chunk = work_dir / "chunk1.mkv"
+            chunk.write_bytes(b"\x00" * 64)
 
-        assert result.outcome == PhaseOutcome.FAILED, (
-            f"Expected FAILED outcome when timestamps_path is None, got {result.outcome}"
-        )
+            merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=None)
 
-    def test_merge_fails_when_timestamps_file_missing(self, tmp_path: Path) -> None:
-        """timestamps_path points to a non-existent file → strategy is skipped."""
-        from pyqenc.constants import FINAL_OUTPUT_DIR
-        from pyqenc.models import PhaseOutcome
+            with patch("pyqenc.phases.merge.subprocess.run"):
+                result = merge.run(dry_run=False)
 
-        final_dir = tmp_path / FINAL_OUTPUT_DIR
-        final_dir.mkdir(parents=True, exist_ok=True)
-
-        # Path that does NOT exist on disk
-        missing_ts = tmp_path / "timestamps.txt"
-
-        chunk = tmp_path / "chunk1.mkv"
-        chunk.write_bytes(b"\x00" * 64)
-
-        output_file = final_dir / "source slow+h265.mkv"
-
-        phase = self._make_phase_with_timestamps(tmp_path, timestamps_path=missing_ts)
-
-        artifact = MergeArtifact(
-            path          = output_file,
-            state         = ArtifactState.ABSENT,
-            strategy_name = "slow+h265",
-        )
-
-        phase._collect_encoded_chunks = MagicMock(  # type: ignore[method-assign]
-            return_value={"chunk1": {"slow+h265": chunk}}
-        )
-
-        result = phase._execute_merge([artifact])  # type: ignore[attr-defined]
-
-        assert result.outcome == PhaseOutcome.FAILED, (
-            f"Expected FAILED outcome when timestamps file is missing, got {result.outcome}"
-        )
-
-    def test_merge_fails_message_mentions_timestamps(self, tmp_path: Path) -> None:
-        """The failure message or error must mention timestamps."""
-        from pyqenc.constants import FINAL_OUTPUT_DIR
-
-        final_dir = tmp_path / FINAL_OUTPUT_DIR
-        final_dir.mkdir(parents=True, exist_ok=True)
-
-        chunk = tmp_path / "chunk1.mkv"
-        chunk.write_bytes(b"\x00" * 64)
-
-        output_file = final_dir / "source slow+h265.mkv"
-
-        phase = self._make_phase_with_timestamps(tmp_path, timestamps_path=None)
-
-        artifact = MergeArtifact(
-            path          = output_file,
-            state         = ArtifactState.ABSENT,
-            strategy_name = "slow+h265",
-        )
-
-        phase._collect_encoded_chunks = MagicMock(  # type: ignore[method-assign]
-            return_value={"chunk1": {"slow+h265": chunk}}
-        )
-
-        result = phase._execute_merge([artifact])  # type: ignore[attr-defined]
-
-        # The result message or error should mention the failure
-        combined = f"{result.message} {result.error or ''}"
-        assert "fail" in combined.lower() or "timestamps" in combined.lower(), (
-            f"Expected failure message to mention 'fail' or 'timestamps', got: {combined!r}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# 7.5  concat_cmd bug fix
-# ---------------------------------------------------------------------------
-
-class TestConcatCmdBugFix:
-    """The ffmpeg concat command list must have '+genpts' and '-y' as separate elements."""
-
-    def test_genpts_and_y_are_separate_elements(self, tmp_path: Path) -> None:
-        """'+genpts' and '-y' must be separate list elements (not concatenated)."""
-        from pyqenc.constants import FINAL_OUTPUT_DIR, TEMP_SUFFIX
-
-        final_dir = tmp_path / FINAL_OUTPUT_DIR
-        final_dir.mkdir(parents=True, exist_ok=True)
-
-        # Build the concat_cmd as it appears in _execute_merge (dead code path)
-        concat_file = final_dir / f"concat_test{TEMP_SUFFIX}.txt"
-        output_file = final_dir / "output.mkv"
-
-        concat_cmd: list[str] = [
-            "ffmpeg",
-            "-f",      "concat",
-            "-safe",   "0",
-            "-i",      str(concat_file),
-            "-c",      "copy",
-            "-fflags", "+genpts",
-            "-y",
-            str(output_file),
-        ]
-
-        # Verify '+genpts' and '-y' are separate elements
-        assert "+genpts" in concat_cmd, "'+genpts' must be a separate element in concat_cmd"
-        assert "-y" in concat_cmd, "'-y' must be a separate element in concat_cmd"
-
-        # Verify they are NOT concatenated into '+genpts-y'
-        assert "+genpts-y" not in concat_cmd, (
-            "'+genpts-y' must NOT appear in concat_cmd — this is the bug that was fixed"
-        )
-
-    def test_fflags_receives_genpts_value(self, tmp_path: Path) -> None:
-        """'-fflags' must be followed by '+genpts' (not '+genpts-y')."""
-        from pyqenc.constants import FINAL_OUTPUT_DIR, TEMP_SUFFIX
-
-        final_dir = tmp_path / FINAL_OUTPUT_DIR
-        final_dir.mkdir(parents=True, exist_ok=True)
-
-        concat_file = final_dir / f"concat_test{TEMP_SUFFIX}.txt"
-        output_file = final_dir / "output.mkv"
-
-        concat_cmd: list[str] = [
-            "ffmpeg",
-            "-f",      "concat",
-            "-safe",   "0",
-            "-i",      str(concat_file),
-            "-c",      "copy",
-            "-fflags", "+genpts",
-            "-y",
-            str(output_file),
-        ]
-
-        assert "-fflags" in concat_cmd
-        fflags_index = concat_cmd.index("-fflags")
-        fflags_value = concat_cmd[fflags_index + 1]
-        assert fflags_value == "+genpts", (
-            f"'-fflags' must be followed by '+genpts', got {fflags_value!r}"
-        )
+            combined = f"{result.message} {result.error or ''}"
+            assert "fail" in combined.lower() or "timestamps" in combined.lower(), (
+                f"Expected failure message to mention 'fail' or 'timestamps', got: {combined!r}"
+            )

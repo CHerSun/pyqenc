@@ -16,7 +16,6 @@ from decimal import Decimal
 from enum import Enum, IntEnum
 from fractions import Fraction
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from pydantic import (
     BaseModel,
@@ -35,9 +34,6 @@ from pyqenc.constants import (
     TIMEOUT_SECONDS_SHORT,
     UP_ARROW,
 )
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -108,18 +104,23 @@ class CleanupLevel(IntEnum):
 
 
 class PhaseOutcome(Enum):
-    """Outcome of a completed pipeline phase execution.
+    """Work-state of a pipeline phase — never the run mode.
+
+    This enum describes only *what state the phase's work is in*; it never
+    encodes whether the run was a preview (dry-run) or a real execution. Run
+    mode is owned by the runner via the ``dry_run`` flag it threads.
 
     Attributes:
         COMPLETED: Phase did real work and succeeded.
         REUSED:    All artifacts existed; no work performed (valid in both modes).
-        DRY_RUN:   Dry-run mode; work would be needed; pipeline stops here.
+        PENDING:   Wanted work remains (one or more artifacts are ``ABSENT`` or
+                   ``PARTIAL``), independent of run mode.
         FAILED:    Phase failed (``error`` field populated).
     """
 
     COMPLETED = "completed"
     REUSED    = "reused"
-    DRY_RUN   = "dry_run"
+    PENDING   = "pending"
     FAILED    = "failed"
 
 
@@ -429,7 +430,7 @@ class CodecConfig(BaseModel):
 
     @field_validator("default_quality", "quality_granularity", "quality_max_step", mode="before")
     @classmethod
-    def _to_decimal(cls, v: Decimal | float | int | str | None) -> Decimal | None:
+    def _to_decimal(cls, v: Decimal | float | str | None) -> Decimal | None:
         """Coerce numeric config values to ``Decimal`` for exact arithmetic."""
         if v is None:
             return None

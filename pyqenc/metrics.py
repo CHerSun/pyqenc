@@ -40,6 +40,8 @@ __all__ = [
     # Protocol + implementations
     "MetricsCollector",
     "NoOpMetricsCollector",
+    # Interrupt-flush registry
+    "flush_all_metrics",
     # Internal helpers exposed for testing
     "_ConvergenceAccumulator",
     "_update_accumulator",
@@ -48,31 +50,26 @@ __all__ = [
     "_compute_dotted_groups",
     # Added in task 7:
     "YamlMetricsCollector",
-    # Active collector registry (task 19):
-    "register_active_collector",
-    "flush_active_collector",
 ]
 
 import contextlib
 import logging
-import math  # noqa: F401  (used in YamlMetricsCollector — task 7)
-import time as _time  # noqa: F401  (used in YamlMetricsCollector — task 7)
+import math
+import threading
+import time as _time
 from dataclasses import (  # noqa: F401  (field used in ConvergenceAccumulator — task 5)
     dataclass,
     field,
 )
 from datetime import datetime  # noqa: F401  (used in flush — task 7)
 from enum import StrEnum
-from pathlib import Path  # noqa: F401  (used in YamlMetricsCollector — task 7)
-from typing import TYPE_CHECKING, Protocol  # noqa: F401
+from pathlib import Path
+from typing import Protocol
 
-import yaml  # noqa: F401  (used in YamlMetricsCollector — task 7)
+import yaml
 from pydantic import BaseModel
 
 from pyqenc.constants import DOTTED_KEY_SEPARATOR
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -87,37 +84,6 @@ METRICS_YAML_FILENAME: str = "metrics.yaml"
 """Filename of the metrics sidecar written to the work directory root."""
 
 _TEMP_SUFFIX: str = ".tmp"
-
-# ---------------------------------------------------------------------------
-# Active collector registry — used by CLI signal handler
-# ---------------------------------------------------------------------------
-
-_active_collector: MetricsCollector | None = None
-
-
-def register_active_collector(collector: MetricsCollector | None) -> None:
-    """Register *collector* as the process-wide active collector.
-
-    Called by the orchestrator when it constructs a ``YamlMetricsCollector``
-    so that the CLI's SIGINT handler can flush it on forced exit.
-    Pass ``None`` to clear the registration after the run completes.
-    """
-    global _active_collector
-    _active_collector = collector
-
-
-def flush_active_collector() -> None:
-    """Flush the active collector if one is registered.
-
-    Safe to call even when no collector is registered (no-op).  Used by the
-    CLI SIGINT handler so metrics are written before ``os._exit``.
-    """
-    if _active_collector is not None:
-        try:
-            _active_collector.flush()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Metrics: flush on exit failed: %s", exc)
-
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -289,12 +255,40 @@ class PipelineMetrics(BaseModel):
     ``convergence`` is ``None`` when no encoded result data has been collected
     (e.g. all chunks were reused from a prior run).
 
-    Note: ``parallelism`` is written separately by the pipeline orchestrator
-    and is NOT part of this model.
+    Note: ``parallelism`` is set where the metrics are assembled and is NOT
+    part of this model.
     """
 
     time_distribution: TimeDistribution
     convergence:       list[ConvergenceStats] | None = None
+
+
+# ---------------------------------------------------------------------------
+# Interrupt-flush registry
+# ---------------------------------------------------------------------------
+#
+# Symmetric with ffmpeg's ``_live_procs`` / ``kill_all_ffmpeg`` in
+# ``ffmpeg_runner``: the collectors own their own registry, and the CLI SIGINT
+# handler reaches this registry (never through the runner) to flush partial
+# timing before ``os._exit``.
+
+_live_collectors_lock: threading.Lock = threading.Lock()
+_live_collectors: set[YamlMetricsCollector] = set()
+
+
+def flush_all_metrics() -> None:
+    """Flush every live collector. Called from the CLI SIGINT handler before os._exit.
+
+    Safe to call from any thread; each flush() already snapshots in-flight timers so
+    partial timing is preserved. Never raises.
+    """
+    with _live_collectors_lock:
+        collectors = set(_live_collectors)
+    for c in collectors:
+        try:
+            c.flush()
+        except Exception:
+            logger.warning("Metrics: flush_all_metrics failed for a collector", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +343,10 @@ class MetricsCollector(Protocol):
         This method is **not** part of the phase-facing surface — phases must
         not call it.
         """
+        ...
+
+    def close(self) -> None:
+        """Release run-scoped resources (final unregister from the interrupt-flush registry). Idempotent; not part of the phase-facing surface."""
         ...
 
 
@@ -444,6 +442,9 @@ class NoOpMetricsCollector(MetricsCollector):
 
     def flush(self) -> None:
         """No-op — nothing to flush."""
+
+    def close(self) -> None:
+        """No-op — never registered in the interrupt-flush registry."""
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +570,11 @@ class YamlMetricsCollector(MetricsCollector):
                 logger.warning("Metrics: could not delete existing %s: %s", metrics_file, exc)
         else:
             self._try_resume(metrics_file)
+
+        # Register in the interrupt-flush registry so the CLI SIGINT handler can
+        # flush partial timing for this run (unregistered by close() at run end).
+        with _live_collectors_lock:
+            _live_collectors.add(self)
 
     def _try_resume(self, metrics_file: Path) -> None:
         """Load persisted state from *metrics_file* and restore accumulators.
@@ -762,3 +768,8 @@ class YamlMetricsCollector(MetricsCollector):
         not raise.
         """
         self._write_atomic(self._build_metrics())
+
+    def close(self) -> None:
+        """Unregister from the interrupt-flush registry. Idempotent; safe to call once per run end."""
+        with _live_collectors_lock:
+            _live_collectors.discard(self)

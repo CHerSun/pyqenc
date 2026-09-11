@@ -28,7 +28,13 @@ from pyqenc.constants import (
     TIMESTAMPS_FILENAME,
 )
 from pyqenc.models import AudioMetadata, PhaseOutcome, VideoMetadata
-from pyqenc.phase import Artifact, Phase, PhaseResult
+from pyqenc.phase import (
+    Artifact,
+    FinalizeContext,
+    Phase,
+    PhaseResult,
+    resolve_dependencies,
+)
 from pyqenc.state import ArtifactState, ExtractionParams
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 
@@ -223,7 +229,10 @@ class SubtitleStream(StreamBase):
         if 'subrip'      in codec_lower: return 'srt'
         if 'dvd'         in codec_lower: return 'sub'
         if 'pgs'         in codec_lower: return 'pgs'
-        if 'substation'  in codec_lower: return 'ssa'
+        # ffmpeg reports ASS/SSA text subtitles as 'ass' (modern) or 'ssa'/
+        # 'substation' (older); all are ASS-family text subs written as .ass.
+        if 'ass'         in codec_lower: return 'ass'
+        if 'ssa'         in codec_lower or 'substation' in codec_lower: return 'ssa'
         raise ValueError(f"Unknown subtitle codec: {self.codec_name}")
 
     @property
@@ -733,42 +742,6 @@ class ExtractionPhase:
     # Public Phase interface
     # ------------------------------------------------------------------
 
-    def scan(self) -> ExtractionPhaseResult:
-        """Classify existing extraction artifacts without executing any work.
-
-        Calls ``_ensure_dependencies()`` to scan dependencies if needed, then
-        runs ``_recover()`` in read-only mode.
-
-        Returns:
-            ``ExtractionPhaseResult`` with all artifacts classified.
-        """
-        if self.result is not None:
-            return self.result
-
-        dep_result = self._ensure_dependencies(execute=False)
-        if dep_result is not None:
-            self.result = dep_result
-            return self.result
-
-        job_result = self._job.result  # type: ignore[union-attr]
-        force_wipe = getattr(job_result, "force_wipe", False)
-
-        artifacts, video_meta, audio_meta = self._recover(
-            force_wipe=force_wipe, execute=False
-        )
-        outcome = self._outcome_from_artifacts(artifacts, did_work=False)
-        ts_artifact = next((a for a in artifacts if isinstance(a, TimestampArtifact)), None)
-        message = log_recovery_line(logger, artifacts)
-        self.result = ExtractionPhaseResult(
-            outcome         = outcome,
-            artifacts       = [a for a in artifacts if a.wanted],
-            message         = message,
-            video           = video_meta,
-            audio           = audio_meta,
-            timestamps_path = ts_artifact.path if ts_artifact and ts_artifact.state == ArtifactState.COMPLETE else None,
-        )
-        return self.result
-
     def run(self, dry_run: bool = False) -> ExtractionPhaseResult:
         """Recover, extract pending artifacts, persist ``extraction.yaml``.
 
@@ -777,7 +750,7 @@ class ExtractionPhase:
         2. Ensure dependencies have results (scan if needed).
         3. Run ``_recover()`` — handles ``force_wipe`` and filter-change detection.
         4. Log recovery result line.
-        5. In dry-run mode: return ``DRY_RUN`` if any artifacts are pending.
+        5. In dry-run mode: return ``PENDING`` if any artifacts are pending.
         6. Extract ``ABSENT`` artifacts; leave unwanted (``wanted=False``) artifacts on disk.
         7. Persist ``extraction.yaml``.
         8. Log completion summary.
@@ -788,12 +761,16 @@ class ExtractionPhase:
         Returns:
             ``ExtractionPhaseResult`` with all artifacts ``COMPLETE`` on success.
         """
-        emit_phase_banner("EXTRACTION", logger)
+        # In-run memoization guard (Property 1): return cached result verbatim.
+        if self.result is not None:
+            return self.result
 
-        dep_result = self._ensure_dependencies(execute=True)
+        dep_result = self._ensure_dependencies(dry_run=dry_run)
         if dep_result is not None:
             self.result = dep_result
             return self.result
+
+        emit_phase_banner("EXTRACTION", logger)
 
         job_result = self._job.result  # type: ignore[union-attr]
         force_wipe = getattr(job_result, "force_wipe", False)
@@ -810,7 +787,7 @@ class ExtractionPhase:
         from pyqenc.metrics import MetricKey
         with self._collector.time(MetricKey.RECOVERY):
             artifacts, video_meta, audio_meta = self._recover(
-                force_wipe=force_wipe, execute=True
+                force_wipe=force_wipe
             )
 
         # Log recovery result line from the internal (unfiltered) artifact list
@@ -831,7 +808,7 @@ class ExtractionPhase:
             if pending_count == 0 and complete_count > 0:
                 outcome = PhaseOutcome.REUSED
             else:
-                outcome = PhaseOutcome.DRY_RUN
+                outcome = PhaseOutcome.PENDING
             ts_artifact = next((a for a in artifacts if isinstance(a, TimestampArtifact)), None)
             self.result = ExtractionPhaseResult(
                 outcome         = outcome,
@@ -861,19 +838,47 @@ class ExtractionPhase:
         self.result = result
         return result
 
+    def finalize(self, ctx: FinalizeContext) -> None:
+        """Perform end-of-run housekeeping for the extraction phase.
+
+        When ``ctx.deep_cleanup`` is ``True``, deletes this phase's own
+        ``extracted/`` directory in full. Every extraction artifact (video,
+        audio, subtitles, chapters, attachments, timestamps) is reproducible
+        from the source, so none is exempt from deep cleanup. ``extraction.yaml``
+        is a recovery sidecar and is left in place. Deletion is guarded by an
+        existence check and never raises: any ``OSError`` is caught and logged
+        as a warning so a cleanup failure never fails the run.
+
+        Args:
+            ctx: Pre-resolved end-of-run decisions from the runner.
+        """
+        if not ctx.deep_cleanup:
+            return
+        if self._job is None or self._job.result is None:
+            return
+        extracted_dir = self._job.result.work_dir / EXTRACTED_DIR
+        if extracted_dir.exists():
+            try:
+                shutil.rmtree(extracted_dir)
+                logger.debug("deep cleanup: deleted %s", extracted_dir)
+            except OSError as exc:
+                logger.warning("deep cleanup: could not delete %s: %s", extracted_dir, exc)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _ensure_dependencies(self, execute: bool) -> "ExtractionPhaseResult | None":
-        """Scan dependencies if they have no cached result; fail fast if incomplete.
+    def _ensure_dependencies(self, dry_run: bool) -> "ExtractionPhaseResult | None":
+        """Resolve dependencies via the shared walk; fail fast if any is incomplete.
 
         Args:
-            execute: When ``True``, call ``dep.run()`` instead of ``dep.scan()``
-                     for dependencies without a cached result.
+            dry_run: Propagated unchanged to each dependency's ``run()``.
 
         Returns:
-            A ``FAILED`` result if any dependency is not complete; ``None`` otherwise.
+            A ``FAILED`` result if any dependency failed, a ``PENDING`` result
+            if any dependency is legitimately pending (dry-run only), or
+            ``None`` when all dependencies are complete and the phase may
+            proceed.
         """
         if self._job is None:
             return ExtractionPhaseResult(
@@ -885,15 +890,11 @@ class ExtractionPhase:
                 audio     = [],
             )
 
-        if self._job.result is None:
-            if execute:
-                self._job.run()
-            else:
-                self._job.scan()
-
-        if not self._job.result.is_complete:  # type: ignore[union-attr]
-            err = "JobPhase did not complete successfully"
-            logger.critical(err)
+        status = resolve_dependencies(self, dry_run=dry_run)
+        if status.failed:
+            names = ", ".join(n.capitalize() for n in status.failed)
+            err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
+            logger.error(err)
             return ExtractionPhaseResult(
                 outcome   = PhaseOutcome.FAILED,
                 artifacts = [],
@@ -902,12 +903,23 @@ class ExtractionPhase:
                 video     = None,
                 audio     = [],
             )
+        if status.pending:
+            names = ", ".join(n.capitalize() for n in status.pending)
+            msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
+            logger.info(msg)
+            return ExtractionPhaseResult(
+                outcome   = PhaseOutcome.PENDING,
+                artifacts = [],
+                message   = msg,
+                error     = None,
+                video     = None,
+                audio     = [],
+            )
         return None
 
     def _recover(
         self,
         force_wipe: bool,
-        execute: bool,
     ) -> tuple[list[ExtractionArtifact], VideoMetadata | None, list[AudioMetadata]]:
         """Classify extraction artifacts by enumerating every source track.
 
@@ -927,8 +939,6 @@ class ExtractionPhase:
 
         Args:
             force_wipe: When ``True``, wipe all extraction artifacts first.
-            execute:    When ``True``, ``.tmp`` cleanup and wipe are performed;
-                        when ``False`` (scan mode), no files are written or deleted.
 
         Returns:
             ``(artifacts, primary_video_meta, audio_meta_list)`` tuple. The
@@ -940,7 +950,7 @@ class ExtractionPhase:
         yaml_path     = work_dir / _EXTRACTION_YAML_NAME
 
         # Step 1: force-wipe
-        if force_wipe and execute:
+        if force_wipe:
             if extracted_dir.exists():
                 shutil.rmtree(extracted_dir)
                 logger.debug("force_wipe: deleted %s", extracted_dir)
@@ -948,8 +958,8 @@ class ExtractionPhase:
                 yaml_path.unlink()
                 logger.debug("force_wipe: deleted %s", yaml_path)
 
-        # Step 2: clean up .tmp files (execute mode only)
-        if execute and extracted_dir.exists():
+        # Step 2: clean up .tmp files
+        if extracted_dir.exists():
             for tmp in extracted_dir.glob(f"*{TEMP_SUFFIX}"):
                 try:
                     tmp.unlink()
@@ -1332,9 +1342,15 @@ class ExtractionPhase:
         artifacts: list[ExtractionArtifact],
         did_work:  bool,
     ) -> PhaseOutcome:
-        """Derive ``PhaseOutcome`` from artifact states."""
-        if any(a.state == ArtifactState.ABSENT for a in artifacts):
-            return PhaseOutcome.DRY_RUN
+        """Derive ``PhaseOutcome`` purely from artifact states (mode-free).
+
+        Any ``ABSENT`` or ``PARTIAL`` artifact means wanted work remains, so
+        the phase is ``PENDING`` regardless of run mode; the runner owns the
+        dry-run vs execute distinction. When every artifact is ``COMPLETE``
+        the phase is ``COMPLETED`` (did work) or ``REUSED`` (nothing to do).
+        """
+        if any(a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL) for a in artifacts):
+            return PhaseOutcome.PENDING
         if all(a.state == ArtifactState.COMPLETE for a in artifacts) and artifacts:
             return PhaseOutcome.REUSED if not did_work else PhaseOutcome.COMPLETED
-        return PhaseOutcome.DRY_RUN
+        return PhaseOutcome.PENDING

@@ -6,6 +6,8 @@
 
 ## Cross-Spec Notes
 
+**Superseded in part by `phase-terminal-runner` (2026-09-09).** The read-only recovery pass this spec exposed through `scan()` is gone: `scan()` is removed from the `Phase` protocol and every phase, and `_ensure_dependencies` loses its `execute` parameter — every dependency is now resolved uniformly via `dep.run(dry_run=...)`. The `execute` parameter on each phase's internal `_recover()` is likewise removed (the old `execute=False` read-only mode had no remaining caller). Recovery itself (filesystem scan, artifact classification, `.tmp` cleanup) is unchanged; only the separate `scan()`/`execute=False` entry point is retired.
+
 **Superseded in part by `artifact-state-refactor` (2026-09-15).** This spec established the `ArtifactState` enum (`ABSENT`/`ARTIFACT_ONLY`/`COMPLETE`) used throughout recovery. `artifact-state-refactor` renames `ARTIFACT_ONLY` → `PARTIAL` and re-scopes the enum to completeness only (selection is carried by a new `Artifact.wanted` field). It also removes the per-phase `_recovery_message()` helpers and unifies recovery reporting in a single `log_recovery_line()`. References to `ARTIFACT_ONLY` below are historical — see `artifact-state-refactor` for the current names.
 
 ## Introduction
