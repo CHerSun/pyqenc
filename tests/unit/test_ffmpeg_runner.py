@@ -207,3 +207,29 @@ class TestResolveTmpPaths:
         _, tmp_to_final = _resolve_tmp_paths(cmd, out)
         tmp_path = list(tmp_to_final.keys())[0]
         assert tmp_path.name == "chunk.1920x800.crf22.0.tmp"
+
+    def test_default_output_format_injects_matroska(self) -> None:
+        """Bug: an audio-chains change must not silently alter video call sites.
+
+        With no ``output_format`` the runner must still inject ``-f matroska``
+        before the ``.tmp`` output, exactly as before the parameter existed.
+        """
+        out = Path("/tmp/output.mkv")
+        cmd: list = ["ffmpeg", "-i", "input.mkv", out]
+        modified_cmd, _ = _resolve_tmp_paths(cmd, out)
+        tmp_path = out.parent / f"{out.stem}.tmp"
+        idx = modified_cmd.index(tmp_path)
+        assert modified_cmd[idx - 2 : idx] == ["-f", "matroska"]
+
+    def test_explicit_output_format_injects_that_muxer(self) -> None:
+        """Bug: audio outputs muxed as Matroska instead of their real container.
+
+        An explicit ``output_format="flac"`` must inject ``-f flac`` before the
+        ``.tmp`` output — never the Matroska default.
+        """
+        out = Path("/tmp/track chain=night.flac")
+        cmd: list = ["ffmpeg", "-i", "in.flac", out]
+        modified_cmd, _ = _resolve_tmp_paths(cmd, out, output_format="flac")
+        tmp_path = out.parent / f"{out.stem}.tmp"
+        idx = modified_cmd.index(tmp_path)
+        assert modified_cmd[idx - 2 : idx] == ["-f", "flac"]

@@ -1,1214 +1,50 @@
 """
 Audio processing phase for the quality-based encoding pipeline.
 
-This module handles audio stream processing using audio strategies
-to generate normalised stereo variants for day and night modes.
-
-Strategy classes:
-  BaseStrategy, ConversionStrategy,
-  DownmixStrategy71to51, DownmixStrategy51to20Std,
-  DownmixStrategy51to20Night, DownmixStrategy51to20NBoost,
-  NormStrategy, DynaudnormStrategy,
-  Task, AudioEngine, SynchronousRunner, AsyncRunner
+Drives the configured audio *chains* over the selected source tracks: each
+(track, chain) pair produces one deterministically-named output. Chain
+resolution, selection, and the generic filter executor live in the
+``pyqenc.audio`` package; this module owns the :class:`AudioPhase` object that
+recovers, invalidates, produces, and reports those outputs following the Phase
+pattern.
 """
 # CHerSun 2026
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
-import re
-from abc import ABC, abstractmethod
-from collections import deque
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from pathlib import Path
 
 from alive_progress import config_handler
-
-from pyqenc.constants import (
-    AUDIO_CH_51,
-    AUDIO_CH_71,
-    AUDIO_STEM_SEPARATOR,
-    NORMALISED_PREFIXES,
-    TIME_SEPARATOR_MS,
-)
-from pyqenc.utils.alive import AdvanceState, ProgressBar
-from pyqenc.utils.ffmpeg_runner import run_ffmpeg, run_ffmpeg_async
 
 config_handler.set_global(enrich_print=False) # type: ignore
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Constants
+# AudioPhase — Phase object
 # ---------------------------------------------------------------------------
 
-_INTERMEDIATE_CODEC:     str = "flac"
-_INTERMEDIATE_EXTENSION: str = "flac"
-
-
-# ---------------------------------------------------------------------------
-# EBU R128 loudnorm constants
-# ---------------------------------------------------------------------------
-
-_LOUDNORM_TARGET_I:   str = "-23.0"
-"""Target integrated loudness (LUFS) for EBU R128 normalisation."""
-_LOUDNORM_TARGET_TP:  str = "-0.5"
-"""Target true peak (dBFS) for EBU R128 normalisation."""
-_LOUDNORM_TARGET_LRA: str = "7.0"
-"""Target loudness range (LU) for EBU R128 normalisation."""
-
-_LOUDNORM_JSON_RE = re.compile(
-    r"\[Parsed_loudnorm[^\]]*\]\s*(\{.*?\})",
-    re.DOTALL,
-)
-"""Regex to extract the loudnorm JSON measurement block from ffmpeg stderr."""
-
-
-async def _two_pass_loudnorm(
-    source:        Path,
-    output:        Path,
-    extra_filters: list[str] | None = None,
-) -> None:
-    """Run a 2-pass EBU R128 loudnorm normalisation, optionally with prepended filters.
-
-    Pass 1 measures integrated loudness and true peak by running ffmpeg with
-    ``loudnorm=print_format=json`` and a null output (no file written).
-    Pass 2 applies linear normalisation using the measured values (and any
-    ``extra_filters`` prepended) and writes the output FLAC file via the
-    ``.tmp``-then-rename protocol.
-
-    Args:
-        source:        Input audio file.
-        output:        Intended output FLAC path.
-        extra_filters: Optional list of ffmpeg audio filter strings to prepend
-                       before the ``loudnorm`` filter in both passes (e.g. a
-                       downmix filter).  ``None`` means no extra filters.
-
-    Raises:
-        RuntimeError: If pass 1 does not produce a parseable loudnorm JSON block.
-        RuntimeError: If pass 2 ffmpeg command fails.
-    """
-    filters_prefix = list(extra_filters) if extra_filters else []
-
-    # ------------------------------------------------------------------
-    # Pass 1 — analysis only (no output file)
-    # ------------------------------------------------------------------
-    analysis_filter = ",".join(
-        filters_prefix
-        + [f"loudnorm=I={_LOUDNORM_TARGET_I}:TP={_LOUDNORM_TARGET_TP}:LRA={_LOUDNORM_TARGET_LRA}:print_format=json"]
-    )
-    pass1_cmd: list[str | os.PathLike] = [
-        "ffmpeg",
-        "-i",    source,
-        "-af",   analysis_filter,
-        "-f",    "null",
-        "-",
-    ]
-    logger.debug("loudnorm pass 1: %s", source.name)
-    pass1_result = await run_ffmpeg_async(pass1_cmd, output_file=None)
-
-    # Parse the JSON block from stderr
-    stderr_text = "\n".join(pass1_result.stderr_lines)
-    match = _LOUDNORM_JSON_RE.search(stderr_text)
-    if not match:
-        raise RuntimeError(
-            f"loudnorm pass 1 did not produce a parseable JSON block for {source.name!r}. "
-            f"ffmpeg exit code: {pass1_result.returncode}"
-        )
-
-    try:
-        measured = json.loads(match.group(1))
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"Failed to parse loudnorm JSON for {source.name!r}: {exc}"
-        ) from exc
-
-    input_i   = measured.get("input_i",   "-23.0")
-    input_tp  = measured.get("input_tp",  "-0.5")
-    input_lra = measured.get("input_lra", "7.0")
-    input_thresh = measured.get("input_thresh", "-33.0")
-    target_offset = measured.get("target_offset", "0.0")
-
-    logger.debug(
-        "loudnorm pass 1 measured: I=%s TP=%s LRA=%s thresh=%s offset=%s",
-        input_i, input_tp, input_lra, input_thresh, target_offset,
-    )
-
-    # ------------------------------------------------------------------
-    # Pass 2 — linear normalisation → output FLAC
-    # ------------------------------------------------------------------
-    normalise_filter = (
-        f"loudnorm=I={_LOUDNORM_TARGET_I}:TP={_LOUDNORM_TARGET_TP}:LRA={_LOUDNORM_TARGET_LRA}"
-        f":linear=true"
-        f":measured_I={input_i}:measured_TP={input_tp}:measured_LRA={input_lra}"
-        f":measured_thresh={input_thresh}:offset={target_offset}:print_format=none"
-    )
-    pass2_filter = ",".join(filters_prefix + [normalise_filter])
-    pass2_cmd: list[str | os.PathLike] = [
-        "ffmpeg",
-        "-i",    source,
-        "-af",   pass2_filter,
-        "-c:a",  _INTERMEDIATE_CODEC,
-        output,
-    ]
-    logger.debug("loudnorm pass 2: %s → %s", source.name, output.name)
-    pass2_result = await run_ffmpeg_async(pass2_cmd, output_file=output)
-
-    if not pass2_result.success:
-        raise RuntimeError(
-            f"loudnorm pass 2 failed for {source.name!r} "
-            f"(exit code {pass2_result.returncode})"
-        )
-
-    logger.info("loudnorm complete: %s", output.name)
-
-
-_VOLUMEDETECT_RE = re.compile(r"max_volume:\s*([-\d.]+)\s*dB")
-"""Regex to extract the max_volume reading from ``volumedetect`` stderr output."""
-
-
-async def _two_pass_peaknorm(
-    source:           Path,
-    output:           Path,
-    peak_target_dbfs: float,
-    extra_filters:    list[str] | None = None,
-) -> None:
-    """Run a 2-pass peak normalisation, optionally with prepended filters.
-
-    Pass 1 measures the true peak via ``volumedetect``, running the full filter
-    chain (extra_filters + volumedetect) with a null output.
-    Pass 2 appends a ``volume`` filter to shift the peak to *peak_target_dbfs*
-    and writes the output FLAC file via the ``.tmp``-then-rename protocol.
-
-    No resampling is performed — the output preserves the source sample rate
-    and bit depth exactly.
-
-    Args:
-        source:           Input audio file.
-        output:           Intended output FLAC path.
-        peak_target_dbfs: Target peak level in dBFS (e.g. ``-1.0``).
-        extra_filters:    Optional list of ffmpeg audio filter strings to prepend
-                          before the ``volumedetect`` / ``volume`` filter
-                          (e.g. a downmix filter).  ``None`` means no extra filters.
-
-    Raises:
-        RuntimeError: If pass 1 does not produce a parseable ``max_volume`` line.
-        RuntimeError: If pass 2 ffmpeg command fails.
-    """
-    filters_prefix = list(extra_filters) if extra_filters else []
-
-    # ------------------------------------------------------------------
-    # Pass 1 — measure peak via volumedetect (no output file)
-    # ------------------------------------------------------------------
-    analysis_filter = ",".join(filters_prefix + ["volumedetect"])
-    pass1_cmd: list[str | os.PathLike] = [
-        "ffmpeg",
-        "-i",  source,
-        "-af", analysis_filter,
-        "-f",  "null",
-        "-",
-    ]
-    logger.debug("peaknorm pass 1: %s", source.name)
-    pass1_result = await run_ffmpeg_async(pass1_cmd, output_file=None)
-
-    stderr_text = "\n".join(pass1_result.stderr_lines)
-    match = _VOLUMEDETECT_RE.search(stderr_text)
-    if not match:
-        raise RuntimeError(
-            f"peaknorm pass 1 did not produce a parseable max_volume line for {source.name!r}. "
-            f"ffmpeg exit code: {pass1_result.returncode}"
-        )
-
-    max_volume_db = float(match.group(1))
-    gain_db       = peak_target_dbfs - max_volume_db
-    logger.debug(
-        "peaknorm pass 1: max_volume=%.2f dB, target=%.2f dBFS, gain=%.2f dB",
-        max_volume_db, peak_target_dbfs, gain_db,
-    )
-
-    # ------------------------------------------------------------------
-    # Pass 2 — apply gain → output FLAC
-    # ------------------------------------------------------------------
-    volume_filter = f"volume={gain_db:.4f}dB"
-    pass2_filter  = ",".join(filters_prefix + [volume_filter])
-    pass2_cmd: list[str | os.PathLike] = [
-        "ffmpeg",
-        "-i",    source,
-        "-af",   pass2_filter,
-        "-c:a",  _INTERMEDIATE_CODEC,
-        output,
-    ]
-    logger.debug("peaknorm pass 2: %s → %s", source.name, output.name)
-    pass2_result = await run_ffmpeg_async(pass2_cmd, output_file=output)
-
-    if not pass2_result.success:
-        raise RuntimeError(
-            f"peaknorm pass 2 failed for {source.name!r} "
-            f"(exit code {pass2_result.returncode})"
-        )
-
-    logger.info("peaknorm complete: %s", output.name)
-
-
-# ---------------------------------------------------------------------------
-# BaseStrategy
-# ---------------------------------------------------------------------------
-
-class BaseStrategy(ABC):
-    """Base class for all audio processing strategies."""
-
-    def __init__(self, name: str, strategy_short: str) -> None:
-        self.name           = name.replace(".", TIME_SEPARATOR_MS)
-        self.strategy_short = strategy_short.replace(".", TIME_SEPARATOR_MS)
-
-    def output_path(self, source: Path, extension: str = "flac") -> Path:
-        """Construct the output path using the ``{strategy_short} ← {stem}.{extension}`` convention."""
-        return source.parent / f"{self.strategy_short} {AUDIO_STEM_SEPARATOR} {source.stem}.{extension}"
-
-    @abstractmethod
-    def check(self, source: Path) -> bool:
-        """Return True if this strategy should be applied to *source*."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def plan(self, source: Path) -> Path:
-        """Return the planned output Path for *source* (used during plan building)."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def execute(self, source: Path, output: Path, dry_run: bool) -> None:
-        """Execute the strategy on *source*, writing to *output*.
-
-        If *dry_run* is True, no actual processing is performed.
-        """
-        raise NotImplementedError
-
-    async def execute_async(self, source: Path, output: Path, dry_run: bool) -> None:
-        """Async execution contract — default wraps synchronous *execute* in a thread."""
-        await asyncio.to_thread(self.execute, source, output, dry_run)
-
-
-# ---------------------------------------------------------------------------
-# Channel-count lookup (used by ConversionStrategy for bitrate scaling)
-# ---------------------------------------------------------------------------
-
-_CHANNEL_COUNTS: dict[str, int] = {
-    "ch=2.0":    2,
-    "ch=stereo": 2,
-    "ch=5.1":    6,
-    "ch=7.1":    8,
-}
-"""Maps channel layout tags to their channel count for proportional bitrate scaling."""
-
-
-def _scale_bitrate(bitrate_per_channel: str, source: Path) -> str:
-    """Derive the total bitrate for *source* from a per-channel bitrate string.
-
-    Reads the channel layout tag embedded in *source*'s filename (e.g. ``ch=5.1``)
-    and multiplies the per-channel rate by the corresponding channel count.
-
-    Args:
-        bitrate_per_channel: Per-channel bitrate string, e.g. ``"96k"``.
-                             The trailing ``k``/``K`` suffix is stripped, the integer
-                             multiplied by the channel count, and ``k`` re-appended.
-        source:              Audio file whose name contains the channel layout tag.
-
-    Returns:
-        Total bitrate string (e.g. ``"576k"`` for 5.1 + 96k/ch).
-        Falls back to ``bitrate_per_channel`` unchanged if parsing fails or
-        no recognised layout tag is found in the filename.
-    """
-    # Determine channel count from filename tag
-    ch_count = 2  # default: stereo
-    for tag, count in _CHANNEL_COUNTS.items():
-        if tag in source.name:
-            ch_count = count
-            break
-
-    # Parse the numeric part (strip k/K suffix)
-    raw = bitrate_per_channel.lower()
-    if raw.endswith("k"):
-        try:
-            kbps = int(raw[:-1])
-            return f"{kbps * ch_count}k"
-        except ValueError:
-            logger.warning("Cannot parse bitrate_per_channel %r; using as-is", bitrate_per_channel)
-    elif raw.endswith("m"):
-        try:
-            kbps = int(float(raw[:-1]) * 1000)
-            return f"{kbps * ch_count}k"
-        except ValueError:
-            logger.warning("Cannot parse bitrate_per_channel %r; using as-is", bitrate_per_channel)
-
-    return bitrate_per_channel
-
-
-def _filename_prefix(source: Path) -> str:
-    """Return the part of the filename *before* the first ``←`` separator.
-
-    For a raw extracted file (no separator) this is the whole filename, which
-    contains the channel layout tag (e.g. ``ch=5.1``).  For any processed
-    output the prefix is just the ``strategy_short`` (e.g. ``2.0 std``), which
-    never contains a channel layout tag.
-
-    Using the prefix for ``check()`` prevents channel layout tags buried in
-    chained stems from triggering downmix strategies on already-processed files.
-    """
-    sep = f" {AUDIO_STEM_SEPARATOR} "
-    name = source.name
-    idx = name.find(sep)
-    return name[:idx] if idx != -1 else name
-
-
-def _is_raw_source(source: Path) -> bool:
-    """Return True when *source* is a raw extracted file (no ``←`` separator in name)."""
-    return f" {AUDIO_STEM_SEPARATOR} " not in source.name
-
-
-# ---------------------------------------------------------------------------
-# DownmixStrategy71to51
-# ---------------------------------------------------------------------------
-
-class DownmixStrategy71to51(BaseStrategy):
-    """Single-pass 7.1 → 5.1 downmix (no normalisation needed; no clipping risk)."""
-
-    # 7.1 → 5.1: drop the wide-left/wide-right pair, keep the rest
-    _FILTER: str = "pan=5.1|FL=FL|FR=FR|FC=FC|LFE=LFE|BL=BL|BR=BR"
-
-    def __init__(self) -> None:
-        super().__init__(name="7.1→5.1 Downmix", strategy_short="5.1")
-
-    def check(self, source: Path) -> bool:
-        """Return True only when source is a raw extracted file with the 7.1 channel layout tag."""
-        return _is_raw_source(source) and AUDIO_CH_71 in source.name
-
-    def plan(self, source: Path) -> Path:
-        return self.output_path(source)
-
-    def execute(self, source: Path, output: Path, dry_run: bool) -> None:
-        if dry_run:
-            return
-        cmd: list[str | os.PathLike] = [
-            "ffmpeg",
-            "-i",   source,
-            "-af",  self._FILTER,
-            "-c:a", _INTERMEDIATE_CODEC,
-            output,
-        ]
-        result = run_ffmpeg(cmd, output_file=output)
-        if not result.success:
-            raise RuntimeError(f"7.1→5.1 downmix failed for {source.name!r}")
-
-    async def execute_async(self, source: Path, output: Path, dry_run: bool) -> None:
-        if dry_run:
-            return
-        cmd: list[str | os.PathLike] = [
-            "ffmpeg",
-            "-i",   source,
-            "-af",  self._FILTER,
-            "-c:a", _INTERMEDIATE_CODEC,
-            output,
-        ]
-        result = await run_ffmpeg_async(cmd, output_file=output)
-        if not result.success:
-            raise RuntimeError(f"7.1→5.1 downmix failed for {source.name!r}")
-
-
-# ---------------------------------------------------------------------------
-# DownmixStrategy51to20Std
-# ---------------------------------------------------------------------------
-
-class DownmixStrategy51to20Std(BaseStrategy):
-    """5.1 → 2.0 standard downmix + peak normalisation (2-pass).
-
-    Uses ffmpeg's default downmix matrix (``-ac 2``), which ignores the LFE channel.
-    """
-
-    _FILTER: str = "aresample=matrix_encoding=dplii,pan=stereo|FL=FL+0.707*FC+0.707*BL|FR=FR+0.707*FC+0.707*BR"
-
-    def __init__(self, audio_cfg: AudioConfig) -> None:
-        super().__init__(name="5.1→2.0 Std Downmix+Norm", strategy_short="2.0 std")
-        self._audio_cfg = audio_cfg
-
-    def check(self, source: Path) -> bool:
-        """Return True for raw 5.1 sources or the direct 7.1→5.1 downmix output."""
-        return (_is_raw_source(source) and AUDIO_CH_51 in source.name) or _filename_prefix(source) == f"5{TIME_SEPARATOR_MS}1"
-
-    def plan(self, source: Path) -> Path:
-        return self.output_path(source)
-
-    def execute(self, source: Path, output: Path, dry_run: bool) -> None:
-        if dry_run:
-            return
-        asyncio.run(_two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs, extra_filters=[self._FILTER]))
-
-    async def execute_async(self, source: Path, output: Path, dry_run: bool) -> None:
-        if dry_run:
-            return
-        await _two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs, extra_filters=[self._FILTER])
-
-
-# ---------------------------------------------------------------------------
-# DownmixStrategy51to20Night
-# ---------------------------------------------------------------------------
-
-class DownmixStrategy51to20Night(BaseStrategy):
-    """5.1 → 2.0 night-mode downmix + peak normalisation (2-pass).
-
-    Incorporates the LFE channel mildly (0.5× gain) for better bass reproduction
-    at low listening volumes.
-    """
-
-    _FILTER: str = (
-        "pan=stereo"
-        "|FL=FL+0.707*FC+0.5*LFE+0.707*BL"
-        "|FR=FR+0.707*FC+0.5*LFE+0.707*BR"
-    )
-
-    def __init__(self, audio_cfg: AudioConfig) -> None:
-        super().__init__(name="5.1→2.0 Night Downmix+Norm", strategy_short="2.0 night")
-        self._audio_cfg = audio_cfg
-
-    def check(self, source: Path) -> bool:
-        """Return True for raw 5.1 sources or the direct 7.1→5.1 downmix output."""
-        return (_is_raw_source(source) and AUDIO_CH_51 in source.name) or _filename_prefix(source) == f"5{TIME_SEPARATOR_MS}1"
-
-    def plan(self, source: Path) -> Path:
-        return self.output_path(source)
-
-    def execute(self, source: Path, output: Path, dry_run: bool) -> None:
-        if dry_run:
-            return
-        asyncio.run(_two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs, extra_filters=[self._FILTER]))
-
-    async def execute_async(self, source: Path, output: Path, dry_run: bool) -> None:
-        if dry_run:
-            return
-        await _two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs, extra_filters=[self._FILTER])
-
-
-# ---------------------------------------------------------------------------
-# DownmixStrategy51to20NBoost
-# ---------------------------------------------------------------------------
-
-class DownmixStrategy51to20NBoost(BaseStrategy):
-    """5.1 → 2.0 night-mode boosted downmix + peak normalisation (2-pass).
-
-    Incorporates the LFE channel with a stronger boost (0.9× gain) for
-    pronounced bass at low listening volumes.
-    """
-
-    _FILTER: str = (
-        "pan=stereo"
-        "|FL=FL+0.707*FC+0.9*LFE+0.707*BL"
-        "|FR=FR+0.707*FC+0.9*LFE+0.707*BR"
-    )
-
-    def __init__(self, audio_cfg: AudioConfig) -> None:
-        super().__init__(name="5.1→2.0 NBoost Downmix+Norm", strategy_short="2.0 nboost")
-        self._audio_cfg = audio_cfg
-
-    def check(self, source: Path) -> bool:
-        """Return True for raw 5.1 sources or the direct 7.1→5.1 downmix output."""
-        return (_is_raw_source(source) and AUDIO_CH_51 in source.name) or _filename_prefix(source) == f"5{TIME_SEPARATOR_MS}1"
-
-    def plan(self, source: Path) -> Path:
-        return self.output_path(source)
-
-    def execute(self, source: Path, output: Path, dry_run: bool) -> None:
-        if dry_run:
-            return
-        asyncio.run(_two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs, extra_filters=[self._FILTER]))
-
-    async def execute_async(self, source: Path, output: Path, dry_run: bool) -> None:
-        if dry_run:
-            return
-        await _two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs, extra_filters=[self._FILTER])
-
-
-# ---------------------------------------------------------------------------
-# NormStrategy
-# ---------------------------------------------------------------------------
-
-class NormStrategy(BaseStrategy):
-    """Standalone peak normalisation (2-pass, no downmix).
-
-    Applied to any source that has not yet been normalised — i.e. whose filename
-    does not start with any of the ``NORMALISED_PREFIXES``.
-    """
-
-    def __init__(self, audio_cfg: AudioConfig) -> None:
-        super().__init__(name="EBU R128 Norm", strategy_short="norm")
-        self._audio_cfg = audio_cfg
-
-    def check(self, source: Path) -> bool:
-        """Return True for raw extracted sources or the 7.1→5.1 downmix output that have not been normalised.
-
-        The ``5.1 ←`` downmix output is not a raw source but still needs
-        normalisation treatment — it is a 5.1 FLAC that has never been through
-        EBU R128.  All other processed outputs (anything else with a ``←``) are
-        excluded.
-        """
-        is_eligible = _is_raw_source(source) or _filename_prefix(source) == f"5{TIME_SEPARATOR_MS}1"
-        return is_eligible and not source.name.startswith(NORMALISED_PREFIXES)
-
-    def plan(self, source: Path) -> Path:
-        return self.output_path(source)
-
-    def execute(self, source: Path, output: Path, dry_run: bool) -> None:
-        if dry_run:
-            return
-        asyncio.run(_two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs))
-
-    async def execute_async(self, source: Path, output: Path, dry_run: bool) -> None:
-        if dry_run:
-            return
-        await _two_pass_peaknorm(source, output, self._audio_cfg.peak_target_dbfs)
-
-
-# ---------------------------------------------------------------------------
-# DynaudnormStrategy
-# ---------------------------------------------------------------------------
-
-class DynaudnormStrategy(BaseStrategy):
-    """Dynamic normalisation applied on top of any statically normalised output.
-
-    Applied only to files whose filename starts with one of the
-    ``NORMALISED_PREFIXES`` (i.e. ``norm ←``, ``2.0 std ←``, etc.).
-    """
-
-    _FILTER: str = "dynaudnorm=f=500:g=31:p=0.95:m=10.0:r=0.5:b=1"
-
-    def __init__(self) -> None:
-        super().__init__(name="Dynamic Norm", strategy_short="dynaudnorm")
-
-    def check(self, source: Path) -> bool:
-        """Return True when the file is a direct normalised output, or dynaudnorm applied to a 5.1 downmix norm output.
-
-        Accepts:
-        - Any non-raw file starting with a normalised prefix (``norm ←``,
-          ``2.0 std ←``, etc.) — the standard case.
-        - The ``norm ← 5.1 ←`` output, which starts with ``norm ←`` and is
-          not raw, so it is already covered by the above.
-
-        Rejects:
-        - Raw sources (``_is_raw_source``).
-        - ``dynaudnorm ←`` outputs (their name starts with ``dynaudnorm``, not
-          a normalised prefix, so ``startswith`` already excludes them).
-        """
-        return source.name.startswith(NORMALISED_PREFIXES) and not _is_raw_source(source)
-
-    def plan(self, source: Path) -> Path:
-        return self.output_path(source)
-
-    def execute(self, source: Path, output: Path, dry_run: bool) -> None:
-        if dry_run:
-            return
-        cmd: list[str | os.PathLike] = [
-            "ffmpeg",
-            "-i",   source,
-            "-af",  self._FILTER,
-            "-c:a", _INTERMEDIATE_CODEC,
-            output,
-        ]
-        result = run_ffmpeg(cmd, output_file=output)
-        if not result.success:
-            raise RuntimeError(f"dynaudnorm failed for {source.name!r}")
-
-    async def execute_async(self, source: Path, output: Path, dry_run: bool) -> None:
-        if dry_run:
-            return
-        cmd: list[str | os.PathLike] = [
-            "ffmpeg",
-            "-i",   source,
-            "-af",  self._FILTER,
-            "-c:a", _INTERMEDIATE_CODEC,
-            output,
-        ]
-        result = await run_ffmpeg_async(cmd, output_file=output)
-        if not result.success:
-            raise RuntimeError(f"dynaudnorm failed for {source.name!r}")
-
-
-# ---------------------------------------------------------------------------
-# ConversionStrategy
-# ---------------------------------------------------------------------------
-
-class ConversionStrategy(BaseStrategy):
-    """Flat final delivery conversion to the configured codec/extension.
-
-    The target bitrate is derived at execution time by multiplying
-    ``bitrate_per_channel`` by the channel count read from the source filename.
-    CBR mode is enforced unconditionally via ``-b:a <bitrate>``.
-    """
-
-    def __init__(
-        self,
-        codec:               str,
-        bitrate_per_channel: str,
-        extension:           str,
-    ) -> None:
-        """
-        Args:
-            codec:               ffmpeg audio codec name (e.g. ``"aac"``).
-            bitrate_per_channel: Per-channel bitrate string (e.g. ``"96k"``).
-                                 Scaled at runtime by channel count.
-            extension:           Output file extension (e.g. ``".m4a"`` or ``"m4a"``).
-        """
-        super().__init__(name="Audio Conversion", strategy_short=codec)
-        self._codec               = codec
-        self._bitrate_per_channel = bitrate_per_channel
-        self._extension           = extension
-
-    def check(self, source: Path) -> bool:
-        """Always returns False — applied via keep/convert filter only."""
-        return False
-
-    def plan(self, source: Path) -> Path:
-        return self.output_path(source, extension=self._extension.lstrip("."))
-
-    def execute(self, source: Path, output: Path, dry_run: bool) -> None:
-        if dry_run:
-            return
-        bitrate = _scale_bitrate(self._bitrate_per_channel, source)
-        cmd: list[str | os.PathLike] = [
-            "ffmpeg",
-            "-i",   source,
-            "-c:a", self._codec,
-            "-b:a", bitrate,
-            output,
-        ]
-        result = run_ffmpeg(cmd, output_file=output)
-        if not result.success:
-            raise RuntimeError(f"Audio conversion failed for {source.name!r}")
-
-    async def execute_async(self, source: Path, output: Path, dry_run: bool) -> None:
-        if dry_run:
-            return
-        bitrate = _scale_bitrate(self._bitrate_per_channel, source)
-        cmd: list[str | os.PathLike] = [
-            "ffmpeg",
-            "-i",   source,
-            "-c:a", self._codec,
-            "-b:a", bitrate,
-            output,
-        ]
-        result = await run_ffmpeg_async(cmd, output_file=output)
-        if not result.success:
-            raise RuntimeError(f"Audio conversion failed for {source.name!r}")
-
-
-# ---------------------------------------------------------------------------
-# Task
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Task:
-    """A single audio processing task in the pipeline graph."""
-
-    source:      Path
-    """Source audio file."""
-    output:      Path
-    """Output path — must be unique across all tasks (used for hashing)."""
-    strategy:    BaseStrategy
-    """Strategy to apply."""
-    depth:       int
-    """Depth in the task tree (0 = root)."""
-    failed:      bool      = field(default=False)
-    """Set to True when execution fails."""
-    parent:      Task|None = field(default=None)
-    """Parent task, if any."""
-
-    def __hash__(self) -> int:
-        return hash(self.output)
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, Task) and self.output == other.output
-
-    def __repr__(self) -> str:
-        flags = "❌" if self.failed else ""
-        suffix = f" {flags}" if flags else ""
-        return f"[{self.strategy.name}]{suffix} {self.output}"
-
-
-# ---------------------------------------------------------------------------
-# AudioEngine — plan builder
-# ---------------------------------------------------------------------------
-
-@dataclass
-class PlanResult:
-    """Processing plan produced by :meth:`AudioEngine.build_plan`."""
-
-    tasks:         list[Task]
-    found_files:   int
-    skipped_files: int
-
-
-@dataclass
-class PlanExecutionResult:
-    """Execution counters returned by a runner."""
-
-    success: int
-    failed:  int
-    skipped: int
-
-
-class AudioEngine:
-    """Orchestrates the application of strategies to audio files.
-
-    Attributes:
-        strategies:         Ordered list of transformation strategies.
-        finalizer_strategy: Optional strategy applied to terminal nodes.
-    """
-
-    def __init__(
-        self,
-        strategies: list[BaseStrategy],
-        finalizer:  BaseStrategy | None = None,
-    ) -> None:
-        self.strategies        = strategies
-        self.finalizer_strategy = finalizer
-
-        # Validate uniqueness of strategy_short across all registered strategies
-        all_strategies = list(strategies) + ([finalizer] if finalizer else [])
-        seen_shorts: dict[str, str] = {}
-        for s in all_strategies:
-            if s.strategy_short in seen_shorts:
-                raise ValueError(
-                    f"Duplicate strategy_short '{s.strategy_short}' on '{s.name}' "
-                    f"(already used by '{seen_shorts[s.strategy_short]}')"
-                )
-            seen_shorts[s.strategy_short] = s.name
-
-    def build_plan(
-        self,
-        directory:      Path,
-        convert_filter: str,
-    ) -> PlanResult:
-        """Scan *directory* and build a processing plan.
-
-        Each source file is expanded through the registered strategies via BFS.
-        After each new output path is enqueued, its filename is tested against
-        *convert_filter*; any match causes a :class:`ConversionStrategy` task to
-        be appended immediately (with that output as its source).
-
-        Graph termination is natural: ``dynaudnorm ←`` prefixed outputs never
-        satisfy any strategy's ``check()``, so the BFS stops without needing an
-        explicit depth limit or ``is_terminal`` flag.
-
-        Args:
-            directory:      Directory containing source audio files.
-            convert_filter: Compiled-regex string; outputs whose filename matches
-                            are passed to the finalizer strategy for conversion.
-
-        Returns:
-            :class:`PlanResult` with the task list and discovery counters.
-        """
-        convert_re = re.compile(convert_filter)
-
-        initial = [
-            Path(f) for f in directory.iterdir()
-            if f.is_file() and f.suffix.lower() in (".flac", ".mka")
-        ]
-        found_files = len(initial)
-
-        queue: deque[tuple[Path, int, Task | None]] = deque(
-            (f, 0, None) for f in initial
-        )
-        seen:  set[str]   = set()
-        tasks: list[Task] = []
-
-        skipped_files = 0
-
-        while queue:
-            target, depth, parent = queue.popleft()
-
-            matched = [s for s in self.strategies if s.check(target)]
-            if not matched and depth == 0:
-                skipped_files += 1
-                continue
-
-            for strategy in matched:
-                new_out = strategy.plan(target)
-                if new_out.name in seen:
-                    continue
-                seen.add(new_out.name)
-                current = Task(target, new_out, strategy, depth + 1, parent=parent)
-                tasks.append(current)
-                queue.append((new_out, depth + 1, current))
-
-                # Finalizer dispatch: if the new output matches the convert filter,
-                # append a ConversionStrategy task for it immediately.
-                if self.finalizer_strategy and convert_re.search(new_out.name):
-                    conv_out  = self.finalizer_strategy.plan(new_out)
-                    conv_task = Task(new_out, conv_out, self.finalizer_strategy, depth + 2, parent=current)
-                    tasks.append(conv_task)
-
-        return PlanResult(
-            tasks         = tasks,
-            found_files   = found_files,
-            skipped_files = skipped_files,
-        )
-
-
-# ---------------------------------------------------------------------------
-# SynchronousRunner
-# ---------------------------------------------------------------------------
-
-class SynchronousRunner:
-    """Execute a :class:`PlanResult` synchronously with a live progress bar."""
-
-    def __init__(
-        self,
-        engine:    AudioEngine,
-        plan:      PlanResult,
-        collector: MetricsCollector | None = None,
-    ) -> None:
-        self._engine:          AudioEngine = engine
-        self._found_files:     int         = plan.found_files
-        self._skipped_files:   int         = plan.skipped_files
-        self.tasks:            list[Task]  = plan.tasks
-        self._started:         bool        = False
-        self._collector:       MetricsCollector | None = collector
-
-    def process(self, dry_run: bool) -> PlanExecutionResult:
-        """Execute the plan.  May only be called once.
-
-        In dry-run mode, prints the full task list without executing and without
-        a progress bar.  In normal mode, displays a live ``alive_bar`` with a
-        running summary counter ``✔ {success}  ✘ {failed}  ⏭ {skipped}``.
-        """
-        assert not self._started, "process() must be called only once"
-        self._started = True
-
-        count_success = count_failed = count_skipped = 0
-
-        if dry_run:
-            print(f"  Audio pipeline — {len(self.tasks)} planned task(s):")
-            for task in self.tasks:
-                print(f"    [{task.strategy.strategy_short}]  {task.output.name}")
-            return PlanExecutionResult(count_success, count_failed, count_skipped)
-
-        try:
-            with ProgressBar(len(self.tasks), title="Audio Pipeline", total_count=len(self.tasks)) as advance:
-                for task in self.tasks:
-                    if task.output.exists():
-                        count_skipped += 1
-                        logger.info("Reused (output exists): %s", task.output.name)
-                        advance(state=AdvanceState.SKIPPED)
-                        continue
-
-                    if task.parent and task.parent.failed:
-                        task.failed = True
-                        count_failed += 1
-                        logger.warning("Skipped (parent failure): %s", task.source.name)
-                        advance(state=AdvanceState.FAILED)
-                        continue
-
-                    try:
-                        if self._collector is not None:
-                            from pyqenc.metrics import MetricKey
-                            with self._collector.time(MetricKey.AUDIO, task.strategy.strategy_short):
-                                task.strategy.execute(task.source, task.output, dry_run=False)
-                        else:
-                            task.strategy.execute(task.source, task.output, dry_run=False)
-                        count_success += 1
-                        logger.info("SUCCESS [%s] %s", task.strategy.name, task.output.name)
-                        advance()
-                    except Exception as exc:
-                        task.failed = True
-                        count_failed += 1
-                        logger.error("FAILURE [%s]: %s", task.strategy.name, str(exc)[:70])
-                        advance(state=AdvanceState.FAILED)
-                advance(0, AdvanceState.COMPLETE)
-        finally:
-            return PlanExecutionResult(count_success, count_failed, count_skipped)
-
-
-# ---------------------------------------------------------------------------
-# AsyncRunner
-# ---------------------------------------------------------------------------
-
-class AsyncRunner:
-    """Execute a :class:`PlanResult` concurrently using asyncio."""
-
-    def __init__(
-        self,
-        engine:       AudioEngine,
-        plan:         PlanResult,
-        max_parallel: int = 4,
-    ) -> None:
-        self._engine:     AudioEngine                    = engine
-        self._semaphore:  asyncio.Semaphore              = asyncio.Semaphore(max_parallel)
-        self.tasks:       list[Task]                     = plan.tasks
-        self.registry:    dict[Path, asyncio.Task[bool]] = {}
-        self._advance:    Callable[..., None] | None     = None
-        self._started:    bool                           = False
-
-    async def process(self, dry_run: bool = False) -> PlanExecutionResult:
-        """Execute the plan concurrently.  May only be called once."""
-        assert not self._started, "process() must be called only once"
-        self._started = True
-
-        parent_tasks   = {t.parent for t in self.tasks if t.parent}
-        terminal_tasks = set(self.tasks) - parent_tasks
-        if not terminal_tasks:
-            raise RuntimeError("Cyclic dependencies detected in plan.")
-
-        with ProgressBar(len(self.tasks), title="Audio Pipeline", total_count=len(self.tasks)) as advance:
-            self._advance = advance
-            await asyncio.gather(*(self._get_or_execute(t, dry_run) for t in terminal_tasks))
-            advance(0, AdvanceState.COMPLETE)
-            self._advance = None
-
-        succeeded = sum(1 for t in self.tasks if not t.failed)
-        failed    = sum(1 for t in self.tasks if t.failed)
-        return PlanExecutionResult(succeeded, failed, len(self.tasks) - succeeded - failed)
-
-    async def _get_or_execute(self, task: Task, dry_run: bool) -> bool:
-        key = task.output
-        if key not in self.registry:
-            coro = self._run_task(task, dry_run)
-            self.registry[key] = asyncio.create_task(coro)
-        return await self.registry[key]
-
-    async def _run_task(self, task: Task, dry_run: bool) -> bool:
-        if task.output.exists():
-            logger.info("Reused (output exists): %s", task.output.name)
-            if self._advance:
-                self._advance(state=AdvanceState.SKIPPED)
-            return True
-
-        if task.parent:
-            parent_ok = await self._get_or_execute(task.parent, dry_run)
-            if not parent_ok:
-                task.failed = True
-                logger.warning("Skipped (parent failure): %s", task.source.name)
-                if self._advance:
-                    self._advance(state=AdvanceState.FAILED)
-                return False
-
-        async with self._semaphore:
-            try:
-                await task.strategy.execute_async(task.source, task.output, dry_run)
-                logger.info("SUCCESS [%s] %s", task.strategy.name, task.output.name)
-                if self._advance:
-                    self._advance()
-                return True
-            except Exception as exc:
-                task.failed = True
-                logger.error("FAILURE [%s]: %s", task.strategy.name, str(exc)[:70])
-                if self._advance:
-                    self._advance(state=AdvanceState.FAILED)
-                return False
-
-
-# ---------------------------------------------------------------------------
-# AudioResult + process_audio_streams
-# ---------------------------------------------------------------------------
-
-@dataclass
-class AudioResult:
-    """Result of the audio processing phase.
-
-    Attributes:
-        output_files: All processed audio files produced (AAC delivery files).
-        reused:       True if existing files were reused without re-processing.
-        needs_work:   True if processing would be performed (dry-run indicator).
-        success:      True if processing succeeded.
-        error:        Error message when *success* is False.
-    """
-
-    output_files: list[Path]
-    reused:       bool
-    needs_work:   bool
-    success:      bool
-    error:        str | None = None
-
-
-def process_audio_streams(
-    audio_files: list[Path],
-    output_dir:  Path,
-    audio_cfg:   AudioConfig,
-    force:       bool                      = False,
-    dry_run:     bool                      = False,
-    collector:   MetricsCollector | None = None,
-) -> AudioResult:
-    """Process audio files through the full strategy graph and convert to the delivery format.
-
-    Applies the complete audio processing graph:
-    - 7.1 → 5.1 downmix (single-pass)
-    - 5.1 → 2.0 std / night / nboost downmix + peak normalisation (2-pass each)
-    - norm (peak normalisation only, 2-pass, for any non-normalised source)
-    - dynaudnorm (dynamic normalisation on top of any normalised output)
-    - Delivery conversion finalizer (applied to files matching *convert_pattern*)
-
-    Args:
-        audio_files: Extracted audio files to process.
-        output_dir:  Directory for processed audio output.
-        audio_cfg:   Full audio configuration; supplies codec, bitrate, extension,
-                     convert pattern, and peak normalisation target.
-        force:       Re-process even when output files already exist.
-        dry_run:     Report status only; do not perform actual processing.
-        collector:   Optional metrics collector.
-
-    Returns:
-        :class:`AudioResult` with paths to all produced delivery files.
-
-    Requirements:
-        7.1, 7.2, 9.2, 9.3
-    """
-    try:
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        ext             = audio_cfg.extension.lstrip(".")
-        convert_pattern = audio_cfg.convert_pattern
-
-        # --- Reuse check ---
-        if not force:
-            existing = sorted(output_dir.glob(f"*.{ext}"))
-            if existing:
-                logger.info("Reusing existing processed audio: %d %s file(s)", len(existing), ext)
-                if dry_run:
-                    logger.info("[DRY-RUN] Audio processing: Complete (reusing existing files)")
-                return AudioResult(
-                    output_files = existing,
-                    reused       = True,
-                    needs_work   = False,
-                    success      = True,
-                )
-
-        # --- Dry-run ---
-        if dry_run:
-            logger.info("[DRY-RUN] Would process %d audio files", len(audio_files))
-            _build_and_display_dry_run_plan(
-                audio_files = audio_files,
-                output_dir  = output_dir,
-                audio_cfg   = audio_cfg,
-            )
-            return AudioResult(
-                output_files = [],
-                reused       = False,
-                needs_work   = True,
-                success      = True,
-            )
-
-        # --- Convert source files to FLAC intermediates ---
-        logger.debug("Converting %d audio files to FLAC for processing", len(audio_files))
-        flac_files: list[Path] = []
-        for audio_file in audio_files:
-            target = output_dir / (audio_file.stem + ".flac")
-            if not target.exists():
-                cmd: list[str | os.PathLike] = [
-                    "ffmpeg",
-                    "-i",   audio_file,
-                    "-c:a", "flac",
-                    target,
-                ]
-                try:
-                    result = run_ffmpeg(cmd, output_file=target)
-                    if result.success:
-                        logger.debug("Converted %s → %s", audio_file.name, target.name)
-                    else:
-                        logger.error("Failed to convert %s", audio_file.name)
-                        continue
-                except Exception as exc:
-                    logger.error("Failed to convert %s: %s", audio_file.name, exc)
-                    continue
-            flac_files.append(target)
-
-        if not flac_files:
-            logger.error("No audio files were successfully converted to FLAC")
-            return AudioResult(
-                output_files = [],
-                reused       = False,
-                needs_work   = False,
-                success      = False,
-                error        = "Failed to convert audio files to FLAC",
-            )
-
-        # --- Build engine and execute the unified plan ---
-        engine = _build_audio_engine(audio_cfg)
-        plan = engine.build_plan(
-            directory      = output_dir,
-            convert_filter = convert_pattern,
-        )
-        logger.debug("Audio pipeline plan: %d tasks", len(plan.tasks))
-
-        exec_result = SynchronousRunner(engine, plan, collector=collector).process(dry_run=False)
-        logger.info(
-            "Audio pipeline complete: %d succeeded, %d failed, %d skipped",
-            exec_result.success, exec_result.failed, exec_result.skipped,
-        )
-        if exec_result.failed:
-            logger.warning("Audio pipeline had %d failure(s)", exec_result.failed)
-
-        # --- Collect all produced delivery files ---
-        output_files = sorted(output_dir.glob(f"*.{ext}"))
-        logger.info("Audio processing complete: %d %s delivery file(s)", len(output_files), ext)
-
-        return AudioResult(
-            output_files = output_files,
-            reused       = False,
-            needs_work   = False,
-            success      = True,
-        )
-
-    except Exception as exc:
-        logger.critical("Audio processing failed: %s", exc, exc_info=True)
-        return AudioResult(
-            output_files = [],
-            reused       = False,
-            needs_work   = False,
-            success      = False,
-            error        = str(exc),
-        )
-
-
-def _build_and_display_dry_run_plan(
-    audio_files: list[Path],
-    output_dir:  Path,
-    audio_cfg:   AudioConfig,
-) -> None:
-    """Build and print the audio processing plan for dry-run mode (no execution).
-
-    Args:
-        audio_files: Source audio files.
-        output_dir:  Output directory (used as plan root).
-        audio_cfg:   Full audio configuration.
-    """
-    engine = _build_audio_engine(audio_cfg)
-    # We build the plan against the output_dir; if it's empty we show a placeholder.
-    plan = engine.build_plan(
-        directory      = output_dir,
-        convert_filter = audio_cfg.convert_pattern,
-    )
-    if plan.tasks:
-        runner = SynchronousRunner(engine, plan)
-        runner.process(dry_run=True)
-    else:
-        logger.info("[DRY-RUN] Audio pipeline: no tasks planned (output_dir may be empty)")
-        logger.info("[DRY-RUN] Source files that would be processed: %d", len(audio_files))
-
-
-# ---------------------------------------------------------------------------
-# AudioPhase — Phase object (task 10)
-# ---------------------------------------------------------------------------
-
-import shutil
 from dataclasses import dataclass as _dataclass
+from dataclasses import field as _field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pyqenc.app_config import AppConfig, AudioConfig
+    from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
-    from pyqenc.phase import Phase, PhaseResult
 
+from pyqenc.audio.chain import (
+    ChainExecutionError,
+    ResolvedChain,
+    chain_output_path,
+    execute_chain,
+    resolve_chain,
+)
+from pyqenc.audio.layout import ChannelLayout
+from pyqenc.audio.select import resolve_selection
 from pyqenc.constants import (
     AUDIO_OUTPUT_DIR,
+    CHAIN_FILENAME_SUFFIX,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
     THICK_LINE,
@@ -1221,70 +57,67 @@ from pyqenc.phase import (
     PhaseResult,
     resolve_dependencies,
 )
-from pyqenc.state import ArtifactState, AudioParams
+from pyqenc.state import ArtifactState, AudioSidecar
+from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
+from pyqenc.utils.long_path import LongPath
 
 _AUDIO_YAML = "audio.yaml"
+
+# Default channel layout when a selected track carries no extraction layout.
+# Preferred source is always the track's own ``AudioMetadata.layout``; this is a
+# graceful fallback so a missing layout never crashes chain execution.
+_FALLBACK_LAYOUT_TOKEN = "stereo"
 
 
 @_dataclass
 class AudioArtifact(Artifact):
-    """Audio phase artifact for a single processed audio file.
+    """Audio phase artifact for one (source track, chain) output.
+
+    One artifact per expected chain output. ``path`` is the deterministic
+    ``<source-stem> chain=<name>.<ext>`` output location; ``state`` reflects
+    on-disk presence (COMPLETE when the file exists, ABSENT when it must be
+    produced); ``wanted`` marks whether the current config still expects it.
 
     Attributes:
-        source_path: Path to the source extracted audio file this was produced from.
+        source_track: The extracted track this output is produced from.
+        chain_name:   The producing chain's configured name.
+        out_layout:   The resolved output channel layout (after any downmix).
+        codec:        The effective output codec (e.g. ``flac``, ``aac``).
     """
 
-    source_path: Path | None = None
+    source_track: AudioMetadata | None = None
+    chain_name:   str | None           = None
+    out_layout:   ChannelLayout | None = None
+    codec:        str | None           = None
 
 
 @_dataclass
 class AudioPhaseResult(PhaseResult):
-    """``PhaseResult`` subclass carrying audio-specific payload.
+    """``PhaseResult`` subclass carrying the audio phase's typed outputs.
+
+    ``artifacts`` (inherited) holds the wanted artifacts, driving the standard
+    ``pending`` / ``complete`` / ``is_complete`` machinery so MergePhase — which
+    lists AudioPhase purely for ordering — resolves the dependency as
+    COMPLETE / REUSED. ``outputs`` is the audio-specific view (one
+    :class:`AudioArtifact` per produced chain output). ``audio_files`` is the
+    convenience list of the produced delivery-file paths.
 
     Attributes:
-        audio_files: Paths to all produced AAC delivery files.
+        outputs:     Typed chain-output artifacts (all wanted outputs).
+        audio_files: Paths of the produced/present delivery files.
     """
 
-    audio_files: list[Path] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        if self.audio_files is None:
-            self.audio_files = []
-
-
-def _build_audio_engine(audio_cfg: AudioConfig) -> AudioEngine:
-    """Build an ``AudioEngine`` with the standard strategy set and delivery finalizer.
-
-    Args:
-        audio_cfg: Full audio configuration; supplies codec, bitrate, extension,
-                   and peak normalisation target to the strategy set.
-
-    Returns:
-        Configured :class:`AudioEngine` instance.
-    """
-    return AudioEngine(
-        strategies=[
-            DownmixStrategy71to51(),
-            DownmixStrategy51to20Std(audio_cfg),
-            DownmixStrategy51to20Night(audio_cfg),
-            DownmixStrategy51to20NBoost(audio_cfg),
-            NormStrategy(audio_cfg),
-            DynaudnormStrategy(),
-        ],
-        finalizer=ConversionStrategy(
-            codec               = audio_cfg.codec,
-            bitrate_per_channel = audio_cfg.bitrate_per_channel,
-            extension           = audio_cfg.extension,
-        ),
-    )
+    outputs:     list[AudioArtifact] = _field(default_factory=list)
+    audio_files: list[Path]          = _field(default_factory=list)
 
 
 class AudioPhase:
     """Phase object for audio stream processing.
 
     Owns artifact enumeration, recovery, invalidation, execution, and logging
-    for the audio phase.  Wraps the existing ``process_audio_streams`` helper.
+    for the audio phase. Drives the configured chains over the selected source
+    tracks via the ``pyqenc.audio`` chain executor.
 
     Args:
         config: Full pipeline configuration.
@@ -1305,38 +138,42 @@ class AudioPhase:
         from pyqenc.phases.extraction import ExtractionPhase as _ExtractionPhase
         from pyqenc.phases.job import JobPhase as _JobPhase
 
-        self._config:     AppConfig                = config
-        self._collector:  MetricsCollector         = collector
-        self._job:        _JobPhase | None          = cast(_JobPhase,        phases.get(_JobPhase))        if phases else None
-        self._extraction: _ExtractionPhase | None  = cast(_ExtractionPhase, phases.get(_ExtractionPhase)) if phases else None
-        self.params       = AudioParams(codec=config.audio.codec, bitrate_per_channel=config.audio.bitrate_per_channel)
-        self.result:      AudioPhaseResult | None  = None
-        self.dependencies: list[Phase]             = [d for d in [self._job, self._extraction] if d is not None]
+        self._config:     AppConfig               = config
+        self._collector:  MetricsCollector        = collector
+        self._job:        _JobPhase | None         = cast(_JobPhase,        phases.get(_JobPhase))        if phases else None
+        self._extraction: _ExtractionPhase | None = cast(_ExtractionPhase, phases.get(_ExtractionPhase)) if phases else None
+        self.result:      AudioPhaseResult | None = None
+        self.dependencies: list[Phase]            = [d for d in [self._job, self._extraction] if d is not None]
 
     # ------------------------------------------------------------------
     # Public Phase interface
     # ------------------------------------------------------------------
 
     def run(self, dry_run: bool = False) -> AudioPhaseResult:
-        """Recover, process pending audio files, cache result.
+        """Recover, produce pending (track, chain) outputs, cache result.
 
-        Sequence:
+        Sequence (mirrors the other phases):
+
         1. In-run memoization guard.
-        2. Ensure dependencies have results.
-        3. Emit phase banner.
-        4. Run ``_recover()`` — handles ``force_wipe``.
-        5. Log recovery result line.
-        6. In dry-run mode: return ``PENDING`` if any artifacts are pending.
-        7. Process pending audio files.
-        8. Log completion summary.
+        2. ``_ensure_dependencies`` — Job, Extraction.
+        3. ``emit_phase_banner``.
+        4. ``_recover(force_wipe)`` — resolve select + chains, invalidate
+           differing/removed chains, write the updated sidecar **before**
+           producing, then classify expected (track, chain) outputs vs on-disk.
+        5. ``log_recovery_line``.
+        6. Dry-run: return REUSED / PENDING without executing.
+        7. Execute pending jobs with a count-based ``ProgressBar``.
+        8. Emit summary; cache and return.
 
         Args:
-            dry_run: When ``True``, report what would be done without writing files.
+            dry_run: When ``True``, report what would be done without producing
+                     files.
 
         Returns:
-            ``AudioPhaseResult`` with all artifacts ``COMPLETE`` on success.
+            ``AudioPhaseResult`` — COMPLETED / REUSED on success, PENDING in a
+            dry-run with pending work, FAILED on a dependency or fatal error.
         """
-        # In-run memoization guard (Property 1): return cached result verbatim.
+        # In-run memoization guard: return cached result verbatim.
         if self.result is not None:
             return self.result
 
@@ -1350,14 +187,10 @@ class AudioPhase:
         job_result = self._job.result  # type: ignore[union-attr]
         force_wipe = getattr(job_result, "force_wipe", False)
 
-        # Key parameters
-        audio_cfg = self._job.result.config.audio  # type: ignore[union-attr]
-        if audio_cfg.convert_pattern:
-            logger.info("Convert pattern: %s", audio_cfg.convert_pattern)
-        if audio_cfg.codec:
-            logger.info("Codec:           %s", audio_cfg.codec)
-        if audio_cfg.bitrate_per_channel:
-            logger.info("Bitrate/channel: %s", audio_cfg.bitrate_per_channel)
+        audio_cfg = job_result.config.audio
+        logger.info("Chains:  %d configured", len(audio_cfg.chains))
+        if audio_cfg.select:
+            logger.info("Select:  %d entr(y/ies)", len(audio_cfg.select))
 
         from pyqenc.metrics import MetricKey
 
@@ -1365,40 +198,24 @@ class AudioPhase:
             internal_artifacts = self._recover(force_wipe=force_wipe)
 
         artifacts     = [a for a in internal_artifacts if a.wanted]
-        pending_count = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL))
+        pending       = [a for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)]
         message       = log_recovery_line(logger, internal_artifacts)
 
-        # Action plan — log source file count before starting work
-        if pending_count > 0:
-            extraction_result = self._extraction.result if self._extraction else None  # type: ignore[union-attr]
-            audio_meta = getattr(extraction_result, "audio", []) or []
-            if audio_meta:
-                logger.info("Sources: %d audio track(s) to process", len(audio_meta))
+        if pending:
+            logger.info("Sources: %d (track, chain) output(s) to produce", len(pending))
 
-        # Dry-run path
+        # Dry-run path — no production.
         if dry_run:
-            outcome     = PhaseOutcome.REUSED if pending_count == 0 else PhaseOutcome.PENDING
-            audio_files = [a.path for a in artifacts if a.state == ArtifactState.COMPLETE]
-            self.result = AudioPhaseResult(
-                outcome     = outcome,
-                artifacts   = artifacts,
-                message     = message,
-                audio_files = audio_files,
-            )
+            outcome = PhaseOutcome.REUSED if not pending else PhaseOutcome.PENDING
+            self.result = self._make_result(outcome, artifacts, message)
             return self.result
 
-        # Nothing to do
-        if pending_count == 0:
-            audio_files = [a.path for a in artifacts if a.state == ArtifactState.COMPLETE]
-            self.result = AudioPhaseResult(
-                outcome     = PhaseOutcome.REUSED,
-                artifacts   = artifacts,
-                message     = message,
-                audio_files = audio_files,
-            )
+        # Nothing pending — everything is already on disk.
+        if not pending:
+            self.result = self._make_result(PhaseOutcome.REUSED, artifacts, message)
             return self.result
 
-        # Execute audio processing
+        # Produce the pending outputs.
         with self._collector.time(MetricKey.AUDIO):
             result = self._execute_audio(artifacts)
         self.result = result
@@ -1407,10 +224,10 @@ class AudioPhase:
     def finalize(self, ctx: FinalizeContext) -> None:
         """Perform end-of-run housekeeping for the audio phase.
 
-        The processed audio files under ``audio/`` are delivery outputs kept
-        even under ``ALL`` cleanup, and ``audio.yaml`` is a recovery sidecar
-        that must survive reruns. ``AudioPhase`` therefore has no deep artifacts
-        to remove — a safe no-op regardless of ``ctx.deep_cleanup``.
+        Chain outputs are delivery artifacts kept under every cleanup level, and
+        ``audio.yaml`` is a recovery sidecar that must survive reruns (Req 10.8).
+        ``AudioPhase`` therefore has no deep artifacts to remove — a safe no-op
+        regardless of ``ctx.deep_cleanup``.
 
         Args:
             ctx: Pre-resolved end-of-run decisions from the runner.
@@ -1452,213 +269,395 @@ class AudioPhase:
 
         return None
 
-    def _recover(self, force_wipe: bool) -> list[AudioArtifact]:
-        """Classify audio artifacts and handle force-wipe.
+    # ------------------------------------------------------------------
+    # Recovery + invalidation
+    # ------------------------------------------------------------------
 
-        Steps:
-        1. If ``force_wipe``: delete ``audio/``.
-        2. Clean up leftover ``.tmp`` files.
-        3. Build the processing plan from the current convert filter to determine
-           expected terminal outputs (AAC delivery files).
-        4. Load ``audio.yaml``; detect codec/bitrate changes (Type B config).
-        5. Classify each expected terminal output as ``COMPLETE`` (``wanted=True``),
-           ``ABSENT``, or — when the codec/bitrate changed — ``COMPLETE`` with
-           ``wanted=False``. Files present in ``audio/`` that are not terminal
-           outputs are ``COMPLETE`` with ``wanted=False`` (surplus/intermediate).
+    def _recover(self, force_wipe: bool) -> list[AudioArtifact]:
+        """Resolve the plan, invalidate changed chains, classify on-disk outputs.
+
+        Steps (Req 9.x, 10.x):
+
+        1. ``force_wipe`` (Req 9.9) → delete every chain output and the sidecar.
+        2. Clean up leftover ``.tmp`` files (Req 8.5).
+        3. Resolve the working track set (``resolve_selection`` — select is never
+           persisted, Req 9.1) and every configured chain
+           (``resolve_chain``).
+        4. Compare each resolved chain against the persisted sidecar entry of the
+           same name (Req 9.2). For a **differing** chain, delete its on-disk
+           outputs for ALL tracks by exact chain-name match (Req 9.4) so they are
+           reproduced. For a chain **removed** from config, delete its persisted
+           outputs (cleanup — unwanted now).
+        5. Write the updated sidecar (current resolved chains) **before producing
+           anything** (Req 9.5) when it differs from what is on disk.
+        6. Classify each expected (track, chain) output COMPLETE (file present) /
+           ABSENT (missing) — completion is read from disk only (Req 9.6).
 
         Args:
-            force_wipe: When ``True``, wipe all audio artifacts first.
+            force_wipe: When ``True``, wipe all audio artifacts + sidecar first.
 
         Returns:
-            List of ``AudioArtifact`` objects.
+            The internal artifact list (wanted expected outputs plus any
+            present-but-unwanted surplus files).
         """
-        work_dir  = self._job.result.work_dir  # type: ignore[union-attr]
-        audio_dir = work_dir / AUDIO_OUTPUT_DIR
+        job_result   = self._job.result       # type: ignore[union-attr]
+        work_dir     = LongPath(job_result.work_dir)
+        sidecar_path = work_dir / _AUDIO_YAML
+        audio_cfg    = job_result.config.audio
 
-        # Step 1: force-wipe
+        # Step 3 — resolve the working plan (selection is recomputed every run).
+        tracks   = self._selected_tracks()
+        resolved = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
+
+        # Chain outputs go to the phase's DEDICATED audio directory (Phase
+        # Contract: each phase owns its own folder). Deletion / .tmp-cleanup /
+        # surplus scanning / production all use this dir — never the extraction
+        # dir. Created up front so producing can write into it.
+        audio_dir = self._output_dir(tracks, work_dir)
+        audio_dir.mkdir(parents=True, exist_ok=True)
+
+        # Step 1 — force wipe.
         if force_wipe:
-            if audio_dir.exists():
-                shutil.rmtree(audio_dir)
-                logger.debug("force_wipe: deleted %s", audio_dir)
+            self._force_wipe(audio_dir, sidecar_path, resolved)
 
-        # Step 2: clean up .tmp files
+        # Step 2 — clear leftover .tmp files.
+        self._clean_tmp(audio_dir)
+
+        # Step 4 + 5 — invalidate differing/removed chains and rewrite the sidecar
+        #              BEFORE producing anything.
+        self._invalidate_and_commit(audio_dir, sidecar_path, resolved)
+
+        # Step 6 — classify expected outputs (completion from disk only).
+        return self._classify(audio_dir, tracks, resolved)
+
+    def _output_dir(self, tracks: list[AudioMetadata], work_dir: LongPath) -> LongPath:
+        """Return the phase's DEDICATED audio output directory (``work_dir/audio``).
+
+        The audio phase owns this folder (Phase Contract). Chain outputs are
+        written here — never next to the source tracks — so all deletion,
+        ``.tmp``-cleanup, surplus-scanning, and production operate on one
+        phase-owned directory regardless of where the sources live. The
+        ``tracks`` argument is accepted for a uniform signature but no longer
+        influences the location.
+
+        Args:
+            tracks:   The working track set (unused; kept for signature uniformity).
+            work_dir: The job work directory.
+
+        Returns:
+            The dedicated audio output directory.
+        """
+        return work_dir / AUDIO_OUTPUT_DIR
+
+    def _force_wipe(
+        self,
+        audio_dir:    LongPath,
+        sidecar_path: LongPath,
+        resolved:     dict[str, ResolvedChain],
+    ) -> None:
+        """Delete every chain output and the sidecar (Req 9.9).
+
+        The dedicated audio dir holds only chain outputs, but the
+        ``chain=<name>`` token guard is kept (extra-safe): only files carrying it
+        are removed, so any unrelated file dropped into the dir survives.
+
+        Args:
+            audio_dir:    The dedicated audio output directory.
+            sidecar_path: The ``audio.yaml`` path.
+            resolved:     Current resolved chains (unused for the wipe; kept for a
+                          uniform invalidation signature).
+        """
         if audio_dir.exists():
-            for tmp in audio_dir.glob(f"*{TEMP_SUFFIX}"):
-                try:
-                    tmp.unlink()
-                    logger.warning("Removed leftover temp file: %s", tmp)
-                except OSError as exc:
-                    logger.warning("Could not remove temp file %s: %s", tmp, exc)
+            for path in audio_dir.iterdir():
+                if path.is_file() and _parse_chain_name(path.name) is not None:
+                    path.unlink(missing_ok=True)
+                    logger.debug("force_wipe: deleted %s", path.name)
+        if sidecar_path.exists():
+            sidecar_path.unlink(missing_ok=True)
+            logger.debug("force_wipe: deleted %s", sidecar_path.name)
 
-        # Step 3: build plan to determine expected terminal outputs
-        effective_convert_filter = self._effective_convert_filter()
-        terminal_outputs: set[str] = set()
-
-        if audio_dir.exists():
-            engine = _build_audio_engine(self._job.result.config.audio)  # type: ignore[union-attr]
-            plan = engine.build_plan(
-                directory      = audio_dir,
-                convert_filter = effective_convert_filter,
-            )
-            # Terminal outputs are the outputs of ConversionStrategy tasks
-            terminal_outputs = {
-                t.output.name
-                for t in plan.tasks
-                if t.strategy.strategy_short == self._job.result.config.audio.codec  # type: ignore[union-attr]
-            }
-
-        # Step 4: load audio.yaml and detect codec/bitrate changes
-        persisted      = AudioParams.load(work_dir / _AUDIO_YAML)
-        params_unknown = persisted is None
-        codec_changed  = persisted is not None and persisted != self.params
-
-        if codec_changed:
-            logger.debug(
-                "audio.yaml codec/bitrate changed (%s/%s → %s/%s) — marking all artifacts unwanted (wanted=False)",
-                persisted.codec,               self.params.codec,               # type: ignore[union-attr]
-                persisted.bitrate_per_channel, self.params.bitrate_per_channel,
-            )
-
-        # Step 5: classify artifacts
+    def _clean_tmp(self, audio_dir: LongPath) -> None:
+        """Remove leftover ``.tmp`` files from a previous interrupted run."""
         if not audio_dir.exists():
-            return self._build_absent_artifacts()
+            return
+        for tmp in audio_dir.glob(f"*{TEMP_SUFFIX}"):
+            try:
+                tmp.unlink()
+                logger.warning("Removed leftover temp file: %s", tmp.name)
+            except OSError as exc:
+                logger.warning("Could not remove temp file %s: %s", tmp, exc)
 
-        existing = {
-            f.name: f
-            for f in audio_dir.iterdir()
-            if f.is_file() and not f.name.endswith(TEMP_SUFFIX)
+    def _selected_tracks(self) -> list[AudioMetadata]:
+        """Resolve the working track set from extraction + ``audio.select`` (Req 9.1)."""
+        extraction_result = self._extraction.result if self._extraction else None  # type: ignore[union-attr]
+        audio_meta: list[AudioMetadata] = getattr(extraction_result, "audio", []) or []
+        audio_cfg = self._job.result.config.audio  # type: ignore[union-attr]
+        return resolve_selection(audio_meta, audio_cfg.select)
+
+    def _invalidate_and_commit(
+        self,
+        audio_dir:    LongPath,
+        sidecar_path: LongPath,
+        resolved:     dict[str, ResolvedChain],
+    ) -> None:
+        """Delete outputs of differing/removed chains, then commit the sidecar.
+
+        Compares each resolved chain to the persisted sidecar (Req 9.2). A
+        differing chain's outputs are deleted for all tracks (reproduced,
+        Req 9.3/9.4); a removed chain's persisted outputs are deleted (cleanup).
+        The updated sidecar is written **before any output is produced**
+        (Req 9.5); when nothing differs the rewrite is skipped (the sidecar is
+        already correct).
+
+        Args:
+            audio_dir:    The dedicated audio output directory.
+            sidecar_path: The ``audio.yaml`` path.
+            resolved:     Current resolved chains, keyed by name.
+        """
+        persisted   = AudioSidecar.load(sidecar_path)
+        prior_sigs  = persisted.signatures if persisted is not None else {}
+
+        # Current chain signatures (the same canonical string the sidecar stores).
+        current      = AudioSidecar.from_resolved(resolved)
+        current_sigs = current.signatures
+
+        # Chains whose signature changed → invalidate (reproduce).
+        changed = {
+            name for name, sig in current_sigs.items()
+            if name in prior_sigs and prior_sigs[name] != sig
         }
+        # Chains removed from config → invalidate (cleanup, now unwanted).
+        removed = set(prior_sigs) - set(current_sigs)
 
+        for name in sorted(changed):
+            logger.info("Chain %r changed — invalidating its outputs for reprocessing", name)
+            self._delete_chain_outputs(audio_dir, name)
+        for name in sorted(removed):
+            logger.info("Chain %r removed from config — cleaning up its outputs", name)
+            self._delete_chain_outputs(audio_dir, name)
+
+        # Commit the current signatures before producing (Req 9.5). Skip the
+        # rewrite when the sidecar already matches exactly (Req 9.5 last sentence).
+        if prior_sigs != current_sigs:
+            current.save(sidecar_path)
+            logger.debug("Committed audio sidecar (%d chain(s)) before producing", len(resolved))
+
+    def _delete_chain_outputs(self, audio_dir: LongPath, chain_name: str) -> None:
+        """Delete on-disk outputs of ``chain_name`` by EXACT chain-name (Req 9.4).
+
+        Output files are ``<stem> chain=<name>.<ext>``. The trailing
+        ``chain=<name>`` token is parsed from each candidate and compared for
+        equality — never a substring/prefix match — so ``chain=nightlong`` is not
+        deleted when invalidating ``night``.
+
+        Args:
+            audio_dir:  The directory holding chain outputs.
+            chain_name: The exact chain name whose outputs must be removed.
+        """
+        if not audio_dir.exists():
+            return
+        for path in audio_dir.iterdir():
+            if not path.is_file():
+                continue
+            if _parse_chain_name(path.name) == chain_name:
+                try:
+                    path.unlink()
+                    logger.debug("Deleted invalidated output: %s", path.name)
+                except OSError as exc:
+                    logger.warning("Could not delete %s: %s", path, exc)
+
+    def _classify(
+        self,
+        audio_dir: LongPath,
+        tracks:    list[AudioMetadata],
+        resolved:  dict[str, ResolvedChain],
+    ) -> list[AudioArtifact]:
+        """Build one artifact per expected (track, chain), classified from disk.
+
+        Completion is read solely from output-file presence (Req 9.6): present →
+        COMPLETE, missing → ABSENT. Any present file that is not an expected
+        output of a configured chain is surfaced as present-but-unwanted
+        (COMPLETE, ``wanted=False``) per the Phase Contract (Req 9.8).
+
+        Args:
+            audio_dir: The dedicated audio output directory.
+            tracks:    The working track set.
+            resolved:  Current resolved chains, keyed by name.
+
+        Returns:
+            The internal artifact list (expected outputs + surplus files).
+        """
         artifacts: list[AudioArtifact] = []
+        expected_names: set[str]       = set()
 
-        # Classify expected terminal outputs
-        for name in terminal_outputs:
-            path = audio_dir / name
-            if name not in existing:
-                artifacts.append(AudioArtifact(path=path, state=ArtifactState.ABSENT))
-            elif params_unknown:
-                # Config unknown — cannot confirm content validity
-                artifacts.append(AudioArtifact(path=path, state=ArtifactState.PARTIAL))
-            elif codec_changed:
-                # Produced under the previous codec — no longer wanted this run,
-                # but the file is fully present on disk (COMPLETE).
-                artifacts.append(AudioArtifact(path=path, state=ArtifactState.COMPLETE, wanted=False))
-            else:
-                artifacts.append(AudioArtifact(path=path, state=ArtifactState.COMPLETE))
+        for track in tracks:
+            source = LongPath(track.path)
+            layout = self._track_layout(track)
+            for name, chain in resolved.items():
+                out = chain_output_path(source, name, chain.encode.extension, audio_dir)
+                expected_names.add(out.name)
+                state = ArtifactState.COMPLETE if out.exists() else ArtifactState.ABSENT
+                artifacts.append(AudioArtifact(
+                    path         = out,
+                    state        = state,
+                    source_track = track,
+                    chain_name   = name,
+                    out_layout   = layout,
+                    codec        = chain.encode.codec,
+                ))
 
-        # Files present but not terminal outputs are surplus/intermediate — not
-        # wanted this run, but fully present on disk (COMPLETE, wanted=False).
-        for name, path in existing.items():
-            if name not in terminal_outputs:
-                artifacts.append(AudioArtifact(path=path, state=ArtifactState.COMPLETE, wanted=False))
-
-        # If no terminal outputs were planned and no existing files, fall back to absent
-        if not artifacts:
-            return self._build_absent_artifacts()
+        # Surface present-but-unwanted surplus files (a stale output whose chain
+        # was removed and whose deletion failed, or an unrelated file).
+        if audio_dir.exists():
+            for path in audio_dir.iterdir():
+                if (
+                    path.is_file()
+                    and not path.name.endswith(TEMP_SUFFIX)
+                    and _parse_chain_name(path.name) is not None
+                    and path.name not in expected_names
+                ):
+                    artifacts.append(AudioArtifact(
+                        path   = LongPath(path),
+                        state  = ArtifactState.COMPLETE,
+                        wanted = False,
+                    ))
 
         return artifacts
 
-    def _effective_convert_filter(self) -> str:
-        """Return the effective convert pattern from job result config."""
-        return self._job.result.config.audio.convert_pattern  # type: ignore[union-attr]
+    def _track_layout(self, track: AudioMetadata) -> ChannelLayout:
+        """Return the track's channel layout, falling back gracefully when absent.
 
-    def _build_absent_artifacts(self) -> list[AudioArtifact]:
-        """Build a list of ABSENT artifacts from ExtractionPhase audio results.
-
-        Returns:
-            List of ``AudioArtifact`` with state ``ABSENT``, one per source audio file.
-        """
-        extraction_result = self._extraction.result if self._extraction else None  # type: ignore[union-attr]
-        audio_meta: list[AudioMetadata] = getattr(extraction_result, "audio", []) or []
-
-        work_dir  = self._job.result.work_dir  # type: ignore[union-attr]
-        audio_dir = work_dir / AUDIO_OUTPUT_DIR
-
-        ext = self._config.audio.extension.lstrip(".")
-
-        if not audio_meta:
-            # No audio tracks — return a single sentinel absent artifact so
-            # pending_count > 0 and the phase still runs (it will produce nothing).
-            return [AudioArtifact(path=audio_dir / f"placeholder.{ext}", state=ArtifactState.ABSENT)]
-
-        return [
-            AudioArtifact(
-                path        = audio_dir / f"{m.path.stem}.{ext}",
-                state       = ArtifactState.ABSENT,
-                source_path = m.path,
-            )
-            for m in audio_meta
-        ]
-
-    def _execute_audio(self, artifacts: list[AudioArtifact]) -> AudioPhaseResult:
-        """Process pending audio files via ``process_audio_streams``.
+        The extraction-provided ``AudioMetadata.layout`` is preferred (Task 4);
+        when it is ``None`` a stereo fallback keeps chain execution viable rather
+        than crashing on a missing layout.
 
         Args:
-            artifacts: Artifact list from ``_recover()``.
+            track: The selected extracted audio track.
 
         Returns:
-            ``AudioPhaseResult`` after processing.
+            A concrete :class:`ChannelLayout`.
         """
-        work_dir  = self._job.result.work_dir  # type: ignore[union-attr]
-        audio_dir = work_dir / AUDIO_OUTPUT_DIR
-        audio_dir.mkdir(parents=True, exist_ok=True)
-
-        # Collect source audio files from ExtractionPhase result
-        extraction_result = self._extraction.result if self._extraction else None  # type: ignore[union-attr]
-        audio_meta: list[AudioMetadata] = getattr(extraction_result, "audio", []) or []
-        source_files = [m.path for m in audio_meta]
-
-        if not source_files:
-            logger.warning("No extracted audio files available — skipping audio processing")
-            self.result = AudioPhaseResult(
-                outcome     = PhaseOutcome.REUSED,
-                artifacts   = [],
-                message     = "no audio tracks",
-                audio_files = [],
-            )
-            return self.result
-
-        audio_cfg    = self._job.result.config.audio  # type: ignore[union-attr]
-        audio_result = process_audio_streams(
-            audio_files = source_files,
-            output_dir  = audio_dir,
-            audio_cfg   = audio_cfg,
-            force       = False,
-            dry_run     = False,
-            collector   = self._collector,
+        if track.layout is not None:
+            return track.layout
+        logger.warning(
+            "Track %s has no extraction layout — falling back to %s",
+            track.path.name, _FALLBACK_LAYOUT_TOKEN,
         )
+        return ChannelLayout.parse(_FALLBACK_LAYOUT_TOKEN)
 
-        if not audio_result.success:
-            err = audio_result.error or "Audio processing failed"
-            logger.critical(err)
-            return _failed(err)
+    # ------------------------------------------------------------------
+    # Execution
+    # ------------------------------------------------------------------
 
-        # Re-scan audio_dir to build final artifact list
-        ext         = audio_cfg.extension.lstrip(".")
-        final_files = sorted(audio_dir.glob(f"*.{ext}"))
-        final_artifacts = [
-            AudioArtifact(path=f, state=ArtifactState.COMPLETE)
-            for f in final_files
-        ]
+    def _execute_audio(self, artifacts: list[AudioArtifact]) -> AudioPhaseResult:
+        """Produce every pending (track, chain) output via the chain executor.
 
-        complete_count = len(final_artifacts)
+        Pending artifacts (ABSENT / PARTIAL) are produced one at a time through
+        :func:`~pyqenc.audio.chain.execute_chain`, advancing a count-based
+        :class:`ProgressBar` (total = pending job count, Req 10.6). A
+        ``passthrough`` chain raises ``NotImplementedError`` and a failing chain
+        raises ``ChainExecutionError``; both are caught per-job and surfaced as a
+        FAILED artifact for that output — the phase never crashes on one bad
+        chain (Req 11.1, 11.4).
+
+        Args:
+            artifacts: The wanted artifact list from ``_recover()``.
+
+        Returns:
+            ``AudioPhaseResult`` — COMPLETED when work ran (even with some
+            failures), FAILED only when nothing could be produced and failures
+            occurred.
+        """
+        pending = [a for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)]
+        job_result = self._job.result  # type: ignore[union-attr]
+        audio_cfg  = job_result.config.audio
+        resolved   = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
+        audio_dir  = LongPath(job_result.work_dir) / AUDIO_OUTPUT_DIR
+
+        produced = 0
+        failed   = 0
+        with ProgressBar(total=len(pending), title="AUDIO", total_count=len(pending)) as advance:
+            for art in pending:
+                label = f"[{art.chain_name}] {art.source_track.path.stem if art.source_track else '?'}"
+                logger.debug("Producing %s", label)
+                try:
+                    self._produce_one(art, resolved[art.chain_name], audio_dir)  # type: ignore[index]
+                    art.state = ArtifactState.COMPLETE
+                    produced += 1
+                    advance(1, AdvanceState.SUCCESS)
+                except NotImplementedError as exc:
+                    art.state = ArtifactState.ABSENT
+                    failed += 1
+                    logger.error("%s — passthrough not implemented: %s", label, exc)
+                    advance(1, AdvanceState.FAILED)
+                except ChainExecutionError as exc:
+                    art.state = ArtifactState.ABSENT
+                    failed += 1
+                    logger.error("%s — chain failed: %s", label, exc)
+                    advance(1, AdvanceState.FAILED)
+
+        reused = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE) - produced
         logger.info(
-            "%s Audio complete: %d %s delivery file(s) produced",
-            SUCCESS_SYMBOL_MINOR, complete_count, ext,
+            "%s Audio complete: %d produced, %d reused, %d failed",
+            SUCCESS_SYMBOL_MINOR, produced, max(reused, 0), failed,
         )
         logger.info(THICK_LINE)
 
-        # Persist audio.yaml with current codec/bitrate config
-        try:
-            self.params.save(self._job.result.work_dir / _AUDIO_YAML)  # type: ignore[union-attr]
-        except Exception as exc:
-            logger.warning("Could not persist audio.yaml: %s", exc)
+        if produced == 0 and failed > 0:
+            return _failed(f"all {failed} audio chain output(s) failed")
 
+        outcome = PhaseOutcome.COMPLETED
+        return self._make_result(
+            outcome,
+            artifacts,
+            f"produced {produced}, reused {max(reused, 0)}, failed {failed}",
+        )
+
+    def _produce_one(self, artifact: AudioArtifact, chain: ResolvedChain, output_dir: LongPath) -> None:
+        """Execute one (track, chain) job, writing the artifact's output file.
+
+        Runs the async chain executor to completion. The executor enforces the
+        ``.tmp``-then-rename protocol and the correct output container muxer, and
+        writes into the phase's dedicated ``output_dir``.
+
+        Args:
+            artifact:   The pending artifact (carries source track + layout).
+            chain:      The resolved chain to apply.
+            output_dir: The dedicated audio output directory.
+
+        Raises:
+            NotImplementedError: For a ``passthrough`` chain (Req 11).
+            ChainExecutionError: When a measurement or application pass fails.
+        """
+        assert artifact.source_track is not None
+        source = LongPath(artifact.source_track.path)
+        layout = artifact.out_layout or self._track_layout(artifact.source_track)
+        asyncio.run(execute_chain(chain, source, layout, output_dir))
+
+    def _make_result(
+        self,
+        outcome:   PhaseOutcome,
+        artifacts: list[AudioArtifact],
+        message:   str,
+    ) -> AudioPhaseResult:
+        """Assemble an ``AudioPhaseResult`` from the wanted artifacts.
+
+        Args:
+            outcome:   The phase outcome.
+            artifacts: The wanted artifact list.
+            message:   Human-readable summary.
+
+        Returns:
+            The populated result (``artifacts`` drive dependency resolution;
+            ``outputs`` / ``audio_files`` are the audio-specific views).
+        """
+        complete = [a for a in artifacts if a.state == ArtifactState.COMPLETE]
         return AudioPhaseResult(
-            outcome     = PhaseOutcome.COMPLETED,
-            artifacts   = final_artifacts,
-            message     = f"produced {complete_count} {ext} file(s)",
-            audio_files = final_files,
+            outcome     = outcome,
+            artifacts   = artifacts,
+            message     = message,
+            outputs     = artifacts,
+            audio_files = [a.path for a in complete],
         )
 
 
@@ -1666,16 +665,27 @@ class AudioPhase:
 # AudioPhase module-level helpers
 # ---------------------------------------------------------------------------
 
-def _outcome_from_artifacts(
-    artifacts: list[AudioArtifact],
-    did_work:  bool,
-) -> PhaseOutcome:
-    """Derive ``PhaseOutcome`` from artifact states."""
-    if any(a.state == ArtifactState.ABSENT for a in artifacts):
-        return PhaseOutcome.PENDING
-    if all(a.state == ArtifactState.COMPLETE for a in artifacts) and artifacts:
-        return PhaseOutcome.REUSED if not did_work else PhaseOutcome.COMPLETED
-    return PhaseOutcome.PENDING
+def _parse_chain_name(filename: str) -> str | None:
+    """Return the exact chain name from a ``<stem> chain=<name>.<ext>`` filename.
+
+    Splits on the ``chain=`` suffix delimiter and strips the extension, returning
+    the chain name verbatim for exact-match invalidation (Req 9.4). Returns
+    ``None`` when the filename carries no ``chain=`` token (not a chain output).
+
+    Args:
+        filename: A bare filename (no directory component).
+
+    Returns:
+        The chain name, or ``None`` when the file is not a chain output.
+    """
+    idx = filename.rfind(CHAIN_FILENAME_SUFFIX)
+    if idx == -1:
+        return None
+    tail = filename[idx + len(CHAIN_FILENAME_SUFFIX):]
+    # Strip the extension (single trailing suffix) — chain names are filesystem
+    # safe and contain no dot in practice, but rsplit is robust to a dotted stem.
+    dot = tail.rfind(".")
+    return tail[:dot] if dot != -1 else tail
 
 
 def _failed(error: str) -> AudioPhaseResult:

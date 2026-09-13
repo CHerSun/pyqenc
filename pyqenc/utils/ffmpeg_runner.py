@@ -27,7 +27,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pyqenc.constants import STDERR_TAIL_LINES, TEMP_SUFFIX
+from pyqenc.constants import (
+    FFMPEG_ARG_FORMAT,
+    FFMPEG_MUXER_MATROSKA,
+    STDERR_TAIL_LINES,
+    TEMP_SUFFIX,
+)
 
 if TYPE_CHECKING:
     from pyqenc.models import VideoMetadata
@@ -244,14 +249,25 @@ async def _read_stderr(stderr: asyncio.StreamReader) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _resolve_tmp_paths(
-    cmd:         list[str | os.PathLike],
-    output_file: Path | list[Path],
+    cmd:           list[str | os.PathLike],
+    output_file:   Path | list[Path],
+    output_format: str | None = None,
 ) -> tuple[list[str | os.PathLike], dict[Path, Path]]:
     """Validate output paths appear in cmd and substitute with ``.tmp`` siblings.
 
+    Each final output path in ``cmd`` is replaced with ``-f <muxer> <tmp>``. The
+    explicit ``-f`` is required because the ``.tmp`` extension strips the
+    container hint ffmpeg would otherwise infer from the real extension, so it
+    cannot pick a muxer on its own. ``output_format`` names that muxer; when it
+    is ``None`` the historical default ``matroska`` is used, so all existing
+    video call sites are unaffected. Audio call sites pass e.g. ``"flac"`` or
+    ``"ipod"``.
+
     Args:
-        cmd:         Original ffmpeg command.
-        output_file: Intended output path(s). Pass the same objects as in cmd.
+        cmd:           Original ffmpeg command.
+        output_file:   Intended output path(s). Pass the same objects as in cmd.
+        output_format: The ffmpeg ``-f`` muxer token for the ``.tmp`` output(s),
+                       or ``None`` to use the ``matroska`` default.
 
     Returns:
         Tuple of ``(modified_cmd, tmp_to_final)`` where ``tmp_to_final`` maps
@@ -260,6 +276,7 @@ def _resolve_tmp_paths(
     Raises:
         ValueError: If any output path is not found in ``cmd``.
     """
+    muxer = output_format if output_format is not None else FFMPEG_MUXER_MATROSKA
     paths: list[Path] = [output_file] if isinstance(output_file, Path) else list(output_file)
 
     # Ensure that all given paths are present in the cmd. Just a safety check of dev intent.
@@ -274,11 +291,11 @@ def _resolve_tmp_paths(
     final_to_tmp: dict[Path, Path] = {p: p.parent / f"{p.stem}{TEMP_SUFFIX}" for p in paths}
     tmp_to_final: dict[Path, Path] = {tmp: Path(final) for final, tmp in final_to_tmp.items()}
 
-    # Replace cmd args with temp files
+    # Replace cmd args with temp files, injecting the explicit output muxer.
     modified_cmd: list[str | os.PathLike] = []
     for arg in cmd:
         if arg in final_to_tmp:
-            modified_cmd += ["-f", "matroska", final_to_tmp[arg]]
+            modified_cmd += [FFMPEG_ARG_FORMAT, muxer, final_to_tmp[arg]]
         else:
             modified_cmd.append(arg)
 
@@ -319,6 +336,7 @@ async def run_ffmpeg_async(
     progress_callback: ProgressCallback | None = None,
     video_meta:        VideoMetadata | None    = None,
     cwd:               Path | None             = None,
+    output_format:     str | None              = None,
 ) -> FFmpegRunResult:
     """Run an ffmpeg command asynchronously with correct pipe handling.
 
@@ -329,7 +347,11 @@ async def run_ffmpeg_async(
     When ``output_file`` is a ``Path`` or ``list[Path]``, the runner enforces
     the ``.tmp``-then-rename protocol: each output path is substituted with a
     ``<stem>.tmp`` sibling before launching ffmpeg, then renamed to the final
-    name on success or deleted on failure.
+    name on success or deleted on failure. Because the ``.tmp`` extension hides
+    the real container, the runner injects an explicit ``-f <muxer>`` for each
+    substituted output: ``output_format`` names that muxer, defaulting to
+    ``matroska`` (unchanged behaviour for every video call site). Audio call
+    sites pass the correct muxer (``"flac"`` / ``"ipod"``).
 
     Args:
         cmd:               Full ffmpeg command including the executable.
@@ -340,6 +362,9 @@ async def run_ffmpeg_async(
         video_meta:        Optional ``VideoMetadata`` instance populated
                            in-place from stderr (and stdout frame count).
         cwd:               Optional working directory for the subprocess.
+        output_format:     ffmpeg ``-f`` muxer token for the ``.tmp`` output(s),
+                           or ``None`` for the ``matroska`` default. Ignored when
+                           ``output_file`` is ``None``.
 
     Returns:
         ``FFmpegRunResult`` with ``returncode``, ``success``, ``stderr_lines``,
@@ -351,7 +376,7 @@ async def run_ffmpeg_async(
     # Resolve .tmp substitutions before injecting progress flags
     tmp_to_final: dict[Path, Path] = {}
     if output_file is not None:
-        cmd, tmp_to_final = _resolve_tmp_paths(list(cmd), output_file)
+        cmd, tmp_to_final = _resolve_tmp_paths(list(cmd), output_file, output_format)
 
     modified_cmd = _inject_flags(list(cmd))
     logger.debug("run_ffmpeg_async: %s", " ".join(str(a) for a in modified_cmd))
@@ -409,6 +434,7 @@ def run_ffmpeg(
     progress_callback: ProgressCallback | None = None,
     video_meta:        VideoMetadata | None    = None,
     cwd:               Path | None             = None,
+    output_format:     str | None              = None,
 ) -> FFmpegRunResult:
     """Synchronous wrapper around ``run_ffmpeg_async``.
 
@@ -423,6 +449,8 @@ def run_ffmpeg(
         progress_callback: Optional ``(frame, out_time_seconds)`` callable.
         video_meta:        Optional ``VideoMetadata`` instance to populate.
         cwd:               Optional working directory for the subprocess.
+        output_format:     ffmpeg ``-f`` muxer token for the ``.tmp`` output(s),
+                           or ``None`` for the ``matroska`` default.
 
     Returns:
         ``FFmpegRunResult``.
@@ -441,7 +469,9 @@ def run_ffmpeg(
             "Use 'await run_ffmpeg_async(...)' instead."
         )
 
-    return asyncio.run(run_ffmpeg_async(cmd, output_file, progress_callback, video_meta, cwd))
+    return asyncio.run(
+        run_ffmpeg_async(cmd, output_file, progress_callback, video_meta, cwd, output_format)
+    )
 
 
 # ---------------------------------------------------------------------------

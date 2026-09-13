@@ -15,12 +15,26 @@ from decimal import Decimal
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SerializeAsAny,
+    field_validator,
+    model_validator,
+)
 
+from pyqenc.audio.filters import (
+    PassthroughFilter,
+    get_filter_class,
+    registered_type_ids,
+)
 from pyqenc.constants import (
     CONFIG_DIR_HOME,
     CONFIG_FILENAME_CWD,
     CONFIG_FILENAME_HOME,
+    FILENAME_FORBIDDEN_CHARS,
 )
 from pyqenc.models import (
     ChunkingMode,
@@ -258,32 +272,203 @@ class EncodingConfig(BaseModel):
         return self._resolved_strategies
 
 
-class AudioConfig(BaseModel):
-    """Audio output / conversion phase configuration.
+class FilterInstance(BaseModel):
+    """A validated config-side filter definition from ``audio.filters``.
 
-    All fields are required — values are supplied by the bundled YAML and
-    any user overrides. No Python-level defaults are set; a missing YAML
-    key raises a ``ValidationError`` at startup.
+    A raw filter def in YAML is ``{type: <id>, ...params}``. This model resolves
+    ``type`` against the filter-type **registry** (``pyqenc.audio.filters``) — the
+    single authority on which types exist — and validates the remaining fields
+    against that type's ``params_model`` (whose ``extra="forbid"`` rejects unknown
+    params). No filter-type ids are enumerated here (Req 2.5); adding a filter
+    type never touches this model.
+
+    Task 6 constructs the runnable filter from an instance via
+    ``get_filter_class(inst.type)(inst.params)``.
 
     Attributes:
-        convert_pattern:     Regex pattern; processed audio files whose name
-                             matches are passed to the ``ConversionStrategy``
-                             finalizer.
-        codec:               FFmpeg audio codec name (e.g. ``"aac"``).
-        bitrate_per_channel: Per-channel bitrate string (e.g. ``"96k"``).
-                             Scaled at runtime by channel count:
-                             2.0/stereo → ×2, 5.1 → ×6, 7.1 → ×8.
-        extension:           Output file extension (e.g. ``".m4a"``).
-        peak_target_dbfs:    Target peak level in dBFS for normalisation passes
-                             (e.g. ``-1.0``). Applied uniformly to all
-                             ``NormStrategy`` and downmix normalisation passes.
+        type:   The filter-type id, guaranteed present in the registry.
+        params: The validated parameter model instance for that type.
     """
 
-    convert_pattern:     str
-    codec:               str
-    bitrate_per_channel: str
-    extension:           str
-    peak_target_dbfs:    float
+    model_config = ConfigDict(frozen=True)
+
+    type:   str
+    # ``SerializeAsAny`` makes ``params`` serialise by its RUNTIME concrete type
+    # (the per-filter param model) rather than the declared ``BaseModel``. Without
+    # it, ``model_dump``/``model_dump_json`` would emit ``{}`` (the base model has
+    # no fields), which would silently drop every filter param — breaking the
+    # sidecar signature so a changed param could never be detected for
+    # invalidation.
+    params: SerializeAsAny[BaseModel]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_and_validate(cls, data: object) -> object:
+        """Resolve ``type`` via the registry and validate the remaining params.
+
+        Args:
+            data: The raw filter def — a mapping ``{type: <id>, ...params}``.
+
+        Returns:
+            A dict ``{"type": <id>, "params": <validated model>}`` ready for
+            field validation.
+
+        Raises:
+            ValueError: If ``type`` is missing, unknown to the registry (message
+                lists the registered ids), or the params fail the type's model.
+        """
+        if not isinstance(data, dict):
+            return data
+        # Already in resolved form (e.g. model_dump round-trip) — pass through.
+        if "params" in data and "type" in data and not (set(data) - {"type", "params"}):
+            return data
+
+        raw = dict(data)
+        type_id = raw.pop("type", None)
+        if type_id is None:
+            raise ValueError("Filter definition is missing the required 'type' field.")
+        try:
+            filter_cls = get_filter_class(type_id)
+        except KeyError:
+            raise ValueError(
+                f"Unknown filter type {type_id!r}. "
+                f"Registered filter types: {registered_type_ids()}."
+            ) from None
+        # Validate the remaining fields against the type's param model.
+        # extra="forbid" on the param model rejects any parameter not valid for the type.
+        params = filter_cls.params_model(**raw)
+        return {"type": type_id, "params": params}
+
+
+class ChainSpec(BaseModel):
+    """A named, ordered chain of filter references from ``audio.chains``.
+
+    Applied to N matched tracks a chain produces exactly N outputs. Referential
+    integrity (each name resolves in the palette), name uniqueness across the
+    list, passthrough-alone, and filename-safe name are all enforced by
+    :class:`AudioConfig`'s model-validator so failures surface as a
+    ``ValidationError`` at config load.
+
+    Attributes:
+        name:    Unique, filesystem-safe chain name; the ``chain=<name>`` output
+                 filename suffix.
+        filters: Ordered list of filter names, each referencing an
+                 ``audio.filters`` key.
+    """
+
+    name:    str
+    filters: list[str]
+
+
+class SelectEntry(BaseModel):
+    """One entry of the ``audio.select`` track-selection tree.
+
+    Attributes:
+        for_:    Regex gate (YAML key ``for``) matched against a track's
+                 conventional string; matching tracks are candidates.
+        exclude: Optional regex; candidate tracks matching it are dropped.
+        prefer:  Optional ordered regex tiers; the first tier matching ≥1
+                 candidate wins and contributes all its matches, else the
+                 implicit fallback contributes all candidates.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    for_:    str             = Field(alias="for")
+    exclude: str | None      = None
+    prefer:  list[str]       = []
+
+
+class AudioConfig(BaseModel):
+    """Audio processing configuration: filter palette, chains, and track select.
+
+    Replaces the former flat model. The three pieces are:
+
+    - ``filters`` — a **palette** of named, reusable filter definitions, each
+      validated through the filter-type registry (:class:`FilterInstance`).
+      Uses **dict-merge** across config layers, so a later layer may add or tune
+      a named filter without redefining the whole palette (Req 1.3).
+    - ``chains`` — ordered recipes referencing filter names. Uses **list-replace**
+      across layers (Req 4.2).
+    - ``select`` — an ordered track-selection tree; empty means "all extracted
+      tracks" (Req 5.3). Uses **list-replace** across layers (Req 5.2).
+
+    Cross-field integrity (chain→filter references, name uniqueness, passthrough
+    alone, filename-safe names) is enforced by :meth:`_validate_chains` and
+    surfaces as a ``ValidationError`` at config load (Req 12.1).
+
+    Attributes:
+        filters: Palette: filter name → validated :class:`FilterInstance`.
+        chains:  Ordered list of :class:`ChainSpec` recipes.
+        select:  Ordered list of :class:`SelectEntry`; empty = all tracks.
+    """
+
+    filters: dict[str, FilterInstance]
+    chains:  list[ChainSpec]
+    select:  list[SelectEntry]         = []
+
+    @model_validator(mode="after")
+    def _validate_chains(self) -> AudioConfig:
+        """Enforce chain integrity: references, uniqueness, passthrough-alone, safe names.
+
+        Returns:
+            ``self`` — required by Pydantic ``mode='after'`` validators.
+
+        Raises:
+            ValueError: If a chain references an unknown filter, two chains share
+                a name, a ``passthrough`` filter is not alone in its chain, or a
+                chain name contains filesystem-unsafe characters. Pydantic wraps
+                this as a ``ValidationError`` at load.
+        """
+        seen_names: set[str] = set()
+        for chain in self.chains:
+            if chain.name in seen_names:
+                raise ValueError(f"Duplicate chain name {chain.name!r} in audio.chains.")
+            seen_names.add(chain.name)
+
+            _validate_chain_name_filesystem_safe(chain.name)
+
+            for filter_name in chain.filters:
+                if filter_name not in self.filters:
+                    raise ValueError(
+                        f"Chain {chain.name!r} references unknown filter "
+                        f"{filter_name!r}. Defined filters: {sorted(self.filters)}."
+                    )
+
+            has_passthrough = any(
+                self.filters[name].type == PassthroughFilter.type_id
+                for name in chain.filters
+            )
+            if has_passthrough and len(chain.filters) != 1:
+                raise ValueError(
+                    f"Chain {chain.name!r} combines {PassthroughFilter.type_id!r} with "
+                    f"other filters; a passthrough filter must be the only filter in its chain."
+                )
+        return self
+
+
+def _validate_chain_name_filesystem_safe(name: str) -> None:
+    """Raise ``ValueError`` if *name* is unsafe for use in an output filename.
+
+    Rejects empty/whitespace-only names, any character in
+    :data:`~pyqenc.constants.FILENAME_FORBIDDEN_CHARS` (``< > : " / \\ | ? *``),
+    and control characters (U+0000–U+001F). Chain names form the
+    ``chain=<name>`` filename suffix, so they must be filesystem-safe (Req 8.4).
+
+    Args:
+        name: The chain name to validate.
+
+    Raises:
+        ValueError: If *name* is empty/blank or contains a forbidden character.
+    """
+    if not name or not name.strip():
+        raise ValueError("Chain name must be a non-empty, non-blank string.")
+    bad = {ch for ch in name if ch in FILENAME_FORBIDDEN_CHARS or ord(ch) < 0x20}
+    if bad:
+        raise ValueError(
+            f"Chain name {name!r} contains filesystem-unsafe character(s): "
+            f"{sorted(bad)}. Avoid {sorted(FILENAME_FORBIDDEN_CHARS)} and control characters."
+        )
 
 
 class AppConfig(BaseModel):
@@ -308,7 +493,7 @@ class AppConfig(BaseModel):
         extraction:  Stream filter settings for the extraction phase.
         chunking:    Chunking strategy and scene-detection tuning.
         encoding:    Quality targets, strategy selection, and encoding tuning.
-        audio:       Audio conversion settings (flat; no per-layout profiles).
+        audio:       Audio processing settings (filter palette, chains, select).
         measurement: Measurement phase settings (sampling factor).
         codecs:      Map of codec name → :class:`~pyqenc.models.CodecConfig`.
         profiles:    Map of profile name → :class:`ProfileConfig`.
@@ -690,5 +875,5 @@ def load_app_config(*, default_only: bool = False) -> AppConfig:
             _logger.debug("CWD config absent (skipped): %s", cwd_config)
 
     config = AppConfig.model_validate(merged)
-    config._source_paths = source_paths  # noqa: SLF001  (intentional post-init population)
+    config._source_paths = source_paths
     return config

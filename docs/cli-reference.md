@@ -66,7 +66,8 @@ Applied during extraction phase, use dry-run to preview.
 | ----------------------- | -------------------------------------------------------------------- | ------------------ | ---------------------------------- |
 | `--include REGEX`       | Regex pattern to include streams                                     | `"\b(RUS\|ENG)\b"` | Include all                        |
 | `--exclude REGEX`       | Regex pattern to exclude streams                                     | `"comment"`        | Exclude none                       |
-| `--audio-convert REGEX` | Regex pattern selecting processed audio files to convert to delivery format | `"5\.1"`    | All normalized and all 2.0 results |
+
+> Audio processing (filters, chains, track selection) is configured under `audio:` in your config file, not via CLI flags. See the [Audio Processing Guide](./audio-processing.md).
 
 ### Chunking
 
