@@ -43,11 +43,93 @@ measurement:
                # applies to quality checks during encoding, merge verification, and measure command
 
 audio:
-  convert_pattern: "^(norm|dynaudnorm|2\\.0 (std|night|nboost)) ←"  # regex — processed audio files to convert for delivery
-  codec: aac                 # ffmpeg audio codec name
-  bitrate_per_channel: 96k   # per-channel bitrate; scaled at runtime: 2.0→192k, 5.1→576k, 7.1→768k
-  extension: .m4a            # output file extension
-  peak_target_dbfs: -1.0     # peak normalisation target in dBFS
+  # Audio processing is defined by three pieces:
+  #   filters — a palette of named, reusable transformations (this section, dict-merged across layers)
+  #   chains  — ordered recipes referencing filters by name; one chain = one output per matched track (list-replaced)
+  #   select  — which extracted tracks to process; empty = all tracks (list-replaced)
+  #
+  # AUTOMATIC REPROCESSING: each committed chain's fully-resolved definition
+  # (all referenced filter params inlined + its effective output format) is
+  # recorded in a per-run sidecar. On the next run pyqenc compares the current
+  # resolved chain against the sidecar; if you change a chain — reorder its
+  # filters, tune a referenced filter's params, or swap the encode target — that
+  # chain's outputs are automatically invalidated and reprocessed. Unchanged
+  # chains with their output already on disk are reused as-is. Removing a chain
+  # deletes its outputs. So editing this section is all it takes to re-run only
+  # what changed.
+
+  filters:                        # palette — dict-merge across config layers (a later layer may add or tune one filter)
+    # --- normalisation ---------------------------------------------------
+    peaknorm:                     # two-pass peak normalisation: measure peak (volumedetect), then apply a gain
+      type: peaknorm
+      target_dbfs: -1.0           # shift the measured peak to this dBFS (0 = full scale); -1.0 leaves 1 dB headroom
+    loudnorm:                     # two-pass EBU R128 loudness normalisation (measure, then linear-normalise)
+      type: loudnorm
+      i: -16.0                    # integrated loudness target (LUFS); -16 is a common streaming target
+      tp: -1.0                    # max true peak (dBTP)
+      lra: 11.0                   # target loudness range (LU)
+    dynaudnorm:                   # single-pass dynamic normalisation (ffmpeg dynaudnorm)
+      type: dynaudnorm            # option names are ffmpeg's long forms; run `ffmpeg -h filter=dynaudnorm` to inspect
+      framelen: 500               # frame length (ms) of each analysis window
+      gausssize: 31               # Gaussian window size (frames); larger = smoother gain
+      peak: 0.95                  # target peak magnitude (0..1)
+      maxgain: 3.0                # max gain factor
+      targetrms: 0.0              # target RMS (0 = disabled, pure peak-based)
+    # --- downmix (downmix-only: no-op when source channels <= target) -----
+    down_std:                     # canonical ITU-R BS.775 / ATSC Lo/Ro fold to stereo (LFE dropped)
+      type: downmix
+      to: "2.0"                   # target layout; 5.1/7.1 fold to 2.0, a 2.0/stereo source passes through untouched
+      matrix: std
+    down_lfe:                     # custom downmix preserving LFE channel for better dialogs / effects balance
+      type: downmix
+      to: "2.0"
+      matrix: lfe
+    down_boosted:                 # custom downmix for dialogs boosting (full FC, reduced surrounds, LFE dropped)
+      type: downmix
+      to: "2.0"
+      matrix: boosted
+    # --- encode (terminal output target: sets -c:a/-b:a + extension, no -af) ---
+    aac:                          # AAC in an .m4a container; without an encode filter a chain defaults to FLAC
+      type: encode
+      codec: aac
+      bitrate_per_channel: 96k    # scaled by the OUTPUT channel count at run time (e.g. 2.0 -> 192k, 5.1 -> 576k)
+      extension: m4a
+    # --- passthrough (RESERVED — not yet implemented) ---------------------
+    passthrough:                  # stream-copy with no filtering; declaring it is future-ready but a passthrough
+      type: passthrough           # chain currently fails loudly (reserved for the in-memory-stream spec). No params.
+
+  chains:                         # recipes — list-replace across config layers
+    # A chain applied to N matched tracks produces exactly N outputs, named
+    # "<source-stem> chain=<name>.<ext>". No encode filter -> FLAC (lossless);
+    # otherwise the LAST encode filter in the chain sets the codec/extension.
+    - name: normal_stereo         # custom downmix to stereo with LFE channel and peak-normalized to prevent clipping
+      filters: [down_lfe, peaknorm, aac]
+    - name: night_stereo          # custom downmix to stereo with LFE channel + dynamic normalization for night
+      filters: [down_lfe, peaknorm, dynaudnorm, aac]
+
+  select: []                      # empty (default) = process ALL extracted audio tracks
+    # Uncomment and adapt entries below to process only specific tracks. Each
+    # entry is matched (case-insensitively) against a track's conventional
+    # string "lang=<code> ch=<layout> title=<text>" (ch= uses the faithful
+    # source token, e.g. ch=5.1(side)). Entries are ADDITIVE — every entry
+    # contributes its picked tracks and the results are combined (deduplicated).
+    #
+    # Within one entry: candidates = tracks matching `for` and NOT matching
+    # `exclude`. If `prefer` is given, the FIRST tier matching >=1 candidate
+    # wins and contributes ALL its matches (tiers are never merged); if no tier
+    # matches, the implicit fallback contributes all candidates.
+    #
+    # Example 1 — all Russian dubs, but drop commentary tracks by title:
+    # - for: "lang=rus"
+    #   exclude: "comment|коммент"
+    #   prefer: ["dub|дубляж"]
+    #
+    # Example 2 — English, preferring 7.1, then 5.1, else any English track:
+    # - for: "lang=eng"
+    #   prefer:
+    #     - "ch=7.1"            # first choice: 7.1
+    #     - "ch=5.1"            # second choice: 5.1
+    #     # no third tier -> implicit fallback: any English track
 
 # CODEC DEFINITIONS
 # encoder_args templated values: {input}, {quality}, {preset}, {profile_args}, {vf}

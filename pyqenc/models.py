@@ -26,10 +26,14 @@ from pydantic import (
     model_validator,
 )
 
+from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import (
     DOWN_ARROW,
     LEFT_ARROW,
     RIGHT_ARROW,
+    SELECTOR_KEY_CH,
+    SELECTOR_KEY_LANG,
+    SELECTOR_KEY_TITLE,
     TIME_SEPARATOR_MS,
     TIMEOUT_SECONDS_SHORT,
     UP_ARROW,
@@ -808,7 +812,9 @@ class AudioMetadata(BaseModel):
     Attributes:
         path:             Path to the extracted audio file.
         codec:            Audio codec name (e.g. ``'aac'``, ``'ac3'``).
-        channels:         Number of audio channels.
+        layout:           Channel layout as a :class:`~pyqenc.audio.layout.ChannelLayout`
+                          (carries the faithful source token plus its normalized form
+                          and channel count).
         language:         Language tag (e.g. ``'eng'``, ``'rus'``).
         title:            Descriptive title from track metadata (e.g. ``'Surround 5.1'``).
         duration_seconds: Duration of the audio track in seconds.
@@ -816,12 +822,35 @@ class AudioMetadata(BaseModel):
     """
 
     path:             Path
-    codec:            str   | None = None
-    channels:         int   | None = None
-    language:         str   | None = None
-    title:            str   | None = None
-    duration_seconds: float | None = None
-    start_timestamp:  float | None = None
+    codec:            str            | None = None
+    layout:           ChannelLayout  | None = None
+    language:         str            | None = None
+    title:            str            | None = None
+    duration_seconds: float          | None = None
+    start_timestamp:  float          | None = None
+
+    def selector_string(self) -> str:
+        """Return the conventional, regex-friendly string describing this track.
+
+        The string contains ``lang=<code>``, ``ch=<layout>``, and ``title=<text>``
+        tokens (title omitted when absent), space-separated. The ``ch=`` token uses
+        the layout's faithful source token (``ChannelLayout.original``) so a user's
+        select regex matches the source layout exactly (e.g. ``ch=5.1(side)``).
+
+        Select-entry regexes (``for``/``exclude``/``prefer``) match against this
+        string. It is derived purely from already-extracted metadata fields, so no
+        re-probe is required.
+
+        Returns:
+            The conventional string (e.g. ``"lang=eng ch=5.1(side) title=Surround"``).
+        """
+        tokens: list[str] = [
+            f"{SELECTOR_KEY_LANG}={self.language or ''}",
+            f"{SELECTOR_KEY_CH}={self.layout.original if self.layout else ''}",
+        ]
+        if self.title:
+            tokens.append(f"{SELECTOR_KEY_TITLE}={self.title}")
+        return " ".join(tokens)
 
 
 class AttemptMetadata(BaseModel):

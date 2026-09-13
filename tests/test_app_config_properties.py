@@ -712,8 +712,6 @@ class TestAppConfigRoundTrip:
         optimize_tolerance=st.floats(
             min_value=0.0, max_value=50.0, allow_nan=False, allow_infinity=False
         ),
-        audio_codec=st.sampled_from(["aac", "libopus", "flac"]),
-        audio_bitrate_per_channel=st.sampled_from(["64k", "96k", "128k", "192k"]),
         extraction_include=st.one_of(st.none(), st.text(min_size=1, max_size=30)),
         extraction_exclude=st.one_of(st.none(), st.text(min_size=1, max_size=30)),
         chunking_scene_threshold=st.floats(
@@ -729,8 +727,6 @@ class TestAppConfigRoundTrip:
         measurement_sampling: int,
         visual_hash: bool,
         optimize_tolerance: float,
-        audio_codec: str,
-        audio_bitrate_per_channel: str,
         extraction_include: str | None,
         extraction_exclude: str | None,
         chunking_scene_threshold: float,
@@ -756,8 +752,6 @@ class TestAppConfigRoundTrip:
         config.measurement.sampling       = measurement_sampling
         config.encoding.visual_hash       = visual_hash
         config.encoding.optimize_tolerance = optimize_tolerance
-        config.audio.codec                = audio_codec
-        config.audio.bitrate_per_channel  = audio_bitrate_per_channel
         config.extraction.include         = extraction_include
         config.extraction.exclude         = extraction_exclude
         config.chunking.scene_threshold   = chunking_scene_threshold
@@ -792,16 +786,6 @@ class TestAppConfigRoundTrip:
             f"encoding.optimize_tolerance changed during round-trip.\n"
             f"  expected : {optimize_tolerance!r}\n"
             f"  got      : {round_tripped.encoding.optimize_tolerance!r}"
-        )
-        assert round_tripped.audio.codec == audio_codec, (
-            f"audio.codec changed during round-trip.\n"
-            f"  expected : {audio_codec!r}\n"
-            f"  got      : {round_tripped.audio.codec!r}"
-        )
-        assert round_tripped.audio.bitrate_per_channel == audio_bitrate_per_channel, (
-            f"audio.bitrate_per_channel changed during round-trip.\n"
-            f"  expected : {audio_bitrate_per_channel!r}\n"
-            f"  got      : {round_tripped.audio.bitrate_per_channel!r}"
         )
         assert round_tripped.extraction.include == extraction_include, (
             f"extraction.include changed during round-trip.\n"
@@ -931,10 +915,9 @@ class TestAppConfigRoundTrip:
         assert round_tripped.chunking.mode              == config.chunking.mode
         assert round_tripped.chunking.scene_threshold   == config.chunking.scene_threshold
         assert round_tripped.chunking.min_scene_length  == config.chunking.min_scene_length
-        assert round_tripped.audio.convert_pattern      == config.audio.convert_pattern
-        assert round_tripped.audio.codec                 == config.audio.codec
-        assert round_tripped.audio.bitrate_per_channel   == config.audio.bitrate_per_channel
-        assert round_tripped.audio.extension             == config.audio.extension
+        assert set(round_tripped.audio.filters.keys())  == set(config.audio.filters.keys())
+        assert [c.name for c in round_tripped.audio.chains] == [c.name for c in config.audio.chains]
+        assert round_tripped.audio.select               == config.audio.select
         assert set(round_tripped.codecs.keys())         == set(config.codecs.keys())
         assert set(round_tripped.profiles.keys())       == set(config.profiles.keys())
 
@@ -1624,24 +1607,29 @@ class TestLoadAppConfigWithBundledDefault:
             "define at least one profile."
         )
 
-    def test_audio_convert_pattern_is_non_empty_string(self) -> None:
-        """load_app_config() returns a config with a non-empty audio.convert_pattern.
+    def test_audio_palette_and_chains_are_non_empty(self) -> None:
+        """load_app_config() returns a config with a working filter palette and chains.
 
-        Bug condition: if audio.convert_pattern is empty or None, the audio
-        conversion phase would match no files and silently skip all audio
-        conversion — users would get video-only output with no indication
-        that audio processing was skipped.
+        Bug condition: if audio.filters or audio.chains is empty, the audio
+        phase would have nothing to reference or produce — users would get
+        video-only output with no indication audio processing was skipped.
+        Also verifies every chain references only defined filters (the
+        cross-field validator actually ran on the bundled default).
 
-        **Validates: Requirements 1.2, 11.1**
+        **Validates: Requirements 1.1, 4.1, 12.2**
         """
         config = load_app_config(default_only=True)
-        assert isinstance(config.audio.convert_pattern, str), (
-            f"audio.convert_pattern is not a string; got: {type(config.audio.convert_pattern)!r}"
+        assert len(config.audio.filters) > 0, (
+            "load_app_config() returned a config with an empty audio.filters palette."
         )
-        assert len(config.audio.convert_pattern) > 0, (
-            "load_app_config() returned a config with an empty audio.convert_pattern. "
-            "The bundled default must define a non-empty convert_pattern regex."
+        assert len(config.audio.chains) > 0, (
+            "load_app_config() returned a config with no audio.chains."
         )
+        for chain in config.audio.chains:
+            for filter_name in chain.filters:
+                assert filter_name in config.audio.filters, (
+                    f"Chain {chain.name!r} references undefined filter {filter_name!r}."
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -1680,3 +1668,182 @@ class TestAppConfigRequiresAllFields:
 
         with pytest.raises(ValidationError):
             AppConfig.model_validate({})
+
+
+# ---------------------------------------------------------------------------
+# Task 3: AudioConfig — layered-merge semantics and load-time validation
+#
+# The new audio config surface is a filter palette (dict-merge across layers),
+# chains (list-replace), and select (list-replace). Every invalid audio config
+# must fail at load with a ValidationError, before any phase runs (Req 12.1).
+#
+# **Validates: Requirements 1.1, 1.3, 1.4, 1.5, 4.1, 4.2, 4.3, 4.4, 4.9, 5.2,
+#              8.4, 12.1**
+# ---------------------------------------------------------------------------
+
+import pytest
+
+from pyqenc.app_config import AudioConfig
+
+
+def _valid_audio_dict() -> dict:
+    """Return a minimal valid ``audio`` config dict for mutation in tests."""
+    return {
+        "filters": {
+            "peaknorm":  {"type": "peaknorm", "target_dbfs": -1.0},
+            "down_lfe":  {"type": "downmix", "to": "2.0", "matrix": "lfe"},
+            "aac":       {"type": "encode", "codec": "aac",
+                          "bitrate_per_channel": "96k", "extension": "m4a"},
+            "passthrough": {"type": "passthrough"},
+        },
+        "chains": [
+            {"name": "normal", "filters": ["peaknorm"]},
+            {"name": "night",  "filters": ["down_lfe", "aac"]},
+        ],
+        "select": [],
+    }
+
+
+class TestAudioConfigLayeredMerge:
+    """Task 3: filters dict-merge; chains/select list-replace across layers.
+
+    **Validates: Requirements 1.3, 4.2, 5.2**
+    """
+
+    def test_filters_dict_merge_adds_and_overrides_without_redefining_palette(self) -> None:
+        """A later layer adds one filter and tunes another; the rest survive.
+
+        Bug condition: if ``filters`` used list-replace (or the loader dropped
+        base keys), a user overriding one filter's param would wipe the entire
+        bundled palette — exactly the repetition Req 1.3 forbids.
+
+        **Validates: Requirements 1.3**
+        """
+        base = {"audio": _valid_audio_dict()}
+        override = {"audio": {"filters": {
+            # tune an existing filter's param
+            "peaknorm": {"type": "peaknorm", "target_dbfs": -2.0},
+            # add a brand-new named filter
+            "loudnorm": {"type": "loudnorm", "i": -16.0, "tp": -1.5, "lra": 11.0},
+        }}}
+
+        merged = _deep_merge(base, override)
+        audio = AudioConfig.model_validate(merged["audio"])
+
+        # Untouched base filters survive (dict-merge, not replace).
+        assert {"peaknorm", "down_lfe", "aac", "passthrough", "loudnorm"} <= set(audio.filters)
+        # Overridden param won.
+        assert audio.filters["peaknorm"].params.target_dbfs == -2.0
+        # Added filter present.
+        assert audio.filters["loudnorm"].type == "loudnorm"
+
+    def test_chains_and_select_list_replace_wholesale(self) -> None:
+        """A later layer's chains/select lists replace the base lists entirely.
+
+        Bug condition: if ``chains``/``select`` were element-merged or appended,
+        a user redefining chains would inherit stale base chains they meant to
+        drop (Req 4.2 / 5.2 require wholesale replacement).
+
+        **Validates: Requirements 4.2, 5.2**
+        """
+        base = {"audio": _valid_audio_dict()}
+        override = {"audio": {
+            "chains": [{"name": "only", "filters": ["peaknorm"]}],
+            "select": [{"for": "lang=eng"}],
+        }}
+
+        merged = _deep_merge(base, override)
+        audio = AudioConfig.model_validate(merged["audio"])
+
+        assert [c.name for c in audio.chains] == ["only"]
+        assert len(audio.select) == 1
+        assert audio.select[0].for_ == "lang=eng"
+
+
+class TestSelectEntryAlias:
+    """Task 3: SelectEntry accepts the YAML ``for:`` key via alias.
+
+    **Validates: Requirements 5.1**
+    """
+
+    def test_for_key_populates_for_field(self) -> None:
+        """YAML ``for``/``exclude``/``prefer`` populate the model fields.
+
+        Bug condition: without ``populate_by_name`` + alias, the reserved
+        keyword ``for`` in YAML could not map to the field and select config
+        would fail to load.
+
+        **Validates: Requirements 5.1**
+        """
+        audio_dict = _valid_audio_dict()
+        audio_dict["select"] = [
+            {"for": "lang=rus", "exclude": "comment", "prefer": ["ch=7.1", "ch=5.1"]},
+        ]
+        audio = AudioConfig.model_validate(audio_dict)
+        entry = audio.select[0]
+        assert entry.for_ == "lang=rus"
+        assert entry.exclude == "comment"
+        assert entry.prefer == ["ch=7.1", "ch=5.1"]
+
+
+class TestAudioConfigInvalidRaisesValidationError:
+    """Task 3: every invalid audio config raises ValidationError at load.
+
+    Each case is a distinct bug that must be caught at config load (Req 12.1)
+    rather than surfacing deep in the audio phase.
+
+    **Validates: Requirements 1.4, 1.5, 4.3, 4.4, 4.9, 8.4, 12.1**
+    """
+
+    def test_unknown_filter_type_raises(self) -> None:
+        """A filter def with a type not in the registry is rejected (Req 1.4)."""
+        audio_dict = _valid_audio_dict()
+        audio_dict["filters"]["bogus"] = {"type": "does-not-exist"}
+        with pytest.raises(ValidationError):
+            AudioConfig.model_validate(audio_dict)
+
+    def test_invalid_filter_param_raises(self) -> None:
+        """A parameter not valid for the filter's type is rejected (Req 1.5)."""
+        audio_dict = _valid_audio_dict()
+        # peaknorm's param model forbids extras.
+        audio_dict["filters"]["peaknorm"] = {"type": "peaknorm", "target_dbfs": -1.0, "bogus": 1}
+        with pytest.raises(ValidationError):
+            AudioConfig.model_validate(audio_dict)
+
+    def test_unknown_chain_filter_reference_raises(self) -> None:
+        """A chain referencing an undefined filter name is rejected (Req 4.4)."""
+        audio_dict = _valid_audio_dict()
+        audio_dict["chains"].append({"name": "bad", "filters": ["nope"]})
+        with pytest.raises(ValidationError):
+            AudioConfig.model_validate(audio_dict)
+
+    def test_duplicate_chain_name_raises(self) -> None:
+        """Two chains with the same name are rejected (Req 4.3)."""
+        audio_dict = _valid_audio_dict()
+        audio_dict["chains"].append({"name": "normal", "filters": ["peaknorm"]})
+        with pytest.raises(ValidationError):
+            AudioConfig.model_validate(audio_dict)
+
+    def test_passthrough_not_alone_raises(self) -> None:
+        """A passthrough filter combined with others in a chain is rejected (Req 4.9)."""
+        audio_dict = _valid_audio_dict()
+        audio_dict["chains"].append(
+            {"name": "mixed", "filters": ["passthrough", "peaknorm"]}
+        )
+        with pytest.raises(ValidationError):
+            AudioConfig.model_validate(audio_dict)
+
+    def test_passthrough_alone_is_valid(self) -> None:
+        """A chain consisting solely of passthrough loads fine (Req 4.9 / 11.1)."""
+        audio_dict = _valid_audio_dict()
+        audio_dict["chains"].append({"name": "copy", "filters": ["passthrough"]})
+        audio = AudioConfig.model_validate(audio_dict)
+        assert any(c.name == "copy" for c in audio.chains)
+
+    @pytest.mark.parametrize("bad_name", ["night/day", "a:b", "q?", 'a"b', "x|y", "<z>", "*", "  "])
+    def test_filesystem_unsafe_chain_name_raises(self, bad_name: str) -> None:
+        """A chain name with filesystem-unsafe characters is rejected (Req 8.4)."""
+        audio_dict = _valid_audio_dict()
+        audio_dict["chains"].append({"name": bad_name, "filters": ["peaknorm"]})
+        with pytest.raises(ValidationError):
+            AudioConfig.model_validate(audio_dict)

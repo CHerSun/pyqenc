@@ -20,6 +20,7 @@ from os import PathLike
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import (
     FAILURE_SYMBOL_MINOR,
     SUCCESS_SYMBOL_MINOR,
@@ -191,13 +192,17 @@ class AudioStream(StreamBase):
     extract_type = 'tracks'
 
     @property
-    def channels_layout(self) -> str:
-        """Audio channel layout as specified in the file, or empty string."""
+    def channels_layout(self) -> ChannelLayout | None:
+        """Audio channel layout as a :class:`ChannelLayout`, or ``None`` when unknown.
+
+        Prefers the explicit ``channel_layout`` token (e.g. ``5.1(side)``); falls
+        back to synthesising ``<channels>.0`` from the raw ``channels`` count.
+        """
         if channel_layout := self.raw.get('channel_layout'):
-            return channel_layout
+            return ChannelLayout.parse(channel_layout)
         if channels := self.raw.get('channels'):
-            return f"{channels}.0"
-        return ''
+            return ChannelLayout.parse(f"{channels}.0")
+        return None
 
     @property
     def file_extension(self) -> str:
@@ -351,11 +356,12 @@ def _log_stream_table(
         artifacts: Internal artifact list produced by ``_recover()`` (includes
                    both wanted and unwanted entries).
     """
-    if not artifacts:
-        return
-
     logger.info("Streams:")
     logger.info("Want  Present      Name")
+    if not artifacts:
+        logger.warning("NO streams found.")
+        return
+
     for artifact in artifacts:
         w_sym = SUCCESS_SYMBOL_MINOR if artifact.wanted else FAILURE_SYMBOL_MINOR
         p_sym = (
@@ -490,13 +496,7 @@ def _audio_metadata_from_stream(path: Path, track: "AudioStream") -> AudioMetada
     Returns:
         Populated ``AudioMetadata`` instance.
     """
-    channels: int | None = None
-    raw_channels = track.raw.get("channels")
-    if raw_channels is not None:
-        try:
-            channels = int(raw_channels)
-        except (ValueError, TypeError):
-            pass
+    layout = track.channels_layout
 
     start_ts: float | None = None
     raw_start = track.start_time
@@ -511,7 +511,7 @@ def _audio_metadata_from_stream(path: Path, track: "AudioStream") -> AudioMetada
     return AudioMetadata(
         path            = path,
         codec           = track.codec_name or None,
-        channels        = channels,
+        layout          = layout,
         language        = track.language or None,
         title           = track.title or None,
         start_timestamp = start_ts,
@@ -650,10 +650,13 @@ class VideoArtifact(Artifact):
     """Extraction artifact for a video stream.
 
     Attributes:
-        meta: Video metadata; populated when ``state`` is ``COMPLETE``.
+        meta:   Video metadata; populated when ``state`` is ``COMPLETE``.
+        stream: Originating source track; carries the ``track_id`` the executor
+                needs to extract this artifact without re-probing the source.
     """
 
-    meta: VideoMetadata | None = None
+    meta:   VideoMetadata | None = None
+    stream: "VideoStream | None" = None
 
 
 @dataclass
@@ -661,18 +664,27 @@ class AudioArtifact(Artifact):
     """Extraction artifact for an audio stream.
 
     Attributes:
-        meta: Audio metadata; populated when ``state`` is ``COMPLETE``.
+        meta:   Audio metadata; populated when ``state`` is ``COMPLETE``.
+        stream: Originating source track; carries the ``track_id`` the executor
+                needs to extract this artifact without re-probing the source.
     """
 
-    meta: AudioMetadata | None = None
+    meta:   AudioMetadata | None = None
+    stream: "AudioStream | None" = None
 
 
 @dataclass
 class OtherArtifact(Artifact):
     """Extraction artifact for subtitles, chapters, or attachments.
 
-    No additional metadata beyond the base ``path`` and ``state``.
+    Attributes:
+        stream: Originating source track. The executor dispatches on its
+                concrete type (``ChaptersStream`` / ``AttachmentStream`` /
+                ``SubtitleStream``) and reads ``track_id`` / ``file_extension``
+                to extract this artifact without re-probing the source.
     """
+
+    stream: "StreamBase | None" = None
 
 
 @dataclass
@@ -682,7 +694,13 @@ class TimestampArtifact(Artifact):
     Path: extracted/timestamps.txt
     States: COMPLETE (file exists and non-empty) or ABSENT only.
     Not subject to include/exclude stream filtering.
+
+    Attributes:
+        stream: The video source track whose PTS values are extracted. Carries
+                the ``track_id`` the executor passes to timestamp extraction.
     """
+
+    stream: "VideoStream | None" = None
 
 
 # Type alias for all extraction artifacts — use this in annotations throughout
@@ -794,14 +812,19 @@ class ExtractionPhase:
         # Log recovery result line from the internal (unfiltered) artifact list
         log_recovery_line(logger, artifacts)
 
-        # Wanted-only counts drive the dry-run / nothing-to-do control flow
+        # Select wanted artifacts ONCE — recovery is the sole owner of selection.
+        # This single list drives the dry-run / reused returns and is the exact
+        # payload handed to the pure executor. Unwanted artifacts stay on disk
+        # and never leave ``run()``.
+        wanted_artifacts = [a for a in artifacts if a.wanted]
+
         complete_count = sum(
-            1 for a in artifacts
-            if a.wanted and a.state == ArtifactState.COMPLETE
+            1 for a in wanted_artifacts
+            if a.state == ArtifactState.COMPLETE
         )
         pending_count  = sum(
-            1 for a in artifacts
-            if a.wanted and a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)
+            1 for a in wanted_artifacts
+            if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)
         )
 
         # Dry-run path
@@ -810,10 +833,10 @@ class ExtractionPhase:
                 outcome = PhaseOutcome.REUSED
             else:
                 outcome = PhaseOutcome.PENDING
-            ts_artifact = next((a for a in artifacts if isinstance(a, TimestampArtifact)), None)
+            ts_artifact = next((a for a in wanted_artifacts if isinstance(a, TimestampArtifact)), None)
             self.result = ExtractionPhaseResult(
                 outcome         = outcome,
-                artifacts       = [a for a in artifacts if a.wanted],
+                artifacts       = wanted_artifacts,
                 message         = "dry-run",
                 video           = video_meta,
                 audio           = audio_meta,
@@ -823,10 +846,10 @@ class ExtractionPhase:
 
         # Nothing to do — only skip if we actually have complete artifacts
         if pending_count == 0 and complete_count > 0:
-            ts_artifact = next((a for a in artifacts if isinstance(a, TimestampArtifact)), None)
+            ts_artifact = next((a for a in wanted_artifacts if isinstance(a, TimestampArtifact)), None)
             self.result = ExtractionPhaseResult(
                 outcome         = PhaseOutcome.REUSED,
-                artifacts       = [a for a in artifacts if a.wanted],
+                artifacts       = wanted_artifacts,
                 message         = "all artifacts reused",
                 video           = video_meta,
                 audio           = audio_meta,
@@ -834,8 +857,10 @@ class ExtractionPhase:
             )
             return self.result
 
-        # Execute extraction for ABSENT artifacts
-        result = self._execute_extraction(artifacts, video_meta, audio_meta)
+        # Execute extraction for ABSENT artifacts. Pass ONLY the wanted list:
+        # recovery already selected and typed each artifact and attached its
+        # source stream, so the executor performs no gating or re-probing.
+        result = self._execute_extraction(wanted_artifacts)
         self.result = result
         return result
 
@@ -1009,24 +1034,40 @@ class ExtractionPhase:
                 vm = VideoMetadata(path=path) if present else None
                 if vm is not None and wanted and primary_video is None:
                     primary_video = vm
-                artifacts.append(VideoArtifact(path=path, state=state, wanted=wanted, meta=vm))
+                artifacts.append(VideoArtifact(
+                    path=path, state=state, wanted=wanted, meta=vm,
+                    stream=cast(VideoStream, track),
+                ))
             elif track.codec_type == "audio":
                 am: AudioMetadata | None = None
                 if present:
                     am = _audio_metadata_from_stream(path, track)  # type: ignore[arg-type]
                     if wanted:
                         audio_list.append(am)
-                artifacts.append(AudioArtifact(path=path, state=state, wanted=wanted, meta=am))
+                artifacts.append(AudioArtifact(
+                    path=path, state=state, wanted=wanted, meta=am,
+                    stream=cast(AudioStream, track),
+                ))
             else:
-                artifacts.append(OtherArtifact(path=path, state=state, wanted=wanted))
+                artifacts.append(OtherArtifact(
+                    path=path, state=state, wanted=wanted, stream=track,
+                ))
 
-        # TimestampArtifact — driven by the same rules; wanted only when video is required.
+        # TimestampArtifact — enumerated and shown in the table like any other
+        # stream, but ``wanted`` only when video is required (same treatment as
+        # video streams in audio-only mode: shown as unwanted, never extracted).
+        # Carries the first video track, whose PTS the executor extracts.
+        first_video: VideoStream | None = next(
+            (cast(VideoStream, t) for t in extractor.tracks if t.codec_type == "video"),
+            None,
+        )
         timestamps_file = extracted_dir / TIMESTAMPS_FILENAME
         ts_present      = TIMESTAMPS_FILENAME in on_disk_names
         artifacts.append(TimestampArtifact(
             path   = timestamps_file,
             state  = ArtifactState.COMPLETE if ts_present else ArtifactState.ABSENT,
             wanted = self._video_required,
+            stream = first_video,
         ))
 
         # Emit stream table — artifacts are the single source of truth
@@ -1036,19 +1077,25 @@ class ExtractionPhase:
 
     def _execute_extraction(
         self,
-        artifacts:   list[ExtractionArtifact],
-        video_meta:  VideoMetadata | None,
-        audio_meta:  list[AudioMetadata],
+        artifacts: list[ExtractionArtifact],
     ) -> ExtractionPhaseResult:
-        """Extract ABSENT artifacts.
+        """Extract the ``ABSENT`` artifacts among the given wanted artifacts.
+
+        Pure executor. It performs NO selection, filtering, re-probing, or
+        ``video_required`` gating: ``_recover()`` already decided what is wanted,
+        typed each artifact, and attached its originating source stream. This
+        method walks the passed-in list (all ``wanted=True``), extracts each
+        artifact whose ``state`` is ``ABSENT`` using the concrete artifact type
+        plus its carried ``stream``, then updates that artifact's ``state`` and
+        ``meta`` in place. No third disk re-scan and no re-derivation of track
+        lists occur.
 
         Args:
-            artifacts:  Artifact list from ``_recover()``.
-            video_meta: Primary video metadata (may be ``None`` if not yet extracted).
-            audio_meta: Audio metadata list (may be incomplete).
+            artifacts: Wanted artifacts from ``_recover()`` (``wanted=True``),
+                       each carrying its source ``stream``.
 
         Returns:
-            ``ExtractionPhaseResult`` after extraction.
+            ``ExtractionPhaseResult`` built directly from the updated artifacts.
         """
         work_dir      = self._job.result.work_dir  # type: ignore[union-attr]
         extracted_dir = work_dir / EXTRACTED_DIR
@@ -1063,239 +1110,47 @@ class ExtractionPhase:
                 message=err, error=err, video=None, audio=[],
             )
 
-        # Re-build extractor and selected tracks for extraction
-        try:
-            extractor = MKVTrackExtractor(str(source))
-        except Exception as exc:
-            err = f"Failed to analyse source video: {exc}"
-            logger.critical(err)
-            return ExtractionPhaseResult(
-                outcome=PhaseOutcome.FAILED, artifacts=artifacts,
-                message=err, error=err, video=None, audio=[],
-            )
-
-        selected_tracks = streams_filter_plain_regex(
-            extractor.tracks,
-            include_pattern = self._job.result.config.extraction.include,  # type: ignore[union-attr]
-            exclude_pattern = self._job.result.config.extraction.exclude,  # type: ignore[union-attr]
-        )
-
-        video_tracks: list[VideoStream] = [t for t in selected_tracks if t.codec_type == "video"]  # type: ignore[assignment]
-        audio_tracks: list[AudioStream] = [t for t in selected_tracks if t.codec_type == "audio"]  # type: ignore[assignment]
-        other_tracks: list[StreamBase]  = [t for t in selected_tracks if t.codec_type not in ("video", "audio")]
-
-        if not self._video_required:
-            # Audio-only pipeline mode: skip video and timestamp extraction entirely.
-            logger.debug("Video extraction skipped by pipeline mode (video_required=False)")
-            video_tracks = []
-        elif not video_tracks:
-            # video_required=True but no video tracks match the current filters — not fatal.
-            logger.info("No video tracks selected — skipping video extraction")
-
-        # Determine which files are ABSENT (need extraction) — unwanted
-        # artifacts are never extracted, only wanted ones.
-        absent_names = {
-            a.path.name
-            for a in artifacts
-            if a.wanted and a.state == ArtifactState.ABSENT
-        }
-
         errors: list[str] = []
 
-        # Extract timestamps — only meaningful when video tracks are present
-        if video_tracks:
-            timestamps_output = extracted_dir / TIMESTAMPS_FILENAME
-            job_source = getattr(getattr(self._job, "result", None), "job", None)
-            source_duration_s: float | None = job_source.source.duration_seconds if job_source is not None else None
-            duration_ms: int | None = int(source_duration_s * 1000) if source_duration_s is not None else None
-            try:
-                _extract_timestamps(source, video_tracks[0].track_id, timestamps_output, duration_ms=duration_ms)
-            except Exception as exc:
-                err = f"Failed to extract timestamps: {exc}"
-                logger.critical(err)
-                errors.append(err)
-
-        # Extract video tracks
-        for track in video_tracks:
-            output_file = extracted_dir / track.display_name()
-            if output_file.name not in absent_names:
+        # Extract only artifacts recovery marked ABSENT; COMPLETE ones are kept
+        # as-is. Dispatch on the concrete artifact type — the type already says
+        # WHAT to extract, and the carried ``stream`` says HOW (track_id / format).
+        for artifact in artifacts:
+            if artifact.state != ArtifactState.ABSENT:
                 continue
-            cmd: list[str | PathLike] = [
-                "ffmpeg", "-i", source,
-                "-map", f"0:{track.track_id}",
-                "-c", "copy",
-                "-f", "matroska",
-                output_file,
-            ]
-            logger.debug("Extracting video track %d: %s", track.track_id, output_file.name)
-            res = run_ffmpeg(cmd, output_file=output_file)
-            if not res.success:
-                err = f"ffmpeg failed extracting video track {track.track_id}"
-                logger.error(err)
-                errors.append(err)
+            if isinstance(artifact, TimestampArtifact):
+                self._extract_timestamp_artifact(artifact, source, errors)
+            elif isinstance(artifact, VideoArtifact):
+                self._extract_video_artifact(artifact, source, errors)
+            elif isinstance(artifact, AudioArtifact):
+                self._extract_audio_artifact(artifact, source, errors)
+            elif isinstance(artifact, OtherArtifact):
+                self._extract_other_artifact(artifact, source, errors)
 
-        # Extract audio tracks
-        for track in audio_tracks:
-            output_file = extracted_dir / track.display_name()
-            if output_file.name not in absent_names:
-                continue
-            cmd = [
-                "ffmpeg", "-i", source,
-                "-map", f"0:{track.track_id}",
-                "-c", "copy",
-                output_file,
-            ]
-            logger.debug("Extracting audio track %d: %s", track.track_id, output_file.name)
-            res = run_ffmpeg(cmd, output_file=output_file)
-            if not res.success:
-                err = f"ffmpeg failed extracting audio track {track.track_id}"
-                logger.error(err)
-                errors.append(err)
-
-        # Extract other tracks (subtitles, chapters, attachments) via ffmpeg
-        for track in other_tracks:
-            output_file = extracted_dir / track.display_name()
-            if output_file.name not in absent_names:
-                continue
-
-            if isinstance(track, ChaptersStream):
-                # Chapters: try mkvextract first (native MKV XML format).
-                # Fall back to ffprobe -show_chapters -print_format xml for
-                # non-MKV containers or when mkvextract is unavailable.
-                # Both paths use .tmp-then-rename for atomicity.
-                tmp = output_file.parent / f"{output_file.stem}{TEMP_SUFFIX}"
-                logger.debug("Extracting chapters: %s", output_file.name)
-
-                mkvextract_cmd: list[str | os.PathLike] = [
-                    "mkvextract", source, "chapters", tmp,
-                ]
-                try:
-                    subprocess.run(mkvextract_cmd, capture_output=True, check=True)
-                    if tmp.exists() and tmp.stat().st_size > 0:
-                        tmp.replace(output_file)
-                        logger.debug("Chapters extracted via mkvextract")
-                    else:
-                        raise subprocess.CalledProcessError(1, mkvextract_cmd)
-                except (subprocess.CalledProcessError, OSError) as exc:
-                    logger.debug(
-                        "mkvextract chapters failed (%s), falling back to ffprobe", exc,
-                    )
-                    # Clean up any partial output from mkvextract
-                    output_file.unlink(missing_ok=True)
-                    tmp.unlink(missing_ok=True)
-
-                    ffprobe_cmd: list[str | os.PathLike] = [
-                        "ffprobe", "-v", "error",
-                        "-show_chapters",
-                        "-print_format", "xml",
-                        source,
-                    ]
-                    try:
-                        ffprobe_result = subprocess.run(
-                            ffprobe_cmd, capture_output=True, text=True, check=True,
-                        )
-                    except subprocess.CalledProcessError as ffprobe_exc:
-                        err = f"ffprobe failed extracting chapters (exit {ffprobe_exc.returncode}): {(ffprobe_exc.stderr or '').strip()}"
-                        logger.error(err)
-                        errors.append(err)
-                        continue
-                    comment = "<!-- Extracted by ffprobe -show_chapters -print_format xml (mkvextract not available or not applicable) -->\n"
-                    tmp.write_text(comment + ffprobe_result.stdout, encoding="utf-8")
-                    tmp.replace(output_file)
-                    logger.debug("Chapters extracted via ffprobe fallback")
-
-            elif isinstance(track, AttachmentStream):
-                # Attachments: -dump_attachment writes directly — bypass muxer
-                cmd = [
-                    "ffmpeg", "-i", source,
-                    f"-dump_attachment:{track.track_id}", output_file,
-                    "-t", "0", "-f", "null", "-",
-                ]
-                logger.debug("Extracting attachment track %d: %s", track.track_id, output_file.name)
-                # output_file=None: dump_attachment writes directly, .tmp protocol does not apply
-                res = run_ffmpeg(cmd, output_file=None)
-                if not res.success:
-                    err = f"ffmpeg failed extracting attachment track {track.track_id}"
-                    logger.error(err)
-                    errors.append(err)
-
-            elif isinstance(track, SubtitleStream):
-                # Subtitles: text codecs need explicit -f; bitmap codecs do not
-                fmt = _SUBTITLE_FFMPEG_FORMAT.get(track.file_extension)
-                cmd = [
-                    "ffmpeg", "-i", source,
-                    "-map", f"0:{track.track_id}",
-                    "-c", "copy",
-                ]
-                if fmt:
-                    cmd += ["-f", fmt]
-                cmd.append(output_file)
-                logger.debug("Extracting subtitle track %d: %s", track.track_id, output_file.name)
-                res = run_ffmpeg(cmd, output_file=output_file)
-                if not res.success:
-                    err = f"ffmpeg failed extracting subtitle track {track.track_id}"
-                    logger.error(err)
-                    errors.append(err)
-
-            else:
-                logger.warning("Skipping unknown stream type %s: %s", type(track).__name__, output_file.name)
-
-        # Re-scan to build final typed artifact list and metadata
-        final_artifacts: list[ExtractionArtifact] = []
-        final_video: VideoMetadata | None = None
-        final_audio: list[AudioMetadata] = []
-
-        for track in video_tracks:
-            f     = extracted_dir / track.display_name()
-            state = ArtifactState.COMPLETE if f.exists() and f.stat().st_size > 0 else ArtifactState.ABSENT
-            vm    = VideoMetadata(path=f) if state == ArtifactState.COMPLETE else None
-            if vm is not None and final_video is None:
-                final_video = vm
-            final_artifacts.append(VideoArtifact(path=f, state=state, meta=vm))
-
-        for track in audio_tracks:
-            f     = extracted_dir / track.display_name()
-            state = ArtifactState.COMPLETE if f.exists() and f.stat().st_size > 0 else ArtifactState.ABSENT
-            am: AudioMetadata | None = None
-            if state == ArtifactState.COMPLETE:
-                am = _audio_metadata_from_stream(f, track)  # type: ignore[arg-type]
-                final_audio.append(am)
-            final_artifacts.append(AudioArtifact(path=f, state=state, meta=am))
-
-        for track in other_tracks:
-            f     = extracted_dir / track.display_name()
-            state = ArtifactState.COMPLETE if f.exists() else ArtifactState.ABSENT
-            final_artifacts.append(OtherArtifact(path=f, state=state))
-
-        # TimestampArtifact — always present regardless of include/exclude filters
-        ts_file  = extracted_dir / TIMESTAMPS_FILENAME
-        ts_state = ArtifactState.COMPLETE if ts_file.exists() else ArtifactState.ABSENT
-        final_artifacts.append(TimestampArtifact(path=ts_file, state=ts_state))
-        final_timestamps_path: Path | None = ts_file if ts_state == ArtifactState.COMPLETE else None
-
-        # Keep unwanted artifacts from original recovery in place unchanged
-        # (they stay on disk); they are tracked internally but never exposed
-        # in ``PhaseResult.artifacts``.
-        for a in artifacts:
-            if not a.wanted:
-                final_artifacts.append(a)
-
-        # Recovery line derived from the internal (unfiltered) list; wanted-only
-        # artifacts are exposed on the result.
-        message       = log_recovery_line(logger, final_artifacts)
-        wanted_result = [a for a in final_artifacts if a.wanted]
+        # Build result directly from the (now updated) wanted artifacts — no
+        # disk re-scan, no re-filtering.
+        final_video: VideoMetadata | None = next(
+            (a.meta for a in artifacts if isinstance(a, VideoArtifact) and a.meta is not None),
+            None,
+        )
+        final_audio: list[AudioMetadata] = [
+            a.meta for a in artifacts if isinstance(a, AudioArtifact) and a.meta is not None
+        ]
+        ts_artifact = next((a for a in artifacts if isinstance(a, TimestampArtifact)), None)
+        final_timestamps_path: Path | None = (
+            ts_artifact.path
+            if ts_artifact is not None and ts_artifact.state == ArtifactState.COMPLETE
+            else None
+        )
 
         if errors:
-            failed_count = sum(
-                1 for a in final_artifacts
-                if a.wanted and a.state == ArtifactState.ABSENT
-            )
+            failed_count = sum(1 for a in artifacts if a.state == ArtifactState.ABSENT)
             err_summary  = f"{len(errors)} extraction error(s): {'; '.join(errors)}"
             logger.error(err_summary)
             outcome = PhaseOutcome.FAILED if failed_count > 0 else PhaseOutcome.COMPLETED
             return ExtractionPhaseResult(
                 outcome         = outcome,
-                artifacts       = wanted_result,
+                artifacts       = artifacts,
                 message         = err_summary,
                 error           = err_summary if outcome == PhaseOutcome.FAILED else None,
                 video           = final_video,
@@ -1303,10 +1158,7 @@ class ExtractionPhase:
                 timestamps_path = final_timestamps_path,
             )
 
-        complete_count = sum(
-            1 for a in final_artifacts
-            if a.wanted and a.state == ArtifactState.COMPLETE
-        )
+        complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
         logger.info(
             "%s Extraction complete: %d artifact(s) extracted",
             SUCCESS_SYMBOL_MINOR, complete_count,
@@ -1315,12 +1167,201 @@ class ExtractionPhase:
 
         return ExtractionPhaseResult(
             outcome         = PhaseOutcome.COMPLETED,
-            artifacts       = wanted_result,
-            message         = message,
+            artifacts       = artifacts,
+            message         = f"extracted {complete_count} artifact(s)",
             video           = final_video,
             audio           = final_audio,
             timestamps_path = final_timestamps_path,
         )
+
+    # ------------------------------------------------------------------
+    # Per-artifact extractors — pure "how to extract" helpers
+    # ------------------------------------------------------------------
+
+    def _extract_timestamp_artifact(
+        self,
+        artifact: TimestampArtifact,
+        source:   Path,
+        errors:   list[str],
+    ) -> None:
+        """Extract per-frame PTS timestamps for the carried video track.
+
+        PTS are read from the source video stream, so a video track is required;
+        recovery only marks the timestamp artifact wanted when video is required
+        (and thus a video track exists and is carried on ``artifact.stream``).
+        Updates ``artifact.state`` to ``COMPLETE`` on success.
+        """
+        if artifact.stream is None:
+            return
+        job_source = getattr(getattr(self._job, "result", None), "job", None)
+        source_duration_s: float | None = job_source.source.duration_seconds if job_source is not None else None
+        duration_ms: int | None = int(source_duration_s * 1000) if source_duration_s is not None else None
+        try:
+            _extract_timestamps(source, artifact.stream.track_id, artifact.path, duration_ms=duration_ms)
+            if artifact.path.exists() and artifact.path.stat().st_size > 0:
+                artifact.state = ArtifactState.COMPLETE
+        except Exception as exc:
+            err = f"Failed to extract timestamps: {exc}"
+            logger.critical(err)
+            errors.append(err)
+
+    def _extract_video_artifact(
+        self,
+        artifact: VideoArtifact,
+        source:   Path,
+        errors:   list[str],
+    ) -> None:
+        """Copy the carried video track into the artifact path (matroska)."""
+        if artifact.stream is None:
+            return
+        track = artifact.stream
+        cmd: list[str | PathLike] = [
+            "ffmpeg", "-i", source,
+            "-map", f"0:{track.track_id}",
+            "-c", "copy",
+            "-f", "matroska",
+            artifact.path,
+        ]
+        logger.debug("Extracting video track %d: %s", track.track_id, artifact.path.name)
+        res = run_ffmpeg(cmd, output_file=artifact.path)
+        if res.success and artifact.path.exists() and artifact.path.stat().st_size > 0:
+            artifact.state = ArtifactState.COMPLETE
+            artifact.meta  = VideoMetadata(path=artifact.path)
+        else:
+            err = f"ffmpeg failed extracting video track {track.track_id}"
+            logger.error(err)
+            errors.append(err)
+
+    def _extract_audio_artifact(
+        self,
+        artifact: AudioArtifact,
+        source:   Path,
+        errors:   list[str],
+    ) -> None:
+        """Copy the carried audio track into the artifact path."""
+        if artifact.stream is None:
+            return
+        track = artifact.stream
+        cmd: list[str | PathLike] = [
+            "ffmpeg", "-i", source,
+            "-map", f"0:{track.track_id}",
+            "-c", "copy",
+            artifact.path,
+        ]
+        logger.debug("Extracting audio track %d: %s", track.track_id, artifact.path.name)
+        res = run_ffmpeg(cmd, output_file=artifact.path)
+        if res.success and artifact.path.exists() and artifact.path.stat().st_size > 0:
+            artifact.state = ArtifactState.COMPLETE
+            artifact.meta  = _audio_metadata_from_stream(artifact.path, track)
+        else:
+            err = f"ffmpeg failed extracting audio track {track.track_id}"
+            logger.error(err)
+            errors.append(err)
+
+    def _extract_other_artifact(
+        self,
+        artifact: OtherArtifact,
+        source:   Path,
+        errors:   list[str],
+    ) -> None:
+        """Extract a subtitle, chapters, or attachment artifact.
+
+        Dispatches on the carried stream's concrete type. Updates
+        ``artifact.state`` to ``COMPLETE`` on success.
+        """
+        track       = artifact.stream
+        output_file = artifact.path
+        if track is None:
+            logger.warning("OtherArtifact without a source stream: %s", output_file.name)
+            return
+
+        if isinstance(track, ChaptersStream):
+            # Chapters: try mkvextract first (native MKV XML format).
+            # Fall back to ffprobe -show_chapters -print_format xml for
+            # non-MKV containers or when mkvextract is unavailable.
+            # Both paths use .tmp-then-rename for atomicity.
+            tmp = output_file.parent / f"{output_file.stem}{TEMP_SUFFIX}"
+            logger.debug("Extracting chapters: %s", output_file.name)
+
+            mkvextract_cmd: list[str | os.PathLike] = [
+                "mkvextract", source, "chapters", tmp,
+            ]
+            try:
+                subprocess.run(mkvextract_cmd, capture_output=True, check=True)
+                if tmp.exists() and tmp.stat().st_size > 0:
+                    tmp.replace(output_file)
+                    artifact.state = ArtifactState.COMPLETE
+                    logger.debug("Chapters extracted via mkvextract")
+                    return
+                raise subprocess.CalledProcessError(1, mkvextract_cmd)
+            except (subprocess.CalledProcessError, OSError) as exc:
+                logger.debug(
+                    "mkvextract chapters failed (%s), falling back to ffprobe", exc,
+                )
+                # Clean up any partial output from mkvextract
+                output_file.unlink(missing_ok=True)
+                tmp.unlink(missing_ok=True)
+
+                ffprobe_cmd: list[str | os.PathLike] = [
+                    "ffprobe", "-v", "error",
+                    "-show_chapters",
+                    "-print_format", "xml",
+                    source,
+                ]
+                try:
+                    ffprobe_result = subprocess.run(
+                        ffprobe_cmd, capture_output=True, text=True, check=True,
+                    )
+                except subprocess.CalledProcessError as ffprobe_exc:
+                    err = f"ffprobe failed extracting chapters (exit {ffprobe_exc.returncode}): {(ffprobe_exc.stderr or '').strip()}"
+                    logger.error(err)
+                    errors.append(err)
+                    return
+                comment = "<!-- Extracted by ffprobe -show_chapters -print_format xml (mkvextract not available or not applicable) -->\n"
+                tmp.write_text(comment + ffprobe_result.stdout, encoding="utf-8")
+                tmp.replace(output_file)
+                artifact.state = ArtifactState.COMPLETE
+                logger.debug("Chapters extracted via ffprobe fallback")
+
+        elif isinstance(track, AttachmentStream):
+            # Attachments: -dump_attachment writes directly — bypass muxer
+            cmd: list[str | PathLike] = [
+                "ffmpeg", "-i", source,
+                f"-dump_attachment:{track.track_id}", output_file,
+                "-t", "0", "-f", "null", "-",
+            ]
+            logger.debug("Extracting attachment track %d: %s", track.track_id, output_file.name)
+            # output_file=None: dump_attachment writes directly, .tmp protocol does not apply
+            res = run_ffmpeg(cmd, output_file=None)
+            if res.success and output_file.exists():
+                artifact.state = ArtifactState.COMPLETE
+            else:
+                err = f"ffmpeg failed extracting attachment track {track.track_id}"
+                logger.error(err)
+                errors.append(err)
+
+        elif isinstance(track, SubtitleStream):
+            # Subtitles: text codecs need explicit -f; bitmap codecs do not
+            fmt = _SUBTITLE_FFMPEG_FORMAT.get(track.file_extension)
+            cmd = [
+                "ffmpeg", "-i", source,
+                "-map", f"0:{track.track_id}",
+                "-c", "copy",
+            ]
+            if fmt:
+                cmd += ["-f", fmt]
+            cmd.append(output_file)
+            logger.debug("Extracting subtitle track %d: %s", track.track_id, output_file.name)
+            res = run_ffmpeg(cmd, output_file=output_file)
+            if res.success and output_file.exists():
+                artifact.state = ArtifactState.COMPLETE
+            else:
+                err = f"ffmpeg failed extracting subtitle track {track.track_id}"
+                logger.error(err)
+                errors.append(err)
+
+        else:
+            logger.warning("Skipping unknown stream type %s: %s", type(track).__name__, output_file.name)
 
     @staticmethod
     def _outcome_from_artifacts(

@@ -175,28 +175,95 @@ scheme.  Named groups: ``chunk_id``, ``resolution`` (e.g. ``1920x800``),
 ``quality`` (e.g. ``18.0``)."""
 
 # Audio processing — filename conventions
-AUDIO_STEM_SEPARATOR = "←"
-"""Separator used between strategy_short and source stem in audio output filenames.
-Example: ``norm ← #02 ID=2 (audio-ac3) lang=eng ch=5.1(side) start=0.028.flac``"""
+CHAIN_FILENAME_SUFFIX = " chain="
+"""Filename suffix marking a produced chain output: ``<source-stem> chain=<name>.<ext>``.
+The chain name that follows is parsed back out for exact-name artifact invalidation."""
 
-AUDIO_CH_71     = "ch=7.1"
-"""Channel layout tag embedded in filenames by the extraction phase for 7.1 surround."""
-AUDIO_CH_51     = "ch=5.1"
-"""Channel layout tag embedded in filenames by the extraction phase for 5.1 surround."""
-AUDIO_CH_20     = "ch=2.0"
-"""Channel layout tag embedded in filenames by the extraction phase for 2.0 stereo."""
-AUDIO_CH_STEREO = "ch=stereo"
-"""Channel layout tag embedded in filenames by the extraction phase for stereo (non-numeric)."""
+# ffmpeg argument tokens (used when building audio chain commands)
+FFMPEG_EXECUTABLE = "ffmpeg"
+"""The ffmpeg executable name; the unified runner locates it as ``cmd[0]``."""
 
-NORMALISED_PREFIXES: tuple[str, ...] = (
-    f"norm {AUDIO_STEM_SEPARATOR}",
-    f"2{TIME_SEPARATOR_MS}0 std {AUDIO_STEM_SEPARATOR}",
-    f"2{TIME_SEPARATOR_MS}0 night {AUDIO_STEM_SEPARATOR}",
-    f"2{TIME_SEPARATOR_MS}0 nboost {AUDIO_STEM_SEPARATOR}",
-)
-"""Filename prefixes that indicate a file has already been statically normalised.
-Used by ``NormStrategy.check()`` (to skip already-normalised files) and
-``DynaudnormStrategy.check()`` (to select only normalised files)."""
+FFMPEG_ARG_INPUT    = "-i"
+"""ffmpeg input-file flag."""
+FFMPEG_ARG_MAP      = "-map"
+"""ffmpeg stream-map flag."""
+FFMPEG_ARG_AF       = "-af"
+"""ffmpeg audio-filter-chain flag; its value is a comma-joined filter chain."""
+FFMPEG_ARG_CODEC_A  = "-c:a"
+"""ffmpeg audio-codec flag."""
+FFMPEG_ARG_BITRATE_A = "-b:a"
+"""ffmpeg audio-bitrate flag."""
+FFMPEG_ARG_FORMAT   = "-f"
+"""ffmpeg output-format (muxer) flag."""
+
+FFMPEG_MAP_FIRST_AUDIO = "0:a:0"
+"""Maps the first audio stream of the (single) input — chain sources are single-stream extracts."""
+
+FFMPEG_ARG_NO_AUDIO = "-an"
+"""ffmpeg flag dropping all audio streams — keeps chain outputs video-only."""
+FFMPEG_ARG_NO_VIDEO = "-vn"
+"""ffmpeg flag dropping all video streams — keeps chain outputs audio-only."""
+FFMPEG_ARG_NO_SUBS  = "-sn"
+"""ffmpeg flag dropping all subtitle streams — keeps chain outputs audio-only."""
+FFMPEG_ARG_NO_DATA  = "-dn"
+"""ffmpeg flag dropping all data streams (e.g. a stray ``bin_data`` stream the
+muxer would otherwise carry through) — keeps chain outputs audio-only."""
+
+FFMPEG_NULL_MUXER = "null"
+"""The ``null`` muxer, used with a ``-`` sink for measurement passes that write no file."""
+FFMPEG_NULL_SINK  = "-"
+"""stdout sink placeholder paired with the ``null`` muxer for measurement passes."""
+
+# ---------------------------------------------------------------------------
+# Output-container muxers
+# ---------------------------------------------------------------------------
+# The shared ffmpeg runner writes every file output to a ``.tmp`` sibling first
+# (atomicity). The ``.tmp`` extension carries no container hint, so ffmpeg cannot
+# infer the muxer from the extension and needs an explicit ``-f <muxer>``. Each
+# call site supplies the correct muxer for its target container (per the project
+# ffmpeg philosophy: be explicit about the container). When a caller supplies no
+# muxer, the runner defaults to ``matroska`` (the historical behaviour for all
+# video outputs).
+
+FFMPEG_MUXER_MATROSKA = "matroska"
+"""Default ``-f`` muxer for ``.tmp`` outputs — Matroska (all video call sites)."""
+FFMPEG_MUXER_FLAC     = "flac"
+"""``-f`` muxer for raw FLAC audio outputs (``.flac``)."""
+FFMPEG_MUXER_IPOD     = "ipod"
+"""``-f`` muxer for MP4/M4A audio outputs (``.m4a``) — the conventional ffmpeg
+muxer for an ``.m4a`` audio-only container."""
+
+AF_CHAIN_SEPARATOR = ","
+"""ffmpeg's audio-filter-chain separator; chain fragments are joined with it."""
+
+FLAC_CODEC     = "flac"
+"""Default audio codec when a chain declares no ``encode`` filter (lossless, bitrate-agnostic)."""
+FLAC_EXTENSION = "flac"
+"""Default output extension when a chain declares no ``encode`` filter."""
+
+M4A_EXTENSION = "m4a"
+"""Output extension for an AAC-in-MP4 audio container."""
+
+OUTPUT_FORMAT_MUXERS: dict[str, str] = {
+    FLAC_EXTENSION: FFMPEG_MUXER_FLAC,   # flac -> flac
+    M4A_EXTENSION:  FFMPEG_MUXER_IPOD,   # m4a  -> ipod
+}
+"""Maps an audio output extension (without the dot) to the ffmpeg ``-f`` muxer to
+use for its ``.tmp`` output. The chain executor looks up the effective encode
+extension here and passes the muxer to the runner as ``output_format``; a missing
+extension falls back to the runner default (Matroska)."""
+
+FILENAME_FORBIDDEN_CHARS: frozenset[str] = frozenset('<>:"/\\|?*')
+"""Characters forbidden in a chain name because they are unsafe in filenames on
+common filesystems (Windows especially). A chain name containing any of these —
+or any control character (U+0000–U+001F) — is rejected at config load (Req 8.4)."""
+
+SELECTOR_KEY_LANG  = "lang"
+"""Conventional-string token key for an audio track's language (e.g. ``lang=eng``)."""
+SELECTOR_KEY_CH    = "ch"
+"""Conventional-string token key for an audio track's channel layout (e.g. ``ch=5.1(side)``)."""
+SELECTOR_KEY_TITLE = "title"
+"""Conventional-string token key for an audio track's title (e.g. ``title=Surround``)."""
 
 # Progress display
 STDERR_TAIL_LINES = 20

@@ -24,6 +24,7 @@ from typing import Self
 import yaml
 from pydantic import BaseModel, Field
 
+from pyqenc.audio.chain import ResolvedChain, chain_signature
 from pyqenc.models import (
     ChunkMetadata,
     CropParams,
@@ -568,43 +569,89 @@ class MeasureSidecar(BaseModel):
         )
 
 
-class AudioParams(BaseModel):
-    """Phase parameter file model for audio processing (``audio.yaml``).
+class AudioSidecar(BaseModel):
+    """Sidecar model for the audio phase (``audio.yaml``).
 
-    Stores the codec and per-channel bitrate that were active when audio
-    processing last ran.  These are Type B config values — they affect the
-    *content* of produced delivery files and must be tracked across runs so
-    that a codec or bitrate change triggers re-processing.
+    Records ONLY a compact, per-chain **signature** for each chain this work-dir
+    is committed to, keyed by chain name (Req 9.1). ``select`` is deliberately
+    NOT persisted: selection is a pure function of the current extracted tracks
+    plus the current ``select`` config, recomputed for free every run, so there
+    is nothing to track across runs.
 
-    ``convert_pattern`` (the convert filter) is intentionally excluded: it is a
-    Type A input — ``AudioEngine.build_plan()`` with the current filter already
-    defines the expected terminal outputs, so no cross-run tracking is needed.
+    Each signature is the canonical :func:`~pyqenc.audio.chain.chain_signature`
+    string (``ResolvedChain.model_dump_json()``) — one deterministic, compact
+    line per chain. The sidecar stores these strings verbatim and never
+    reconstructs a :class:`~pyqenc.audio.chain.ResolvedChain` from them: that is
+    the whole point of the compact form. Invalidation compares the CURRENT
+    chain's signature against the persisted one for the same name (equality of
+    strings), so the sidecar stays cheap and stable while duplicating none of the
+    config's nested structure on disk.
+
+    The sidecar records committed **intent**, decoupled from completion —
+    completion is always read from the presence of output files on disk, never
+    inferred from this sidecar (Req 9.6). A differing or removed chain (detected
+    by signature comparison) triggers invalidation of that chain's on-disk
+    outputs (Req 9.2, 9.3, 9.4).
+
+    On-disk shape (``audio.yaml``)::
+
+        chains:
+          normal: '{"name":"normal","filters":[...],"encode":{...}}'
+          night:  '{"name":"night","filters":[...],"encode":{...}}'
+
+    Attributes:
+        signatures: Map of chain name → its canonical signature string.
     """
 
-    codec:               str | None = None
-    bitrate_per_channel: str | None = None
+    signatures: dict[str, str]
 
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict."""
-        return {
-            "codec":               self.codec,
-            "bitrate_per_channel": self.bitrate_per_channel,
-        }
+    @staticmethod
+    def signature_of(chain: ResolvedChain) -> str:
+        """Return the canonical signature string for a resolved chain.
+
+        Delegates to :func:`~pyqenc.audio.chain.chain_signature` so the sidecar
+        and the audio phase use the SAME canonical function (DRY).
+
+        Args:
+            chain: The resolved chain to sign.
+
+        Returns:
+            The canonical signature string.
+        """
+        return chain_signature(chain)
 
     @classmethod
-    def from_yaml_dict(cls, data: dict) -> AudioParams:
-        """Restore from a dict loaded from ``audio.yaml``."""
-        return cls(
-            codec               = data.get("codec"),
-            bitrate_per_channel = data.get("bitrate_per_channel"),
-        )
+    def from_resolved(cls, resolved: dict[str, ResolvedChain]) -> AudioSidecar:
+        """Build an ``AudioSidecar`` from resolved chains, computing each signature.
+
+        Args:
+            resolved: Map of chain name → :class:`ResolvedChain`.
+
+        Returns:
+            The sidecar holding one signature string per chain.
+        """
+        return cls(signatures={name: cls.signature_of(chain) for name, chain in resolved.items()})
+
+    def to_yaml_dict(self) -> dict:
+        """Serialise to a YAML-friendly dict: ``{"chains": {name: signature}}``."""
+        return {"chains": dict(self.signatures)}
+
+    @classmethod
+    def from_yaml_dict(cls, data: dict) -> AudioSidecar:
+        """Restore from a dict loaded from ``audio.yaml``.
+
+        Signatures are read back as-is (they stay strings — never reconstructed
+        into :class:`ResolvedChain` objects).
+        """
+        raw = data.get("chains") or {}
+        return cls(signatures={str(name): str(sig) for name, sig in raw.items()})
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
-        """Load ``AudioParams`` from *path*.
+        """Load ``AudioSidecar`` from *path*.
 
         Returns:
-            ``AudioParams`` if the file exists and is valid, ``None`` otherwise.
+            ``AudioSidecar`` if the file exists and is valid, ``None`` otherwise.
         """
         if not path.exists():
             return None
@@ -617,11 +664,15 @@ class AudioParams(BaseModel):
             return None
 
     def save(self, path: Path) -> None:
-        """Write this ``AudioParams`` to *path* atomically.
+        """Write this ``AudioSidecar`` to *path* atomically.
+
+        Uses the ``.tmp``-then-rename protocol (Req 9.7). Creates parent
+        directories as needed.
 
         Args:
             path: Destination YAML file path.
         """
+        path.parent.mkdir(parents=True, exist_ok=True)
         write_yaml_atomic(path, self.to_yaml_dict())
         logger.debug("Saved %s", path.name)
 

@@ -34,7 +34,6 @@ from pyqenc.metrics import (
     _update_accumulator,
 )
 from pyqenc.models import CodecConfig, Strategy
-from pyqenc.phases.audio import BaseStrategy
 
 # ---------------------------------------------------------------------------
 # Shared strategies
@@ -687,19 +686,6 @@ _st_name_with_dots = st.text(
 """Arbitrary strings that may contain ASCII dots — used as preset/profile/strategy_short inputs."""
 
 
-class _ConcreteStrategy(BaseStrategy):
-    """Minimal concrete BaseStrategy for property testing."""
-
-    def check(self, source: Path) -> bool:  # noqa: D102
-        return False
-
-    def plan(self, source: Path) -> Path:  # noqa: D102
-        return source
-
-    def execute(self, source: Path, output: Path, dry_run: bool) -> None:  # noqa: D102
-        pass
-
-
 @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(
     preset  = _st_name_with_dots,
@@ -732,30 +718,4 @@ def test_strategy_dot_sanitization_produces_valid_metric_keys(
     prefix = _last_dot_prefix(dotted)
     assert prefix == MetricKey.ENCODING, (
         f"prefix={prefix!r} != {MetricKey.ENCODING!r} for dotted key {dotted!r}"
-    )
-
-
-@settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-@given(strategy_short=_st_name_with_dots)
-def test_base_strategy_dot_sanitization_produces_valid_metric_keys(
-    strategy_short: str,
-) -> None:
-    """Property 7b (metrics-two-tier): BaseStrategy dot sanitization produces valid metric keys.
-
-    Validates: Requirements 8.2, 8.5
-    # Feature: metrics-two-tier, Property 7: Strategy dot sanitization produces valid metric keys
-    """
-    bs = _ConcreteStrategy(name=strategy_short, strategy_short=strategy_short)
-
-    # strategy_short must contain no ASCII dot after sanitization
-    assert _ASCII_DOT not in bs.strategy_short, (
-        f"strategy_short={bs.strategy_short!r} still contains ASCII dot "
-        f"(input={strategy_short!r})"
-    )
-
-    # Using strategy_short as a suffix must produce a key that groups under MetricKey.AUDIO
-    dotted = _build_key(MetricKey.AUDIO, bs.strategy_short)
-    prefix = _last_dot_prefix(dotted)
-    assert prefix == MetricKey.AUDIO, (
-        f"prefix={prefix!r} != {MetricKey.AUDIO!r} for dotted key {dotted!r}"
     )

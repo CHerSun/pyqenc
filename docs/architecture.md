@@ -295,22 +295,25 @@ Metrics are written to `metrics.yaml` and flushed periodically — they survive 
 
 ## Audio Processing
 
-Audio processing applies a strategy DAG to each extracted audio stream. Each strategy produces one output file named `{strategy_short} ← {source_stem}.{ext}`.
+Audio processing is explicit and config-driven — no combinatorial fan-out. It is defined by three pieces under `audio:` in config, and each **chain** applied to each **selected** track produces exactly one output file named `<source-stem> chain=<name>.<ext>`. See the [Audio Processing Guide](./audio-processing.md) for the full user-facing reference.
 
-### Strategy types
+### The three pieces
 
-| Strategy | What it does |
-|----------|-------------|
-| `DownmixStrategy` | Reduce channel count (7.1→5.1, 5.1→2.0 std/night/nboost variants) |
-| `NormStrategy` | 2-pass EBU R128 static loudness normalization |
-| `DynaudnormStrategy` | Dynamic normalization applied on top of static norm |
-| `ConversionStrategy` | Convert to delivery format (AAC, bitrate scaled by channel count) |
+| Piece | Role |
+|-------|------|
+| `filters` | A palette of named, reusable transformations. Each has a `type` (`peaknorm`, `loudnorm`, `dynaudnorm`, `downmix`, `encode`, `passthrough`) and its own parameters. Dict-merged across config layers. |
+| `chains` | Ordered lists of filter names. One chain applied to N selected tracks produces exactly N outputs. No `encode` filter → lossless FLAC; otherwise the last `encode` filter sets the codec/extension. List-replaced across layers. |
+| `select` | An ordered tree (`for`/`exclude`/`prefer`) deciding which extracted tracks are processed; empty (default) = all tracks. Matched against each track's conventional string `lang=<> ch=<> title=<>`. |
 
-Each strategy implements `check(source_path) -> bool` to determine applicability. The DAG terminates naturally — no explicit terminal flag needed.
+Filter types are an **open registry** — a new type is one registered class with no edits to the config model or executor. A chain runs as a single combined ffmpeg `-af` invocation, split into extra passes only where a filter needs measurement first (`peaknorm`, `loudnorm`).
 
-### Audio strategy graph
+### Recovery and invalidation
 
-Graph below shows full path of currently implemented audio strategies for 3 cases - stereo, 5.1 and 7.1 audios:
+Each chain's fully-resolved definition (inlined filter params + effective output format) is recorded in a per-run sidecar. On rerun, a changed chain is reprocessed, an unchanged chain with its output on disk is reused, and a removed chain's outputs are cleaned up (matched by exact chain name). Selection is recomputed every run and never persisted.
+
+### Audio processing graph
+
+The graph below shows the model: `select` chooses the working track set, and each (track × chain) pair yields one output.
 
 ![Audio processing graph](./audio-processing-graph.mermaid)
 

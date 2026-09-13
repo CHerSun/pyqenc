@@ -1794,33 +1794,6 @@ class TestMetricKeySmoke:
         )
 
     # ------------------------------------------------------------------
-    # 6. BaseStrategy construction with dots in strategy_short produces no ASCII dots
-    # ------------------------------------------------------------------
-
-    def test_base_strategy_dots_sanitized_in_strategy_short(self) -> None:
-        """BaseStrategy(name="audio.5.1", strategy_short="5.1") must produce no ASCII dots.
-
-        Validates: Requirements 8.2, 8.3, 8.4, 8.5
-        """
-        from pyqenc.phases.audio import BaseStrategy as _BaseStrategy
-
-        class _TestStrategy(_BaseStrategy):
-            def check(self, source: Path) -> bool:
-                return False
-            def plan(self, source: Path) -> Path:
-                return source
-            def execute(self, source: Path, output: Path, dry_run: bool) -> None:
-                pass
-
-        strategy = _TestStrategy(name="audio.5.1", strategy_short="5.1")
-        assert "." not in strategy.name, (
-            f"Expected no ASCII dot in BaseStrategy.name, got: {strategy.name!r}"
-        )
-        assert "." not in strategy.strategy_short, (
-            f"Expected no ASCII dot in BaseStrategy.strategy_short, got: {strategy.strategy_short!r}"
-        )
-
-    # ------------------------------------------------------------------
     # 7. Top-level and dotted keys coexist in the same store
     # ------------------------------------------------------------------
 
