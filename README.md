@@ -63,15 +63,15 @@ For all options: `pyqenc auto --help` or [CLI Reference](docs/cli-reference.md).
 
 ### Scene-based encoding
 
-The video is split into scenes first. Each scene is short and visually uniform — a dark scene, a fast-action sequence, a title card — they all have very different encoding characteristics. pyqenc assigns an independent quality parameter to each scene, so every scene gets exactly what it needs. Dark scenes get their own value, fast-moving scenes get theirs. No wasted bits, no scenes that look worse than others.
+The video is split into scenes first. Each scene is short and visually uniform — a dark scene, a fast-action sequence, a title card — they all have very different encoding characteristics. pyqenc assigns an independent quality parameter to each scene, so every scene gets exactly what it needs. Dark scenes get their own value, fast-moving scenes get theirs. No wasted bits, no scenes that look worse than others (this differs from native 2-pass encoding, where static scenes are prioritized).
 
 ### Quality targeting
 
-You specify quality targets as metric thresholds (e.g. `vmaf-p05:95`). pyqenc encodes each scene repeatedly, adjusting the quality parameter until all targets are met. It stops as soon as they are — no over-encoding.
+You specify quality targets as metric thresholds (e.g. `vmaf-med:97`). pyqenc encodes each scene repeatedly, adjusting the quality parameter until all targets are met. It stops as soon as they are — no over-encoding.
 
 Supported metrics: `vmaf`, `vif`, `ssim`, `psnr`. Supported statistics: `min`, `p05`, `p25`, `med`, `p75`, `p95`, `max`.
 
-Default targets: `vif-med:92.0, vmaf-p05:95.0, psnr-med:45.0, ssim-med:98.0`
+For default targets - see `default_config.yaml`.
 
 See [Quality Targeting Guide](docs/quality-targeting.md) for guidance on choosing good targets.
 

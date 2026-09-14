@@ -8,7 +8,7 @@
 
 ## Available metrics
 
-Each metric measures similarity between the source and encoded frame on a 0–100 scale (100 = identical). They capture different aspects of visual quality, and none is sufficient on its own.
+Each metric measures similarity between the source and encoded frame on a 0–100 scale (100 = identical). All metrics are scaled to that range. They capture different aspects of visual quality, and none is sufficient on its own.
 
 ### VMAF
 
@@ -17,9 +17,10 @@ VMAF (Video Multi-Method Assessment Fusion) is a Netflix-developed perceptual me
 **Strengths:** Good general-purpose perceived quality indicator. Well-calibrated for broadcast and streaming content. A score of 95+ is generally considered high quality; 98+ is visually near-lossless for smooth content.
 
 **Limitations:**
+
 - Strongly biased toward smooth, clean content. It rewards blurring fine texture (film grain, noise) because a denoised frame looks "cleaner" to its model. If preserving original grain matters, VMAF alone will push toward over-smoothing.
-- The first frame of a chunk gets an artificially high score because VMAF lacks motion context at frame 0. This inflates the `min` statistic, making it an unreliable target. Use `vmaf-p05` instead of `vmaf-min`.
-- Some content types — title cards, solid-color transitions — hit a VMAF ceiling around 97–97.5 even at very high bitrate. This is a known model limitation, not an encoding problem. `pyqenc` handles this gracefully by accepting the best achievable result.
+- The first frame of a chunk gets a significantly different score because VMAF lacks motion context at frame 0. This makes `min` and `max` scores unreliable.
+- Some content types — title cards, solid-color transitions — hit a VMAF ceiling around 97–97.5 even at very high bitrate. This is a known model limitation, not an encoding problem. `pyqenc` handles this gracefully by accepting the best achievable result if target is unreachable.
 
 ### VIF
 
@@ -49,7 +50,7 @@ SSIM (Structural Similarity Index) measures luminance, contrast, and structure s
 
 ## Why target multiple metrics
 
-A single metric can be fooled. The table below shows a real example where `any_vulkan_hevc-10bit` looks excellent by median scores across all four metrics — yet its minimum scores tell a different story:
+A single metric can be fooled. The table below shows a real example where `any_vulkan_hevc-10bit` looks excellent by median scores across all four metrics:
 
 | Strategy                   | Size (MB) | PSNR med | SSIM med | VMAF med | VIF med |
 | -------------------------- | --------- | -------- | -------- | -------- | ------- |
@@ -61,28 +62,23 @@ A single metric can be fooled. The table below shows a real example where `any_v
 | slow_h265                  | 146.8     | 47.5     | 98.8     | 98.6     | 94.4    |
 | veryslow_h264              | 206.8     | 47.4     | 98.9     | 98.5     | 94.3    |
 
-The Vulkan strategy has a VMAF min of 84 and a VIF min of 84. Manual inspection confirmed visible quality problems. Median-only comparison missed them entirely.
-
-**The key insight:** metrics are targeted per-chunk in `pyqenc` (each chunk is a short, relatively uniform scene), so median values are meaningful and stable at that granularity. But still use at least one safeguard statistic (min or p05) alongside the median for each metric to catch outlier chunks.
-
----
+Yet its minimum scores tell a different story - a VMAF min of 84 and a VIF min of 84 (not in the table). Manual inspection confirmed visible quality problems. Median-only comparison missed them entirely.
 
 ## Which statistics to target
 
 `pyqenc` supports several statistics over the per-frame metric scores within a chunk:
 
-| Statistic | Description | Notes |
-|-----------|-------------|-------|
-| `min` | Worst single frame | Fragile — a single bad frame (e.g. VMAF frame 0 bias) distorts it. Avoid as a primary target. |
-| `p05` | 5th percentile | Robust worst-case. Recommended over `min` for VMAF. |
-| `p25` | 25th percentile | Useful for tighter floor control. |
-| `med` | Median (50th percentile) | Good general target. Stable per-chunk. Recommended. |
-| `p75`, `p95` | Upper percentiles | Rarely needed for targeting; useful for analysis. |
-| `max` | Best single frame | Not useful for targeting; useful for analysis. |
+| Statistic    | Description              | Notes                                                                                         |
+| ------------ | ------------------------ | --------------------------------------------------------------------------------------------- |
+| `min`        | Worst single frame       | Fragile — a single bad frame (e.g. VMAF frame 0 bias) distorts it. Avoid as a primary target. |
+| `p05`        | 5th percentile           | Robust worst-case. Recommended over `min` for VMAF.                                           |
+| `p25`        | 25th percentile          | Useful for tighter floor control.                                                             |
+| `med`        | Median (50th percentile) | Good general target. Stable per-chunk. Recommended.                                           |
+| `p75`, `p95` | Upper percentiles        | Rarely needed for targeting; useful for analysis.                                             |
+| `max`        | Best single frame        | Not useful for targeting; useful for analysis.                                                |
 
-Recommended approach: **target `med` as the primary statistic and add a `p05` or `min` as a floor safeguard.** For VMAF specifically, prefer `p05` over `min` due to the first-frame bias.
-
-You do not need to target both `med` and `p05` for the same metric — pick one primary and one safeguard and move on.
+Metrics are measured on per-chunk basis. So median values in general are quite stable, but a floor (min/p05) safeguard is recommended.
+For VMAF specifically, prefer `p05` over `min` due to the first-frame bias.
 
 ---
 
@@ -109,17 +105,7 @@ To decrease quality (smaller files): lower the most constraining failing target 
 
 Tune on a representative sample clip first. Metrics do not linearly map to perceived quality, so small numeric changes can have larger visual effects than expected. As long as intermediate results have not been cleaned up, re-running with adjusted targets only re-encodes the affected chunks.
 
----
-
-## Content-specific considerations
-
-**Film grain / live action:** VIF is particularly useful here. VMAF will reward over-smoothing of grain; VIF catches it. Keep both.
-
-**Anime / flat areas:** VMAF and SSIM tend to work well. VIF targets can be relaxed (anime has less natural texture). PSNR is a reliable secondary.
-
-**Titles and solid transitions:** VMAF hits its ceiling (~97.5) on these scenes at any bitrate. This is a model limitation — `pyqenc` accepts the best achievable result and moves on. It does not cause problems in practice as these scenes are usually short.
-
-**HDR content:** All metrics run in the encoded colour space. Results are comparable to SDR in practice, but absolute target values may need slight adjustment — HDR encodes can score slightly lower on VMAF at equivalent visual quality.
+NOTE: If you have multiple encoding strategies - those targets will not only affect chunk quality search, but also optimal strategy selection.
 
 ---
 
@@ -128,7 +114,7 @@ Tune on a representative sample clip first. Metrics do not linearly map to perce
 By default the quality search explores the full range declared on the codec — e.g. CRF 6–30 for h.265. For most content that's fine. But you may want tighter control:
 
 - **Avoid extreme values.** CRF 6 on h.265 produces enormous files. Constraining to CRF 12–24 keeps the search focused.
-- **Pin to a single CRF.** Setting `min == max` skips quality search entirely — the encoder runs once at that value.
+- **Pin to a single CRF.** Setting `min == max` skips quality search entirely — the encoder runs once at that value, but retains quality of resumability.
 - **Per-content tuning.** Film grain, anime, and clean CGI converge at different CRF bands. A narrowed profile encodes more predictably for a specific type of content.
 
 ### Adding a local profile with a range override
@@ -137,14 +123,14 @@ Create or edit a `pyqenc.yaml` in your project directory (`pyqenc config . -y` c
 
 ```yaml
 profiles:
-  h265-tight:                # new profile — needs full profile fields
+  h265-tight:                # NEW profile — needs full profile fields
     codec: h265-10bit
-    description: "h.265 with a tighter CRF band"
+    description: "Basic h.265 with a tighter CRF band"
     extra_args: []
     quality_range: [12.0, 24.0]   # narrows the codec's default [6.0, 30.0]
 
-  h265-anime:                # overriding an existing profile — only add what changes
-    quality_range: [14.0, 22.0]
+  h265-anime:                # OVERRIDING an existing profile — only add what changes
+    quality_range: [18.0, 18.0]
 ```
 
 Then use it:
