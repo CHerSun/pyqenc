@@ -46,7 +46,7 @@ from typing import ClassVar, Final
 from pydantic import BaseModel, ConfigDict
 
 from pyqenc.audio.layout import ChannelLayout
-from pyqenc.audio.matrices import DOWNMIX_MATRICES, layout_channels
+from pyqenc.audio.matrices import DOWNMIX_FORMAT, DOWNMIX_MATRICES, layout_channels
 from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
 
 # ---------------------------------------------------------------------------
@@ -283,7 +283,10 @@ _LOUDNORM_JSON_RE: Final = re.compile(
 
 _VOLUMEDETECT_RE: Final = re.compile(r"max_volume:\s*([-\d.]+)\s*dB")
 """Extracts the ``max_volume`` reading from ``volumedetect`` stderr output."""
-
+_ASTATS_PEAK_VOLUME_RE: Final = re.compile(r"Peak level dB:\s*([-\d.]+)")
+"""Extracts the ``peak_volume`` reading from ``astats`` stderr output."""
+# Sample line:
+# [Parsed_astats_2 @ ...] Peak level dB: 2.269108
 
 # ---------------------------------------------------------------------------
 # Registered filter types
@@ -307,18 +310,20 @@ class PeakNormFilter(FilterType):
     ) -> FilterStep:
         """Measure on the first call, apply the measured gain on the second."""
         if last_output is None:
-            # Pass 1 — measure the peak via volumedetect (no output file).
+            # DON'T use `volumedetect`. It uses 16-bit samples internally and cannot represent positive volume.
+            # Use dbl/flt format for downmixing and `astats` for peak measurement instead.
+            # Pass 1 — measure the peak via astats (must not be clipped before that! use dbl/flt format for downmixing).
             return FilterStep(
-                af         = "volumedetect",
+                af         = "astats",
                 needs_pass = True,
                 out_layout = layout,
             )
-        # Pass 2 — scrape max_volume and apply the corrective gain.
+        # Pass 2 — scrape peak volume and apply the corrective gain.
         stderr_text = "\n".join(last_output.stderr_lines)
-        match       = _VOLUMEDETECT_RE.search(stderr_text)
+        match       = _ASTATS_PEAK_VOLUME_RE.search(stderr_text)
         if not match:
             raise RuntimeError(
-                "peaknorm did not produce a parseable max_volume line "
+                "peaknorm did not produce a parseable peak volume line "
                 f"(ffmpeg exit code {last_output.returncode})"
             )
         params        = self._params
@@ -461,7 +466,19 @@ class DownmixFilter(FilterType):
         if layout.channels <= target_channels:
             # Downmix-only: nothing to reduce, pass channels through untouched.
             return FilterStep(af="", needs_pass=False, out_layout=layout)
-        pan = DOWNMIX_MATRICES[(layout.normalized, target.normalized, params.matrix)]
+
+        # Pick the matrix to downmix with.
+        layout_id = (layout.normalized, target.normalized, params.matrix)
+        if layout_id not in DOWNMIX_MATRICES:
+            raise ValueError(
+                f"No downmix matrix for {layout.normalized} → {target.normalized} "
+                f"with matrix={params.matrix!r}"
+            )
+
+        pan = ",".join([
+            DOWNMIX_FORMAT,
+            DOWNMIX_MATRICES[layout_id]
+        ])
         return FilterStep(af=pan, needs_pass=False, out_layout=target)
 
 

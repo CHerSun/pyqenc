@@ -31,3 +31,6 @@ uv.lock
 
 # Hypothesis testing
 .hypothesis
+
+# Local modified config for debug runs
+pyqenc.yaml

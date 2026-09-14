@@ -86,6 +86,11 @@ def layout_channels(normalized_layout: str) -> int:
     return _LAYOUT_CHANNELS[normalized_layout]
 
 
+DOWNMIX_FORMAT: str ="aformat=sample_fmts=flt"
+"""ffmpeg filter fragment to convert the input to float samples for downmixing. This is needed because the built-in downmix matrices
+can produce positive gain, which cannot be represented in 16-bit/32-bit integer samples. The `flt` (and `dbl`) format is used to avoid clipping
+and preserve audio fidelity during the downmixing process."""
+
 # Key: (normalized source layout, normalized target layout, matrix name | None).
 # Value: an ffmpeg `pan` filter fragment (index-addressed).
 #
