@@ -102,6 +102,10 @@ audio:
     # A chain applied to N matched tracks produces exactly N outputs, named
     # "<source-stem> chain=<name>.<ext>". No encode filter -> FLAC (lossless);
     # otherwise the LAST encode filter in the chain sets the codec/extension.
+    - name: stereo_std_normal     # custom downmix to stereo with LFE channel and peak-normalized to prevent clipping
+      filters: [down_std, peaknorm, aac]
+    - name: stereo_std_night      # custom downmix to stereo with LFE channel + dynamic normalization for night
+      filters: [down_std, peaknorm, dynaudnorm, aac]
     - name: stereo_lfe_normal     # custom downmix to stereo with LFE channel and peak-normalized to prevent clipping
       filters: [down_lfe, peaknorm, aac]
     - name: stereo_lfe_night      # custom downmix to stereo with LFE channel + dynamic normalization for night

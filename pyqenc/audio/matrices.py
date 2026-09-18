@@ -91,39 +91,27 @@ DOWNMIX_FORMAT: str ="aformat=sample_fmts=flt"
 can produce positive gain, which cannot be represented in 16-bit/32-bit integer samples. The `flt` (and `dbl`) format is used to avoid clipping
 and preserve audio fidelity during the downmixing process."""
 
-# Key: (normalized source layout, normalized target layout, matrix name | None).
-# Value: an ffmpeg `pan` filter fragment (index-addressed).
-#
-# 7.1→5.1 is a plain index fold of the side pair (c6/c7) into the back pair
-# (c4/c5) and takes no matrix (key's matrix name is None).
-#
-# 7.1→2.0 for each named matrix is derived by first folding the side pair into
-# the back terms (c4+c6, c5+c7) and then applying the corresponding 5.1→2.0
-# fold — i.e. the back-channel terms of the 5.1 matrix act on (c4+c6)/(c5+c7).
 DOWNMIX_MATRICES: dict[tuple[str, str, str | None], str] = {
-    # ------------------------------------------------------------------ 5.1 → 2.0
-    # std: ITU-R BS.775 / ATSC Lo/Ro fold, LFE (c3) dropped.
-    (Layout.SURROUND_51.value, Layout.STEREO.value, MatrixName.STD.value):
-        "pan=stereo|c0=c0+0.707*c2+0.707*c4|c1=c1+0.707*c2+0.707*c5",
-    # lfe: historical "night" fold, preserved verbatim (FC 0.5, surrounds 0.707, LFE 0.5).
-    (Layout.SURROUND_51.value, Layout.STEREO.value, MatrixName.LFE.value):
-        "pan=stereo|c0=0.5*c2+0.707*c0+0.707*c4+0.5*c3|c1=0.5*c2+0.707*c1+0.707*c5+0.5*c3",
-    # boosted: historical "nboost" fold, preserved verbatim (FC full, surrounds 0.30, LFE dropped).
-    (Layout.SURROUND_51.value, Layout.STEREO.value, MatrixName.BOOSTED.value):
-        "pan=stereo|c0=c2+0.30*c0+0.30*c4|c1=c2+0.30*c1+0.30*c5",
-    # ------------------------------------------------------------------ 7.1 → 5.1
+    #@ ___ 7.1 → 5.1 ___
     # Plain index fold of the side pair into the back pair, no matrix.
     (Layout.SURROUND_71.value, Layout.SURROUND_51.value, None):
-        "pan=5.1|c0=c0|c1=c1|c2=c2|c3=c3|c4=c4+c6|c5=c5+c7",
-    # ------------------------------------------------------------------ 7.1 → 2.0
-    # Derived from the 5.1 folds by feeding (c4+c6)/(c5+c7) into the back terms.
-    # std: LFE (c3) dropped.
+        "pan=5.1|c0=c0|c1=c1|c2=c2|c3=c3|c4=0.5*c6+0.5*c4|c5=0.5*c7+0.5*c5",       # Direct folding of channels.
+    #@ ___ 5.1 → 2.0 ___
+    (Layout.SURROUND_51.value, Layout.STEREO.value, MatrixName.STD.value):
+        "pan=stereo|c0=c0+0.707*c2+0.707*c4|c1=c1+0.707*c2+0.707*c5",                                         # std: ITU-R BS.775 / ATSC Lo/Ro fold, LFE (c3) dropped.
+    (Layout.SURROUND_51.value, Layout.STEREO.value, MatrixName.LFE.value):
+        "pan=stereo|c0=0.3431*c0+0.2426*c2+0.2426*c4+0.1716*c3|c1=0.3431*c1+0.2426*c2+0.2426*c5+0.1716*c3",   # Standard Dolby Downmix with LFE adjusted for power
+        #"pan=stereo|c0=0.5*c2+0.707*c0+0.707*c4+0.5*c3|c1=0.5*c2+0.707*c1+0.707*c5+0.5*c3",                  # David's LFE downmix from doom9 forum
+    (Layout.SURROUND_51.value, Layout.STEREO.value, MatrixName.BOOSTED.value):
+        "pan=stereo|c0=c2+0.30*c0+0.30*c4|c1=c2+0.30*c1+0.30*c5",                                             # Boosted dialogs from doom9 forum.
+    #@ ___ 7.1 → 2.0 ___
     (Layout.SURROUND_71.value, Layout.STEREO.value, MatrixName.STD.value):
-        "pan=stereo|c0=c0+0.707*c2+0.707*c4+0.707*c6|c1=c1+0.707*c2+0.707*c5+0.707*c7",
-    # lfe: FC 0.5, surrounds (back+side) 0.707, LFE 0.5.
+        "pan=stereo|c0=c0+0.707*c2+0.707*c4+0.707*c6|c1=c1+0.707*c2+0.707*c5+0.707*c7",        # std: ITU-R BS.775 / ATSC Lo/Ro fold, LFE (c3) dropped.
     (Layout.SURROUND_71.value, Layout.STEREO.value, MatrixName.LFE.value):
-        "pan=stereo|c0=0.5*c2+0.707*c0+0.707*c4+0.707*c6+0.5*c3"
-        "|c1=0.5*c2+0.707*c1+0.707*c5+0.707*c7+0.5*c3",
+        "pan=stereo|c0=0.2761*c0+0.1953*c2+0.1953*c6+0.1953*c4+0.1381*c3"
+                  "|c1=0.2761*c1+0.1953*c2+0.1953*c7+0.1953*c5+0.1381*c3",                     # Standard Dolby Downmix with LFE adjusted for power
+        #"pan=stereo|c0=0.5*c2+0.707*c0+0.707*c4+0.707*c6+0.5*c3"
+        #"|c1=0.5*c2+0.707*c1+0.707*c5+0.707*c7+0.5*c3",                                       # David's LFE downmix
     # boosted: FC full, surrounds (back+side) 0.30, LFE dropped.
     (Layout.SURROUND_71.value, Layout.STEREO.value, MatrixName.BOOSTED.value):
         "pan=stereo|c0=c2+0.30*c0+0.30*c4+0.30*c6|c1=c2+0.30*c1+0.30*c5+0.30*c7",

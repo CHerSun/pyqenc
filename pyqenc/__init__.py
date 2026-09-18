@@ -5,7 +5,7 @@ A comprehensive video processing system that orchestrates extraction, scene-base
 chunking, quality-targeted encoding, audio processing, and final merging of video files.
 """
 
-__version__ = "0.14.0"
+__version__ = "0.14.1"
 
 # Public API exports
 from pyqenc.api import (
@@ -20,11 +20,11 @@ from pyqenc.api import (
 
 __all__ = [
     "__version__",
-    "run_pipeline",
-    "extract_streams",
     "chunk_video",
     "encode_chunks",
-    "process_audio",
-    "merge_final",
+    "extract_streams",
     "measure_quality",
+    "merge_final",
+    "process_audio",
+    "run_pipeline",
 ]
