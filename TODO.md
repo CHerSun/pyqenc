@@ -1,7 +1,9 @@
 # Project TODO — findings needing thought
 
 Items are **observations with evidence, not decisions** — each needs a design
-call before any implementation. Nothing here is blocking.
+call before any implementation. Nothing here is blocking. Entries are removed
+outright once a plan covering them is finalized or they are fixed — git and
+spec history are the record.
 
 Sources:
 - §1–7: 2026-09-19/20 investigation of the extraction-metrics bug (fixed in 0.14.2).
@@ -21,7 +23,7 @@ Status legend: 🤔 needs thinking · 🔍 verified against code
 
 - Spec requires `optimization.<strategy>` dotted keys for per-strategy
   optimization test-encode process time
-  (`.kiro/specs/metrics-two-tier/requirements.md:183-186`).
+  (`.kiro/specs/2026-04-22 app-metrics-two-tier/requirements.md:183-186`).
 - In reality `OptimizationPhase` reuses `ChunkEncoder` via `_make_encoder`
   (`pyqenc/phases/optimization.py:878-904`), and `ChunkEncoder` hardcodes the
   `MetricKey.ENCODING` prefix for its per-strategy keys
@@ -42,7 +44,7 @@ current accounting?
 
 **Status:** needs thinking (spec/code reconciliation)
 
-- `.kiro/specs/metrics-two-tier/design.md:299` describes a top-level
+- `.kiro/specs/2026-04-22 app-metrics-two-tier/design.md:299` describes a top-level
   `parallelism` field; `PipelineMetrics` explicitly notes it is
   "NOT part of this model" (`pyqenc/metrics.py:258-259`).
 - Related minor spec staleness: `requirements.md:189-191` still motivates
@@ -51,7 +53,7 @@ current accounting?
   (The design.md call-site table row was already reworded in the 0.14.2 fix.)
 
 **Questions to think about:** implement the field, or reconcile the spec down
-to what exists? Worth a general pass over `metrics-two-tier` vs. current code.
+to what exists? Worth a general pass over `app-metrics-two-tier` vs. current code.
 
 ---
 
@@ -619,21 +621,6 @@ coverage)?
 
 **Questions to think about:** migrate to pydantic-settings with ENV vars?
 (Old DeepSeek chat link in the source notes is the original sketch.)
-
----
-
-## 🤔 36. Specs housekeeping: date prefixes + [outdated] markers
-
-**Status:** needs thinking (docs hygiene)
-
-- 31 folders under `.kiro/specs/`, all plain kebab-case — none carry a
-  `YYYY-MM-DD` creation prefix, none are marked superseded, so old vs. new is
-  hard to tell at a glance.
-
-**Questions to think about:** rename folders with ISO date prefix going
-forward (creation-time only, not mtime); audit and mark fully superseded
-specs `[outdated]` (candidates: the ones superseded by phase-object-model /
-audio-chains / metrics-two-tier).
 
 ---
 

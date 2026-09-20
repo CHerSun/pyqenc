@@ -23,4 +23,5 @@
 
 - Known issues and findings awaiting a design decision live in `TODO.md` in the project root.
 - Entries there are marked "needs thinking" — they are observations with evidence, not work orders: discuss the approach with the user before implementing any of them.
-- Keep the file current: resolve/remove entries once decided or fixed, and record new notable findings there.
+- TODO.md holds open items only. Once a plan covering an item is finalized (or the item is fixed), remove the item outright — no "resolved" sections, no rewording into a historical record. Git history and specs are the record.
+- Keep the file current: record new notable findings there.
