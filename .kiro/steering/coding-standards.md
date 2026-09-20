@@ -64,7 +64,7 @@ All ffmpeg subprocess calls MUST go through the unified runner in `pyqenc/utils/
 - The runner automatically injects `-hide_banner -nostats -progress pipe:1`, reads stdout/stderr concurrently, parses structured progress blocks, and returns `FFmpegRunResult`
 - Pass a `ProgressCallback` (`(frame: int, out_time_s: float) -> None`) for live progress updates
 - Pass a `VideoMetadata` instance to have it populated in-place from ffmpeg output
-- See `.kiro/specs/ffmpeg-unified-runner/` for full requirements and design rationale
+- See `.kiro/specs/2026-03-17 ffmpeg-unified-runner/` for full requirements and design rationale
 
 ## Pipeline Phase Contract
 

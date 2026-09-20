@@ -4,7 +4,7 @@ Each test is tagged with the feature and property it validates.
 Run with: uv run python -m pytest tests/test_metrics_properties.py
 """
 
-# Feature: metrics-two-tier, Property 5: YAML serialisation round-trip preserves all values
+# Feature: app-metrics-two-tier, Property 5: YAML serialisation round-trip preserves all values
 
 from __future__ import annotations
 
@@ -179,19 +179,19 @@ def _deserialize(text: str) -> PipelineMetrics:
 
 
 # ---------------------------------------------------------------------------
-# Property 5 (metrics-two-tier): YAML serialisation round-trip preserves all values
+# Property 5 (app-metrics-two-tier): YAML serialisation round-trip preserves all values
 # ---------------------------------------------------------------------------
 
-# Feature: metrics-two-tier, Property 5: YAML serialisation round-trip preserves all values
+# Feature: app-metrics-two-tier, Property 5: YAML serialisation round-trip preserves all values
 
 
 @settings(max_examples=50, suppress_health_check=[HealthCheck.too_slow])
 @given(metrics=_st_pipeline_metrics())
 def test_yaml_round_trip(metrics: PipelineMetrics) -> None:
-    """Property 5 (metrics-two-tier): YAML serialisation round-trip preserves all values.
+    """Property 5 (app-metrics-two-tier): YAML serialisation round-trip preserves all values.
 
     Validates: Requirements 5.1, 5.6
-    # Feature: metrics-two-tier, Property 5: YAML serialisation round-trip preserves all values
+    # Feature: app-metrics-two-tier, Property 5: YAML serialisation round-trip preserves all values
     """
     restored = _deserialize(_serialize(metrics))
 
@@ -260,7 +260,7 @@ def test_convergence_stats_math(counts: list[int]) -> None:
     """Property 5: Convergence stats math.
 
     Validates: Requirements 4.2, 4.1a
-    # Feature: pipeline-metrics-report, Property 5: Convergence stats math
+    # Feature: app-metrics-report, Property 5: Convergence stats math
     """
     strategy = "slow+h265-aq"
     acc = _ConvergenceAccumulator()
@@ -351,10 +351,10 @@ def test_convergence_stats_resume_from_yaml(counts: list[int]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Property 1 (metrics-two-tier): Prefix extraction is last-dot
+# Property 1 (app-metrics-two-tier): Prefix extraction is last-dot
 # ---------------------------------------------------------------------------
 
-# Feature: metrics-two-tier, Property 1: Prefix extraction is last-dot
+# Feature: app-metrics-two-tier, Property 1: Prefix extraction is last-dot
 
 _st_segment = st.text(
     alphabet=st.characters(whitelist_categories=("Ll", "Lu", "Nd"), whitelist_characters="_"),
@@ -374,19 +374,19 @@ def _st_dotted_key(draw: st.DrawFn) -> str:
 @settings(max_examples=100)
 @given(key=_st_dotted_key())
 def test_last_dot_prefix_is_last_dot(key: str) -> None:
-    """Property 1 (metrics-two-tier): Prefix extraction is last-dot.
+    """Property 1 (app-metrics-two-tier): Prefix extraction is last-dot.
 
     Validates: Requirements 1.4
-    # Feature: metrics-two-tier, Property 1: Prefix extraction is last-dot
+    # Feature: app-metrics-two-tier, Property 1: Prefix extraction is last-dot
     """
     assert _last_dot_prefix(key) == key.rsplit(".", 1)[0]
 
 
 # ---------------------------------------------------------------------------
-# Property 2 (metrics-two-tier): Time accumulation is additive
+# Property 2 (app-metrics-two-tier): Time accumulation is additive
 # ---------------------------------------------------------------------------
 
-# Feature: metrics-two-tier, Property 2: Time accumulation is additive
+# Feature: app-metrics-two-tier, Property 2: Time accumulation is additive
 
 _st_any_key = st.one_of(
     # top-level key (no dot)
@@ -406,10 +406,10 @@ _st_any_key = st.one_of(
     ),
 )
 def test_time_accumulation_is_additive(key: str, durations: list[float]) -> None:
-    """Property 2 (metrics-two-tier): Time accumulation is additive.
+    """Property 2 (app-metrics-two-tier): Time accumulation is additive.
 
     Validates: Requirements 2.2, 3.4
-    # Feature: metrics-two-tier, Property 2: Time accumulation is additive
+    # Feature: app-metrics-two-tier, Property 2: Time accumulation is additive
     """
     with tempfile.TemporaryDirectory() as _tmp:
         collector = _make_yaml_collector(Path(_tmp))
@@ -422,10 +422,10 @@ def test_time_accumulation_is_additive(key: str, durations: list[float]) -> None
 
 
 # ---------------------------------------------------------------------------
-# Property 3 (metrics-two-tier): Top-level percentages sum to 100%
+# Property 3 (app-metrics-two-tier): Top-level percentages sum to 100%
 # ---------------------------------------------------------------------------
 
-# Feature: metrics-two-tier, Property 3: Top-level percentages sum to 100%
+# Feature: app-metrics-two-tier, Property 3: Top-level percentages sum to 100%
 
 
 @st.composite
@@ -447,10 +447,10 @@ def _st_top_level_store(draw: st.DrawFn) -> dict[str, float]:
 @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(store=_st_top_level_store())
 def test_top_level_percentages_sum_to_100(store: dict[str, float]) -> None:
-    """Property 3 (metrics-two-tier): Top-level percentages sum to 100%.
+    """Property 3 (app-metrics-two-tier): Top-level percentages sum to 100%.
 
     Validates: Requirements 4.1, 4.4
-    # Feature: metrics-two-tier, Property 3: Top-level percentages sum to 100%
+    # Feature: app-metrics-two-tier, Property 3: Top-level percentages sum to 100%
     """
     with tempfile.TemporaryDirectory() as _tmp:
         tmp_path = Path(_tmp)
@@ -470,10 +470,10 @@ def test_top_level_percentages_sum_to_100(store: dict[str, float]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Property 4 (metrics-two-tier): Dotted percentages sum to 100% per prefix
+# Property 4 (app-metrics-two-tier): Dotted percentages sum to 100% per prefix
 # ---------------------------------------------------------------------------
 
-# Feature: metrics-two-tier, Property 4: Dotted percentages sum to 100% per prefix
+# Feature: app-metrics-two-tier, Property 4: Dotted percentages sum to 100% per prefix
 
 
 @st.composite
@@ -502,10 +502,10 @@ def _st_dotted_store(draw: st.DrawFn) -> dict[str, float]:
 def test_dotted_percentages_sum_to_100_per_prefix(
     store: dict[str, float],
 ) -> None:
-    """Property 4 (metrics-two-tier): Dotted percentages sum to 100% per prefix.
+    """Property 4 (app-metrics-two-tier): Dotted percentages sum to 100% per prefix.
 
     Validates: Requirements 4.2, 4.5
-    # Feature: metrics-two-tier, Property 4: Dotted percentages sum to 100% per prefix
+    # Feature: app-metrics-two-tier, Property 4: Dotted percentages sum to 100% per prefix
     """
     with tempfile.TemporaryDirectory() as _tmp:
         tmp_path = Path(_tmp)
@@ -527,10 +527,10 @@ def test_dotted_percentages_sum_to_100_per_prefix(
 
 
 # ---------------------------------------------------------------------------
-# Property 8 (metrics-two-tier): Top-level list sorted descending with no zeros
+# Property 8 (app-metrics-two-tier): Top-level list sorted descending with no zeros
 # ---------------------------------------------------------------------------
 
-# Feature: metrics-two-tier, Property 8: Top-level list sorted descending with no zeros
+# Feature: app-metrics-two-tier, Property 8: Top-level list sorted descending with no zeros
 
 
 @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
@@ -538,10 +538,10 @@ def test_dotted_percentages_sum_to_100_per_prefix(
 def test_top_level_sorted_descending_no_zeros(
     store: dict[str, float],
 ) -> None:
-    """Property 8 (metrics-two-tier): Top-level list sorted descending with no zeros.
+    """Property 8 (app-metrics-two-tier): Top-level list sorted descending with no zeros.
 
     Validates: Requirements 5.2
-    # Feature: metrics-two-tier, Property 8: Top-level list sorted descending with no zeros
+    # Feature: app-metrics-two-tier, Property 8: Top-level list sorted descending with no zeros
     """
     with tempfile.TemporaryDirectory() as _tmp:
         tmp_path = Path(_tmp)
@@ -560,10 +560,10 @@ def test_top_level_sorted_descending_no_zeros(
 
 
 # ---------------------------------------------------------------------------
-# Property 9 (metrics-two-tier): Dotted breakdown sorted descending with no zeros
+# Property 9 (app-metrics-two-tier): Dotted breakdown sorted descending with no zeros
 # ---------------------------------------------------------------------------
 
-# Feature: metrics-two-tier, Property 9: Dotted breakdown sorted descending with no zeros
+# Feature: app-metrics-two-tier, Property 9: Dotted breakdown sorted descending with no zeros
 
 
 @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
@@ -571,10 +571,10 @@ def test_top_level_sorted_descending_no_zeros(
 def test_dotted_breakdown_sorted_descending_no_zeros(
     store: dict[str, float],
 ) -> None:
-    """Property 9 (metrics-two-tier): Dotted breakdown sorted descending with no zeros.
+    """Property 9 (app-metrics-two-tier): Dotted breakdown sorted descending with no zeros.
 
     Validates: Requirements 5.3
-    # Feature: metrics-two-tier, Property 9: Dotted breakdown sorted descending with no zeros
+    # Feature: app-metrics-two-tier, Property 9: Dotted breakdown sorted descending with no zeros
     """
     with tempfile.TemporaryDirectory() as _tmp:
         tmp_path = Path(_tmp)
@@ -597,10 +597,10 @@ def test_dotted_breakdown_sorted_descending_no_zeros(
 
 
 # ---------------------------------------------------------------------------
-# Property 6 (metrics-two-tier): Resume restores accumulated store
+# Property 6 (app-metrics-two-tier): Resume restores accumulated store
 # ---------------------------------------------------------------------------
 
-# Feature: metrics-two-tier, Property 6: Resume restores accumulated store
+# Feature: app-metrics-two-tier, Property 6: Resume restores accumulated store
 
 
 @st.composite
@@ -635,10 +635,10 @@ def _st_mixed_store(draw: st.DrawFn) -> dict[str, float]:
 @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(store=_st_mixed_store())
 def test_resume_restores_accumulated_store(store: dict[str, float]) -> None:
-    """Property 6 (metrics-two-tier): Resume restores accumulated store.
+    """Property 6 (app-metrics-two-tier): Resume restores accumulated store.
 
     Validates: Requirements 5.6
-    # Feature: metrics-two-tier, Property 6: Resume restores accumulated store
+    # Feature: app-metrics-two-tier, Property 6: Resume restores accumulated store
     """
     with tempfile.TemporaryDirectory() as _tmp:
         tmp_path = Path(_tmp)
@@ -661,10 +661,10 @@ def test_resume_restores_accumulated_store(store: dict[str, float]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Property 7 (metrics-two-tier): Strategy dot sanitization produces valid metric keys
+# Property 7 (app-metrics-two-tier): Strategy dot sanitization produces valid metric keys
 # ---------------------------------------------------------------------------
 
-# Feature: metrics-two-tier, Property 7: Strategy dot sanitization produces valid metric keys
+# Feature: app-metrics-two-tier, Property 7: Strategy dot sanitization produces valid metric keys
 
 _ASCII_DOT = "."
 
@@ -695,10 +695,10 @@ def test_strategy_dot_sanitization_produces_valid_metric_keys(
     preset: str,
     profile: str,
 ) -> None:
-    """Property 7 (metrics-two-tier): Strategy dot sanitization produces valid metric keys.
+    """Property 7 (app-metrics-two-tier): Strategy dot sanitization produces valid metric keys.
 
     Validates: Requirements 8.1, 8.2, 8.5
-    # Feature: metrics-two-tier, Property 7: Strategy dot sanitization produces valid metric keys
+    # Feature: app-metrics-two-tier, Property 7: Strategy dot sanitization produces valid metric keys
     """
     strategy = Strategy(
         preset       = preset,

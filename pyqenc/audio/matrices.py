@@ -5,7 +5,7 @@ are looked up by the normalized ``(source_layout, target_layout, matrix_name)``
 triple (see :data:`DOWNMIX_MATRICES`) and returned as ready-to-use ffmpeg ``pan``
 filter fragments.
 
-Design decisions (see ``.kiro/specs/audio-chains/design.md``):
+Design decisions (see ``.kiro/specs/2026-09-11 audio-chains/design.md``):
 
 - **Index-addressed, never channel-name-addressed.** Every matrix uses
   ``pan=<layout>|c0=…|c1=…`` addressing channels by physical position. Named
