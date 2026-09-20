@@ -381,7 +381,7 @@ time is authoritative.
 | JobPhase — probe                 | `MetricKey.JOB`          | top-level                         |
 | JobPhase — crop detect           | `MetricKey.JOB`          | top-level (same key, accumulates) |
 | JobPhase — recovery              | `MetricKey.RECOVERY`     | top-level                         |
-| ExtractionPhase — mkvextract     | `MetricKey.EXTRACTION`   | top-level                         |
+| ExtractionPhase — track extraction | `MetricKey.EXTRACTION`   | top-level                         |
 | ExtractionPhase — recovery       | `MetricKey.RECOVERY`     | top-level                         |
 | ChunkingPhase — scene detect     | `MetricKey.CHUNKING`     | top-level                         |
 | ChunkingPhase — split            | `MetricKey.CHUNKING`     | top-level (same key, accumulates) |

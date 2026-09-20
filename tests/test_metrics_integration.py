@@ -248,12 +248,16 @@ class TestExtractionPhaseTiming:
         assert MetricKey.RECOVERY in time_keys_called, (
             f"Expected MetricKey.RECOVERY in time() calls, got: {time_keys_called}"
         )
+        assert MetricKey.EXTRACTION not in time_keys_called, (
+            "EXTRACTION must not be timed when all artifacts are reused, "
+            f"got: {time_keys_called}"
+        )
 
     def test_extraction_recorded_for_mkvextract_tracks(self, tmp_path: Path) -> None:
-        """``time(MetricKey.RECOVERY)`` is called during extraction (the only timed
-        operation in ExtractionPhase — EXTRACTION key is not separately timed).
+        """Both ``time(MetricKey.RECOVERY)`` and ``time(MetricKey.EXTRACTION)``
+        are called when extraction produces pending artifacts.
 
-        Validates: Requirements 6.5
+        Validates: Requirements 6.5, 2.5
         """
         from pyqenc.phases.extraction import (
             ExtractionPhase,
@@ -309,6 +313,9 @@ class TestExtractionPhaseTiming:
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
         assert MetricKey.RECOVERY in time_keys_called, (
             f"Expected MetricKey.RECOVERY in time() calls, got: {time_keys_called}"
+        )
+        assert MetricKey.EXTRACTION in time_keys_called, (
+            f"Expected MetricKey.EXTRACTION in time() calls, got: {time_keys_called}"
         )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:

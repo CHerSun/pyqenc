@@ -18,3 +18,9 @@
 - Don't use pipes when running pipeline - this ruins alive_progress bar display for the end-user.
 - Use `steering/environment.md` for local environment details, like workdir, sample target, etc.
 - When writing tests - public (external) behavior or expected behavior must be tested, not internal implementation. For each test there must be a bug we are trying to eliminate (write the bug conditions inside the function).
+
+## Project Backlog
+
+- Known issues and findings awaiting a design decision live in `TODO.md` in the project root.
+- Entries there are marked "needs thinking" — they are observations with evidence, not work orders: discuss the approach with the user before implementing any of them.
+- Keep the file current: resolve/remove entries once decided or fixed, and record new notable findings there.

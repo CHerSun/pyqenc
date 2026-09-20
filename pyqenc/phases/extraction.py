@@ -804,6 +804,7 @@ class ExtractionPhase:
                 logger.info("  Exclude:  %s", self._job.result.config.extraction.exclude)  # type: ignore[union-attr]
 
         from pyqenc.metrics import MetricKey
+
         with self._collector.time(MetricKey.RECOVERY):
             artifacts, video_meta, audio_meta = self._recover(
                 force_wipe=force_wipe
@@ -860,7 +861,8 @@ class ExtractionPhase:
         # Execute extraction for ABSENT artifacts. Pass ONLY the wanted list:
         # recovery already selected and typed each artifact and attached its
         # source stream, so the executor performs no gating or re-probing.
-        result = self._execute_extraction(wanted_artifacts)
+        with self._collector.time(MetricKey.EXTRACTION):
+            result = self._execute_extraction(wanted_artifacts)
         self.result = result
         return result
 
