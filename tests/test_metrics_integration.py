@@ -21,6 +21,7 @@ from pyqenc.models import (
     Strategy,
     VideoMetadata,
 )
+from pyqenc.phase import Recovery
 
 _SHARED_APP_CONFIG: AppConfig = load_app_config(default_only=True)
 
@@ -686,7 +687,7 @@ class TestAudioPhaseTiming:
         stub_artifact.state = ArtifactState.COMPLETE
         stub_artifact.path  = tmp_path / "track.aac"
 
-        with patch.object(AudioPhase, "_recover", return_value=[stub_artifact]):
+        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -717,8 +718,8 @@ class TestAudioPhaseTiming:
         )
 
         with (
-            patch.object(AudioPhase, "_recover", return_value=[stub_artifact]),
-            patch.object(AudioPhase, "_execute_audio", return_value=stub_result),
+            patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
+            patch.object(AudioPhase, "_execute", return_value=stub_result),
         ):
             phase.run()
 
@@ -742,7 +743,7 @@ class TestAudioPhaseTiming:
         stub_artifact.state = ArtifactState.COMPLETE
         stub_artifact.path  = tmp_path / "track.aac"
 
-        with patch.object(AudioPhase, "_recover", return_value=[stub_artifact]):
+        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -765,7 +766,7 @@ class TestAudioPhaseTiming:
         stub_artifact.state = ArtifactState.COMPLETE
         stub_artifact.path  = tmp_path / "track.aac"
 
-        with patch.object(AudioPhase, "_recover", return_value=[stub_artifact]):
+        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             result = phase.run()
 
         assert result is not None

@@ -7,28 +7,39 @@ This module defines the structural backbone of the phase object model:
 - ``PhaseOutcome``    — re-exported from ``models`` for convenience.
 - ``PhaseResult``     — result returned by every phase's ``run()``.
 - ``FinalizeContext`` — pre-resolved end-of-run decisions passed to ``finalize``.
+- ``Recovery``        — single source of truth produced by ``PhaseBase._recover()``.
+- ``RecoveryError``   — fatal recover-time invalidation signal.
 - ``Phase``           — ``Protocol`` that every phase class must satisfy.
+- ``PhaseBase``       — template-method base implementing the uniform ``run()``
+                        footprint shared by every phase.
 - ``CleanupLevel``    — re-exported from ``models`` for convenience.
 - ``Strategy``        — re-exported from ``models`` for convenience.
 - ``_build_registry`` — factory that constructs all phase objects in execution
                         order, wires their dependencies, and returns the registry.
 
-Every phase has a single execution entry point, ``run()``: it resolves
-dependencies, recovers on-disk artifacts, executes any pending work, and caches
-its ``PhaseResult``. A separate ``finalize(ctx)`` hook lets each phase perform
-end-of-run housekeeping — today, deleting its own artifacts when the runner's
+Every phase inherits ``PhaseBase``, whose single concrete ``run()`` owns the
+uniform footprint — memoization guard, skip check, dependency resolution,
+banner, timed recovery, recovery summary, dry-run / no-pending branches, and
+timed execution — so no phase can forget a step or drift from the contract.
+Status decisions stay with the concrete phases: ``_recover()`` declares what
+work is pending, and ``_execute()`` returns the outcome the phase chooses.
+A separate ``finalize(ctx)`` hook lets each phase perform end-of-run
+housekeeping — today, deleting its own artifacts when the runner's
 pre-resolved ``FinalizeContext.deep_cleanup`` flag is set.
 """
 # CHerSun 2026
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from pyqenc.metrics import MetricKey
 from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, Strategy
 from pyqenc.state import ArtifactState
+from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -41,12 +52,17 @@ __all__ = [
     "DependencyStatus",
     "FinalizeContext",
     "Phase",
+    "PhaseBase",
     "PhaseOutcome",
     "PhaseResult",
+    "Recovery",
+    "RecoveryError",
     "Strategy",
     "_build_registry",
     "resolve_dependencies",
 ]
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +254,364 @@ class Phase(Protocol):
             ctx: Pre-resolved end-of-run decisions from the runner.
         """
         ...
+
+
+# ---------------------------------------------------------------------------
+# Recovery — single source of truth from _recover()
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Recovery:
+    """What ``PhaseBase._recover()`` hands to the template ``run()``.
+
+    The single source of truth for the phase's view of the world after
+    scanning disk: the full internal artifact list and whether any work
+    remains this run.
+
+    Attributes:
+        artifacts: Full internal artifact list — wanted AND unwanted entries.
+                   Phases whose outputs are state sidecars rather than
+                   artifacts (job, probe) return an empty list and signal
+                   everything through ``pending``.
+        pending:   Whether any work remains this run (any wanted artifact
+                   ``ABSENT`` / ``PARTIAL``, or — for state phases — the
+                   sidecar is absent or invalidated). The template maps it
+                   mechanically: ``pending and dry_run`` → ``PENDING``,
+                   ``not pending`` → ``REUSED``, ``pending`` → execute.
+    """
+
+    artifacts: list[Artifact] = field(default_factory=list)
+    pending:   bool           = False
+
+    @classmethod
+    def from_artifacts(cls, artifacts: list[Artifact]) -> "Recovery":
+        """Derive ``pending`` from a full internal artifact list.
+
+        Args:
+            artifacts: The internal list including ``wanted=False`` entries.
+
+        Returns:
+            A ``Recovery`` whose ``pending`` is True when any wanted artifact
+            is ``ABSENT`` or ``PARTIAL``.
+        """
+        pending = any(
+            a.wanted and a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)
+            for a in artifacts
+        )
+        return cls(artifacts=artifacts, pending=pending)
+
+
+class RecoveryError(Exception):
+    """Fatal recover-time invalidation raised by ``PhaseBase._recover()``.
+
+    Raised when persisted state contradicts the current run's inputs so
+    fundamentally that the phase cannot proceed — e.g. a chunking-mode change
+    or an encoding probe change without ``--force``, or a job source mismatch.
+    This is the *invalidation* axis (persisted settings may be read and
+    compared), distinct from completeness (presence-based only). The template
+    catches it and converts it to the phase's typed ``FAILED`` result.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+# ---------------------------------------------------------------------------
+# PhaseBase — template-method base implementing the uniform run()
+# ---------------------------------------------------------------------------
+
+class PhaseBase:
+    """Template-method base class implementing the uniform phase ``run()``.
+
+    The single concrete ``run()`` below owns the run footprint shared by every
+    phase, in this exact order:
+
+    1. In-run memoization guard — a cached ``self.result`` is returned
+       verbatim: no re-resolution, no banner, no re-classification.
+    2. ``_skip_check()`` — phase-specific skip (e.g. optimization disabled);
+       reads constructor state (config) only, never dependency results.
+    3. ``_ensure_dependencies()`` — shared dependency walk; a ``FAILED``
+       dependency chains a typed ``FAILED`` result with one ERROR line, a
+       ``PENDING`` one (dry-run only) chains a typed ``PENDING`` with one
+       INFO line. No banner is emitted on either short-circuit.
+    4. Banner — iff the ``BANNER`` class flag; exactly once, after deps.
+    5. ``_log_key_params()`` — key-parameter logging.
+    6. Timed ``_recover()`` under the top-level ``recovery`` metric key;
+       returns the :class:`Recovery` single source of truth. A
+       :class:`RecoveryError` converts to a typed ``FAILED`` result.
+    7. ``log_recovery_line`` over the unfiltered internal artifact list
+       (skipped when the phase has no artifacts).
+    8. Dry-run branch — unless ``_DRY_RUN_READONLY``: ``PENDING`` when work
+       remains, otherwise the reused result. No writes happen.
+    9. No pending work — the phase-built reused result (``REUSED``).
+    10. Timed ``_execute(wanted, dry_run)`` under the phase's top-level
+        metric key. The concrete phase alone decides ``COMPLETED`` /
+        ``FAILED``; returning ``PENDING`` from ``_execute`` violates the
+        contract and the runner fails loudly on it.
+
+    The template never decides ``COMPLETED`` / ``FAILED`` and never computes
+    per-phase payloads — those live in the phase hooks. Timing, banner, guards
+    and the wanted-filter exist exactly once, here.
+
+    Class attributes:
+        name:              Human-readable phase name (logs, banners, summary).
+        BANNER:            Whether ``run()`` emits the thick-line banner.
+                           Phases whose work is not user-significant (job
+                           setup, probe) set ``False`` and log concise INFO
+                           substitutes instead.
+        _METRIC_KEY:       Top-level metric key timing this phase's execution.
+        _DRY_RUN_READONLY: When ``True``, a dry-run still performs the
+                           phase's read-only work (only writes are skipped)
+                           instead of returning a preview — the phase falls
+                           through to ``_execute(dry_run=True)``. Job only.
+    """
+
+    name:              str       = "phase"
+    BANNER:            bool      = True
+    _METRIC_KEY:       MetricKey = MetricKey.RECOVERY  # overridden per phase
+    _DRY_RUN_READONLY: bool      = False
+
+    def __init__(
+        self,
+        config:  AppConfig,
+        phases:  "dict[type[Phase], Phase] | None" = None,
+        *,
+        collector: MetricsCollector,
+    ) -> None:
+        """Store the shared constructor state; subclasses resolve typed deps.
+
+        Args:
+            config:    Full validated application configuration.
+            phases:    Phase registry; subclasses pull typed dependency
+                       references from it after calling ``super().__init__``.
+            collector: Metrics collector; the template owns all timing calls.
+        """
+        self._config:    AppConfig        = config
+        self._collector: MetricsCollector = collector
+        self.result:     PhaseResult | None = None
+        self.dependencies: list[Phase]    = []
+
+    # ------------------------------------------------------------------
+    # Public Phase interface — the template run() and default finalize
+    # ------------------------------------------------------------------
+
+    @property
+    def _logger(self) -> logging.Logger:
+        """Logger of the concrete phase's module (keeps log provenance)."""
+        return logging.getLogger(type(self).__module__)
+
+    def run(self, dry_run: bool = False) -> PhaseResult:
+        """Run the uniform footprint once; the concrete hooks do the work.
+
+        Args:
+            dry_run: When ``True``, report what work would be done without
+                     executing it (returns ``PENDING`` when any wanted work
+                     remains), unless the phase is ``_DRY_RUN_READONLY``.
+
+        Returns:
+            The phase's typed ``PhaseResult``, cached on ``self.result`` and
+            returned verbatim on subsequent calls.
+        """
+        # 1. In-run memoization guard: return cached result verbatim.
+        if self.result is not None:
+            return self.result
+
+        # 2. Phase-specific skip (constructor/config state only, no banner).
+        skip = self._skip_check()
+        if skip is not None:
+            self.result = skip
+            return self.result
+
+        # 3. Dependencies: FAILED deps chain FAILED (one ERROR line), PENDING
+        #    deps (dry-run only) chain PENDING (one INFO line). No banner.
+        dep_result = self._ensure_dependencies(dry_run=dry_run)
+        if dep_result is not None:
+            self.result = dep_result
+            return self.result
+
+        # 4./5. Banner (once, after deps) and key-parameter logging.
+        if self.BANNER:
+            emit_phase_banner(self.name.upper(), self._logger)
+        self._log_key_params()
+
+        # 6. Timed recovery — the single source of truth.
+        try:
+            with self._collector.time(MetricKey.RECOVERY):
+                recovery = self._recover()
+        except RecoveryError as exc:
+            self._logger.error(exc.message)
+            self.result = self._make_result(
+                PhaseOutcome.FAILED, [], exc.message, error=exc.message,
+            )
+            return self.result
+
+        # 7. Recovery summary over the unfiltered internal list; wanted
+        #    artifacts are selected exactly once, here.
+        wanted = [a for a in recovery.artifacts if a.wanted]
+        message = (
+            log_recovery_line(self._logger, recovery.artifacts, unit=self._recovery_unit())
+            if recovery.artifacts
+            else ""
+        )
+
+        # 8. Dry-run preview (readonly-execute phases fall through to work).
+        if dry_run and not self._DRY_RUN_READONLY:
+            if recovery.pending:
+                self.result = self._make_result(
+                    PhaseOutcome.PENDING, wanted,
+                    message or f"dry-run: {self.name} not yet complete",
+                )
+            else:
+                self.result = self._reused_result(wanted, message)
+            return self.result
+
+        # 9. Nothing pending — the phase-built reused result.
+        if not recovery.pending:
+            self.result = self._reused_result(wanted, message)
+            return self.result
+
+        # 10. Timed execution — the phase alone decides COMPLETED / FAILED.
+        with self._collector.time(self._METRIC_KEY):
+            result = self._execute(wanted, dry_run=dry_run)
+        self.result = result
+        return result
+
+    def finalize(self, ctx: FinalizeContext) -> None:
+        """Default end-of-run housekeeping: nothing to do.
+
+        Phases with deep-cleanup deletions override this (extraction,
+        chunking, encoding); for every other phase the base no-op applies.
+
+        Args:
+            ctx: Pre-resolved end-of-run decisions from the runner.
+        """
+        return
+
+    # ------------------------------------------------------------------
+    # Shared dependency resolution (thin, uniform wrapper)
+    # ------------------------------------------------------------------
+
+    def _ensure_dependencies(self, *, dry_run: bool) -> PhaseResult | None:
+        """Run the shared dependency walk and build the typed short-circuit.
+
+        Args:
+            dry_run: Propagated unchanged to each dependency's ``run()``.
+
+        Returns:
+            A typed ``FAILED`` result if any dependency failed, a typed
+            ``PENDING`` result if any dependency is legitimately pending
+            (dry-run only), or ``None`` when the phase may proceed.
+        """
+        status = resolve_dependencies(self, dry_run=dry_run)
+        if status.failed:
+            names = ", ".join(n.capitalize() for n in status.failed)
+            err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
+            self._logger.error(err)
+            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+        if status.pending:
+            names = ", ".join(n.capitalize() for n in status.pending)
+            msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
+            self._logger.info(msg)
+            return self._make_result(PhaseOutcome.PENDING, [], msg)
+        return None
+
+    # ------------------------------------------------------------------
+    # Hooks — concrete phases implement / override these
+    # ------------------------------------------------------------------
+
+    def _skip_check(self) -> PhaseResult | None:
+        """Phase-specific skip decision made before dependencies resolve.
+
+        Must read constructor state (config) only — never dependency results
+        (they are not resolved yet). Returning a result skips the phase with
+        no banner and no work.
+
+        Returns:
+            A typed result to return immediately, or ``None`` to proceed.
+        """
+        return None
+
+    def _log_key_params(self) -> None:
+        """Log the phase's key parameters (after the banner, before recovery)."""
+        return
+
+    def _recovery_unit(self) -> str:
+        """Singular noun for the recovery summary line (e.g. ``"chunk"``)."""
+        return "artifact"
+
+    def _reused_result(self, wanted: list[Artifact], message: str) -> PhaseResult:
+        """Build the typed result for the nothing-pending path.
+
+        Default: ``_make_result(REUSED, wanted, message)``. Override when the
+        payload must be rebuilt from persisted state (merge replays its
+        summary, probe rebuilds cached values) — never to change the outcome.
+
+        Args:
+            wanted:   The wanted artifact list (all ``COMPLETE`` here).
+            message:  The recovery summary message, or ``""`` for phases
+                      without artifacts.
+
+        Returns:
+            The typed ``REUSED`` result.
+        """
+        return self._make_result(
+            PhaseOutcome.REUSED, wanted,
+            message or f"all {self._recovery_unit()}s reused",
+        )
+
+    def _recover(self) -> Recovery:
+        """Scan disk and build the single source of truth for this run.
+
+        Owns force-wipe, invalidation, ``.tmp`` pre-clean, and classification.
+        Completeness is presence-based only (a present file is never
+        incomplete — atomic writes guarantee it); invalidation MAY read
+        persisted settings and raises :class:`RecoveryError` on fatal
+        mismatch. The returned artifact list must include unwanted-but-present
+        entries; ``wanted`` is derived from external input, never mutated here.
+
+        Returns:
+            The :class:`Recovery` single source of truth.
+        """
+        raise NotImplementedError
+
+    def _execute(self, wanted: list[Artifact], dry_run: bool) -> PhaseResult:
+        """Produce every wanted artifact; the phase alone decides the outcome.
+
+        A pure executor: it receives the wanted list selected by recovery and
+        must return ``COMPLETED`` or ``FAILED`` — never ``PENDING`` (the
+        template's dry-run branch is the only PENDING producer; the runner
+        treats a surviving PENDING as a contract violation and fails loudly).
+
+        Args:
+            wanted:   The wanted artifact list from recovery.
+            dry_run:  True only for ``_DRY_RUN_READONLY`` phases; the executor
+                      performs all read-only work and skips writes.
+
+        Returns:
+            The typed phase result with the outcome the phase chooses.
+        """
+        raise NotImplementedError
+
+    def _make_result(
+        self,
+        outcome:   PhaseOutcome,
+        artifacts: list[Artifact],
+        message:   str,
+        error:     str | None = None,
+    ) -> PhaseResult:
+        """Assemble the phase's typed result (payload defaults for the phase).
+
+        Args:
+            outcome:   The phase outcome.
+            artifacts: The wanted artifact list (``PhaseResult.artifacts``).
+            message:   Human-readable summary.
+            error:     Error description when ``outcome`` is ``FAILED``.
+
+        Returns:
+            The populated typed result.
+        """
+        raise NotImplementedError
 
 
 # ---------------------------------------------------------------------------
