@@ -440,7 +440,9 @@ class PhaseBase:
             with self._collector.time(MetricKey.RECOVERY):
                 recovery = self._recover()
         except RecoveryError as exc:
-            self._logger.error(exc.message)
+            # Fatal recover-time invalidation — a hard stop (same severity the
+            # phases already used for mode/probe/source mismatches).
+            self._logger.critical(exc.message)
             self.result = self._make_result(
                 PhaseOutcome.FAILED, [], exc.message, error=exc.message,
             )

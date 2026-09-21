@@ -241,7 +241,7 @@ class TestExtractionPhaseTiming:
 
         with patch.object(
             ExtractionPhase, "_recover",
-            return_value=([stub_artifact], None, []),
+            return_value=Recovery.from_artifacts([stub_artifact]),
         ):
             phase.run()
 
@@ -295,7 +295,7 @@ class TestExtractionPhaseTiming:
         with (
             patch.object(
                 ExtractionPhase, "_recover",
-                return_value=([stub_artifact], None, []),
+                return_value=Recovery.from_artifacts([stub_artifact]),
             ),
             patch(
                 "pyqenc.phases.extraction.MKVTrackExtractor",
@@ -335,7 +335,7 @@ class TestExtractionPhaseTiming:
 
         with patch.object(
             ExtractionPhase, "_recover",
-            return_value=([stub_artifact], None, []),
+            return_value=Recovery.from_artifacts([stub_artifact]),
         ):
             result = phase.run()
 
