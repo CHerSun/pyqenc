@@ -338,14 +338,16 @@ from pyqenc.constants import (
     TEMP_SUFFIX,
     THICK_LINE,
 )
+from pyqenc.metrics import MetricKey
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
     Phase,
+    PhaseBase,
     PhaseResult,
-    resolve_dependencies,
+    Recovery,
+    RecoveryError,
 )
-from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
 
 _CHUNKING_YAML     = "chunking.yaml"
 
@@ -358,8 +360,8 @@ class ChunkArtifact(Artifact):
     Returns ``None`` if the sidecar is absent or cannot be parsed.
     """
 
-    def __init__(self, path: Path, state: ArtifactState) -> None:
-        super().__init__(path=path, state=state)
+    def __init__(self, path: Path, state: ArtifactState, wanted: bool = True) -> None:
+        super().__init__(path=path, state=state, wanted=wanted)
         self._metadata:        ChunkMetadata | None = None
         self._metadata_loaded: bool                 = False
 
@@ -399,19 +401,21 @@ class ChunkingPhaseResult(PhaseResult):
             self.chunks = []
 
 
-class ChunkingPhase:
+class ChunkingPhase(PhaseBase):
     """Phase object for scene-based video chunking.
 
     Owns artifact enumeration, recovery, invalidation, execution, and logging
     for the chunking phase.  Wraps the existing ``detect_scenes`` and
-    ``split_chunks`` helpers.
+    ``split_chunks`` helpers. The uniform run footprint is inherited from
+    :class:`PhaseBase`.
 
     Args:
         config: Full pipeline configuration.
         phases: Phase registry; used to resolve typed dependency references.
     """
 
-    name: str = "chunking"
+    name:        str       = "chunking"
+    _METRIC_KEY: MetricKey = MetricKey.CHUNKING
 
     def __init__(
         self,
@@ -425,110 +429,257 @@ class ChunkingPhase:
         from pyqenc.phases.extraction import ExtractionPhase as _ExtractionPhase
         from pyqenc.phases.job import JobPhase as _JobPhase
 
-        self._config    = config
-        self._collector: MetricsCollector = collector
+        super().__init__(config, phases, collector=collector)
+
         self._job:        _JobPhase | None        = cast(_JobPhase,        phases.get(_JobPhase))        if phases else None
         self._extraction: _ExtractionPhase | None = cast(_ExtractionPhase, phases.get(_ExtractionPhase)) if phases else None
         self.params       = ChunkingParams(chunking_mode=config.chunking.mode.value, scenes=[])
-        self.result:      ChunkingPhaseResult | None = None
         self.dependencies: list[Phase]            = [d for d in [self._job, self._extraction] if d is not None]
-        # Set by _recover() when a chunking-mode mismatch is detected
-        self._mode_mismatch_error:    str  = ""
-        self._mode_changed_force_wipe: bool = False
+
+        # Set by _recover() when scene boundaries were loaded from chunking.yaml.
+        self._recovered_scenes: list[SceneBoundary] = []
 
     # ------------------------------------------------------------------
-    # Public Phase interface
+    # PhaseBase hooks
     # ------------------------------------------------------------------
 
-    def run(self, dry_run: bool = False) -> ChunkingPhaseResult:
-        """Recover, detect scenes if needed, split pending chunks, cache result.
+    def _log_key_params(self) -> None:
+        """Log the chunking mode (key parameter)."""
+        logger.info("Mode:  %s", self._config.chunking.mode.value)
 
-        Sequence:
-        1. Emit phase banner.
-        2. Ensure dependencies have results (scan if needed).
-        3. Run ``_recover()`` — handles ``force_wipe``.
-        4. Log recovery result line.
-        5. In dry-run mode: return ``PENDING`` if any artifacts are pending.
-        6. Detect scenes if not cached; split pending chunks.
-        7. Log completion summary.
+    def _recovery_unit(self) -> str:
+        """The recovery summary counts chunks."""
+        return "chunk"
+
+    def _ensure_dependencies(self, *, dry_run: bool) -> ChunkingPhaseResult | None:
+        """Presence-check the typed references, then defer to the shared walk.
 
         Args:
-            dry_run: When ``True``, report what would be done without writing files.
+            dry_run: Propagated unchanged to each dependency's ``run()``.
 
         Returns:
-            ``ChunkingPhaseResult`` with all artifacts ``COMPLETE`` on success.
+            A ``FAILED`` result when a required phase is missing or a
+            dependency failed, a ``PENDING`` result if any dependency is
+            legitimately pending (dry-run only), or ``None`` when the phase
+            may proceed.
         """
-        # In-run memoization guard (Property 1): return cached result verbatim.
-        if self.result is not None:
-            return self.result
+        missing = [
+            label for label, dep in (("JobPhase", self._job), ("ExtractionPhase", self._extraction))
+            if dep is None
+        ]
+        if missing:
+            err = f"ChunkingPhase requires {', '.join(missing)}"
+            logger.error(err)
+            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+        return super()._ensure_dependencies(dry_run=dry_run)
 
-        dep_result = self._ensure_dependencies(dry_run=dry_run)
-        if dep_result is not None:
-            self.result = dep_result
-            return self.result
+    def _recover(self) -> Recovery:
+        """Classify chunk artifacts, handle force-wipe and mode invalidation.
 
-        emit_phase_banner("CHUNKING", logger)
+        Steps:
+        1. If ``force_wipe``: delete ``chunks/`` and ``chunking.yaml``.
+        2. Clean up leftover ``.tmp`` files.
+        3. Load scene boundaries from ``chunking.yaml``; a persisted chunking
+           mode differing from the current config is a fatal invalidation
+           without ``--force`` (chunks are incompatible), or — with ``--force``
+           — a wipe of ``chunks/`` + sidecar with ``force_wipe`` propagated
+           downstream through the job result.
+        4. Classify chunks from the authoritative scene list (expected set):
+           file + sidecar → COMPLETE, file without sidecar → PARTIAL, missing
+           → ABSENT. Chunk files on disk that are NOT in the expected set are
+           surplus and surface as ``wanted=False`` artifacts (kept in place,
+           never pending).
 
-        job_result = self._job.result  # type: ignore[union-attr]
-        force_wipe = getattr(job_result, "force_wipe", False)
+        Returns:
+            The :class:`Recovery` single source of truth.
 
-        # Key parameters
-        logger.info("Mode:  %s", self._job.result.config.chunking.mode.value)  # type: ignore[union-attr]
+        Raises:
+            RecoveryError: On a chunking-mode change without ``--force``.
+        """
+        work_dir   = self._job.result.work_dir  # type: ignore[union-attr]
+        chunks_dir = work_dir / CHUNKS_DIR
+        yaml_path  = work_dir / _CHUNKING_YAML
+        force_wipe = getattr(self._job.result, "force_wipe", False)  # type: ignore[union-attr]
 
-        from pyqenc.metrics import MetricKey as _MetricKey
-        with self._collector.time(_MetricKey.RECOVERY):
-            artifacts = self._recover(force_wipe=force_wipe)
+        # Step 1: force-wipe
+        if force_wipe:
+            if chunks_dir.exists():
+                shutil.rmtree(chunks_dir)
+                logger.debug("force_wipe: deleted %s", chunks_dir)
+            if yaml_path.exists():
+                yaml_path.unlink()
+                logger.debug("force_wipe: deleted %s", yaml_path)
 
-        # Mode mismatch without --force: abort
-        if self._mode_mismatch_error:
-            self.result = _failed(self._mode_mismatch_error)
-            return self.result
+        # Step 2: clean up .tmp files
+        if chunks_dir.exists():
+            for tmp in chunks_dir.glob(f"*{TEMP_SUFFIX}"):
+                try:
+                    tmp.unlink()
+                    logger.warning("Removed leftover temp file: %s", tmp)
+                except OSError as exc:
+                    logger.warning("Could not remove temp file %s: %s", tmp, exc)
 
-        # Mode changed with --force: chunks wiped, propagate force_wipe to downstream
-        # via JobPhaseResult so all downstream phases see it through the standard path.
-        if self._mode_changed_force_wipe:
-            job_result.force_wipe = True  # type: ignore[union-attr]
-            force_wipe = True
+        if not chunks_dir.exists():
+            self._recovered_scenes = []
+            return Recovery(pending=True)
 
-        log_recovery_line(logger, artifacts, unit="chunk")
-        complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
-        pending_count  = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL))
-
-        # Action plan — log scene count and pending work before starting
-        recovered_scenes = getattr(self, "_recovered_scenes", [])
-        if recovered_scenes:
-            logger.info("Scenes:  %d (from chunking.yaml)", len(recovered_scenes))
-        if pending_count > 0:
-            logger.info("Pending: %d chunk(s) to split", pending_count)
-
-        # Dry-run path
-        if dry_run:
-            outcome = PhaseOutcome.REUSED if (pending_count == 0 and complete_count > 0) else PhaseOutcome.PENDING
-            chunks  = [a.metadata for a in artifacts if a.state == ArtifactState.COMPLETE and a.metadata is not None]
-            self.result = ChunkingPhaseResult(
-                outcome   = outcome,
-                artifacts = artifacts,
-                message   = "dry-run",
-                chunks    = chunks,
+        # Step 3: load scene boundaries from chunking.yaml
+        chunking_params = ChunkingParams.load(yaml_path)
+        scenes: list[SceneBoundary] = []
+        if chunking_params is not None and chunking_params.scenes:
+            scenes = chunking_params.scenes
+            logger.debug(
+                "Chunking recovery: loaded %d scene boundary(ies) from chunking.yaml",
+                len(scenes),
             )
-            return self.result
+            if scenes:
+                logger.info("Scenes:  %d (from chunking.yaml)", len(scenes))
 
-        # Nothing to do — only skip if we actually have complete chunks
-        if pending_count == 0 and complete_count > 0:
-            chunks = [a.metadata for a in artifacts if a.state == ArtifactState.COMPLETE and a.metadata is not None]
-            chunks.sort(key=lambda c: c.chunk_id)
-            self.result = ChunkingPhaseResult(
-                outcome   = PhaseOutcome.REUSED,
-                artifacts = artifacts,
-                message   = "all chunks reused",
-                chunks    = chunks,
+            # Mode mismatch check: if the persisted mode differs from the current
+            # config, chunks are incompatible and cannot be reused.
+            persisted_mode = chunking_params.chunking_mode
+            current_mode   = self.params.chunking_mode
+            if persisted_mode is not None and persisted_mode != current_mode:
+                if self._job.result.force_wipe:  # type: ignore[union-attr]
+                    logger.warning(
+                        "Chunking mode changed (%s → %s) — --force: wiping chunks/ and downstream artifacts",
+                        persisted_mode, current_mode,
+                    )
+                    if chunks_dir.exists():
+                        shutil.rmtree(chunks_dir)
+                        logger.debug("force_wipe: deleted %s", chunks_dir)
+                    yaml_path.unlink(missing_ok=True)
+                    logger.debug("force_wipe: deleted %s", yaml_path)
+                    # Propagate force_wipe to downstream phases through the
+                    # standard path (the job result).
+                    self._job.result.force_wipe = True  # type: ignore[union-attr]
+                    self._recovered_scenes = []
+                    return Recovery(pending=True)
+                raise RecoveryError(
+                    f"Chunking mode changed since last run "
+                    f"(persisted={persisted_mode!r}, current={current_mode!r}). "
+                    "Existing chunks are incompatible. "
+                    "Re-run with --force to delete stale chunks and continue."
+                )
+        else:
+            logger.debug("Chunking recovery: chunking.yaml absent or empty — scene detection needed")
+
+        # Step 4: classify chunks.
+        #
+        # When scene boundaries are known (from chunking.yaml), the scene list is
+        # the authoritative source of truth.  We iterate expected chunks derived
+        # from the boundaries and classify each one:
+        #   - file + sidecar present  → COMPLETE
+        #   - file present, no sidecar → PARTIAL (pending)
+        #   - file absent              → ABSENT (pending)
+        # Files on disk that are NOT in the expected set are surplus: they
+        # surface as present-but-unwanted (wanted=False) per the Phase
+        # Contract — retained in place, never counted as pending.
+        #
+        # When no scene boundaries are available yet, fall back to a plain disk
+        # scan — scene detection will run during execution to determine boundaries.
+        artifacts:      list[ChunkArtifact] = []
+        pending_ids:    list[str]           = []
+        expected_paths: set[Path]           = set()
+
+        if scenes:
+            # Get source duration from JobPhase result — it's already probed and cached there.
+            job_result = self._job.result if self._job else None  # type: ignore[union-attr]
+            job_state  = getattr(job_result, "job", None)
+            source_duration: float | None = (
+                job_state.source.duration_seconds if job_state is not None else None
             )
-            return self.result
 
-        # Execute chunking
-        result = self._execute_chunking(artifacts)
-        self.result = result
-        return result
+            for start_ts, end_ts, stem, chunk_file in _expand_scenes(
+                scenes, source_duration, chunks_dir
+            ):
+                expected_paths.add(chunk_file)
+                if chunk_file.exists():
+                    if chunk_file.with_suffix(".yaml").exists():
+                        artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.COMPLETE))
+                        logger.debug("Chunk %s: COMPLETE", stem)
+                    else:
+                        artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.PARTIAL))
+                        pending_ids.append(stem)
+                        logger.debug("Chunk %s: PARTIAL (sidecar missing)", stem)
+                else:
+                    artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.ABSENT))
+                    pending_ids.append(stem)
+                    logger.debug("Chunk %s: ABSENT (missing from disk)", stem)
+
+            # Surface present-but-unwanted surplus chunk files (scene list
+            # changed underneath them; deletion only via explicit cleanup).
+            for chunk_file in sorted(chunks_dir.glob("*.mkv")):
+                if chunk_file in expected_paths or not CHUNK_NAME_PATTERN.match(chunk_file.stem):
+                    continue
+                state = (
+                    ArtifactState.COMPLETE
+                    if chunk_file.with_suffix(".yaml").exists()
+                    else ArtifactState.PARTIAL
+                )
+                artifacts.append(ChunkArtifact(
+                    path=chunk_file, state=state, wanted=False,
+                ))
+                logger.debug("Chunk %s: surplus (not in scene list) — unwanted", chunk_file.stem)
+        else:
+            # No scene boundaries yet — plain disk scan, scene detection will follow.
+            for chunk_file in sorted(chunks_dir.glob("*.mkv")):
+                stem = chunk_file.stem
+                if not CHUNK_NAME_PATTERN.match(stem):
+                    logger.debug("Skipping non-chunk file: %s", chunk_file.name)
+                    continue
+                if chunk_file.with_suffix(".yaml").exists():
+                    artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.COMPLETE))
+                    logger.debug("Chunk %s: COMPLETE", stem)
+                else:
+                    artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.PARTIAL))
+                    pending_ids.append(stem)
+                    logger.debug("Chunk %s: PARTIAL (sidecar missing)", stem)
+
+        complete_count = len(artifacts) - len(pending_ids)
+        logger.debug(
+            "Chunking recovery: %d chunk(s) found — %d COMPLETE, %d pending",
+            len(artifacts), complete_count, len(pending_ids),
+        )
+
+        # Store recovered scene boundaries for use in _execute
+        self._recovered_scenes = scenes
+
+        return Recovery.from_artifacts(artifacts)
+
+    def _make_result(
+        self,
+        outcome:   PhaseOutcome,
+        artifacts: list[ChunkArtifact],
+        message:   str,
+        error:     str | None = None,
+    ) -> ChunkingPhaseResult:
+        """Assemble a ``ChunkingPhaseResult`` deriving the chunk payload.
+
+        ``chunks`` holds the metadata of all ``COMPLETE`` wanted artifacts
+        (lazy sidecar load), sorted by chunk id.
+
+        Args:
+            outcome:   The phase outcome.
+            artifacts: The wanted artifact list.
+            message:   Human-readable summary.
+            error:     Error description when ``outcome`` is ``FAILED``.
+
+        Returns:
+            The populated result.
+        """
+        chunks = [
+            a.metadata for a in artifacts
+            if a.state == ArtifactState.COMPLETE and a.metadata is not None
+        ]
+        chunks.sort(key=lambda c: c.chunk_id)
+        return ChunkingPhaseResult(
+            outcome   = outcome,
+            artifacts = artifacts,
+            message   = message,
+            error     = error,
+            chunks    = chunks,
+        )
 
     def finalize(self, ctx: FinalizeContext) -> None:
         """Perform end-of-run housekeeping for the chunking phase.
@@ -559,208 +710,47 @@ class ChunkingPhase:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _ensure_dependencies(self, dry_run: bool) -> ChunkingPhaseResult | None:
-        """Resolve dependencies via the shared walk; fail fast if incomplete.
 
-        Args:
-            dry_run: Propagated unchanged to each dependency's ``run()``.
-
-        Returns:
-            A ``FAILED`` result if any dependency failed, a ``PENDING`` result
-            if any dependency is legitimately pending (dry-run only), or
-            ``None`` when all dependencies are complete and the phase may
-            proceed.
-        """
-        if self._job is None:
-            return _failed("ChunkingPhase requires JobPhase")
-        if self._extraction is None:
-            return _failed("ChunkingPhase requires ExtractionPhase")
-
-        status = resolve_dependencies(self, dry_run=dry_run)
-        if status.failed:
-            names = ", ".join(n.capitalize() for n in status.failed)
-            err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
-            logger.error(err)
-            return _failed(err)
-        if status.pending:
-            names = ", ".join(n.capitalize() for n in status.pending)
-            msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
-            logger.info(msg)
-            return _pending(msg)
-
-        return None
-
-    def _recover(self, force_wipe: bool) -> list[ChunkArtifact]:
-        """Classify chunk artifacts and handle force-wipe.
-
-        Steps:
-        1. If ``force_wipe``: delete ``chunks/`` and ``chunking.yaml``.
-        2. Clean up leftover ``.tmp`` files.
-        3. Load scene boundaries from ``chunking.yaml``.
-        4. Scan ``chunks/`` and classify each chunk.
-
-        Args:
-            force_wipe: When ``True``, wipe all chunk artifacts first.
-
-        Returns:
-            List of ``ChunkArtifact`` objects.
-        """
-        work_dir   = self._job.result.work_dir  # type: ignore[union-attr]
-        chunks_dir = work_dir / CHUNKS_DIR
-        yaml_path  = work_dir / _CHUNKING_YAML
-
-        # Step 1: force-wipe
-        if force_wipe:
-            if chunks_dir.exists():
-                shutil.rmtree(chunks_dir)
-                logger.debug("force_wipe: deleted %s", chunks_dir)
-            if yaml_path.exists():
-                yaml_path.unlink()
-                logger.debug("force_wipe: deleted %s", yaml_path)
-
-        # Step 2: clean up .tmp files
-        if chunks_dir.exists():
-            for tmp in chunks_dir.glob(f"*{TEMP_SUFFIX}"):
-                try:
-                    tmp.unlink()
-                    logger.warning("Removed leftover temp file: %s", tmp)
-                except OSError as exc:
-                    logger.warning("Could not remove temp file %s: %s", tmp, exc)
-
-        if not chunks_dir.exists():
-            return []
-
-        # Step 3: load scene boundaries from chunking.yaml
-        chunking_params = ChunkingParams.load(yaml_path)
-        scenes: list[SceneBoundary] = []
-        if chunking_params is not None and chunking_params.scenes:
-            scenes = chunking_params.scenes
-            logger.debug(
-                "Chunking recovery: loaded %d scene boundary(ies) from chunking.yaml",
-                len(scenes),
-            )
-
-            # Mode mismatch check: if the persisted mode differs from the current
-            # config, chunks are incompatible and cannot be reused.
-            persisted_mode = chunking_params.chunking_mode
-            current_mode   = self.params.chunking_mode
-            if persisted_mode is not None and persisted_mode != current_mode:
-                if self._job.result.force_wipe:  # type: ignore[union-attr]
-                    logger.warning(
-                        "Chunking mode changed (%s → %s) — --force: wiping chunks/ and downstream artifacts",
-                        persisted_mode, current_mode,
-                    )
-                    if chunks_dir.exists():
-                        shutil.rmtree(chunks_dir)
-                        logger.debug("force_wipe: deleted %s", chunks_dir)
-                    yaml_path.unlink(missing_ok=True)
-                    logger.debug("force_wipe: deleted %s", yaml_path)
-                    # Signal downstream phases to wipe their artifacts too
-                    self._mode_changed_force_wipe = True
-                    return []
-                else:
-                    err = (
-                        f"Chunking mode changed since last run "
-                        f"(persisted={persisted_mode!r}, current={current_mode!r}). "
-                        "Existing chunks are incompatible. "
-                        "Re-run with --force to delete stale chunks and continue."
-                    )
-                    logger.critical(err)
-                    self._mode_mismatch_error = err
-                    return []
-        else:
-            logger.debug("Chunking recovery: chunking.yaml absent or empty — scene detection needed")
-
-        # Step 4: classify chunks.
-        #
-        # When scene boundaries are known (from chunking.yaml), the scene list is
-        # the authoritative source of truth.  We iterate expected chunks derived
-        # from the boundaries and classify each one:
-        #   - file + sidecar present  → COMPLETE
-        #   - file present, no sidecar → PARTIAL (pending)
-        #   - file absent              → ABSENT (pending)
-        # Files on disk that are NOT in the expected set are surplus and are
-        # ignored (not added to artifacts, not counted as pending).
-        #
-        # When no scene boundaries are available yet, fall back to a plain disk
-        # scan — scene detection will run during execution to determine boundaries.
-        artifacts:   list[ChunkArtifact] = []
-        pending_ids: list[str]           = []
-
-        if scenes:
-            # Get source duration from JobPhase result — it's already probed and cached there.
-            job_result = self._job.result if self._job else None  # type: ignore[union-attr]
-            job_state  = getattr(job_result, "job", None)
-            source_duration: float | None = (
-                job_state.source.duration_seconds if job_state is not None else None
-            )
-
-            for start_ts, end_ts, stem, chunk_file in _expand_scenes(
-                scenes, source_duration, chunks_dir
-            ):
-                if chunk_file.exists():
-                    if chunk_file.with_suffix(".yaml").exists():
-                        artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.COMPLETE))
-                        logger.debug("Chunk %s: COMPLETE", stem)
-                    else:
-                        artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.PARTIAL))
-                        pending_ids.append(stem)
-                        logger.debug("Chunk %s: PARTIAL (sidecar missing)", stem)
-                else:
-                    artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.ABSENT))
-                    pending_ids.append(stem)
-                    logger.debug("Chunk %s: ABSENT (missing from disk)", stem)
-        else:
-            # No scene boundaries yet — plain disk scan, scene detection will follow.
-            for chunk_file in sorted(chunks_dir.glob("*.mkv")):
-                stem = chunk_file.stem
-                if not CHUNK_NAME_PATTERN.match(stem):
-                    logger.debug("Skipping non-chunk file: %s", chunk_file.name)
-                    continue
-                if chunk_file.with_suffix(".yaml").exists():
-                    artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.COMPLETE))
-                    logger.debug("Chunk %s: COMPLETE", stem)
-                else:
-                    artifacts.append(ChunkArtifact(path=chunk_file, state=ArtifactState.PARTIAL))
-                    pending_ids.append(stem)
-                    logger.debug("Chunk %s: PARTIAL (sidecar missing)", stem)
-
-        complete_count = len(artifacts) - len(pending_ids)
-        logger.debug(
-            "Chunking recovery: %d chunk(s) found — %d COMPLETE, %d pending",
-            len(artifacts), complete_count, len(pending_ids),
-        )
-
-        # Store recovered scene boundaries for use in _execute_chunking
-        self._recovered_scenes: list[SceneBoundary] = scenes
-
-        return artifacts
-
-    def _execute_chunking(self, artifacts: list[ChunkArtifact]) -> ChunkingPhaseResult:
+    def _execute(
+        self,
+        wanted:  list[ChunkArtifact],
+        dry_run: bool,
+    ) -> ChunkingPhaseResult:
         """Detect scenes if needed and split pending chunks.
 
+        The top-level ``chunking`` span belongs to the template; the two
+        sub-actions carry their own dotted spans (``chunking.scene_detect``,
+        ``chunking.split``). ``dry_run`` is never ``True`` here (chunking is
+        not a readonly-execute phase; the template previews instead).
+
         Args:
-            artifacts: Artifact list from ``_recover()``.
+            wanted:  Wanted artifact list from ``_recover()``.
+            dry_run: Unused for this phase (template guarantees ``False``).
 
         Returns:
             ``ChunkingPhaseResult`` after chunking.
         """
         from pyqenc.metrics import MetricKey
+        artifacts = wanted
         work_dir   = self._job.result.work_dir  # type: ignore[union-attr]
         chunks_dir = work_dir / CHUNKS_DIR
         chunks_dir.mkdir(parents=True, exist_ok=True)
+
+        pending = [a for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)]
+        if pending:
+            logger.info("Pending: %d chunk(s) to split", len(pending))
 
         # Resolve the video file from ExtractionPhase result
         video_file = self._resolve_video_file()
         if video_file is None:
             err = "No extracted video file available for chunking"
             logger.critical(err)
-            return _failed(err)
+            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
 
         if not video_file.exists():
             err = f"Video file not found: {video_file}"
             logger.critical(err)
-            return _failed(err)
+            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
 
         job_result = self._job.result  # type: ignore[union-attr]
         job_state  = getattr(job_result, "job", None)
@@ -770,7 +760,7 @@ class ChunkingPhase:
         video_meta = job_state.source
 
         # Use recovered scene boundaries or run detection
-        boundaries = getattr(self, "_recovered_scenes", [])
+        boundaries = self._recovered_scenes
         if boundaries:
             logger.info(
                 "Scene boundaries already in chunking.yaml (%d) — skipping detection.",
@@ -778,18 +768,17 @@ class ChunkingPhase:
             )
         else:
             try:
-                with self._collector.time(MetricKey.CHUNKING):
-                    with self._collector.time(MetricKey.CHUNKING, "scene_detect"):
-                        boundaries = detect_scenes(
-                            video_meta       = video_meta,
-                            scene_threshold  = self._job.result.config.chunking.scene_threshold,  # type: ignore[union-attr]
-                            min_scene_length = self._job.result.config.chunking.min_scene_length,  # type: ignore[union-attr]
-                        )
+                with self._collector.time(MetricKey.CHUNKING, "scene_detect"):
+                    boundaries = detect_scenes(
+                        video_meta       = video_meta,
+                        scene_threshold  = self._config.chunking.scene_threshold,
+                        min_scene_length = self._config.chunking.min_scene_length,
+                    )
                 self.params.scenes = boundaries
                 self.params.save(work_dir / _CHUNKING_YAML)
             except Exception as exc:
                 logger.error("Scene detection failed: %s", exc, exc_info=True)
-                return _failed(str(exc))
+                return self._make_result(PhaseOutcome.FAILED, [], str(exc), error=str(exc))
 
         # Build recovery object for split_chunks (it needs to know which chunks are already COMPLETE)
         from pyqenc.phases.recovery import ChunkingRecovery, ChunkRecovery
@@ -812,22 +801,22 @@ class ChunkingPhase:
         )
 
         try:
-            with self._collector.time(MetricKey.CHUNKING):
-                with self._collector.time(MetricKey.CHUNKING, "split"):
-                    chunk_metas = split_chunks(
-                        video_meta    = video_meta,
-                        output_dir    = chunks_dir,
-                        boundaries    = boundaries,
-                        recovery      = recovery_obj,
-                        chunking_mode = self._job.result.config.chunking.mode,  # type: ignore[union-attr]
-                        collector     = self._collector,
-                    )
+            with self._collector.time(MetricKey.CHUNKING, "split"):
+                chunk_metas = split_chunks(
+                    video_meta    = video_meta,
+                    output_dir    = chunks_dir,
+                    boundaries    = boundaries,
+                    recovery      = recovery_obj,
+                    chunking_mode = self._config.chunking.mode,
+                    collector     = self._collector,
+                )
         except Exception as exc:
             logger.error("Chunk splitting failed: %s", exc, exc_info=True)
-            return _failed(str(exc))
+            return self._make_result(PhaseOutcome.FAILED, [], str(exc), error=str(exc))
 
         if not chunk_metas:
-            return _failed("No valid chunks created.")
+            err = "No valid chunks created."
+            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
 
         # Build final artifact list
         final_artifacts: list[ChunkArtifact] = []
@@ -866,45 +855,7 @@ class ChunkingPhase:
                     return f
         return None
 
-    @staticmethod
-    def _outcome_from_artifacts(
-        artifacts: list[ChunkArtifact],
-        did_work:  bool,
-    ) -> PhaseOutcome:
-        """Derive ``PhaseOutcome`` from artifact states."""
-        if any(a.state == ArtifactState.ABSENT for a in artifacts):
-            return PhaseOutcome.PENDING
-        if all(a.state == ArtifactState.COMPLETE for a in artifacts) and artifacts:
-            return PhaseOutcome.REUSED if not did_work else PhaseOutcome.COMPLETED
-        return PhaseOutcome.PENDING
-
 
 # ---------------------------------------------------------------------------
 # Module-level logging helpers
 # ---------------------------------------------------------------------------
-
-def _failed(error: str) -> ChunkingPhaseResult:
-    """Return a ``FAILED`` ``ChunkingPhaseResult`` with the given error."""
-    return ChunkingPhaseResult(
-        outcome   = PhaseOutcome.FAILED,
-        artifacts = [],
-        message   = error,
-        error     = error,
-        chunks    = [],
-    )
-
-
-def _pending(reason: str) -> ChunkingPhaseResult:
-    """Return a ``PENDING`` ``ChunkingPhaseResult`` with the given reason.
-
-    Used when a dependency is legitimately pending during a dry-run preview:
-    the phase cannot preview its own work, so it chains ``PENDING`` without an
-    error.
-    """
-    return ChunkingPhaseResult(
-        outcome   = PhaseOutcome.PENDING,
-        artifacts = [],
-        message   = reason,
-        error     = None,
-        chunks    = [],
-    )

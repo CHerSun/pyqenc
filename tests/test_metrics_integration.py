@@ -431,7 +431,7 @@ class TestChunkingPhaseTiming:
         stub_artifact.state    = ArtifactState.COMPLETE
         stub_artifact.metadata = None
 
-        with patch.object(ChunkingPhase, "_recover", return_value=[stub_artifact]):
+        with patch.object(ChunkingPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -456,7 +456,7 @@ class TestChunkingPhaseTiming:
         stub_boundaries = [SceneBoundary(frame=0, timestamp_seconds=0.0)]
 
         with (
-            patch.object(ChunkingPhase, "_recover", return_value=[]),
+            patch.object(ChunkingPhase, "_recover", return_value=Recovery(pending=True)),
             patch("pyqenc.phases.chunking.detect_scenes", return_value=stub_boundaries),
             patch("pyqenc.phases.chunking.split_chunks", return_value=[]),
         ):
@@ -488,7 +488,7 @@ class TestChunkingPhaseTiming:
         phase._recovered_scenes = cached_boundaries  # type: ignore[attr-defined]
 
         with (
-            patch.object(ChunkingPhase, "_recover", return_value=[]),
+            patch.object(ChunkingPhase, "_recover", return_value=Recovery(pending=True)),
             patch("pyqenc.phases.chunking.split_chunks", return_value=[]),
         ):
             phase.run()
@@ -531,7 +531,7 @@ class TestChunkingPhaseTiming:
         )
 
         with (
-            patch.object(ChunkingPhase, "_recover", return_value=[]),
+            patch.object(ChunkingPhase, "_recover", return_value=Recovery(pending=True)),
             patch("pyqenc.phases.chunking.split_chunks", return_value=[real_chunk]),
         ):
             phase.run()
@@ -607,7 +607,7 @@ class TestChunkingPhaseTiming:
         phase._recovered_scenes = cached_boundaries  # type: ignore[attr-defined]
 
         with (
-            patch.object(ChunkingPhase, "_recover", return_value=[]),
+            patch.object(ChunkingPhase, "_recover", return_value=Recovery(pending=True)),
             patch("pyqenc.phases.chunking.split_chunks", return_value=[]),
         ):
             result = phase.run()
@@ -1685,17 +1685,18 @@ class TestMetricKeySmoke:
     """
 
     # ------------------------------------------------------------------
-    # 1. MetricKey has exactly 8 members with correct string values
+    # 1. MetricKey has exactly 9 members with correct string values
     # ------------------------------------------------------------------
 
-    def test_metric_key_has_eight_members(self) -> None:
-        """MetricKey must have exactly 8 members with the correct string values.
+    def test_metric_key_has_nine_members(self) -> None:
+        """MetricKey must have exactly 9 members with the correct string values.
 
-        Validates: Requirements 6.1, 6.2
+        Validates: Requirements 6.1, 6.2 (PROBE added by phase-run-template)
         """
         expected = {
             "JOB":          "job",
             "EXTRACTION":   "extraction",
+            "PROBE":        "probe",
             "CHUNKING":     "chunking",
             "AUDIO":        "audio",
             "ENCODING":     "encoding",
@@ -1703,8 +1704,8 @@ class TestMetricKeySmoke:
             "MERGE":        "merge",
             "RECOVERY":     "recovery",
         }
-        assert len(MetricKey) == 8, (
-            f"Expected 8 MetricKey members, got {len(MetricKey)}: {list(MetricKey)}"
+        assert len(MetricKey) == 9, (
+            f"Expected 9 MetricKey members, got {len(MetricKey)}: {list(MetricKey)}"
         )
         for name, value in expected.items():
             member = MetricKey[name]
