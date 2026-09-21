@@ -20,7 +20,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
-from pyqenc.constants import THICK_LINE
+from pyqenc.constants import TEMP_SUFFIX, THICK_LINE
+from pyqenc.metrics import MetricKey
 from pyqenc.models import (
     CropParams,
     ExtendedVideoMetadata,
@@ -29,12 +30,13 @@ from pyqenc.models import (
 )
 from pyqenc.phase import (
     Artifact,
-    FinalizeContext,
     Phase,
+    PhaseBase,
     PhaseResult,
-    resolve_dependencies,
+    Recovery,
+    RecoveryError,
 )
-from pyqenc.state import ArtifactState, ProbeState
+from pyqenc.state import ProbeState
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -69,7 +71,7 @@ class ProbePhaseResult(PhaseResult):
 # ProbePhase
 # ---------------------------------------------------------------------------
 
-class ProbePhase:
+class ProbePhase(PhaseBase):
     """Phase object that resolves crop parameters and source frame count.
 
     Depends on ``JobPhase`` and ``ExtractionPhase``.  Returns ``FAILED`` when
@@ -77,18 +79,25 @@ class ProbePhase:
     their ``_ensure_dependencies()`` mechanism.
 
     Results are written to ``probe.yaml`` after a successful run so subsequent
-    runs can skip re-probing.
+    runs can skip re-probing. ``probe.yaml`` is phase STATE, not an artifact:
+    the result carries no artifacts and ``pending`` comes from the sidecar's
+    currency (absent, or invalidated by a manual ``--crop`` override). The
+    phase emits no banner — it logs a concise INFO line when the slow probe
+    starts and a result line with the probed (or cached) details.
 
     Args:
         config:      Full validated application configuration.
         phases:      Phase registry; used to resolve typed dependency references.
-        collector:   Metrics collector (accepted for API uniformity, not used here).
+        collector:   Metrics collector; recovery and probe work are timed under
+                     ``probe`` / ``probe.crop_detect`` / ``probe.frame_count``.
         crop_params: Optional manual ``--crop`` override forwarded from the CLI.
-                     When not ``None``, crop detection is always skipped and the
-                     value is persisted to ``probe.yaml`` on each run.
+                     When ``not None`` it invalidates the cached sidecar (cheap
+                     rewrite reusing the cached frame count).
     """
 
-    name: str = "probe"
+    name:        str       = "probe"
+    BANNER:      bool      = False
+    _METRIC_KEY: MetricKey = MetricKey.PROBE
 
     def __init__(
         self,
@@ -101,207 +110,217 @@ class ProbePhase:
         from pyqenc.phases.extraction import ExtractionPhase as _ExtractionPhase
         from pyqenc.phases.job import JobPhase as _JobPhase
 
-        self._config:      AppConfig           = config
-        self._collector:   MetricsCollector    = collector
-        self._crop_params: CropParams | None     = crop_params
-        self._job:         _JobPhase | None    = cast("_JobPhase",        phases.get(_JobPhase))        if phases else None
-        self._extraction:  _ExtractionPhase | None = cast("_ExtractionPhase", phases.get(_ExtractionPhase)) if phases else None
+        super().__init__(config, phases, collector=collector)
 
-        self.result:       ProbePhaseResult | None = None
-        self.dependencies: list[Phase] = [
+        self._crop_params: CropParams | None       = crop_params
+        self._job:         _JobPhase | None        = cast("_JobPhase",        phases.get(_JobPhase))        if phases else None
+        self._extraction:  _ExtractionPhase | None = cast("_ExtractionPhase", phases.get(_ExtractionPhase)) if phases else None
+        self.dependencies: list[Phase]             = [
             dep for dep in (self._job, self._extraction) if dep is not None
         ]
 
-    # ------------------------------------------------------------------
-    # Public Phase interface
-    # ------------------------------------------------------------------
-
-    def run(self, dry_run: bool = False) -> ProbePhaseResult:
-        """Resolve crop and frame count, persist ``probe.yaml``, return result.
-
-        Sequence:
-        1. Emit phase banner.
-        2. Ensure dependencies have results (scan if needed).
-        3. If ``extraction_result.video is None`` → return ``FAILED``.
-        4. If ``probe.yaml`` is fully cached and no manual ``--crop`` → return ``REUSED``.
-        5. Resolve crop: manual ``--crop`` → cached from ``probe.yaml`` →
-           ``detect_crop_parameters()`` on extracted video.
-        6. Resolve frame count: cached from ``probe.yaml`` →
-           ``job_result.job.source.probe_extended()``.
-        7. Write ``probe.yaml`` via ``.tmp``-then-rename (``ProbeState.save()``).
-        8. Return ``COMPLETED``.
-
-        Args:
-            dry_run: When ``True``, report what would be done without writing files.
-
-        Returns:
-            ``ProbePhaseResult`` on success; ``FAILED`` when no video was extracted.
-        """
-        # In-run memoization guard (Property 1): return cached result verbatim.
-        if self.result is not None:
-            return self.result
-
-        dep_result = self._ensure_dependencies(dry_run=dry_run)
-        if dep_result is not None:
-            self.result = dep_result
-            return self.result
-
-        from pyqenc.utils.log_format import emit_phase_banner
-        emit_phase_banner("PROBE", logger)
-
-        job_result        = self._job.result        # type: ignore[union-attr]
-        extraction_result = self._extraction.result # type: ignore[union-attr]
-        probe_yaml_path   = job_result.work_dir / _PROBE_YAML_NAME  # type: ignore[operator]
-
-        # Step 3: fail fast when no video was extracted
-        if extraction_result.video is None:  # type: ignore[union-attr]
-            err = "No video tracks extracted — video processing cannot continue"
-            logger.error(err)
-            logger.info(THICK_LINE)
-            self.result = ProbePhaseResult(
-                outcome   = PhaseOutcome.FAILED,
-                artifacts = [Artifact(path=probe_yaml_path, state=ArtifactState.ABSENT)],
-                message   = err,
-                error     = err,
-                source    = None,
-                crop      = CropParams(),
-            )
-            return self.result
-
-        # Load existing probe.yaml (may be None)
-        probe_state = ProbeState.load(probe_yaml_path)
-
-        # Step 4: return REUSED when fully cached and no manual crop override
-        if (
-            probe_state is not None
-            and probe_state.frame_count > 0
-            and probe_state.crop is not None
-            and self._crop_params is None
-        ):
-            source_vm   = self._get_source_vm(job_result)
-            extended_vm = ExtendedVideoMetadata.from_base(
-                source_vm, frame_count=probe_state.frame_count
-            )
-            logger.info("Probe: all values cached — reusing probe.yaml")
-            logger.info(THICK_LINE)
-            self.result = ProbePhaseResult(
-                outcome   = PhaseOutcome.REUSED,
-                artifacts = [Artifact(path=probe_yaml_path, state=ArtifactState.COMPLETE)],
-                message   = "probe.yaml reused",
-                source    = extended_vm,
-                crop      = probe_state.crop,
-            )
-            return self.result
-
-        # Dry-run: report what would be done
-        if dry_run:
-            self.result = ProbePhaseResult(
-                outcome   = PhaseOutcome.PENDING,
-                artifacts = [Artifact(path=probe_yaml_path, state=ArtifactState.ABSENT)],
-                message   = "dry-run: probe not yet complete",
-                source    = None,
-                crop      = CropParams(),
-            )
-            return self.result
-
-        # Step 5: resolve crop
-        crop = self._resolve_crop(probe_state, extraction_result.video)  # type: ignore[union-attr]
-
-        # Step 6: resolve frame count
-        frame_count, extended_vm = self._resolve_frame_count(probe_state, job_result)
-
-        # Step 7: persist probe.yaml via .tmp-then-rename (handled by ProbeState.save)
-        new_probe_state = ProbeState(
-            frame_count = frame_count,
-            crop        = crop,
-        )
-        new_probe_state.save(probe_yaml_path)
-
-        logger.info(
-            "Probe: frame_count=%d  crop=%s",
-            frame_count,
-            crop.display(),
-        )
-        logger.info(THICK_LINE)
-
-        # Step 8: return COMPLETED
-        self.result = ProbePhaseResult(
-            outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [Artifact(path=probe_yaml_path, state=ArtifactState.COMPLETE)],
-            message   = f"probed frame_count={frame_count}, crop={crop}",
-            source    = extended_vm,
-            crop      = crop,
-        )
-        return self.result
-
-    def finalize(self, ctx: FinalizeContext) -> None:
-        """Perform end-of-run housekeeping for the probe phase.
-
-        ``ProbePhase`` owns only ``probe.yaml`` — a recovery/parameter sidecar
-        that must survive for reruns — so it has no deep artifacts to remove.
-        This is a safe no-op regardless of ``ctx.deep_cleanup``.
-
-        Args:
-            ctx: Pre-resolved end-of-run decisions from the runner.
-        """
-        return
+        # Recovery stash — the loaded probe.yaml state and the resolved payload
+        # (source / crop) for result construction.
+        self._probe_state:     ProbeState | None           = None
+        self._resolved_source: ExtendedVideoMetadata | None = None
+        self._resolved_crop:   CropParams                  = CropParams()
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # PhaseBase hooks
     # ------------------------------------------------------------------
 
-    def _ensure_dependencies(self, dry_run: bool) -> ProbePhaseResult | None:
-        """Resolve dependencies via the shared walk; fail fast when incomplete.
+    def _ensure_dependencies(self, *, dry_run: bool) -> ProbePhaseResult | None:
+        """Presence-check the typed references, then defer to the shared walk.
 
         Args:
             dry_run: Propagated unchanged to each dependency's ``run()``.
 
         Returns:
-            A ``FAILED`` ``ProbePhaseResult`` if any dependency failed, a
-            ``PENDING`` result if any dependency is legitimately pending
-            (dry-run only), or ``None`` when all dependencies are complete and
-            the phase may proceed.
+            A ``FAILED`` result when a required phase is missing or a
+            dependency failed, a ``PENDING`` result if any dependency is
+            legitimately pending (dry-run only), or ``None`` when the phase
+            may proceed.
         """
-        if self._job is None or self._extraction is None:
-            err = "ProbePhase requires JobPhase and ExtractionPhase dependencies"
-            return ProbePhaseResult(
-                outcome   = PhaseOutcome.FAILED,
-                artifacts = [],
-                message   = err,
-                error     = err,
-                source    = None,
-                crop      = CropParams(),
-            )
-
-        status = resolve_dependencies(self, dry_run=dry_run)
-        if status.failed:
-            names = ", ".join(n.capitalize() for n in status.failed)
-            err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
+        missing = [
+            label for label, dep in (("JobPhase", self._job), ("ExtractionPhase", self._extraction))
+            if dep is None
+        ]
+        if missing:
+            err = f"ProbePhase requires {', '.join(missing)} dependencies"
             logger.error(err)
-            return ProbePhaseResult(
-                outcome   = PhaseOutcome.FAILED,
-                artifacts = [],
-                message   = err,
-                error     = err,
-                source    = None,
-                crop      = CropParams(),
-            )
-        if status.pending:
-            names = ", ".join(n.capitalize() for n in status.pending)
-            msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
-            logger.info(msg)
-            return ProbePhaseResult(
-                outcome   = PhaseOutcome.PENDING,
-                artifacts = [],
-                message   = msg,
-                error     = None,
-                source    = None,
-                crop      = CropParams(),
+            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+        return super()._ensure_dependencies(dry_run=dry_run)
+
+    def _recover(self) -> Recovery:
+        """Determine ``probe.yaml`` currency: absent, invalidated, or current.
+
+        Steps:
+
+        1. Fail fast when no video was extracted — a fatal invalidation for
+           every downstream video phase.
+        2. Remove a leftover ``probe.yaml.tmp`` from an interrupted write.
+        3. Load ``probe.yaml``. Pending when absent (full probe needed) or
+           when a manual ``--crop`` override invalidates the cached crop
+           (cheap rewrite: the frame count stays cached). Current otherwise —
+           the sidecar is written atomically, so presence implies complete
+           data (no content peeking).
+
+        Returns:
+            ``Recovery(artifacts=[], pending=...)`` — probe.yaml is state,
+            not an artifact; the loaded state is stashed on ``self._probe_state``.
+
+        Raises:
+            RecoveryError: When extraction produced no video track.
+        """
+        job_result        = self._job.result        # type: ignore[union-attr]
+        extraction_result = self._extraction.result # type: ignore[union-attr]
+        probe_yaml        = job_result.work_dir / _PROBE_YAML_NAME  # type: ignore[operator]
+
+        # Step 1 — no video extracted: fatal for all downstream video phases.
+        if extraction_result.video is None:  # type: ignore[union-attr]
+            raise RecoveryError(
+                "No video tracks extracted — video processing cannot continue"
             )
 
-        return None
+        # Step 2 — .tmp pre-clean (probe.yaml is written via .tmp-then-rename).
+        tmp = probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX)
+        if tmp.exists():
+            try:
+                tmp.unlink()
+                logger.warning("Removed leftover temp file: %s", tmp.name)
+            except OSError as exc:
+                logger.warning("Could not remove temp file %s: %s", tmp, exc)
+
+        # Step 3 — load + currency.
+        self._probe_state = ProbeState.load(probe_yaml)
+        if self._probe_state is None:
+            return Recovery(pending=True)
+        if self._crop_params is not None:
+            # Manual --crop invalidates the cached crop: rewrite (cheap — the
+            # frame count stays cached).
+            return Recovery(pending=True)
+        return Recovery(pending=False)
+
+    def _execute(self, wanted: list[Artifact], dry_run: bool) -> ProbePhaseResult:
+        """Resolve crop + frame count and persist ``probe.yaml``.
+
+        The slow operations are individually timed under the dotted keys
+        ``probe.crop_detect`` and ``probe.frame_count`` (the top-level
+        ``probe`` span belongs to the template). Cache hits skip the slow
+        operation entirely. ``dry_run`` is never ``True`` here (probe is not a
+        readonly-execute phase; the template previews instead).
+
+        Args:
+            wanted:  Always empty (probe.yaml is state, not artifacts).
+            dry_run: Unused for this phase (template guarantees ``False``).
+
+        Returns:
+            ``ProbePhaseResult`` with outcome ``COMPLETED``.
+        """
+        from pyqenc.utils.crop import detect_crop_parameters
+
+        job_result        = self._job.result         # type: ignore[union-attr]
+        extraction_result = self._extraction.result  # type: ignore[union-attr]
+        probe_yaml        = job_result.work_dir / _PROBE_YAML_NAME  # type: ignore[operator]
+        probe_state       = self._probe_state
+        extracted_vm      = extraction_result.video   # type: ignore[union-attr]
+
+        needs_crop_detect = (
+            self._crop_params is None
+            and (probe_state is None or probe_state.crop is None)
+        )
+        needs_frame_probe = probe_state is None or probe_state.frame_count <= 0
+        if needs_crop_detect or needs_frame_probe:
+            logger.info(
+                "Probe: starting long probe%s%s — may take a while",
+                " + crop detect" if needs_crop_detect else "",
+                " + frame count" if needs_frame_probe else "",
+            )
+
+        # Resolve crop: manual → cached → auto-detect (timed when slow).
+        if self._crop_params is not None:
+            crop = self._crop_params
+            logger.info("Crop: %s (manual)", crop.display())
+        elif probe_state is not None and probe_state.crop is not None:
+            crop = probe_state.crop
+            logger.info("Crop: %s (cached)", crop.display())
+        else:
+            logger.info("Detecting crop: %s", extracted_vm.path.name)
+            with self._collector.time(MetricKey.PROBE, "crop_detect"):
+                crop = detect_crop_parameters(extracted_vm)
+
+        # Resolve frame count: cached → slow null-encode probe (timed).
+        source_vm = self._get_source_vm(job_result)
+        if probe_state is not None and probe_state.frame_count > 0:
+            frame_count        = probe_state.frame_count
+            extended_vm        = ExtendedVideoMetadata.from_base(
+                source_vm, frame_count=frame_count
+            )
+            logger.debug("Frame count: %d (cached)", frame_count)
+        else:
+            with self._collector.time(MetricKey.PROBE, "frame_count"):
+                extended_vm = source_vm.probe_extended()
+            frame_count = extended_vm.frame_count
+
+        # Persist and stash the payload.
+        ProbeState(frame_count=frame_count, crop=crop).save(probe_yaml)
+        self._resolved_source = extended_vm
+        self._resolved_crop   = crop
+
+        logger.info(
+            "Probe: done — frame_count=%d, crop=%s",
+            frame_count, crop.display(),
+        )
+        return self._make_result(PhaseOutcome.COMPLETED, [], "probe resolved")
+
+    def _reused_result(self, wanted: list[Artifact], message: str) -> ProbePhaseResult:
+        """Build the reused result from the cached ``probe.yaml`` state."""
+        state = self._probe_state
+        assert state is not None  # current currency implies a loaded state
+        source_vm   = self._get_source_vm(self._job.result)  # type: ignore[union-attr]
+        extended_vm = ExtendedVideoMetadata.from_base(
+            source_vm, frame_count=state.frame_count
+        )
+        self._resolved_source = extended_vm
+        self._resolved_crop   = state.crop if state.crop is not None else CropParams()
+        logger.info("Probe: all values cached — reusing probe.yaml")
+        logger.info(THICK_LINE)
+        return self._make_result(PhaseOutcome.REUSED, [], "probe.yaml reused")
+
+    def _make_result(
+        self,
+        outcome:   PhaseOutcome,
+        artifacts: list[Artifact],
+        message:   str,
+        error:     str | None = None,
+    ) -> ProbePhaseResult:
+        """Assemble a ``ProbePhaseResult`` from the resolved payload stash.
+
+        Args:
+            outcome:   The phase outcome.
+            artifacts: Always empty (probe.yaml is state, not artifacts).
+            message:   Human-readable summary.
+            error:     Error description when ``outcome`` is ``FAILED``.
+
+        Returns:
+            The populated result (``source``/``crop`` default to ``None`` /
+            all-zero on non-complete paths).
+        """
+        return ProbePhaseResult(
+            outcome   = outcome,
+            artifacts = artifacts,
+            message   = message,
+            error     = error,
+            source    = self._resolved_source,
+            crop      = self._resolved_crop,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
     def _get_source_vm(self, job_result: JobPhaseResult) -> VideoMetadata:
+
         """Return the source ``VideoMetadata`` from job state, or a bare instance.
 
         Args:
@@ -314,64 +333,3 @@ class ProbePhase:
             return job_result.job.source
         # Fallback: construct bare instance from the source path
         return VideoMetadata(path=job_result.source)  # type: ignore[arg-type]
-
-    def _resolve_crop(
-        self,
-        probe_state:   ProbeState | None,
-        extracted_vm:  VideoMetadata,
-    ) -> CropParams:
-        """Resolve crop using the priority order: manual → cached → auto-detect.
-
-        Args:
-            probe_state:  Existing ``probe.yaml`` state (may be ``None``).
-            extracted_vm: ``VideoMetadata`` for the *extracted* video file
-                          (not the source) — used for crop detection.
-
-        Returns:
-            Resolved ``CropParams``.
-        """
-        from pyqenc.utils.crop import detect_crop_parameters
-
-        # 1. Manual --crop override
-        if self._crop_params is not None:
-            c = self._crop_params
-            logger.info("Crop: %s (manual)", c.display())
-            return c
-
-        # 2. Cached in probe.yaml
-        if probe_state is not None and probe_state.crop is not None:
-            c = probe_state.crop
-            logger.info("Crop: %s (cached)", c.display())
-            return c
-
-        # 3. Auto-detect on extracted video
-        logger.info("Detecting crop: %s", extracted_vm.path.name)
-        crop = detect_crop_parameters(extracted_vm)
-        return crop
-
-    def _resolve_frame_count(
-        self,
-        probe_state: ProbeState | None,
-        job_result:  JobPhaseResult,
-    ) -> tuple[int, ExtendedVideoMetadata]:
-        """Resolve frame count: cached from ``probe.yaml`` → ``probe_extended()``.
-
-        Args:
-            probe_state: Existing ``probe.yaml`` state (may be ``None``).
-            job_result:  Completed ``JobPhaseResult``.
-
-        Returns:
-            ``(frame_count, extended_vm)`` tuple.
-        """
-        source_vm = self._get_source_vm(job_result)
-
-        # 1. Cached in probe.yaml
-        if probe_state is not None and probe_state.frame_count > 0:
-            logger.debug("Frame count: %d (cached)", probe_state.frame_count)
-            return probe_state.frame_count, ExtendedVideoMetadata.from_base(
-                source_vm, frame_count=probe_state.frame_count
-            )
-
-        # 2. Slow null-encode probe
-        extended_vm = source_vm.probe_extended()
-        return extended_vm.frame_count, extended_vm
