@@ -53,6 +53,7 @@ __all__ = [
     "FinalizeContext",
     "Phase",
     "PhaseBase",
+    "PhaseContractError",
     "PhaseOutcome",
     "PhaseResult",
     "Recovery",
@@ -315,6 +316,17 @@ class RecoveryError(Exception):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
+
+
+class PhaseContractError(RuntimeError):
+    """A phase violated the PhaseBase run contract — a programming error.
+
+    Raised by the runner when a phase's ``_execute()`` returned ``PENDING`` on
+    an execute run: the template's dry-run branch is the only legitimate
+    ``PENDING`` producer, so a surviving ``PENDING`` means a phase hook broke
+    its contract. Loud by design (traceback) — a bug to fix, not a runtime
+    condition to handle.
+    """
 
 
 # ---------------------------------------------------------------------------
