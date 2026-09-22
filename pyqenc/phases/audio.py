@@ -49,8 +49,8 @@ from pyqenc.constants import (
     TEMP_SUFFIX,
     THICK_LINE,
 )
-from pyqenc.models import AudioMetadata, PhaseOutcome
 from pyqenc.metrics import MetricKey
+from pyqenc.models import AudioMetadata, PhaseOutcome
 from pyqenc.phase import (
     Artifact,
     Phase,

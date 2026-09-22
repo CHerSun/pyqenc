@@ -284,7 +284,7 @@ class Recovery:
     pending:   bool           = False
 
     @classmethod
-    def from_artifacts(cls, artifacts: list[Artifact]) -> "Recovery":
+    def from_artifacts(cls, artifacts: list[Artifact]) -> Recovery:
         """Derive ``pending`` from a full internal artifact list.
 
         Args:
@@ -375,7 +375,7 @@ class PhaseBase:
     def __init__(
         self,
         config:  AppConfig,
-        phases:  "dict[type[Phase], Phase] | None" = None,
+        phases:  dict[type[Phase], Phase] | None = None,
         *,
         collector: MetricsCollector,
     ) -> None:
@@ -417,8 +417,8 @@ class PhaseBase:
         if self.result is not None:
             return self.result
 
-        # 2. Phase-specific skip (constructor/config state only, no banner).
-        skip = self._skip_check()
+        # 2. Phase-specific skip (config-only decision; no banner).
+        skip = self._skip_check(dry_run)
         if skip is not None:
             self.result = skip
             return self.result
@@ -522,12 +522,17 @@ class PhaseBase:
     # Hooks — concrete phases implement / override these
     # ------------------------------------------------------------------
 
-    def _skip_check(self) -> PhaseResult | None:
-        """Phase-specific skip decision made before dependencies resolve.
+    def _skip_check(self, dry_run: bool) -> PhaseResult | None:
+        """Phase-specific skip decision made before the template resolves deps.
 
-        Must read constructor state (config) only — never dependency results
-        (they are not resolved yet). Returning a result skips the phase with
-        no banner and no work.
+        Must decide from constructor state (config) only. When the skip path
+        itself needs dependency state (e.g. a work_dir for bookkeeping), it
+        calls ``self._ensure_dependencies`` itself — the template's step 3 is
+        skipped when a skip result is returned, and dependency results are
+        memoized, so this is safe. No banner is emitted on this path.
+
+        Args:
+            dry_run: The run's dry-run flag (skip bookkeeping may skip writes).
 
         Returns:
             A typed result to return immediately, or ``None`` to proceed.

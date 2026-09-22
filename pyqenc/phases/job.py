@@ -28,8 +28,16 @@ from pyqenc.models import (
     PhaseOutcome,
     VideoMetadata,
 )
-from pyqenc.phase import Artifact, FinalizeContext, Phase, PhaseBase, PhaseResult, Recovery, RecoveryError
-from pyqenc.state import ArtifactState, JobState
+from pyqenc.phase import (
+    Artifact,
+    FinalizeContext,
+    Phase,
+    PhaseBase,
+    PhaseResult,
+    Recovery,
+    RecoveryError,
+)
+from pyqenc.state import JobState
 from pyqenc.utils.disk_space import log_disk_space_info
 
 if TYPE_CHECKING:
