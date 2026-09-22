@@ -17,29 +17,6 @@ Status legend: 🤔 needs thinking · 🔍 verified against code
 
 # From the 2026-09-19/20 metrics investigation
 
-## 🤔 1. Optimization test-encodes are recorded under `encoding.*` dotted keys, not `optimization.*`
-
-**Status:** needs thinking (spec deviation)
-
-- Spec requires `optimization.<strategy>` dotted keys for per-strategy
-  optimization test-encode process time
-  (`.kiro/specs/2026-04-22 app-metrics-two-tier/requirements.md:183-186`).
-- In reality `OptimizationPhase` reuses `ChunkEncoder` via `_make_encoder`
-  (`pyqenc/phases/optimization.py:878-904`), and `ChunkEncoder` hardcodes the
-  `MetricKey.ENCODING` prefix for its per-strategy keys
-  (`pyqenc/phases/encoding.py:875`) and quality-measure keys
-  (`pyqenc/phases/encoding.py:909`).
-- Consequence: optimization process time inflates `encoding.<strategy>`
-  dotted sums (they can exceed the `encoding` top-level total, since only the
-  optimization *loop* wall-clock lands under `optimization`), and per-strategy
-  optimization cost is invisible.
-
-**Questions to think about:** inject the metric-key prefix into `ChunkEncoder`
-(vs. keying the encoder by owning phase)? Or amend the spec to accept the
-current accounting?
-
----
-
 ## 🤔 2. `parallelism` field described by the metrics spec is not implemented
 
 **Status:** needs thinking (spec/code reconciliation)
@@ -131,19 +108,6 @@ top-level imports.
 
 ---
 
-## 🤔 7. ProbePhase receives a collector it never uses (informational)
-
-**Status:** needs thinking (probably fine as-is)
-
-- `phases/probe.py:85` accepts the collector "for API uniformity, not used
-  here"; probe work is timed inside JobPhase under `JOB` / `JOB.probe`
-  (`pyqenc/phases/job.py:366-368`).
-
-**Questions to think about:** keep for registry uniformity, or stop injecting
-an unused dependency?
-
----
-
 # Imported from `D:\todo pyqenc.md` (verified 2026-09-20)
 
 ## Correctness / invalidation
@@ -209,9 +173,11 @@ mkvmerge concat. Worth doing before someone hits per-chunk chapter explosion?
   probe/crop mismatch (`encoding.py:1730-1770`), merge
   (`merge.py:786-817`).
 - But editing codec/profile `encoder_args`/`extra_args` invalidates nothing
-  (`EncodingParams` persists only `probe`, `encoding.py:1740`); strategy-list
-  changes leave orphaned encoded dirs (acknowledged in
-  `parameters-phases-invalidation.md:39`).
+  (`EncodingParams` persists only `probe`, `encoding.py:1740`).
+  (2026-09-22, phase-run-template: strategy-list changes no longer leave
+  *invisible* orphans — encoding recovery surfaces `encoded/<strategy>/`
+  dirs outside the current selection as `wanted=False` artifacts; actual
+  deletion remains gated by explicit cleanup levels.)
 - `parameters-phases-invalidation.md` is itself partly stale: row 16 claims
   chunking_mode is untracked (now tracked at `chunking.py:645-670`), rows
   23–25 reference audio params removed by the audio-chains rework.
@@ -227,14 +193,14 @@ of hand-listed fields? Refresh/regenerate the matrix doc?
 
 ## 🤔 12. No per-chain dotted metrics from the audio phase
 
-**Status:** needs thinking (spec/code gap; cf. §1 for the mirror image)
+**Status:** needs thinking (spec/code gap; the ChunkEncoder prefix-injection mechanism now exists — time per chain under `audio.<chain>`?)
 
 - Audio records only top-level `audio` and `recovery` — the only two
   collector calls in the file (`pyqenc/phases/audio.py:197,219`); the whole
   `_execute_audio` is timed under one key. No `audio.<chain>` dotted keys.
 
 **Questions to think about:** time per chain under dotted keys? Needs the
-same prefix-injection decision as §1.
+the same prefix-injection mechanism the optimization phase already uses (metric_prefix on ChunkEncoder).
 
 ---
 
@@ -396,25 +362,6 @@ year, strategy?
 ---
 
 ## Architecture
-
-## 🤔 23. Phase run() bodies are copy-pasted ×7 — hoist to a base class?
-
-**Status:** needs thinking (refactor)
-
-- Same skeleton (memoization guard → `_ensure_dependencies` → banner →
-  `_recover` → recovery log → dry-run branch → REUSED branch → execute) in
-  extraction (`pyqenc/phases/extraction.py:782-871`), audio
-  (`audio.py:175-235`), chunking (`chunking.py:461-493`), encoding
-  (`encoding.py:1568-1603`), merge (`merge.py:620-648`), probe
-  (`probe.py:140-150`), optimization (`optimization.py:164-232`).
-- `Phase` is only a Protocol (`pyqenc/phase.py:189-240`); the only shared
-  code is `resolve_dependencies` (`phase.py:275-313`). No template-method
-  base with `_recover`/`_perform` hooks exists.
-
-**Questions to think about:** base class with `run()` template method,
-phases override `_recover`/`_perform`? Or keep Protocol + shared helpers?
-
----
 
 ## 🤔 24. Phase registry is a static hand-ordered list, not derived from dependencies
 
