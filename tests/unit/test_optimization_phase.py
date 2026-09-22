@@ -220,7 +220,7 @@ class TestToleranceReapplication:
         """When all results cached and tolerance changed, the cheap re-select runs (COMPLETED)."""
         strategies = [_S1, _S2, _S3]
         phase, work_dir = _make_phase(tmp_path, strategies, tolerance=10.0)
-        source = phase._job._source  # type: ignore[union-attr]
+        source = phase._dep(JobPhase)._source
 
         results = _make_results([100, 104, 120])
         _persist_optimization(
@@ -242,7 +242,7 @@ class TestToleranceReapplication:
         strategies = [_S1, _S2, _S3]
         # New tolerance is 25% — should include S3 (20% above best)
         phase, work_dir = _make_phase(tmp_path, strategies, tolerance=25.0)
-        source = phase._job._source  # type: ignore[union-attr]
+        source = phase._dep(JobPhase)._source
 
         results = _make_results([100, 104, 120])
         _persist_optimization(
@@ -262,7 +262,7 @@ class TestToleranceReapplication:
         """After re-application, optimization.yaml is updated with the new tolerance."""
         strategies = [_S1, _S2, _S3]
         phase, work_dir = _make_phase(tmp_path, strategies, tolerance=10.0)
-        source = phase._job._source  # type: ignore[union-attr]
+        source = phase._dep(JobPhase)._source
 
         results = _make_results([100, 104, 120])
         _persist_optimization(
@@ -283,7 +283,7 @@ class TestToleranceReapplication:
         """When tolerance is unchanged and all results cached, outcome is REUSED (fast path)."""
         strategies = [_S1, _S2, _S3]
         phase, work_dir = _make_phase(tmp_path, strategies, tolerance=5.0)
-        source = phase._job._source  # type: ignore[union-attr]
+        source = phase._dep(JobPhase)._source
 
         results = _make_results([100, 104, 120])
         _persist_optimization(
@@ -304,7 +304,7 @@ class TestToleranceReapplication:
         """Changing tolerance to 0% selects exactly the best strategy."""
         strategies = [_S1, _S2, _S3]
         phase, work_dir = _make_phase(tmp_path, strategies, tolerance=0.0)
-        source = phase._job._source  # type: ignore[union-attr]
+        source = phase._dep(JobPhase)._source
 
         results = _make_results([100, 104, 120])
         _persist_optimization(
@@ -323,7 +323,7 @@ class TestToleranceReapplication:
         """Re-application only triggers when ALL strategies have cached results."""
         strategies = [_S1, _S2, _S3]
         phase, work_dir = _make_phase(tmp_path, strategies, tolerance=10.0)
-        source = phase._job._source  # type: ignore[union-attr]
+        source = phase._dep(JobPhase)._source
 
         # Only 2 of 3 strategies have results
         partial_results = [

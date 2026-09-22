@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 from dataclasses import dataclass as _dataclass
 from dataclasses import field as _field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -58,6 +58,8 @@ from pyqenc.phase import (
     PhaseResult,
     Recovery,
 )
+from pyqenc.phases.extraction import ExtractionPhase
+from pyqenc.phases.job import JobPhase
 from pyqenc.state import ArtifactState, AudioSidecar
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.long_path import LongPath
@@ -127,6 +129,7 @@ class AudioPhase(PhaseBase):
     """
 
     name:        str       = "audio"
+    DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase)
     _METRIC_KEY: MetricKey = MetricKey.AUDIO
 
     def __init__(
@@ -136,16 +139,7 @@ class AudioPhase(PhaseBase):
         *,
         collector: MetricsCollector,
     ) -> None:
-        from typing import cast
-
-        from pyqenc.phases.extraction import ExtractionPhase as _ExtractionPhase
-        from pyqenc.phases.job import JobPhase as _JobPhase
-
         super().__init__(config, phases, collector=collector)
-
-        self._job:        _JobPhase | None         = cast(_JobPhase,        phases.get(_JobPhase))        if phases else None
-        self._extraction: _ExtractionPhase | None = cast(_ExtractionPhase, phases.get(_ExtractionPhase)) if phases else None
-        self.dependencies: list[Phase]            = [d for d in [self._job, self._extraction] if d is not None]
 
     # ------------------------------------------------------------------
     # PhaseBase hooks
@@ -157,28 +151,6 @@ class AudioPhase(PhaseBase):
         logger.info("Chains:  %d configured", len(audio_cfg.chains))
         if audio_cfg.select:
             logger.info("Select:  %d entr(y/ies)", len(audio_cfg.select))
-
-    def _ensure_dependencies(self, *, dry_run: bool) -> AudioPhaseResult | None:
-        """Presence-check the typed references, then defer to the shared walk.
-
-        Args:
-            dry_run: Propagated unchanged to each dependency's ``run()``.
-
-        Returns:
-            A ``FAILED`` result when a required phase is missing from the
-            registry or a dependency failed, a ``PENDING`` result if any
-            dependency is legitimately pending (dry-run only), or ``None``
-            when the phase may proceed.
-        """
-        missing = [
-            label for label, dep in (("JobPhase", self._job), ("ExtractionPhase", self._extraction))
-            if dep is None
-        ]
-        if missing:
-            err = f"AudioPhase requires {', '.join(missing)}"
-            logger.error(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
-        return super()._ensure_dependencies(dry_run=dry_run)
 
     # ------------------------------------------------------------------
     # Recovery + invalidation
@@ -209,7 +181,7 @@ class AudioPhase(PhaseBase):
             list: wanted expected outputs plus any present-but-unwanted
             surplus files).
         """
-        job_result   = self._job.result       # type: ignore[union-attr]
+        job_result   = self._dep(JobPhase).result       # type: ignore[union-attr]
         work_dir     = LongPath(job_result.work_dir)
         sidecar_path = work_dir / _AUDIO_YAML
         audio_cfg    = job_result.config.audio
@@ -299,9 +271,9 @@ class AudioPhase(PhaseBase):
 
     def _selected_tracks(self) -> list[AudioMetadata]:
         """Resolve the working track set from extraction + ``audio.select`` (Req 9.1)."""
-        extraction_result = self._extraction.result if self._extraction else None  # type: ignore[union-attr]
+        extraction_result = self._dep(ExtractionPhase).result
         audio_meta: list[AudioMetadata] = getattr(extraction_result, "audio", []) or []
-        audio_cfg = self._job.result.config.audio  # type: ignore[union-attr]
+        audio_cfg = self._dep(JobPhase).result.config.audio  # type: ignore[union-attr]
         return resolve_selection(audio_meta, audio_cfg.select)
 
     def _invalidate_and_commit(
@@ -482,7 +454,7 @@ class AudioPhase(PhaseBase):
         """
         artifacts  = wanted
         pending    = [a for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)]
-        job_result = self._job.result  # type: ignore[union-attr]
+        job_result = self._dep(JobPhase).result  # type: ignore[union-attr]
         audio_cfg  = job_result.config.audio
         resolved   = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
         audio_dir  = LongPath(job_result.work_dir) / AUDIO_OUTPUT_DIR

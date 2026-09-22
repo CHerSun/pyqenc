@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from dataclasses import dataclass as _dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from alive_progress import config_handler
 
@@ -52,6 +52,10 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
+from pyqenc.phases.chunking import ChunkingPhase
+from pyqenc.phases.job import JobPhase
+from pyqenc.phases.optimization import OptimizationPhase
+from pyqenc.phases.probe import ProbePhase
 from pyqenc.quality import QualitySearchV3
 from pyqenc.state import (
     ArtifactState,
@@ -1526,6 +1530,9 @@ class EncodingPhase(PhaseBase):
     """
 
     name:        str       = "encoding"
+    DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (
+        JobPhase, ProbePhase, ChunkingPhase, OptimizationPhase,
+    )
     _METRIC_KEY: MetricKey = MetricKey.ENCODING
 
     def __init__(
@@ -1535,23 +1542,13 @@ class EncodingPhase(PhaseBase):
         *,
         collector: "MetricsCollector",
     ) -> None:
-        from pyqenc.phases.chunking import ChunkingPhase as _ChunkingPhase
-        from pyqenc.phases.job import JobPhase as _JobPhase
-        from pyqenc.phases.optimization import OptimizationPhase as _OptimizationPhase
-        from pyqenc.phases.probe import ProbePhase as _ProbePhase
-
         super().__init__(config, phases, collector=collector)
 
-        self._job:          _JobPhase | None          = cast("_JobPhase",          phases.get(_JobPhase))          if phases else None
-        self._probe:        _ProbePhase | None        = cast("_ProbePhase",        phases.get(_ProbePhase))        if phases else None
-        self._chunking:     _ChunkingPhase | None     = cast("_ChunkingPhase",     phases.get(_ChunkingPhase))     if phases else None
-        self._optimization: _OptimizationPhase | None = cast("_OptimizationPhase", phases.get(_OptimizationPhase)) if phases else None
         self.params:        EncodingParams | None     = None
         self.quality_labels: dict[str, str]           = {}
         """Maps strategy name → quality_label (e.g. ``'CRF'``, ``'CQ'``) for all
         strategies resolved during the last ``run()`` call.  Empty until ``run()``
         completes.  Used by downstream phases (e.g. ``MergePhase``) to label plots."""
-        self.dependencies:  list[Phase]               = [d for d in [self._job, self._probe, self._chunking, self._optimization] if d is not None]
 
     # ------------------------------------------------------------------
     # PhaseBase hooks
@@ -1565,44 +1562,18 @@ class EncodingPhase(PhaseBase):
         """Log chunks, strategies, crop, and targets (key parameters)."""
         logger.info("Scanning for existing artifacts...")
 
-        probe_result = self._probe.result if self._probe else None  # type: ignore[union-attr]
+        probe_result = self._dep(ProbePhase).result
         crop         = probe_result.crop if probe_result is not None else None
 
-        opt_result      = self._optimization.result if self._optimization else None  # type: ignore[union-attr]
+        opt_result      = self._dep(OptimizationPhase).result
         strategies      = getattr(opt_result, "selected_strategies", []) if opt_result else []
-        chunking_result = self._chunking.result if self._chunking else None  # type: ignore[union-attr]
+        chunking_result = self._dep(ChunkingPhase).result
         chunks          = getattr(chunking_result, "chunks", []) if chunking_result else []
         logger.info("Chunks:      %d", len(chunks))
         logger.info("Strategies:  %s", ", ".join(s.name for s in strategies) if strategies else "none")
         if crop:
             logger.info("Crop:        %s", crop)
         logger.info("Targets:     %s", ", ".join(f"{t.metric}-{t.statistic}≥{t.value}" for t in self._config.encoding.resolved_targets))
-
-    def _ensure_dependencies(self, *, dry_run: bool) -> "EncodingPhaseResult | None":
-        """Presence-check the typed references, then defer to the shared walk.
-
-        Args:
-            dry_run: Propagated unchanged to each dependency's ``run()``.
-
-        Returns:
-            A ``FAILED`` result when a required phase is missing or a
-            dependency failed, a ``PENDING`` result if any dependency is
-            legitimately pending (dry-run only), or ``None`` when the phase
-            may proceed.
-        """
-        missing = [
-            label for label, dep in (
-                ("JobPhase", self._job),
-                ("ProbePhase", self._probe),
-                ("ChunkingPhase", self._chunking),
-                ("OptimizationPhase", self._optimization),
-            ) if dep is None
-        ]
-        if missing:
-            err = f"EncodingPhase requires {', '.join(missing)}"
-            logger.error(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
-        return super()._ensure_dependencies(dry_run=dry_run)
 
     def finalize(self, ctx: FinalizeContext) -> None:
         """Perform end-of-run housekeeping for the encoding phase.
@@ -1621,9 +1592,10 @@ class EncodingPhase(PhaseBase):
         """
         if not ctx.deep_cleanup:
             return
-        if self._job is None or self._job.result is None:
+        job = self._dep(JobPhase)
+        if job.result is None:
             return
-        work_dir = self._job.result.work_dir
+        work_dir = job.result.work_dir
         for target in (work_dir / ENCODING_WORKSPACE_DIR, work_dir / ENCODED_OUTPUT_DIR):
             if target.exists():
                 try:
@@ -1657,11 +1629,11 @@ class EncodingPhase(PhaseBase):
             RecoveryError: On a probe change without ``--force``, or when
                 chunking/optimization produced no chunks / strategies.
         """
-        work_dir  = self._job.result.work_dir  # type: ignore[union-attr]
+        work_dir  = self._dep(JobPhase).result.work_dir  # type: ignore[union-attr]
         enc_dir   = work_dir / ENCODING_WORKSPACE_DIR
         out_dir   = work_dir / ENCODED_OUTPUT_DIR
         yaml_path = work_dir / _ENCODING_YAML
-        force_wipe = getattr(self._job.result, "force_wipe", False)  # type: ignore[union-attr]
+        force_wipe = getattr(self._dep(JobPhase).result, "force_wipe", False)  # type: ignore[union-attr]
 
         # Step 1: force-wipe
         if force_wipe:
@@ -1677,7 +1649,7 @@ class EncodingPhase(PhaseBase):
         # removed encoding.yaml, so a mismatch can only be seen without it).
         if not force_wipe:
             persisted_enc = EncodingParams.load(yaml_path)
-            probe_result  = self._probe.result  # type: ignore[union-attr]
+            probe_result  = self._dep(ProbePhase).result  # type: ignore[union-attr]
             crop          = probe_result.crop if probe_result is not None else None
             current_probe = ProbeState(
                 frame_count = probe_result.source.frame_count if (probe_result is not None and probe_result.source) else 0,
@@ -1703,8 +1675,8 @@ class EncodingPhase(PhaseBase):
                     logger.warning("Could not remove temp file %s: %s", tmp, exc)
 
         # Step 4: get chunks and strategies from dependencies
-        chunking_result    = self._chunking.result  # type: ignore[union-attr]
-        optimization_result = self._optimization.result  # type: ignore[union-attr]
+        chunking_result    = self._dep(ChunkingPhase).result  # type: ignore[union-attr]
+        optimization_result = self._dep(OptimizationPhase).result  # type: ignore[union-attr]
 
         chunks: list[ChunkMetadata] = getattr(chunking_result, "chunks", [])
         strategies = getattr(optimization_result, "selected_strategies", [])
@@ -1814,13 +1786,13 @@ class EncodingPhase(PhaseBase):
         Returns:
             ``EncodingPhaseResult`` after encoding.
         """
-        work_dir = self._job.result.work_dir  # type: ignore[union-attr]
-        probe_result = self._probe.result  # type: ignore[union-attr]
+        work_dir = self._dep(JobPhase).result.work_dir  # type: ignore[union-attr]
+        probe_result = self._dep(ProbePhase).result  # type: ignore[union-attr]
         crop         = probe_result.crop if probe_result is not None else None
 
         # Resolve chunks and strategies from dependencies
-        chunking_result     = self._chunking.result  # type: ignore[union-attr]
-        optimization_result = self._optimization.result  # type: ignore[union-attr]
+        chunking_result     = self._dep(ChunkingPhase).result  # type: ignore[union-attr]
+        optimization_result = self._dep(OptimizationPhase).result  # type: ignore[union-attr]
 
         chunks: list[ChunkMetadata] = getattr(chunking_result, "chunks", [])
         strategies = getattr(optimization_result, "selected_strategies", [])
@@ -1863,11 +1835,11 @@ class EncodingPhase(PhaseBase):
             work_dir         = work_dir,
             collector        = self._collector,
             max_parallel     = self._config.encoding.concurrency,
-            force            = self._job.result.force_wipe,  # type: ignore[union-attr]
+            force            = self._dep(JobPhase).result.force_wipe,  # type: ignore[union-attr]
             dry_run          = False,
             crop_params      = crop,
             encoding_yaml    = None,  # already persisted above with ProbeState
-            cleanup_level    = self._job.result.cleanup,  # type: ignore[union-attr]
+            cleanup_level    = self._dep(JobPhase).result.cleanup,  # type: ignore[union-attr]
             visual_hash      = self._config.encoding.visual_hash,
             metrics_sampling = self._config.measurement.sampling,
         )

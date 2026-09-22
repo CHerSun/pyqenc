@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -348,6 +348,8 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
+from pyqenc.phases.extraction import ExtractionPhase
+from pyqenc.phases.job import JobPhase
 
 _CHUNKING_YAML     = "chunking.yaml"
 
@@ -415,6 +417,7 @@ class ChunkingPhase(PhaseBase):
     """
 
     name:        str       = "chunking"
+    DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase)
     _METRIC_KEY: MetricKey = MetricKey.CHUNKING
 
     def __init__(
@@ -424,17 +427,9 @@ class ChunkingPhase(PhaseBase):
         *,
         collector: MetricsCollector,
     ) -> None:
-        from typing import cast
-
-        from pyqenc.phases.extraction import ExtractionPhase as _ExtractionPhase
-        from pyqenc.phases.job import JobPhase as _JobPhase
-
         super().__init__(config, phases, collector=collector)
 
-        self._job:        _JobPhase | None        = cast(_JobPhase,        phases.get(_JobPhase))        if phases else None
-        self._extraction: _ExtractionPhase | None = cast(_ExtractionPhase, phases.get(_ExtractionPhase)) if phases else None
-        self.params       = ChunkingParams(chunking_mode=config.chunking.mode.value, scenes=[])
-        self.dependencies: list[Phase]            = [d for d in [self._job, self._extraction] if d is not None]
+        self.params = ChunkingParams(chunking_mode=config.chunking.mode.value, scenes=[])
 
         # Set by _recover() when scene boundaries were loaded from chunking.yaml.
         self._recovered_scenes: list[SceneBoundary] = []
@@ -450,28 +445,6 @@ class ChunkingPhase(PhaseBase):
     def _recovery_unit(self) -> str:
         """The recovery summary counts chunks."""
         return "chunk"
-
-    def _ensure_dependencies(self, *, dry_run: bool) -> ChunkingPhaseResult | None:
-        """Presence-check the typed references, then defer to the shared walk.
-
-        Args:
-            dry_run: Propagated unchanged to each dependency's ``run()``.
-
-        Returns:
-            A ``FAILED`` result when a required phase is missing or a
-            dependency failed, a ``PENDING`` result if any dependency is
-            legitimately pending (dry-run only), or ``None`` when the phase
-            may proceed.
-        """
-        missing = [
-            label for label, dep in (("JobPhase", self._job), ("ExtractionPhase", self._extraction))
-            if dep is None
-        ]
-        if missing:
-            err = f"ChunkingPhase requires {', '.join(missing)}"
-            logger.error(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
-        return super()._ensure_dependencies(dry_run=dry_run)
 
     def _recover(self) -> Recovery:
         """Classify chunk artifacts, handle force-wipe and mode invalidation.
@@ -496,10 +469,10 @@ class ChunkingPhase(PhaseBase):
         Raises:
             RecoveryError: On a chunking-mode change without ``--force``.
         """
-        work_dir   = self._job.result.work_dir  # type: ignore[union-attr]
+        work_dir   = self._dep(JobPhase).result.work_dir  # type: ignore[union-attr]
         chunks_dir = work_dir / CHUNKS_DIR
         yaml_path  = work_dir / _CHUNKING_YAML
-        force_wipe = getattr(self._job.result, "force_wipe", False)  # type: ignore[union-attr]
+        force_wipe = getattr(self._dep(JobPhase).result, "force_wipe", False)  # type: ignore[union-attr]
 
         # Step 1: force-wipe
         if force_wipe:
@@ -540,7 +513,7 @@ class ChunkingPhase(PhaseBase):
             persisted_mode = chunking_params.chunking_mode
             current_mode   = self.params.chunking_mode
             if persisted_mode is not None and persisted_mode != current_mode:
-                if self._job.result.force_wipe:  # type: ignore[union-attr]
+                if self._dep(JobPhase).result.force_wipe:  # type: ignore[union-attr]
                     logger.warning(
                         "Chunking mode changed (%s → %s) — --force: wiping chunks/ and downstream artifacts",
                         persisted_mode, current_mode,
@@ -552,7 +525,7 @@ class ChunkingPhase(PhaseBase):
                     logger.debug("force_wipe: deleted %s", yaml_path)
                     # Propagate force_wipe to downstream phases through the
                     # standard path (the job result).
-                    self._job.result.force_wipe = True  # type: ignore[union-attr]
+                    self._dep(JobPhase).result.force_wipe = True  # type: ignore[union-attr]
                     self._recovered_scenes = []
                     return Recovery(pending=True)
                 raise RecoveryError(
@@ -584,7 +557,7 @@ class ChunkingPhase(PhaseBase):
 
         if scenes:
             # Get source duration from JobPhase result — it's already probed and cached there.
-            job_result = self._job.result if self._job else None  # type: ignore[union-attr]
+            job_result = self._dep(JobPhase).result
             job_state  = getattr(job_result, "job", None)
             source_duration: float | None = (
                 job_state.source.duration_seconds if job_state is not None else None
@@ -696,9 +669,10 @@ class ChunkingPhase(PhaseBase):
         """
         if not ctx.deep_cleanup:
             return
-        if self._job is None or self._job.result is None:
+        job = self._dep(JobPhase)
+        if job.result is None:
             return
-        chunks_dir = self._job.result.work_dir / CHUNKS_DIR
+        chunks_dir = job.result.work_dir / CHUNKS_DIR
         if chunks_dir.exists():
             try:
                 shutil.rmtree(chunks_dir)
@@ -732,7 +706,7 @@ class ChunkingPhase(PhaseBase):
         """
         from pyqenc.metrics import MetricKey
         artifacts = wanted
-        work_dir   = self._job.result.work_dir  # type: ignore[union-attr]
+        work_dir   = self._dep(JobPhase).result.work_dir  # type: ignore[union-attr]
         chunks_dir = work_dir / CHUNKS_DIR
         chunks_dir.mkdir(parents=True, exist_ok=True)
 
@@ -752,7 +726,7 @@ class ChunkingPhase(PhaseBase):
             logger.critical(err)
             return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
 
-        job_result = self._job.result  # type: ignore[union-attr]
+        job_result = self._dep(JobPhase).result  # type: ignore[union-attr]
         job_state  = getattr(job_result, "job", None)
         if job_state is None:
             from pyqenc.state import JobState as _JobState
@@ -842,13 +816,14 @@ class ChunkingPhase(PhaseBase):
 
     def _resolve_video_file(self) -> Path | None:
         """Resolve the extracted video file from ExtractionPhase result."""
-        if self._extraction is None or self._extraction.result is None:
+        extraction = self._dep(ExtractionPhase)
+        if extraction.result is None:
             return None
-        video_meta = getattr(self._extraction.result, "video", None)
+        video_meta = getattr(extraction.result, "video", None)
         if video_meta is not None:
             return video_meta.path
         # Fallback: scan extracted/ for a .mkv file
-        extracted_dir = self._job.result.work_dir / EXTRACTED_DIR  # type: ignore[union-attr]
+        extracted_dir = self._dep(JobPhase).result.work_dir / EXTRACTED_DIR  # type: ignore[union-attr]
         if extracted_dir.exists():
             for f in sorted(extracted_dir.glob("*.mkv")):
                 if not f.name.endswith(TEMP_SUFFIX):

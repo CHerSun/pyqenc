@@ -39,6 +39,7 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
+from pyqenc.phases.job import JobPhase
 from pyqenc.state import ArtifactState
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 
@@ -527,7 +528,7 @@ def _audio_metadata_from_stream(path: Path, track: "AudioStream") -> AudioMetada
 # ExtractionPhase — Phase object (task 5)
 # ---------------------------------------------------------------------------
 
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
 from pyqenc.constants import (
     EXTRACTED_DIR,
@@ -738,6 +739,7 @@ class ExtractionPhase(PhaseBase):
     """
 
     name:        str       = "extraction"
+    DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase,)
     _METRIC_KEY: MetricKey = MetricKey.EXTRACTION
 
     def __init__(
@@ -748,13 +750,9 @@ class ExtractionPhase(PhaseBase):
         video_required: bool              = True,
         collector:      "MetricsCollector",
     ) -> None:
-        from pyqenc.phases.job import JobPhase as _JobPhase
-
         super().__init__(config, phases, collector=collector)
 
-        self._video_required: bool             = video_required
-        self._job:            _JobPhase | None = cast("_JobPhase", phases.get(_JobPhase)) if phases else None
-        self.dependencies:    list[Phase]      = [self._job] if self._job is not None else []
+        self._video_required: bool = video_required
 
     # ------------------------------------------------------------------
     # PhaseBase hooks
@@ -762,31 +760,14 @@ class ExtractionPhase(PhaseBase):
 
     def _log_key_params(self) -> None:
         """Log the source path and the active include/exclude filter."""
-        logger.info("Source:   %s", self._job.result.source.name)  # type: ignore[union-attr]
-        extraction_cfg = self._job.result.config.extraction  # type: ignore[union-attr]
+        logger.info("Source:   %s", self._dep(JobPhase).result.source.name)  # type: ignore[union-attr]
+        extraction_cfg = self._dep(JobPhase).result.config.extraction  # type: ignore[union-attr]
         if extraction_cfg.include or extraction_cfg.exclude:
             logger.info("Filter:")
             if extraction_cfg.include:
                 logger.info("  Include:  %s", extraction_cfg.include)
             if extraction_cfg.exclude:
                 logger.info("  Exclude:  %s", extraction_cfg.exclude)
-
-    def _ensure_dependencies(self, *, dry_run: bool) -> "ExtractionPhaseResult | None":
-        """Presence-check the typed Job reference, then defer to the shared walk.
-
-        Args:
-            dry_run: Propagated unchanged to each dependency's ``run()``.
-
-        Returns:
-            A ``FAILED`` result when JobPhase is missing or a dependency
-            failed, a ``PENDING`` result if any dependency is legitimately
-            pending (dry-run only), or ``None`` when the phase may proceed.
-        """
-        if self._job is None:
-            err = "ExtractionPhase requires JobPhase"
-            logger.error(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
-        return super()._ensure_dependencies(dry_run=dry_run)
 
     def _recover(self) -> Recovery:
         """Classify extraction artifacts by enumerating every source track.
@@ -813,9 +794,9 @@ class ExtractionPhase(PhaseBase):
         Raises:
             RecoveryError: When the source cannot be analysed at all.
         """
-        work_dir      = self._job.result.work_dir  # type: ignore[union-attr]
+        work_dir      = self._dep(JobPhase).result.work_dir  # type: ignore[union-attr]
         extracted_dir = work_dir / EXTRACTED_DIR
-        force_wipe    = getattr(self._job.result, "force_wipe", False)  # type: ignore[union-attr]
+        force_wipe    = getattr(self._dep(JobPhase).result, "force_wipe", False)  # type: ignore[union-attr]
 
         # Step 1: force-wipe
         if force_wipe and extracted_dir.exists():
@@ -839,14 +820,14 @@ class ExtractionPhase(PhaseBase):
 
         # Step 3: analyse the source and enumerate ALL tracks.
         try:
-            extractor = MKVTrackExtractor(str(self._job.result.source))  # type: ignore[union-attr]
+            extractor = MKVTrackExtractor(str(self._dep(JobPhase).result.source))  # type: ignore[union-attr]
         except Exception as exc:
             raise RecoveryError(f"Failed to analyse source video: {exc}") from exc
 
         selected_tracks = streams_filter_plain_regex(
             extractor.tracks,
-            include_pattern = self._job.result.config.extraction.include,  # type: ignore[union-attr]
-            exclude_pattern = self._job.result.config.extraction.exclude,  # type: ignore[union-attr]
+            include_pattern = self._dep(JobPhase).result.config.extraction.include,  # type: ignore[union-attr]
+            exclude_pattern = self._dep(JobPhase).result.config.extraction.exclude,  # type: ignore[union-attr]
         )
 
         # Single on-disk listing shared by every artifact's completeness check.
@@ -973,9 +954,10 @@ class ExtractionPhase(PhaseBase):
         """
         if not ctx.deep_cleanup:
             return
-        if self._job is None or self._job.result is None:
+        job = self._dep(JobPhase)
+        if job.result is None:
             return
-        extracted_dir = self._job.result.work_dir / EXTRACTED_DIR
+        extracted_dir = job.result.work_dir / EXTRACTED_DIR
         if extracted_dir.exists():
             try:
                 shutil.rmtree(extracted_dir)
@@ -1009,11 +991,11 @@ class ExtractionPhase(PhaseBase):
             ``ExtractionPhaseResult`` built directly from the updated artifacts.
         """
         artifacts = wanted
-        work_dir      = self._job.result.work_dir  # type: ignore[union-attr]
+        work_dir      = self._dep(JobPhase).result.work_dir  # type: ignore[union-attr]
         extracted_dir = work_dir / EXTRACTED_DIR
         extracted_dir.mkdir(parents=True, exist_ok=True)
 
-        source = self._job.result.source  # type: ignore[union-attr]
+        source = self._dep(JobPhase).result.source  # type: ignore[union-attr]
         if not source.exists():
             err = f"Source video not found: {source}"
             logger.critical(err)
@@ -1079,7 +1061,7 @@ class ExtractionPhase(PhaseBase):
         """
         if artifact.stream is None:
             return
-        job_source = getattr(getattr(self._job, "result", None), "job", None)
+        job_source = self._dep(JobPhase).result.job if self._dep(JobPhase).result is not None else None
         source_duration_s: float | None = job_source.source.duration_seconds if job_source is not None else None
         duration_ms: int | None = int(source_duration_s * 1000) if source_duration_s is not None else None
         try:

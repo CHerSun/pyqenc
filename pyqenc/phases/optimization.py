@@ -23,7 +23,7 @@ import random
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from alive_progress import config_handler
 
@@ -49,6 +49,9 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
+from pyqenc.phases.chunking import ChunkingPhase
+from pyqenc.phases.job import JobPhase
+from pyqenc.phases.probe import ProbePhase
 from pyqenc.state import (
     ArtifactState,
     OptimizationParams,
@@ -114,6 +117,7 @@ class OptimizationPhase(PhaseBase):
     """
 
     name:        str       = "optimization"
+    DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ProbePhase, ChunkingPhase)
     _METRIC_KEY: MetricKey = MetricKey.OPTIMIZATION
 
     def __init__(
@@ -123,16 +127,7 @@ class OptimizationPhase(PhaseBase):
         *,
         collector: MetricsCollector,
     ) -> None:
-        from pyqenc.phases.chunking import ChunkingPhase as _ChunkingPhase
-        from pyqenc.phases.job import JobPhase as _JobPhase
-        from pyqenc.phases.probe import ProbePhase as _ProbePhase
-
         super().__init__(config, phases, collector=collector)
-
-        self._job:      _JobPhase | None      = cast(_JobPhase,      phases.get(_JobPhase))      if phases else None
-        self._probe:    _ProbePhase | None    = cast(_ProbePhase,    phases.get(_ProbePhase))    if phases else None
-        self._chunking: _ChunkingPhase | None = cast(_ChunkingPhase, phases.get(_ChunkingPhase)) if phases else None
-        self.dependencies: list[Phase] = [d for d in [self._job, self._probe, self._chunking] if d is not None]
 
         # Recovery stash — resolved during _recover(), consumed by
         # _execute()/_reused_result()/_make_result().
@@ -189,31 +184,6 @@ class OptimizationPhase(PhaseBase):
         """The recovery summary counts strategy results."""
         return "strategy result"
 
-    def _ensure_dependencies(self, *, dry_run: bool) -> OptimizationPhaseResult | None:
-        """Presence-check the typed references, then defer to the shared walk.
-
-        Args:
-            dry_run: Propagated unchanged to each dependency's ``run()``.
-
-        Returns:
-            A ``FAILED`` result when a required phase is missing or a
-            dependency failed, a ``PENDING`` result if any dependency is
-            legitimately pending (dry-run only), or ``None`` when the phase
-            may proceed.
-        """
-        missing = [
-            label for label, dep in (
-                ("JobPhase", self._job),
-                ("ProbePhase", self._probe),
-                ("ChunkingPhase", self._chunking),
-            ) if dep is None
-        ]
-        if missing:
-            err = f"OptimizationPhase requires {', '.join(missing)}"
-            logger.error(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
-        return super()._ensure_dependencies(dry_run=dry_run)
-
     def _recover(self) -> Recovery:
         """Resolve optimization state currency: invalidations first, then caches.
 
@@ -237,8 +207,8 @@ class OptimizationPhase(PhaseBase):
             RecoveryError: On a probe change without ``--force``, or when
                 ChunkingPhase produced no chunks.
         """
-        job_result   = self._job.result  # type: ignore[union-attr]
-        probe_result = self._probe.result  # type: ignore[union-attr]
+        job_result   = self._dep(JobPhase).result  # type: ignore[union-attr]
+        probe_result = self._dep(ProbePhase).result  # type: ignore[union-attr]
         work_dir     = job_result.work_dir
         opt_yaml     = work_dir / _OPTIMIZATION_YAML
         tolerance    = self._config.encoding.optimize_tolerance
@@ -357,7 +327,7 @@ class OptimizationPhase(PhaseBase):
         Returns:
             ``OptimizationPhaseResult`` with ``selected_strategies`` set.
         """
-        job_result = self._job.result  # type: ignore[union-attr]
+        job_result = self._dep(JobPhase).result  # type: ignore[union-attr]
         work_dir   = job_result.work_dir
         opt_yaml   = work_dir / _OPTIMIZATION_YAML
         tolerance  = self._config.encoding.optimize_tolerance
@@ -396,7 +366,7 @@ class OptimizationPhase(PhaseBase):
         strategies_to_test = self._strategies_to_test
 
         # Test encodes need chunks from ChunkingPhase.
-        chunking_result = self._chunking.result  # type: ignore[union-attr]
+        chunking_result = self._dep(ChunkingPhase).result  # type: ignore[union-attr]
         chunks: list[ChunkMetadata] = getattr(chunking_result, "chunks", [])
         if strategies_to_test and not chunks:
             err = "No chunks available from ChunkingPhase"
@@ -583,7 +553,7 @@ class OptimizationPhase(PhaseBase):
         Returns:
             ``OptimizationPhaseResult`` with all configured strategies selected.
         """
-        job_result       = self._job.result  # type: ignore[union-attr]
+        job_result       = self._dep(JobPhase).result  # type: ignore[union-attr]
         work_dir         = job_result.work_dir
         opt_yaml         = work_dir / _OPTIMIZATION_YAML
         current_targets  = _targets_as_strings(self._config.encoding.resolved_targets)

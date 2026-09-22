@@ -106,9 +106,13 @@ def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioMetadata]
     extraction_mock = MagicMock()
     extraction_mock.result = extraction_result
 
-    phase = AudioPhase(app_config, collector=NoOpMetricsCollector())
-    phase._job        = job_mock
-    phase._extraction = extraction_mock
+    from pyqenc.phases.extraction import ExtractionPhase
+    from pyqenc.phases.job import JobPhase
+
+    registry: dict[type, object] = {}
+    phase = AudioPhase(app_config, registry, collector=NoOpMetricsCollector())  # type: ignore[arg-type]
+    registry[JobPhase]        = job_mock
+    registry[ExtractionPhase] = extraction_mock
     return phase
 
 

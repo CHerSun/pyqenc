@@ -50,12 +50,15 @@ class _StubPhase(PhaseBase):
         collector,
         recovery: Recovery,
         execute_result: PhaseResult | None = None,
+        registry: dict | None = None,
         *,
         banner: bool = True,
         recover_error: RecoveryError | None = None,
     ) -> None:
-        super().__init__(cast("AppConfig", _APP_CONFIG), None, collector=collector)
-        self.BANNER = banner
+        super().__init__(
+            cast("AppConfig", _APP_CONFIG), registry, collector=collector
+        )
+        self.BANNER = banner  # noqa: N806 — instance-level override of the class flag
         self._recovery = recovery
         self._execute_result = execute_result
         self._recover_error = recover_error
@@ -90,6 +93,55 @@ class _StubPhase(PhaseBase):
     def _reused_result(self, wanted: list[Artifact], message: str) -> PhaseResult:
         self.reused_built = True
         return super()._reused_result(wanted, message)
+
+
+class _DepStubPhase(_StubPhase):
+    """Stub declaring a dependency on another stub phase."""
+
+    name = "depstub"
+    DEPENDS_ON = (_StubPhase,)  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# DEPENDS_ON — static declaration, registry fetch at run
+# ---------------------------------------------------------------------------
+
+
+class TestDeclaredDependencies:
+    def test_registry_may_be_populated_after_construction(self) -> None:
+        """The registry link is stored; instances are fetched at run time.
+
+        The registry is populated incrementally (each phase is constructed
+        before its dependents are registered), so construction must not read
+        it. Populating the declared dependency AFTER the target's
+        construction is enough for the run to succeed.
+        """
+        registry: dict[type[Phase], Phase] = {}
+        target = _DepStubPhase(NoOpMetricsCollector(), Recovery(pending=False), registry=registry)  # type: ignore[call-arg]
+
+        dep = _StubPhase(NoOpMetricsCollector(), Recovery(pending=False))
+        dep.result = dep._make_result(PhaseOutcome.REUSED, [], "already run")
+        registry[_StubPhase] = dep  # populated after target construction
+
+        result = target.run()
+        assert result.outcome is PhaseOutcome.REUSED
+        assert target._dep(_StubPhase) is dep
+
+    def test_missing_declared_dependency_raises_loudly(self) -> None:
+        """A declared dependency absent from the registry is never dropped."""
+        registry: dict[type[Phase], Phase] = {}
+        target = _DepStubPhase(NoOpMetricsCollector(), Recovery(pending=False), registry=registry)  # type: ignore[call-arg]
+        # registry stays empty — the declared dep is absent
+
+        with pytest.raises(TypeError, match="requires _StubPhase"):
+            target.run()
+
+    def test_dependencies_property_lists_declared_instances(self) -> None:
+        registry: dict[type[Phase], Phase] = {}
+        target = _DepStubPhase(NoOpMetricsCollector(), Recovery(pending=False), registry=registry)  # type: ignore[call-arg]
+        dep = _StubPhase(NoOpMetricsCollector(), Recovery(pending=False))
+        registry[_StubPhase] = dep
+        assert target.dependencies == [dep]
 
 
 def _spy_collector() -> MagicMock:

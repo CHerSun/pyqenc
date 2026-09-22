@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from pyqenc.constants import TEMP_SUFFIX, THICK_LINE
 from pyqenc.metrics import MetricKey
@@ -36,6 +36,8 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
+from pyqenc.phases.extraction import ExtractionPhase
+from pyqenc.phases.job import JobPhase
 from pyqenc.state import ProbeState
 
 if TYPE_CHECKING:
@@ -96,6 +98,7 @@ class ProbePhase(PhaseBase):
     """
 
     name:        str       = "probe"
+    DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase)
     BANNER:      bool      = False
     _METRIC_KEY: MetricKey = MetricKey.PROBE
 
@@ -107,17 +110,9 @@ class ProbePhase(PhaseBase):
         collector:   MetricsCollector,
         crop_params: CropParams | None = None,
     ) -> None:
-        from pyqenc.phases.extraction import ExtractionPhase as _ExtractionPhase
-        from pyqenc.phases.job import JobPhase as _JobPhase
-
         super().__init__(config, phases, collector=collector)
 
-        self._crop_params: CropParams | None       = crop_params
-        self._job:         _JobPhase | None        = cast("_JobPhase",        phases.get(_JobPhase))        if phases else None
-        self._extraction:  _ExtractionPhase | None = cast("_ExtractionPhase", phases.get(_ExtractionPhase)) if phases else None
-        self.dependencies: list[Phase]             = [
-            dep for dep in (self._job, self._extraction) if dep is not None
-        ]
+        self._crop_params: CropParams | None = crop_params
 
         # Recovery stash — the loaded probe.yaml state and the resolved payload
         # (source / crop) for result construction.
@@ -128,28 +123,6 @@ class ProbePhase(PhaseBase):
     # ------------------------------------------------------------------
     # PhaseBase hooks
     # ------------------------------------------------------------------
-
-    def _ensure_dependencies(self, *, dry_run: bool) -> ProbePhaseResult | None:
-        """Presence-check the typed references, then defer to the shared walk.
-
-        Args:
-            dry_run: Propagated unchanged to each dependency's ``run()``.
-
-        Returns:
-            A ``FAILED`` result when a required phase is missing or a
-            dependency failed, a ``PENDING`` result if any dependency is
-            legitimately pending (dry-run only), or ``None`` when the phase
-            may proceed.
-        """
-        missing = [
-            label for label, dep in (("JobPhase", self._job), ("ExtractionPhase", self._extraction))
-            if dep is None
-        ]
-        if missing:
-            err = f"ProbePhase requires {', '.join(missing)} dependencies"
-            logger.error(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
-        return super()._ensure_dependencies(dry_run=dry_run)
 
     def _recover(self) -> Recovery:
         """Determine ``probe.yaml`` currency: absent, invalidated, or current.
@@ -172,8 +145,8 @@ class ProbePhase(PhaseBase):
         Raises:
             RecoveryError: When extraction produced no video track.
         """
-        job_result        = self._job.result        # type: ignore[union-attr]
-        extraction_result = self._extraction.result # type: ignore[union-attr]
+        job_result        = self._dep(JobPhase).result        # type: ignore[union-attr]
+        extraction_result = self._dep(ExtractionPhase).result # type: ignore[union-attr]
         probe_yaml        = job_result.work_dir / _PROBE_YAML_NAME  # type: ignore[operator]
 
         # Step 1 — no video extracted: fatal for all downstream video phases.
@@ -219,8 +192,8 @@ class ProbePhase(PhaseBase):
         """
         from pyqenc.utils.crop import detect_crop_parameters
 
-        job_result        = self._job.result         # type: ignore[union-attr]
-        extraction_result = self._extraction.result  # type: ignore[union-attr]
+        job_result        = self._dep(JobPhase).result         # type: ignore[union-attr]
+        extraction_result = self._dep(ExtractionPhase).result  # type: ignore[union-attr]
         probe_yaml        = job_result.work_dir / _PROBE_YAML_NAME  # type: ignore[operator]
         probe_state       = self._probe_state
         extracted_vm      = extraction_result.video   # type: ignore[union-attr]
@@ -277,7 +250,7 @@ class ProbePhase(PhaseBase):
         """Build the reused result from the cached ``probe.yaml`` state."""
         state = self._probe_state
         assert state is not None  # current currency implies a loaded state
-        source_vm   = self._get_source_vm(self._job.result)  # type: ignore[union-attr]
+        source_vm   = self._get_source_vm(self._dep(JobPhase).result)  # type: ignore[union-attr]
         extended_vm = ExtendedVideoMetadata.from_base(
             source_vm, frame_count=state.frame_count
         )

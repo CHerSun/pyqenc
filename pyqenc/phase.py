@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar, cast, runtime_checkable
 
 from pyqenc.metrics import MetricKey
 from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, Strategy
@@ -64,6 +64,9 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+TPhase = TypeVar("TPhase", bound="Phase")
+"""A Phase subclass; the return type of ``PhaseBase._dep()``."""
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +371,12 @@ class PhaseBase:
 
     Class attributes:
         name:              Human-readable phase name (logs, banners, summary).
+        DEPENDS_ON:        Static, read-only declaration of the phase TYPES
+                           this phase requires. The set is fixed per phase and
+                           never mutated; the concrete instances are fetched
+                           from the registry when ``run()`` resolves
+                           dependencies (the registry is populated
+                           incrementally, so construction time is too early).
         BANNER:            Whether ``run()`` emits the thick-line banner.
                            Phases whose work is not user-significant (job
                            setup, probe) set ``False`` and log concise INFO
@@ -380,6 +389,7 @@ class PhaseBase:
     """
 
     name:              str       = "phase"
+    DEPENDS_ON: ClassVar[tuple[type[Phase], ...]] = ()
     BANNER:            bool      = True
     _METRIC_KEY:       MetricKey = MetricKey.RECOVERY  # overridden per phase
     _DRY_RUN_READONLY: bool      = False
@@ -391,18 +401,65 @@ class PhaseBase:
         *,
         collector: MetricsCollector,
     ) -> None:
-        """Store the shared constructor state; subclasses resolve typed deps.
+        """Store the shared constructor state and the registry link.
+
+        The registry is NOT read here: it is populated incrementally
+        (``_build_registry`` constructs phases one by one), so dependency
+        instances are fetched from it when ``run()`` resolves dependencies.
 
         Args:
             config:    Full validated application configuration.
-            phases:    Phase registry; subclasses pull typed dependency
-                       references from it after calling ``super().__init__``.
+            phases:    Phase registry link. Must contain an instance of every
+                       type in ``DEPENDS_ON`` by the time ``run()`` is called;
+                       a declared dependency still missing then raises
+                       ``TypeError`` (mis-wired registry — a programming
+                       error, never silently dropped). ``None`` is legal only
+                       for phases with no dependencies.
             collector: Metrics collector; the template owns all timing calls.
         """
         self._config:    AppConfig        = config
         self._collector: MetricsCollector = collector
+        self._phases:    dict[type[Phase], Phase] = phases if phases is not None else {}
         self.result:     PhaseResult | None = None
-        self.dependencies: list[Phase]    = []
+
+    # ------------------------------------------------------------------
+    # Dependency resolution — DEPENDS_ON is the declaration, the registry
+    # link is the source of truth, fetched fresh at run time.
+    # ------------------------------------------------------------------
+
+    @property
+    def dependencies(self) -> list[Phase]:
+        """Dependency instances, fetched from the registry on every access.
+
+        Only meaningful after ``_ensure_dependencies`` has confirmed every
+        declared type is present (it raises ``TypeError`` otherwise); this
+        property itself does not re-validate.
+        """
+        return [self._phases[cls] for cls in self.DEPENDS_ON if cls in self._phases]
+
+    def _dep(self, dep_cls: type[TPhase]) -> TPhase:
+        """Return the dependency instance of ``dep_cls`` from the registry.
+
+        Fetches fresh on every call — the registry is the single source of
+        truth, and it may have been populated after this phase's construction.
+
+        Args:
+            dep_cls: The dependency's phase class.
+
+        Returns:
+            The concrete instance from the registry.
+
+        Raises:
+            TypeError: When the declared dependency is missing from the
+                registry (mis-wired registry — a programming error).
+        """
+        instance = self._phases.get(dep_cls)
+        if instance is None:
+            raise TypeError(
+                f"{type(self).__name__} requires {dep_cls.__name__} "
+                "in the phase registry (declared in DEPENDS_ON)"
+            )
+        return cast(TPhase, instance)
 
     # ------------------------------------------------------------------
     # Public Phase interface — the template run() and default finalize
@@ -507,7 +564,14 @@ class PhaseBase:
     # ------------------------------------------------------------------
 
     def _ensure_dependencies(self, *, dry_run: bool) -> PhaseResult | None:
-        """Run the shared dependency walk and build the typed short-circuit.
+        """Resolve dependencies and build the typed short-circuit.
+
+        First fetches every type declared in ``DEPENDS_ON`` from the registry
+        link — a declared dependency missing from the registry raises
+        ``TypeError`` (mis-wired registry, a programming error; the dependency
+        is never silently dropped). Then runs the shared walk: a ``FAILED``
+        dependency chains a typed ``FAILED`` result, a ``PENDING`` one
+        (dry-run only) chains a typed ``PENDING`` result.
 
         Args:
             dry_run: Propagated unchanged to each dependency's ``run()``.
@@ -516,7 +580,19 @@ class PhaseBase:
             A typed ``FAILED`` result if any dependency failed, a typed
             ``PENDING`` result if any dependency is legitimately pending
             (dry-run only), or ``None`` when the phase may proceed.
+
+        Raises:
+            TypeError: When a dependency declared in ``DEPENDS_ON`` is absent
+                from the registry.
         """
+        missing = [
+            cls.__name__ for cls in self.DEPENDS_ON if cls not in self._phases
+        ]
+        if missing:
+            raise TypeError(
+                f"{type(self).__name__} requires {', '.join(missing)} "
+                "in the phase registry (declared in DEPENDS_ON)"
+            )
         status = resolve_dependencies(self, dry_run=dry_run)
         if status.failed:
             names = ", ".join(n.capitalize() for n in status.failed)
@@ -528,6 +604,19 @@ class PhaseBase:
             msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
             self._logger.info(msg)
             return self._make_result(PhaseOutcome.PENDING, [], msg)
+        return self._post_dependency_check()
+
+    def _post_dependency_check(self) -> PhaseResult | None:
+        """Phase-specific validation after the dependency walk succeeded.
+
+        Override to refuse proceeding on a dependency whose result is
+        technically complete yet unusable for this phase (e.g. merge refuses
+        to merge when EncodingPhase still holds incomplete artifacts). The
+        default imposes no extra checks.
+
+        Returns:
+            A typed result to short-circuit with, or ``None`` to proceed.
+        """
         return None
 
     # ------------------------------------------------------------------

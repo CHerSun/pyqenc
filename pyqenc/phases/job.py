@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from pyqenc.constants import TEMP_SUFFIX
 from pyqenc.metrics import MetricKey, MetricsCollector
@@ -107,6 +107,7 @@ class JobPhase(PhaseBase):
     """
 
     name:              str       = "job"
+    DEPENDS_ON:        ClassVar[tuple[type[Phase], ...]] = ()
     BANNER:            bool      = False
     _METRIC_KEY:       MetricKey = MetricKey.JOB
     _DRY_RUN_READONLY: bool      = True

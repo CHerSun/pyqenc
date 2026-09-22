@@ -220,8 +220,9 @@ class TestExtractionPhaseTiming:
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
 
-        phase = ExtractionPhase(config, collector=collector)
-        phase._job = job_mock  # type: ignore[assignment]
+        registry: dict[type, object] = {}
+        phase = ExtractionPhase(config, registry, collector=collector)  # type: ignore[arg-type]
+        registry[JobPhase] = job_mock  # type: ignore[index]
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
@@ -407,9 +408,10 @@ class TestChunkingPhaseTiming:
         extraction_mock = MagicMock(spec=ExtractionPhase)
         extraction_mock.result = self._make_extraction_result(tmp_path)
 
-        phase = ChunkingPhase(config, collector=collector)
-        phase._job        = job_mock         # type: ignore[assignment]
-        phase._extraction = extraction_mock  # type: ignore[assignment]
+        registry: dict[type, object] = {}
+        phase = ChunkingPhase(config, registry, collector=collector)  # type: ignore[arg-type]
+        registry[JobPhase]        = job_mock         # type: ignore[index]
+        registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
@@ -667,9 +669,10 @@ class TestAudioPhaseTiming:
         extraction_mock = MagicMock(spec=ExtractionPhase)
         extraction_mock.result = extraction_result
 
-        phase = AudioPhase(config, collector=collector)
-        phase._job        = job_mock         # type: ignore[assignment]
-        phase._extraction = extraction_mock  # type: ignore[assignment]
+        registry: dict[type, object] = {}
+        phase = AudioPhase(config, registry, collector=collector)  # type: ignore[arg-type]
+        registry[JobPhase]        = job_mock         # type: ignore[index]
+        registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
@@ -869,11 +872,11 @@ class TestOptimizationPhaseTiming:
         chunking_mock = MagicMock(spec=ChunkingPhase)
         chunking_mock.result = self._make_chunking_result(tmp_path)
 
-        phase = OptimizationPhase(config, collector=collector)
-        phase._job        = job_mock       # type: ignore[assignment]
-        phase._probe      = probe_mock     # type: ignore[assignment]
-        phase._chunking   = chunking_mock  # type: ignore[assignment]
-        phase.dependencies = [job_mock, probe_mock, chunking_mock]  # type: ignore[list-item]
+        registry: dict[type, object] = {}
+        phase = OptimizationPhase(config, registry, collector=collector)  # type: ignore[arg-type]
+        registry[JobPhase]      = job_mock       # type: ignore[index]
+        registry[ProbePhase]    = probe_mock     # type: ignore[index]
+        registry[ChunkingPhase] = chunking_mock  # type: ignore[index]
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
@@ -1180,11 +1183,12 @@ class TestEncodingPhaseTiming:
         optimization_mock = MagicMock(spec=OptimizationPhase)
         optimization_mock.result = self._make_optimization_result(tmp_path)
 
-        phase = EncodingPhase(config, collector=collector)
-        phase._job          = job_mock           # type: ignore[assignment]
-        phase._probe        = probe_mock         # type: ignore[assignment]
-        phase._chunking     = chunking_mock      # type: ignore[assignment]
-        phase._optimization = optimization_mock  # type: ignore[assignment]
+        registry: dict[type, object] = {}
+        phase = EncodingPhase(config, registry, collector=collector)  # type: ignore[arg-type]
+        registry[JobPhase]          = job_mock           # type: ignore[index]
+        registry[ProbePhase]        = probe_mock         # type: ignore[index]
+        registry[ChunkingPhase]     = chunking_mock      # type: ignore[index]
+        registry[OptimizationPhase] = optimization_mock  # type: ignore[index]
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
@@ -1221,7 +1225,11 @@ class TestEncodingPhaseTiming:
         Validates: Requirements 6.5, 2.2a
         """
         from pyqenc.models import PhaseOutcome
-        from pyqenc.phases.encoding import EncodedArtifact, EncodingPhase, EncodingPhaseResult
+        from pyqenc.phases.encoding import (
+            EncodedArtifact,
+            EncodingPhase,
+            EncodingPhaseResult,
+        )
         from pyqenc.state import ArtifactState
 
         collector = _spy_collector()
@@ -1489,11 +1497,24 @@ class TestMergePhaseTiming:
         audio_mock = MagicMock(spec=AudioPhase)
         audio_mock.result = self._make_audio_result()
 
-        phase = MergePhase(config, collector=collector)
-        phase._job        = job_mock        # type: ignore[assignment]
-        phase._extraction = extraction_mock  # type: ignore[assignment]
-        phase._encoding   = encoding_mock   # type: ignore[assignment]
-        phase._audio      = audio_mock      # type: ignore[assignment]
+        from pyqenc.models import CropParams
+        from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
+        probe_mock = MagicMock(spec=ProbePhase)
+        probe_mock.result = ProbePhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            artifacts = [],
+            message   = "probe complete",
+            source    = None,
+            crop      = CropParams(),
+        )
+
+        registry: dict[type, object] = {}
+        phase = MergePhase(config, registry, collector=collector)  # type: ignore[arg-type]
+        registry[JobPhase]        = job_mock         # type: ignore[index]
+        registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
+        registry[ProbePhase]      = probe_mock       # type: ignore[index]
+        registry[EncodingPhase]   = encoding_mock    # type: ignore[index]
+        registry[AudioPhase]      = audio_mock       # type: ignore[index]
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
@@ -1615,11 +1636,24 @@ class TestMergePhaseTiming:
         audio_mock = MagicMock(spec=AudioPhase)
         audio_mock.result = self._make_audio_result()
 
-        phase = MergePhase(config, collector=collector)
-        phase._job        = job_mock        # type: ignore[assignment]
-        phase._extraction = extraction_mock  # type: ignore[assignment]
-        phase._encoding   = encoding_mock   # type: ignore[assignment]
-        phase._audio      = audio_mock      # type: ignore[assignment]
+        from pyqenc.models import CropParams
+        from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
+        probe_mock = MagicMock(spec=ProbePhase)
+        probe_mock.result = ProbePhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            artifacts = [],
+            message   = "probe complete",
+            source    = None,
+            crop      = CropParams(),
+        )
+
+        registry: dict[type, object] = {}
+        phase = MergePhase(config, registry, collector=collector)  # type: ignore[arg-type]
+        registry[JobPhase]        = job_mock         # type: ignore[index]
+        registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
+        registry[ProbePhase]      = probe_mock       # type: ignore[index]
+        registry[EncodingPhase]   = encoding_mock    # type: ignore[index]
+        registry[AudioPhase]      = audio_mock       # type: ignore[index]
 
         output_file = tmp_path / "work" / "final" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
