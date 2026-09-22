@@ -1517,7 +1517,7 @@ class TestMergePhaseTiming:
             strategy_name = "slow+h265",
         )
 
-        with patch.object(MergePhase, "_recover", return_value=[stub_artifact]):
+        with patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -1553,7 +1553,7 @@ class TestMergePhaseTiming:
         success_result = FFmpegRunResult(success=True, returncode=0)
 
         with (
-            patch.object(MergePhase, "_recover", return_value=[stub_artifact]),
+            patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
             patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
             patch("pyqenc.phases.merge.get_frame_count", return_value=100),
             patch.object(MergePhase, "_collect_encoded_chunks", return_value={
@@ -1635,7 +1635,7 @@ class TestMergePhaseTiming:
         encoded_path.write_bytes(b"\x00" * 128)
 
         with (
-            patch.object(MergePhase, "_recover", return_value=[stub_artifact]),
+            patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
             patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
             patch("pyqenc.phases.merge.get_frame_count", return_value=100),
             patch.object(MergePhase, "_collect_encoded_chunks", return_value={
@@ -1673,7 +1673,7 @@ class TestMergePhaseTiming:
             strategy_name = "slow+h265",
         )
 
-        with patch.object(MergePhase, "_recover", return_value=[stub_artifact]):
+        with patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             result = phase.run()
 
         assert result is not None
