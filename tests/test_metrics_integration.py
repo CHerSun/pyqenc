@@ -519,7 +519,7 @@ class TestChunkingPhaseTiming:
         cached_boundaries = [SceneBoundary(frame=0, timestamp_seconds=0.0)]
         phase._recovered_scenes = cached_boundaries  # type: ignore[attr-defined]
 
-        # Use a real ChunkMetadata (not a bare Mock): _execute_chunking reads
+        # Use a real ChunkMetadata (not a bare Mock): the executor reads
         # cm.path and cm.frame_count to build the final ChunkArtifact list, so a
         # spec-only Mock without a real .path fails with AttributeError.
         real_chunk = ChunkMetadata(

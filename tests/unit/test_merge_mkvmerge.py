@@ -9,7 +9,7 @@ built via its real constructor and a real phase registry whose Job / Extraction
 then run through the public ``merge.run(dry_run=False)`` entry point. Only the
 external shell-outs are mocked: mkvmerge (``subprocess.run``) and the
 frame-count check (``get_frame_count``) — boundaries, never phase internals. No
-``__new__``, no private ``_execute_merge`` / ``_collect_encoded_chunks`` calls,
+``__new__``, no private ``_execute`` / ``_collect_encoded_chunks`` calls,
 no private-attr poking.
 
 Covers:

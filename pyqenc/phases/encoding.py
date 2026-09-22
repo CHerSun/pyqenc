@@ -1404,7 +1404,7 @@ def encode_all_chunks(
 
     # --- Step 2: Write encoding.yaml (Req 2.4) — handled by EncodingPhase ---
     # encoding.yaml persistence and probe mismatch validation are owned by
-    # EncodingPhase._recover() and _execute_encoding(). encoding_yaml is
+    # EncodingPhase._recover() and _execute(). encoding_yaml is
     # always None when called from the Phase path.
 
     # --- Step 3: Artifact recovery via _recover_encoding_attempts (Req 3.6) ---

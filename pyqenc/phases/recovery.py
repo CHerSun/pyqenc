@@ -1,7 +1,7 @@
 """Shared low-level recovery helpers for the pyqenc pipeline.
 
 Contains helpers shared across multiple phase modules and dataclasses used
-by ``split_chunks`` (called from ``ChunkingPhase._execute_chunking``).
+by ``split_chunks`` (called from ``ChunkingPhase._execute``).
 
 Per-phase recovery logic lives in the respective phase objects:
 - ``ExtractionPhase._recover()``  in ``pyqenc/phases/extraction.py``
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Dataclasses used by split_chunks (called from ChunkingPhase._execute_chunking)
+# Dataclasses used by split_chunks (called from ChunkingPhase._execute)
 # ---------------------------------------------------------------------------
 
 @dataclass
