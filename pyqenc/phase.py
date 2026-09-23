@@ -7,17 +7,18 @@ This module defines the structural backbone of the phase object model:
 - ``PhaseOutcome``    — re-exported from ``models`` for convenience.
 - ``PhaseResult``     — result returned by every phase's ``run()``.
 - ``FinalizeContext`` — pre-resolved end-of-run decisions passed to ``finalize``.
-- ``Recovery``        — single source of truth produced by ``PhaseBase._recover()``.
+- ``Recovery``        — single source of truth produced by ``Phase._recover()``.
 - ``RecoveryError``   — fatal recover-time invalidation signal.
-- ``Phase``           — ``Protocol`` that every phase class must satisfy.
-- ``PhaseBase``       — template-method base implementing the uniform ``run()``
-                        footprint shared by every phase.
+- ``Phase``           — template-method base class every phase inherits;
+                        its concrete ``run()`` owns the uniform footprint.
+- ``PhaseRegistry``   — type alias for the registry ``dict`` (phase class →
+                        its instance).
 - ``CleanupLevel``    — re-exported from ``models`` for convenience.
 - ``Strategy``        — re-exported from ``models`` for convenience.
 - ``_build_registry`` — factory that constructs all phase objects in execution
                         order, wires their dependencies, and returns the registry.
 
-Every phase inherits ``PhaseBase``, whose single concrete ``run()`` owns the
+Every phase inherits ``Phase``, whose single concrete ``run()`` owns the
 uniform footprint — memoization guard, skip check, dependency resolution,
 banner, timed recovery, recovery summary, dry-run / no-pending branches, and
 timed execution — so no phase can forget a step or drift from the contract.
@@ -34,7 +35,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
 
 from pyqenc.metrics import MetricKey
 from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, Strategy
@@ -49,24 +50,22 @@ __all__ = [
     "Artifact",
     "ArtifactState",
     "CleanupLevel",
-    "DependencyStatus",
     "FinalizeContext",
     "Phase",
-    "PhaseBase",
     "PhaseContractError",
     "PhaseOutcome",
+    "PhaseRegistry",
     "PhaseResult",
     "Recovery",
     "RecoveryError",
     "Strategy",
     "_build_registry",
-    "resolve_dependencies",
 ]
 
 logger = logging.getLogger(__name__)
 
 TPhase = TypeVar("TPhase", bound="Phase")
-"""A Phase subclass; the return type of ``PhaseBase._dep()``."""
+"""A Phase subclass; the return type of ``Phase._dep()``."""
 
 
 # ---------------------------------------------------------------------------
@@ -202,71 +201,12 @@ class FinalizeContext:
 
 
 # ---------------------------------------------------------------------------
-# Phase Protocol
-# ---------------------------------------------------------------------------
-
-@runtime_checkable
-class Phase(Protocol):
-    """Common interface that every pipeline phase must implement.
-
-    The runner and CLI drive phases exclusively through this protocol, without
-    knowing any phase-specific internals. Each phase has a single execution
-    entry point, ``run()``; ``finalize()`` handles end-of-run housekeeping.
-
-    Attributes:
-        name:         Human-readable phase name used in logs and banners.
-        dependencies: Ordered list of phase objects this phase depends on.
-        result:       Cached result from the last ``run()`` call; ``None`` if
-                      ``run()`` has not been called yet.
-    """
-
-    name:         str
-    dependencies: list[Phase]
-    result:       PhaseResult | None
-
-    def run(self, dry_run: bool = False) -> PhaseResult:
-        """Resolve dependencies, recover, execute pending work, cache and return.
-
-        Returns any cached ``self.result`` verbatim (in-run memoization). On a
-        fresh call it resolves each dependency via ``dep.run(dry_run=...)``,
-        emits the phase banner, runs ``_recover()`` internally, then executes
-        work for all pending artifacts. On an already-complete phase this is
-        side-effect-free and returns ``REUSED``.
-
-        Args:
-            dry_run: When ``True``, report what work would be done without
-                     executing it; return a ``PENDING`` outcome when any wanted
-                     work remains.
-
-        Returns:
-            ``PhaseResult`` with all artifacts ``COMPLETE`` on success
-            (``COMPLETED`` / ``REUSED``), or ``PENDING`` / ``FAILED``
-            otherwise; cached in ``self.result``.
-        """
-        ...
-
-    def finalize(self, ctx: FinalizeContext) -> None:
-        """Perform end-of-run housekeeping for this phase.
-
-        Called by the runner after a successful, non-dry-run execution. Its
-        sole current responsibility is deep cleanup: when
-        ``ctx.deep_cleanup`` is ``True``, the phase deletes only its **own**
-        artifacts. It never touches another phase's artifacts, and a cleanup
-        failure never fails the run.
-
-        Args:
-            ctx: Pre-resolved end-of-run decisions from the runner.
-        """
-        ...
-
-
-# ---------------------------------------------------------------------------
 # Recovery — single source of truth from _recover()
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class Recovery:
-    """What ``PhaseBase._recover()`` hands to the template ``run()``.
+    """What ``Phase._recover()`` hands to the template ``run()``.
 
     The single source of truth for the phase's view of the world after
     scanning disk: the full internal artifact list and whether any work
@@ -306,7 +246,7 @@ class Recovery:
 
 
 class RecoveryError(Exception):
-    """Fatal recover-time invalidation raised by ``PhaseBase._recover()``.
+    """Fatal recover-time invalidation raised by ``Phase._recover()``.
 
     Raised when persisted state contradicts the current run's inputs so
     fundamentally that the phase cannot proceed — e.g. a chunking-mode change
@@ -322,7 +262,7 @@ class RecoveryError(Exception):
 
 
 class PhaseContractError(RuntimeError):
-    """A phase violated the PhaseBase run contract — a programming error.
+    """A phase violated the Phase run contract — a programming error.
 
     Raised by the runner when a phase's ``_execute()`` returned ``PENDING`` on
     an execute run: the template's dry-run branch is the only legitimate
@@ -333,10 +273,10 @@ class PhaseContractError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
-# PhaseBase — template-method base implementing the uniform run()
+# Phase — template-method base implementing the uniform run()
 # ---------------------------------------------------------------------------
 
-class PhaseBase:
+class Phase:
     """Template-method base class implementing the uniform phase ``run()``.
 
     The single concrete ``run()`` below owns the run footprint shared by every
@@ -426,16 +366,6 @@ class PhaseBase:
     # Dependency resolution — DEPENDS_ON is the declaration, the registry
     # link is the source of truth, fetched fresh at run time.
     # ------------------------------------------------------------------
-
-    @property
-    def dependencies(self) -> list[Phase]:
-        """Dependency instances, fetched from the registry on every access.
-
-        Only meaningful after ``_ensure_dependencies`` has confirmed every
-        declared type is present (it raises ``TypeError`` otherwise); this
-        property itself does not re-validate.
-        """
-        return [self._phases[cls] for cls in self.DEPENDS_ON if cls in self._phases]
 
     def _dep(self, dep_cls: type[TPhase]) -> TPhase:
         """Return the dependency instance of ``dep_cls`` from the registry.
@@ -569,7 +499,7 @@ class PhaseBase:
         First fetches every type declared in ``DEPENDS_ON`` from the registry
         link — a declared dependency missing from the registry raises
         ``TypeError`` (mis-wired registry, a programming error; the dependency
-        is never silently dropped). Then runs the shared walk: a ``FAILED``
+        is never silently dropped). A ``FAILED``
         dependency chains a typed ``FAILED`` result, a ``PENDING`` one
         (dry-run only) chains a typed ``PENDING`` result.
 
@@ -593,14 +523,24 @@ class PhaseBase:
                 f"{type(self).__name__} requires {', '.join(missing)} "
                 "in the phase registry (declared in DEPENDS_ON)"
             )
-        status = resolve_dependencies(self, dry_run=dry_run)
-        if status.failed:
-            names = ", ".join(n.capitalize() for n in status.failed)
+        failed:  list[str] = []
+        pending: list[str] = []
+        for dep_cls in self.DEPENDS_ON:
+            dep = self._phases[dep_cls]
+            if dep.result is None:
+                dep.run(dry_run=dry_run)
+            if dep.result is None or dep.result.outcome is PhaseOutcome.FAILED:
+                failed.append(dep.name)
+            elif dep.result.outcome is PhaseOutcome.PENDING:
+                pending.append(dep.name)
+
+        if failed:
+            names = ", ".join(n.capitalize() for n in failed)
             err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
             self._logger.error(err)
             return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
-        if status.pending:
-            names = ", ".join(n.capitalize() for n in status.pending)
+        if pending:
+            names = ", ".join(n.capitalize() for n in pending)
             msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
             self._logger.info(msg)
             return self._make_result(PhaseOutcome.PENDING, [], msg)
@@ -723,76 +663,16 @@ class PhaseBase:
 
 
 # ---------------------------------------------------------------------------
-# Shared dependency resolution
+# Phase registry
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
-class DependencyStatus:
-    """Outcome of resolving a phase's dependencies (see ``resolve_dependencies``).
+PhaseRegistry = dict[type[Phase], Phase]
+"""The phase registry: maps each phase **class** to its constructed instance.
 
-    Splits non-complete dependencies into two distinct buckets so callers can
-    react differently:
-
-    - ``failed``  is a genuine error condition — the dependency reported
-      ``FAILED`` or produced no result at all. The dependent phase must chain
-      ``FAILED`` and log at ERROR.
-    - ``pending`` means the dependency has legitimate work remaining but has not
-      failed. This only ever occurs during a dry-run preview (in execute mode a
-      dependency runs its work and never stays ``PENDING``). The dependent phase
-      chains ``PENDING`` and logs at INFO — a dry-run cannot be previewed past a
-      dependency whose work has not been performed yet.
-
-    Both lists are in dependency order.
-
-    Attributes:
-        failed:  Names of deps whose outcome is ``FAILED`` or whose result is
-                 missing.
-        pending: Names of deps whose outcome is ``PENDING`` (dry-run only).
-    """
-
-    failed:  list[str]
-    pending: list[str]
-
-
-def resolve_dependencies(phase: Phase, *, dry_run: bool) -> DependencyStatus:
-    """Resolve every dependency of ``phase`` and classify which did not complete.
-
-    This is the single, uniform dependency walk shared by every phase (Req 2):
-    for each dependency in ``phase.dependencies`` (in order), it triggers the
-    dependency's ``run(dry_run=...)`` when that dependency has no cached result
-    yet, then classifies the dependency's outcome. A dependency is bucketed as:
-
-    - ``failed``  when it still has no result, or its cached outcome is
-      ``FAILED`` — a genuine error.
-    - ``pending`` when its cached outcome is ``PENDING`` — legitimate remaining
-      work, only possible in a dry-run preview.
-
-    A dependency that is ``is_complete`` (``COMPLETED`` / ``REUSED``) is in
-    neither bucket and the phase may proceed.
-
-    Because a dependency with an existing cached result is never re-run, the
-    in-run memoization guarantee holds: each dependency resolves at most once
-    per registry instance regardless of how many phases depend on it.
-
-    Args:
-        phase:   The phase whose dependencies should be resolved.
-        dry_run: Propagated unchanged to each dependency's ``run()``.
-
-    Returns:
-        A ``DependencyStatus`` with the failed and pending dependency names in
-        dependency order. When both lists are empty all dependencies are
-        complete and the phase may proceed with its own work.
-    """
-    failed:  list[str] = []
-    pending: list[str] = []
-    for dep in phase.dependencies:
-        if dep.result is None:
-            dep.run(dry_run=dry_run)
-        if dep.result is None or dep.result.outcome is PhaseOutcome.FAILED:
-            failed.append(dep.name)
-        elif dep.result.outcome is PhaseOutcome.PENDING:
-            pending.append(dep.name)
-    return DependencyStatus(failed=failed, pending=pending)
+Built incrementally by ``_build_registry`` and shared by reference with every
+phase (fetched from at run time — see ``Phase.DEPENDS_ON``). Keys are plain
+``dict`` keys, so lookup by type is direct and order follows insertion
+(execution order)."""
 
 
 # ---------------------------------------------------------------------------
@@ -809,7 +689,7 @@ def _build_registry(
     collector:      MetricsCollector,
     crop_params:    CropParams | None = None,
     video_required: bool              = True,
-) -> dict[type[Phase], Phase]:
+) -> PhaseRegistry:
     """Construct all phase objects in execution order and wire their dependencies.
 
     ``JobPhase`` receives all volatile per-run parameters (``source``,
@@ -866,7 +746,7 @@ def _build_registry(
     from pyqenc.phases.extraction import ExtractionPhase
     from pyqenc.phases.job import JobPhase
 
-    registry: dict[type[Phase], Phase] = {}
+    registry: PhaseRegistry = {}
 
     # JobPhase receives all volatile kwargs — it stores them on JobPhaseResult
     # so downstream phases can access them via self._job.result.*.

@@ -28,7 +28,13 @@ from pathlib import Path
 from pyqenc.constants import THICK_LINE
 from pyqenc.metrics import METRICS_YAML_FILENAME, MetricsCollector
 from pyqenc.models import CleanupLevel, PhaseOutcome
-from pyqenc.phase import FinalizeContext, Phase, PhaseContractError, PhaseResult
+from pyqenc.phase import (
+    FinalizeContext,
+    Phase,
+    PhaseContractError,
+    PhaseRegistry,
+    PhaseResult,
+)
 from pyqenc.utils.long_path import LongPath
 
 logger = logging.getLogger(__name__)
@@ -103,7 +109,7 @@ class Runner:
 
     def __init__(
         self,
-        registry:          dict[type[Phase], Phase],
+        registry:          PhaseRegistry,
         target:            type[Phase],
         collector:         MetricsCollector,
         *,
@@ -112,7 +118,7 @@ class Runner:
         no_metrics:        bool,
         is_terminal_most:  bool,
     ) -> None:
-        self._registry:         dict[type[Phase], Phase] = registry
+        self._registry:         PhaseRegistry = registry
         self._target:           type[Phase]              = target
         self._collector:        MetricsCollector         = collector
         self._work_dir:         LongPath                 = LongPath(work_dir)

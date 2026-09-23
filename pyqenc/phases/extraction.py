@@ -34,7 +34,6 @@ from pyqenc.phase import (
     Artifact,
     FinalizeContext,
     Phase,
-    PhaseBase,
     PhaseResult,
     Recovery,
     RecoveryError,
@@ -725,13 +724,13 @@ class ExtractionPhaseResult(PhaseResult):
     timestamps_path: Path | None          = None
 
 
-class ExtractionPhase(PhaseBase):
+class ExtractionPhase(Phase):
     """Phase object for stream extraction.
 
     Owns artifact enumeration, recovery, invalidation, execution, and logging
     for the extraction phase.  Wraps the existing ``MKVTrackExtractor`` and
     ``extract_streams`` helpers. The uniform run footprint is inherited from
-    :class:`PhaseBase`.
+    :class:`Phase`.
 
     Args:
         config: Full pipeline configuration.
@@ -755,7 +754,7 @@ class ExtractionPhase(PhaseBase):
         self._video_required: bool = video_required
 
     # ------------------------------------------------------------------
-    # PhaseBase hooks
+    # Phase hooks
     # ------------------------------------------------------------------
 
     def _log_key_params(self) -> None:

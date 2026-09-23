@@ -32,7 +32,6 @@ from pyqenc.phase import (
     Artifact,
     FinalizeContext,
     Phase,
-    PhaseBase,
     PhaseResult,
     Recovery,
     RecoveryError,
@@ -81,7 +80,7 @@ class JobPhaseResult(PhaseResult):
 # JobPhase
 # ---------------------------------------------------------------------------
 
-class JobPhase(PhaseBase):
+class JobPhase(Phase):
     """Phase object that initialises ``job.yaml`` and probes source metadata.
 
     This phase has no dependencies and is a declared dependency of every other
@@ -138,7 +137,7 @@ class JobPhase(PhaseBase):
         self._force_wipe: bool            = False
 
     # ------------------------------------------------------------------
-    # PhaseBase hooks
+    # Phase hooks
     # ------------------------------------------------------------------
 
     def _recover(self) -> Recovery:

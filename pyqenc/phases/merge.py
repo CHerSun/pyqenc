@@ -45,7 +45,6 @@ from pyqenc.phase import (
     Artifact,
     ArtifactState,
     Phase,
-    PhaseBase,
     PhaseResult,
     Recovery,
 )
@@ -520,12 +519,12 @@ class MergePhaseResult(PhaseResult):
 # MergePhase
 # ---------------------------------------------------------------------------
 
-class MergePhase(PhaseBase):
+class MergePhase(Phase):
     """Phase object for final video merging.
 
     Owns artifact enumeration, recovery, execution, and logging for the merge
     phase.  Wraps the existing ``merge_final_video`` helper. The uniform run
-    footprint is inherited from :class:`PhaseBase`.
+    footprint is inherited from :class:`Phase`.
 
     In pipeline mode encoded chunks are read directly from
     ``EncodingPhase.result`` without rescanning the filesystem.  In standalone
@@ -582,7 +581,7 @@ class MergePhase(PhaseBase):
         return MergeParams(quality_targets=[], metrics_sampling=1)
 
     # ------------------------------------------------------------------
-    # PhaseBase hooks
+    # Phase hooks
     # ------------------------------------------------------------------
 
     def _log_key_params(self) -> None:

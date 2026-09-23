@@ -31,7 +31,6 @@ from pyqenc.models import (
 from pyqenc.phase import (
     Artifact,
     Phase,
-    PhaseBase,
     PhaseResult,
     Recovery,
     RecoveryError,
@@ -73,7 +72,7 @@ class ProbePhaseResult(PhaseResult):
 # ProbePhase
 # ---------------------------------------------------------------------------
 
-class ProbePhase(PhaseBase):
+class ProbePhase(Phase):
     """Phase object that resolves crop parameters and source frame count.
 
     Depends on ``JobPhase`` and ``ExtractionPhase``.  Returns ``FAILED`` when
@@ -121,7 +120,7 @@ class ProbePhase(PhaseBase):
         self._resolved_crop:   CropParams                  = CropParams()
 
     # ------------------------------------------------------------------
-    # PhaseBase hooks
+    # Phase hooks
     # ------------------------------------------------------------------
 
     def _recover(self) -> Recovery:

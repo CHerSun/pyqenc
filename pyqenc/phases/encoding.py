@@ -47,7 +47,6 @@ from pyqenc.phase import (
     Artifact,
     FinalizeContext,
     Phase,
-    PhaseBase,
     PhaseResult,
     Recovery,
     RecoveryError,
@@ -1517,12 +1516,12 @@ class EncodingPhaseResult(PhaseResult):
             self.encoded = []
 
 
-class EncodingPhase(PhaseBase):
+class EncodingPhase(Phase):
     """Phase object for CRF-search chunk encoding.
 
     Owns artifact enumeration, recovery, invalidation, execution, and logging
     for the encoding phase.  Wraps the existing ``encode_all_chunks`` helper.
-    The uniform run footprint is inherited from :class:`PhaseBase`.
+    The uniform run footprint is inherited from :class:`Phase`.
 
     Args:
         config: Full pipeline configuration.
@@ -1551,7 +1550,7 @@ class EncodingPhase(PhaseBase):
         completes.  Used by downstream phases (e.g. ``MergePhase``) to label plots."""
 
     # ------------------------------------------------------------------
-    # PhaseBase hooks
+    # Phase hooks
     # ------------------------------------------------------------------
 
     def _recovery_unit(self) -> str:

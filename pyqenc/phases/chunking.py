@@ -343,7 +343,6 @@ from pyqenc.phase import (
     Artifact,
     FinalizeContext,
     Phase,
-    PhaseBase,
     PhaseResult,
     Recovery,
     RecoveryError,
@@ -403,13 +402,13 @@ class ChunkingPhaseResult(PhaseResult):
             self.chunks = []
 
 
-class ChunkingPhase(PhaseBase):
+class ChunkingPhase(Phase):
     """Phase object for scene-based video chunking.
 
     Owns artifact enumeration, recovery, invalidation, execution, and logging
     for the chunking phase.  Wraps the existing ``detect_scenes`` and
     ``split_chunks`` helpers. The uniform run footprint is inherited from
-    :class:`PhaseBase`.
+    :class:`Phase`.
 
     Args:
         config: Full pipeline configuration.
@@ -435,7 +434,7 @@ class ChunkingPhase(PhaseBase):
         self._recovered_scenes: list[SceneBoundary] = []
 
     # ------------------------------------------------------------------
-    # PhaseBase hooks
+    # Phase hooks
     # ------------------------------------------------------------------
 
     def _log_key_params(self) -> None:

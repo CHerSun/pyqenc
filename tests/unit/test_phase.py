@@ -1,4 +1,4 @@
-"""Unit tests for the PhaseBase template run() — observable behavior only.
+"""Unit tests for the Phase template run() — observable behavior only.
 
 A minimal stub phase exercises the template mechanics through the public
 ``run()``: memoization, banner emission, timed recovery, wanted-filtering,
@@ -27,7 +27,6 @@ from pyqenc.phase import (
     Artifact,
     FinalizeContext,
     Phase,
-    PhaseBase,
     PhaseContractError,
     PhaseResult,
     Recovery,
@@ -39,7 +38,7 @@ from pyqenc.state import ArtifactState
 _APP_CONFIG: AppConfig = load_app_config(default_only=True)
 
 
-class _StubPhase(PhaseBase):
+class _StubPhase(Phase):
     """Minimal concrete phase: canned recovery, recording execute, base result."""
 
     name = "stub"
@@ -58,7 +57,7 @@ class _StubPhase(PhaseBase):
         super().__init__(
             cast("AppConfig", _APP_CONFIG), registry, collector=collector
         )
-        self.BANNER = banner  # noqa: N806 — instance-level override of the class flag
+        self.BANNER = banner
         self._recovery = recovery
         self._execute_result = execute_result
         self._recover_error = recover_error
@@ -135,13 +134,6 @@ class TestDeclaredDependencies:
 
         with pytest.raises(TypeError, match="requires _StubPhase"):
             target.run()
-
-    def test_dependencies_property_lists_declared_instances(self) -> None:
-        registry: dict[type[Phase], Phase] = {}
-        target = _DepStubPhase(NoOpMetricsCollector(), Recovery(pending=False), registry=registry)  # type: ignore[call-arg]
-        dep = _StubPhase(NoOpMetricsCollector(), Recovery(pending=False))
-        registry[_StubPhase] = dep
-        assert target.dependencies == [dep]
 
 
 def _spy_collector() -> MagicMock:

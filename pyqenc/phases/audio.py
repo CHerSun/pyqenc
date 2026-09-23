@@ -54,7 +54,6 @@ from pyqenc.models import AudioMetadata, PhaseOutcome
 from pyqenc.phase import (
     Artifact,
     Phase,
-    PhaseBase,
     PhaseResult,
     Recovery,
 )
@@ -114,14 +113,14 @@ class AudioPhaseResult(PhaseResult):
     audio_files: list[Path]          = _field(default_factory=list)
 
 
-class AudioPhase(PhaseBase):
+class AudioPhase(Phase):
     """Phase object for audio stream processing.
 
     Owns artifact enumeration, recovery, invalidation, execution, and logging
     for the audio phase. Drives the configured chains over the selected source
     tracks via the ``pyqenc.audio`` chain executor. The uniform run footprint
     (memoization, dependencies, banner, timed recovery, dry-run / reused
-    branches, timed execution) is inherited from :class:`PhaseBase`.
+    branches, timed execution) is inherited from :class:`Phase`.
 
     Args:
         config: Full pipeline configuration.
@@ -142,7 +141,7 @@ class AudioPhase(PhaseBase):
         super().__init__(config, phases, collector=collector)
 
     # ------------------------------------------------------------------
-    # PhaseBase hooks
+    # Phase hooks
     # ------------------------------------------------------------------
 
     def _log_key_params(self) -> None:

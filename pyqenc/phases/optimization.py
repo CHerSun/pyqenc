@@ -44,7 +44,6 @@ from pyqenc.models import (
 from pyqenc.phase import (
     Artifact,
     Phase,
-    PhaseBase,
     PhaseResult,
     Recovery,
     RecoveryError,
@@ -94,7 +93,7 @@ class OptimizationPhaseResult(PhaseResult):
 # OptimizationPhase
 # ---------------------------------------------------------------------------
 
-class OptimizationPhase(PhaseBase):
+class OptimizationPhase(Phase):
     """Phase object for strategy optimization.
 
     In **all-strategies mode** (``config.optimize=False`` or a single
@@ -140,7 +139,7 @@ class OptimizationPhase(PhaseBase):
         self._current_probe:     ProbeState | None                 = None
 
     # ------------------------------------------------------------------
-    # PhaseBase hooks
+    # Phase hooks
     # ------------------------------------------------------------------
 
     def _skip_check(self, dry_run: bool) -> OptimizationPhaseResult | None:
