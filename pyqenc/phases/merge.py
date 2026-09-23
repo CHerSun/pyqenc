@@ -45,6 +45,7 @@ from pyqenc.phase import (
     Artifact,
     ArtifactState,
     Phase,
+    PhaseRegistry,
     PhaseResult,
     Recovery,
 )
@@ -544,7 +545,7 @@ class MergePhase(Phase):
     def __init__(
         self,
         config:    AppConfig,
-        phases:    dict[type[Phase], Phase] | None = None,
+        phases:    PhaseRegistry | None = None,
         *,
         collector: MetricsCollector,
     ) -> None:

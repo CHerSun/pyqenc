@@ -35,7 +35,7 @@ from pyqenc.models import (
     PhaseOutcome,
     VideoMetadata,
 )
-from pyqenc.phase import Artifact, Phase
+from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
 from pyqenc.phases.encoding import (
     EncodedArtifact,
@@ -122,7 +122,7 @@ def _make_merge_phase(
         source     = source,
     )
 
-    registry: dict[type[Phase], Phase] = {JobPhase: job}
+    registry: PhaseRegistry = {JobPhase: job}
 
     extraction = ExtractionPhase(config, registry, video_required=True, collector=collector)
     ts_artifacts = (

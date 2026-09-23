@@ -34,6 +34,7 @@ from pyqenc.phase import (
     Artifact,
     FinalizeContext,
     Phase,
+    PhaseRegistry,
     PhaseResult,
     Recovery,
     RecoveryError,
@@ -744,7 +745,7 @@ class ExtractionPhase(Phase):
     def __init__(
         self,
         config:         "AppConfig",
-        phases:         "dict[type[Phase], Phase] | None" = None,
+        phases:         PhaseRegistry | None = None,
         *,
         video_required: bool              = True,
         collector:      "MetricsCollector",

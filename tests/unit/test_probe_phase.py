@@ -34,7 +34,7 @@ from pyqenc.models import (
     PhaseOutcome,
     VideoMetadata,
 )
-from pyqenc.phase import Artifact, Phase
+from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
@@ -109,7 +109,7 @@ def _make_probe_phase(
     )
     job.result = job_result
 
-    registry: dict[type[Phase], Phase] = {JobPhase: job}
+    registry: PhaseRegistry = {JobPhase: job}
 
     extraction = ExtractionPhase(_APP_CONFIG, registry, collector=collector)
     extraction.result = extraction_result

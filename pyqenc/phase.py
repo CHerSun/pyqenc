@@ -337,7 +337,7 @@ class Phase:
     def __init__(
         self,
         config:  AppConfig,
-        phases:  dict[type[Phase], Phase] | None = None,
+        phases:  PhaseRegistry | None = None,
         *,
         collector: MetricsCollector,
     ) -> None:
@@ -359,7 +359,7 @@ class Phase:
         """
         self._config:    AppConfig        = config
         self._collector: MetricsCollector = collector
-        self._phases:    dict[type[Phase], Phase] = phases if phases is not None else {}
+        self._phases:    PhaseRegistry = phases if phases is not None else {}
         self.result:     PhaseResult | None = None
 
     # ------------------------------------------------------------------
@@ -737,7 +737,7 @@ def _build_registry(
                         ``audio`` subcommand to skip video processing entirely.
 
     Returns:
-        Ordered ``dict[type[Phase], Phase]`` mapping each phase class to its
+        A ``PhaseRegistry`` (ordered dict) mapping each phase class to its
         constructed instance.  Iterating the values yields phases in execution
         order.
     """

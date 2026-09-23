@@ -31,6 +31,7 @@ from pyqenc.models import (
 from pyqenc.phase import (
     Artifact,
     Phase,
+    PhaseRegistry,
     PhaseResult,
     Recovery,
     RecoveryError,
@@ -104,7 +105,7 @@ class ProbePhase(Phase):
     def __init__(
         self,
         config:      AppConfig,
-        phases:      dict[type[Phase], Phase] | None = None,
+        phases:      PhaseRegistry | None = None,
         *,
         collector:   MetricsCollector,
         crop_params: CropParams | None = None,

@@ -28,6 +28,7 @@ from pyqenc.phase import (
     FinalizeContext,
     Phase,
     PhaseContractError,
+    PhaseRegistry,
     PhaseResult,
     Recovery,
     RecoveryError,
@@ -115,7 +116,7 @@ class TestDeclaredDependencies:
         it. Populating the declared dependency AFTER the target's
         construction is enough for the run to succeed.
         """
-        registry: dict[type[Phase], Phase] = {}
+        registry: PhaseRegistry = {}
         target = _DepStubPhase(NoOpMetricsCollector(), Recovery(pending=False), registry=registry)  # type: ignore[call-arg]
 
         dep = _StubPhase(NoOpMetricsCollector(), Recovery(pending=False))
@@ -128,7 +129,7 @@ class TestDeclaredDependencies:
 
     def test_missing_declared_dependency_raises_loudly(self) -> None:
         """A declared dependency absent from the registry is never dropped."""
-        registry: dict[type[Phase], Phase] = {}
+        registry: PhaseRegistry = {}
         target = _DepStubPhase(NoOpMetricsCollector(), Recovery(pending=False), registry=registry)  # type: ignore[call-arg]
         # registry stays empty — the declared dep is absent
 
@@ -292,7 +293,7 @@ class _FinalizeRecorder(_StubPhase):
 
 
 def _runner_with(target: _StubPhase, collector, *, no_metrics: bool = False) -> Runner:
-    registry: dict[type[Phase], Phase] = {type(target): target}
+    registry: PhaseRegistry = {type(target): target}
     return Runner(
         registry,
         type(target),

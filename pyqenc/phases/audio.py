@@ -54,6 +54,7 @@ from pyqenc.models import AudioMetadata, PhaseOutcome
 from pyqenc.phase import (
     Artifact,
     Phase,
+    PhaseRegistry,
     PhaseResult,
     Recovery,
 )
@@ -134,7 +135,7 @@ class AudioPhase(Phase):
     def __init__(
         self,
         config:    AppConfig,
-        phases:    dict[type[Phase], Phase] | None = None,
+        phases:    PhaseRegistry | None = None,
         *,
         collector: MetricsCollector,
     ) -> None:
