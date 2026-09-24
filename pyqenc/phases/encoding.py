@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from dataclasses import dataclass as _dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from alive_progress import config_handler
 
@@ -52,9 +52,9 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
-from pyqenc.phases.chunking import ChunkingPhase
-from pyqenc.phases.job import JobPhase
-from pyqenc.phases.optimization import OptimizationPhase
+from pyqenc.phases.chunking import ChunkingPhase, ChunkingPhaseResult
+from pyqenc.phases.job import JobPhase, JobPhaseResult
+from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.quality import QualitySearchV3
 from pyqenc.state import (
@@ -1565,10 +1565,8 @@ class EncodingPhase(Phase):
         probe_result = self._dep(ProbePhase).result
         crop         = probe_result.crop if probe_result is not None else None
 
-        opt_result      = self._dep(OptimizationPhase).result
-        strategies      = getattr(opt_result, "selected_strategies", []) if opt_result else []
-        chunking_result = self._dep(ChunkingPhase).result
-        chunks          = getattr(chunking_result, "chunks", []) if chunking_result else []
+        strategies = cast(OptimizationPhaseResult, self._dep(OptimizationPhase).result).selected_strategies
+        chunks     = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result).chunks
         logger.info("Chunks:      %d", len(chunks))
         logger.info("Strategies:  %s", ", ".join(s.name for s in strategies) if strategies else "none")
         if crop:
@@ -1629,11 +1627,12 @@ class EncodingPhase(Phase):
             RecoveryError: On a probe change without ``--force``, or when
                 chunking/optimization produced no chunks / strategies.
         """
-        work_dir  = self._dep(JobPhase).result.work_dir  # type: ignore[union-attr]
-        enc_dir   = work_dir / ENCODING_WORKSPACE_DIR
-        out_dir   = work_dir / ENCODED_OUTPUT_DIR
-        yaml_path = work_dir / _ENCODING_YAML
-        force_wipe = getattr(self._dep(JobPhase).result, "force_wipe", False)  # type: ignore[union-attr]
+        job_result: JobPhaseResult = cast(JobPhaseResult, self._dep(JobPhase).result)
+        work_dir   = job_result.work_dir
+        enc_dir    = work_dir / ENCODING_WORKSPACE_DIR
+        out_dir    = work_dir / ENCODED_OUTPUT_DIR
+        yaml_path  = work_dir / _ENCODING_YAML
+        force_wipe = job_result.force_wipe
 
         # Step 1: force-wipe
         if force_wipe:
@@ -1675,11 +1674,11 @@ class EncodingPhase(Phase):
                     logger.warning("Could not remove temp file %s: %s", tmp, exc)
 
         # Step 4: get chunks and strategies from dependencies
-        chunking_result    = self._dep(ChunkingPhase).result  # type: ignore[union-attr]
-        optimization_result = self._dep(OptimizationPhase).result  # type: ignore[union-attr]
+        chunking_result     = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result)
+        optimization_result = cast(OptimizationPhaseResult, self._dep(OptimizationPhase).result)
 
-        chunks: list[ChunkMetadata] = getattr(chunking_result, "chunks", [])
-        strategies = getattr(optimization_result, "selected_strategies", [])
+        chunks: list[ChunkMetadata] = chunking_result.chunks
+        strategies = optimization_result.selected_strategies
 
         if not chunks:
             raise RecoveryError("No chunks available from ChunkingPhase")
@@ -1786,16 +1785,16 @@ class EncodingPhase(Phase):
         Returns:
             ``EncodingPhaseResult`` after encoding.
         """
-        work_dir = self._dep(JobPhase).result.work_dir  # type: ignore[union-attr]
-        probe_result = self._dep(ProbePhase).result  # type: ignore[union-attr]
+        work_dir = cast(JobPhaseResult, self._dep(JobPhase).result).work_dir
+        probe_result = self._dep(ProbePhase).result
         crop         = probe_result.crop if probe_result is not None else None
 
         # Resolve chunks and strategies from dependencies
-        chunking_result     = self._dep(ChunkingPhase).result  # type: ignore[union-attr]
-        optimization_result = self._dep(OptimizationPhase).result  # type: ignore[union-attr]
+        chunking_result     = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result)
+        optimization_result = cast(OptimizationPhaseResult, self._dep(OptimizationPhase).result)
 
-        chunks: list[ChunkMetadata] = getattr(chunking_result, "chunks", [])
-        strategies = getattr(optimization_result, "selected_strategies", [])
+        chunks: list[ChunkMetadata] = chunking_result.chunks
+        strategies = optimization_result.selected_strategies
 
         if not chunks:
             err = "No chunks available from ChunkingPhase"

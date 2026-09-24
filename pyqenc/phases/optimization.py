@@ -23,7 +23,7 @@ import random
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from alive_progress import config_handler
 
@@ -49,8 +49,8 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
-from pyqenc.phases.chunking import ChunkingPhase
-from pyqenc.phases.job import JobPhase
+from pyqenc.phases.chunking import ChunkingPhase, ChunkingPhaseResult
+from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.state import (
     ArtifactState,
@@ -213,7 +213,7 @@ class OptimizationPhase(Phase):
         opt_yaml     = work_dir / _OPTIMIZATION_YAML
         tolerance    = self._config.encoding.optimize_tolerance
         strategies   = self._config.encoding.resolved_strategies
-        force_wipe   = getattr(job_result, "force_wipe", False)
+        force_wipe   = job_result.force_wipe
 
         crop           = probe_result.crop
         current_probe  = ProbeState(
@@ -327,7 +327,7 @@ class OptimizationPhase(Phase):
         Returns:
             ``OptimizationPhaseResult`` with ``selected_strategies`` set.
         """
-        job_result = self._dep(JobPhase).result  # type: ignore[union-attr]
+        job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
         work_dir   = job_result.work_dir
         opt_yaml   = work_dir / _OPTIMIZATION_YAML
         tolerance  = self._config.encoding.optimize_tolerance
@@ -366,8 +366,8 @@ class OptimizationPhase(Phase):
         strategies_to_test = self._strategies_to_test
 
         # Test encodes need chunks from ChunkingPhase.
-        chunking_result = self._dep(ChunkingPhase).result  # type: ignore[union-attr]
-        chunks: list[ChunkMetadata] = getattr(chunking_result, "chunks", [])
+        chunking_result = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result)
+        chunks: list[ChunkMetadata] = chunking_result.chunks
         if strategies_to_test and not chunks:
             err = "No chunks available from ChunkingPhase"
             logger.critical(err)

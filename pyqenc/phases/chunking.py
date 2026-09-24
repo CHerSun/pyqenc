@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -348,8 +348,8 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
-from pyqenc.phases.extraction import ExtractionPhase
-from pyqenc.phases.job import JobPhase
+from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
+from pyqenc.phases.job import JobPhase, JobPhaseResult
 
 _CHUNKING_YAML     = "chunking.yaml"
 
@@ -469,10 +469,11 @@ class ChunkingPhase(Phase):
         Raises:
             RecoveryError: On a chunking-mode change without ``--force``.
         """
-        work_dir   = self._dep(JobPhase).result.work_dir  # type: ignore[union-attr]
+        job_result: JobPhaseResult = cast(JobPhaseResult, self._dep(JobPhase).result)
+        work_dir   = job_result.work_dir
         chunks_dir = work_dir / CHUNKS_DIR
         yaml_path  = work_dir / _CHUNKING_YAML
-        force_wipe = getattr(self._dep(JobPhase).result, "force_wipe", False)  # type: ignore[union-attr]
+        force_wipe = job_result.force_wipe
 
         # Step 1: force-wipe
         if force_wipe:
@@ -557,10 +558,9 @@ class ChunkingPhase(Phase):
 
         if scenes:
             # Get source duration from JobPhase result — it's already probed and cached there.
-            job_result = self._dep(JobPhase).result
-            job_state  = getattr(job_result, "job", None)
+            job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
             source_duration: float | None = (
-                job_state.source.duration_seconds if job_state is not None else None
+                job_result.job.source.duration_seconds if job_result.job is not None else None
             )
 
             for start_ts, end_ts, stem, chunk_file in _expand_scenes(
@@ -726,8 +726,8 @@ class ChunkingPhase(Phase):
             logger.critical(err)
             return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
 
-        job_result = self._dep(JobPhase).result  # type: ignore[union-attr]
-        job_state  = getattr(job_result, "job", None)
+        job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
+        job_state  = job_result.job
         if job_state is None:
             from pyqenc.state import JobState as _JobState
             job_state = _JobState(source=VideoMetadata(path=job_result.source))
@@ -819,7 +819,7 @@ class ChunkingPhase(Phase):
         extraction = self._dep(ExtractionPhase)
         if extraction.result is None:
             return None
-        video_meta = getattr(extraction.result, "video", None)
+        video_meta = cast(ExtractionPhaseResult, extraction.result).video
         if video_meta is not None:
             return video_meta.path
         # Fallback: scan extracted/ for a .mkv file

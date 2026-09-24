@@ -21,7 +21,7 @@ import subprocess
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import yaml
 
@@ -50,10 +50,10 @@ from pyqenc.phase import (
     Recovery,
 )
 from pyqenc.phases.audio import AudioPhase
-from pyqenc.phases.encoding import EncodingPhase
+from pyqenc.phases.encoding import EncodingPhase, EncodingPhaseResult
 from pyqenc.phases.extraction import ExtractionPhase
-from pyqenc.phases.job import JobPhase
-from pyqenc.phases.probe import ProbePhase
+from pyqenc.phases.job import JobPhase, JobPhaseResult
+from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import MergeParams, MergeStrategySummary, ProbeState
 from pyqenc.utils.ffmpeg_runner import get_frame_count
 from pyqenc.utils.log_format import (
@@ -564,14 +564,14 @@ class MergePhase(Phase):
         snapshotted at construction time.
         """
         probe: ProbeState | None = None
-        probe_result = self._dep(ProbePhase).result
+        probe_result = cast(ProbePhaseResult, self._dep(ProbePhase).result)
         if probe_result is not None:
             probe = ProbeState(
                 frame_count = probe_result.source.frame_count if probe_result.source else 0,
                 crop        = probe_result.crop if probe_result.crop else None,
             )
 
-        job_result = self._dep(JobPhase).result
+        job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
         if job_result is not None:
             return MergeParams(
                 quality_targets  = _targets_as_strings(job_result.config.encoding.resolved_targets),
@@ -587,7 +587,7 @@ class MergePhase(Phase):
 
     def _log_key_params(self) -> None:
         """Log the source stem and quality targets (key parameters)."""
-        logger.info("Source stem:  %s", self._dep(JobPhase).result.source.stem)  # type: ignore[union-attr]
+        logger.info("Source stem:  %s", cast(JobPhaseResult, self._dep(JobPhase).result).source.stem)
         if self._config.encoding.resolved_targets:
             logger.info("Targets:      %s", ", ".join(
                 f"{t.metric}-{t.statistic}≥{t.value}" for t in self._config.encoding.resolved_targets
@@ -606,7 +606,7 @@ class MergePhase(Phase):
             A typed ``FAILED`` result, or ``None`` when the phase may proceed.
         """
         incomplete = [
-            a for a in self._dep(EncodingPhase).result.encoded  # type: ignore[union-attr]
+            a for a in cast(EncodingPhaseResult, self._dep(EncodingPhase).result).encoded
             if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)
         ]
         if incomplete:
@@ -634,10 +634,11 @@ class MergePhase(Phase):
         Returns:
             The :class:`Recovery` single source of truth.
         """
-        work_dir  = self._dep(JobPhase).result.work_dir  # type: ignore[union-attr]
-        final_dir = work_dir / FINAL_OUTPUT_DIR
+        job_result: JobPhaseResult = cast(JobPhaseResult, self._dep(JobPhase).result)
+        work_dir   = job_result.work_dir
+        final_dir  = work_dir / FINAL_OUTPUT_DIR
         merge_yaml = work_dir / _MERGE_YAML
-        force_wipe = getattr(self._dep(JobPhase).result, "force_wipe", False)  # type: ignore[union-attr]
+        force_wipe = job_result.force_wipe
 
         # Step 1: force-wipe
         if force_wipe:
@@ -697,7 +698,7 @@ class MergePhase(Phase):
         if not strategies:
             return Recovery()
 
-        source_stem = self._dep(JobPhase).result.source.stem  # type: ignore[union-attr]
+        source_stem = job_result.source.stem
 
         # Step 5: classify each expected output
         artifacts: list[MergeArtifact] = []
@@ -771,7 +772,7 @@ class MergePhase(Phase):
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> MergePhaseResult:
         """Build the reused result, replaying the persisted merge summary."""
-        merge_yaml = self._dep(JobPhase).result.work_dir / _MERGE_YAML  # type: ignore[union-attr]
+        merge_yaml = cast(JobPhaseResult, self._dep(JobPhase).result).work_dir / _MERGE_YAML
         persisted  = MergeParams.load(merge_yaml)
         if persisted is not None:
             logger.info(THICK_LINE)
@@ -826,7 +827,7 @@ class MergePhase(Phase):
         if encoding.result is None:
             return []
 
-        encoded = getattr(encoding.result, "encoded", [])
+        encoded = cast(EncodingPhaseResult, encoding.result).encoded
         seen: dict[str, str] = {}
         for artifact in encoded:
             if artifact.state == ArtifactState.COMPLETE:
@@ -858,19 +859,20 @@ class MergePhase(Phase):
         from pyqenc.metrics import MetricKey
 
         artifacts = wanted
-        work_dir  = self._dep(JobPhase).result.work_dir  # type: ignore[union-attr]
+        work_dir  = cast(JobPhaseResult, self._dep(JobPhase).result).work_dir
         final_dir = work_dir / FINAL_OUTPUT_DIR
         final_dir.mkdir(parents=True, exist_ok=True)
 
-        job_result = self._dep(JobPhase).result  # type: ignore[union-attr]
-        probe_result = self._dep(ProbePhase).result
+        job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
+        probe_result = cast(ProbePhaseResult, self._dep(ProbePhase).result)
         crop: CropParams | None = probe_result.crop if probe_result is not None else None
-        job        = getattr(job_result, "job", None)
-        source_video: VideoMetadata | None = getattr(job, "source", None) if job else None
+        source_video: VideoMetadata | None = (
+            job_result.job.source if job_result.job is not None else None
+        )
         source_frame_count: int = (
             probe_result.source.frame_count if (probe_result is not None and probe_result.source) else 0
         )
-        source_stem = self._dep(JobPhase).result.source.stem  # type: ignore[union-attr]
+        source_stem = job_result.source.stem
 
         # Build encoded_chunks dict from EncodingPhase result
         encoded_chunks = self._collect_encoded_chunks()
@@ -985,14 +987,14 @@ class MergePhase(Phase):
                 targets_met:  bool             = False
                 plot_path:    Path | None       = None
 
-                if source_video and self._dep(JobPhase).result.config.encoding.resolved_targets:  # type: ignore[union-attr]
+                if source_video and job_result.config.encoding.resolved_targets:
                     try:
                         with self._collector.time(MetricKey.MERGE, METRIC_KEY_QUALITY_MEASURE):
                             metrics_dict, targets_met, plot_path = _measure_quality(
                                 final_result     = output_file,
                                 source_video     = source_video,
                                 ref_crop         = crop,
-                                quality_targets  = self._dep(JobPhase).result.config.encoding.resolved_targets,  # type: ignore[union-attr]
+                                quality_targets  = job_result.config.encoding.resolved_targets,
                                 output_dir       = final_dir,
                                 metrics_sampling = self._dep(JobPhase).result.config.measurement.sampling,  # type: ignore[union-attr]
                             )
@@ -1000,9 +1002,9 @@ class MergePhase(Phase):
                         logger.warning("  Could not measure quality: %s", exc)
 
                 # CRF distribution plot
-                encoded_artifacts = getattr(
-                    self._dep(EncodingPhase).result, "encoded", []
-                )
+                encoded_artifacts = cast(
+                    EncodingPhaseResult, self._dep(EncodingPhase).result
+                ).encoded
                 crf_data = _collect_crf_data(encoded_artifacts, strategy_name)
                 if crf_data:
                     crf_plot_path = final_dir / f"{output_file.stem}.crf.png"
@@ -1117,7 +1119,7 @@ class MergePhase(Phase):
         if encoding.result is None:
             return {}
 
-        encoded = getattr(encoding.result, "encoded", [])
+        encoded = cast(EncodingPhaseResult, encoding.result).encoded
         chunks: dict[str, dict[str, Path]] = {}
         for artifact in encoded:
             if artifact.state == ArtifactState.COMPLETE and artifact.path.exists():

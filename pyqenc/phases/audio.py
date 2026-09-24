@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 from dataclasses import dataclass as _dataclass
 from dataclasses import field as _field
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -58,8 +58,8 @@ from pyqenc.phase import (
     PhaseResult,
     Recovery,
 )
-from pyqenc.phases.extraction import ExtractionPhase
-from pyqenc.phases.job import JobPhase
+from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
+from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.state import ArtifactState, AudioSidecar
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.long_path import LongPath
@@ -181,11 +181,11 @@ class AudioPhase(Phase):
             list: wanted expected outputs plus any present-but-unwanted
             surplus files).
         """
-        job_result   = self._dep(JobPhase).result       # type: ignore[union-attr]
-        work_dir     = LongPath(job_result.work_dir)
+        job_result: JobPhaseResult = cast(JobPhaseResult, self._dep(JobPhase).result)
+        work_dir    = LongPath(job_result.work_dir)
         sidecar_path = work_dir / _AUDIO_YAML
-        audio_cfg    = job_result.config.audio
-        force_wipe   = getattr(job_result, "force_wipe", False)
+        audio_cfg   = job_result.config.audio
+        force_wipe  = job_result.force_wipe
 
         # Step 3 — resolve the working plan (selection is recomputed every run).
         tracks   = self._selected_tracks()
@@ -271,9 +271,9 @@ class AudioPhase(Phase):
 
     def _selected_tracks(self) -> list[AudioMetadata]:
         """Resolve the working track set from extraction + ``audio.select`` (Req 9.1)."""
-        extraction_result = self._dep(ExtractionPhase).result
-        audio_meta: list[AudioMetadata] = getattr(extraction_result, "audio", []) or []
-        audio_cfg = self._dep(JobPhase).result.config.audio  # type: ignore[union-attr]
+        extraction_result = cast(ExtractionPhaseResult, self._dep(ExtractionPhase).result)
+        audio_meta: list[AudioMetadata] = extraction_result.audio or []
+        audio_cfg = cast(JobPhaseResult, self._dep(JobPhase).result).config.audio
         return resolve_selection(audio_meta, audio_cfg.select)
 
     def _invalidate_and_commit(
@@ -454,7 +454,7 @@ class AudioPhase(Phase):
         """
         artifacts  = wanted
         pending    = [a for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)]
-        job_result = self._dep(JobPhase).result  # type: ignore[union-attr]
+        job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
         audio_cfg  = job_result.config.audio
         resolved   = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
         audio_dir  = LongPath(job_result.work_dir) / AUDIO_OUTPUT_DIR

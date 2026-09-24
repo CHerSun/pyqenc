@@ -39,7 +39,7 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
-from pyqenc.phases.job import JobPhase
+from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.state import ArtifactState
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 
@@ -794,9 +794,10 @@ class ExtractionPhase(Phase):
         Raises:
             RecoveryError: When the source cannot be analysed at all.
         """
-        work_dir      = self._dep(JobPhase).result.work_dir  # type: ignore[union-attr]
+        job_result: JobPhaseResult = cast(JobPhaseResult, self._dep(JobPhase).result)
+        work_dir      = job_result.work_dir
         extracted_dir = work_dir / EXTRACTED_DIR
-        force_wipe    = getattr(self._dep(JobPhase).result, "force_wipe", False)  # type: ignore[union-attr]
+        force_wipe    = job_result.force_wipe
 
         # Step 1: force-wipe
         if force_wipe and extracted_dir.exists():
