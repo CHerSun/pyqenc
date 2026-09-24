@@ -36,7 +36,7 @@ from pyqenc.quality import (
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 
 matplotlib.use("Agg")  # non-interactive backend — safe to call from any thread
-import matplotlib as ticker
+from matplotlib import ticker
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
