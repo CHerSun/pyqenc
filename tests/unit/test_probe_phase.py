@@ -26,7 +26,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pyqenc.app_config import load_app_config
-from pyqenc.metrics import NoOpMetricsCollector
+from pyqenc.metrics import MetricKey, NoOpMetricsCollector
 from pyqenc.models import (
     CleanupLevel,
     CropParams,
@@ -34,7 +34,7 @@ from pyqenc.models import (
     PhaseOutcome,
     VideoMetadata,
 )
-from pyqenc.phase import Artifact, Phase
+from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
@@ -87,6 +87,7 @@ def _make_probe_phase(
     extraction_result: ExtractionPhaseResult,
     *,
     crop_params:       CropParams | None = None,
+    collector          = None,
 ) -> ProbePhase:
     """Construct ProbePhase via its real constructor and a real registry.
 
@@ -94,7 +95,8 @@ def _make_probe_phase(
     their public ``result`` pre-set to a completed typed result, so the shared
     dependency walk treats them as already-run without any mocking.
     """
-    collector = NoOpMetricsCollector()
+    if collector is None:
+        collector = NoOpMetricsCollector()
 
     job = JobPhase(
         _APP_CONFIG, None,
@@ -107,7 +109,7 @@ def _make_probe_phase(
     )
     job.result = job_result
 
-    registry: dict[type[Phase], Phase] = {JobPhase: job}
+    registry: PhaseRegistry = {JobPhase: job}
 
     extraction = ExtractionPhase(_APP_CONFIG, registry, collector=collector)
     extraction.result = extraction_result
@@ -274,3 +276,80 @@ class TestProbePhaseCompleted:
         assert loaded.crop is not None
         assert loaded.crop.top    == self._DETECTED_CROP.top
         assert loaded.crop.bottom == self._DETECTED_CROP.bottom
+
+
+# ---------------------------------------------------------------------------
+# Timing instrumentation — top-level probe + dotted crop_detect / frame_count
+# ---------------------------------------------------------------------------
+
+
+class TestProbeTiming:
+    """The collector now times the probe phase (closes the TODO-7 gap)."""
+
+    _DETECTED_CROP = CropParams(top=8, bottom=8, left=0, right=0)
+    _DETECTED_FRAME_COUNT = 1234
+
+    def test_all_probe_spans_recorded_on_fresh_run(self, tmp_path: Path) -> None:
+        """Fresh probe records top-level `probe` plus both dotted sub-action keys."""
+        from unittest.mock import MagicMock
+
+        from pyqenc.metrics import MetricsCollector
+
+        collector = MagicMock(spec=MetricsCollector)
+        collector.time.return_value = __import__("contextlib").nullcontext()
+
+        source = tmp_path / "source.mkv"
+        source.write_bytes(bytes(64))
+        source_vm = _make_source_vm(source)
+        job_result = _make_job_result(tmp_path, source_vm)
+        video_vm = _make_source_vm(tmp_path / "extracted" / "video.mkv")
+        extraction_result = _make_extraction_result(video_vm)
+
+        phase = _make_probe_phase(
+            job_result, extraction_result, collector=collector
+        )
+
+        extended_vm = ExtendedVideoMetadata.from_base(
+            source_vm, frame_count=self._DETECTED_FRAME_COUNT
+        )
+        with (
+            patch("pyqenc.utils.crop.detect_crop_parameters", return_value=self._DETECTED_CROP),
+            patch.object(VideoMetadata, "probe_extended", return_value=extended_vm),
+        ):
+            result = phase.run()
+
+        assert result.outcome is PhaseOutcome.COMPLETED
+
+        calls = [call.args for call in collector.time.call_args_list]
+        assert (MetricKey.RECOVERY,) in calls, f"recovery span missing: {calls}"
+        assert (MetricKey.PROBE, "crop_detect") in calls, f"crop_detect span missing: {calls}"
+        assert (MetricKey.PROBE, "frame_count") in calls, f"frame_count span missing: {calls}"
+
+    def test_cached_run_records_no_probe_work_spans(self, tmp_path: Path) -> None:
+        """Fully cached probe.yaml records only recovery — no probe spans."""
+        from unittest.mock import MagicMock
+
+        from pyqenc.metrics import MetricsCollector
+
+        collector = MagicMock(spec=MetricsCollector)
+        collector.time.return_value = __import__("contextlib").nullcontext()
+
+        source = tmp_path / "source.mkv"
+        source.write_bytes(bytes(64))
+        source_vm = _make_source_vm(source)
+        job_result = _make_job_result(tmp_path, source_vm)
+        video_vm = _make_source_vm(tmp_path / "extracted" / "video.mkv")
+        extraction_result = _make_extraction_result(video_vm)
+
+        phase = _make_probe_phase(
+            job_result, extraction_result, collector=collector
+        )
+        _write_probe_yaml(
+            tmp_path, frame_count=42, crop=CropParams(top=1, bottom=1, left=0, right=0)
+        )
+
+        result = phase.run()
+
+        assert result.outcome is PhaseOutcome.REUSED
+        calls = [call.args for call in collector.time.call_args_list]
+        assert calls == [(MetricKey.RECOVERY,)], f"unexpected spans: {calls}"

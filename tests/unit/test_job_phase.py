@@ -59,13 +59,14 @@ def _make_phase(
 
 
 def _persist_job(work_dir: Path, source: Path, file_size: int | None = None) -> None:
-    """Write a job.yaml with given source metadata."""
+    """Write a job.yaml with given source metadata (valid fps — current state)."""
     work_dir.mkdir(parents=True, exist_ok=True)
     vm = VideoMetadata(path=source)
     if file_size is not None:
         vm._file_size_bytes = file_size
     else:
         vm._file_size_bytes = source.stat().st_size
+    vm._fps = 24.0
     JobState(source=vm).save(work_dir / "job.yaml")
 
 
@@ -100,20 +101,29 @@ class TestJobPhaseRunDryRun:
         assert result.outcome == PhaseOutcome.REUSED
         assert result.is_complete is True
 
-    def test_dry_run_mismatch_logs_warning_no_fail(
+    def test_dry_run_mismatch_fails_actionably(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
+        """Dry-run on a mismatched source fails with the actionable error.
+
+        Contract change (phase-run-template): recovery raises a fatal
+        ``RecoveryError`` on a source mismatch without ``--force`` regardless
+        of dry-run — previewing "success" against stale state would be
+        misleading. The error names the mismatch and points at ``--force``.
+        """
         src = _make_source(tmp_path)
         work_dir = tmp_path / "work"
         _persist_job(work_dir, src, file_size=9999)  # wrong size
         phase = _make_phase(tmp_path, src)
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.CRITICAL):
             result = phase.run(dry_run=True)
 
-        # Dry-run: mismatch is a warning, not a failure
-        assert result.outcome != PhaseOutcome.FAILED
-        assert any("mismatch" in r.message.lower() for r in caplog.records)
+        assert result.outcome == PhaseOutcome.FAILED
+        assert result.error is not None
+        assert "mismatch" in result.error.lower()
+        assert "--force" in result.error
+        assert any(r.levelno == logging.CRITICAL and "mismatch" in r.message.lower() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

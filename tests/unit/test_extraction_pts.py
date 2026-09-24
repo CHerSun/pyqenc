@@ -31,7 +31,7 @@ from pyqenc.app_config import load_app_config
 from pyqenc.constants import EXTRACTED_DIR, TIMESTAMPS_FILENAME
 from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import CleanupLevel, PhaseOutcome, VideoMetadata
-from pyqenc.phase import Artifact, Phase
+from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import (
     ExtractionPhase,
     ExtractionPhaseResult,
@@ -103,7 +103,7 @@ def _make_extraction_phase(
     )
     job.result = job_result
 
-    registry: dict[type[Phase], Phase] = {JobPhase: job}
+    registry: PhaseRegistry = {JobPhase: job}
     return ExtractionPhase(
         config, registry, video_required=video_required, collector=collector,
     )

@@ -28,7 +28,13 @@ from pathlib import Path
 from pyqenc.constants import THICK_LINE
 from pyqenc.metrics import METRICS_YAML_FILENAME, MetricsCollector
 from pyqenc.models import CleanupLevel, PhaseOutcome
-from pyqenc.phase import FinalizeContext, Phase, PhaseResult
+from pyqenc.phase import (
+    FinalizeContext,
+    Phase,
+    PhaseContractError,
+    PhaseRegistry,
+    PhaseResult,
+)
 from pyqenc.utils.long_path import LongPath
 
 logger = logging.getLogger(__name__)
@@ -103,7 +109,7 @@ class Runner:
 
     def __init__(
         self,
-        registry:          dict[type[Phase], Phase],
+        registry:          PhaseRegistry,
         target:            type[Phase],
         collector:         MetricsCollector,
         *,
@@ -112,7 +118,7 @@ class Runner:
         no_metrics:        bool,
         is_terminal_most:  bool,
     ) -> None:
-        self._registry:         dict[type[Phase], Phase] = registry
+        self._registry:         PhaseRegistry = registry
         self._target:           type[Phase]              = target
         self._collector:        MetricsCollector         = collector
         self._work_dir:         LongPath                 = LongPath(work_dir)
@@ -146,20 +152,25 @@ class Runner:
 
         result: PhaseResult = target.run(dry_run=dry_run)
 
-        # PENDING must never survive an execute run — treat as failure-to-progress.
-        if not dry_run and result.outcome == PhaseOutcome.PENDING:
-            logger.debug(
-                "Runner: target '%s' returned PENDING on an execute run; treating as failure.",
+        # PENDING on an execute run is a phase-contract violation, not a
+        # runtime condition: the template's dry-run branch is the only
+        # legitimate PENDING producer, so a surviving PENDING means a phase
+        # hook broke its contract. Metrics are still flushed (debug evidence)
+        # and the collector closed (always-unregister invariant); finalize is
+        # skipped and the run fails loudly below.
+        contract_violation = not dry_run and result.outcome is PhaseOutcome.PENDING
+        if contract_violation:
+            logger.error(
+                "Internal error: phase '%s' returned PENDING on an execute run — "
+                "this is a bug in the phase implementation; please report it.",
                 target.name,
             )
-            result = _as_failed(result, "phase did not progress to completion")
 
         # Whether the run succeeded at its PURPOSE. On an execute run that means
         # the target completed (is_complete). On a dry-run the purpose is a
         # preview: a PENDING target ("work remains here") is the normal,
         # successful preview outcome — only a genuine FAILED makes a dry-run
-        # unsuccessful. (PENDING never reaches here on execute; it was converted
-        # to FAILED above.)
+        # unsuccessful.
         if dry_run:
             run_ok = result.outcome != PhaseOutcome.FAILED
         else:
@@ -173,9 +184,16 @@ class Runner:
             logger.info("Metrics written to: %s", self._work_dir / METRICS_YAML_FILENAME)
 
         # Always unregister the collector from the interrupt-flush registry — on
-        # every path (success, failure, dry-run) — now that this run is done
-        # (Req 7.7). close() only unregisters; it never writes.
+        # every path (success, failure, dry-run, contract violation) — now that
+        # this run is done (Req 7.7). close() only unregisters; it never writes.
         self._collector.close()
+
+        if contract_violation:
+            self._log_summary(summary, dry_run=dry_run)
+            raise PhaseContractError(
+                f"phase '{target.name}' returned PENDING on an execute run "
+                "(phase contract violation — _execute must return COMPLETED or FAILED)"
+            )
 
         # Downgrade-and-warn for ALL on a non-terminal command (Req 6.3, 6.4).
         if self._cleanup >= CleanupLevel.ALL and not self._is_terminal_most:
@@ -321,24 +339,3 @@ def _collect_output_files(result: PhaseResult) -> list[Path]:
     return [artifact.path for artifact in result.complete if "final" in artifact.path.parts]
 
 
-def _as_failed(result: PhaseResult, message: str) -> PhaseResult:
-    """Return a ``FAILED`` copy of ``result`` carrying ``message`` as the error.
-
-    Used when a phase returns ``PENDING`` on an execute run — a
-    failure-to-progress the runner surfaces as an explicit failure (Req 10.6).
-    The original artifacts are preserved so the summary still reflects on-disk
-    state.
-
-    Args:
-        result:  The phase result to convert.
-        message: The failure description.
-
-    Returns:
-        A new ``PhaseResult`` with ``outcome=FAILED`` and ``error=message``.
-    """
-    return PhaseResult(
-        outcome   = PhaseOutcome.FAILED,
-        artifacts = result.artifacts,
-        message   = message,
-        error     = message,
-    )

@@ -200,6 +200,26 @@ class EncodingConfig(BaseModel):
     _resolved_targets:    list[QualityTarget] | None = PrivateAttr(default=None)
     _resolved_strategies: list[Strategy]     | None = PrivateAttr(default=None)
 
+    model_config = ConfigDict(validate_assignment=True)
+
+    @model_validator(mode="after")
+    def _invalidate_resolved_cache_on_mutation(self) -> "EncodingConfig":
+        """Invalidate the resolved caches whenever a field is assigned.
+
+        ``AppConfig`` resolves eagerly at validation time and ``resolve()`` is
+        idempotent — so without this, a post-load assignment (e.g. the CLI
+        applying ``--strategies`` / ``--targets`` overrides) would silently
+        leave the previously resolved defaults in place. Clearing on every
+        assignment is cheap: the caller re-resolves once, at most.
+
+        Runs on initial validation too (caches are ``None`` then — no-op) and
+        on assignments of non-input fields (``optimize`` etc.) — also a
+        harmless no-op beyond a single re-resolve.
+        """
+        self._resolved_targets    = None
+        self._resolved_strategies = None
+        return self
+
     def resolve(
         self,
         codecs:   dict[str, CodecConfig],

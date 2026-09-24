@@ -28,14 +28,18 @@ from pyqenc.constants import (
     THICK_LINE,
     TIMESTAMPS_FILENAME,
 )
+from pyqenc.metrics import MetricKey
 from pyqenc.models import AudioMetadata, PhaseOutcome, VideoMetadata
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
     Phase,
+    PhaseRegistry,
     PhaseResult,
-    resolve_dependencies,
+    Recovery,
+    RecoveryError,
 )
+from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.state import ArtifactState
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 
@@ -524,13 +528,12 @@ def _audio_metadata_from_stream(path: Path, track: "AudioStream") -> AudioMetada
 # ExtractionPhase — Phase object (task 5)
 # ---------------------------------------------------------------------------
 
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
 from pyqenc.constants import (
     EXTRACTED_DIR,
 )
 from pyqenc.models import AudioMetadata
-from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -722,232 +725,51 @@ class ExtractionPhaseResult(PhaseResult):
     timestamps_path: Path | None          = None
 
 
-class ExtractionPhase:
+class ExtractionPhase(Phase):
     """Phase object for stream extraction.
 
     Owns artifact enumeration, recovery, invalidation, execution, and logging
     for the extraction phase.  Wraps the existing ``MKVTrackExtractor`` and
-    ``extract_streams`` helpers.
+    ``extract_streams`` helpers. The uniform run footprint is inherited from
+    :class:`Phase`.
 
     Args:
         config: Full pipeline configuration.
         phases: Phase registry; used to resolve typed dependency references.
     """
 
-    name: str = "extraction"
+    name:        str       = "extraction"
+    DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase,)
+    _METRIC_KEY: MetricKey = MetricKey.EXTRACTION
 
     def __init__(
         self,
         config:         "AppConfig",
-        phases:         "dict[type[Phase], Phase] | None" = None,
+        phases:         PhaseRegistry | None = None,
         *,
         video_required: bool              = True,
         collector:      "MetricsCollector",
     ) -> None:
-        from pyqenc.phases.job import JobPhase as _JobPhase
+        super().__init__(config, phases, collector=collector)
 
-        self._config:         AppConfig                    = config
-        self._collector:      MetricsCollector             = collector
-        self._video_required: bool                           = video_required
-        self._job:            _JobPhase | None             = cast("_JobPhase", phases.get(_JobPhase)) if phases else None
-        self.result:          ExtractionPhaseResult | None   = None
-        self.dependencies:    list[Phase]                    = [self._job] if self._job is not None else []
+        self._video_required: bool = video_required
 
     # ------------------------------------------------------------------
-    # Public Phase interface
+    # Phase hooks
     # ------------------------------------------------------------------
 
-    def run(self, dry_run: bool = False) -> ExtractionPhaseResult:
-        """Recover and extract pending artifacts.
-
-        Sequence:
-        1. Emit phase banner.
-        2. Ensure dependencies have results (scan if needed).
-        3. Run ``_recover()`` — handles ``force_wipe`` and derives wanted artifacts
-           from the current include/exclude filter.
-        4. Log recovery result line.
-        5. In dry-run mode: return ``PENDING`` if any artifacts are pending.
-        6. Extract ``ABSENT`` artifacts; leave unwanted (``wanted=False``) artifacts on disk.
-        7. Log completion summary.
-
-        Extraction keeps no sidecar: recovery re-probes the source and re-applies
-        the current filter on every run, so a filter change is fully expressed
-        through each artifact's ``wanted`` flag with nothing to persist.
-
-        Args:
-            dry_run: When ``True``, report what would be done without writing files.
-
-        Returns:
-            ``ExtractionPhaseResult`` with all artifacts ``COMPLETE`` on success.
-        """
-        # In-run memoization guard (Property 1): return cached result verbatim.
-        if self.result is not None:
-            return self.result
-
-        dep_result = self._ensure_dependencies(dry_run=dry_run)
-        if dep_result is not None:
-            self.result = dep_result
-            return self.result
-
-        emit_phase_banner("EXTRACTION", logger)
-
-        job_result = self._job.result  # type: ignore[union-attr]
-        force_wipe = getattr(job_result, "force_wipe", False)
-
-        # Key parameters
-        logger.info("Source:   %s", self._job.result.source.name)  # type: ignore[union-attr]
-        if self._job.result.config.extraction.include or self._job.result.config.extraction.exclude:  # type: ignore[union-attr]
+    def _log_key_params(self) -> None:
+        """Log the source path and the active include/exclude filter."""
+        logger.info("Source:   %s", self._dep(JobPhase).result.source.name)  # type: ignore[union-attr]
+        extraction_cfg = self._dep(JobPhase).result.config.extraction  # type: ignore[union-attr]
+        if extraction_cfg.include or extraction_cfg.exclude:
             logger.info("Filter:")
-            if self._job.result.config.extraction.include:  # type: ignore[union-attr]
-                logger.info("  Include:  %s", self._job.result.config.extraction.include)  # type: ignore[union-attr]
-            if self._job.result.config.extraction.exclude:  # type: ignore[union-attr]
-                logger.info("  Exclude:  %s", self._job.result.config.extraction.exclude)  # type: ignore[union-attr]
+            if extraction_cfg.include:
+                logger.info("  Include:  %s", extraction_cfg.include)
+            if extraction_cfg.exclude:
+                logger.info("  Exclude:  %s", extraction_cfg.exclude)
 
-        from pyqenc.metrics import MetricKey
-
-        with self._collector.time(MetricKey.RECOVERY):
-            artifacts, video_meta, audio_meta = self._recover(
-                force_wipe=force_wipe
-            )
-
-        # Log recovery result line from the internal (unfiltered) artifact list
-        log_recovery_line(logger, artifacts)
-
-        # Select wanted artifacts ONCE — recovery is the sole owner of selection.
-        # This single list drives the dry-run / reused returns and is the exact
-        # payload handed to the pure executor. Unwanted artifacts stay on disk
-        # and never leave ``run()``.
-        wanted_artifacts = [a for a in artifacts if a.wanted]
-
-        complete_count = sum(
-            1 for a in wanted_artifacts
-            if a.state == ArtifactState.COMPLETE
-        )
-        pending_count  = sum(
-            1 for a in wanted_artifacts
-            if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)
-        )
-
-        # Dry-run path
-        if dry_run:
-            if pending_count == 0 and complete_count > 0:
-                outcome = PhaseOutcome.REUSED
-            else:
-                outcome = PhaseOutcome.PENDING
-            ts_artifact = next((a for a in wanted_artifacts if isinstance(a, TimestampArtifact)), None)
-            self.result = ExtractionPhaseResult(
-                outcome         = outcome,
-                artifacts       = wanted_artifacts,
-                message         = "dry-run",
-                video           = video_meta,
-                audio           = audio_meta,
-                timestamps_path = ts_artifact.path if ts_artifact and ts_artifact.state == ArtifactState.COMPLETE else None,
-            )
-            return self.result
-
-        # Nothing to do — only skip if we actually have complete artifacts
-        if pending_count == 0 and complete_count > 0:
-            ts_artifact = next((a for a in wanted_artifacts if isinstance(a, TimestampArtifact)), None)
-            self.result = ExtractionPhaseResult(
-                outcome         = PhaseOutcome.REUSED,
-                artifacts       = wanted_artifacts,
-                message         = "all artifacts reused",
-                video           = video_meta,
-                audio           = audio_meta,
-                timestamps_path = ts_artifact.path if ts_artifact and ts_artifact.state == ArtifactState.COMPLETE else None,
-            )
-            return self.result
-
-        # Execute extraction for ABSENT artifacts. Pass ONLY the wanted list:
-        # recovery already selected and typed each artifact and attached its
-        # source stream, so the executor performs no gating or re-probing.
-        with self._collector.time(MetricKey.EXTRACTION):
-            result = self._execute_extraction(wanted_artifacts)
-        self.result = result
-        return result
-
-    def finalize(self, ctx: FinalizeContext) -> None:
-        """Perform end-of-run housekeeping for the extraction phase.
-
-        When ``ctx.deep_cleanup`` is ``True``, deletes this phase's own
-        ``extracted/`` directory in full. Every extraction artifact (video,
-        audio, subtitles, chapters, attachments, timestamps) is reproducible
-        from the source, so none is exempt from deep cleanup. Deletion is guarded
-        by an existence check and never raises: any ``OSError`` is caught and logged
-        as a warning so a cleanup failure never fails the run.
-
-        Args:
-            ctx: Pre-resolved end-of-run decisions from the runner.
-        """
-        if not ctx.deep_cleanup:
-            return
-        if self._job is None or self._job.result is None:
-            return
-        extracted_dir = self._job.result.work_dir / EXTRACTED_DIR
-        if extracted_dir.exists():
-            try:
-                shutil.rmtree(extracted_dir)
-                logger.debug("deep cleanup: deleted %s", extracted_dir)
-            except OSError as exc:
-                logger.warning("deep cleanup: could not delete %s: %s", extracted_dir, exc)
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _ensure_dependencies(self, dry_run: bool) -> "ExtractionPhaseResult | None":
-        """Resolve dependencies via the shared walk; fail fast if any is incomplete.
-
-        Args:
-            dry_run: Propagated unchanged to each dependency's ``run()``.
-
-        Returns:
-            A ``FAILED`` result if any dependency failed, a ``PENDING`` result
-            if any dependency is legitimately pending (dry-run only), or
-            ``None`` when all dependencies are complete and the phase may
-            proceed.
-        """
-        if self._job is None:
-            return ExtractionPhaseResult(
-                outcome   = PhaseOutcome.FAILED,
-                artifacts = [],
-                message   = "JobPhase dependency not wired",
-                error     = "ExtractionPhase requires JobPhase",
-                video     = None,
-                audio     = [],
-            )
-
-        status = resolve_dependencies(self, dry_run=dry_run)
-        if status.failed:
-            names = ", ".join(n.capitalize() for n in status.failed)
-            err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
-            logger.error(err)
-            return ExtractionPhaseResult(
-                outcome   = PhaseOutcome.FAILED,
-                artifacts = [],
-                message   = err,
-                error     = err,
-                video     = None,
-                audio     = [],
-            )
-        if status.pending:
-            names = ", ".join(n.capitalize() for n in status.pending)
-            msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
-            logger.info(msg)
-            return ExtractionPhaseResult(
-                outcome   = PhaseOutcome.PENDING,
-                artifacts = [],
-                message   = msg,
-                error     = None,
-                video     = None,
-                audio     = [],
-            )
-        return None
-
-    def _recover(
-        self,
-        force_wipe: bool,
-    ) -> tuple[list[ExtractionArtifact], VideoMetadata | None, list[AudioMetadata]]:
+    def _recover(self) -> Recovery:
         """Classify extraction artifacts by enumerating every source track.
 
         Steps:
@@ -963,16 +785,19 @@ class ExtractionPhase:
              on-disk listing, otherwise ``ABSENT``.
            A ``TimestampArtifact`` row is appended under the same rules.
 
-        Args:
-            force_wipe: When ``True``, wipe all extraction artifacts first.
-
         Returns:
-            ``(artifacts, primary_video_meta, audio_meta_list)`` tuple. The
-            artifact list contains every track (including ``wanted=False`` ones);
-            metadata lists only include selected (``wanted=True``) tracks.
+            The :class:`Recovery` single source of truth; the artifact list
+            contains every track (including ``wanted=False`` ones). Metadata
+            stash fields (``_recovered_video`` / ``_recovered_audio``) hold only
+            selected (``wanted=True``) tracks for result payloads.
+
+        Raises:
+            RecoveryError: When the source cannot be analysed at all.
         """
-        work_dir      = self._job.result.work_dir  # type: ignore[union-attr]
+        job_result: JobPhaseResult = cast(JobPhaseResult, self._dep(JobPhase).result)
+        work_dir      = job_result.work_dir
         extracted_dir = work_dir / EXTRACTED_DIR
+        force_wipe    = job_result.force_wipe
 
         # Step 1: force-wipe
         if force_wipe and extracted_dir.exists():
@@ -996,15 +821,14 @@ class ExtractionPhase:
 
         # Step 3: analyse the source and enumerate ALL tracks.
         try:
-            extractor = MKVTrackExtractor(str(self._job.result.source))  # type: ignore[union-attr]
+            extractor = MKVTrackExtractor(str(self._dep(JobPhase).result.source))  # type: ignore[union-attr]
         except Exception as exc:
-            logger.critical("Failed to analyse source video: %s", exc)
-            return [], None, []
+            raise RecoveryError(f"Failed to analyse source video: {exc}") from exc
 
         selected_tracks = streams_filter_plain_regex(
             extractor.tracks,
-            include_pattern = self._job.result.config.extraction.include,  # type: ignore[union-attr]
-            exclude_pattern = self._job.result.config.extraction.exclude,  # type: ignore[union-attr]
+            include_pattern = self._dep(JobPhase).result.config.extraction.include,  # type: ignore[union-attr]
+            exclude_pattern = self._dep(JobPhase).result.config.extraction.exclude,  # type: ignore[union-attr]
         )
 
         # Single on-disk listing shared by every artifact's completeness check.
@@ -1074,12 +898,78 @@ class ExtractionPhase:
 
         # Emit stream table — artifacts are the single source of truth
         _log_stream_table(artifacts)
+        return Recovery.from_artifacts(artifacts)
 
-        return artifacts, primary_video, audio_list
-
-    def _execute_extraction(
+    def _make_result(
         self,
+        outcome:   PhaseOutcome,
         artifacts: list[ExtractionArtifact],
+        message:   str,
+        error:     str | None = None,
+    ) -> ExtractionPhaseResult:
+        """Assemble an ``ExtractionPhaseResult`` deriving payloads from artifacts.
+
+        ``video`` / ``audio`` / ``timestamps_path`` are computed from the given
+        artifacts' current metas and states — the single source of truth — so
+        every path (dry-run, reused, executed, failed) derives identical
+        payloads. Empty artifact lists (dependency short-circuits) naturally
+        yield ``video=None, audio=[]``.
+
+        Args:
+            outcome:   The phase outcome.
+            artifacts: The wanted artifact list.
+            message:   Human-readable summary.
+            error:     Error description when ``outcome`` is ``FAILED``.
+
+        Returns:
+            The populated result.
+        """
+        video = next(
+            (a.meta for a in artifacts if isinstance(a, VideoArtifact) and a.meta is not None),
+            None,
+        )
+        audio = [a.meta for a in artifacts if isinstance(a, AudioArtifact) and a.meta is not None]
+        ts    = next((a for a in artifacts if isinstance(a, TimestampArtifact)), None)
+        return ExtractionPhaseResult(
+            outcome         = outcome,
+            artifacts       = artifacts,
+            message         = message,
+            error           = error,
+            video           = video,
+            audio           = audio,
+            timestamps_path = ts.path if ts is not None and ts.state == ArtifactState.COMPLETE else None,
+        )
+
+    def finalize(self, ctx: FinalizeContext) -> None:
+        """Perform end-of-run housekeeping for the extraction phase.
+
+        When ``ctx.deep_cleanup`` is ``True``, deletes this phase's own
+        ``extracted/`` directory in full. Every extraction artifact (video,
+        audio, subtitles, chapters, attachments, timestamps) is reproducible
+        from the source, so none is exempt from deep cleanup. Deletion is guarded
+        by an existence check and never raises: any ``OSError`` is caught and logged
+        as a warning so a cleanup failure never fails the run.
+
+        Args:
+            ctx: Pre-resolved end-of-run decisions from the runner.
+        """
+        if not ctx.deep_cleanup:
+            return
+        job = self._dep(JobPhase)
+        if job.result is None:
+            return
+        extracted_dir = job.result.work_dir / EXTRACTED_DIR
+        if extracted_dir.exists():
+            try:
+                shutil.rmtree(extracted_dir)
+                logger.debug("deep cleanup: deleted %s", extracted_dir)
+            except OSError as exc:
+                logger.warning("deep cleanup: could not delete %s: %s", extracted_dir, exc)
+
+    def _execute(
+        self,
+        wanted:    list[ExtractionArtifact],
+        dry_run:   bool,
     ) -> ExtractionPhaseResult:
         """Extract the ``ABSENT`` artifacts among the given wanted artifacts.
 
@@ -1090,27 +980,27 @@ class ExtractionPhase:
         artifact whose ``state`` is ``ABSENT`` using the concrete artifact type
         plus its carried ``stream``, then updates that artifact's ``state`` and
         ``meta`` in place. No third disk re-scan and no re-derivation of track
-        lists occur.
+        lists occur. ``dry_run`` is never ``True`` here (extraction is not a
+        readonly-execute phase; the template previews instead).
 
         Args:
-            artifacts: Wanted artifacts from ``_recover()`` (``wanted=True``),
-                       each carrying its source ``stream``.
+            wanted:  Wanted artifacts from ``_recover()`` (``wanted=True``),
+                     each carrying its source ``stream``.
+            dry_run: Unused for this phase (template guarantees ``False``).
 
         Returns:
             ``ExtractionPhaseResult`` built directly from the updated artifacts.
         """
-        work_dir      = self._job.result.work_dir  # type: ignore[union-attr]
+        artifacts = wanted
+        work_dir      = self._dep(JobPhase).result.work_dir  # type: ignore[union-attr]
         extracted_dir = work_dir / EXTRACTED_DIR
         extracted_dir.mkdir(parents=True, exist_ok=True)
 
-        source = self._job.result.source  # type: ignore[union-attr]
+        source = self._dep(JobPhase).result.source  # type: ignore[union-attr]
         if not source.exists():
             err = f"Source video not found: {source}"
             logger.critical(err)
-            return ExtractionPhaseResult(
-                outcome=PhaseOutcome.FAILED, artifacts=artifacts,
-                message=err, error=err, video=None, audio=[],
-            )
+            return self._make_result(PhaseOutcome.FAILED, artifacts, err, error=err)
 
         errors: list[str] = []
 
@@ -1129,35 +1019,16 @@ class ExtractionPhase:
             elif isinstance(artifact, OtherArtifact):
                 self._extract_other_artifact(artifact, source, errors)
 
-        # Build result directly from the (now updated) wanted artifacts — no
-        # disk re-scan, no re-filtering.
-        final_video: VideoMetadata | None = next(
-            (a.meta for a in artifacts if isinstance(a, VideoArtifact) and a.meta is not None),
-            None,
-        )
-        final_audio: list[AudioMetadata] = [
-            a.meta for a in artifacts if isinstance(a, AudioArtifact) and a.meta is not None
-        ]
-        ts_artifact = next((a for a in artifacts if isinstance(a, TimestampArtifact)), None)
-        final_timestamps_path: Path | None = (
-            ts_artifact.path
-            if ts_artifact is not None and ts_artifact.state == ArtifactState.COMPLETE
-            else None
-        )
-
+        # Build the result directly from the (now updated) wanted artifacts —
+        # payloads derive from artifact metas inside ``_make_result``.
         if errors:
             failed_count = sum(1 for a in artifacts if a.state == ArtifactState.ABSENT)
             err_summary  = f"{len(errors)} extraction error(s): {'; '.join(errors)}"
             logger.error(err_summary)
             outcome = PhaseOutcome.FAILED if failed_count > 0 else PhaseOutcome.COMPLETED
-            return ExtractionPhaseResult(
-                outcome         = outcome,
-                artifacts       = artifacts,
-                message         = err_summary,
-                error           = err_summary if outcome == PhaseOutcome.FAILED else None,
-                video           = final_video,
-                audio           = final_audio,
-                timestamps_path = final_timestamps_path,
+            return self._make_result(
+                outcome, artifacts, err_summary,
+                error=err_summary if outcome == PhaseOutcome.FAILED else None,
             )
 
         complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
@@ -1167,13 +1038,9 @@ class ExtractionPhase:
         )
         logger.info(THICK_LINE)
 
-        return ExtractionPhaseResult(
-            outcome         = PhaseOutcome.COMPLETED,
-            artifacts       = artifacts,
-            message         = f"extracted {complete_count} artifact(s)",
-            video           = final_video,
-            audio           = final_audio,
-            timestamps_path = final_timestamps_path,
+        return self._make_result(
+            PhaseOutcome.COMPLETED, artifacts,
+            f"extracted {complete_count} artifact(s)",
         )
 
     # ------------------------------------------------------------------
@@ -1195,7 +1062,7 @@ class ExtractionPhase:
         """
         if artifact.stream is None:
             return
-        job_source = getattr(getattr(self._job, "result", None), "job", None)
+        job_source = self._dep(JobPhase).result.job if self._dep(JobPhase).result is not None else None
         source_duration_s: float | None = job_source.source.duration_seconds if job_source is not None else None
         duration_ms: int | None = int(source_duration_s * 1000) if source_duration_s is not None else None
         try:

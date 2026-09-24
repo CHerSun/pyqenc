@@ -101,6 +101,7 @@ class MetricKey(StrEnum):
 
     JOB          = "job"
     EXTRACTION   = "extraction"
+    PROBE        = "probe"
     CHUNKING     = "chunking"
     AUDIO        = "audio"
     ENCODING     = "encoding"

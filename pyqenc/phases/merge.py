@@ -21,7 +21,7 @@ import subprocess
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import yaml
 
@@ -39,22 +39,26 @@ from pyqenc.constants import (
     TIME_SEPARATOR_SAFE,
     WARNING_SYMBOL,
 )
+from pyqenc.metrics import MetricKey
 from pyqenc.models import CropParams, PhaseOutcome, QualityTarget, VideoMetadata
 from pyqenc.phase import (
     Artifact,
     ArtifactState,
-    FinalizeContext,
     Phase,
+    PhaseRegistry,
     PhaseResult,
-    resolve_dependencies,
+    Recovery,
 )
+from pyqenc.phases.audio import AudioPhase
+from pyqenc.phases.encoding import EncodingPhase, EncodingPhaseResult
+from pyqenc.phases.extraction import ExtractionPhase
+from pyqenc.phases.job import JobPhase, JobPhaseResult
+from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import MergeParams, MergeStrategySummary, ProbeState
 from pyqenc.utils.ffmpeg_runner import get_frame_count
 from pyqenc.utils.log_format import (
-    emit_phase_banner,
     fmt_key_value_table,
     fmt_metric_value,
-    log_recovery_line,
 )
 from pyqenc.utils.visualization import QualityEvaluator, create_crf_plot
 from pyqenc.utils.yaml_utils import write_yaml_atomic
@@ -62,14 +66,7 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
-    from pyqenc.phases.audio import AudioPhase
-    from pyqenc.phases.encoding import (
-        EncodedArtifact,
-        EncodingPhase,
-    )
-    from pyqenc.phases.extraction import ExtractionPhase
-    from pyqenc.phases.job import JobPhase
-    from pyqenc.phases.probe import ProbePhase
+    from pyqenc.phases.encoding import EncodedArtifact
 
 logger = logging.getLogger(__name__)
 
@@ -523,11 +520,12 @@ class MergePhaseResult(PhaseResult):
 # MergePhase
 # ---------------------------------------------------------------------------
 
-class MergePhase:
+class MergePhase(Phase):
     """Phase object for final video merging.
 
     Owns artifact enumeration, recovery, execution, and logging for the merge
-    phase.  Wraps the existing ``merge_final_video`` helper.
+    phase.  Wraps the existing ``merge_final_video`` helper. The uniform run
+    footprint is inherited from :class:`Phase`.
 
     In pipeline mode encoded chunks are read directly from
     ``EncodingPhase.result`` without rescanning the filesystem.  In standalone
@@ -538,33 +536,20 @@ class MergePhase:
         phases: Phase registry; used to resolve typed dependency references.
     """
 
-    name: str = "merge"
+    name:        str       = "merge"
+    DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (
+        JobPhase, ExtractionPhase, ProbePhase, EncodingPhase, AudioPhase,
+    )
+    _METRIC_KEY: MetricKey = MetricKey.MERGE
 
     def __init__(
         self,
         config:    AppConfig,
-        phases:    dict[type[Phase], Phase] | None = None,
+        phases:    PhaseRegistry | None = None,
         *,
         collector: MetricsCollector,
     ) -> None:
-        from pyqenc.phases.audio import AudioPhase
-        from pyqenc.phases.encoding import EncodingPhase
-        from pyqenc.phases.extraction import ExtractionPhase
-        from pyqenc.phases.job import JobPhase
-        from pyqenc.phases.probe import ProbePhase
-
-        self._config:     AppConfig              = config
-        self._collector:  MetricsCollector       = collector
-        self._job:        JobPhase | None          = cast(JobPhase,        phases[JobPhase])        if phases else None
-        self._extraction: ExtractionPhase | None   = cast(ExtractionPhase, phases[ExtractionPhase]) if phases else None
-        self._probe:      ProbePhase | None        = cast("ProbePhase",    phases.get(ProbePhase))  if phases else None
-        self._encoding:   EncodingPhase | None     = cast(EncodingPhase,   phases[EncodingPhase])   if phases else None
-        self._audio:      AudioPhase | None        = cast(AudioPhase,      phases[AudioPhase])      if phases else None
-        self.result:      MergePhaseResult | None   = None
-        self.dependencies: list[Phase]              = [
-            d for d in [self._job, self._extraction, self._probe, self._encoding, self._audio]
-            if d is not None
-        ]
+        super().__init__(config, phases, collector=collector)
 
     # ------------------------------------------------------------------
     # Properties
@@ -574,203 +559,86 @@ class MergePhase:
     def params(self) -> MergeParams:
         """Current merge params derived from the job result config and probe result.
 
-        Built at runtime from ``self._job.result`` and ``self._probe.result``
+        Built at runtime from ``self._dep(JobPhase).result`` and ``self._dep(ProbePhase).result``
         so the values are always current (e.g. after CLI overrides) rather than
         snapshotted at construction time.
         """
         probe: ProbeState | None = None
-        if self._probe is not None and self._probe.result is not None:
-            probe_result = self._probe.result
+        probe_result = cast(ProbePhaseResult, self._dep(ProbePhase).result)
+        if probe_result is not None:
             probe = ProbeState(
                 frame_count = probe_result.source.frame_count if probe_result.source else 0,
                 crop        = probe_result.crop if probe_result.crop else None,
             )
 
-        if self._job is not None and self._job.result is not None:
+        job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
+        if job_result is not None:
             return MergeParams(
-                quality_targets  = _targets_as_strings(self._job.result.config.encoding.resolved_targets),  # type: ignore[union-attr]
-                metrics_sampling = self._job.result.config.measurement.sampling,  # type: ignore[union-attr]
+                quality_targets  = _targets_as_strings(job_result.config.encoding.resolved_targets),
+                metrics_sampling = job_result.config.measurement.sampling,
                 probe            = probe,
             )
         # Fallback: empty params before job result is available
         return MergeParams(quality_targets=[], metrics_sampling=1)
 
     # ------------------------------------------------------------------
-    # Public Phase interface
+    # Phase hooks
     # ------------------------------------------------------------------
 
-    def run(self, dry_run: bool = False) -> MergePhaseResult:
-        """Recover, merge pending strategies, cache and return result.
-
-        Sequence:
-        1. Emit phase banner.
-        2. Ensure dependencies have results.
-        3. Run ``_recover()`` — handles ``force_wipe``.
-        4. Log recovery result line.
-        5. In dry-run mode: return ``PENDING`` if any artifacts are pending.
-        6. Merge pending strategies.
-        7. Log completion summary.
-
-        Args:
-            dry_run: When ``True``, report what would be done without merging.
-
-        Returns:
-            ``MergePhaseResult`` with all artifacts ``COMPLETE`` on success.
-        """
-        # In-run memoization guard (Property 1): return cached result verbatim.
-        if self.result is not None:
-            return self.result
-
-        dep_result = self._ensure_dependencies(dry_run=dry_run)
-        if dep_result is not None:
-            self.result = dep_result
-            return self.result
-
-        emit_phase_banner("MERGE", logger)
-
-        job_result = self._job.result  # type: ignore[union-attr]
-        force_wipe = getattr(job_result, "force_wipe", False)
-
-        # Key parameters
-        logger.info("Source stem:  %s", self._job.result.source.stem)  # type: ignore[union-attr]
-        if self._job.result.config.encoding.resolved_targets:  # type: ignore[union-attr]
+    def _log_key_params(self) -> None:
+        """Log the source stem and quality targets (key parameters)."""
+        logger.info("Source stem:  %s", cast(JobPhaseResult, self._dep(JobPhase).result).source.stem)
+        if self._config.encoding.resolved_targets:
             logger.info("Targets:      %s", ", ".join(
-                f"{t.metric}-{t.statistic}≥{t.value}" for t in self._job.result.config.encoding.resolved_targets  # type: ignore[union-attr]
+                f"{t.metric}-{t.statistic}≥{t.value}" for t in self._config.encoding.resolved_targets
             ))
 
-        from pyqenc.metrics import MetricKey
+    def _post_dependency_check(self) -> MergePhaseResult | None:
+        """Encoding-completeness guard: refuse to merge incomplete encodes.
 
-        with self._collector.time(MetricKey.RECOVERY):
-            artifacts = self._recover(force_wipe=force_wipe)
-
-        message       = log_recovery_line(logger, artifacts)
-        wanted        = [a for a in artifacts if a.wanted]
-        pending_count = sum(1 for a in artifacts if a.wanted and a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL))
-
-        # Dry-run path
-        if dry_run:
-            outcome = PhaseOutcome.REUSED if pending_count == 0 else PhaseOutcome.PENDING
-            self.result = MergePhaseResult(
-                outcome   = outcome,
-                artifacts = wanted,
-                message   = "dry-run",
-                merged    = wanted,
-            )
-            return self.result
-
-        # Nothing to do
-        if pending_count == 0:
-            merge_yaml = self._job.result.work_dir / _MERGE_YAML  # type: ignore[union-attr]
-            persisted  = MergeParams.load(merge_yaml)
-            if persisted is not None:
-                logger.info(THICK_LINE)
-                logger.info("MERGE SUMMARY")
-                logger.info(THICK_LINE)
-                _log_merge_summary_from_params(persisted, self._job.result.config.encoding.resolved_targets)  # type: ignore[union-attr]
-            self.result = MergePhaseResult(
-                outcome   = PhaseOutcome.REUSED,
-                artifacts = wanted,
-                message   = message,
-                merged    = wanted,
-            )
-            return self.result
-
-        # Execute merging
-        from pyqenc.metrics import MetricKey
-        with self._collector.time(MetricKey.MERGE):
-            result = self._execute_merge(artifacts)
-        self.result = result
-        return result
-
-    def finalize(self, ctx: FinalizeContext) -> None:
-        """Perform end-of-run housekeeping for the merge phase.
-
-        The merged files under ``final/`` are the pipeline's delivery outputs
-        and are kept even under ``ALL`` cleanup, and ``merge.yaml`` is a
-        recovery sidecar that must survive reruns. ``MergePhase`` therefore has
-        no deep artifacts to remove — a safe no-op regardless of
-        ``ctx.deep_cleanup``.
-
-        Args:
-            ctx: Pre-resolved end-of-run decisions from the runner.
-        """
-        return
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _ensure_dependencies(self, dry_run: bool) -> MergePhaseResult | None:
-        """Resolve dependencies via the shared walk; fail fast if incomplete.
-
-        Args:
-            dry_run: Propagated unchanged to each dependency's ``run()``.
+        Every encoded artifact must be COMPLETE before merging, even though
+        the phase itself reports is_complete. This only triggers when encoding
+        reported is_complete (COMPLETED / REUSED) yet still holds incomplete
+        encoded artifacts — a genuine inconsistency; failed/pending encodes
+        are already handled by the shared dependency walk.
 
         Returns:
-            A ``FAILED`` result if any dependency failed, a ``PENDING`` result
-            if any dependency is legitimately pending (dry-run only), or
-            ``None`` when all dependencies are complete and the phase may
-            proceed.
+            A typed ``FAILED`` result, or ``None`` when the phase may proceed.
         """
-        if self._job is None:
-            return _failed("MergePhase requires JobPhase")
-        if self._extraction is None:
-            return _failed("MergePhase requires ExtractionPhase")
-        if self._encoding is None:
-            return _failed("MergePhase requires EncodingPhase")
-        if self._audio is None:
-            return _failed("MergePhase requires AudioPhase")
-
-        status = resolve_dependencies(self, dry_run=dry_run)
-        if status.failed:
-            names = ", ".join(n.capitalize() for n in status.failed)
-            err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
-            logger.error(err)
-            return _failed(err)
-        if status.pending:
-            names = ", ".join(n.capitalize() for n in status.pending)
-            msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
-            logger.info(msg)
-            return _pending(msg)
-
-        # EncodingPhase-specific guard: every encoded artifact must be COMPLETE
-        # before merging, even though the phase itself reports is_complete.
-        # This only triggers when encoding reported is_complete (COMPLETED /
-        # REUSED) yet still holds incomplete encoded artifacts — a genuine
-        # inconsistency. The dry-run/failure cases are already handled by the
-        # status.pending / status.failed checks above.
         incomplete = [
-            a for a in self._encoding.result.encoded  # type: ignore[union-attr]
+            a for a in cast(EncodingPhaseResult, self._dep(EncodingPhase).result).encoded
             if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)
         ]
         if incomplete:
             err = f"EncodingPhase has {len(incomplete)} incomplete artifact(s) — cannot merge"
             logger.critical(err)
-            return _failed(err)
+            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
 
         return None
 
-    def _recover(self, force_wipe: bool) -> list[MergeArtifact]:
-        """Classify merge artifacts and handle force-wipe.
+    def _recover(self) -> Recovery:
+        """Classify merge artifacts and handle force-wipe / param invalidation.
 
         Steps:
         1. If ``force_wipe``: delete ``final/`` and ``merge.yaml``.
         2. Detect quality-target / metrics_sampling change — delete per-output
            sidecars so stale COMPLETE artifacts are reclassified as PARTIAL
-           and the merge re-runs with fresh metrics.
+           and the merge re-runs with fresh metrics. A probe change deletes
+           the whole ``final/`` (outputs are re-merged).
         3. Clean up leftover ``.tmp`` files.
         4. Determine expected strategies from ``EncodingPhase.result``.
-        5. Scan ``final/`` for output + sidecar pairs; classify each.
-
-        Args:
-            force_wipe: When ``True``, wipe all merge artifacts first.
+        5. Scan ``final/`` for output + sidecar pairs; classify each. Output
+           files not matching any expected strategy surface as ``wanted=False``
+           artifacts (kept in place; deletion only via explicit cleanup).
 
         Returns:
-            List of ``MergeArtifact`` objects.
+            The :class:`Recovery` single source of truth.
         """
-        work_dir  = self._job.result.work_dir  # type: ignore[union-attr]
-        final_dir = work_dir / FINAL_OUTPUT_DIR
+        job_result: JobPhaseResult = cast(JobPhaseResult, self._dep(JobPhase).result)
+        work_dir   = job_result.work_dir
+        final_dir  = work_dir / FINAL_OUTPUT_DIR
         merge_yaml = work_dir / _MERGE_YAML
+        force_wipe = job_result.force_wipe
 
         # Step 1: force-wipe
         if force_wipe:
@@ -828,14 +696,16 @@ class MergePhase:
         # Step 4: determine expected strategies
         strategies = self._get_expected_strategies()
         if not strategies:
-            return []
+            return Recovery()
 
-        source_stem = self._job.result.source.stem  # type: ignore[union-attr]
+        source_stem = job_result.source.stem
 
         # Step 5: classify each expected output
         artifacts: list[MergeArtifact] = []
+        expected_names: set[str] = set()
         for strategy_name, safe_name in strategies:
             output_file = final_dir / f"{source_stem} {safe_name}.mkv"
+            expected_names.add(output_file.name)
             sidecar     = _load_merge_sidecar(output_file)
 
             if output_file.exists() and sidecar is not None:
@@ -873,7 +743,73 @@ class MergePhase:
                     strategy_name = strategy_name,
                 ))
 
-        return artifacts
+        # Surface present-but-unwanted surplus outputs (a strategy dropped from
+        # the selection whose final file still exists). Retained in place,
+        # never pending; deletion only via explicit cleanup.
+        if final_dir.exists():
+            prefix = f"{source_stem} "
+            for output_file in sorted(final_dir.glob("*.mkv")):
+                if output_file.name in expected_names:
+                    continue
+                surplus_strategy = (
+                    output_file.name[len(prefix):-len(".mkv")]
+                    if output_file.name.startswith(prefix) else output_file.stem
+                )
+                state = (
+                    ArtifactState.COMPLETE
+                    if _load_merge_sidecar(output_file) is not None
+                    else ArtifactState.PARTIAL
+                )
+                artifacts.append(MergeArtifact(
+                    path          = output_file,
+                    state         = state,
+                    wanted        = False,
+                    strategy_name = surplus_strategy,
+                ))
+                logger.debug("Final output %s is surplus (strategy no longer selected) — unwanted", output_file.name)
+
+        return Recovery.from_artifacts(artifacts)
+
+    def _reused_result(self, wanted: list[Artifact], message: str) -> MergePhaseResult:
+        """Build the reused result, replaying the persisted merge summary."""
+        merge_yaml = cast(JobPhaseResult, self._dep(JobPhase).result).work_dir / _MERGE_YAML
+        persisted  = MergeParams.load(merge_yaml)
+        if persisted is not None:
+            logger.info(THICK_LINE)
+            logger.info("MERGE SUMMARY")
+            logger.info(THICK_LINE)
+            _log_merge_summary_from_params(persisted, self._config.encoding.resolved_targets)
+        return self._make_result(PhaseOutcome.REUSED, wanted, message)
+
+    def _make_result(
+        self,
+        outcome:   PhaseOutcome,
+        artifacts: list[MergeArtifact],
+        message:   str,
+        error:     str | None = None,
+    ) -> MergePhaseResult:
+        """Assemble a ``MergePhaseResult`` from the final-output artifacts.
+
+        Args:
+            outcome:   The phase outcome.
+            artifacts: The wanted artifact list.
+            message:   Human-readable summary.
+            error:     Error description when ``outcome`` is ``FAILED``.
+
+        Returns:
+            The populated result (``merged`` mirrors ``artifacts``).
+        """
+        return MergePhaseResult(
+            outcome   = outcome,
+            artifacts = artifacts,
+            message   = message,
+            error     = error,
+            merged    = artifacts,
+        )
+
+    # ------------------------------------------------------------------
+    # Public Phase interface
+    # ------------------------------------------------------------------
 
     def _get_expected_strategies(self) -> list[tuple[str, str]]:
         """Return ``(display_name, safe_name)`` pairs for all expected strategies.
@@ -887,10 +823,11 @@ class MergePhase:
         Returns:
             List of ``(strategy_name, safe_name)`` tuples.
         """
-        if self._encoding is None or self._encoding.result is None:
+        encoding = self._dep(EncodingPhase)
+        if encoding.result is None:
             return []
 
-        encoded = getattr(self._encoding.result, "encoded", [])
+        encoded = cast(EncodingPhaseResult, encoding.result).encoded
         seen: dict[str, str] = {}
         for artifact in encoded:
             if artifact.state == ArtifactState.COMPLETE:
@@ -899,30 +836,43 @@ class MergePhase:
                 seen[strategy_name] = safe_name
         return list(seen.items())
 
-    def _execute_merge(self, artifacts: list[MergeArtifact]) -> MergePhaseResult:
+    def _execute(
+        self,
+        wanted:  list[MergeArtifact],
+        dry_run: bool,
+    ) -> MergePhaseResult:
         """Merge pending strategies by concatenating encoded chunks.
 
+        The top-level ``merge`` span belongs to the template; the dotted
+        ``merge.concat`` / ``merge.quality_measure`` spans are recorded around
+        the individual sub-actions below. ``dry_run`` is never ``True`` here
+        (merge is not a readonly-execute phase; the template previews
+        instead).
+
         Args:
-            artifacts: Artifact list from ``_recover()``.
+            wanted:  Wanted artifact list from ``_recover()``.
+            dry_run: Unused for this phase (template guarantees ``False``).
 
         Returns:
             ``MergePhaseResult`` after merging.
         """
         from pyqenc.metrics import MetricKey
 
-        work_dir  = self._job.result.work_dir  # type: ignore[union-attr]
+        artifacts = wanted
+        work_dir  = cast(JobPhaseResult, self._dep(JobPhase).result).work_dir
         final_dir = work_dir / FINAL_OUTPUT_DIR
         final_dir.mkdir(parents=True, exist_ok=True)
 
-        job_result = self._job.result  # type: ignore[union-attr]
-        probe_result = self._probe.result if self._probe is not None else None
+        job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
+        probe_result = cast(ProbePhaseResult, self._dep(ProbePhase).result)
         crop: CropParams | None = probe_result.crop if probe_result is not None else None
-        job        = getattr(job_result, "job", None)
-        source_video: VideoMetadata | None = getattr(job, "source", None) if job else None
+        source_video: VideoMetadata | None = (
+            job_result.job.source if job_result.job is not None else None
+        )
         source_frame_count: int = (
             probe_result.source.frame_count if (probe_result is not None and probe_result.source) else 0
         )
-        source_stem = self._job.result.source.stem  # type: ignore[union-attr]
+        source_stem = job_result.source.stem
 
         # Build encoded_chunks dict from EncodingPhase result
         encoded_chunks = self._collect_encoded_chunks()
@@ -961,9 +911,7 @@ class MergePhase:
 
                 # Resolve timestamps path from ExtractionPhase result
                 timestamps_path: Path | None = (
-                    self._extraction.result.timestamps_path  # type: ignore[union-attr]
-                    if self._extraction is not None and self._extraction.result is not None
-                    else None
+                    self._dep(ExtractionPhase).result.timestamps_path
                 )
 
                 if timestamps_path is None or not timestamps_path.exists():
@@ -1039,33 +987,29 @@ class MergePhase:
                 targets_met:  bool             = False
                 plot_path:    Path | None       = None
 
-                if source_video and self._job.result.config.encoding.resolved_targets:  # type: ignore[union-attr]
+                if source_video and job_result.config.encoding.resolved_targets:
                     try:
                         with self._collector.time(MetricKey.MERGE, METRIC_KEY_QUALITY_MEASURE):
                             metrics_dict, targets_met, plot_path = _measure_quality(
                                 final_result     = output_file,
                                 source_video     = source_video,
                                 ref_crop         = crop,
-                                quality_targets  = self._job.result.config.encoding.resolved_targets,  # type: ignore[union-attr]
+                                quality_targets  = job_result.config.encoding.resolved_targets,
                                 output_dir       = final_dir,
-                                metrics_sampling = self._job.result.config.measurement.sampling,  # type: ignore[union-attr]
+                                metrics_sampling = self._dep(JobPhase).result.config.measurement.sampling,  # type: ignore[union-attr]
                             )
                     except Exception as exc:
                         logger.warning("  Could not measure quality: %s", exc)
 
                 # CRF distribution plot
-                encoded_artifacts = getattr(
-                    getattr(self._encoding, "result", None), "encoded", []
-                )
+                encoded_artifacts = cast(
+                    EncodingPhaseResult, self._dep(EncodingPhase).result
+                ).encoded
                 crf_data = _collect_crf_data(encoded_artifacts, strategy_name)
                 if crf_data:
                     crf_plot_path = final_dir / f"{output_file.stem}.crf.png"
                     try:
-                        qlabel = (
-                            self._encoding.quality_labels.get(strategy_name, "CRF")
-                            if self._encoding is not None
-                            else "CRF"
-                        )
+                        qlabel = self._dep(EncodingPhase).quality_labels.get(strategy_name, "CRF")
                         create_crf_plot(
                             chunks        = crf_data,
                             output_path   = crf_plot_path,
@@ -1083,7 +1027,7 @@ class MergePhase:
                     output_file     = output_file,
                     frame_count     = frame_count,
                     all_metrics     = metrics_dict,
-                    quality_targets = self._job.result.config.encoding.resolved_targets,  # type: ignore[union-attr]
+                    quality_targets = self._dep(JobPhase).result.config.encoding.resolved_targets,  # type: ignore[union-attr]
                     targets_met     = targets_met,
                     plot_path       = plot_path,
                 )
@@ -1091,7 +1035,7 @@ class MergePhase:
                 symbol      = SUCCESS_SYMBOL_MAJOR if targets_met else WARNING_SYMBOL
                 frames_sym  = SUCCESS_SYMBOL_MINOR if frame_count_ok else FAILURE_SYMBOL_MINOR
                 frames_str  = str(frame_count) if frame_count is not None else "unknown"
-                metrics_str = _fmt_inline_metrics(metrics_dict, self._job.result.config.encoding.resolved_targets)  # type: ignore[union-attr]
+                metrics_str = _fmt_inline_metrics(metrics_dict, self._dep(JobPhase).result.config.encoding.resolved_targets)  # type: ignore[union-attr]
                 logger.info(
                     "%s Merged %s:  frames=%s %s%s",
                     symbol, strategy_name, frames_str, frames_sym,
@@ -1123,11 +1067,11 @@ class MergePhase:
             artifacts          = [a for a in final_artifacts if a.state == ArtifactState.COMPLETE],
             source_stem        = source_stem,
             source_size_bytes  = _safe_file_size(source_video.path) if source_video else 0,
-            quality_targets    = self._job.result.config.encoding.resolved_targets,  # type: ignore[union-attr]
-            metrics_sampling   = self._job.result.config.measurement.sampling,  # type: ignore[union-attr]
+            quality_targets    = self._dep(JobPhase).result.config.encoding.resolved_targets,  # type: ignore[union-attr]
+            metrics_sampling   = self._dep(JobPhase).result.config.measurement.sampling,  # type: ignore[union-attr]
         )
         if failed_strategies and not final_artifacts:
-            return _failed("All strategy merges failed")
+            return self._make_result(PhaseOutcome.FAILED, [], "All strategy merges failed", error="All strategy merges failed")
 
         # Persist merge params (with summary) so quality-target / sampling changes are
         # detected next run and the summary table can be replayed on rerun.
@@ -1143,23 +1087,20 @@ class MergePhase:
                 source_stem        = source_stem,
                 source_size_bytes  = source_size_bytes,
                 strategy_summaries = strategy_summaries,
-            ).save(self._job.result.work_dir / _MERGE_YAML)  # type: ignore[union-attr]
+            ).save(self._dep(JobPhase).result.work_dir / _MERGE_YAML)  # type: ignore[union-attr]
 
         if failed_strategies:
-            return MergePhaseResult(
-                outcome   = PhaseOutcome.FAILED,
-                artifacts = final_artifacts,
-                message   = f"{len(failed_strategies)} strategy(ies) failed",
-                error     = f"Failed: {', '.join(failed_strategies[:5])}",
-                merged    = final_artifacts,
+            return self._make_result(
+                PhaseOutcome.FAILED, final_artifacts,
+                f"{len(failed_strategies)} strategy(ies) failed",
+                error=f"Failed: {', '.join(failed_strategies[:5])}",
             )
 
         did_work = any(a.state == ArtifactState.COMPLETE for a in final_artifacts)
-        return MergePhaseResult(
-            outcome   = PhaseOutcome.COMPLETED if did_work else PhaseOutcome.REUSED,
-            artifacts = final_artifacts,
-            message   = f"{complete_count} output file(s) complete",
-            merged    = final_artifacts,
+        return self._make_result(
+            PhaseOutcome.COMPLETED if did_work else PhaseOutcome.REUSED,
+            final_artifacts,
+            f"{complete_count} output file(s) complete",
         )
 
     def _collect_encoded_chunks(self) -> dict[str, dict[str, Path]]:
@@ -1174,10 +1115,11 @@ class MergePhase:
         Returns:
             Nested dict mapping chunk IDs to strategy-to-path mappings.
         """
-        if self._encoding is None or self._encoding.result is None:
+        encoding = self._dep(EncodingPhase)
+        if encoding.result is None:
             return {}
 
-        encoded = getattr(self._encoding.result, "encoded", [])
+        encoded = cast(EncodingPhaseResult, encoding.result).encoded
         chunks: dict[str, dict[str, Path]] = {}
         for artifact in encoded:
             if artifact.state == ArtifactState.COMPLETE and artifact.path.exists():
@@ -1257,28 +1199,4 @@ def _outcome_from_artifacts(
     return PhaseOutcome.PENDING
 
 
-def _failed(error: str) -> MergePhaseResult:
-    """Return a ``FAILED`` ``MergePhaseResult`` with the given error message."""
-    return MergePhaseResult(
-        outcome   = PhaseOutcome.FAILED,
-        artifacts = [],
-        message   = error,
-        error     = error,
-        merged    = [],
-    )
 
-
-def _pending(reason: str) -> MergePhaseResult:
-    """Return a ``PENDING`` ``MergePhaseResult`` with the given reason.
-
-    Used when a dependency is legitimately pending during a dry-run preview:
-    the phase cannot preview its own work, so it chains ``PENDING`` without an
-    error.
-    """
-    return MergePhaseResult(
-        outcome   = PhaseOutcome.PENDING,
-        artifacts = [],
-        message   = reason,
-        error     = None,
-        merged    = [],
-    )

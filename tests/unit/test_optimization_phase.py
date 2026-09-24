@@ -23,7 +23,7 @@ from pyqenc.models import (
 )
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.optimization import OptimizationPhase
-from pyqenc.state import OptimizationParams, StrategyTestResult
+from pyqenc.state import OptimizationParams, ProbeState, StrategyTestResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -137,12 +137,16 @@ def _persist_optimization(
     strategy_results: list[StrategyTestResult],
     tolerance_pct: float,
     selected: list[str],
-    crop: CropParams | None = None,
 ) -> None:
-    """Write optimization.yaml with given results."""
+    """Write optimization.yaml with given results.
+
+    The persisted ``probe`` matches the coherent state the ``_make_phase``
+    probe mock reports (``source=None`` → frame_count=0, empty crop), so the
+    phase's probe-mismatch validation sees a current persisted state.
+    """
     work_dir.mkdir(parents=True, exist_ok=True)
     OptimizationParams(
-        crop             = crop,
+        probe            = ProbeState(frame_count=0, crop=CropParams()),
         test_chunks      = ["chunk-001", "chunk-002"],
         strategy_results = strategy_results,
         tolerance_pct    = tolerance_pct,
@@ -212,11 +216,11 @@ class TestApplyTolerance:
 class TestToleranceReapplication:
     """Tests for re-selecting strategies from cached results when tolerance changes."""
 
-    def test_reapplication_returns_reused_outcome(self, tmp_path: Path) -> None:
-        """When all results cached and tolerance changed, outcome is REUSED."""
+    def test_reapplication_returns_completed_outcome(self, tmp_path: Path) -> None:
+        """When all results cached and tolerance changed, the cheap re-select runs (COMPLETED)."""
         strategies = [_S1, _S2, _S3]
         phase, work_dir = _make_phase(tmp_path, strategies, tolerance=10.0)
-        source = phase._job._source  # type: ignore[union-attr]
+        source = phase._dep(JobPhase)._source
 
         results = _make_results([100, 104, 120])
         _persist_optimization(
@@ -228,7 +232,9 @@ class TestToleranceReapplication:
         )
 
         result = phase.run(dry_run=False)
-        assert result.outcome == PhaseOutcome.REUSED
+        # Tolerance re-application is cheap pending work (re-select + save),
+        # so the phase COMPLETED it rather than short-circuiting to REUSED.
+        assert result.outcome == PhaseOutcome.COMPLETED
         assert result.is_complete is True
 
     def test_reapplication_updates_selected_strategies(self, tmp_path: Path) -> None:
@@ -236,7 +242,7 @@ class TestToleranceReapplication:
         strategies = [_S1, _S2, _S3]
         # New tolerance is 25% — should include S3 (20% above best)
         phase, work_dir = _make_phase(tmp_path, strategies, tolerance=25.0)
-        source = phase._job._source  # type: ignore[union-attr]
+        source = phase._dep(JobPhase)._source
 
         results = _make_results([100, 104, 120])
         _persist_optimization(
@@ -256,7 +262,7 @@ class TestToleranceReapplication:
         """After re-application, optimization.yaml is updated with the new tolerance."""
         strategies = [_S1, _S2, _S3]
         phase, work_dir = _make_phase(tmp_path, strategies, tolerance=10.0)
-        source = phase._job._source  # type: ignore[union-attr]
+        source = phase._dep(JobPhase)._source
 
         results = _make_results([100, 104, 120])
         _persist_optimization(
@@ -277,7 +283,7 @@ class TestToleranceReapplication:
         """When tolerance is unchanged and all results cached, outcome is REUSED (fast path)."""
         strategies = [_S1, _S2, _S3]
         phase, work_dir = _make_phase(tmp_path, strategies, tolerance=5.0)
-        source = phase._job._source  # type: ignore[union-attr]
+        source = phase._dep(JobPhase)._source
 
         results = _make_results([100, 104, 120])
         _persist_optimization(
@@ -298,7 +304,7 @@ class TestToleranceReapplication:
         """Changing tolerance to 0% selects exactly the best strategy."""
         strategies = [_S1, _S2, _S3]
         phase, work_dir = _make_phase(tmp_path, strategies, tolerance=0.0)
-        source = phase._job._source  # type: ignore[union-attr]
+        source = phase._dep(JobPhase)._source
 
         results = _make_results([100, 104, 120])
         _persist_optimization(
@@ -317,7 +323,7 @@ class TestToleranceReapplication:
         """Re-application only triggers when ALL strategies have cached results."""
         strategies = [_S1, _S2, _S3]
         phase, work_dir = _make_phase(tmp_path, strategies, tolerance=10.0)
-        source = phase._job._source  # type: ignore[union-attr]
+        source = phase._dep(JobPhase)._source
 
         # Only 2 of 3 strategies have results
         partial_results = [

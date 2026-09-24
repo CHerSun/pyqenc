@@ -21,6 +21,7 @@ from pyqenc.models import (
     Strategy,
     VideoMetadata,
 )
+from pyqenc.phase import Recovery
 
 _SHARED_APP_CONFIG: AppConfig = load_app_config(default_only=True)
 
@@ -219,8 +220,9 @@ class TestExtractionPhaseTiming:
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
 
-        phase = ExtractionPhase(config, collector=collector)
-        phase._job = job_mock  # type: ignore[assignment]
+        registry: dict[type, object] = {}
+        phase = ExtractionPhase(config, registry, collector=collector)  # type: ignore[arg-type]
+        registry[JobPhase] = job_mock  # type: ignore[index]
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
@@ -240,7 +242,7 @@ class TestExtractionPhaseTiming:
 
         with patch.object(
             ExtractionPhase, "_recover",
-            return_value=([stub_artifact], None, []),
+            return_value=Recovery.from_artifacts([stub_artifact]),
         ):
             phase.run()
 
@@ -294,7 +296,7 @@ class TestExtractionPhaseTiming:
         with (
             patch.object(
                 ExtractionPhase, "_recover",
-                return_value=([stub_artifact], None, []),
+                return_value=Recovery.from_artifacts([stub_artifact]),
             ),
             patch(
                 "pyqenc.phases.extraction.MKVTrackExtractor",
@@ -334,7 +336,7 @@ class TestExtractionPhaseTiming:
 
         with patch.object(
             ExtractionPhase, "_recover",
-            return_value=([stub_artifact], None, []),
+            return_value=Recovery.from_artifacts([stub_artifact]),
         ):
             result = phase.run()
 
@@ -406,9 +408,10 @@ class TestChunkingPhaseTiming:
         extraction_mock = MagicMock(spec=ExtractionPhase)
         extraction_mock.result = self._make_extraction_result(tmp_path)
 
-        phase = ChunkingPhase(config, collector=collector)
-        phase._job        = job_mock         # type: ignore[assignment]
-        phase._extraction = extraction_mock  # type: ignore[assignment]
+        registry: dict[type, object] = {}
+        phase = ChunkingPhase(config, registry, collector=collector)  # type: ignore[arg-type]
+        registry[JobPhase]        = job_mock         # type: ignore[index]
+        registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
@@ -430,7 +433,7 @@ class TestChunkingPhaseTiming:
         stub_artifact.state    = ArtifactState.COMPLETE
         stub_artifact.metadata = None
 
-        with patch.object(ChunkingPhase, "_recover", return_value=[stub_artifact]):
+        with patch.object(ChunkingPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -455,7 +458,7 @@ class TestChunkingPhaseTiming:
         stub_boundaries = [SceneBoundary(frame=0, timestamp_seconds=0.0)]
 
         with (
-            patch.object(ChunkingPhase, "_recover", return_value=[]),
+            patch.object(ChunkingPhase, "_recover", return_value=Recovery(pending=True)),
             patch("pyqenc.phases.chunking.detect_scenes", return_value=stub_boundaries),
             patch("pyqenc.phases.chunking.split_chunks", return_value=[]),
         ):
@@ -487,7 +490,7 @@ class TestChunkingPhaseTiming:
         phase._recovered_scenes = cached_boundaries  # type: ignore[attr-defined]
 
         with (
-            patch.object(ChunkingPhase, "_recover", return_value=[]),
+            patch.object(ChunkingPhase, "_recover", return_value=Recovery(pending=True)),
             patch("pyqenc.phases.chunking.split_chunks", return_value=[]),
         ):
             phase.run()
@@ -518,7 +521,7 @@ class TestChunkingPhaseTiming:
         cached_boundaries = [SceneBoundary(frame=0, timestamp_seconds=0.0)]
         phase._recovered_scenes = cached_boundaries  # type: ignore[attr-defined]
 
-        # Use a real ChunkMetadata (not a bare Mock): _execute_chunking reads
+        # Use a real ChunkMetadata (not a bare Mock): the executor reads
         # cm.path and cm.frame_count to build the final ChunkArtifact list, so a
         # spec-only Mock without a real .path fails with AttributeError.
         real_chunk = ChunkMetadata(
@@ -530,7 +533,7 @@ class TestChunkingPhaseTiming:
         )
 
         with (
-            patch.object(ChunkingPhase, "_recover", return_value=[]),
+            patch.object(ChunkingPhase, "_recover", return_value=Recovery(pending=True)),
             patch("pyqenc.phases.chunking.split_chunks", return_value=[real_chunk]),
         ):
             phase.run()
@@ -606,7 +609,7 @@ class TestChunkingPhaseTiming:
         phase._recovered_scenes = cached_boundaries  # type: ignore[attr-defined]
 
         with (
-            patch.object(ChunkingPhase, "_recover", return_value=[]),
+            patch.object(ChunkingPhase, "_recover", return_value=Recovery(pending=True)),
             patch("pyqenc.phases.chunking.split_chunks", return_value=[]),
         ):
             result = phase.run()
@@ -666,9 +669,10 @@ class TestAudioPhaseTiming:
         extraction_mock = MagicMock(spec=ExtractionPhase)
         extraction_mock.result = extraction_result
 
-        phase = AudioPhase(config, collector=collector)
-        phase._job        = job_mock         # type: ignore[assignment]
-        phase._extraction = extraction_mock  # type: ignore[assignment]
+        registry: dict[type, object] = {}
+        phase = AudioPhase(config, registry, collector=collector)  # type: ignore[arg-type]
+        registry[JobPhase]        = job_mock         # type: ignore[index]
+        registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
@@ -686,7 +690,7 @@ class TestAudioPhaseTiming:
         stub_artifact.state = ArtifactState.COMPLETE
         stub_artifact.path  = tmp_path / "track.aac"
 
-        with patch.object(AudioPhase, "_recover", return_value=[stub_artifact]):
+        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -717,8 +721,8 @@ class TestAudioPhaseTiming:
         )
 
         with (
-            patch.object(AudioPhase, "_recover", return_value=[stub_artifact]),
-            patch.object(AudioPhase, "_execute_audio", return_value=stub_result),
+            patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
+            patch.object(AudioPhase, "_execute", return_value=stub_result),
         ):
             phase.run()
 
@@ -742,7 +746,7 @@ class TestAudioPhaseTiming:
         stub_artifact.state = ArtifactState.COMPLETE
         stub_artifact.path  = tmp_path / "track.aac"
 
-        with patch.object(AudioPhase, "_recover", return_value=[stub_artifact]):
+        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -765,7 +769,7 @@ class TestAudioPhaseTiming:
         stub_artifact.state = ArtifactState.COMPLETE
         stub_artifact.path  = tmp_path / "track.aac"
 
-        with patch.object(AudioPhase, "_recover", return_value=[stub_artifact]):
+        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             result = phase.run()
 
         assert result is not None
@@ -852,17 +856,27 @@ class TestOptimizationPhaseTiming:
 
         # ProbePhase is a dependency; the uniform run() resolves deps first, so a
         # completed probe result must be present for the reuse path to be reached.
+        # The result is a REAL typed result (recovery builds a ProbeState from
+        # .source/.crop — bare Mocks would fail pydantic validation).
+        from pyqenc.models import CropParams
+        from pyqenc.phases.probe import ProbePhaseResult
         probe_mock = MagicMock(spec=ProbePhase)
-        probe_mock.result = MagicMock(outcome=PhaseOutcome.COMPLETED, is_complete=True)
+        probe_mock.result = ProbePhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            artifacts = [],
+            message   = "probe complete",
+            source    = None,
+            crop      = CropParams(),
+        )
 
         chunking_mock = MagicMock(spec=ChunkingPhase)
         chunking_mock.result = self._make_chunking_result(tmp_path)
 
-        phase = OptimizationPhase(config, collector=collector)
-        phase._job        = job_mock       # type: ignore[assignment]
-        phase._probe      = probe_mock     # type: ignore[assignment]
-        phase._chunking   = chunking_mock  # type: ignore[assignment]
-        phase.dependencies = [job_mock, probe_mock, chunking_mock]  # type: ignore[list-item]
+        registry: dict[type, object] = {}
+        phase = OptimizationPhase(config, registry, collector=collector)  # type: ignore[arg-type]
+        registry[JobPhase]      = job_mock       # type: ignore[index]
+        registry[ProbePhase]    = probe_mock     # type: ignore[index]
+        registry[ChunkingPhase] = chunking_mock  # type: ignore[index]
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
@@ -870,7 +884,8 @@ class TestOptimizationPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.state import OptimizationParams, StrategyTestResult
+        from pyqenc.models import CropParams
+        from pyqenc.state import OptimizationParams, ProbeState, StrategyTestResult
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector, optimize=True)
@@ -879,7 +894,7 @@ class TestOptimizationPhaseTiming:
         # tolerance_pct and metrics_sampling must match config defaults so the
         # full-reuse path (step 4) is taken rather than falling through to encodes.
         persisted = OptimizationParams(
-            probe            = None,
+            probe            = ProbeState(frame_count=0, crop=CropParams()),
             test_chunks      = ["chunk_0"],
             strategy_results = [
                 StrategyTestResult(strategy_name=strategy.name, total_size=1024),
@@ -900,12 +915,14 @@ class TestOptimizationPhaseTiming:
             f"Expected MetricKey.RECOVERY in time() calls on reuse path, got: {time_keys_called}"
         )
 
-    def test_encoding_optimization_recorded_when_test_encodes_run(self, tmp_path: Path) -> None:
-        """``time(MetricKey.OPTIMIZATION)`` must be called when test encodes run.
+    def test_optimization_prefix_threads_through_shared_encoder(self, tmp_path: Path) -> None:
+        """Test encodes are attributed to the optimization phase, not encoding.
 
-        The ``time()`` call wraps the entire parallel encode loop in OptimizationPhase.run(),
-        so we verify the collector receives it by running _encode_chunks_parallel directly
-        with a mocked inner encode call and the ENCODING_OPTIMIZATION key.
+        ``_encode_chunks_parallel`` records NO top-level span any more (the
+        owning phase's template owns it); with ``metric_prefix=OPTIMIZATION``
+        its convergence ``step`` lands under the optimization key (Req: TODO-1
+        fix — optimization follows the encoding contract via the shared
+        encoder, no code duplication).
 
         Validates: Requirements 6.5, 2.2a
         """
@@ -922,9 +939,10 @@ class TestOptimizationPhaseTiming:
         chunk.start_timestamp = 0.0
         chunk.end_timestamp   = 1.0
         chunk.path            = tmp_path / "chunk_0.mkv"
+        (tmp_path / "chunk_0.mkv").write_bytes(bytes(64))
 
         encoded_path = tmp_path / "chunk_0_enc.mkv"
-        encoded_path.write_bytes(b"\x00" * 128)
+        encoded_path.write_bytes(bytes(128))
 
         successful_result = ChunkEncodingResult(
             chunk_id     = "chunk_0",
@@ -953,12 +971,19 @@ class TestOptimizationPhaseTiming:
                     max_parallel     = 1,
                     force            = False,
                     collector        = collector,
+                    metric_prefix    = MetricKey.OPTIMIZATION,
                 )
             )
 
+        # No top-level span is recorded by the executor itself...
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.ENCODING in time_keys_called, (
-            f"Expected MetricKey.ENCODING in time() calls, got: {time_keys_called}"
+        assert MetricKey.ENCODING not in time_keys_called, (
+            f"Executor must not record a top-level span (phase template owns it), got: {time_keys_called}"
+        )
+        # ...and convergence steps land under the owning phase's prefix.
+        step_keys = [call.args[0] for call in collector.step.call_args_list]
+        assert MetricKey.OPTIMIZATION in step_keys, (
+            f"Expected step(OPTIMIZATION) for the optimization-owned encode, got: {step_keys}"
         )
 
     def test_step_called_with_convergence_update_per_chunk(self, tmp_path: Path) -> None:
@@ -1032,14 +1057,15 @@ class TestOptimizationPhaseTiming:
 
         Validates: Requirements 6.4, 6.5
         """
-        from pyqenc.state import OptimizationParams, StrategyTestResult
+        from pyqenc.models import CropParams
+        from pyqenc.state import OptimizationParams, ProbeState, StrategyTestResult
 
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector, optimize=True)  # type: ignore[arg-type]
 
         strategy = _STRATEGY_SLOW_H265
         persisted = OptimizationParams(
-            probe            = None,
+            probe            = ProbeState(frame_count=0, crop=CropParams()),
             test_chunks      = ["chunk_0"],
             strategy_results = [
                 StrategyTestResult(strategy_name=strategy.name, total_size=1024),
@@ -1157,11 +1183,12 @@ class TestEncodingPhaseTiming:
         optimization_mock = MagicMock(spec=OptimizationPhase)
         optimization_mock.result = self._make_optimization_result(tmp_path)
 
-        phase = EncodingPhase(config, collector=collector)
-        phase._job          = job_mock           # type: ignore[assignment]
-        phase._probe        = probe_mock         # type: ignore[assignment]
-        phase._chunking     = chunking_mock      # type: ignore[assignment]
-        phase._optimization = optimization_mock  # type: ignore[assignment]
+        registry: dict[type, object] = {}
+        phase = EncodingPhase(config, registry, collector=collector)  # type: ignore[arg-type]
+        registry[JobPhase]          = job_mock           # type: ignore[index]
+        registry[ProbePhase]        = probe_mock         # type: ignore[index]
+        registry[ChunkingPhase]     = chunking_mock      # type: ignore[index]
+        registry[OptimizationPhase] = optimization_mock  # type: ignore[index]
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
@@ -1180,7 +1207,7 @@ class TestEncodingPhaseTiming:
         stub_artifact.chunk_id = "chunk_0"
         stub_artifact.strategy = "slow+h265"
 
-        with patch.object(EncodingPhase, "_recover", return_value=[stub_artifact]):
+        with patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -1191,50 +1218,39 @@ class TestEncodingPhaseTiming:
     def test_encoding_main_recorded_when_encodes_run(self, tmp_path: Path) -> None:
         """``time(MetricKey.ENCODING)`` must be called when encoding executes.
 
-        Uses ``_encode_chunks_parallel`` directly with mocked inner encode calls
-        to verify the collector receives the timing call.
+        The top-level span is owned by the phase template's ``run()`` (it wraps
+        ``_execute``), so drive the phase with one pending artifact and a
+        stubbed executor.
 
         Validates: Requirements 6.5, 2.2a
         """
-        import asyncio
-
-        from pyqenc.models import ChunkMetadata
-        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
+        from pyqenc.models import PhaseOutcome
+        from pyqenc.phases.encoding import (
+            EncodedArtifact,
+            EncodingPhase,
+            EncodingPhaseResult,
+        )
+        from pyqenc.state import ArtifactState
 
         collector = _spy_collector()
+        phase     = self._make_phase(tmp_path, collector)
 
-        chunk = MagicMock(spec=ChunkMetadata)
-        chunk.chunk_id        = "chunk_0"
-        chunk.start_timestamp = 0.0
-        chunk.end_timestamp   = 1.0
-        chunk.path            = tmp_path / "chunk_0.mkv"
+        stub_artifact = MagicMock(spec=EncodedArtifact)
+        stub_artifact.state    = ArtifactState.ABSENT
+        stub_artifact.chunk_id = "chunk_0"
+        stub_artifact.strategy = "slow+h265"
 
-        encoded_path = tmp_path / "chunk_0_enc.mkv"
-        encoded_path.write_bytes(b"\x00" * 128)
-
-        successful_result = ChunkEncodingResult(
-            chunk_id     = "chunk_0",
-            strategy     = "slow+h265",
-            success      = True,
-            final_crf    = 28.0,
-            attempts     = 2,
-            encoded_file = MagicMock(path=encoded_path),
-            reused       = False,
+        stub_result = EncodingPhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            artifacts = [],
+            message   = "ok",
         )
 
-        with patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result):
-            asyncio.run(
-                _encode_chunks_parallel(
-                    encoder          = MagicMock(),
-                    chunks           = [chunk],
-                    reference_dir    = tmp_path,
-                    strategies       = [_STRATEGY_SLOW_H265],
-                    quality_targets  = [],
-                    max_parallel     = 1,
-                    force            = False,
-                    collector        = collector,
-                )
-            )
+        with (
+            patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
+            patch.object(EncodingPhase, "_execute", return_value=stub_result),
+        ):
+            phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
         assert MetricKey.ENCODING in time_keys_called, (
@@ -1369,7 +1385,7 @@ class TestEncodingPhaseTiming:
         stub_artifact.chunk_id = "chunk_0"
         stub_artifact.strategy = "slow+h265"
 
-        with patch.object(EncodingPhase, "_recover", return_value=[stub_artifact]):
+        with patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             result = phase.run()
 
         assert result is not None
@@ -1481,11 +1497,24 @@ class TestMergePhaseTiming:
         audio_mock = MagicMock(spec=AudioPhase)
         audio_mock.result = self._make_audio_result()
 
-        phase = MergePhase(config, collector=collector)
-        phase._job        = job_mock        # type: ignore[assignment]
-        phase._extraction = extraction_mock  # type: ignore[assignment]
-        phase._encoding   = encoding_mock   # type: ignore[assignment]
-        phase._audio      = audio_mock      # type: ignore[assignment]
+        from pyqenc.models import CropParams
+        from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
+        probe_mock = MagicMock(spec=ProbePhase)
+        probe_mock.result = ProbePhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            artifacts = [],
+            message   = "probe complete",
+            source    = None,
+            crop      = CropParams(),
+        )
+
+        registry: dict[type, object] = {}
+        phase = MergePhase(config, registry, collector=collector)  # type: ignore[arg-type]
+        registry[JobPhase]        = job_mock         # type: ignore[index]
+        registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
+        registry[ProbePhase]      = probe_mock       # type: ignore[index]
+        registry[EncodingPhase]   = encoding_mock    # type: ignore[index]
+        registry[AudioPhase]      = audio_mock       # type: ignore[index]
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
@@ -1509,7 +1538,7 @@ class TestMergePhaseTiming:
             strategy_name = "slow+h265",
         )
 
-        with patch.object(MergePhase, "_recover", return_value=[stub_artifact]):
+        with patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -1545,7 +1574,7 @@ class TestMergePhaseTiming:
         success_result = FFmpegRunResult(success=True, returncode=0)
 
         with (
-            patch.object(MergePhase, "_recover", return_value=[stub_artifact]),
+            patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
             patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
             patch("pyqenc.phases.merge.get_frame_count", return_value=100),
             patch.object(MergePhase, "_collect_encoded_chunks", return_value={
@@ -1607,11 +1636,24 @@ class TestMergePhaseTiming:
         audio_mock = MagicMock(spec=AudioPhase)
         audio_mock.result = self._make_audio_result()
 
-        phase = MergePhase(config, collector=collector)
-        phase._job        = job_mock        # type: ignore[assignment]
-        phase._extraction = extraction_mock  # type: ignore[assignment]
-        phase._encoding   = encoding_mock   # type: ignore[assignment]
-        phase._audio      = audio_mock      # type: ignore[assignment]
+        from pyqenc.models import CropParams
+        from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
+        probe_mock = MagicMock(spec=ProbePhase)
+        probe_mock.result = ProbePhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            artifacts = [],
+            message   = "probe complete",
+            source    = None,
+            crop      = CropParams(),
+        )
+
+        registry: dict[type, object] = {}
+        phase = MergePhase(config, registry, collector=collector)  # type: ignore[arg-type]
+        registry[JobPhase]        = job_mock         # type: ignore[index]
+        registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
+        registry[ProbePhase]      = probe_mock       # type: ignore[index]
+        registry[EncodingPhase]   = encoding_mock    # type: ignore[index]
+        registry[AudioPhase]      = audio_mock       # type: ignore[index]
 
         output_file = tmp_path / "work" / "final" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1627,7 +1669,7 @@ class TestMergePhaseTiming:
         encoded_path.write_bytes(b"\x00" * 128)
 
         with (
-            patch.object(MergePhase, "_recover", return_value=[stub_artifact]),
+            patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
             patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
             patch("pyqenc.phases.merge.get_frame_count", return_value=100),
             patch.object(MergePhase, "_collect_encoded_chunks", return_value={
@@ -1665,7 +1707,7 @@ class TestMergePhaseTiming:
             strategy_name = "slow+h265",
         )
 
-        with patch.object(MergePhase, "_recover", return_value=[stub_artifact]):
+        with patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             result = phase.run()
 
         assert result is not None
@@ -1684,17 +1726,18 @@ class TestMetricKeySmoke:
     """
 
     # ------------------------------------------------------------------
-    # 1. MetricKey has exactly 8 members with correct string values
+    # 1. MetricKey has exactly 9 members with correct string values
     # ------------------------------------------------------------------
 
-    def test_metric_key_has_eight_members(self) -> None:
-        """MetricKey must have exactly 8 members with the correct string values.
+    def test_metric_key_has_nine_members(self) -> None:
+        """MetricKey must have exactly 9 members with the correct string values.
 
-        Validates: Requirements 6.1, 6.2
+        Validates: Requirements 6.1, 6.2 (PROBE added by phase-run-template)
         """
         expected = {
             "JOB":          "job",
             "EXTRACTION":   "extraction",
+            "PROBE":        "probe",
             "CHUNKING":     "chunking",
             "AUDIO":        "audio",
             "ENCODING":     "encoding",
@@ -1702,8 +1745,8 @@ class TestMetricKeySmoke:
             "MERGE":        "merge",
             "RECOVERY":     "recovery",
         }
-        assert len(MetricKey) == 8, (
-            f"Expected 8 MetricKey members, got {len(MetricKey)}: {list(MetricKey)}"
+        assert len(MetricKey) == 9, (
+            f"Expected 9 MetricKey members, got {len(MetricKey)}: {list(MetricKey)}"
         )
         for name, value in expected.items():
             member = MetricKey[name]

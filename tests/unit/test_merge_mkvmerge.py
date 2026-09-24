@@ -9,7 +9,7 @@ built via its real constructor and a real phase registry whose Job / Extraction
 then run through the public ``merge.run(dry_run=False)`` entry point. Only the
 external shell-outs are mocked: mkvmerge (``subprocess.run``) and the
 frame-count check (``get_frame_count``) — boundaries, never phase internals. No
-``__new__``, no private ``_execute_merge`` / ``_collect_encoded_chunks`` calls,
+``__new__``, no private ``_execute`` / ``_collect_encoded_chunks`` calls,
 no private-attr poking.
 
 Covers:
@@ -35,7 +35,7 @@ from pyqenc.models import (
     PhaseOutcome,
     VideoMetadata,
 )
-from pyqenc.phase import Artifact, Phase
+from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
 from pyqenc.phases.encoding import (
     EncodedArtifact,
@@ -122,7 +122,7 @@ def _make_merge_phase(
         source     = source,
     )
 
-    registry: dict[type[Phase], Phase] = {JobPhase: job}
+    registry: PhaseRegistry = {JobPhase: job}
 
     extraction = ExtractionPhase(config, registry, video_required=True, collector=collector)
     ts_artifacts = (

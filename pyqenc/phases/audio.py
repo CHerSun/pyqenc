@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 from dataclasses import dataclass as _dataclass
 from dataclasses import field as _field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar, cast
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -49,17 +49,19 @@ from pyqenc.constants import (
     TEMP_SUFFIX,
     THICK_LINE,
 )
+from pyqenc.metrics import MetricKey
 from pyqenc.models import AudioMetadata, PhaseOutcome
 from pyqenc.phase import (
     Artifact,
-    FinalizeContext,
     Phase,
+    PhaseRegistry,
     PhaseResult,
-    resolve_dependencies,
+    Recovery,
 )
+from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
+from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.state import ArtifactState, AudioSidecar
 from pyqenc.utils.alive import AdvanceState, ProgressBar
-from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
 from pyqenc.utils.long_path import LongPath
 
 _AUDIO_YAML = "audio.yaml"
@@ -112,168 +114,49 @@ class AudioPhaseResult(PhaseResult):
     audio_files: list[Path]          = _field(default_factory=list)
 
 
-class AudioPhase:
+class AudioPhase(Phase):
     """Phase object for audio stream processing.
 
     Owns artifact enumeration, recovery, invalidation, execution, and logging
     for the audio phase. Drives the configured chains over the selected source
-    tracks via the ``pyqenc.audio`` chain executor.
+    tracks via the ``pyqenc.audio`` chain executor. The uniform run footprint
+    (memoization, dependencies, banner, timed recovery, dry-run / reused
+    branches, timed execution) is inherited from :class:`Phase`.
 
     Args:
         config: Full pipeline configuration.
         phases: Phase registry; used to resolve typed dependency references.
     """
 
-    name: str = "audio"
+    name:        str       = "audio"
+    DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase)
+    _METRIC_KEY: MetricKey = MetricKey.AUDIO
 
     def __init__(
         self,
         config:    AppConfig,
-        phases:    dict[type[Phase], Phase] | None = None,
+        phases:    PhaseRegistry | None = None,
         *,
         collector: MetricsCollector,
     ) -> None:
-        from typing import cast
-
-        from pyqenc.phases.extraction import ExtractionPhase as _ExtractionPhase
-        from pyqenc.phases.job import JobPhase as _JobPhase
-
-        self._config:     AppConfig               = config
-        self._collector:  MetricsCollector        = collector
-        self._job:        _JobPhase | None         = cast(_JobPhase,        phases.get(_JobPhase))        if phases else None
-        self._extraction: _ExtractionPhase | None = cast(_ExtractionPhase, phases.get(_ExtractionPhase)) if phases else None
-        self.result:      AudioPhaseResult | None = None
-        self.dependencies: list[Phase]            = [d for d in [self._job, self._extraction] if d is not None]
+        super().__init__(config, phases, collector=collector)
 
     # ------------------------------------------------------------------
-    # Public Phase interface
+    # Phase hooks
     # ------------------------------------------------------------------
 
-    def run(self, dry_run: bool = False) -> AudioPhaseResult:
-        """Recover, produce pending (track, chain) outputs, cache result.
-
-        Sequence (mirrors the other phases):
-
-        1. In-run memoization guard.
-        2. ``_ensure_dependencies`` — Job, Extraction.
-        3. ``emit_phase_banner``.
-        4. ``_recover(force_wipe)`` — resolve select + chains, invalidate
-           differing/removed chains, write the updated sidecar **before**
-           producing, then classify expected (track, chain) outputs vs on-disk.
-        5. ``log_recovery_line``.
-        6. Dry-run: return REUSED / PENDING without executing.
-        7. Execute pending jobs with a count-based ``ProgressBar``.
-        8. Emit summary; cache and return.
-
-        Args:
-            dry_run: When ``True``, report what would be done without producing
-                     files.
-
-        Returns:
-            ``AudioPhaseResult`` — COMPLETED / REUSED on success, PENDING in a
-            dry-run with pending work, FAILED on a dependency or fatal error.
-        """
-        # In-run memoization guard: return cached result verbatim.
-        if self.result is not None:
-            return self.result
-
-        dep_result = self._ensure_dependencies(dry_run=dry_run)
-        if dep_result is not None:
-            self.result = dep_result
-            return self.result
-
-        emit_phase_banner("AUDIO", logger)
-
-        job_result = self._job.result  # type: ignore[union-attr]
-        force_wipe = getattr(job_result, "force_wipe", False)
-
-        audio_cfg = job_result.config.audio
+    def _log_key_params(self) -> None:
+        """Log the configured chain / select counts (key parameters)."""
+        audio_cfg = self._config.audio
         logger.info("Chains:  %d configured", len(audio_cfg.chains))
         if audio_cfg.select:
             logger.info("Select:  %d entr(y/ies)", len(audio_cfg.select))
-
-        from pyqenc.metrics import MetricKey
-
-        with self._collector.time(MetricKey.RECOVERY):
-            internal_artifacts = self._recover(force_wipe=force_wipe)
-
-        artifacts     = [a for a in internal_artifacts if a.wanted]
-        pending       = [a for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)]
-        message       = log_recovery_line(logger, internal_artifacts)
-
-        if pending:
-            logger.info("Sources: %d (track, chain) output(s) to produce", len(pending))
-
-        # Dry-run path — no production.
-        if dry_run:
-            outcome = PhaseOutcome.REUSED if not pending else PhaseOutcome.PENDING
-            self.result = self._make_result(outcome, artifacts, message)
-            return self.result
-
-        # Nothing pending — everything is already on disk.
-        if not pending:
-            self.result = self._make_result(PhaseOutcome.REUSED, artifacts, message)
-            return self.result
-
-        # Produce the pending outputs.
-        with self._collector.time(MetricKey.AUDIO):
-            result = self._execute_audio(artifacts)
-        self.result = result
-        return result
-
-    def finalize(self, ctx: FinalizeContext) -> None:
-        """Perform end-of-run housekeeping for the audio phase.
-
-        Chain outputs are delivery artifacts kept under every cleanup level, and
-        ``audio.yaml`` is a recovery sidecar that must survive reruns (Req 10.8).
-        ``AudioPhase`` therefore has no deep artifacts to remove — a safe no-op
-        regardless of ``ctx.deep_cleanup``.
-
-        Args:
-            ctx: Pre-resolved end-of-run decisions from the runner.
-        """
-        return
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _ensure_dependencies(self, dry_run: bool) -> AudioPhaseResult | None:
-        """Resolve dependencies via the shared walk; fail fast if incomplete.
-
-        Args:
-            dry_run: Propagated unchanged to each dependency's ``run()``.
-
-        Returns:
-            A ``FAILED`` result if any dependency failed, a ``PENDING`` result
-            if any dependency is legitimately pending (dry-run only), or
-            ``None`` when all dependencies are complete and the phase may
-            proceed.
-        """
-        if self._job is None:
-            return _failed("AudioPhase requires JobPhase")
-        if self._extraction is None:
-            return _failed("AudioPhase requires ExtractionPhase")
-
-        status = resolve_dependencies(self, dry_run=dry_run)
-        if status.failed:
-            names = ", ".join(n.capitalize() for n in status.failed)
-            err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
-            logger.error(err)
-            return _failed(err)
-        if status.pending:
-            names = ", ".join(n.capitalize() for n in status.pending)
-            msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
-            logger.info(msg)
-            return _pending(msg)
-
-        return None
 
     # ------------------------------------------------------------------
     # Recovery + invalidation
     # ------------------------------------------------------------------
 
-    def _recover(self, force_wipe: bool) -> list[AudioArtifact]:
+    def _recover(self) -> Recovery:
         """Resolve the plan, invalidate changed chains, classify on-disk outputs.
 
         Steps (Req 9.x, 10.x):
@@ -293,17 +176,16 @@ class AudioPhase:
         6. Classify each expected (track, chain) output COMPLETE (file present) /
            ABSENT (missing) — completion is read from disk only (Req 9.6).
 
-        Args:
-            force_wipe: When ``True``, wipe all audio artifacts + sidecar first.
-
         Returns:
-            The internal artifact list (wanted expected outputs plus any
-            present-but-unwanted surplus files).
+            The :class:`Recovery` single source of truth (internal artifact
+            list: wanted expected outputs plus any present-but-unwanted
+            surplus files).
         """
-        job_result   = self._job.result       # type: ignore[union-attr]
-        work_dir     = LongPath(job_result.work_dir)
+        job_result: JobPhaseResult = cast(JobPhaseResult, self._dep(JobPhase).result)
+        work_dir    = LongPath(job_result.work_dir)
         sidecar_path = work_dir / _AUDIO_YAML
-        audio_cfg    = job_result.config.audio
+        audio_cfg   = job_result.config.audio
+        force_wipe  = job_result.force_wipe
 
         # Step 3 — resolve the working plan (selection is recomputed every run).
         tracks   = self._selected_tracks()
@@ -328,7 +210,7 @@ class AudioPhase:
         self._invalidate_and_commit(audio_dir, sidecar_path, resolved)
 
         # Step 6 — classify expected outputs (completion from disk only).
-        return self._classify(audio_dir, tracks, resolved)
+        return Recovery.from_artifacts(self._classify(audio_dir, tracks, resolved))
 
     def _output_dir(self, tracks: list[AudioMetadata], work_dir: LongPath) -> LongPath:
         """Return the phase's DEDICATED audio output directory (``work_dir/audio``).
@@ -389,9 +271,9 @@ class AudioPhase:
 
     def _selected_tracks(self) -> list[AudioMetadata]:
         """Resolve the working track set from extraction + ``audio.select`` (Req 9.1)."""
-        extraction_result = self._extraction.result if self._extraction else None  # type: ignore[union-attr]
-        audio_meta: list[AudioMetadata] = getattr(extraction_result, "audio", []) or []
-        audio_cfg = self._job.result.config.audio  # type: ignore[union-attr]
+        extraction_result = cast(ExtractionPhaseResult, self._dep(ExtractionPhase).result)
+        audio_meta: list[AudioMetadata] = extraction_result.audio or []
+        audio_cfg = cast(JobPhaseResult, self._dep(JobPhase).result).config.audio
         return resolve_selection(audio_meta, audio_cfg.select)
 
     def _invalidate_and_commit(
@@ -549,7 +431,7 @@ class AudioPhase:
     # Execution
     # ------------------------------------------------------------------
 
-    def _execute_audio(self, artifacts: list[AudioArtifact]) -> AudioPhaseResult:
+    def _execute(self, wanted: list[Artifact], dry_run: bool) -> AudioPhaseResult:
         """Produce every pending (track, chain) output via the chain executor.
 
         Pending artifacts (ABSENT / PARTIAL) are produced one at a time through
@@ -558,21 +440,27 @@ class AudioPhase:
         ``passthrough`` chain raises ``NotImplementedError`` and a failing chain
         raises ``ChainExecutionError``; both are caught per-job and surfaced as a
         FAILED artifact for that output — the phase never crashes on one bad
-        chain (Req 11.1, 11.4).
+        chain (Req 11.1, 11.4). ``dry_run`` is never ``True`` here (audio is not
+        a readonly-execute phase; the template previews instead).
 
         Args:
-            artifacts: The wanted artifact list from ``_recover()``.
+            wanted:  The wanted artifact list from ``_recover()``.
+            dry_run: Unused for this phase (template guarantees ``False``).
 
         Returns:
             ``AudioPhaseResult`` — COMPLETED when work ran (even with some
             failures), FAILED only when nothing could be produced and failures
             occurred.
         """
-        pending = [a for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)]
-        job_result = self._job.result  # type: ignore[union-attr]
+        artifacts  = wanted
+        pending    = [a for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)]
+        job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
         audio_cfg  = job_result.config.audio
         resolved   = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
         audio_dir  = LongPath(job_result.work_dir) / AUDIO_OUTPUT_DIR
+
+        if pending:
+            logger.info("Sources: %d (track, chain) output(s) to produce", len(pending))
 
         produced = 0
         failed   = 0
@@ -604,7 +492,8 @@ class AudioPhase:
         logger.info(THICK_LINE)
 
         if produced == 0 and failed > 0:
-            return _failed(f"all {failed} audio chain output(s) failed")
+            err = f"all {failed} audio chain output(s) failed"
+            return self._make_result(PhaseOutcome.FAILED, artifacts, err, error=err)
 
         outcome = PhaseOutcome.COMPLETED
         return self._make_result(
@@ -639,6 +528,7 @@ class AudioPhase:
         outcome:   PhaseOutcome,
         artifacts: list[AudioArtifact],
         message:   str,
+        error:     str | None = None,
     ) -> AudioPhaseResult:
         """Assemble an ``AudioPhaseResult`` from the wanted artifacts.
 
@@ -646,6 +536,7 @@ class AudioPhase:
             outcome:   The phase outcome.
             artifacts: The wanted artifact list.
             message:   Human-readable summary.
+            error:     Error description when ``outcome`` is ``FAILED``.
 
         Returns:
             The populated result (``artifacts`` drive dependency resolution;
@@ -656,6 +547,7 @@ class AudioPhase:
             outcome     = outcome,
             artifacts   = artifacts,
             message     = message,
+            error       = error,
             outputs     = artifacts,
             audio_files = [a.path for a in complete],
         )
@@ -686,30 +578,3 @@ def _parse_chain_name(filename: str) -> str | None:
     # safe and contain no dot in practice, but rsplit is robust to a dotted stem.
     dot = tail.rfind(".")
     return tail[:dot] if dot != -1 else tail
-
-
-def _failed(error: str) -> AudioPhaseResult:
-    """Return a ``FAILED`` ``AudioPhaseResult`` with the given error message."""
-    return AudioPhaseResult(
-        outcome     = PhaseOutcome.FAILED,
-        artifacts   = [],
-        message     = error,
-        error       = error,
-        audio_files = [],
-    )
-
-
-def _pending(reason: str) -> AudioPhaseResult:
-    """Return a ``PENDING`` ``AudioPhaseResult`` with the given reason.
-
-    Used when a dependency is legitimately pending during a dry-run preview:
-    the phase cannot preview its own work, so it chains ``PENDING`` without an
-    error.
-    """
-    return AudioPhaseResult(
-        outcome     = PhaseOutcome.PENDING,
-        artifacts   = [],
-        message     = reason,
-        error       = None,
-        audio_files = [],
-    )

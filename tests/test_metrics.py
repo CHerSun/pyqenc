@@ -13,6 +13,7 @@ from pyqenc.metrics import MetricKey, NoOpMetricsCollector
 _EXPECTED_METRIC_KEYS: list[tuple[str, str]] = [
     ("JOB",          "job"),
     ("EXTRACTION",   "extraction"),
+    ("PROBE",        "probe"),
     ("CHUNKING",     "chunking"),
     ("AUDIO",        "audio"),
     ("ENCODING",     "encoding"),
@@ -23,8 +24,8 @@ _EXPECTED_METRIC_KEYS: list[tuple[str, str]] = [
 
 
 def test_metric_key_member_count() -> None:
-    """MetricKey must have exactly 8 members (Req 6.1, 6.2)."""
-    assert len(MetricKey) == 8
+    """MetricKey must have exactly 9 members (Req 6.1, 6.2; PROBE added by phase-run-template)."""
+    assert len(MetricKey) == 9
 
 
 def test_metric_key_member_names_and_values() -> None:

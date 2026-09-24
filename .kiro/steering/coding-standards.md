@@ -14,6 +14,7 @@
 - Use vertical alignment between arguments/parameters where it improves readability.
 - Follow DRY. If code is repeated 2-3+ times — make it reusable.
 - Follow rule of three — if there are 3+ similar entities, define a common interface (`Protocol` or base class) to unify the API.
+- **NEVER use `getattr`/`setattr` on class instances of known types.** When the type is known (e.g. a typed `PhaseResult` subclass), access its fields directly; when the static type is broader than the runtime one, bind once with `cast(KnownType, expr)` and use the fields. `getattr` with a default silently survives typos and renamed fields — a refactoring pain. The only acceptable dynamic access is a genuinely dynamic container (`dict`). Exception: probing an `argparse.Namespace` while assembling optional CLI overrides.
 - Clean, self-explanatory code is preferable over patterns-for-patterns'-sake.
 - Disowned functions are strongly discouraged. Mechanics should be owned by the related class, not written as standalone functions operating on external state. Example when disowned functions could be ok - to reach uniform logging between different phases.
 

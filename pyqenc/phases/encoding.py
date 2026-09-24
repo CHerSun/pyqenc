@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from dataclasses import dataclass as _dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from alive_progress import config_handler
 
@@ -47,9 +47,15 @@ from pyqenc.phase import (
     Artifact,
     FinalizeContext,
     Phase,
+    PhaseRegistry,
     PhaseResult,
-    resolve_dependencies,
+    Recovery,
+    RecoveryError,
 )
+from pyqenc.phases.chunking import ChunkingPhase, ChunkingPhaseResult
+from pyqenc.phases.job import JobPhase, JobPhaseResult
+from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
+from pyqenc.phases.probe import ProbePhase
 from pyqenc.quality import QualitySearchV3
 from pyqenc.state import (
     ArtifactState,
@@ -61,14 +67,12 @@ from pyqenc.state import (
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.ffmpeg_runner import run_ffmpeg
 from pyqenc.utils.log_format import (
-    emit_phase_banner,
     fmt_chunk,
     fmt_chunk_attempt_result,
     fmt_chunk_attempt_start,
     fmt_chunk_final,
     fmt_chunk_start,
     fmt_metric_summary,
-    log_recovery_line,
 )
 from pyqenc.utils.visualization import QualityEvaluator
 from pyqenc.utils.yaml_utils import write_yaml_atomic
@@ -420,6 +424,7 @@ class ChunkEncoder:
         cleanup_level:     CleanupLevel      = CleanupLevel.NONE,
         visual_hash:       bool              = True,
         metrics_sampling:  int               = 3,
+        metric_prefix:     MetricKey         = MetricKey.ENCODING,
     ):
         """Initialize chunk encoder.
 
@@ -427,15 +432,18 @@ class ChunkEncoder:
             quality_evaluator: Quality evaluator for metric calculation.
             work_dir:          Working directory for artifacts.
             collector:         Metrics collector for per-attempt timing.
-                               ``encoding.<strategy>`` is recorded for each
-                               ffmpeg encode; ``encoding.quality_measure`` is
-                               recorded for each quality evaluation.
             crop_params:       Optional crop parameters to apply to every chunk attempt.
             cleanup_level:     Controls deletion of intermediate attempt files after
                                a pair converges (Req 12.3).
             visual_hash:       When ``True``, prepend a deterministic emoji to every
                                chunk log line for visual distinction in parallel output.
             metrics_sampling:  Frame subsampling factor for quality metric generation.
+            metric_prefix:     Top-level key prefixing this encoder's dotted timing
+                               keys — ``<prefix>.<strategy>`` per ffmpeg encode and
+                               ``<prefix>.quality_measure`` per quality evaluation.
+                               EncodingPhase uses the default (``encoding``);
+                               OptimizationPhase passes ``optimization`` so its test
+                               encodes are attributed to the owning phase.
         """
         self.quality_evaluator = quality_evaluator
         self.work_dir          = work_dir
@@ -444,6 +452,7 @@ class ChunkEncoder:
         self._cleanup_level    = cleanup_level
         self._visual_hash      = visual_hash
         self._metrics_sampling = metrics_sampling
+        self._metric_prefix    = metric_prefix
 
     def _get_output_dir(self, strategy: Strategy) -> Path:
         """Get the CRF search workspace directory for *strategy*.
@@ -872,7 +881,7 @@ class ChunkEncoder:
                 output_file    = self._get_attempt_path(
                     chunk.chunk_id, strategy, resolution=resolution, crf=current_q
                 )
-                with self._collector.time(MetricKey.ENCODING, strategy.name):
+                with self._collector.time(self._metric_prefix, strategy.name):
                     encode_success = self._encode_with_ffmpeg(
                         chunk, strategy, current_q, output_file
                     )
@@ -906,7 +915,7 @@ class ChunkEncoder:
 
             # Evaluate quality — raw metric logs/stats go into a per-attempt subfolder;
             # the plot and YAML sidecar stay next to the .mkv.
-            with self._collector.time(MetricKey.ENCODING, METRIC_KEY_QUALITY_MEASURE):
+            with self._collector.time(self._metric_prefix, METRIC_KEY_QUALITY_MEASURE):
                 evaluation = self.quality_evaluator.evaluate_chunk(
                     encoded              = output_file,
                     reference            = reference.path,
@@ -1189,6 +1198,7 @@ async def _encode_chunks_parallel(
     collector:        MetricsCollector,
     phase_recovery:   "_PhaseRecovery | None"                                  = None,
     advance:          Callable[[int | float, AdvanceState], None] | None = None,
+    metric_prefix:    MetricKey                                                  = MetricKey.ENCODING,
 ) -> EncodingResult:
     """Encode chunks in parallel with semaphore control.
 
@@ -1303,7 +1313,7 @@ async def _encode_chunks_parallel(
                             advance(chunk.end_timestamp - chunk.start_timestamp)
                         # Record convergence for this chunk/strategy pair
                         collector.step(
-                            MetricKey.ENCODING,
+                            metric_prefix,
                             convergence_update=ConvergenceUpdate(
                                 strategy      = strategy.name,
                                 attempt_count = chunk_result.attempts,
@@ -1321,10 +1331,10 @@ async def _encode_chunks_parallel(
     # Start worker tasks
     workers = [asyncio.create_task(encode_worker()) for _ in range(max_parallel)]
 
-    # Wait for all workers to complete
-    from pyqenc.metrics import MetricKey
-    async with collector.time(MetricKey.ENCODING):
-        await asyncio.gather(*workers)
+    # No top-level timing span here: the owning phase's template run() wraps
+    # _execute() under its own top-level key (encoding / optimization). Only
+    # the dotted sub-action spans are recorded by the encoder machinery.
+    await asyncio.gather(*workers)
 
     return result
 
@@ -1344,6 +1354,7 @@ def encode_all_chunks(
     cleanup_level:   CleanupLevel      = CleanupLevel.NONE,
     visual_hash:     bool              = True,
     metrics_sampling: int              = 10,
+    metric_prefix:   MetricKey         = MetricKey.ENCODING,
 ) -> EncodingResult:
     """Encode all chunks with quality-targeted CRF adjustment.
 
@@ -1397,7 +1408,7 @@ def encode_all_chunks(
 
     # --- Step 2: Write encoding.yaml (Req 2.4) — handled by EncodingPhase ---
     # encoding.yaml persistence and probe mismatch validation are owned by
-    # EncodingPhase._recover() and _execute_encoding(). encoding_yaml is
+    # EncodingPhase._recover() and _execute(). encoding_yaml is
     # always None when called from the Phase path.
 
     # --- Step 3: Artifact recovery via _recover_encoding_attempts (Req 3.6) ---
@@ -1426,6 +1437,7 @@ def encode_all_chunks(
         cleanup_level     = cleanup_level,
         visual_hash       = visual_hash,
         metrics_sampling  = metrics_sampling,
+        metric_prefix     = metric_prefix,
     )
 
     # Run parallel encoding — COMPLETE pairs are skipped inside _encode_chunks_parallel
@@ -1451,6 +1463,7 @@ def encode_all_chunks(
                 phase_recovery  = phase_recovery,
                 advance         = advance,
                 collector       = collector,
+                metric_prefix   = metric_prefix,
             )
         )
         advance(0, AdvanceState.COMPLETE)
@@ -1504,129 +1517,61 @@ class EncodingPhaseResult(PhaseResult):
             self.encoded = []
 
 
-class EncodingPhase:
+class EncodingPhase(Phase):
     """Phase object for CRF-search chunk encoding.
 
     Owns artifact enumeration, recovery, invalidation, execution, and logging
     for the encoding phase.  Wraps the existing ``encode_all_chunks`` helper.
+    The uniform run footprint is inherited from :class:`Phase`.
 
     Args:
         config: Full pipeline configuration.
         phases: Phase registry; used to resolve typed dependency references.
     """
 
-    name: str = "encoding"
+    name:        str       = "encoding"
+    DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (
+        JobPhase, ProbePhase, ChunkingPhase, OptimizationPhase,
+    )
+    _METRIC_KEY: MetricKey = MetricKey.ENCODING
 
     def __init__(
         self,
         config:    "AppConfig",
-        phases:    "dict[type[Phase], Phase] | None" = None,
+        phases:    PhaseRegistry | None = None,
         *,
         collector: "MetricsCollector",
     ) -> None:
-        from pyqenc.phases.chunking import ChunkingPhase as _ChunkingPhase
-        from pyqenc.phases.job import JobPhase as _JobPhase
-        from pyqenc.phases.optimization import OptimizationPhase as _OptimizationPhase
-        from pyqenc.phases.probe import ProbePhase as _ProbePhase
+        super().__init__(config, phases, collector=collector)
 
-        self._config:       AppConfig                 = config
-        self._collector:    MetricsCollector          = collector
-        self._job:          _JobPhase | None          = cast("_JobPhase",          phases.get(_JobPhase))          if phases else None
-        self._probe:        _ProbePhase | None        = cast("_ProbePhase",        phases.get(_ProbePhase))        if phases else None
-        self._chunking:     _ChunkingPhase | None     = cast("_ChunkingPhase",     phases.get(_ChunkingPhase))     if phases else None
-        self._optimization: _OptimizationPhase | None = cast("_OptimizationPhase", phases.get(_OptimizationPhase)) if phases else None
         self.params:        EncodingParams | None     = None
-        self.result:        EncodingPhaseResult | None = None
-        self.quality_labels: dict[str, str]             = {}
+        self.quality_labels: dict[str, str]           = {}
         """Maps strategy name → quality_label (e.g. ``'CRF'``, ``'CQ'``) for all
         strategies resolved during the last ``run()`` call.  Empty until ``run()``
         completes.  Used by downstream phases (e.g. ``MergePhase``) to label plots."""
-        self.dependencies:  list[Phase]               = [d for d in [self._job, self._probe, self._chunking, self._optimization] if d is not None]
 
     # ------------------------------------------------------------------
-    # Public Phase interface
+    # Phase hooks
     # ------------------------------------------------------------------
 
-    def run(self, dry_run: bool = False) -> "EncodingPhaseResult":
-        """Recover, encode pending pairs, cache and return result.
+    def _recovery_unit(self) -> str:
+        """The recovery summary counts (chunk, strategy) pairs."""
+        return "pair"
 
-        Sequence:
-        1. Emit phase banner.
-        2. Ensure dependencies have results.
-        3. Run ``_recover()`` — handles ``force_wipe`` and crop mismatch.
-        4. Log recovery result line.
-        5. In dry-run mode: return ``PENDING`` if any pairs are pending.
-        6. Encode pending pairs via ``encode_all_chunks``.
-        7. Log phase completion summary.
-
-        Args:
-            dry_run: When ``True``, report what would be done without encoding.
-
-        Returns:
-            ``EncodingPhaseResult`` with all artifacts ``COMPLETE`` on success.
-        """
-        # In-run memoization guard (Property 1): return cached result verbatim.
-        if self.result is not None:
-            return self.result
-
-        dep_result = self._ensure_dependencies(dry_run=dry_run)
-        if dep_result is not None:
-            self.result = dep_result
-            return self.result
-
-        emit_phase_banner("ENCODING", logger)
-
+    def _log_key_params(self) -> None:
+        """Log chunks, strategies, crop, and targets (key parameters)."""
         logger.info("Scanning for existing artifacts...")
 
-        from pyqenc.metrics import MetricKey
+        probe_result = self._dep(ProbePhase).result
+        crop         = probe_result.crop if probe_result is not None else None
 
-        job_result   = self._job.result  # type: ignore[union-attr]
-        probe_result = self._probe.result  # type: ignore[union-attr]
-        force_wipe   = getattr(job_result, "force_wipe", False)
-        crop         = probe_result.crop
-
-        # Key parameters — strategies come from OptimizationPhase after deps are resolved
-        with self._collector.time(MetricKey.RECOVERY):
-            artifacts = self._recover(force_wipe=force_wipe)
-
-        # Log key parameters now that dependencies are resolved
-        opt_result = self._optimization.result if self._optimization else None  # type: ignore[union-attr]
-        strategies = getattr(opt_result, "selected_strategies", []) if opt_result else []
-        chunking_result = self._chunking.result if self._chunking else None  # type: ignore[union-attr]
-        chunks = getattr(chunking_result, "chunks", []) if chunking_result else []
+        strategies = cast(OptimizationPhaseResult, self._dep(OptimizationPhase).result).selected_strategies
+        chunks     = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result).chunks
         logger.info("Chunks:      %d", len(chunks))
         logger.info("Strategies:  %s", ", ".join(s.name for s in strategies) if strategies else "none")
         if crop:
             logger.info("Crop:        %s", crop)
-        logger.info("Targets:     %s", ", ".join(f"{t.metric}-{t.statistic}≥{t.value}" for t in self._job.result.config.encoding.resolved_targets))
-
-        log_recovery_line(logger, artifacts, unit="pair")
-        pending_count = sum(1 for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL))
-        # Dry-run path
-        if dry_run:
-            outcome = PhaseOutcome.REUSED if pending_count == 0 else PhaseOutcome.PENDING
-            self.result = EncodingPhaseResult(
-                outcome   = outcome,
-                artifacts = artifacts,
-                message   = "dry-run",
-                encoded   = [a for a in artifacts if isinstance(a, EncodedArtifact)],
-            )
-            return self.result
-
-        # Nothing to do
-        if pending_count == 0:
-            self.result = EncodingPhaseResult(
-                outcome   = PhaseOutcome.REUSED,
-                artifacts = artifacts,
-                message   = "all encoding pairs reused",
-                encoded   = [a for a in artifacts if isinstance(a, EncodedArtifact)],
-            )
-            return self.result
-
-        # Execute encoding
-        result = self._execute_encoding(artifacts, crop)
-        self.result = result
-        return result
+        logger.info("Targets:     %s", ", ".join(f"{t.metric}-{t.statistic}≥{t.value}" for t in self._config.encoding.resolved_targets))
 
     def finalize(self, ctx: FinalizeContext) -> None:
         """Perform end-of-run housekeeping for the encoding phase.
@@ -1645,9 +1590,10 @@ class EncodingPhase:
         """
         if not ctx.deep_cleanup:
             return
-        if self._job is None or self._job.result is None:
+        job = self._dep(JobPhase)
+        if job.result is None:
             return
-        work_dir = self._job.result.work_dir
+        work_dir = job.result.work_dir
         for target in (work_dir / ENCODING_WORKSPACE_DIR, work_dir / ENCODED_OUTPUT_DIR):
             if target.exists():
                 try:
@@ -1660,62 +1606,33 @@ class EncodingPhase:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _ensure_dependencies(self, dry_run: bool) -> "EncodingPhaseResult | None":
-        """Resolve dependencies via the shared walk; fail fast if incomplete.
-
-        Args:
-            dry_run: Propagated unchanged to each dependency's ``run()``.
-
-        Returns:
-            A ``FAILED`` result if any dependency failed, a ``PENDING`` result
-            if any dependency is legitimately pending (dry-run only), or
-            ``None`` when all dependencies are complete and the phase may
-            proceed.
-        """
-        if self._job is None:
-            return _enc_failed("EncodingPhase requires JobPhase")
-        if self._probe is None:
-            return _enc_failed("EncodingPhase requires ProbePhase")
-        if self._chunking is None:
-            return _enc_failed("EncodingPhase requires ChunkingPhase")
-        if self._optimization is None:
-            return _enc_failed("EncodingPhase requires OptimizationPhase")
-
-        status = resolve_dependencies(self, dry_run=dry_run)
-        if status.failed:
-            names = ", ".join(n.capitalize() for n in status.failed)
-            err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
-            logger.error(err)
-            return _enc_failed(err)
-        if status.pending:
-            names = ", ".join(n.capitalize() for n in status.pending)
-            msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
-            logger.info(msg)
-            return _enc_pending(msg)
-
-        return None
-
-    def _recover(self, force_wipe: bool) -> list[EncodedArtifact]:
+    def _recover(self) -> Recovery:
         """Classify ``(chunk, strategy)`` pairs and handle force-wipe / crop mismatch.
 
         Steps:
         1. If ``force_wipe``: delete ``encoding/``, ``encoded/``,
            and ``encoding.yaml``.
-        2. Check crop mismatch against ``encoding.yaml``.
+        2. Check crop mismatch against ``encoding.yaml`` — a probe change
+           without ``--force`` is a fatal invalidation.
         3. Clean up leftover ``.tmp`` files.
-        4. Call ``_recover_encoding_attempts`` to classify all pairs.
-        5. Re-evaluate ``COMPLETE`` pairs against current quality targets.
-
-        Args:
-            force_wipe: When ``True``, wipe all encoding artifacts first.
+        4. Call ``_recover_encoding_attempts`` to classify all pairs; strategy
+           directories under ``encoded/`` that no longer correspond to a
+           selected strategy surface as ``wanted=False`` artifacts (kept in
+           place; deletion only via explicit cleanup).
 
         Returns:
-            List of ``EncodedArtifact`` objects.
+            The :class:`Recovery` single source of truth.
+
+        Raises:
+            RecoveryError: On a probe change without ``--force``, or when
+                chunking/optimization produced no chunks / strategies.
         """
-        work_dir = self._job.result.work_dir  # type: ignore[union-attr]
-        enc_dir  = work_dir / ENCODING_WORKSPACE_DIR
-        out_dir  = work_dir / ENCODED_OUTPUT_DIR
-        yaml_path = work_dir / _ENCODING_YAML
+        job_result: JobPhaseResult = cast(JobPhaseResult, self._dep(JobPhase).result)
+        work_dir   = job_result.work_dir
+        enc_dir    = work_dir / ENCODING_WORKSPACE_DIR
+        out_dir    = work_dir / ENCODED_OUTPUT_DIR
+        yaml_path  = work_dir / _ENCODING_YAML
+        force_wipe = job_result.force_wipe
 
         # Step 1: force-wipe
         if force_wipe:
@@ -1727,11 +1644,11 @@ class EncodingPhase:
                 yaml_path.unlink()
                 logger.debug("force_wipe: deleted %s", yaml_path)
 
-        # Step 2: probe mismatch check
+        # Step 2: probe mismatch check (with --force the wipe above already
+        # removed encoding.yaml, so a mismatch can only be seen without it).
         if not force_wipe:
             persisted_enc = EncodingParams.load(yaml_path)
-            job_result    = self._job.result    # type: ignore[union-attr]
-            probe_result  = self._probe.result  # type: ignore[union-attr]
+            probe_result  = self._dep(ProbePhase).result  # type: ignore[union-attr]
             crop          = probe_result.crop if probe_result is not None else None
             current_probe = ProbeState(
                 frame_count = probe_result.source.frame_count if (probe_result is not None and probe_result.source) else 0,
@@ -1740,34 +1657,12 @@ class EncodingPhase:
             self.params   = EncodingParams(probe=current_probe)
 
             if persisted_enc is not None and current_probe is not None:
-                # Probe mismatch: requires --force to proceed
-                probe_changed = persisted_enc.probe != current_probe
-                if probe_changed:
-                    if force_wipe:
-                        logger.warning(
-                            "Probe params changed since last encoding run "
-                            "(persisted=%s, current=%s) — --force: deleting encoding artifacts",
-                            persisted_enc.probe, current_probe,
-                        )
-                        for d in (enc_dir, out_dir):
-                            if d.exists():
-                                _shutil.rmtree(d)
-                                logger.debug("Probe mismatch --force: deleted %s", d)
-                        if yaml_path.exists():
-                            yaml_path.unlink()
-                    else:
-                        err = (
-                            "Probe params changed since last encoding run "
-                            f"(persisted={persisted_enc.probe}, current={current_probe}). "
-                            "Re-run with --force to delete stale encoding artifacts and continue."
-                        )
-                        logger.critical(err)
-                        return [EncodedArtifact(
-                            path     = work_dir / _ENCODING_YAML,
-                            state    = ArtifactState.ABSENT,
-                            chunk_id = "__probe_mismatch__",
-                            strategy = "",
-                        )]
+                if persisted_enc.probe != current_probe:
+                    raise RecoveryError(
+                        "Probe params changed since last encoding run "
+                        f"(persisted={persisted_enc.probe}, current={current_probe}). "
+                        "Re-run with --force to delete stale encoding artifacts and continue."
+                    )
 
         # Step 3: clean up .tmp files
         if enc_dir.exists():
@@ -1779,14 +1674,16 @@ class EncodingPhase:
                     logger.warning("Could not remove temp file %s: %s", tmp, exc)
 
         # Step 4: get chunks and strategies from dependencies
-        chunking_result    = self._chunking.result  # type: ignore[union-attr]
-        optimization_result = self._optimization.result  # type: ignore[union-attr]
+        chunking_result     = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result)
+        optimization_result = cast(OptimizationPhaseResult, self._dep(OptimizationPhase).result)
 
-        chunks: list[ChunkMetadata] = getattr(chunking_result, "chunks", [])
-        strategies = getattr(optimization_result, "selected_strategies", [])
+        chunks: list[ChunkMetadata] = chunking_result.chunks
+        strategies = optimization_result.selected_strategies
 
-        if not chunks or not strategies:
-            return []
+        if not chunks:
+            raise RecoveryError("No chunks available from ChunkingPhase")
+        if not strategies:
+            raise RecoveryError("No strategies available from OptimizationPhase")
 
         chunk_ids      = [c.chunk_id for c in chunks]
         strategy_names = [s.name for s in strategies]
@@ -1821,40 +1718,93 @@ class EncodingPhase:
                     strategy = strategy_name,
                 ))
 
-        return artifacts
+        # Surface orphaned encoded/<strategy>/ directories — produced under a
+        # strategy list that no longer selects them. Present-but-unwanted per
+        # the Phase Contract: retained in place, never pending; deletion only
+        # via explicit cleanup.
+        expected_dir_names = {s.safe_name for s in strategies}
+        if out_dir.exists():
+            for strategy_dir in sorted(out_dir.iterdir()):
+                if strategy_dir.is_dir() and strategy_dir.name not in expected_dir_names:
+                    artifacts.append(EncodedArtifact(
+                        path     = strategy_dir,
+                        state    = ArtifactState.COMPLETE,
+                        wanted   = False,
+                        chunk_id = "",
+                        strategy = strategy_dir.name,
+                    ))
+                    logger.debug(
+                        "encoded/%s is orphaned (strategy no longer selected) — unwanted", strategy_dir.name,
+                    )
 
-    def _execute_encoding(
+        return Recovery.from_artifacts(artifacts)
+
+    def _make_result(
         self,
+        outcome:   PhaseOutcome,
         artifacts: list[EncodedArtifact],
-        crop:      "CropParams | None",
+        message:   str,
+        error:     str | None = None,
+    ) -> "EncodingPhaseResult":
+        """Assemble an ``EncodingPhaseResult`` from the pair artifacts.
+
+        Args:
+            outcome:   The phase outcome.
+            artifacts: The wanted artifact list.
+            message:   Human-readable summary.
+            error:     Error description when ``outcome`` is ``FAILED``.
+
+        Returns:
+            The populated result (``encoded`` mirrors ``artifacts``).
+        """
+        return EncodingPhaseResult(
+            outcome   = outcome,
+            artifacts = artifacts,
+            message   = message,
+            error     = error,
+            encoded   = artifacts,
+        )
+
+    def _execute(
+        self,
+        wanted:  list[EncodedArtifact],
+        dry_run: bool,
     ) -> "EncodingPhaseResult":
         """Encode all pending ``(chunk, strategy)`` pairs.
 
+        The top-level ``encoding`` span belongs to the template and therefore
+        covers everything here — the ``encoding.yaml`` write, the parallel
+        encode, and the post-encode re-scan. ``dry_run`` is never ``True``
+        here (encoding is not a readonly-execute phase; the template previews
+        instead).
+
         Args:
-            artifacts: Artifact list from ``_recover()``.
-            crop:      Crop parameters from ``ProbePhase.result``.
+            wanted:  Wanted artifact list from ``_recover()``.
+            dry_run: Unused for this phase (template guarantees ``False``).
 
         Returns:
             ``EncodingPhaseResult`` after encoding.
         """
-        work_dir = self._job.result.work_dir  # type: ignore[union-attr]
+        work_dir = cast(JobPhaseResult, self._dep(JobPhase).result).work_dir
+        probe_result = self._dep(ProbePhase).result
+        crop         = probe_result.crop if probe_result is not None else None
 
         # Resolve chunks and strategies from dependencies
-        chunking_result     = self._chunking.result  # type: ignore[union-attr]
-        optimization_result = self._optimization.result  # type: ignore[union-attr]
+        chunking_result     = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result)
+        optimization_result = cast(OptimizationPhaseResult, self._dep(OptimizationPhase).result)
 
-        chunks: list[ChunkMetadata] = getattr(chunking_result, "chunks", [])
-        strategies = getattr(optimization_result, "selected_strategies", [])
+        chunks: list[ChunkMetadata] = chunking_result.chunks
+        strategies = optimization_result.selected_strategies
 
         if not chunks:
             err = "No chunks available from ChunkingPhase"
             logger.critical(err)
-            return _enc_failed(err)
+            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
 
         if not strategies:
             err = "No strategies available from OptimizationPhase"
             logger.critical(err)
-            return _enc_failed(err)
+            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
 
         strategy_names = [s.name for s in strategies]
 
@@ -1864,7 +1814,6 @@ class EncodingPhase:
         # Persist encoding.yaml with current probe state
         encoding_yaml = work_dir / _ENCODING_YAML
         if self.params is None:
-            probe_result  = self._probe.result  # type: ignore[union-attr]
             current_probe = ProbeState(
                 frame_count = probe_result.source.frame_count if (probe_result is not None and probe_result.source) else 0,
                 crop        = crop if (crop and not crop.is_empty()) else None,
@@ -1881,23 +1830,23 @@ class EncodingPhase:
             chunks           = chunks,
             reference_dir    = reference_dir,
             strategies       = strategies,
-            quality_targets  = self._job.result.config.encoding.resolved_targets,  # type: ignore[union-attr]
+            quality_targets  = self._config.encoding.resolved_targets,
             work_dir         = work_dir,
             collector        = self._collector,
-            max_parallel     = self._job.result.config.encoding.concurrency,  # type: ignore[union-attr]
-            force            = self._job.result.force_wipe,  # type: ignore[union-attr]
+            max_parallel     = self._config.encoding.concurrency,
+            force            = self._dep(JobPhase).result.force_wipe,  # type: ignore[union-attr]
             dry_run          = False,
             crop_params      = crop,
             encoding_yaml    = None,  # already persisted above with ProbeState
-            cleanup_level    = self._job.result.cleanup,  # type: ignore[union-attr]
-            visual_hash      = self._job.result.config.encoding.visual_hash,  # type: ignore[union-attr]
-            metrics_sampling = self._job.result.config.measurement.sampling,  # type: ignore[union-attr]
+            cleanup_level    = self._dep(JobPhase).result.cleanup,  # type: ignore[union-attr]
+            visual_hash      = self._config.encoding.visual_hash,
+            metrics_sampling = self._config.measurement.sampling,
         )
 
         if enc_result.outcome == PhaseOutcome.FAILED:
             err = enc_result.error or "Encoding failed"
             logger.critical(err)
-            return _enc_failed(err)
+            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
 
         # Re-run recovery to get final artifact states
         chunk_ids = [c.chunk_id for c in chunks]
@@ -1944,63 +1893,17 @@ class EncodingPhase:
         complete_count = sum(1 for a in final_artifacts if a.state == ArtifactState.COMPLETE)
 
         if failed_pairs:
-            return EncodingPhaseResult(
-                outcome   = PhaseOutcome.FAILED,
-                artifacts = final_artifacts,
-                message   = f"{len(failed_pairs)} pair(s) failed",
-                error     = f"Failed pairs: {', '.join(failed_pairs[:5])}",
-                encoded   = final_artifacts,
+            return self._make_result(
+                PhaseOutcome.FAILED, final_artifacts,
+                f"{len(failed_pairs)} pair(s) failed",
+                error=f"Failed pairs: {', '.join(failed_pairs[:5])}",
             )
 
         outcome = PhaseOutcome.COMPLETED if enc_result.encoded_count > 0 else PhaseOutcome.REUSED
-        return EncodingPhaseResult(
-            outcome   = outcome,
-            artifacts = final_artifacts,
-            message   = f"{complete_count} pair(s) complete",
-            encoded   = final_artifacts,
+        return self._make_result(
+            outcome, final_artifacts, f"{complete_count} pair(s) complete",
         )
-
-    @staticmethod
-    def _outcome_from_artifacts(
-        artifacts: list[EncodedArtifact],
-        did_work:  bool,
-    ) -> PhaseOutcome:
-        """Derive ``PhaseOutcome`` from artifact states."""
-        if not artifacts:
-            return PhaseOutcome.REUSED
-        if any(a.state == ArtifactState.ABSENT and a.chunk_id == "__probe_mismatch__" for a in artifacts):
-            return PhaseOutcome.FAILED
-        if all(a.state == ArtifactState.COMPLETE for a in artifacts):
-            return PhaseOutcome.COMPLETED if did_work else PhaseOutcome.REUSED
-        return PhaseOutcome.PENDING
-
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
-
-def _enc_failed(error: str) -> "EncodingPhaseResult":
-    """Return a ``FAILED`` ``EncodingPhaseResult`` with the given error."""
-    return EncodingPhaseResult(
-        outcome   = PhaseOutcome.FAILED,
-        artifacts = [],
-        message   = error,
-        error     = error,
-        encoded   = [],
-    )
-
-
-def _enc_pending(reason: str) -> "EncodingPhaseResult":
-    """Return a ``PENDING`` ``EncodingPhaseResult`` with the given reason.
-
-    Used when a dependency is legitimately pending during a dry-run preview:
-    the phase cannot preview its own work, so it chains ``PENDING`` without an
-    error.
-    """
-    return EncodingPhaseResult(
-        outcome   = PhaseOutcome.PENDING,
-        artifacts = [],
-        message   = reason,
-        error     = None,
-        encoded   = [],
-    )
