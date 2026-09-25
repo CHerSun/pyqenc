@@ -23,6 +23,7 @@
 
 - **Merge consumption of audio outputs.** Merge remains video-only. Selecting produced audio outputs for muxing is a future spec. This spec only makes the produced outputs well-formed (tagged artifacts with metadata) so a future merge spec can consume them.
 - **In-memory stream objects (no on-disk extraction).** A future spec moves targeting to source stream objects and lets `passthrough` avoid producing a file entirely. This spec adds `passthrough` to the config surface but leaves its executor as a `NotImplementedError` stub.
+  - 2026-09-25: partially realized by `2026-09-25 file-stream-model` — chain *inputs* become source stream objects (`AudioStream.as_input()` reads the source via a `-map` selector; no `.mka` intermediates are extracted). The `passthrough`-without-output-file idea remains open (merge still requires external audio files).
 
 ## Introduction
 

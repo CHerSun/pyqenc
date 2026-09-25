@@ -112,23 +112,6 @@ top-level imports.
 
 ## Correctness / invalidation
 
-## 🤔 8. Encode commands don't drop non-video streams (bin_data fix only landed in audio)
-
-**Status:** needs thinking (correctness; half-fixed)
-
-- Audio chains already emit `-vn -sn -dn` in both builders
-  (`pyqenc/audio/chain.py:295,336`; rationale in `pyqenc/constants.py:204-210`
-  citing stray bin_data).
-- The chunk-encode command has no `-dn`/`-vn`/`-sn`/`-map_chapters` at all
-  (`pyqenc/phases/encoding.py:689-697`), and OptimizationPhase reuses the same
-  `ChunkEncoder` builder (`pyqenc/phases/optimization.py:878-904`) — so stray
-  data streams / partial chapters can still land in encoded chunks.
-
-**Questions to think about:** add `-dn -sn` (and `-map_chapters -1`?) to the
-encode builder. What streams does chunk input actually carry today?
-
----
-
 ## 🤔 9. AudioPhase doesn't invalidate when its sidecar is deleted
 
 **Status:** needs thinking (bug-ish, verified in code)
@@ -378,57 +361,6 @@ dependencies (that's what the dependency declarations are for)?
 
 ---
 
-## 🤔 25. Strategies degrade to strings; folder-name sanitize duplicated in 4 places
-
-**Status:** needs thinking (consolidation; "+" idea abandoned)
-
-- `EncodedArtifact.strategy: str` (`pyqenc/phases/encoding.py:1488`);
-  `encode_all_chunks` takes `list[Strategy]` but immediately strips to names
-  (`:1335` → `_recover_encoding_attempts(..., list[str])`, `:272-275`).
-- `":"→"_"` mapping is duplicated: `Strategy.safe_name`
-  (`pyqenc/models.py:169-171`), `_enc_encoded_strategy_dir`
-  (`encoding.py:266-269`), and twice inline in merge (`merge.py:898,935`).
-- Note: the earlier "`+` is a fine symbol / поменяляли, но артефакты
-  теряются" concern is moot in the current tree — no `+` handling exists,
-  all sites map identically, and `_recover_encoding_attempts` re-indexes
-  `encoded/<strategy>/` from a fresh directory listing each run
-  (`encoding.py:277-330`); no artifact-loss path found.
-
-**Questions to think about:** sanitize once — validate in `Strategy` (or one
-helper) and use `safe_name` everywhere? Keep merge string-based (artifact
-boundary) as the earlier analysis concluded?
-
----
-
-## 🤔 26. Metadata composition rework: File → Stream → fragment; eager, no lazy props
-
-**Status:** needs thinking (big-ticket design; subsumes several old notes)
-
-- Current state: flat lazy-property models — `VideoMetadata` is explicitly
-  "transparent lazy-loading" over `PrivateAttr` fields
-  (`pyqenc/models.py:450,481-517`), `ExtendedVideoMetadata(VideoMetadata)`
-  (`models.py:725`), `ChunkMetadata(ExtendedVideoMetadata)` (`models.py:788`);
-  `ChunkArtifact.metadata` lazy-loads from a sidecar YAML
-  (`pyqenc/phases/chunking.py:353-368`).
-- Lazy props force workarounds like the `chunk._resolution` lazy-probe dich
-  (`encoding.py:775-778`).
-- Subsumed old notes: (a) *don't extract video, reuse source file (−20–40
-  GB)* — today `_extract_video_artifact` still copies the video track
-  (`pyqenc/phases/extraction.py:1210-1235`) and chunking consumes the
-  extracted file (`chunking.py:854-867`); (b) *extraction returns
-  specialized Stream objects, extracts only subs/chapters/attachments*;
-  (c) *RETHINK phase inputs/outputs / intermediate results*; (d) *Job phase
-  owns fast probe, Probe phase slow probe, no hidden lazy attributes*.
-  Artifacts already carry `stream: VideoStream/AudioStream` references
-  (`extraction.py:655-690`) — a step in this direction.
-
-**Questions to think about:** SourceMetadata = file info + fast video
-metadata; extended = slow metadata; explicit ownership of fast/slow probe
-results per phase. This is the natural entry point for the File → Stream →
-Stream-fragment model.
-
----
-
 ## 🤔 27. Artifact subclass zoo vs. generic `Artifact[T]`
 
 **Status:** needs thinking (API design)
@@ -445,37 +377,6 @@ breaks (per-type fields like crf/strategy)? Worth it?
 
 ---
 
-## 🤔 28. ffmpeg command construction is plain functions + ~20 hand-built cmd lists
-
-**Status:** needs thinking (refactor)
-
-- `utils/ffmpeg_runner.py` is functions + result dataclasses
-  (`run_ffmpeg_async` `:333`, `run_ffmpeg` `:431`, `get_frame_count` `:485`).
-  Call sites hand-build `cmd` lists: `encoding.py:689`, `merge.py:1009`,
-  `extraction.py:1220,1247,1288,1307`, `audio/chain.py:332`, `quality.py:440`,
-  `models.py:564`, … No builder class owning input / filtering / output
-  sections (and progress tracking) exists.
-
-**Questions to think about:** an ffmpeg command class with explicit input /
-filter-chain / output stages? Ties into §26 (accept Stream / Stream-fragment
-as input).
-
----
-
-## 🤔 29. Frame-count probe duplicated (the "0:v:0" ×2 note)
-
-**Status:** needs thinking (dedup)
-
-- `VideoMetadata.probe_extended` hand-builds the same
-  `-map 0:v:0 -c copy -f null -` command and calls `run_ffmpeg` directly
-  (`pyqenc/models.py:553-577`) — duplicating
-  `ffmpeg_runner.get_frame_count` (`utils/ffmpeg_runner.py:485-511`).
-
-**Questions to think about:** models.py should call `get_frame_count` (or get
-the count from the ffmpeg run that already happens there).
-
----
-
 ## 🤔 30. Multi-pass video (audio chains already do it)
 
 **Status:** needs thinking (feature)
@@ -488,23 +389,6 @@ the count from the ffmpeg run that already happens there).
 
 **Questions to think about:** is a 2-pass analog (or reuse of the CRF-search
 attempts as "measurement") worth anything for video?
-
----
-
-## 🤔 31. `to_yaml_dict` / `from_yaml_dict` — 13 hand-written pairs
-
-**Status:** needs thinking (premise partially outdated)
-
-- All 13 pairs live in `pyqenc/state.py` (ProbeState `:95/:108` …
-  ChunkSidecar `:825/:837`). They are NOT trivial `model_dump` wrappers as
-  the old note assumed — most are deliberate selective/delta serializers
-  (e.g. ProbeState persists only `frame_count`+`crop`, `state.py:95-104`;
-  JobState uses `model_dump_full` + Path→str, `:156-161`), though a few are
-  near-trivial (EncodingParams `:399-413`).
-
-**Questions to think about:** prune the near-trivial ones onto
-`model_dump`/`model_validate`; document the delta-serialization contract for
-the rest?
 
 ---
 
@@ -534,9 +418,13 @@ lookup) or replaceable? De-quote remaining casts where imports allow.
   insufficient-space FAILED branch is commented out — "I don't want to block,
   just notify" (`job.py:167-181`). Not per-phase, not based on actual
   extraction/chunking results, no partial scanning.
+- 2026-09-25: the `2026-09-25 file-stream-model` spec moves estimation to
+  ExtractionPhase on real enumerated stream data and reworks the constants
+  (FFV1/remux/extraction terms die with the intermediates). The remaining
+  open question is unchanged:
 
-**Questions to think about:** per-phase re-estimates after extraction /
-chunking with real numbers? Keep log-only?
+**Questions to think about:** per-phase re-estimates later in the pipeline?
+Keep log-only?
 
 ---
 
@@ -631,6 +519,70 @@ Combine with §4's ruff pass?
 - **"`+` in file names — поменяляли, но теперь артефакты теряются"** — the
   `+` experiment is absent from the tree; `":"→"_"` is applied consistently
   and recovery re-indexes from disk each run; no artifact-loss path found
-  (residual dedup concern tracked as §25).
+  (residual dedup concern was resolved by the `2026-09-25 file-stream-model`
+  spec — strategy objects in-memory, sanitize in one place).
 - **VSCode Mermaid `/generate_diagram_from_code` tip** — tooling note for
   the editor, not a project task; intentionally not carried over.
+
+## 38. Single source of truth enforced via explicitly required function arguments
+
+One of my key mottos is - one source of truth. For config - that's default_config.yaml, which must provide all needed values.
+
+```
+    def __init__(
+        self,
+        quality_evaluator: QualityEvaluator,
+        work_dir:          Path,
+        collector:         MetricsCollector,
+        crop_params:       CropParams | None = None,
+        cleanup_level:     CleanupLevel      = CleanupLevel.NONE,
+        visual_hash:       bool              = True,
+        metrics_sampling:  int               = 3,
+        metric_prefix:     MetricKey         = MetricKey.ENCODING,
+    ):
+```
+
+Defaults in functions for values, which must come from config - is the way to shoot your leg. metrics sampling - is part of config, it must never have its own default in code. Visual hash is in config - it must never have its own default in code. Metric_prefix is a persistent value, init default doesn't look like correct place, but that's ok in this paradigm - it is not in the config (giving as an example; key rule - single source of truth; default_config is the first source of truth for any value defined there).
+
+Need to check footprints and adjust accordingly for explicitly required values (what is provided from config).
+
+## 39. 🤔 Forced wipe idempotency
+
+Currently forced run is a flag on Job phase result, which must be respected by each phase. Problem is, if we don't run till the end and exit in the middle, 
+but we've already written new job.yaml sidecar - on rerun we won't know there was a source mismatch. Later phases which didn't reach running on previous
+correctly flagged run - won't have this extra bit of info to invalidate artifacts and we will get inconsistent output.
+
+The right approach is probably something like `finalize` but reversed (finalize runs after succesfully finishing the job) - `invalidate` maybe or something like that.
+Explicitly triggered once in reversed order (from end). And only after that is triggered - the forced wipe flag becomes unneeded and we can write new job.yaml sidecar.
+
+Or... should we remove it completely? 
+- The only true usecase is when crop changed between runs. And here it works as a safeguard against accidentally deleting a lot of work (all attempts become invalid; not detectable with current light invalidation checks; don't want per-attempt sidecar reading for heavy invalidation checks for this usecase as that will affect all runs).
+- If user wants another file - he can either use new dir or purge current dir. So this one isn't a true usecase.
+
+## 40. Attachements are not extractable currently
+
+Attachments should be extracted as standalone files. Pictures, fonts, etc. But currently pyqenc fails to do that, so we have to exclude them using filter.
+
+## 41. Assertions and exhaustiveness checks are rarely used.
+
+A lot of things, like None guards or PENDING phase result state on run - are NOT user validations. Those are programmatic errors. They should use assertions 
+(assertions help with static checks, help avoid part of unnecessary tests, and could be disabled when running in production for better perf).
+User validations should be on things that users or inputs could affect (like, a broken input file with wrong streams metadata - it is a bad input).
+
+Exhaustiveness checks like for enums if we later add a new value - we might not update all places. So often thing like `else assert_never...` are added to ensure
+we don't forget to update.
+
+Those probably should be added to steering docs and memory as key principles. And checked against current codebase.
+
+## 42. Adding ability to fix quality range has broken optimization phase
+
+Previously we were selecting the best strategy via optimization phase - encoding a small subset of chunks using all strategies. Our principle was - we reach targets.
+With fixed quality (range min=max) the principle of reaching targets is broken.
+
+Probably a composite score should be added and used for selection of the best (optimal) variant. Maybe with a cli option allowing either strict min or generic optimum score
+for selection:
+- Min (current default and future default?) - negative score on any missing target and calculate only based on missing targets. Positive only if all targets matched - then score the positive delta.
+- Optimum - score all metrics (both missing and matching) for a single weighted score.
+- Should the score include the size? Size is basically a price for the score, where the score is the profit. Must reach some balance - smaller size is prefered, 
+  while too high score doesn't outweight the size (so that we don't blindly always pick largest size - quite the contrary, target is to reach smaller size while 
+  keeping good enough quality).

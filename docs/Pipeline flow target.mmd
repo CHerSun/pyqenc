@@ -1,0 +1,51 @@
+%% Target pipeline flow — per the spec `.kiro/specs/2026-09-25 file-stream-model/`
+%% (File → Stream object model + direct-from-source ffmpeg).
+%% NOT yet implemented — describes the state after the rework lands.
+%% Current behavior: see "Pipeline flow overview.mmd".
+%% When implementation completes, merge/replace the overview with this diagram.
+flowchart LR
+    subgraph JobPhase
+        A[CLI LongPath] --> B[File eager] --> C[job.yaml]
+    end
+    subgraph ExtractionPhase
+        D[ffprobe enumeration] --> E[VideoStream / AudioStream / subs]
+        E --> F[extraction.yaml]
+        E --> G["extract: timestamps.txt, chapters, subs, attachments"]
+        E --> H[disk-space estimate]
+    end
+    subgraph ProbePhase
+        I[frame count ← timestamps.txt] --> J[ExtendedVideoStream]
+        K[cropdetect on source window] --> J
+        J --> L[probe.yaml]
+    end
+    subgraph AudioPhase
+        U["audio chains: AudioStream.as_input() on source"] --> V[chain outputs + audio.yaml]
+    end
+    subgraph ChunkingPhase
+        M[scenedetect on source] --> N[VideoStreamChunk windows]
+        N --> O[chunking.yaml scenes]
+    end
+    subgraph OptimizationPhase
+        W["test-encodes: chunk subset × all strategies"] --> X[quality: attempt vs windowed source]
+        X --> Y[selected strategies + optimization.yaml]
+    end
+    subgraph EncodingPhase
+        P["encode: full chunk set × selected strategies"] --> Q[quality: attempt vs windowed source]
+        Q --> R["EncodedChunk winners — one per (chunk, strategy)"]
+    end
+    subgraph MergePhase
+        S[mkvmerge append + timestamps.txt] --> T[final + frame-count verify]
+    end
+
+    B --> D
+    G --> I
+    E --> I
+    E --> U
+    J --> N
+    E --> M
+    N -->|"test-chunk subset"| W
+    Y -->|"selected strategies"| P
+    N -->|"full chunk set"| P
+    R --> S
+    V --> S
+    G --> S
