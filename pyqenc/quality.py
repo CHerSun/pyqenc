@@ -11,7 +11,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
-from os import PathLike
 from pathlib import Path
 from typing import (
     TypedDict,
@@ -22,6 +21,8 @@ from collections.abc import Iterable
 import pandas as pd
 
 from pyqenc.utils.ffmpeg_runner import (
+    FFmpegInput,
+    FFmpegRequest,
     FFmpegRunResult,
     ProgressCallback,
     run_ffmpeg_async,
@@ -437,18 +438,19 @@ async def run_metrics(
 
     filter_complex = f"{f_dist};{f_ref};" + ";".join(metric_filters)
 
-    cmd: list[str | PathLike] = ["ffmpeg", "-hide_banner", "-nostats", "-progress", "pipe:1"]
-    if duration:
-        cmd.extend(["-t", str(duration)])
-    cmd.extend(["-i", distorted.resolve()])
-    if duration:
-        cmd.extend(["-t", str(duration)])
-    cmd.extend(["-i", reference.resolve()])
-    cmd.extend(["-filter_complex", filter_complex, "-f", "null", "-"])
-
-    return await run_ffmpeg_async(
-        cmd, output_file=None, progress_callback=progress_callback, video_meta=None, cwd=cwd,
+    # Both inputs share the comparison window; input-side -t bounds each input
+    # and the output timeline starts at ~0 automatically.
+    window  = duration if duration else None
+    request = FFmpegRequest(
+        inputs = [
+            FFmpegInput(path=distorted.resolve(), duration_seconds=window),
+            FFmpegInput(path=reference.resolve(), duration_seconds=window),
+        ],
+        output_args    = (),
+        filter_complex = filter_complex,
     )
+
+    return await run_ffmpeg_async(request, progress_callback=progress_callback, cwd=cwd)
 
 
 @dataclass

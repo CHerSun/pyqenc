@@ -8,7 +8,6 @@ quality targets, including parallel execution and artifact-based resumption.
 
 import asyncio
 import logging
-import os
 import shutil as _shutil
 import subprocess
 from collections.abc import Callable
@@ -65,7 +64,7 @@ from pyqenc.state import (
     ProbeState,
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
-from pyqenc.utils.ffmpeg_runner import run_ffmpeg
+from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg
 from pyqenc.utils.log_format import (
     fmt_chunk,
     fmt_chunk_attempt_result,
@@ -691,24 +690,24 @@ class ChunkEncoder:
         )
         ffmpeg_args = strategy.to_ffmpeg_args(crf, vf_filter=vf_filter)
 
-        # Replace the {input} sentinel with the actual input path.
-        # The preceding "-i" flag is already in the template; everything before
-        # "-i" is pre-input args (e.g. -hwaccel), everything after is output-side.
-        i_pos = ffmpeg_args.index("{input}")
-        cmd: list[str | os.PathLike] = [
-            "ffmpeg",
-            "-y",
-            *ffmpeg_args[:i_pos],
-            chunk.path,
-            *ffmpeg_args[i_pos + 1:],
-            "-f", "matroska",
-            output_file,
-        ]
-
-        logger.debug("Encoding command: %s", " ".join(str(a) for a in cmd))
+        # Split the expanded template at the {input} sentinel. The sentinel's
+        # template pair is "-i {input}": everything before "-i" is pre-input
+        # (e.g. -hwaccel), everything after the sentinel is the output stage.
+        # The runner owns "-i <path>", "-y" and the .tmp muxer stage.
+        i_pos    = ffmpeg_args.index("{input}")
+        request = FFmpegRequest(
+            inputs      = [
+                FFmpegInput(
+                    path           = chunk.path,
+                    pre_input_args = tuple(ffmpeg_args[:i_pos - 1]),
+                ),
+            ],
+            output_args = tuple(ffmpeg_args[i_pos + 1:]),
+            output      = output_file,
+        )
 
         try:
-            result = run_ffmpeg(cmd, output_file=output_file)
+            result = run_ffmpeg(request)
 
             if not result.success:
                 logger.error(

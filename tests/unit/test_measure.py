@@ -471,10 +471,20 @@ class TestWriteSidecar:
 
 import asyncio
 from fractions import Fraction
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
-from pyqenc.phases.measure import ScreenshotPositions, make_screenshots
-from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
+from pyqenc.phases.measure import (
+    ScreenshotPositions,
+    _capture_single_frame,
+    _capture_single_pass,
+    make_screenshots,
+)
+from pyqenc.utils.ffmpeg_runner import (
+    _PROGRESS_FLAGS,
+    FFmpegRequest,
+    FFmpegRunResult,
+    compose_command,
+)
 
 
 def _make_ffmpeg_result(success: bool = True, returncode: int = 0) -> FFmpegRunResult:
@@ -504,11 +514,9 @@ class TestMakeScreenshots:
         """Strategy C success: returns list of final named screenshot paths."""
         positions = _make_positions([240, 480])
 
-        async def fake_ffmpeg(cmd, output_file, **kwargs):
-            # Strategy C writes directly to the tmp_path output file
-            cmd_strs = [str(a) for a in cmd]
-            # The output path is the last arg — create it
-            out = Path(cmd_strs[-1])
+        async def fake_ffmpeg(request: FFmpegRequest, **kwargs):
+            # Strategy C targets the per-frame output path — create it
+            out = Path(str(request.output))
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(b"PNG")
             return _make_ffmpeg_result(success=True)
@@ -532,9 +540,9 @@ class TestMakeScreenshots:
         positions = _make_positions([240])
         captured_cmds: list[list[str]] = []
 
-        async def fake_ffmpeg(cmd, output_file, **kwargs):
-            captured_cmds.append([str(a) for a in cmd])
-            out = Path(str(cmd[-1]))
+        async def fake_ffmpeg(request: FFmpegRequest, **kwargs):
+            captured_cmds.append([str(a) for a in compose_command(request)])
+            out = Path(str(request.output))
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(b"PNG")
             return _make_ffmpeg_result(success=True)
@@ -561,9 +569,9 @@ class TestMakeScreenshots:
         positions = _make_positions([240])
         captured_cmds: list[list[str]] = []
 
-        async def fake_ffmpeg(cmd, output_file, **kwargs):
-            captured_cmds.append([str(a) for a in cmd])
-            out = Path(str(cmd[-1]))
+        async def fake_ffmpeg(request: FFmpegRequest, **kwargs):
+            captured_cmds.append([str(a) for a in compose_command(request)])
+            out = Path(str(request.output))
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(b"PNG")
             return _make_ffmpeg_result(success=True)
@@ -587,18 +595,13 @@ class TestMakeScreenshots:
     def test_strategy_c_zero_output_falls_back_to_a2(self, tmp_path: Path, caplog) -> None:
         """When Strategy C yields zero files, A2 fallback is attempted and warning logged."""
         positions = _make_positions([240, 480])
-        call_count = 0
 
-        async def fake_ffmpeg(cmd, output_file, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            cmd_strs = [str(a) for a in cmd]
-            # Strategy C calls: success=True but output file NOT created → zero output
-            # Strategy A2 call: create output files in tmp_dir
-            if "-vsync" in cmd_strs:
-                # This is A2 or A4 single-pass
-                out_pattern = Path(cmd_strs[-1])
-                tmp_dir = out_pattern.parent
+        async def fake_ffmpeg(request: FFmpegRequest, **kwargs):
+            # Strategy C (request.output set): success=True but output NOT created → zero output
+            # Single-pass fallback (output None): create output files in the pattern's tmp dir
+            if request.output is None:
+                pattern = Path(str(request.output_args[-1]))
+                tmp_dir = pattern.parent
                 tmp_dir.mkdir(parents=True, exist_ok=True)
                 (tmp_dir / "0001.png").write_bytes(b"PNG1")
                 (tmp_dir / "0002.png").write_bytes(b"PNG2")
@@ -622,16 +625,16 @@ class TestMakeScreenshots:
         positions = _make_positions([240, 480])
         a4_called = False
 
-        async def fake_ffmpeg(cmd, output_file, **kwargs):
+        async def fake_ffmpeg(request: FFmpegRequest, **kwargs):
             nonlocal a4_called
-            cmd_strs = [str(a) for a in cmd]
-            if "-vsync" in cmd_strs:
-                vf_val = cmd_strs[cmd_strs.index("-vf") + 1] if "-vf" in cmd_strs else ""
+            if request.output is None:
+                args = [str(a) for a in request.output_args]
+                vf_val = args[args.index("-vf") + 1] if "-vf" in args else ""
                 if "mod(" in vf_val:
                     # A4 call — produce output
                     a4_called = True
-                    out_pattern = Path(cmd_strs[-1])
-                    tmp_dir = out_pattern.parent
+                    pattern = Path(args[-1])
+                    tmp_dir = pattern.parent
                     tmp_dir.mkdir(parents=True, exist_ok=True)
                     (tmp_dir / "0001.png").write_bytes(b"PNG1")
                     (tmp_dir / "0002.png").write_bytes(b"PNG2")
@@ -656,7 +659,7 @@ class TestMakeScreenshots:
         """When all strategies yield zero output, ERROR is logged and [] returned."""
         positions = _make_positions([240])
 
-        async def fake_ffmpeg(cmd, output_file, **kwargs):
+        async def fake_ffmpeg(request: FFmpegRequest, **kwargs):
             return _make_ffmpeg_result(success=True)  # success but no files created
 
         with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
@@ -677,16 +680,14 @@ class TestMakeScreenshots:
         positions = _make_positions([240, 480, 720])
         call_count = 0
 
-        async def fake_ffmpeg(cmd, output_file, **kwargs):
+        async def fake_ffmpeg(request: FFmpegRequest, **kwargs):
             nonlocal call_count
             call_count += 1
-            cmd_strs = [str(a) for a in cmd]
-            # Strategy C: only first frame produces output
-            if "-ss" in cmd_strs and "-frames:v" in cmd_strs:
-                out = Path(cmd_strs[-1])
-                if call_count == 1:  # only first call creates file
-                    out.parent.mkdir(parents=True, exist_ok=True)
-                    out.write_bytes(b"PNG")
+            # Strategy C (request.output set): only first frame produces output
+            if request.output is not None and call_count == 1:
+                out = Path(str(request.output))
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b"PNG")
             return _make_ffmpeg_result(success=True)
 
         with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
@@ -707,8 +708,8 @@ class TestMakeScreenshots:
         """No .tmp files or temp dirs remain after successful Strategy C capture."""
         positions = _make_positions([240])
 
-        async def fake_ffmpeg(cmd, output_file, **kwargs):
-            out = Path(str(cmd[-1]))
+        async def fake_ffmpeg(request: FFmpegRequest, **kwargs):
+            out = Path(str(request.output))
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(b"PNG")
             return _make_ffmpeg_result(success=True)
@@ -726,3 +727,82 @@ class TestMakeScreenshots:
         assert tmp_files == [], f"Unexpected .tmp files: {tmp_files}"
         tmp_dirs = [d for d in tmp_path.iterdir() if d.is_dir() and d.name.startswith(".tmp_")]
         assert tmp_dirs == [], f"Unexpected temp dirs: {tmp_dirs}"
+
+
+# ---------------------------------------------------------------------------
+# Screenshot capture — golden composed argv (both ffmpeg call sites)
+# ---------------------------------------------------------------------------
+
+class TestScreenshotCommandGolden:
+    """Pin the composed argv for the two screenshot capture call sites.
+
+    Bug prevented: the request-model conversion drifting from the original
+    hand-built commands — fast-seek window, vf chain, frame cap, image2 output.
+    The single-frame capture now routes through the runner's ``.tmp`` protocol
+    with an explicit ``image2`` muxer (the pre-request code wrote the final
+    path directly); the multi-frame pattern keeps writing its caller-managed
+    temp dir verbatim.
+    """
+
+    def test_single_frame_golden_argv(self) -> None:
+        captured: list[FFmpegRequest] = []
+
+        async def fake_ffmpeg(request: FFmpegRequest, **kwargs):
+            captured.append(request)
+            return _make_ffmpeg_result(success=True)
+
+        video = Path("/v/video.mkv")
+        out   = Path("/shots/00_video.png")
+        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
+            asyncio.run(_capture_single_frame(video, "9.989583333", out, None))
+
+        assert len(captured) == 1
+        argv = [str(a) for a in compose_command(captured[0])]
+        assert argv == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-ss", "9.989583333",
+            "-i", str(video),
+            "-frames:v", "1",
+            "-c:v", "png",
+            "-map_chapters", "-1",
+            "-f", "image2", str(Path("/shots/00_video.tmp")),
+        ]
+
+    def test_single_frame_crop_in_vf(self) -> None:
+        crop = CropParams(top=1, bottom=1, left=0, right=0)
+        captured: list[FFmpegRequest] = []
+
+        async def fake_ffmpeg(request: FFmpegRequest, **kwargs):
+            captured.append(request)
+            return _make_ffmpeg_result(success=True)
+
+        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
+            asyncio.run(_capture_single_frame(Path("/v/video.mkv"), "9.989583333", Path("/shots/00.png"), crop))
+
+        argv = [str(a) for a in compose_command(captured[0])]
+        vf_idx = argv.index("-vf")
+        assert argv[vf_idx + 1] == "crop=iw-0:ih-2:0:1"
+
+    def test_single_pass_golden_argv(self) -> None:
+        captured: list[FFmpegRequest] = []
+
+        async def fake_ffmpeg(request: FFmpegRequest, **kwargs):
+            captured.append(request)
+            return _make_ffmpeg_result(success=True)
+
+        video   = Path("/v/video.mkv")
+        tmp_dir = Path("/shots/tmpdir")
+        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
+            asyncio.run(_capture_single_pass(video, "not(mod(n,240))", tmp_dir, None))
+
+        assert len(captured) == 1
+        argv = [str(a) for a in compose_command(captured[0])]
+        assert argv == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(video),
+            "-vf", "select='not(mod(n,240))',setpts=N/FRAME_RATE/TB",
+            "-vsync", "0",
+            str(tmp_dir / "%04d.png"),
+            "-map_chapters", "-1",
+            "-f", "null", "-",
+        ]

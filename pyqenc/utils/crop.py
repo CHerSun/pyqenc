@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 
+from pyqenc.constants import FFMPEG_ARG_VF
 from pyqenc.models import CropParams, VideoMetadata
-from pyqenc.utils.ffmpeg_runner import run_ffmpeg
+from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg
 
 logger = logging.getLogger(__name__)
 
@@ -47,17 +47,17 @@ def detect_crop_parameters(
         step_frames = int(step * video_file.fps) if video_file.fps else 0
         step_frames = max(min(step_frames, 500), 30)
 
-        cmd: list[str | os.PathLike] = [
-            "ffmpeg",
-            "-ss", str(start_time),
-            "-i", video_file.path,
-            "-vf", f"select='not(mod(n\\,{step_frames}))',cropdetect=24:2:0", # cropdetect takes cropdetect=limit:round:skip:reset
-            "-vframes", str(sample_count),                             # default round is 16 (safe). minimum round=2 (for crhoma colors)
-            "-f", "null",                                                     # lowered rounding to 2 to reach the same cropping as handbrake
-            "-",
-        ]
+        request = FFmpegRequest(
+            inputs      = [
+                FFmpegInput(path=video_file.path, start_seconds=start_time),
+            ],
+            output_args = (
+                FFMPEG_ARG_VF, f"select='not(mod(n\\,{step_frames}))',cropdetect=24:2:0", # cropdetect takes cropdetect=limit:round:skip:reset
+                "-vframes", str(sample_count),                             # default round is 16 (safe). minimum round=2 (for crhoma colors)
+            ),                                                                   # lowered rounding to 2 to reach the same cropping as handbrake
+        )
 
-        result = run_ffmpeg(cmd, output_file=None)
+        result = run_ffmpeg(request)
 
         # Parse lines like: [Parsed_cropdetect_0 @ ...] w:1920 h:800 x:0 y:140
         crop_detections: list[tuple[int, int, int, int]] = []

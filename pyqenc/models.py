@@ -9,7 +9,6 @@ All models use Pydantic BaseModel for validation and serialisation.
 
 import json
 import logging
-import os
 import re
 import subprocess
 from decimal import Decimal
@@ -551,27 +550,28 @@ class VideoMetadata(BaseModel):
     def probe_extended(self) -> "ExtendedVideoMetadata":
         """Run the slow null-encode probe and return an ExtendedVideoMetadata.
 
-        Runs ``ffmpeg -i {path} -map 0:v:0 -c copy -f null -`` to count frames.
-        This can take seconds to ~15 minutes on large UHD sources.
-        Call only when frame count is genuinely needed and the cost is acceptable.
+        Counts frames via the runner's null-copy pass helper
+        (:func:`get_frame_count`). This can take seconds to ~15 minutes on
+        large UHD sources. Call only when frame count is genuinely needed and
+        the cost is acceptable.
 
         Returns:
             ``ExtendedVideoMetadata`` with frame_count populated (0 on failure).
         """
-        from pyqenc.utils.ffmpeg_runner import run_ffmpeg  # deferred — circular import
+        from pyqenc.utils.ffmpeg_runner import (  # deferred — circular import
+            FrameCountError,
+            get_frame_count,
+        )
 
         logger.info("Counting source frames: %s", self.path.name)
-        cmd: list[str | os.PathLike] = [
-            "ffmpeg", "-i", self.path,
-            "-map", "0:v:0", "-c", "copy", "-f", "null", "-",
-        ]
-        result = run_ffmpeg(cmd, output_file=None)
-        if result.frame_count is None:
+        try:
+            frame_count = get_frame_count(self.path)
+        except FrameCountError:
             logger.warning(
                 "Could not determine frame count for %s — using 0", self.path.name
             )
             return ExtendedVideoMetadata.from_base(self, frame_count=0)
-        return ExtendedVideoMetadata.from_base(self, frame_count=result.frame_count)
+        return ExtendedVideoMetadata.from_base(self, frame_count=frame_count)
 
     def populate_from_ffprobe(self, data: dict) -> None:
         """Fill backing fields from a pre-parsed ffprobe JSON dict.

@@ -22,6 +22,7 @@ from pyqenc.models import (
     VideoMetadata,
 )
 from pyqenc.phase import Recovery
+from pyqenc.utils.ffmpeg_runner import FFmpegRequest
 
 _SHARED_APP_CONFIG: AppConfig = load_app_config(default_only=True)
 
@@ -570,10 +571,11 @@ class TestChunkingPhaseTiming:
 
         # Build a recovery object with no complete chunks
         from pyqenc.phases.recovery import ChunkingRecovery as RecoveryObj
-        recovery = RecoveryObj(scenes=boundaries, chunks={}, pending=[])        # Patch run_ffmpeg to succeed and create the output file
-        def _fake_ffmpeg(cmd: list, output_file: Path | None = None, **kwargs: object) -> MagicMock:
-            if output_file is not None:
-                output_file.write_bytes(b"\x00" * 32)
+        recovery = RecoveryObj(scenes=boundaries, chunks={}, pending=[])
+        # Patch run_ffmpeg to succeed and create the output file
+        def _fake_ffmpeg(request: FFmpegRequest, **kwargs: object) -> MagicMock:
+            if request.output is not None:
+                request.output.write_bytes(b"\x00" * 32)
             result = MagicMock()
             result.success = True
             return result

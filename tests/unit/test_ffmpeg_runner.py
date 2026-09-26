@@ -1,74 +1,196 @@
 """Unit tests for pyqenc/utils/ffmpeg_runner.py.
 
 Covers:
-- _inject_flags: flags inserted after ffmpeg, idempotent if already present
+- compose_command: the golden composed argv — progress flags, ``-y``, per-input
+  ``-ss``/``-t``/``-i`` ordering, ``-map`` per selector, ``-filter_complex``,
+  ``output_args``, ``-map_chapters -1``, ``.tmp`` output with explicit muxer,
+  null output
+- get_frame_count: builds its request internally and raises on missing count
 - _read_stdout: progress blocks parsed, callback invoked, frame_count from progress=end
 - run_ffmpeg: raises RuntimeError when called from a running event loop
-- _resolve_tmp_paths: validates output paths in cmd, substitutes with .tmp siblings
 """
 
 from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pyqenc.utils.ffmpeg_runner import (
     _PROGRESS_FLAGS,
-    _inject_flags,
+    FFmpegInput,
+    FFmpegRequest,
+    FFmpegRunResult,
+    FrameCountError,
     _read_stdout,
-    _resolve_tmp_paths,
+    compose_command,
+    get_frame_count,
     run_ffmpeg,
 )
 
 
+def _flat(argv: list) -> list[str]:
+    """Flatten a composed argv (Path objects → plain strings) for comparison."""
+    return [str(a) for a in argv]
+
+
 # ---------------------------------------------------------------------------
-# _inject_flags
+# compose_command — golden argv
 # ---------------------------------------------------------------------------
 
-class TestInjectFlags:
-    def test_flags_inserted_after_ffmpeg(self) -> None:
-        cmd = ["ffmpeg", "-i", "input.mkv", "-f", "null", "-"]
-        result = _inject_flags(cmd)
-        assert result[1:5] == _PROGRESS_FLAGS
-        assert result[0] == "ffmpeg"
-        assert result[5:] == ["-i", "input.mkv", "-f", "null", "-"]
+class TestComposeCommand:
+    """Pin the exact argv layout the runner composes from a request.
 
-    def test_idempotent_when_flags_already_present(self) -> None:
-        cmd = ["ffmpeg"] + _PROGRESS_FLAGS + ["-i", "input.mkv"]
-        result = _inject_flags(cmd)
-        # Flags should not be duplicated
-        assert result.count("-hide_banner") == 1
-        assert result.count("-nostats") == 1
-        assert result.count("-progress") == 1
+    Bug prevented: any drift in flag ordering or injection (progress flags,
+    ``-y``, ``-map_chapters -1``, muxer-before-``.tmp``) silently changing the
+    command ffmpeg receives at a converted call site.
+    """
 
-    def test_original_list_not_mutated(self) -> None:
-        cmd = ["ffmpeg", "-i", "input.mkv"]
-        original = list(cmd)
-        _inject_flags(cmd)
-        assert cmd == original
+    def test_full_featured_request(self) -> None:
+        """Inputs carry pre-input args, window flags and paths in order;
+        maps follow all inputs; then filter_complex, output_args, chapter guard,
+        muxer + .tmp output."""
+        request = FFmpegRequest(
+            inputs = [
+                FFmpegInput(
+                    path           = Path("/src/a.mkv"),
+                    selector       = "0:1",
+                    start_seconds  = 1.5,
+                    duration_seconds = 2.25,
+                    pre_input_args = ("-hwaccel", "cuda"),
+                ),
+                FFmpegInput(path=Path("/src/b.mkv")),
+            ],
+            output_args    = ("-c:v", "libx264"),
+            filter_complex = "[0:v][1:v]psnr",
+            output         = Path("/out/x.mkv"),
+        )
+        assert _flat(compose_command(request)) == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-hwaccel", "cuda", "-ss", "1.5", "-t", "2.25", "-i", str(Path("/src/a.mkv")),
+            "-i", str(Path("/src/b.mkv")),
+            "-map", "0:1",
+            "-filter_complex", "[0:v][1:v]psnr",
+            "-c:v", "libx264",
+            "-map_chapters", "-1",
+            "-f", "matroska", str(Path("/out/x.tmp")),
+        ]
 
-    def test_ffmpeg_not_first_element(self) -> None:
-        # e.g. a wrapper like ["nice", "-n", "10", "ffmpeg", "-i", "in.mkv"]
-        cmd = ["nice", "-n", "10", "ffmpeg", "-i", "in.mkv"]
-        result = _inject_flags(cmd)
-        ffmpeg_idx = result.index("ffmpeg")
-        assert result[ffmpeg_idx + 1 : ffmpeg_idx + 5] == _PROGRESS_FLAGS
+    def test_null_output_terminates_command(self) -> None:
+        """No output file → the command ends with the null muxer sink."""
+        request = FFmpegRequest(
+            inputs      = [FFmpegInput(path=Path("/v.mkv"), selector="0:v:0")],
+            output_args = ("-c", "copy"),
+        )
+        assert _flat(compose_command(request))[-5:] == [
+            "-c", "copy", "-map_chapters", "-1", "-f", "null", "-",
+        ][-5:]
+
+    def test_null_output_full_argv(self) -> None:
+        request = FFmpegRequest(
+            inputs      = [FFmpegInput(path=Path("/v.mkv"), selector="0:v:0")],
+            output_args = ("-c", "copy"),
+        )
+        assert _flat(compose_command(request)) == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(Path("/v.mkv")),
+            "-map", "0:v:0",
+            "-c", "copy",
+            "-map_chapters", "-1",
+            "-f", "null", "-",
+        ]
+
+    def test_explicit_output_format_names_the_muxer(self) -> None:
+        """Bug prevented: an audio/flac output silently muxed as Matroska."""
+        request = FFmpegRequest(
+            inputs       = [FFmpegInput(path=Path("/src/a.mka"), selector="0:a:0")],
+            output_args  = ("-c:a", "flac"),
+            output       = Path("/out/a.flac"),
+            output_format = "flac",
+        )
+        argv = _flat(compose_command(request))
+        assert argv[-3:] == ["-f", "flac", str(Path("/out/a.tmp"))]
+
+    def test_tmp_output_is_stem_tmp_sibling(self) -> None:
+        """Bug prevented: tmp named <stem><suffix>.tmp instead of <stem>.tmp,
+        which would leak the container hint and break the rename step."""
+        request = FFmpegRequest(
+            inputs      = [FFmpegInput(path=Path("/src/a.mkv"))],
+            output_args = ("-c", "copy"),
+            output      = Path("/out/chunk.1920x800.q22.mkv"),
+        )
+        argv = _flat(compose_command(request))
+        assert argv[-1] == str(Path("/out/chunk.1920x800.q22.tmp"))
+
+    def test_zero_start_is_emitted_not_skipped(self) -> None:
+        """A 0.0-second window start must still emit ``-ss 0.0`` — a window
+        starting at zero is a real seek target, not "no window"."""
+        request = FFmpegRequest(
+            inputs      = [FFmpegInput(path=Path("/v.mkv"), start_seconds=0.0, duration_seconds=1.0)],
+            output_args = (),
+        )
+        argv = _flat(compose_command(request))
+        assert argv[6:10] == ["-ss", "0.0", "-t", "1.0"]
+
+    def test_selector_only_inputs_get_maps_in_order(self) -> None:
+        """Maps are emitted once per input, in input order; selector-less
+        inputs contribute none."""
+        request = FFmpegRequest(
+            inputs = [
+                FFmpegInput(path=Path("/a.mkv")),
+                FFmpegInput(path=Path("/b.mkv"), selector="1:2"),
+                FFmpegInput(path=Path("/c.mkv"), selector="2:0"),
+            ],
+            output_args = (),
+        )
+        argv = _flat(compose_command(request))
+        maps = [argv[i + 1] for i, a in enumerate(argv) if a == "-map"]
+        assert maps == ["1:2", "2:0"]
+
+    def test_y_and_chapter_guard_always_present(self) -> None:
+        """Every request carries ``-y`` (stale .tmp must never hang ffmpeg)
+        and ``-map_chapters -1`` (no output ever inherits input chapters)."""
+        request = FFmpegRequest(inputs=[FFmpegInput(path=Path("/v.mkv"))], output_args=())
+        argv = _flat(compose_command(request))
+        assert argv[1:6] == [*_PROGRESS_FLAGS, "-y"]
+        assert "-map_chapters" in argv
+        assert argv[argv.index("-map_chapters") + 1] == "-1"
+
+
+# ---------------------------------------------------------------------------
+# get_frame_count
+# ---------------------------------------------------------------------------
+
+class TestGetFrameCount:
+    def test_returns_frame_count_from_result(self) -> None:
+        result = FFmpegRunResult(returncode=0, success=True, frame_count=42)
+        with patch("pyqenc.utils.ffmpeg_runner.run_ffmpeg", return_value=result) as mock_run:
+            assert get_frame_count(Path("/v.mkv")) == 42
+        request = mock_run.call_args[0][0]
+        assert _flat(compose_command(request)) == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(Path("/v.mkv")),
+            "-map", "0:v:0",
+            "-c", "copy",
+            "-map_chapters", "-1",
+            "-f", "null", "-",
+        ]
+
+    def test_raises_frame_count_error_when_undetermined(self) -> None:
+        """Bug prevented: an uncountable video silently returning a bogus 0."""
+        result = FFmpegRunResult(returncode=1, success=False, frame_count=None)
+        with (
+            patch("pyqenc.utils.ffmpeg_runner.run_ffmpeg", return_value=result),
+            pytest.raises(FrameCountError),
+        ):
+            get_frame_count(Path("/v.mkv"))
 
 
 # ---------------------------------------------------------------------------
 # _read_stdout
 # ---------------------------------------------------------------------------
-
-def _make_stream(lines: list[str]) -> asyncio.StreamReader:
-    """Build a mock StreamReader that yields the given lines then EOF."""
-    reader = MagicMock(spec=asyncio.StreamReader)
-    encoded = [line.encode() for line in lines] + [b""]
-    reader.readline = MagicMock(side_effect=[asyncio.coroutine(lambda v=v: v)() for v in encoded])
-    return reader
-
 
 def _async_values(values: list[bytes]) -> MagicMock:
     """Return a mock whose readline() is an async function cycling through values."""
@@ -163,73 +285,10 @@ class TestReadStdout:
 
 class TestRunFfmpegEventLoopGuard:
     def test_raises_runtime_error_inside_running_loop(self) -> None:
+        request = FFmpegRequest(inputs=[FFmpegInput(path=Path("/v.mkv"))], output_args=())
+
         async def _inner() -> None:
             with pytest.raises(RuntimeError, match="run_ffmpeg_async"):
-                run_ffmpeg(["ffmpeg", "-version"], output_file=None)
+                run_ffmpeg(request)
 
         asyncio.run(_inner())
-
-
-# ---------------------------------------------------------------------------
-# _resolve_tmp_paths
-# ---------------------------------------------------------------------------
-
-class TestResolveTmpPaths:
-    def test_single_output_substituted_with_tmp(self) -> None:
-        out = Path("/tmp/output.mkv")
-        cmd: list = ["ffmpeg", "-i", "input.mkv", out]
-        modified_cmd, tmp_to_final = _resolve_tmp_paths(cmd, out)
-        # Final path replaced with .tmp sibling
-        assert out not in modified_cmd
-        tmp_path = out.parent / f"{out.stem}.tmp"
-        assert tmp_path in modified_cmd
-        assert tmp_to_final[tmp_path] == out
-
-    def test_multiple_outputs_all_substituted(self) -> None:
-        out1 = Path("/tmp/video.mkv")
-        out2 = Path("/tmp/audio.mka")
-        cmd: list = ["ffmpeg", "-i", "in.mkv", out1, out2]
-        modified_cmd, tmp_to_final = _resolve_tmp_paths(cmd, [out1, out2])
-        assert out1 not in modified_cmd
-        assert out2 not in modified_cmd
-        assert len(tmp_to_final) == 2
-
-    def test_raises_value_error_when_path_not_in_cmd(self) -> None:
-        out = Path("/tmp/output.mkv")
-        cmd: list = ["ffmpeg", "-i", "input.mkv", "/tmp/other.mkv"]
-        with pytest.raises(ValueError, match="not found in ffmpeg cmd"):
-            _resolve_tmp_paths(cmd, out)
-
-    def test_tmp_stem_has_no_original_suffix(self) -> None:
-        """Req 7.3: tmp file is <stem>.tmp, not <stem><original_suffix>.tmp."""
-        out = Path("/tmp/chunk.1920x800.crf22.0.mkv")
-        cmd: list = ["ffmpeg", "-i", "in.mkv", out]
-        _, tmp_to_final = _resolve_tmp_paths(cmd, out)
-        tmp_path = list(tmp_to_final.keys())[0]
-        assert tmp_path.name == "chunk.1920x800.crf22.0.tmp"
-
-    def test_default_output_format_injects_matroska(self) -> None:
-        """Bug: an audio-chains change must not silently alter video call sites.
-
-        With no ``output_format`` the runner must still inject ``-f matroska``
-        before the ``.tmp`` output, exactly as before the parameter existed.
-        """
-        out = Path("/tmp/output.mkv")
-        cmd: list = ["ffmpeg", "-i", "input.mkv", out]
-        modified_cmd, _ = _resolve_tmp_paths(cmd, out)
-        tmp_path = out.parent / f"{out.stem}.tmp"
-        idx = modified_cmd.index(tmp_path)
-        assert modified_cmd[idx - 2 : idx] == ["-f", "matroska"]
-
-    def test_explicit_output_format_injects_that_muxer(self) -> None:
-        """Bug: audio outputs muxed as Matroska instead of their real container.
-
-        An explicit ``output_format="flac"`` must inject ``-f flac`` before the
-        ``.tmp`` output — never the Matroska default.
-        """
-        out = Path("/tmp/track chain=night.flac")
-        cmd: list = ["ffmpeg", "-i", "in.flac", out]
-        modified_cmd, _ = _resolve_tmp_paths(cmd, out, output_format="flac")
-        tmp_path = out.parent / f"{out.stem}.tmp"
-        idx = modified_cmd.index(tmp_path)
-        assert modified_cmd[idx - 2 : idx] == ["-f", "flac"]

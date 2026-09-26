@@ -1,12 +1,17 @@
 """Unit tests for crop parameter injection in ChunkEncoder._encode_with_ffmpeg."""
 
+from decimal import Decimal
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
-import pytest
 from pyqenc.models import ChunkMetadata, CodecConfig, CropParams, Strategy
 from pyqenc.phases.encoding import ChunkEncoder
-from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
+from pyqenc.utils.ffmpeg_runner import (
+    _PROGRESS_FLAGS,
+    FFmpegRequest,
+    FFmpegRunResult,
+    compose_command,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -57,31 +62,58 @@ def _make_chunk() -> ChunkMetadata:
 # Helpers to capture the ffmpeg command
 # ---------------------------------------------------------------------------
 
-def _captured_cmd(encoder: ChunkEncoder, crop: CropParams | None) -> list[str]:
-    """Run _encode_with_ffmpeg with a mocked runner and return the captured cmd."""
+def _captured_request(encoder: ChunkEncoder, crop: CropParams | None) -> FFmpegRequest:
+    """Run _encode_with_ffmpeg with a mocked runner and return the captured request."""
     encoder._crop_params = crop
     chunk = _make_chunk()
     strategy = _make_strategy()
     output = Path("/tmp/out.mkv")
 
-    captured: list[list] = []
+    captured: list[FFmpegRequest] = []
 
-    def fake_run_ffmpeg(cmd, output_file=None, **_kwargs):
-        captured.append(list(cmd))
+    def fake_run_ffmpeg(request: FFmpegRequest, **_kwargs: object) -> FFmpegRunResult:
+        captured.append(request)
         result = MagicMock(spec=FFmpegRunResult)
         result.success = True
         result.returncode = 0
         return result
 
     with patch("pyqenc.phases.encoding.run_ffmpeg", side_effect=fake_run_ffmpeg):
-        encoder._encode_with_ffmpeg(chunk, strategy, 28.0, output)
+        encoder._encode_with_ffmpeg(chunk, strategy, Decimal("28.0"), output)
 
-    return captured[0] if captured else []
+    return captured[0]
+
+
+def _captured_cmd(encoder: ChunkEncoder, crop: CropParams | None) -> list[str]:
+    """Composed launch argv of the request captured by ``_captured_request``."""
+    return [str(a) for a in compose_command(_captured_request(encoder, crop))]
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+class TestEncodeCommandGolden:
+    def test_golden_argv(self) -> None:
+        """Bug prevented: the encode call-site conversion drifting from the
+        original hand-built command (strategy template split, ``-f matroska``
+        tmp output, chapter guard)."""
+        crop = CropParams(top=140, bottom=140, left=0, right=0)
+        encoder = _make_encoder(crop)
+        cmd = _captured_cmd(encoder, crop)
+
+        assert cmd == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(Path("/tmp/chunk.mkv")),
+            "-c:v", "libx265",
+            "-preset", "fast",
+            "-crf", "28.0",
+            "-vf", "crop=iw-0:ih-280:0:140",
+            "-pix_fmt", "yuv420p",
+            "-map_chapters", "-1",
+            "-f", "matroska", str(Path("/tmp/out.tmp")),
+        ]
+
 
 class TestCropInjection:
     def test_vf_present_when_crop_set(self) -> None:

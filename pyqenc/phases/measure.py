@@ -16,6 +16,8 @@ from fractions import Fraction
 from pathlib import Path
 
 from pyqenc.constants import (
+    FFMPEG_ARG_VF,
+    FFMPEG_MUXER_IMAGE2,
     TEMP_SUFFIX,
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
@@ -23,7 +25,7 @@ from pyqenc.constants import (
 from pyqenc.models import CropParams, VideoMetadata
 from pyqenc.quality import ChunkQualityStats, MetricType
 from pyqenc.state import JobState, MeasureSidecar
-from pyqenc.utils.ffmpeg_runner import run_ffmpeg_async
+from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg_async
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 logger = logging.getLogger(__name__)
@@ -611,12 +613,20 @@ async def _capture_single_frame(
     Returns:
         None on success, or a short human-readable failure reason string.
     """
-    cmd: list[str | Path] = ["ffmpeg", "-y", "-ss", seek_ts, "-i", video_path]
+    # Single-frame capture goes through the runner's .tmp protocol with the
+    # image2 muxer (the .tmp extension hides the image container hint).
+    output_args: tuple[str, ...] = ()
     if crop_params is not None and not crop_params.is_empty():
-        cmd += ["-vf", crop_params.to_ffmpeg_filter()]
-    cmd += ["-frames:v", "1", "-f", "image2", "-c:v", "png", output_path]
+        output_args += (FFMPEG_ARG_VF, crop_params.to_ffmpeg_filter())
+    output_args += ("-frames:v", "1", "-c:v", "png")
+    request = FFmpegRequest(
+        inputs        = [FFmpegInput(path=video_path, start_seconds=float(seek_ts))],
+        output_args   = output_args,
+        output        = output_path,
+        output_format = FFMPEG_MUXER_IMAGE2,
+    )
     try:
-        result = await run_ffmpeg_async(cmd, output_file=None)
+        result = await run_ffmpeg_async(request)
         if not result.success:
             reason = f"ffmpeg exit {result.returncode}"
             logger.debug("Strategy C frame failed (%s) seek_ts=%s output=%s", reason, seek_ts, output_path.name)
@@ -644,15 +654,20 @@ async def _capture_single_pass(
     if crop_params is not None and not crop_params.is_empty():
         vf_parts.append(crop_params.to_ffmpeg_filter())
     vf_parts.append("setpts=N/FRAME_RATE/TB")
-    cmd: list[str | Path] = [
-        "ffmpeg", "-y", "-i", video_path,
-        "-vf", ",".join(vf_parts),
-        "-vsync", "0",
-        str(output_pattern),
-    ]
+    # Multi-frame pattern output: writes into this caller-managed temp
+    # directory with its own lifecycle — the sanctioned bypass of the .tmp
+    # substitution protocol (the trailing null sink shares the input decode).
+    request = FFmpegRequest(
+        inputs      = [FFmpegInput(path=video_path)],
+        output_args = (
+            FFMPEG_ARG_VF, ",".join(vf_parts),
+            "-vsync", "0",
+            str(output_pattern),
+        ),
+    )
     try:
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        result = await run_ffmpeg_async(cmd, output_file=None)
+        result = await run_ffmpeg_async(request)
         if not result.success:
             logger.debug("Single-pass capture failed (ffmpeg non-zero) tmp_dir=%s", tmp_dir)
             return []

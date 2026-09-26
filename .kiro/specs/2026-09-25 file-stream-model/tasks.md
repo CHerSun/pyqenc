@@ -19,7 +19,7 @@ Staged so every task lands green: the runner converts first (pure mechanical, co
 
 ## Tasks
 
-- [ ] 1. FFmpeg request model + runner conversion (Req 8)
+- [x] 1. FFmpeg request model + runner conversion (Req 8)
   - Add `FFmpegInput` / `FFmpegRequest` to `utils/ffmpeg_runner.py`; compose argv exactly per design (progress flags, `-y`, `-map_chapters -1`, per-input `-ss`/`-t`/`-i`, maps, `filter_complex`, output stage, null output)
   - Convert `run_ffmpeg_async`/`run_ffmpeg` to take a request; keep progress parsing, `.tmp`-then-rename + muxer, stderr handling, kill registry, sync-loop guard; remove `video_meta=`
   - `get_frame_count` builds a request internally

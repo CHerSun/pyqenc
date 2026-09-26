@@ -32,6 +32,8 @@ from scenedetect import ContentDetector, detect
 
 from pyqenc.constants import (
     CHUNK_NAME_PATTERN,
+    FFMPEG_ARG_DURATION,
+    FFMPEG_ARG_NO_AUDIO,
     RANGE_SEPARATOR,
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
@@ -49,7 +51,7 @@ from pyqenc.state import (
     ChunkSidecar,
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
-from pyqenc.utils.ffmpeg_runner import run_ffmpeg
+from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 config_handler.set_global(enrich_print=False)  # type: ignore
@@ -253,14 +255,14 @@ def split_chunks(
                 continue
 
             duration = end_ts - start_ts
-            cmd: list[str | Path] = [
-                "ffmpeg", "-y",
-                "-ss", str(start_ts),
-                "-i", video_meta.path,
-                "-t", str(duration),
-                *video_args,
-                "-an", chunk_file,
-            ]
+            request = FFmpegRequest(
+                inputs      = [FFmpegInput(path=video_meta.path, start_seconds=start_ts)],
+                # The duration limit stays output-side (unchanged window
+                # semantics); this whole split path is deleted with the chunk
+                # files by the direct-from-source model.
+                output_args = (FFMPEG_ARG_DURATION, str(duration), *video_args, FFMPEG_ARG_NO_AUDIO),
+                output      = chunk_file,
+            )
             logger.debug("Splitting chunk %s (%.3fs)", stem, duration)
 
             chunk_meta = ChunkMetadata(
@@ -270,7 +272,7 @@ def split_chunks(
                 end_timestamp   = end_ts,
                 frame_count     = 0,
             )
-            split_result = run_ffmpeg(cmd, output_file=chunk_file, video_meta=chunk_meta)
+            split_result = run_ffmpeg(request)
 
             if not split_result.success:
                 logger.critical(

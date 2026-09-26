@@ -40,6 +40,11 @@ from pyqenc.phases.extraction import (
 )
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.state import ArtifactState, JobState
+from pyqenc.utils.ffmpeg_runner import (
+    _PROGRESS_FLAGS,
+    FFmpegRequest,
+    compose_command,
+)
 
 _APP_CONFIG = load_app_config(default_only=True)
 
@@ -475,20 +480,20 @@ def _run_and_capture(
     ``subprocess.run`` (for the chapter mkvextract/ffprobe path).
 
     Returns ``(ffmpeg_cmds, subprocess_cmds)`` where ``ffmpeg_cmds`` is the list
-    of commands passed to ``run_ffmpeg`` in call order (index 0 is the video
-    extraction), and ``subprocess_cmds`` records ``subprocess.run`` invocations
-    when a side effect is supplied.
+    of composed launch argvs (runner-composed from the requests) in call order
+    (index 0 is the video extraction), and ``subprocess_cmds`` records
+    ``subprocess.run`` invocations when a side effect is supplied.
     """
     work_dir, source = _make_work_and_source(tmp_path)
     phase = _make_extraction_phase(work_dir, source)
 
     all_tracks = [_fake_video_track(), *extra_tracks]
 
-    ffmpeg_cmds:     list[list] = []
+    ffmpeg_cmds:     list[list[str]] = []
     subprocess_cmds: list[list] = []
 
-    def fake_run_ffmpeg(cmd: list, **kwargs: object) -> MagicMock:
-        ffmpeg_cmds.append(list(cmd))
+    def fake_run_ffmpeg(request: FFmpegRequest, **kwargs: object) -> MagicMock:
+        ffmpeg_cmds.append([str(a) for a in compose_command(request)])
         result = MagicMock()
         result.success = True
         return result
@@ -575,6 +580,102 @@ class TestExtractionCommandCorrectness:
 
 
 # ---------------------------------------------------------------------------
+# Golden composed argv — one per extraction ffmpeg call site
+# ---------------------------------------------------------------------------
+
+
+class TestExtractionCommandGolden:
+    """Pin the full composed argv for every extraction ffmpeg call site.
+
+    Bug prevented: the request-model conversion drifting from the original
+    hand-built commands — same source, same ``-map`` selectors, same copy
+    codec; the runner contributes progress flags, ``-y``, the chapter guard,
+    and the single explicit ``.tmp`` muxer.
+    """
+
+    def test_video_track_copy_golden(self, tmp_path: Path) -> None:
+        work_dir, source = _make_work_and_source(tmp_path)
+        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [])
+        assert ffmpeg_cmds, "Expected a run_ffmpeg call for video extraction"
+        out_tmp = work_dir / EXTRACTED_DIR / "video.tmp"
+        assert ffmpeg_cmds[0] == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(source),
+            "-map", "0:0",
+            "-c", "copy",
+            "-map_chapters", "-1",
+            "-f", "matroska", str(out_tmp),
+        ]
+
+    def test_audio_track_copy_golden(self, tmp_path: Path) -> None:
+        work_dir, source = _make_work_and_source(tmp_path)
+        audio = MagicMock()
+        audio.track_id   = 1
+        audio.codec_type = "audio"
+        audio.display_name.return_value = "audio.mka"
+
+        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [audio])
+        audio_cmds = [c for c in ffmpeg_cmds if "-map" in c and c[c.index("-map") + 1] == "0:1"]
+        assert audio_cmds, "Expected a run_ffmpeg call for audio extraction"
+        out_tmp = work_dir / EXTRACTED_DIR / "audio.tmp"
+        assert audio_cmds[0] == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(source),
+            "-map", "0:1",
+            "-c", "copy",
+            "-map_chapters", "-1",
+            "-f", "matroska", str(out_tmp),
+        ]
+
+    def test_text_subtitle_copy_golden(self, tmp_path: Path) -> None:
+        """Text subtitles carry exactly one ``-f`` — the srt muxer for the
+        ``.tmp`` output (the pre-request code emitted ``-f srt -f matroska``,
+        where the runner-injected Matroska silently overrode the srt muxer)."""
+        from pyqenc.phases.extraction import SubtitleStream
+        work_dir, source = _make_work_and_source(tmp_path)
+        sub = MagicMock(spec=SubtitleStream)
+        sub.track_id       = 7
+        sub.codec_type     = "subtitle"
+        sub.file_extension = "srt"
+        sub.display_name.return_value = "subtitle.srt"
+
+        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [sub])
+        sub_cmds = [c for c in ffmpeg_cmds if "-map" in c and c[c.index("-map") + 1] == "0:7"]
+        assert sub_cmds, "Expected a run_ffmpeg call for subtitle extraction"
+        out_tmp = work_dir / EXTRACTED_DIR / "subtitle.tmp"
+        assert sub_cmds[0] == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(source),
+            "-map", "0:7",
+            "-c", "copy",
+            "-map_chapters", "-1",
+            "-f", "srt", str(out_tmp),
+        ]
+
+    def test_attachment_dump_golden(self, tmp_path: Path) -> None:
+        from pyqenc.phases.extraction import AttachmentStream
+        work_dir, source = _make_work_and_source(tmp_path)
+        att = MagicMock(spec=AttachmentStream)
+        att.track_id       = 8
+        att.codec_type     = "attachment"
+        att.file_extension = "ttf"
+        att.display_name.return_value = "font.ttf"
+
+        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [att])
+        att_cmds = [c for c in ffmpeg_cmds if "-dump_attachment:8" in c]
+        assert att_cmds, "Expected a run_ffmpeg call for attachment extraction"
+        out_file = work_dir / EXTRACTED_DIR / "font.ttf"
+        assert att_cmds[0] == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(source),
+            "-dump_attachment:8", str(out_file),
+            "-t", "0",
+            "-map_chapters", "-1",
+            "-f", "null", "-",
+        ]
+
+
+# ---------------------------------------------------------------------------
 # 1.1 / 1.4-1.7  subtitle / chapter / attachment extraction command correctness
 # ---------------------------------------------------------------------------
 
@@ -635,23 +736,33 @@ class TestFfmpegStreamExtraction:
         )
 
     def test_subtitle_bitmap_pgs_has_no_format_flag(self, tmp_path: Path) -> None:
-        """Requirement 1.5: PGS (bitmap) subtitle extraction must NOT include -f."""
+        """Requirement 1.5: PGS (bitmap) subtitle extraction must NOT pick a
+        subtitle-format muxer — the ``.tmp`` output stays on the Matroska default."""
         ffmpeg_cmds, _ = _run_and_capture(tmp_path, [self._fake_subtitle(5, "pgs")])
         cmds = self._other_cmds(ffmpeg_cmds)
         assert cmds, "Expected a run_ffmpeg call for PGS subtitle extraction"
         flat = [str(a) for a in cmds[0]]
-        assert "-f" not in flat, (
-            f"-f must NOT be present for PGS (bitmap) subtitle; got: {flat}"
+        assert "srt" not in flat and "ass" not in flat, (
+            f"Bitmap subtitle must not carry a text-subtitle -f; got: {flat}"
+        )
+        muxers = [flat[i + 1] for i, a in enumerate(flat) if a == "-f"]
+        assert muxers == ["matroska"], (
+            f"Expected only the default Matroska tmp muxer; got: {flat}"
         )
 
     def test_subtitle_bitmap_sub_has_no_format_flag(self, tmp_path: Path) -> None:
-        """Requirement 1.5: VobSub (bitmap) subtitle extraction must NOT include -f."""
+        """Requirement 1.5: VobSub (bitmap) subtitle extraction must NOT pick a
+        subtitle-format muxer — the ``.tmp`` output stays on the Matroska default."""
         ffmpeg_cmds, _ = _run_and_capture(tmp_path, [self._fake_subtitle(6, "sub")])
         cmds = self._other_cmds(ffmpeg_cmds)
         assert cmds, "Expected a run_ffmpeg call for VobSub subtitle extraction"
         flat = [str(a) for a in cmds[0]]
-        assert "-f" not in flat, (
-            f"-f must NOT be present for VobSub (bitmap) subtitle; got: {flat}"
+        assert "srt" not in flat and "ass" not in flat, (
+            f"Bitmap subtitle must not carry a text-subtitle -f; got: {flat}"
+        )
+        muxers = [flat[i + 1] for i, a in enumerate(flat) if a == "-f"]
+        assert muxers == ["matroska"], (
+            f"Expected only the default Matroska tmp muxer; got: {flat}"
         )
 
     def test_subtitle_extraction_uses_map_and_copy(self, tmp_path: Path) -> None:

@@ -37,7 +37,6 @@ imports from ``filters.py``, never the reverse.
 from __future__ import annotations
 
 import logging
-import os
 from collections import deque
 from collections.abc import Awaitable, Callable
 
@@ -57,21 +56,17 @@ from pyqenc.constants import (
     FFMPEG_ARG_AF,
     FFMPEG_ARG_BITRATE_A,
     FFMPEG_ARG_CODEC_A,
-    FFMPEG_ARG_FORMAT,
-    FFMPEG_ARG_INPUT,
-    FFMPEG_ARG_MAP,
     FFMPEG_ARG_NO_DATA,
     FFMPEG_ARG_NO_SUBS,
     FFMPEG_ARG_NO_VIDEO,
-    FFMPEG_EXECUTABLE,
     FFMPEG_MAP_FIRST_AUDIO,
-    FFMPEG_NULL_MUXER,
-    FFMPEG_NULL_SINK,
     FLAC_CODEC,
     FLAC_EXTENSION,
     OUTPUT_FORMAT_MUXERS,
 )
 from pyqenc.utils.ffmpeg_runner import (
+    FFmpegInput,
+    FFmpegRequest,
     FFmpegRunResult,
     run_ffmpeg_async,
 )
@@ -101,13 +96,12 @@ initial ``output_format`` rather than a synthetic filter injected into the chain
 # The injectable ffmpeg run callable
 # ---------------------------------------------------------------------------
 
-FFmpegRunner = Callable[..., Awaitable[FFmpegRunResult]]
+FFmpegRunner = Callable[[FFmpegRequest], Awaitable[FFmpegRunResult]]
 """Signature-compatible with :func:`run_ffmpeg_async`.
 
 Injected into :func:`execute_chain` so tests supply a spy runner that records
-each invocation's ``cmd``/``output_file`` and returns a canned
-:class:`FFmpegRunResult` — no real ffmpeg. Only the two keyword args the executor
-passes (``cmd`` positionally, ``output_file=...``) are exercised."""
+each invocation's :class:`FFmpegRequest` and returns a canned
+:class:`FFmpegRunResult` — no real ffmpeg."""
 
 
 # ---------------------------------------------------------------------------
@@ -271,14 +265,14 @@ def chain_output_path(
 # Command builders
 # ---------------------------------------------------------------------------
 
-def _build_measurement_cmd(source: LongPath, af: str) -> list[str | os.PathLike]:
-    """Build a measurement-pass command: apply ``af`` and write to the null muxer.
+def _build_measurement_request(source: LongPath, af: str) -> FFmpegRequest:
+    """Build a measurement-pass request: apply ``af`` and write to the null muxer.
 
-    No file is produced (``-f null -``), so the caller passes ``output_file=None``
-    to the runner. The filter reads its measured value from the result's
-    ``stderr_lines``. ``-vn -sn -dn`` drop any non-audio streams so the pass
-    operates on the audio stream alone (consistent with the application pass; the
-    flags never touch the audio stream's rate or timestamps).
+    No file is produced (null output), and the filter reads its measured value
+    from the result's ``stderr_lines``. ``-vn -sn -dn`` drop any non-audio
+    streams so the pass operates on the audio stream alone (consistent with the
+    application pass; the flags never touch the audio stream's rate or
+    timestamps).
 
     Args:
         source: The source track path.
@@ -286,27 +280,25 @@ def _build_measurement_cmd(source: LongPath, af: str) -> list[str | os.PathLike]
                 measurement pass always has at least the measuring filter's ``af``).
 
     Returns:
-        The ffmpeg command (executable first; the runner injects progress flags).
+        The structured ffmpeg request.
     """
-    return [
-        FFMPEG_EXECUTABLE,
-        FFMPEG_ARG_INPUT, str(source),
-        FFMPEG_ARG_MAP,   FFMPEG_MAP_FIRST_AUDIO,
-        FFMPEG_ARG_NO_VIDEO, FFMPEG_ARG_NO_SUBS, FFMPEG_ARG_NO_DATA,  # audio-only
-        FFMPEG_ARG_AF,    af,
-        FFMPEG_ARG_FORMAT, FFMPEG_NULL_MUXER,
-        FFMPEG_NULL_SINK,
-    ]
+    return FFmpegRequest(
+        inputs      = [FFmpegInput(path=source, selector=FFMPEG_MAP_FIRST_AUDIO)],
+        output_args = (
+            FFMPEG_ARG_NO_VIDEO, FFMPEG_ARG_NO_SUBS, FFMPEG_ARG_NO_DATA,  # audio-only
+            FFMPEG_ARG_AF, af,
+        ),
+    )
 
 
-def _build_application_cmd(
+def _build_application_request(
     source:  LongPath,
     output:  LongPath,
     af:      str,
     encode:  EncodeParams,
     channels: int,
-) -> list[str | os.PathLike]:
-    """Build the final application-pass command producing the output file.
+) -> FFmpegRequest:
+    """Build the final application-pass request producing the output file.
 
     ``-vn -sn -dn`` drop video, subtitle, and data streams so the produced file
     contains ONLY the audio stream (no stray ``bin_data``/data stream carried
@@ -316,32 +308,34 @@ def _build_application_cmd(
     Emits ``-af`` only when ``af`` is non-empty (an all-empty chain omits it,
     Req 6.1). Emits ``-c:a <codec>``; for lossy codecs also ``-b:a <scaled>``
     (bitrate scaled by the final layout's channel count). FLAC emits **no**
-    ``-b:a`` (it ignores bitrate). The exact ``output`` Path object is present in
-    the command so the runner can enforce ``.tmp``-then-rename.
+    ``-b:a`` (it ignores bitrate). The output goes through the runner's
+    ``.tmp`` protocol with the target container's muxer (``flac`` → ``flac``,
+    ``m4a`` → ``ipod``; unmapped extensions fall back to the Matroska default).
 
     Args:
         source:   The source track path.
-        output:   The final output path (present in cmd for the runner).
+        output:   The final output path.
         af:       The comma-joined ``-af`` chain (may be empty).
         encode:   The effective terminal output format.
         channels: The final layout's channel count (for bitrate scaling).
 
     Returns:
-        The ffmpeg command.
+        The structured ffmpeg request.
     """
-    cmd: list[str | os.PathLike] = [
-        FFMPEG_EXECUTABLE,
-        FFMPEG_ARG_INPUT, str(source),
-        FFMPEG_ARG_MAP,   FFMPEG_MAP_FIRST_AUDIO,
+    output_args: tuple[str, ...] = (
         FFMPEG_ARG_NO_VIDEO, FFMPEG_ARG_NO_SUBS, FFMPEG_ARG_NO_DATA,  # audio-only output
-    ]
+    )
     if af:
-        cmd += [FFMPEG_ARG_AF, af]
-    cmd += [FFMPEG_ARG_CODEC_A, encode.codec]
+        output_args += (FFMPEG_ARG_AF, af)
+    output_args += (FFMPEG_ARG_CODEC_A, encode.codec)
     if encode.codec != FLAC_CODEC:
-        cmd += [FFMPEG_ARG_BITRATE_A, _scale_bitrate(encode.bitrate_per_channel, channels)]
-    cmd.append(output)
-    return cmd
+        output_args += (FFMPEG_ARG_BITRATE_A, _scale_bitrate(encode.bitrate_per_channel, channels))
+    return FFmpegRequest(
+        inputs       = [FFmpegInput(path=source, selector=FFMPEG_MAP_FIRST_AUDIO)],
+        output_args  = output_args,
+        output       = output,
+        output_format = OUTPUT_FORMAT_MUXERS.get(encode.extension),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -416,15 +410,13 @@ async def execute_chain(
 
     af     = AF_CHAIN_SEPARATOR.join(af_parts)
     output = chain_output_path(source, resolved.name, output_format.extension, output_dir)
-    cmd    = _build_application_cmd(source, output, af, output_format, layout.channels)
-
-    # The `.tmp`-then-rename protocol hides the real extension from ffmpeg, so it
-    # cannot infer the muxer. Supply the explicit `-f <muxer>` for the target
-    # container (flac -> flac, m4a -> ipod); an unmapped extension falls back to
-    # the runner's Matroska default.
-    muxer = OUTPUT_FORMAT_MUXERS.get(output_format.extension)
+    # The request carries the target container's muxer for the `.tmp` output
+    # (flac -> flac, m4a -> ipod); an unmapped extension falls back to the
+    # runner's Matroska default.
+    muxer  = OUTPUT_FORMAT_MUXERS.get(output_format.extension)
+    request = _build_application_request(source, output, af, output_format, layout.channels)
     logger.debug("[%s] apply → %s (-af %r, -f %s)", resolved.name, output.name, af, muxer)
-    result = await runner(cmd, output_file=output, output_format=muxer)
+    result = await runner(request)
     if not result.success:
         raise ChainExecutionError(
             f"chain {resolved.name!r} application pass failed for {source.name!r} "
@@ -454,10 +446,10 @@ async def _run_measurement(
     Raises:
         ChainExecutionError: When the measurement pass exits non-zero.
     """
-    af  = AF_CHAIN_SEPARATOR.join(trial)
-    cmd = _build_measurement_cmd(source, af)
+    af      = AF_CHAIN_SEPARATOR.join(trial)
+    request = _build_measurement_request(source, af)
     logger.debug("[%s] measure (-af %r)", chain_name, af)
-    result = await runner(cmd, output_file=None)
+    result  = await runner(request)
     if not result.success:
         raise ChainExecutionError(
             f"chain {chain_name!r} measurement pass failed for {source.name!r} "

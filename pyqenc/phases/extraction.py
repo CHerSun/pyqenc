@@ -16,13 +16,13 @@ import subprocess
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from os import PathLike
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import (
     FAILURE_SYMBOL_MINOR,
+    FFMPEG_CODEC_COPY,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
     THICK_LINE,
@@ -41,7 +41,7 @@ from pyqenc.phase import (
 )
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.state import ArtifactState
-from pyqenc.utils.ffmpeg_runner import run_ffmpeg
+from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -1084,15 +1084,13 @@ class ExtractionPhase(Phase):
         if artifact.stream is None:
             return
         track = artifact.stream
-        cmd: list[str | PathLike] = [
-            "ffmpeg", "-i", source,
-            "-map", f"0:{track.track_id}",
-            "-c", "copy",
-            "-f", "matroska",
-            artifact.path,
-        ]
+        request = FFmpegRequest(
+            inputs      = [FFmpegInput(path=source, selector=f"0:{track.track_id}")],
+            output_args = ("-c", FFMPEG_CODEC_COPY),
+            output      = artifact.path,
+        )
         logger.debug("Extracting video track %d: %s", track.track_id, artifact.path.name)
-        res = run_ffmpeg(cmd, output_file=artifact.path)
+        res = run_ffmpeg(request)
         if res.success and artifact.path.exists() and artifact.path.stat().st_size > 0:
             artifact.state = ArtifactState.COMPLETE
             artifact.meta  = VideoMetadata(path=artifact.path)
@@ -1111,14 +1109,13 @@ class ExtractionPhase(Phase):
         if artifact.stream is None:
             return
         track = artifact.stream
-        cmd: list[str | PathLike] = [
-            "ffmpeg", "-i", source,
-            "-map", f"0:{track.track_id}",
-            "-c", "copy",
-            artifact.path,
-        ]
+        request = FFmpegRequest(
+            inputs      = [FFmpegInput(path=source, selector=f"0:{track.track_id}")],
+            output_args = ("-c", FFMPEG_CODEC_COPY),
+            output      = artifact.path,
+        )
         logger.debug("Extracting audio track %d: %s", track.track_id, artifact.path.name)
-        res = run_ffmpeg(cmd, output_file=artifact.path)
+        res = run_ffmpeg(request)
         if res.success and artifact.path.exists() and artifact.path.stat().st_size > 0:
             artifact.state = ArtifactState.COMPLETE
             artifact.meta  = _audio_metadata_from_stream(artifact.path, track)
@@ -1194,14 +1191,15 @@ class ExtractionPhase(Phase):
 
         elif isinstance(track, AttachmentStream):
             # Attachments: -dump_attachment writes directly — bypass muxer
-            cmd: list[str | PathLike] = [
-                "ffmpeg", "-i", source,
-                f"-dump_attachment:{track.track_id}", output_file,
-                "-t", "0", "-f", "null", "-",
-            ]
+            request = FFmpegRequest(
+                inputs = [FFmpegInput(path=source)],
+                output_args = (
+                    f"-dump_attachment:{track.track_id}", output_file,
+                    "-t", "0",
+                ),
+            )
             logger.debug("Extracting attachment track %d: %s", track.track_id, output_file.name)
-            # output_file=None: dump_attachment writes directly, .tmp protocol does not apply
-            res = run_ffmpeg(cmd, output_file=None)
+            res = run_ffmpeg(request)
             if res.success and output_file.exists():
                 artifact.state = ArtifactState.COMPLETE
             else:
@@ -1210,18 +1208,17 @@ class ExtractionPhase(Phase):
                 errors.append(err)
 
         elif isinstance(track, SubtitleStream):
-            # Subtitles: text codecs need explicit -f; bitmap codecs do not
+            # Subtitles: text codecs need an explicit muxer for the .tmp output;
+            # bitmap codecs are self-describing and stay on the Matroska default.
             fmt = _SUBTITLE_FFMPEG_FORMAT.get(track.file_extension)
-            cmd = [
-                "ffmpeg", "-i", source,
-                "-map", f"0:{track.track_id}",
-                "-c", "copy",
-            ]
-            if fmt:
-                cmd += ["-f", fmt]
-            cmd.append(output_file)
+            request = FFmpegRequest(
+                inputs       = [FFmpegInput(path=source, selector=f"0:{track.track_id}")],
+                output_args  = ("-c", FFMPEG_CODEC_COPY),
+                output       = output_file,
+                output_format = fmt,
+            )
             logger.debug("Extracting subtitle track %d: %s", track.track_id, output_file.name)
-            res = run_ffmpeg(cmd, output_file=output_file)
+            res = run_ffmpeg(request)
             if res.success and output_file.exists():
                 artifact.state = ArtifactState.COMPLETE
             else:

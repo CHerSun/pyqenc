@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pyqenc.models import (
-    ChunkMetadata,
     ChunkingMode,
+    ChunkMetadata,
     SceneBoundary,
     VideoMetadata,
 )
@@ -23,7 +23,7 @@ from pyqenc.state import (
     ArtifactState,
     JobState,
 )
-
+from pyqenc.utils.ffmpeg_runner import _PROGRESS_FLAGS, compose_command
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -176,10 +176,10 @@ class TestSplitChunks:
         second_chunk_id = "00꞉00꞉13․330-00꞉00꞉26․670"
         second_chunk_file = output_dir / f"{second_chunk_id}.mkv"
 
-        def _fake_run_ffmpeg(cmd, output_file=None, **kwargs):
+        def _fake_run_ffmpeg(request, **kwargs):
             # Simulate ffmpeg writing the output file
-            if output_file is not None:
-                output_file.write_bytes(b"\x00" * 100)
+            if request.output is not None:
+                request.output.write_bytes(b"\x00" * 100)
             result = MagicMock()
             result.success = True
             result.returncode = 0
@@ -217,8 +217,8 @@ class TestSplitChunks:
         output_dir = tmp_path / "chunks"
         output_dir.mkdir()
 
-        # ffmpeg "succeeds" but leaves no file (output_file not written)
-        def _fake_run_ffmpeg(cmd, output_file=None, **kwargs):
+        # ffmpeg "succeeds" but leaves no file (output not written)
+        def _fake_run_ffmpeg(request, **kwargs):
             result = MagicMock()
             result.success = False  # runner returns failure when file is missing
             result.returncode = 1
@@ -266,10 +266,10 @@ class TestFFV1CommandConstruction:
 
         captured_cmds: list[list[str]] = []
 
-        def _fake_run_ffmpeg(cmd, output_file=None, **kwargs):
-            captured_cmds.append([str(a) for a in cmd])
-            if output_file is not None:
-                output_file.write_bytes(b"\x00" * 100)
+        def _fake_run_ffmpeg(request, **kwargs):
+            captured_cmds.append([str(a) for a in compose_command(request)])
+            if request.output is not None:
+                request.output.write_bytes(b"\x00" * 100)
             result = MagicMock()
             result.success = True
             result.returncode = 0
@@ -281,6 +281,24 @@ class TestFFV1CommandConstruction:
             split_chunks(video_meta, output_dir, boundaries, recovery, chunking_mode=chunking_mode, collector=MagicMock())
 
         return captured_cmds
+
+    def test_remux_split_golden_argv(self, tmp_path):
+        """Bug prevented: the split call-site conversion drifting from the
+        original hand-built command — input-side ``-ss``, output-side ``-t``,
+        stream copy, ``-an``, Matroska ``.tmp`` output."""
+        cmds = self._run_split(tmp_path, ChunkingMode.REMUX)
+        assert cmds, "Expected at least one ffmpeg call"
+        chunk_tmp = tmp_path / "chunks" / "00꞉00꞉00․000-00꞉00꞉13․330.tmp"
+        assert cmds[0] == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-ss", "0.0",
+            "-i", str(tmp_path / "source.mkv"),
+            "-t", "13.33",
+            "-c", "copy",
+            "-an",
+            "-map_chapters", "-1",
+            "-f", "matroska", str(chunk_tmp),
+        ]
 
     def test_lossless_uses_ffv1_codec(self, tmp_path):
         cmds = self._run_split(tmp_path, ChunkingMode.LOSSLESS)
@@ -344,10 +362,10 @@ class TestFFV1CommandConstruction:
 
         captured_cmds: list[list[str]] = []
 
-        def _fake_run_ffmpeg(cmd, output_file=None, **kwargs):
-            captured_cmds.append([str(a) for a in cmd])
-            if output_file is not None:
-                output_file.write_bytes(b"\x00" * 100)
+        def _fake_run_ffmpeg(request, **kwargs):
+            captured_cmds.append([str(a) for a in compose_command(request)])
+            if request.output is not None:
+                request.output.write_bytes(b"\x00" * 100)
             result = MagicMock()
             result.success = True
             result.returncode = 0

@@ -187,6 +187,24 @@ FFMPEG_ARG_INPUT    = "-i"
 """ffmpeg input-file flag."""
 FFMPEG_ARG_MAP      = "-map"
 """ffmpeg stream-map flag."""
+FFMPEG_ARG_SEEK     = "-ss"
+"""ffmpeg seek flag; input-side (cue-point seek + decode to the exact frame)
+when emitted before ``-i``."""
+FFMPEG_ARG_DURATION = "-t"
+"""ffmpeg duration-limit flag; bound to its input when emitted before ``-i``."""
+FFMPEG_ARG_YES              = "-y"
+"""ffmpeg overwrite-output flag. Injected by the unified runner into every
+request — a stale ``.tmp`` from a crashed run must never hang ffmpeg on a prompt."""
+FFMPEG_ARG_FILTER_COMPLEX   = "-filter_complex"
+"""ffmpeg multi-input filter-graph flag."""
+FFMPEG_ARG_VF               = "-vf"
+"""ffmpeg video-filter-chain flag; its value is a comma-joined filter chain."""
+FFMPEG_ARG_MAP_CHAPTERS     = "-map_chapters"
+"""ffmpeg chapter-mapping flag. The runner injects it into every request with
+``FFMPEG_MAP_CHAPTERS_DISABLED``: chapters copy to the output regardless of
+``-map``, and no ffmpeg output in this pipeline intentionally carries them."""
+FFMPEG_MAP_CHAPTERS_DISABLED = "-1"
+"""``-map_chapters`` value that copies no chapters from the input."""
 FFMPEG_ARG_AF       = "-af"
 """ffmpeg audio-filter-chain flag; its value is a comma-joined filter chain."""
 FFMPEG_ARG_CODEC_A  = "-c:a"
@@ -198,6 +216,12 @@ FFMPEG_ARG_FORMAT   = "-f"
 
 FFMPEG_MAP_FIRST_AUDIO = "0:a:0"
 """Maps the first audio stream of the (single) input — chain sources are single-stream extracts."""
+
+FFMPEG_MAP_FIRST_VIDEO = "0:v:0"
+"""Maps the first video stream of the (single) input — null-count passes."""
+
+FFMPEG_CODEC_COPY = "copy"
+"""Stream-copy codec token — remux-style extraction and null-count passes."""
 
 FFMPEG_ARG_NO_AUDIO = "-an"
 """ffmpeg flag dropping all audio streams — keeps chain outputs video-only."""
@@ -232,6 +256,9 @@ FFMPEG_MUXER_FLAC     = "flac"
 FFMPEG_MUXER_IPOD     = "ipod"
 """``-f`` muxer for MP4/M4A audio outputs (``.m4a``) — the conventional ffmpeg
 muxer for an ``.m4a`` audio-only container."""
+FFMPEG_MUXER_IMAGE2   = "image2"
+"""``-f`` muxer for single-frame PNG screenshot outputs written through the
+``.tmp`` protocol (the ``.tmp`` extension hides the image container hint)."""
 
 AF_CHAIN_SEPARATOR = ","
 """ffmpeg's audio-filter-chain separator; chain fragments are joined with it."""

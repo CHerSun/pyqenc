@@ -586,3 +586,25 @@ for selection:
 - Should the score include the size? Size is basically a price for the score, where the score is the profit. Must reach some balance - smaller size is prefered, 
   while too high score doesn't outweight the size (so that we don't blindly always pick largest size - quite the contrary, target is to reach smaller size while 
   keeping good enough quality).
+
+---
+
+## 🤔 43. Audio filter tests are stale vs the astats switch (11 pre-existing failures)
+
+**Status:** needs thinking (pre-existing on `file-stream-model` base `ffbf953`, verified in a clean HEAD worktree)
+
+- `PeakNormFilter` pass 1 measures via `astats` and scrapes `Peak level dB:`
+  (`pyqenc/audio/filters.py:286`), but `tests/unit/test_audio_chain.py` still
+  feeds canned `[Parsed_volumedetect] max_volume: ...` stderr and asserts
+  `af == "volumedetect"` → 5 failures (`TestInvocationCount` ×2,
+  `TestMeasurementAfIncludesFrozenFragments` ×2, `TestAfJoining` ×1).
+- `tests/unit/test_audio_filters.py` (3 failures around `TestTwoPassPeakNorm` /
+  `TestDownmixNoOp`) — same root cause: `assert 'astats' == 'volumedetect'`.
+- `tests/unit/test_audio_matrices.py` (2 `TestMatrixLookup` failures) — separate
+  root cause: pan coefficients changed (e.g. LFE fold `0.1716*c5` vs the tested
+  `0.707*c5`) without the test expectations following.
+
+**Questions to think about:** these are behavior-pinning tests drifting from a
+behavior change that landed without them — decide whether the astats/downmix
+behavior itself is approved as-is (then update the canned data/assertions) or
+needs revisiting. Should the audio-chains spec get a difference note?
