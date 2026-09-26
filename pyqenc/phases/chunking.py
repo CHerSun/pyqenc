@@ -34,9 +34,6 @@ from pyqenc.constants import (
     CHUNK_NAME_PATTERN,
     FFMPEG_ARG_DURATION,
     FFMPEG_ARG_NO_AUDIO,
-    RANGE_SEPARATOR,
-    TIME_SEPARATOR_MS,
-    TIME_SEPARATOR_SAFE,
 )
 from pyqenc.models import (
     ChunkingMode,
@@ -50,6 +47,7 @@ from pyqenc.state import (
     ChunkingParams,
     ChunkSidecar,
 )
+from pyqenc.stream_model import VideoStreamChunk
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg
 from pyqenc.utils.yaml_utils import write_yaml_atomic
@@ -68,21 +66,6 @@ FFV1_VIDEO_ARGS: list[str] = [
     "-context", "1",
     "-slices",  "24",
 ]
-
-
-def _chunk_name_duration(start_ts: float, end_ts: float) -> str:
-    """Return the canonical chunk file stem for a timestamp range."""
-    start_str = TIME_SEPARATOR_SAFE.join([
-        f"{int(start_ts // 3600):02d}",
-        f"{int((start_ts % 3600) // 60):02d}",
-        f"{start_ts % 60:06.3f}".replace(".", TIME_SEPARATOR_MS),
-    ])
-    end_str = TIME_SEPARATOR_SAFE.join([
-        f"{int(end_ts // 3600):02d}",
-        f"{int((end_ts % 3600) // 60):02d}",
-        f"{end_ts % 60:06.3f}".replace(".", TIME_SEPARATOR_MS),
-    ])
-    return f"{start_str}{RANGE_SEPARATOR}{end_str}"
 
 
 def _expand_scenes(
@@ -113,7 +96,8 @@ def _expand_scenes(
         )
         if end_ts is None:
             continue
-        stem = _chunk_name_duration(start_ts, end_ts)
+        # The chunk-id family is owned by VideoStreamChunk (Req 15.4).
+        stem = VideoStreamChunk.format_chunk_id(start_ts, end_ts)
         result.append((start_ts, end_ts, stem, output_dir / f"{stem}.mkv"))
     return result
 

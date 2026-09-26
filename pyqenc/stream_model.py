@@ -1,0 +1,554 @@
+"""File → Stream object model: the composition family for direct-from-source
+processing (spec ``2026-09-25 file-stream-model``).
+
+Every logical entity is instantiated exactly once per run by its owning phase
+and passed by reference through phase results:
+
+- :class:`File` — JobPhase; the source file's identity (path + size).
+- :class:`VideoStream` / :class:`AudioStream` / :class:`SubtitleStream` /
+  :class:`AttachmentStream` — ExtractionPhase; a typed stream composing the
+  ``File`` with its fast-facet info. Chapters and timestamps are **not**
+  streams — they carry no ``track_id`` and are not ``-map`` selectable; they
+  persist as plain extracted paths on :class:`ExtractionSidecar`.
+- :class:`ExtendedVideoStream` — ProbePhase; the slow facet (frame count,
+  crop) above the base video stream. The input type of every downstream video
+  phase.
+- :class:`VideoStreamChunk` — ChunkingPhase; an extended video stream plus a
+  ``[start, end)`` timestamp window. No file on disk.
+- :class:`EncodedChunk` — EncodingPhase; an attempt as a stream (the attempt
+  file's own video) composed with its source chunk, strategy and CRF.
+
+All fields are eager — no property access triggers a probe. Producer
+guarantees are guarded by plain asserts at consumers (a violated guarantee is
+a programming bug, not a user-facing validation error).
+
+Serialization follows the unique-property rule: dumping an object serializes
+only its own info slice, never a composed reference; loading re-composes from
+the in-run object graph with the sidecar's source identity validated. The
+only (de)serialization path is ``model_dump(exclude_none=True)`` /
+``model_validate``; type conversions (``Fraction``, ``Decimal``, ``LongPath``)
+are declared once on the annotated types below.
+"""
+# CHerSun 2026
+
+from __future__ import annotations
+
+from dataclasses import replace
+from decimal import Decimal
+from fractions import Fraction
+from typing import Annotated
+
+from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer
+
+from pyqenc.audio.layout import ChannelLayout
+from pyqenc.constants import (
+    CHUNK_NAME_PATTERN,
+    FFMPEG_SELECTOR_PREFIX,
+    RANGE_SEPARATOR,
+    TIME_SEPARATOR_MS,
+    TIME_SEPARATOR_SAFE,
+)
+from pyqenc.models import CropParams, Strategy
+from pyqenc.utils.ffmpeg_runner import FFmpegInput
+from pyqenc.utils.long_path import LongPath
+
+# ---------------------------------------------------------------------------
+# YAML-annotated types — conversions declared once, never per model
+# ---------------------------------------------------------------------------
+
+def _fraction_from_yaml(value: object) -> object:
+    """Convert a serialized ``[numerator, denominator]`` pair into a Fraction."""
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return Fraction(int(value[0]), int(value[1]))
+    return value
+
+
+def _fraction_to_yaml(value: Fraction) -> list[int]:
+    """Serialize a Fraction as ``[numerator, denominator]`` (project convention)."""
+    return [value.numerator, value.denominator]
+
+
+FractionYaml = Annotated[
+    Fraction,
+    BeforeValidator(_fraction_from_yaml),
+    PlainSerializer(_fraction_to_yaml, return_type=list[int]),
+]
+"""A ``Fraction`` persisted as ``[numerator, denominator]`` — the existing
+average-fps convention (e.g. ``[24000, 1001]``)."""
+
+LongPathYaml = Annotated[
+    LongPath,
+    PlainSerializer(str, return_type=str),
+]
+"""A :class:`LongPath` persisted as its plain string form (no ``\\\\?`` prefix)."""
+
+DecimalYaml = Annotated[
+    Decimal,
+    PlainSerializer(str, return_type=str),
+]
+"""A ``Decimal`` persisted as its exact string form (no float drift)."""
+
+
+# ---------------------------------------------------------------------------
+# Req 1 — File
+# ---------------------------------------------------------------------------
+
+class File(BaseModel):
+    """A file on disk plus its basic identity metadata.
+
+    Constructed exactly once per run by JobPhase (populated eagerly from the
+    filesystem) and exposed on ``JobPhaseResult``; every downstream phase
+    obtains it by reference. ``job.yaml`` persists only the :class:`File` dump,
+    and sidecar source-identity checks compare the persisted path +
+    ``file_size_bytes`` against live values.
+
+    Attributes:
+        path:            Link to the file on disk.
+        file_size_bytes: File size in bytes, or ``None`` when unavailable
+                         (e.g. the file is a pipe or the stat failed).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    path:            LongPathYaml
+    file_size_bytes: int | None = None
+
+
+# ---------------------------------------------------------------------------
+# Req 2 — Stream infos (fast facet) and the generic Stream base
+# ---------------------------------------------------------------------------
+
+class StreamInfo(BaseModel):
+    """Container-level properties every stream carries (the fast facet).
+
+    The placement pair (``start_timestamp`` / ``duration_seconds``) is
+    per-stream container placement — each stream sits at an offset on the
+    container timeline (MKV per-track block timestamps/CodecDelay, MP4 edit
+    lists, TS per-stream PTS); A/V alignment derives from the streams'
+    differing start times.
+
+    Attributes:
+        track_id:          Stream index inside the container — the ``-map``
+                           selector target (``0:<track_id>``).
+        codec_name:        ffprobe codec name (e.g. ``hevc``, ``flac``).
+        language:          ISO language tag, when the stream declares one.
+        title:             The stream's title tag (free media-sourced text).
+        start_timestamp:   The stream's start offset on the container timeline.
+        duration_seconds:  The stream's own duration.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    track_id:         int
+    codec_name:       str | None = None
+    language:         str | None = None
+    title:            str | None = None
+    start_timestamp:  float | None = None
+    duration_seconds: float | None = None
+
+
+class VideoStreamInfo(StreamInfo):
+    """Video-specific fast-facet properties.
+
+    Attributes:
+        fps:           Average frames per second as a float (display/log value).
+        fps_fraction:  Exact average fps as a rational (e.g. ``24000/1001``)
+                       — the value timestamp conversions compute with.
+        resolution:    ``"<width>x<height>"`` (e.g. ``"1920x1080"``).
+        pix_fmt:       Pixel format name (e.g. ``yuv420p10le``).
+    """
+
+    fps:          float | None       = None
+    fps_fraction: FractionYaml | None = None
+    resolution:   str | None         = None
+    pix_fmt:      str | None         = None
+
+
+class AudioStreamInfo(StreamInfo):
+    """Audio-specific fast-facet properties.
+
+    Attributes:
+        layout: The track's channel layout (faithful source token plus its
+                canonical form and channel count).
+    """
+
+    layout: ChannelLayout | None = None
+
+
+class SubtitleStreamInfo(StreamInfo):
+    """Subtitle-specific properties plus the extracted-file path.
+
+    Attributes:
+        is_forced:      Whether the track is a forced-subtitle track.
+        extracted_path: Path of the extracted subtitle file (relative to the
+                        work dir on disk), or ``None`` before extraction.
+    """
+
+    is_forced:      bool               = False
+    extracted_path: LongPathYaml | None = None
+
+
+class AttachmentStreamInfo(StreamInfo):
+    """Attachment-specific properties plus the extracted-file path.
+
+    Attributes:
+        filename:       The attachment's original filename (from its tags).
+        extracted_path: Path of the dumped attachment file (relative to the
+                        work dir on disk), or ``None`` before extraction.
+    """
+
+    filename:       str | None         = None
+    extracted_path: LongPathYaml | None = None
+
+
+class Stream[InfoT: StreamInfo](BaseModel):
+    """A stream inside a container: a :class:`File` composed with its info.
+
+    The generic base earns its keep three ways: ``as_input()`` (the
+    ``0:<track_id>`` selector) is implemented exactly once; the extraction
+    inventory is written generically over ``Stream[InfoT]``; and there is one
+    type bound for "anything ``-map``-selectable in this container". The base
+    adds no dumpable payload of its own — dumps are the per-stream info slice,
+    never the composed :class:`File`.
+
+    Type parameter:
+        InfoT: The stream-info slice this stream composes (bound to
+               :class:`StreamInfo`).
+
+    Attributes:
+        file: The container file this stream lives in.
+        info: The stream's fast-facet info slice.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    file: File
+    info: InfoT
+
+    def as_input(self) -> FFmpegInput:
+        """The stream as a runner input: its file plus its ``-map`` selector.
+
+        The single place stream location is expressed — no call site builds a
+        selector by hand.
+
+        Returns:
+            ``FFmpegInput`` with the stream's file and the ``0:<track_id>``
+            selector.
+        """
+        return FFmpegInput(
+            path     = self.file.path,
+            selector = f"{FFMPEG_SELECTOR_PREFIX}{self.info.track_id}",
+        )
+
+
+class VideoStream(Stream[VideoStreamInfo]):
+    """A video stream — ``info`` is statically :class:`VideoStreamInfo`."""
+
+
+class AudioStream(Stream[AudioStreamInfo]):
+    """An audio stream — ``info`` is statically :class:`AudioStreamInfo`."""
+
+
+class SubtitleStream(Stream[SubtitleStreamInfo]):
+    """A subtitle stream — ``info`` is statically :class:`SubtitleStreamInfo`."""
+
+
+class AttachmentStream(Stream[AttachmentStreamInfo]):
+    """An attachment stream — ``info`` is statically :class:`AttachmentStreamInfo`."""
+
+
+# ---------------------------------------------------------------------------
+# Req 3 — Extended video stream (slow facet)
+# ---------------------------------------------------------------------------
+
+class ExtendedVideoStream(BaseModel):
+    """A video stream carrying the slow facet: frame count and crop.
+
+    The type every downstream video phase accepts — demanding it via the type
+    system means audio-only runs never pay for the slow probe. ProbePhase is
+    the sole producer/owner.
+
+    Attributes:
+        stream:      The base video stream (fast facet).
+        frame_count: Total frames; ``0`` is the unknown sentinel, as today.
+        crop:        Detected/configured crop — **non-optional**: an empty
+                     :class:`CropParams` (:meth:`~pyqenc.models.CropParams.is_empty`)
+                     means "no crop". ``None`` ("auto") exists only at
+                     config/CLI level, never here.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    stream:      VideoStream
+    frame_count: int = 0
+    crop:        CropParams
+
+
+# ---------------------------------------------------------------------------
+# Req 4 — Chunk (timestamp window)
+# ---------------------------------------------------------------------------
+
+class VideoStreamChunk(BaseModel):
+    """An extended video stream bounded by a ``[start, end)`` timestamp window.
+
+    Positioning works uniformly for CFR and VFR — no frame-index arithmetic
+    anywhere. The chunk id is a pure function of the window (naming unchanged:
+    ``HH꞉MM꞉SS․mmm-HH꞉MM꞉SS․mmm``), and this class is the sole consumer of
+    the chunk-name constants: generation (``format_chunk_id`` / ``chunk_id``)
+    and parsing (``parse_chunk_id``) live here as a strict inverse pair.
+
+    Attributes:
+        stream:          The extended video stream being windowed.
+        start_timestamp: Window start on the source timeline (seconds).
+        end_timestamp:   Window end on the source timeline (seconds).
+        frame_count:     Detector-derived frame count — the difference of
+                         consecutive boundary frames, the last chunk closing
+                         against the source total; ``0`` = unknown.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    stream:          ExtendedVideoStream
+    start_timestamp: float
+    end_timestamp:   float
+    frame_count:     int = 0
+
+    @staticmethod
+    def format_chunk_id(start_ts: float, end_ts: float) -> str:
+        """Return the canonical chunk id for a timestamp range.
+
+        Millisecond precision — the inverse of :meth:`parse_chunk_id` for
+        ms-quantized timestamps.
+
+        Args:
+            start_ts: Window start in seconds.
+            end_ts:   Window end in seconds.
+
+        Returns:
+            The chunk id ``HH꞉MM꞉SS․mmm-HH꞉MM꞉SS․mmm``.
+        """
+        start_str = TIME_SEPARATOR_SAFE.join([
+            f"{int(start_ts // 3600):02d}",
+            f"{int((start_ts % 3600) // 60):02d}",
+            f"{start_ts % 60:06.3f}".replace(".", TIME_SEPARATOR_MS),
+        ])
+        end_str = TIME_SEPARATOR_SAFE.join([
+            f"{int(end_ts // 3600):02d}",
+            f"{int((end_ts % 3600) // 60):02d}",
+            f"{end_ts % 60:06.3f}".replace(".", TIME_SEPARATOR_MS),
+        ])
+        return f"{start_str}{RANGE_SEPARATOR}{end_str}"
+
+    @property
+    def chunk_id(self) -> str:
+        """The chunk id derived from the window — never stored separately."""
+        return self.format_chunk_id(self.start_timestamp, self.end_timestamp)
+
+    @property
+    def duration_seconds(self) -> float:
+        """The window's duration in seconds."""
+        return self.end_timestamp - self.start_timestamp
+
+    @classmethod
+    def parse_chunk_id(
+        cls,
+        chunk_id:    str,
+        stream:      ExtendedVideoStream,
+        frame_count: int = 0,
+    ) -> VideoStreamChunk:
+        """Reconstruct the chunk from its id; the caller supplies the stream.
+
+        The parsing half of the inverse pair trusted by presence-based
+        recovery: ``parse(format(x)) == x`` for ms-quantized windows.
+
+        Args:
+            chunk_id:    The chunk id to parse.
+            stream:      The extended video stream the window applies to
+                         (the owning phase supplies it on reconstruction).
+            frame_count: Detector-derived count, when known.
+
+        Returns:
+            The reconstructed chunk.
+
+        Raises:
+            ValueError: If ``chunk_id`` does not match the chunk-name pattern.
+        """
+        if not CHUNK_NAME_PATTERN.match(chunk_id):
+            raise ValueError(f"Not a chunk id: {chunk_id!r}")
+
+        def _parse_bound(bound: str) -> float:
+            hours_s, minutes_s, seconds_s = bound.split(TIME_SEPARATOR_SAFE)
+            return (
+                int(hours_s) * 3600
+                + int(minutes_s) * 60
+                + float(seconds_s.replace(TIME_SEPARATOR_MS, "."))
+            )
+
+        start_s, end_s = chunk_id.split(RANGE_SEPARATOR)
+        return cls(
+            stream          = stream,
+            start_timestamp = _parse_bound(start_s),
+            end_timestamp   = _parse_bound(end_s),
+            frame_count     = frame_count,
+        )
+
+    def as_input(self) -> FFmpegInput:
+        """The windowed stream input — the base input plus the window.
+
+        Returns:
+            ``FFmpegInput`` with the stream's file/selector and the window as
+            input-side ``-ss`` / ``-t``.
+        """
+        return replace(
+            self.stream.stream.as_input(),
+            start_seconds    = self.start_timestamp,
+            duration_seconds = self.duration_seconds,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Req 14 — Encoded attempt as a stream
+# ---------------------------------------------------------------------------
+
+class EncodedChunk(BaseModel):
+    """An encoding attempt: the attempt file's own video as a stream.
+
+    Path, size and frame count are read through ``stream.file`` /
+    ``stream.frame_count`` — never duplicated as fields. Crop is empty by
+    construction (applied during the encode); the attempt's
+    :class:`VideoStreamInfo` is populated eagerly, once, after the encode.
+
+    Attributes:
+        stream:   The attempt file's own extended video stream.
+        chunk:    The source window the attempt encodes.
+        strategy: The strategy the attempt was encoded with.
+        crf:      The quality parameter value used for the attempt.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    stream:   ExtendedVideoStream
+    chunk:    VideoStreamChunk
+    strategy: Strategy
+    crf:      DecimalYaml
+
+
+# ---------------------------------------------------------------------------
+# Req 5 — sidecar slices (unique-property persistence)
+# ---------------------------------------------------------------------------
+
+class SourceMismatchError(ValueError):
+    """Raised when a sidecar's recorded source identity does not match the live
+    :class:`File` — the owning phase re-enumerates and rewrites the sidecar."""
+
+
+class _SourceSidecarBase(BaseModel):
+    """Private base for sidecar models that record the source identity."""
+
+    source: File
+
+    def validate_source(self, live: File) -> None:
+        """Validate the recorded source identity against the live file.
+
+        Args:
+            live: The in-run :class:`File` from JobPhase.
+
+        Raises:
+            SourceMismatchError: When the recorded path or size differs from
+                                 the live values.
+        """
+        if (
+            self.source.path != live.path
+            or self.source.file_size_bytes != live.file_size_bytes
+        ):
+            raise SourceMismatchError(
+                f"Sidecar source identity mismatch: recorded "
+                f"{self.source.path} ({self.source.file_size_bytes} bytes), "
+                f"live {live.path} ({live.file_size_bytes} bytes)."
+            )
+
+
+class JobSidecar(_SourceSidecarBase):
+    """The ``job.yaml`` slice: the :class:`File` dump under the ``source`` key.
+
+    The shrunk schema — job-level cached heuristics are gone; the persisted
+    path + size are the source-mismatch comparison basis.
+    """
+
+
+class StreamsInventory(BaseModel):
+    """The per-type stream inventory of :class:`ExtractionSidecar`.
+
+    Each entry is the stream's own info slice — the composed :class:`File` is
+    never part of a dump.
+
+    Attributes:
+        video:       The (first) video stream info, or ``None`` when absent.
+        audio:       Audio stream infos in track order.
+        subtitles:   Subtitle stream infos in track order.
+        attachments: Attachment stream infos in track order.
+    """
+
+    video:       VideoStreamInfo | None    = None
+    audio:       list[AudioStreamInfo]     = []
+    subtitles:   list[SubtitleStreamInfo]  = []
+    attachments: list[AttachmentStreamInfo] = []
+
+
+class ContainerArtifact(BaseModel):
+    """A container-level artifact's extracted path (chapters, timestamps).
+
+    Chapters and timestamps are not streams — no ``track_id``, no ``-map``
+    selector — so they persist as plain extracted paths.
+
+    Attributes:
+        extracted_path: Path of the extracted artifact (relative to the work
+                        dir on disk).
+    """
+
+    extracted_path: LongPathYaml
+
+
+class ExtractionSidecar(_SourceSidecarBase):
+    """The ``extraction.yaml`` slice: stream inventory, extracted paths,
+    source identity.
+
+    Owned by ExtractionPhase; a reuse run loads it instead of re-probing, with
+    :meth:`validate_source` deciding whether the inventory is still valid.
+
+    Attributes:
+        source:          The source identity for invalidation.
+        streams:         The per-type stream inventory (info slices).
+        chapters:        The extracted chapters artifact, or ``None``.
+        timestamps_path: Path of the extracted per-frame PTS file, or ``None``.
+    """
+
+    streams:          StreamsInventory
+    chapters:         ContainerArtifact | None = None
+    timestamps_path:  LongPathYaml | None       = None
+
+
+class SceneRecord(BaseModel):
+    """One persisted scene boundary.
+
+    Attributes:
+        timestamp_seconds: The boundary's timestamp on the source timeline.
+        frame:             The detector-reported frame index — informational
+                           only; no code path depends on it.
+    """
+
+    timestamp_seconds: float
+    frame:             int | None = None
+
+
+class ChunkingSidecar(BaseModel):
+    """The ``chunking.yaml`` slice: scene boundaries (no chunking mode).
+
+    Chunk windows are derived from these boundaries plus the stream duration
+    at load time — no per-chunk records, no per-chunk sidecars.
+
+    Attributes:
+        scenes: Scene boundaries in order; the first is the stream start.
+    """
+
+    scenes: list[SceneRecord]

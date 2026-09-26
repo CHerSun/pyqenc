@@ -220,6 +220,11 @@ FFMPEG_MAP_FIRST_AUDIO = "0:a:0"
 FFMPEG_MAP_FIRST_VIDEO = "0:v:0"
 """Maps the first video stream of the (single) input — null-count passes."""
 
+FFMPEG_SELECTOR_PREFIX = "0:"
+"""Input-index prefix of a ``-map`` selector built from a track id
+(``0:<track_id>`` — input 0, absolute stream index); consumed by the stream
+model's ``as_input()`` adapter."""
+
 FFMPEG_CODEC_COPY = "copy"
 """Stream-copy codec token — remux-style extraction and null-count passes."""
 
@@ -284,6 +289,14 @@ FILENAME_FORBIDDEN_CHARS: frozenset[str] = frozenset('<>:"/\\|?*')
 """Characters forbidden in a chain name because they are unsafe in filenames on
 common filesystems (Windows especially). A chain name containing any of these —
 or any control character (U+0000–U+001F) — is rejected at config load (Req 8.4)."""
+
+FILENAME_CONTROL_CHARS: frozenset[str] = frozenset(chr(code) for code in range(0x20))
+"""Control characters (U+0000–U+001F) — unsafe in filenames alongside
+:data:`FILENAME_FORBIDDEN_CHARS`; shared by every filesystem-name check."""
+
+FILENAME_SANITIZATION_REPLACEMENT = "_"
+"""Replacement character for :func:`pyqenc.utils.naming.sanitize_filesystem_text`
+— media-sourced free text is sanitized by replacement, never rejected (Req 15.2)."""
 
 SELECTOR_KEY_LANG  = "lang"
 """Conventional-string token key for an audio track's language (e.g. ``lang=eng``)."""

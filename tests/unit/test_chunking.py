@@ -14,7 +14,6 @@ from pyqenc.models import (
     VideoMetadata,
 )
 from pyqenc.phases.chunking import (
-    _chunk_name_duration,
     detect_scenes,
     split_chunks,
 )
@@ -23,6 +22,7 @@ from pyqenc.state import (
     ArtifactState,
     JobState,
 )
+from pyqenc.stream_model import VideoStreamChunk
 from pyqenc.utils.ffmpeg_runner import _PROGRESS_FLAGS, compose_command
 
 # ---------------------------------------------------------------------------
@@ -40,24 +40,24 @@ def _make_job(tmp_path: Path) -> JobState:
 
 
 # ---------------------------------------------------------------------------
-# _chunk_name_duration -- timestamp-range naming
+# chunk-id formatting -- timestamp-range naming (owned by VideoStreamChunk)
 # ---------------------------------------------------------------------------
 
-class TestChunkNameDuration:
+class TestChunkIdFormatting:
     def test_matches_chunk_name_pattern(self):
-        """Output of _chunk_name_duration must match CHUNK_NAME_PATTERN."""
+        """Output of VideoStreamChunk.format_chunk_id must match CHUNK_NAME_PATTERN."""
         from pyqenc.constants import CHUNK_NAME_PATTERN
-        name = _chunk_name_duration(0.0, 13.33)
+        name = VideoStreamChunk.format_chunk_id(0.0, 13.33)
         assert CHUNK_NAME_PATTERN.match(name), f"Pattern mismatch: {name!r}"
 
     def test_zero_start(self):
         """Zero start timestamp produces correct zero-padded hours/minutes."""
-        name = _chunk_name_duration(0.0, 13.33)
+        name = VideoStreamChunk.format_chunk_id(0.0, 13.33)
         assert name.startswith("00꞉00꞉"), f"Unexpected start: {name!r}"
 
     def test_range_separator_present(self):
         """The range separator '-' separates start and end timestamps."""
-        name = _chunk_name_duration(0.0, 13.33)
+        name = VideoStreamChunk.format_chunk_id(0.0, 13.33)
         assert "-" in name, f"Missing range separator in: {name!r}"
 
 

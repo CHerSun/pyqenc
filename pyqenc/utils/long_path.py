@@ -3,10 +3,20 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pydantic import GetCoreSchemaHandler
+    from pydantic_core import CoreSchema
 
 _WINDOWS:    bool = sys.platform == "win32"
 _EXT_PREFIX: str  = chr(92) * 2 + "?" + chr(92)   # \\?\  (4 chars)
 _MAX_PATH:   int  = 260                             # Windows MAX_PATH limit
+
+
+def _coerce_long_path(value: Path) -> LongPath:
+    """Return ``value`` as a :class:`LongPath` (pydantic after-validator)."""
+    return value if isinstance(value, LongPath) else LongPath(os.fspath(value))
 
 
 class LongPath(type(Path())): # Platform-specific path type
@@ -70,6 +80,27 @@ class LongPath(type(Path())): # Platform-specific path type
             Plain path string, never prefixed with ``\\?\\``.
         """
         return super().__str__()
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source_type: object,
+        handler: GetCoreSchemaHandler,
+    ) -> CoreSchema:
+        """Pydantic schema: validate like :class:`pathlib.Path`, coerce to ``LongPath``.
+
+        Declared once on the type so pydantic models can annotate fields as
+        ``LongPath`` directly — plain ``Path``/``str`` inputs validate through
+        the standard Path schema and come back as ``LongPath`` instances.
+        YAML string serialization is layered on top via a ``PlainSerializer``
+        in the annotating module, not here.
+        """
+        from pydantic_core import (
+            core_schema,  # local — keeps the module stdlib-only at import time
+        )
+
+        path_schema = handler(Path)
+        return core_schema.no_info_after_validator_function(_coerce_long_path, path_schema)
 
     def __truediv__(self, key: str | Path) -> LongPath:
         """Extend path with ``/`` operator, preserving ``LongPath`` type.

@@ -26,7 +26,7 @@ Staged so every task lands green: the runner converts first (pure mechanical, co
   - Convert all existing call sites mechanically (encode, quality, cropdetect, extraction ×4, screenshots ×2, audio measure/apply) — same inputs, same windows, no behavior change yet
   - Golden command tests: every call site's composed argv pinned against the current hand-built command
 
-- [ ] 2. Model family (Req 1–5, 15)
+- [x] 2. Model family (Req 1–5, 15)
   - New module (e.g. `pyqenc/stream_model.py`): `File`; generic `Stream[InfoT]` base + `StreamInfo` (container-level fields: `track_id`, `codec_name`, `language`, `title`, `start_timestamp`, `duration_seconds`); named subclasses binding the type parameter — `class VideoStream(Stream[VideoStreamInfo])` etc. for audio/subtitle/attachment — so `.info` is statically concrete with no casts at use sites; `ExtendedVideoStream`; `VideoStreamChunk`; `EncodedChunk`. Chapters/timestamps are plain sidecar fields, not classes
   - Eager fields only; producer-contract guards as plain asserts naming the field and phase
   - `as_input()` implemented once on the `Stream` base; chunk override adds the window; `chunk_id` derived property + parse classmethod on the chunk class (absorbing `_chunk_name_duration`) — the class is the sole consumer of the chunk-name constants
