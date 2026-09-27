@@ -4,9 +4,9 @@ This module provides:
 
 - ``ArtifactState`` — three-value enum classifying each artifact's
   completeness (``ABSENT`` / ``PARTIAL`` / ``COMPLETE``).
-- Data models: ``JobState``, ``ChunkingParams``,
+- Data models: ``JobState``,
   ``OptimizationParams``, ``EncodingParams``, ``MetricsSidecar``,
-  ``EncodingResultSidecar``, ``MeasureSidecar``, ``ChunkSidecar``.
+  ``ProbeState``, ``EncodingResultSidecar``, ``MeasureSidecar``.
 
 Each model is self-sufficient: call ``Model.load(path)`` to load from a YAML
 file and ``instance.save(path)`` to persist atomically.
@@ -26,9 +26,7 @@ from pydantic import BaseModel, Field
 
 from pyqenc.audio.chain import ResolvedChain, chain_signature
 from pyqenc.models import (
-    ChunkMetadata,
     CropParams,
-    SceneBoundary,
     VideoMetadata,
 )
 from pyqenc.utils.long_path import LongPath
@@ -79,23 +77,25 @@ class ArtifactState(Enum):
 # ---------------------------------------------------------------------------
 
 class ProbeState(BaseModel):
-    """Sidecar model for ``probe.yaml``.
+    """Sidecar model for ``probe.yaml`` (the slow facet).
 
     Written by ``ProbePhase`` after resolving frame count and crop.  Contains
-    only the delta over ``job.yaml``: ``frame_count`` and ``crop``.  Fast-probe
-    fields (duration, fps, resolution, etc.) are NOT duplicated here.
+    only the delta over the extraction inventory: ``frame_count`` and ``crop``.
 
     ``frame_count=0`` is the sentinel for "could not be determined" — no valid
-    video has zero frames.  ``crop=None`` means no cropping.
+    video has zero frames.  ``crop`` is non-optional: an empty
+    :class:`CropParams` means "no crop" and the key is omitted from the file
+    when empty (serialization compactness only); loading always materializes
+    a concrete crop — ``None`` ("auto") never appears past config.
     """
 
     frame_count: int
-    crop:        CropParams | None = None
+    crop:        CropParams = CropParams()
 
     def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict."""
+        """Serialise to a YAML-friendly dict (the crop key is omitted when empty)."""
         result: dict = {"frame_count": self.frame_count}
-        if self.crop is not None:
+        if not self.crop.is_empty():
             result["crop"] = {
                 "top":    self.crop.top,
                 "bottom": self.crop.bottom,
@@ -106,9 +106,9 @@ class ProbeState(BaseModel):
 
     @classmethod
     def from_yaml_dict(cls, data: dict) -> ProbeState:
-        """Restore from a dict loaded from ``probe.yaml``."""
+        """Restore from a dict loaded from ``probe.yaml`` (an absent crop loads empty)."""
         raw_crop = data.get("crop")
-        crop = CropParams(**raw_crop) if isinstance(raw_crop, dict) else None
+        crop = CropParams(**raw_crop) if isinstance(raw_crop, dict) else CropParams()
         return cls(
             frame_count = int(data["frame_count"]),
             crop        = crop,
@@ -154,70 +154,6 @@ class JobState(BaseModel):
     """
 
     source: VideoMetadata
-
-
-class ChunkingParams(BaseModel):
-    """Phase parameter file model for chunking (``chunking.yaml``).
-
-    Stores the chunking mode and detected scene boundaries.  ``chunking_mode``
-    is written first so a mode change is immediately visible in the file.
-    Crop params are NOT stored here since chunking does not apply or depend on
-    cropping.
-
-    Attributes:
-        chunking_mode: The chunking mode used when chunks were produced.
-                       ``None`` for files written before this field was added
-                       (treated as unknown — no mismatch triggered).
-        scenes:        Detected scene boundaries.
-    """
-
-    chunking_mode: str | None              = None
-    scenes:        list[SceneBoundary]     = Field(default_factory=list)
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict (``chunking_mode`` comes first)."""
-        return {
-            "chunking_mode": self.chunking_mode,
-            "scenes": [
-                {"frame": s.frame, "timestamp_seconds": s.timestamp_seconds}
-                for s in self.scenes
-            ],
-        }
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict) -> ChunkingParams:
-        """Restore from a dict loaded from ``chunking.yaml``."""
-        scenes = [SceneBoundary(**s) for s in data.get("scenes", [])]
-        return cls(
-            chunking_mode = data.get("chunking_mode"),
-            scenes        = scenes,
-        )
-
-    @classmethod
-    def load(cls, path: Path) -> Self | None:
-        """Load ``ChunkingParams`` from *path*.
-
-        Returns:
-            ``ChunkingParams`` if the file exists and is valid, ``None`` otherwise.
-        """
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return cls.from_yaml_dict(data or {})
-        except Exception as exc:
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
-
-    def save(self, path: Path) -> None:
-        """Write this ``ChunkingParams`` to *path* atomically.
-
-        Args:
-            path: Destination YAML file path.
-        """
-        write_yaml_atomic(path, self.to_yaml_dict())
-        logger.debug("Saved %s", path.name)
 
 
 class StrategyTestResult(BaseModel):
@@ -762,45 +698,5 @@ class MergeParams(BaseModel):
         """
         write_yaml_atomic(path, self.to_yaml_dict())
         logger.debug("Saved %s", path.name)
-
-
-class ChunkSidecar(BaseModel):
-    """Chunk sidecar (``<chunk_stem>.yaml``).
-
-    Written atomically alongside each chunk ``.mkv`` file.  Its presence
-    (combined with the ``.tmp`` protocol) means the chunk was written
-    successfully and its metadata is known without re-probing.
-
-    ``chunk_id`` is NOT stored — it is derived from the filename stem.
-    """
-
-    chunk: ChunkMetadata
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict (excludes chunk_id and path)."""
-        data = self.chunk.model_dump_full()
-        # chunk_id and path are derived from the filename — omit from sidecar
-        data.pop("chunk_id", None)
-        data.pop("path", None)
-        data.pop("crop_params", None)
-        data.pop("pix_fmt", None)
-        data.pop("file_size_bytes", None)
-        return data
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict, chunk_id: str, path: Path) -> ChunkSidecar:
-        """Restore from a dict loaded from a chunk sidecar YAML.
-
-        Args:
-            data:     Dict loaded from the sidecar YAML file.
-            chunk_id: Chunk identifier derived from the filename stem.
-            path:     Path to the chunk ``.mkv`` file.
-        """
-        chunk = ChunkMetadata.model_validate_full({
-            **data,
-            "chunk_id": chunk_id,
-            "path":     path,
-        })
-        return cls(chunk=chunk)
 
 

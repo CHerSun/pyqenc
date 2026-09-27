@@ -55,7 +55,7 @@ from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import MergeParams, MergeStrategySummary, ProbeState
-from pyqenc.utils.ffmpeg_runner import get_frame_count
+from pyqenc.utils.ffmpeg_runner import FFmpegInput, get_frame_count
 from pyqenc.utils.log_format import (
     fmt_key_value_table,
     fmt_metric_value,
@@ -246,10 +246,12 @@ def _measure_quality(
 
     evaluation = evaluator.evaluate_chunk(
         encoded            = final_result,
-        reference          = source_video.path,
+        reference          = FFmpegInput(path=source_video.path),
         ref_crop           = ref_crop,
         targets            = quality_targets,
         output_dir         = output_dir,
+        duration_seconds   = source_video.duration_seconds or 0.0,
+        fps_value          = None,
         metrics_output_dir = output_dir,
         subsample_factor   = metrics_sampling,
         show_progress      = True,
@@ -567,8 +569,8 @@ class MergePhase(Phase):
         probe_result = cast(ProbePhaseResult, self._dep(ProbePhase).result)
         if probe_result is not None:
             probe = ProbeState(
-                frame_count = probe_result.source.frame_count if probe_result.source else 0,
-                crop        = probe_result.crop if probe_result.crop else None,
+                frame_count = probe_result.stream.frame_count if probe_result.stream is not None else 0,
+                crop        = probe_result.crop,
             )
 
         job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
@@ -703,8 +705,8 @@ class MergePhase(Phase):
         # Step 5: classify each expected output
         artifacts: list[MergeArtifact] = []
         expected_names: set[str] = set()
-        for strategy_name, safe_name in strategies:
-            output_file = final_dir / f"{source_stem} {safe_name}.mkv"
+        for strategy_name, strategy_display in strategies:
+            output_file = final_dir / f"{source_stem} {strategy_display}.mkv"
             expected_names.add(output_file.name)
             sidecar     = _load_merge_sidecar(output_file)
 
@@ -832,8 +834,7 @@ class MergePhase(Phase):
         for artifact in encoded:
             if artifact.state == ArtifactState.COMPLETE:
                 strategy_name = artifact.strategy
-                safe_name     = strategy_name.replace(":", "_")
-                seen[strategy_name] = safe_name
+                seen[strategy_name] = strategy_name
         return list(seen.items())
 
     def _execute(
@@ -870,7 +871,8 @@ class MergePhase(Phase):
             job_result.job.source if job_result.job is not None else None
         )
         source_frame_count: int = (
-            probe_result.source.frame_count if (probe_result is not None and probe_result.source) else 0
+            probe_result.stream.frame_count
+            if (probe_result is not None and probe_result.stream is not None) else 0
         )
         source_stem = job_result.source.stem
 
@@ -882,13 +884,14 @@ class MergePhase(Phase):
 
         for artifact in artifacts:
             strategy_name = artifact.strategy_name
-            safe_name     = strategy_name.replace(":", "_")
 
             if artifact.state == ArtifactState.COMPLETE:
                 final_artifacts.append(artifact)
                 continue
 
-            output_file = final_dir / f"{source_stem} {safe_name}.mkv"
+            # The merge output name derives in one place from the source stem
+            # + the strategy name (filesystem-safe by construction, Req 15.8).
+            output_file = final_dir / f"{source_stem} {strategy_name}.mkv"
             logger.info("Merging: %s", strategy_name)
 
             try:
@@ -923,7 +926,7 @@ class MergePhase(Phase):
                     continue
 
                 # Write mkvmerge options file
-                options_file = final_dir / f"concat_{safe_name}.json"
+                options_file = final_dir / f"concat_{strategy_name}.json"
                 args = _build_mkvmerge_options(strategy_chunks, output_file, timestamps_path)
                 _write_mkvmerge_options_file(options_file, args)
 
@@ -953,7 +956,7 @@ class MergePhase(Phase):
                 logger.debug("  Concatenation complete: %s", output_file.name)
 
                 # Write concat list to a temp file (kept for reference / dead code after mkvmerge switch)
-                concat_file = final_dir / f"concat_{safe_name}{TEMP_SUFFIX}.txt"
+                concat_file = final_dir / f"concat_{strategy_name}{TEMP_SUFFIX}.txt"
                 concat_cmd: list[str | os.PathLike] = [
                     "ffmpeg",
                     "-f",      "concat",

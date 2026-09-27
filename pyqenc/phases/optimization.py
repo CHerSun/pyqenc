@@ -28,13 +28,11 @@ from typing import TYPE_CHECKING, ClassVar, cast
 from alive_progress import config_handler
 
 from pyqenc.constants import (
-    CHUNKS_DIR,
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
 )
 from pyqenc.metrics import MetricKey
 from pyqenc.models import (
-    ChunkMetadata,
     CleanupLevel,
     CropParams,
     PhaseOutcome,
@@ -58,6 +56,7 @@ from pyqenc.state import (
     ProbeState,
     StrategyTestResult,
 )
+from pyqenc.stream_model import VideoStreamChunk
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.visualization import QualityEvaluator
 
@@ -217,7 +216,7 @@ class OptimizationPhase(Phase):
 
         crop           = probe_result.crop
         current_probe  = ProbeState(
-            frame_count = probe_result.source.frame_count if probe_result.source else 0,
+            frame_count = probe_result.stream.frame_count if probe_result.stream is not None else 0,
             crop        = crop if crop else None,
         )
         self._current_probe = current_probe
@@ -367,7 +366,7 @@ class OptimizationPhase(Phase):
 
         # Test encodes need chunks from ChunkingPhase.
         chunking_result = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result)
-        chunks: list[ChunkMetadata] = chunking_result.chunks
+        chunks: list[VideoStreamChunk] = chunking_result.chunks
         if strategies_to_test and not chunks:
             err = "No chunks available from ChunkingPhase"
             logger.critical(err)
@@ -405,8 +404,6 @@ class OptimizationPhase(Phase):
             cleanup_level    = job_result.cleanup,
             metric_prefix    = MetricKey.OPTIMIZATION,
         )
-        reference_dir = work_dir / CHUNKS_DIR
-
         test_chunk_seconds = sum(c.end_timestamp - c.start_timestamp for c in test_chunks)
         total_seconds      = test_chunk_seconds * len(strategies_to_test)
         total_count        = len(test_chunks) * len(strategies_to_test)
@@ -431,7 +428,6 @@ class OptimizationPhase(Phase):
                 _encode_chunks_parallel(
                     encoder           = encoder,
                     chunks            = test_chunks,
-                    reference_dir     = reference_dir,
                     strategies        = strategies_to_test,
                     quality_targets   = self._config.encoding.resolved_targets,
                     max_parallel      = self._config.encoding.concurrency,
@@ -449,9 +445,9 @@ class OptimizationPhase(Phase):
         for strategy in strategies_to_test:
             file_sizes: list[float] = []
             for chunk in test_chunks:
-                encoded_path = enc_result.encoded_chunks.get(chunk.chunk_id, {}).get(strategy.name)
-                if encoded_path is not None and encoded_path.exists():
-                    file_sizes.append(encoded_path.stat().st_size)
+                encoded = enc_result.encoded_chunks.get(chunk.chunk_id, {}).get(strategy.name)
+                if encoded is not None and encoded.stream.file.path.exists():
+                    file_sizes.append(encoded.stream.file.file_size_bytes or 0)
             new_results.append(StrategyTestResult(
                 strategy_name = strategy.name,
                 total_size    = int(sum(file_sizes)),
@@ -749,7 +745,7 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
 
     Args:
         work_dir:   Pipeline working directory.
-        strategies: All configured strategies (safe_name used for directory lookup).
+        strategies: All configured strategies (name used for directory lookup).
     """
     encoded_base = work_dir / ENCODED_OUTPUT_DIR
     if not encoded_base.exists():
@@ -757,7 +753,7 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
 
     # Collect all existing strategy subdirs
     existing_dirs = [d for d in encoded_base.iterdir() if d.is_dir()]
-    expected_names = {s.safe_name for s in strategies}
+    expected_names = {s.name for s in strategies}
     unexpected = [d for d in existing_dirs if d.name not in expected_names]
 
     if unexpected:
@@ -774,7 +770,7 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
         return
 
     for strategy in strategies:
-        strategy_dir = encoded_base / strategy.safe_name
+        strategy_dir = encoded_base / strategy.name
         if not strategy_dir.exists():
             continue
         try:
@@ -785,12 +781,12 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
 
 
 def _select_test_chunks(
-    chunks:                list[ChunkMetadata],
+    chunks:                list[VideoStreamChunk],
     percentage:            float = 0.01,
     min_chunks:            int   = 3,
     exclude_start_percent: float = 0.10,
     exclude_end_percent:   float = 0.10,
-) -> list[ChunkMetadata]:
+) -> list[VideoStreamChunk]:
     """Select representative test chunks for optimization.
 
     Selects approximately 1% of chunks (minimum 3) from the middle 80% of

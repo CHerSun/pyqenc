@@ -12,7 +12,7 @@ from tests.fixtures.metric_fixtures import (
     create_mock_vmaf_file,
     get_expected_vmaf_stats,
 )
-from tests.fixtures.video_fixtures import get_sample_video_path, sample_video_exists
+from tests.fixtures.video_fixtures import sample_video_exists
 
 
 class TestEncodingQualityIntegration:
@@ -154,7 +154,6 @@ class TestEncodeChunkQualitySearchV2Integration:
     def _make_chunk(self, tmp_path: Path) -> object:
         """Build a minimal ChunkMetadata-like mock."""
         from unittest.mock import MagicMock
-        from pathlib import Path
 
         chunk_file = tmp_path / "chunk_001.mkv"
         chunk_file.write_bytes(b"fake")

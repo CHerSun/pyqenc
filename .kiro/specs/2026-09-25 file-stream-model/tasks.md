@@ -51,13 +51,13 @@ Staged so every task lands green: the runner converts first (pure mechanical, co
   - `ExtractionPhaseResult` carries the stream objects
   - Update `test_extraction_pts.py` + `test_extraction_streams_filter.py`
 
-- [ ] 5. ProbePhase + ChunkingPhase (Req 3, 4, 9.2–9.3)
+- [x] 5. ProbePhase + ChunkingPhase (Req 3, 4, 9.2–9.3)
   - Probe: frame count from `timestamps.txt` (new `utils/timestamps.py` parser; null-count fallback), cropdetect via `stream.as_input()`, emits `ExtendedVideoStream` with non-optional crop (empty on auto-detect failure + warning); `probe.yaml` shape unchanged (crop key omitted when empty, materialized empty on load)
   - Chunking: scenedetect on source; boundaries → `VideoStreamChunk` list (timestamp windows + detector-derived `frame_count` from boundary-frame differences, last closing against the source total); delete `split_chunks`, `ChunkingMode`, `FFV1_VIDEO_ARGS`, chunk sidecars, `ChunkArtifact`, `chunks/` handling, `--chunking-mode` flag and `chunking.mode` config
   - E2E smoke on real media (first full direct-from-source chunking)
   - Update `test_chunking.py`, `test_probe_phase.py`
 
-- [ ] 6. EncodingPhase + OptimizationPhase + quality (Req 7.1–7.3, 9.1, 9.4–9.6, 10, 14, 15)
+- [x] 6. EncodingPhase + OptimizationPhase + quality (Req 7.1–7.3, 9.1, 9.4–9.6, 10, 14, 15)
   - Encode from `chunk.as_input()`; quality consumes `attempt.stream.as_input()` + `chunk.as_input()` — per-side crop from `stream.crop`, reference windowed with `-ss`/`-t`
   - `EncodedChunk.file_name` / `parse_file_name` (typed `chunk_id`/`resolution`/`crf` record) own the attempt filename; sidecar paths derive from it; strategy dir embeds the strategy name verbatim — safe by construction (Req 15.6); drop `_enc_encoded_strategy_dir`, `Strategy.safe_name`, and merge's inline mappings
   - Codec config split (`pre_input_args` / `encoder_args` without `"-i", "{input}"`); migrate `default_config.yaml` templates incl. nvenc

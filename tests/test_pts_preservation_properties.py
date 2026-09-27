@@ -35,6 +35,31 @@ from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.state import ArtifactState, JobState
 from pyqenc.stream_model import File
 
+
+def _extended_stream(path: Path, frame_count: int):
+    """An ExtendedVideoStream for the source (fast facet + frame count)."""
+    from fractions import Fraction
+
+    from pyqenc.stream_model import (
+        ExtendedVideoStream,
+        File,
+        VideoStream,
+        VideoStreamInfo,
+    )
+
+    return ExtendedVideoStream(
+        stream=VideoStream(
+            file=File(path=path, file_size_bytes=64),
+            info=VideoStreamInfo(
+                track_id=0, codec_name="hevc", fps=24.0,
+                fps_fraction=Fraction(24, 1), resolution="1920x1080",
+                duration_seconds=3600.0,
+            ),
+        ),
+        frame_count=frame_count,
+        crop=__import__("pyqenc.models", fromlist=["CropParams"]).CropParams(),
+    )
+
 # ---------------------------------------------------------------------------
 # Shared helpers — build a REAL ExtractionPhase via its real constructor
 # ---------------------------------------------------------------------------
@@ -323,7 +348,6 @@ def test_frame_count_preservation(frame_count: int) -> None:
     **Validates: Requirement 6.1**
     """
     from pyqenc.constants import FINAL_OUTPUT_DIR
-    from pyqenc.models import ExtendedVideoMetadata
     from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
     from pyqenc.phases.encoding import (
         EncodedArtifact,
@@ -398,7 +422,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
             outcome   = PhaseOutcome.COMPLETED,
             artifacts = [Artifact(path=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
             message   = "probe complete",
-            source    = ExtendedVideoMetadata.from_base(source_vm, frame_count=frame_count),
+            stream    = _extended_stream(source_vm.path, frame_count),
         )
         registry[ProbePhase] = probe
 

@@ -8,7 +8,6 @@ extraction:
   exclude: null   # regex — drop matching streams; overrides include
 
 chunking:
-  mode: lossless        # "lossless" (FFV1, frame-perfect) | "remux" (stream-copy, I-frame snapping)
   scene_threshold: 0.25 # 0.0–1.0; lower = more sensitive
   min_scene_length: 24  # minimum frames per chunk
 
@@ -136,16 +135,15 @@ audio:
     #     # no third tier -> implicit fallback: any English track
 
 # CODEC DEFINITIONS
-# encoder_args templated values: {input}, {quality}, {preset}, {profile_args}, {vf}
+# encoder_args templated values: {quality}, {preset}, {profile_args}, {vf}
 codecs:
   h264-8bit:
     default_quality: 18.0
     default_preset: veryslow  # affordable on modern CPUs; good quality benefit
     quality_range: [6.0, 30.0]   # CRF; full codec range is 0–51; 6–30 is the practical working band
     quality_granularity: 0.5     # 0.1 is accepted but produces binary-identical steps; 0.5 is the right balance
+    pre_input_args: []
     encoder_args:
-      - "-i"
-      - "{input}"
       - "-c:v"
       - "libx264"
       - "-preset"
@@ -176,9 +174,8 @@ codecs:
     default_preset: slow         # slow is the practical optimum for h265; slower/very slow are only marginally better but much slower
     quality_range: [6.0, 30.0]   # CRF; full codec range is 0–51; 6–30 is the practical working band
     quality_granularity: 0.5
+    pre_input_args: []
     encoder_args:
-      - "-i"
-      - "{input}"
       - "-c:v"
       - "libx265"
       - "-preset"
@@ -208,9 +205,8 @@ codecs:
     quality_range: [6.0, 30.0]   # CQ; full codec range is 0–51; 6–30 is the practical working band
     quality_granularity: 0.5
     quality_label: "CQ"
+    pre_input_args: []
     encoder_args:
-      - "-i"
-      - "{input}"
       - "-vf"
       - "{vf},format=p010le,hwupload_cuda"
       - "-c:v"
@@ -238,9 +234,8 @@ codecs:
     quality_range: [6.0, 30.0]   # QP; full codec range is 0–51
     quality_granularity: 1.0     # integer steps only
     quality_label: "QP"
+    pre_input_args: []
     encoder_args:
-      - "-i"
-      - "{input}"
       - "-vf"
       - "{vf},format=p010le,hwupload_cuda"
       - "-c:v"
@@ -263,9 +258,8 @@ codecs:
     quality_granularity: 0.5     # 0.5 Mbit/s step; too fine wastes iterations, too coarse overshoots
     quality_max_step: 10.0
     quality_label: "Mbit/s"
+    pre_input_args: []
     encoder_args:
-      - "-i"
-      - "{input}"
       - "-vf"
       - "{vf},format=p010le,hwupload_cuda"
       - "-c:v"
@@ -289,15 +283,14 @@ codecs:
     quality_range: [6, 34]       # QP; actual codec range is -1–255; values above ~50 produce visible artefacts
     quality_granularity: 1       # integer steps only
     quality_label: "QP"
-    encoder_args:
+    pre_input_args:
       - "-hwaccel"
       - "vulkan"
       - "-init_hw_device"
       - "vulkan=vkdev:0"
       - "-filter_hw_device"
       - "vkdev"
-      - "-i"
-      - "{input}"
+    encoder_args:
       - "-vf"
       - "format=p010le,{vf},hwupload=derive_device=vulkan"
       - "-c:v"
@@ -327,9 +320,8 @@ codecs:
     default_preset: "3"          # preset 3 is a good speed/quality balance; use 2 or lower for grain retention
     quality_range: [4, 30]       # CRF; full codec range is 0–63; AV1 is tuned for clean content — grain needs lower CRF
     quality_granularity: 1       # 0.25 is accepted but produces binary-identical steps; integer steps are reliable
+    pre_input_args: []
     encoder_args:
-      - "-i"
-      - "{input}"
       - "-c:v"
       - "libsvtav1"
       - "-preset"

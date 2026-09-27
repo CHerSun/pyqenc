@@ -1403,6 +1403,7 @@ class TestRunMetricsCommandGolden:
         from pyqenc.quality import MetricType, run_metrics
         from pyqenc.utils.ffmpeg_runner import (
             _PROGRESS_FLAGS,
+            FFmpegInput,
             FFmpegRunResult,
             compose_command,
         )
@@ -1420,11 +1421,10 @@ class TestRunMetricsCommandGolden:
             asyncio.run(
                 run_metrics(
                     metrics         = {MetricType.PSNR},
-                    distorted       = distorted,
-                    reference       = reference,
+                    distorted       = FFmpegInput(path=distorted),
+                    reference       = FFmpegInput(path=reference, start_seconds=584.917, duration_seconds=116.5),
                     crop_distorted  = CropParams(),
                     crop_reference  = CropParams(),
-                    duration        = 5.5,
                     width           = 0,
                     use_gpu         = False,
                     subsample       = 1,
@@ -1441,8 +1441,8 @@ class TestRunMetricsCommandGolden:
         argv = [str(a) for a in compose_command(captured[0])]
         assert argv == [
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
-            "-t", "5.5", "-i", str(distorted.resolve()),
-            "-t", "5.5", "-i", str(reference.resolve()),
+            "-i", str(distorted),
+            "-ss", "584.917", "-t", "116.5", "-i", str(reference),
             "-filter_complex", graph,
             "-map_chapters", "-1",
             "-f", "null", "-",

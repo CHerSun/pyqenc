@@ -11,7 +11,7 @@ Run with: uv run python -m pytest tests/unit/test_measure.py
 
 import logging
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -321,25 +321,25 @@ class TestResolveCrop:
         result = _resolve_crop(None, tmp_path, tmp_path / "source.mkv")
         assert result == expected_crop
 
-    # --- None with probe.yaml but no crop (falls back to job.yaml source check) ---
+    # --- None with probe.yaml but empty crop (a concrete "no crop" resolution) ---
 
-    def test_none_probe_yaml_no_crop_falls_back_to_job_yaml(self, tmp_path: Path, caplog) -> None:
-        """None with probe.yaml (no crop) and non-matching job.yaml returns empty CropParams."""
+    def test_none_probe_yaml_empty_crop_resolves_directly(self, tmp_path: Path, caplog) -> None:
+        """None with probe.yaml whose crop is empty returns empty CropParams
+        immediately — an empty crop is a concrete resolution, never a reason
+        to keep probing the job.yaml fallback."""
         from pyqenc.state import ProbeState
 
-        # probe.yaml exists but has no crop
-        probe = ProbeState(frame_count=500, crop=None)
+        probe = ProbeState(frame_count=500)
         probe.save(tmp_path / "probe.yaml")
 
         source = tmp_path / "source.mkv"
-        other  = tmp_path / "other.mkv"
-        _seed_job_yaml(tmp_path, other)
+        _seed_job_yaml(tmp_path, tmp_path / "other.mkv")
 
         with caplog.at_level(logging.INFO, logger="pyqenc.phases.measure"):
             result = _resolve_crop(None, tmp_path, source)
 
         assert result == CropParams()
-        assert any("does not match" in r.message for r in caplog.records)
+        assert not any("does not match" in r.message for r in caplog.records)
 
     # --- None with non-matching source in job.yaml ---
 
@@ -373,8 +373,6 @@ class TestResolveCrop:
 # _write_sidecar
 # ---------------------------------------------------------------------------
 
-import logging
-from unittest.mock import patch
 
 from pyqenc.phases.measure import _write_sidecar
 from pyqenc.quality import MetricStats, MetricType
@@ -468,7 +466,6 @@ class TestWriteSidecar:
 
 import asyncio
 from fractions import Fraction
-from unittest.mock import MagicMock, patch
 
 from pyqenc.phases.measure import (
     ScreenshotPositions,

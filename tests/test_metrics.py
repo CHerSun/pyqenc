@@ -94,7 +94,6 @@ import yaml
 from pyqenc.metrics import (
     METRICS_YAML_FILENAME,
     ConvergenceUpdate,
-    MetricKey,
     YamlMetricsCollector,
 )
 
@@ -202,10 +201,8 @@ def test_resume_bad_file_starts_fresh(
 # Task 9.8 — Phase constructor collector injection
 # ---------------------------------------------------------------------------
 
-from unittest.mock import MagicMock
 
 from pyqenc.app_config import AppConfig, load_app_config
-from pyqenc.metrics import NoOpMetricsCollector
 
 
 def _make_app_config() -> AppConfig:

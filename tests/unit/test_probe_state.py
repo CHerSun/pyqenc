@@ -1,7 +1,6 @@
 """Unit tests for ProbeState load/save round-trip."""
 # CHerSun 2026
 
-import pytest
 from pathlib import Path
 
 from pyqenc.models import CropParams
@@ -34,7 +33,7 @@ class TestProbeStateRoundTrip:
         Bug: if the atomic write failed silently, the file would be absent
         on the next run and the probe would re-run unnecessarily.
         """
-        state = ProbeState(frame_count=1440, crop=None)
+        state = ProbeState(frame_count=1440)
         path  = tmp_path / "probe.yaml"
         state.save(path)
         assert path.exists()
@@ -45,7 +44,7 @@ class TestProbeStateRoundTrip:
         Bug: if atomicity was not implemented, a .tmp file could be left behind
         after a crash, corrupting recovery on the next run.
         """
-        state = ProbeState(frame_count=1440, crop=None)
+        state = ProbeState(frame_count=1440)
         path  = tmp_path / "probe.yaml"
         state.save(path)
         tmp_files = list(tmp_path.glob("*.tmp"))
@@ -57,7 +56,7 @@ class TestProbeStateRoundTrip:
         Bug: saving to a non-existent sub-directory would raise FileNotFoundError.
         """
         nested = tmp_path / "job_dir" / "probe.yaml"
-        ProbeState(frame_count=100, crop=None).save(nested)
+        ProbeState(frame_count=100).save(nested)
         assert nested.exists()
 
     # ------------------------------------------------------------------
@@ -70,14 +69,14 @@ class TestProbeStateRoundTrip:
         Bug: crop=None could be serialised as a dict key that breaks deserialization,
         or frame_count could be lost.
         """
-        original = ProbeState(frame_count=1440, crop=None)
+        original = ProbeState(frame_count=1440)
         path = tmp_path / "probe.yaml"
         original.save(path)
 
         restored = ProbeState.load(path)
         assert restored is not None
         assert restored.frame_count == 1440
-        assert restored.crop is None
+        assert restored.crop is not None and restored.crop.is_empty()
 
     def test_round_trip_with_crop(self, tmp_path: Path):
         """Save and reload a ProbeState with an active CropParams; all fields must match.
@@ -123,7 +122,7 @@ class TestProbeStateRoundTrip:
         Bug: frame_count=0 could be treated as falsy and omitted from the YAML,
         returning a different default on restore.
         """
-        original = ProbeState(frame_count=0, crop=None)
+        original = ProbeState(frame_count=0)
         path     = tmp_path / "probe.yaml"
         original.save(path)
 

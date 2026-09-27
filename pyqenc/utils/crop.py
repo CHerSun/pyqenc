@@ -6,36 +6,39 @@ from __future__ import annotations
 import logging
 import re
 
-from pyqenc.constants import FFMPEG_ARG_VF
-from pyqenc.models import CropParams, VideoMetadata
+from pyqenc.constants import FFMPEG_ARG_VF, FFMPEG_SELECTOR_PREFIX
+from pyqenc.models import CropParams
+from pyqenc.stream_model import VideoStream
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg
 
 logger = logging.getLogger(__name__)
 
 
 def detect_crop_parameters(
-    video_file: VideoMetadata,
+    stream: VideoStream,
     sample_count: int = 50,
 ) -> CropParams:
     """Detect black borders using ffmpeg cropdetect filter.
 
-    Samples multiple frames across the video to find conservative crop parameters
-    that remove all black borders while preserving maximum content area.
+    Samples multiple frames across the middle of the source (through the
+    stream's own input selector) to find conservative crop parameters that
+    remove all black borders while preserving maximum content area.
 
     Always returns a ``CropParams`` instance — all-zero if no borders are found
-    or if detection fails for any reason.
+    or if detection fails for any reason (Req 3.2: auto-detect failure falls
+    back to an empty crop with the warning logged here).
 
     Args:
-        video_file:   Video metadata for the file to analyse.
+        stream:       The source's video stream (file + fast-facet info).
         sample_count: Number of frames to sample across the video.
 
     Returns:
         CropParams with detected border offsets; all-zero if no cropping needed.
     """
-    logger.debug("Detecting black borders in %s...", video_file.path)
+    logger.debug("Detecting black borders in %s...", stream.file.path)
 
     try:
-        duration = video_file.duration_seconds
+        duration = stream.info.duration_seconds
 
         if not duration:
             logger.warning("Duration is not available, skipping crop detection")
@@ -44,12 +47,16 @@ def detect_crop_parameters(
         # Distribute samples across the middle 80 % of the video
         start_time  = duration * 0.1
         step        = duration * 0.8 / (sample_count - 1) if sample_count > 1 else 0
-        step_frames = int(step * video_file.fps) if video_file.fps else 0
+        step_frames = int(step * stream.info.fps) if stream.info.fps else 0
         step_frames = max(min(step_frames, 500), 30)
 
         request = FFmpegRequest(
             inputs      = [
-                FFmpegInput(path=video_file.path, start_seconds=start_time),
+                FFmpegInput(
+                    path           = stream.file.path,
+                    selector       = f"{FFMPEG_SELECTOR_PREFIX}{stream.info.track_id}",
+                    start_seconds  = start_time,
+                ),
             ],
             output_args = (
                 FFMPEG_ARG_VF, f"select='not(mod(n\\,{step_frames}))',cropdetect=24:2:0", # cropdetect takes cropdetect=limit:round:skip:reset
@@ -83,7 +90,7 @@ def detect_crop_parameters(
         left = min_x
         top  = min_y
 
-        width, height = video_file.resolution.split("x", 1) if video_file.resolution else ("0", "0")
+        width, height = stream.info.resolution.split("x", 1) if stream.info.resolution else ("0", "0")
         right  = int(width)  - max_w - left
         bottom = int(height) - max_h - top
 

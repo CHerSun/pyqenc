@@ -43,6 +43,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import (
     CHUNK_NAME_PATTERN,
+    ENCODED_ATTEMPT_NAME_PATTERN,
     FFMPEG_SELECTOR_PREFIX,
     RANGE_SEPARATOR,
     TIME_SEPARATOR_MS,
@@ -493,6 +494,21 @@ class VideoStreamChunk(BaseModel):
 # Req 14 — Encoded attempt as a stream
 # ---------------------------------------------------------------------------
 
+class EncodedAttemptName(BaseModel):
+    """The typed record parsed from an encoded attempt's file name (Req 15.5).
+
+    The name carries only part of a composed identity — recovery joins this
+    record against phase results rather than pretending the name reconstructs
+    the object.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    chunk_id:  str
+    resolution: str
+    crf:       DecimalYaml
+
+
 class EncodedChunk(BaseModel):
     """An encoding attempt: the attempt file's own video as a stream.
 
@@ -500,6 +516,11 @@ class EncodedChunk(BaseModel):
     ``stream.frame_count`` — never duplicated as fields. Crop is empty by
     construction (applied during the encode); the attempt's
     :class:`VideoStreamInfo` is populated eagerly, once, after the encode.
+
+    This class owns the attempt-file name family (Req 15.5): the name is a
+    pure function of the composed identity, generation and parsing living
+    here as a strict inverse pair — presence-based recovery is trustworthy
+    only because ``parse(format(x)) == x`` is pinned by tests.
 
     Attributes:
         stream:   The attempt file's own extended video stream.
@@ -514,6 +535,42 @@ class EncodedChunk(BaseModel):
     chunk:    VideoStreamChunk
     strategy: Strategy
     crf:      DecimalYaml
+
+    @staticmethod
+    def format_file_name(chunk_id: str, resolution: str, crf: Decimal) -> str:
+        """The attempt file name for an identity: ``<chunk_id>.<res>.q<crf>.mkv``."""
+        return f"{chunk_id}.{resolution}.q{crf}.mkv"
+
+    @property
+    def file_name(self) -> str:
+        """The attempt's file name, derived from the composition — never stored."""
+        return self.format_file_name(
+            self.chunk.chunk_id,
+            self.stream.stream.info.resolution or "",
+            self.crf,
+        )
+
+    @classmethod
+    def parse_file_name(cls, name: str) -> EncodedAttemptName:
+        """Parse an attempt file name into its typed identity record.
+
+        Args:
+            name: The attempt file name.
+
+        Returns:
+            The parsed :class:`EncodedAttemptName`.
+
+        Raises:
+            ValueError: When ``name`` does not match the attempt-name pattern.
+        """
+        match = ENCODED_ATTEMPT_NAME_PATTERN.match(name)
+        if not match:
+            raise ValueError(f"Not an encoded attempt file name: {name!r}")
+        return EncodedAttemptName(
+            chunk_id   = match.group("chunk_id"),
+            resolution = match.group("resolution"),
+            crf        = Decimal(match.group("quality")),
+        )
 
 
 # ---------------------------------------------------------------------------

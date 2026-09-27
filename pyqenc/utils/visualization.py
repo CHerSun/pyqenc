@@ -14,6 +14,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from typing import Literal
 
@@ -34,13 +35,14 @@ from pyqenc.quality import (
     run_metrics,
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
+from pyqenc.utils.ffmpeg_runner import FFmpegInput
 
 matplotlib.use("Agg")  # non-interactive backend — safe to call from any thread
-from matplotlib import ticker
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib import ticker
 
 # Suppress noisy matplotlib debug/info chatter
 logging.getLogger("matplotlib").setLevel(logging.WARNING)
@@ -1258,7 +1260,7 @@ class QualityEvaluator:
     async def _generate_metrics(
         self,
         encoded:          Path,
-        reference:        Path,
+        reference:        FFmpegInput,
         ref_crop:         CropParams,
         output_prefix:    str,
         metrics_sampling: int                            = 3,
@@ -1275,15 +1277,17 @@ class QualityEvaluator:
         — no rename is performed.
 
         Args:
-            encoded:          Path to encoded video file.
-            reference:        Path to reference video file.
+            encoded:          Path to encoded video file (read whole).
+            reference:        The reference as a runner input — a chunk window
+                              arrives as ``chunk.as_input()`` (per-input
+                              ``-ss``/``-t``).
             ref_crop:         Crop parameters for the reference input.
             output_prefix:    Full path prefix for metric files (unused for path
                               derivation — ``cwd`` and a UUID prefix are used instead).
             metrics_sampling: Frame subsampling factor (applied to VMAF via
                               ``n_subsample`` and to PSNR/SSIM via ``select``).
             bar_advance:      Optional callable that advances the progress bar.
-            duration_seconds: Duration of the encoded clip in seconds.
+            duration_seconds: Duration of the comparison window in seconds.
             width:            Scale both inputs to this width (0 = no scaling).
             cwd:              Working directory for metric ``.tmp`` files.  When
                               ``None``, derived from ``output_prefix``'s parent.
@@ -1298,7 +1302,7 @@ class QualityEvaluator:
 
         logger.debug(
             "Generating metrics for %s vs %s (tmp prefix: %s)",
-            encoded.name, reference.name, uuid_hex,
+            encoded.name, reference.path.name, uuid_hex,
         )
 
         # Single ffmpeg pass — progress is linear: total = duration_seconds, weight = 1.0.
@@ -1319,7 +1323,7 @@ class QualityEvaluator:
 
         result = await run_metrics(
             metrics          = _metrics_all,
-            distorted        = encoded,
+            distorted        = FFmpegInput(path=encoded),
             reference        = reference,
             crop_distorted   = CropParams(),
             crop_reference   = ref_crop,
@@ -1365,10 +1369,12 @@ class QualityEvaluator:
     async def evaluate_chunk_async(
         self,
         encoded:             Path,
-        reference:           Path,
+        reference:           FFmpegInput,
         ref_crop:            CropParams,
         targets:             list[QualityTarget],
         output_dir:          Path,
+        duration_seconds:    float,
+        fps_value:           Fraction | None,
         subsample_factor:    int               = 10,
         show_progress:       bool              = False,
         plot_path:           Path | None       = None,
@@ -1395,16 +1401,6 @@ class QualityEvaluator:
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         cwd = metrics_output_dir if metrics_output_dir is not None else output_dir
-
-        duration_seconds: float | None = None
-        fps_value:        float | None = None
-        try:
-            from pyqenc.models import VideoMetadata
-            vm = VideoMetadata(path=encoded)
-            duration_seconds = vm.duration_seconds
-            fps_value        = vm.fps
-        except Exception:
-            pass
 
         resolved_title    = bar_title if bar_title is not None \
             else encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
@@ -1447,10 +1443,12 @@ class QualityEvaluator:
     def evaluate_chunk(
         self,
         encoded:             Path,
-        reference:           Path,
+        reference:           FFmpegInput,
         ref_crop:            CropParams,
         targets:             list[QualityTarget],
         output_dir:          Path,
+        duration_seconds:    float,
+        fps_value:           Fraction | None,
         subsample_factor:    int               = 10,
         show_progress:       bool              = False,
         plot_path:           Path | None       = None,
@@ -1461,11 +1459,16 @@ class QualityEvaluator:
         """Evaluate encoded chunk against reference and quality targets.
 
         Args:
-            encoded:             Path to encoded video file.
-            reference:           Path to reference video file.
+            encoded:             Path to encoded video file (read whole).
+            reference:           The reference as a runner input — a chunk
+                                 window arrives as ``chunk.as_input()``.
             ref_crop:            Crop parameters for the reference input.
             targets:             List of quality targets to evaluate against.
             output_dir:          Directory for the plot PNG.
+            duration_seconds:    The comparison window's duration — supplied by
+                                 the caller from the chunk window, never probed.
+            fps_value:           Average fps for plot x-axis conversion
+                                 (``fps_fraction`` of the source stream).
             subsample_factor:    Frame subsampling factor for metrics.
             show_progress:       If True, display a live progress bar.
             plot_path:           Explicit path for the PNG plot.  When ``None``,
@@ -1480,16 +1483,6 @@ class QualityEvaluator:
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         cwd = metrics_output_dir if metrics_output_dir is not None else output_dir
-
-        duration_seconds: float | None = None
-        fps_value:        float | None = None
-        try:
-            from pyqenc.models import VideoMetadata
-            vm = VideoMetadata(path=encoded)
-            duration_seconds = vm.duration_seconds
-            fps_value        = vm.fps
-        except Exception:
-            pass
 
         bar_title         = encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
         _total_complexity = duration_seconds or 0.0  # single ffmpeg run, linear time
@@ -1540,7 +1533,7 @@ class QualityEvaluator:
         targets:             list[QualityTarget],
         subsample_factor:    int,
         plot_path:           Path | None,
-        fps_value:           float | None,
+        fps_value:           Fraction | None,
         chunk_start_seconds: float,
     ) -> QualityEvaluation:
         """Parse metric files, generate plot, and evaluate targets.

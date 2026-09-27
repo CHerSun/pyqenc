@@ -1,7 +1,7 @@
 """Unit tests for VideoMetadata lazy-loading and ChunkMetadata."""
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from pyqenc.models import ChunkMetadata, VideoMetadata

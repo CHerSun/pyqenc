@@ -608,3 +608,13 @@ for selection:
 behavior change that landed without them — decide whether the astats/downmix
 behavior itself is approved as-is (then update the canned data/assertions) or
 needs revisiting. Should the audio-chains spec get a difference note?
+
+## 44. Considering we move to stream objects rather then materialized files - we probably no longer need a video_required flag
+
+Stream objectification takes 0 effort. So we can create all streams. Consumers will take what they need. Audio Phase won't pick up video stream.
+A side effect is also an extraction summary table - it should now have only 1 column - wanted flag.
+
+## 45. Summary table for audio
+
+Like for extraction phase - I want similar table for audio phase - a summary on which stream were picked up (wanted flag). Maybe with a column with counter - by how many chains.
+Maybe should also add after table - selector - selected tracks (as a clear reason for choice).

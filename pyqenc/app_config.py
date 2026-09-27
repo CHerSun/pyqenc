@@ -38,7 +38,6 @@ from pyqenc.constants import (
     FILENAME_FORBIDDEN_CHARS,
 )
 from pyqenc.models import (
-    ChunkingMode,
     CodecConfig,
     QualityTarget,
     Strategy,
@@ -169,7 +168,6 @@ class ChunkingConfig(BaseModel):
                            is eligible to be split off as a separate chunk.
     """
 
-    mode:             ChunkingMode
     scene_threshold:  float
     min_scene_length: int
 

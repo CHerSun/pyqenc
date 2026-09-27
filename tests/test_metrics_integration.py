@@ -24,7 +24,6 @@ from pyqenc.models import (
 )
 from pyqenc.phase import Recovery
 from pyqenc.stream_model import File
-from pyqenc.utils.ffmpeg_runner import FFmpegRequest
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 _SHARED_APP_CONFIG: AppConfig = load_app_config(default_only=True)
@@ -47,6 +46,16 @@ def _make_config(tmp_path: Path) -> AppConfig:
     """
     return load_app_config(default_only=True)
 
+def _make_chunk_window(source: Path, start: float, end: float) -> "VideoStreamChunk":
+    """A VideoStreamChunk fixture over the source window."""
+    from pyqenc.stream_model import VideoStreamChunk
+
+    stream = _make_extended_stream(source, frame_count=640, duration=end)
+    return VideoStreamChunk(
+        stream=stream, start_timestamp=start, end_timestamp=end, frame_count=24,
+    )
+
+
 
 def _make_volatile(tmp_path: Path) -> dict:
     """Return a minimal dict of volatile kwargs for phases that require them."""
@@ -59,6 +68,31 @@ def _make_volatile(tmp_path: Path) -> dict:
         "cleanup":    CleanupLevel.NONE,
         "no_metrics": False,
     }
+
+def _make_extended_stream(path: Path, frame_count: int, duration: float) -> "ExtendedVideoStream":
+    """An ExtendedVideoStream fixture (fast facet + frame count)."""
+    from fractions import Fraction
+
+    from pyqenc.models import CropParams
+    from pyqenc.stream_model import (
+        ExtendedVideoStream,
+        VideoStream,
+        VideoStreamInfo,
+    )
+
+    return ExtendedVideoStream(
+        stream=VideoStream(
+            file=File(path=path, file_size_bytes=64),
+            info=VideoStreamInfo(
+                track_id=0, codec_name="hevc", fps=25.0,
+                fps_fraction=Fraction(25, 1), resolution="1920x1080",
+                duration_seconds=duration,
+            ),
+        ),
+        frame_count=frame_count,
+        crop=CropParams(),
+    )
+
 
 
 def _spy_collector() -> MagicMock:
@@ -344,246 +378,125 @@ class TestChunkingPhaseTiming:
         """Return a minimal complete ``JobPhaseResult`` stub with a real source file."""
         from pyqenc.models import PhaseOutcome
         from pyqenc.phases.job import JobPhaseResult
-        from pyqenc.state import JobState
 
         source = tmp_path / "source.mkv"
-        source.write_bytes(b"\x00" * 64)
-        stub_vm = _stub_video_metadata(source)
-        job_state = JobState(source=stub_vm)
+        source.write_bytes(b"" * 64)
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             artifacts  = [],
             message    = "ok",
             force_wipe = False,
+            file       = File(path=source, file_size_bytes=64),
         )
-        result.job      = job_state           # type: ignore[attr-defined]
         result.source   = source              # type: ignore[attr-defined]
         result.work_dir = tmp_path / "work"   # type: ignore[attr-defined]
         result.config   = _make_config(tmp_path)  # type: ignore[attr-defined]
         return result
 
-    def _make_extraction_result(self, tmp_path: Path) -> ExtractionPhaseResult:
-        """Return a minimal complete ``ExtractionPhaseResult`` stub."""
-        from pyqenc.models import PhaseOutcome
-        from pyqenc.phases.extraction import ExtractionPhaseResult
-
-        source = tmp_path / "source.mkv"
-        stub_vm = _stub_video_metadata(source)
-        result = ExtractionPhaseResult(
-            outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
-            message   = "ok",
-            video     = stub_vm,
-        )
-        return result
-
     def _make_phase(
         self,
-        tmp_path: Path,
+        tmp_path:  Path,
         collector: MagicMock,
     ) -> ChunkingPhase:
-        """Return a ``ChunkingPhase`` with pre-wired job and extraction dependencies."""
-        from pyqenc.phases.chunking import ChunkingPhase
-        from pyqenc.phases.extraction import ExtractionPhase
+        """Return a ``ChunkingPhase`` with pre-wired job/extraction/probe deps."""
+        from pyqenc.models import PhaseOutcome
+        from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
         from pyqenc.phases.job import JobPhase
+        from pyqenc.phases.probe import ProbePhase
+        from pyqenc.phases.probe import ProbePhaseResult
 
         config = _make_config(tmp_path)
         work_dir = tmp_path / "work"
         work_dir.mkdir(parents=True, exist_ok=True)
 
+        source = tmp_path / "source.mkv"
+        stream = _make_extended_stream(source, frame_count=640, duration=26.67)
+
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
 
         extraction_mock = MagicMock(spec=ExtractionPhase)
-        extraction_mock.result = self._make_extraction_result(tmp_path)
+        extraction_mock.result = ExtractionPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, artifacts=[], message="ok",
+            video_stream=stream.stream,
+        )
 
+        probe_mock = MagicMock(spec=ProbePhase)
+        probe_mock.result = ProbePhaseResult(
+            outcome=PhaseOutcome.COMPLETED, artifacts=[], message="ok",
+            stream=stream,
+        )
+
+        from pyqenc.phases.chunking import ChunkingPhase
         registry: dict[type, object] = {}
         phase = ChunkingPhase(config, registry, collector=collector)  # type: ignore[arg-type]
         registry[JobPhase]        = job_mock         # type: ignore[index]
         registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
+        registry[ProbePhase]      = probe_mock       # type: ignore[index]
         return phase
 
     def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
-        """``time(MetricKey.RECOVERY)`` must be called even when all chunks are reused.
+        """``time(MetricKey.RECOVERY)`` must be called when boundaries are cached.
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.phases.chunking import (
-            ChunkArtifact,
-            ChunkingPhase,
-        )
-        from pyqenc.state import ArtifactState
+        from pyqenc.phases.chunking import ChunkingSidecar  # noqa: F401 — via stream_model
+        from pyqenc.stream_model import ChunkingSidecar as _CS, SceneRecord
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        # Stub _recover to return all-complete → REUSED path
-        stub_artifact = MagicMock(spec=ChunkArtifact)
-        stub_artifact.state    = ArtifactState.COMPLETE
-        stub_artifact.metadata = None
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        write_yaml_atomic(
+            work_dir / "chunking.yaml",
+            _CS(scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)]).model_dump(),
+        )
 
-        with patch.object(ChunkingPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
-            phase.run()
+        result = phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
         assert MetricKey.RECOVERY in time_keys_called, (
             f"Expected MetricKey.RECOVERY in time() calls, got: {time_keys_called}"
         )
+        assert result.outcome.value == "reused"
 
     def test_scene_detect_recorded_when_no_cached_boundaries(self, tmp_path: Path) -> None:
-        """``time(MetricKey.CHUNKING)`` must be called when detection runs.
-
-        Validates: Requirements 6.5
-        """
+        """``time(MetricKey.CHUNKING, "scene_detect")`` runs when detection runs."""
         from pyqenc.models import SceneBoundary
-        from pyqenc.phases.chunking import ChunkingPhase
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        # No cached scenes → detection will run
-        phase._recovered_scenes = []  # type: ignore[attr-defined]
+        with patch("pyqenc.phases.chunking.detect_scenes",
+                   return_value=[SceneBoundary(frame=0, timestamp_seconds=0.0)]):
+            result = phase.run()
 
-        stub_boundaries = [SceneBoundary(frame=0, timestamp_seconds=0.0)]
-
-        with (
-            patch.object(ChunkingPhase, "_recover", return_value=Recovery(pending=True)),
-            patch("pyqenc.phases.chunking.detect_scenes", return_value=stub_boundaries),
-            patch("pyqenc.phases.chunking.split_chunks", return_value=[]),
-        ):
-            phase.run()
-
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.CHUNKING in time_keys_called, (
-            f"Expected MetricKey.CHUNKING in time() calls, got: {time_keys_called}"
-        )
+        calls = [call.args for call in collector.time.call_args_list]
+        assert (MetricKey.CHUNKING, "scene_detect") in calls, f"scene_detect span missing: {calls}"
+        assert result.outcome.value == "completed"
 
     def test_scene_detect_not_recorded_when_boundaries_cached(self, tmp_path: Path) -> None:
-        """When scenes are cached, only split timing calls are made — no scene_detect calls.
-
-        After migration to two-tier keys, split emits two calls:
-        ``time(MetricKey.CHUNKING)`` (top-level wall-clock) and
-        ``time(MetricKey.CHUNKING, "split")`` (dotted sub-operation).
-        Scene-detect emits ``time(MetricKey.CHUNKING, "scene_detect")`` — which must NOT appear.
-
-        Validates: Requirements 6.5
-        """
-        from pyqenc.models import SceneBoundary
-        from pyqenc.phases.chunking import ChunkingPhase
+        """Cached boundaries skip detection entirely — no scene_detect span."""
+        from pyqenc.stream_model import ChunkingSidecar as _CS, SceneRecord
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        # Pre-populate cached scenes so detection is skipped
-        cached_boundaries = [SceneBoundary(frame=0, timestamp_seconds=0.0)]
-        phase._recovered_scenes = cached_boundaries  # type: ignore[attr-defined]
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        write_yaml_atomic(
+            work_dir / "chunking.yaml",
+            _CS(scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)]).model_dump(),
+        )
 
-        with (
-            patch.object(ChunkingPhase, "_recover", return_value=Recovery(pending=True)),
-            patch("pyqenc.phases.chunking.split_chunks", return_value=[]),
-        ):
+        with patch("pyqenc.phases.chunking.detect_scenes") as detect_mock:
             phase.run()
 
-        chunking_calls = [call for call in collector.time.call_args_list if call.args[0] == MetricKey.CHUNKING]
-        # scene_detect must NOT appear when boundaries are cached
-        scene_detect_calls = [c for c in chunking_calls if c.args[1:] == ("scene_detect",)]
-        assert not scene_detect_calls, (
-            f"Expected no scene_detect calls when boundaries cached, got: {scene_detect_calls}"
-        )
-        # split dotted call must appear
-        split_calls = [c for c in chunking_calls if c.args[1:] == ("split",)]
-        assert len(split_calls) == 1, (
-            f"Expected exactly 1 dotted split call when boundaries cached, got: {split_calls}"
-        )
-
-    def test_chunking_split_recorded_when_chunks_pending(self, tmp_path: Path) -> None:
-        """``time(MetricKey.CHUNKING)`` must be called when split_chunks runs.
-
-        Validates: Requirements 6.5, 2.2a
-        """
-        from pyqenc.models import ChunkMetadata, SceneBoundary
-        from pyqenc.phases.chunking import ChunkingPhase
-
-        collector = _spy_collector()
-        phase     = self._make_phase(tmp_path, collector)
-
-        cached_boundaries = [SceneBoundary(frame=0, timestamp_seconds=0.0)]
-        phase._recovered_scenes = cached_boundaries  # type: ignore[attr-defined]
-
-        # Use a real ChunkMetadata (not a bare Mock): the executor reads
-        # cm.path and cm.frame_count to build the final ChunkArtifact list, so a
-        # spec-only Mock without a real .path fails with AttributeError.
-        real_chunk = ChunkMetadata(
-            path            = tmp_path / "work" / "chunks" / "chunk_0.mkv",
-            frame_count     = 100,
-            chunk_id        = "chunk_0",
-            start_timestamp = 0.0,
-            end_timestamp   = 1.0,
-        )
-
-        with (
-            patch.object(ChunkingPhase, "_recover", return_value=Recovery(pending=True)),
-            patch("pyqenc.phases.chunking.split_chunks", return_value=[real_chunk]),
-        ):
-            phase.run()
-
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.CHUNKING in time_keys_called, (
-            f"Expected MetricKey.CHUNKING in time() calls, got: {time_keys_called}"
-        )
-
-    def test_step_called_per_successful_split(self, tmp_path: Path) -> None:
-        """``step(MetricKey.CHUNKING)`` must be called once per successful chunk split.
-
-        Two boundaries produce two chunks, so two ``step`` calls are expected.
-
-        Validates: Requirements 6.5, 2.2a
-        """
-        from pyqenc.models import SceneBoundary
-        from pyqenc.phases.chunking import split_chunks
-
-        collector = _spy_collector()
-
-        # Build a minimal video_meta and two fake boundaries
-        source = tmp_path / "source.mkv"
-        source.write_bytes(b"\x00" * 64)
-        vm = _stub_video_metadata(source)
-
-        output_dir = tmp_path / "chunks"
-        output_dir.mkdir()
-
-        boundaries = [
-            SceneBoundary(frame=0,  timestamp_seconds=0.0),
-            SceneBoundary(frame=24, timestamp_seconds=1.0),
-        ]
-
-        # Build a recovery object with no complete chunks
-        from pyqenc.phases.recovery import ChunkingRecovery as RecoveryObj
-        recovery = RecoveryObj(scenes=boundaries, chunks={}, pending=[])
-        # Patch run_ffmpeg to succeed and create the output file
-        def _fake_ffmpeg(request: FFmpegRequest, **kwargs: object) -> MagicMock:
-            if request.output is not None:
-                request.output.write_bytes(b"\x00" * 32)
-            result = MagicMock()
-            result.success = True
-            return result
-
-        with (
-            patch("pyqenc.phases.chunking.run_ffmpeg", side_effect=_fake_ffmpeg),
-            patch("pyqenc.phases.chunking._write_chunk_sidecar"),
-        ):
-            split_chunks(
-                video_meta    = vm,
-                output_dir    = output_dir,
-                boundaries    = boundaries,
-                recovery      = recovery,
-                collector     = collector,
-            )
-        step_keys = [call.args[0] for call in collector.step.call_args_list]
-        assert step_keys.count(MetricKey.CHUNKING) == 2, (
-            f"Expected 2 step(CHUNKING_SPLIT) calls (one per boundary), got: {step_keys}"
-        )
+        detect_mock.assert_not_called()
+        calls = [call.args for call in collector.time.call_args_list]
+        assert (MetricKey.CHUNKING, "scene_detect") not in calls
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
         """``ChunkingPhase`` must run without error when given a ``NoOpMetricsCollector``.
@@ -591,18 +504,12 @@ class TestChunkingPhaseTiming:
         Validates: Requirements 6.4, 6.5
         """
         from pyqenc.models import SceneBoundary
-        from pyqenc.phases.chunking import ChunkingPhase
 
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
 
-        cached_boundaries = [SceneBoundary(frame=0, timestamp_seconds=0.0)]
-        phase._recovered_scenes = cached_boundaries  # type: ignore[attr-defined]
-
-        with (
-            patch.object(ChunkingPhase, "_recover", return_value=Recovery(pending=True)),
-            patch("pyqenc.phases.chunking.split_chunks", return_value=[]),
-        ):
+        with patch("pyqenc.phases.chunking.detect_scenes",
+                   return_value=[SceneBoundary(frame=0, timestamp_seconds=0.0)]):
             result = phase.run()
 
         assert result is not None
@@ -799,14 +706,10 @@ class TestOptimizationPhaseTiming:
 
     def _make_chunking_result(self, tmp_path: Path) -> ChunkingPhaseResult:
         """Return a minimal complete ``ChunkingPhaseResult`` stub with one chunk."""
-        from pyqenc.models import ChunkMetadata, PhaseOutcome
+        from pyqenc.models import PhaseOutcome
         from pyqenc.phases.chunking import ChunkingPhaseResult
 
-        chunk = MagicMock(spec=ChunkMetadata)
-        chunk.chunk_id         = "chunk_0"
-        chunk.start_timestamp  = 0.0
-        chunk.end_timestamp    = 1.0
-        chunk.path             = tmp_path / "chunks" / "chunk_0.mkv"
+        chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
 
         return ChunkingPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
@@ -856,7 +759,7 @@ class TestOptimizationPhaseTiming:
             outcome   = PhaseOutcome.COMPLETED,
             artifacts = [],
             message   = "probe complete",
-            source    = None,
+            stream    = None,
             crop      = CropParams(),
         )
 
@@ -919,18 +822,12 @@ class TestOptimizationPhaseTiming:
         """
         import asyncio
 
-        from pyqenc.models import ChunkMetadata
         from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
 
         collector = _spy_collector()
         strategy  = _STRATEGY_SLOW_H265
 
-        chunk = MagicMock(spec=ChunkMetadata)
-        chunk.chunk_id        = "chunk_0"
-        chunk.start_timestamp = 0.0
-        chunk.end_timestamp   = 1.0
-        chunk.path            = tmp_path / "chunk_0.mkv"
-        (tmp_path / "chunk_0.mkv").write_bytes(bytes(64))
+        chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
 
         encoded_path = tmp_path / "chunk_0_enc.mkv"
         encoded_path.write_bytes(bytes(128))
@@ -941,7 +838,7 @@ class TestOptimizationPhaseTiming:
             success      = True,
             final_crf    = 28.0,
             attempts     = 2,
-            encoded_file = MagicMock(path=encoded_path),
+            encoded_file = MagicMock(path=encoded_path, resolution="1920x1080"),
             reused       = False,
         )
 
@@ -956,7 +853,6 @@ class TestOptimizationPhaseTiming:
                 _encode_chunks_parallel(
                     encoder          = MagicMock(),
                     chunks           = [chunk],
-                    reference_dir    = tmp_path,
                     strategies       = [strategy],
                     quality_targets  = [],
                     max_parallel     = 1,
@@ -986,17 +882,12 @@ class TestOptimizationPhaseTiming:
         import asyncio
 
         from pyqenc.metrics import ConvergenceUpdate
-        from pyqenc.models import ChunkMetadata
         from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
 
         collector = _spy_collector()
         strategy  = _STRATEGY_SLOW_H265
 
-        chunk = MagicMock(spec=ChunkMetadata)
-        chunk.chunk_id        = "chunk_0"
-        chunk.start_timestamp = 0.0
-        chunk.end_timestamp   = 1.0
-        chunk.path            = tmp_path / "chunk_0.mkv"
+        chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
 
         # Reference file must exist so the encode path is reached (not skipped)
         (tmp_path / "chunk_0.mkv").write_bytes(b"\x00" * 64)
@@ -1010,7 +901,7 @@ class TestOptimizationPhaseTiming:
             success      = True,
             final_crf    = 28.0,
             attempts     = 3,
-            encoded_file = MagicMock(path=encoded_path),
+            encoded_file = MagicMock(path=encoded_path, resolution="1920x1080"),
             reused       = False,
         )
 
@@ -1025,7 +916,6 @@ class TestOptimizationPhaseTiming:
                 _encode_chunks_parallel(
                     encoder          = MagicMock(),
                     chunks           = [chunk],
-                    reference_dir    = tmp_path,
                     strategies       = [strategy],
                     quality_targets  = [],
                     max_parallel     = 1,
@@ -1162,7 +1052,7 @@ class TestEncodingPhaseTiming:
             outcome   = PhaseOutcome.COMPLETED,
             artifacts = [],
             message   = "ok",
-            source    = None,
+            stream    = None,
             crop      = CropParams(),
         )
         probe_mock = MagicMock(spec=ProbePhase)
@@ -1257,16 +1147,11 @@ class TestEncodingPhaseTiming:
         import asyncio
 
         from pyqenc.metrics import ConvergenceUpdate
-        from pyqenc.models import ChunkMetadata
         from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
 
         collector = _spy_collector()
 
-        chunk = MagicMock(spec=ChunkMetadata)
-        chunk.chunk_id        = "chunk_0"
-        chunk.start_timestamp = 0.0
-        chunk.end_timestamp   = 1.0
-        chunk.path            = tmp_path / "chunk_0.mkv"
+        chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
 
         # Reference file must exist so the encode path is reached (not skipped)
         (tmp_path / "chunk_0.mkv").write_bytes(b"\x00" * 64)
@@ -1280,7 +1165,7 @@ class TestEncodingPhaseTiming:
             success      = True,
             final_crf    = 28.0,
             attempts     = 3,
-            encoded_file = MagicMock(path=encoded_path),
+            encoded_file = MagicMock(path=encoded_path, resolution="1920x1080"),
             reused       = False,
         )
 
@@ -1289,7 +1174,6 @@ class TestEncodingPhaseTiming:
                 _encode_chunks_parallel(
                     encoder          = MagicMock(),
                     chunks           = [chunk],
-                    reference_dir    = tmp_path,
                     strategies       = [_STRATEGY_SLOW_H265],
                     quality_targets  = [],
                     max_parallel     = 1,
@@ -1317,16 +1201,11 @@ class TestEncodingPhaseTiming:
         """
         import asyncio
 
-        from pyqenc.models import ChunkMetadata
         from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
 
         collector = _spy_collector()
 
-        chunk = MagicMock(spec=ChunkMetadata)
-        chunk.chunk_id        = "chunk_0"
-        chunk.start_timestamp = 0.0
-        chunk.end_timestamp   = 1.0
-        chunk.path            = tmp_path / "chunk_0.mkv"
+        chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
 
         encoded_path = tmp_path / "chunk_0_enc.mkv"
         encoded_path.write_bytes(b"\x00" * 128)
@@ -1337,7 +1216,7 @@ class TestEncodingPhaseTiming:
             success      = True,
             final_crf    = 28.0,
             attempts     = 1,
-            encoded_file = MagicMock(path=encoded_path),
+            encoded_file = MagicMock(path=encoded_path, resolution="1920x1080"),
             reused       = True,
         )
 
@@ -1346,7 +1225,6 @@ class TestEncodingPhaseTiming:
                 _encode_chunks_parallel(
                     encoder          = MagicMock(),
                     chunks           = [chunk],
-                    reference_dir    = tmp_path,
                     strategies       = [_STRATEGY_SLOW_H265],
                     quality_targets  = [],
                     max_parallel     = 1,
@@ -1495,7 +1373,7 @@ class TestMergePhaseTiming:
             outcome   = PhaseOutcome.COMPLETED,
             artifacts = [],
             message   = "probe complete",
-            source    = None,
+            stream    = None,
             crop      = CropParams(),
         )
 
@@ -1634,7 +1512,7 @@ class TestMergePhaseTiming:
             outcome   = PhaseOutcome.COMPLETED,
             artifacts = [],
             message   = "probe complete",
-            source    = None,
+            stream    = None,
             crop      = CropParams(),
         )
 

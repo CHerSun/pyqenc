@@ -13,7 +13,6 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
 
 from pyqenc.phases.encoding import _recover_encoding_attempts
 from pyqenc.state import ArtifactState

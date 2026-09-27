@@ -10,7 +10,7 @@ internals are mocked or monkeypatched.
 Every test drives ``phase.run(...)`` and asserts only on the returned
 ``ProbePhaseResult`` and on-disk ``probe.yaml``. The only things mocked are the
 genuinely external shell-outs (``detect_crop_parameters`` and
-``VideoMetadata.probe_extended``) — boundaries, not internals of the phase.
+``get_frame_count`` / ``timestamps.txt``) — boundaries, not internals of the phase.
 
 Covered observable paths:
 - FAILED when extraction produced no video (source None, error set, no probe.yaml)
@@ -27,10 +27,11 @@ from unittest.mock import patch
 
 from pyqenc.app_config import load_app_config
 from pyqenc.metrics import MetricKey, NoOpMetricsCollector
+from fractions import Fraction
+
 from pyqenc.models import (
     CleanupLevel,
     CropParams,
-    ExtendedVideoMetadata,
     PhaseOutcome,
     VideoMetadata,
 )
@@ -39,6 +40,7 @@ from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import ArtifactState, JobState, ProbeState
+from pyqenc.stream_model import File, VideoStream, VideoStreamInfo
 
 # ---------------------------------------------------------------------------
 # Helpers — build REAL typed results and a REAL registry
@@ -68,17 +70,25 @@ def _make_job_result(work_dir: Path, source_vm: VideoMetadata) -> JobPhaseResult
     )
 
 
-def _make_extraction_result(video: VideoMetadata | None) -> ExtractionPhaseResult:
-    """Return a COMPLETED ExtractionPhaseResult carrying the extracted video."""
-    artifacts = (
-        [Artifact(path=video.path, state=ArtifactState.COMPLETE)]
-        if video is not None else []
+def _make_video_stream(path: Path) -> VideoStream:
+    """A video stream with the fast facet pre-populated (no probing)."""
+    return VideoStream(
+        file = File(path=path, file_size_bytes=64),
+        info = VideoStreamInfo(
+            track_id=0, codec_name="hevc", fps=24.0,
+            fps_fraction=Fraction(24, 1), resolution="1920x1080",
+            duration_seconds=3600.0,
+        ),
     )
+
+
+def _make_extraction_result(video_stream: VideoStream | None) -> ExtractionPhaseResult:
+    """Return a COMPLETED ExtractionPhaseResult carrying the video stream."""
     return ExtractionPhaseResult(
-        outcome   = PhaseOutcome.COMPLETED,
-        artifacts = artifacts,
-        message   = "extraction complete",
-        video     = video,
+        outcome      = PhaseOutcome.COMPLETED,
+        artifacts    = [],
+        message      = "extraction complete",
+        video_stream = video_stream,
     )
 
 
@@ -145,13 +155,13 @@ class TestProbePhaseFailedNoVideo:
         work_dir.mkdir()
         source_vm         = _make_source_vm(tmp_path / "source.mkv")
         job_result        = _make_job_result(work_dir, source_vm)
-        extraction_result = _make_extraction_result(video=None)
+        extraction_result = _make_extraction_result(video_stream=None)
         phase             = _make_probe_phase(job_result, extraction_result)
 
         result = phase.run()
 
         assert result.outcome == PhaseOutcome.FAILED
-        assert result.source is None
+        assert result.stream is None
         assert result.error is not None
         assert not (work_dir / "probe.yaml").exists()
 
@@ -174,17 +184,16 @@ class TestProbePhaseReused:
         cached_crop = CropParams(top=140, bottom=140)
         _write_probe_yaml(work_dir, frame_count=72000, crop=cached_crop)
 
-        source_vm         = _make_source_vm(tmp_path / "source.mkv")
-        extracted_vm      = _make_source_vm(tmp_path / "extracted.mkv")
-        job_result        = _make_job_result(work_dir, source_vm)
-        extraction_result = _make_extraction_result(video=extracted_vm)
+        job_result        = _make_job_result(work_dir, _make_source_vm(tmp_path / "source.mkv"))
+        extraction_result = _make_extraction_result(
+            _make_video_stream(tmp_path / "source.mkv"))
         phase             = _make_probe_phase(job_result, extraction_result, crop_params=None)
 
         result = phase.run()
 
         assert result.outcome == PhaseOutcome.REUSED
-        assert result.source is not None
-        assert result.source.frame_count == 72000
+        assert result.stream is not None
+        assert result.stream.frame_count == 72000
         assert result.crop.top    == 140
         assert result.crop.bottom == 140
 
@@ -198,18 +207,14 @@ class TestProbePhaseReused:
         work_dir.mkdir()
         _write_probe_yaml(work_dir, frame_count=1440, crop=CropParams(top=140, bottom=140))
 
-        source_vm         = _make_source_vm(tmp_path / "source.mkv")
-        extracted_vm      = _make_source_vm(tmp_path / "extracted.mkv")
-        job_result        = _make_job_result(work_dir, source_vm)
-        extraction_result = _make_extraction_result(video=extracted_vm)
+        job_result        = _make_job_result(work_dir, _make_source_vm(tmp_path / "source.mkv"))
+        extraction_result = _make_extraction_result(
+            _make_video_stream(tmp_path / "source.mkv"))
         override_crop     = CropParams(top=0, bottom=0)
 
         with (
             patch("pyqenc.utils.crop.detect_crop_parameters", return_value=override_crop),
-            patch.object(
-                VideoMetadata, "probe_extended",
-                return_value=ExtendedVideoMetadata.from_base(source_vm, frame_count=1440),
-            ),
+            patch("pyqenc.phases.probe.get_frame_count", return_value=1440),
         ):
             phase  = _make_probe_phase(job_result, extraction_result, crop_params=override_crop)
             result = phase.run()
@@ -236,19 +241,21 @@ class TestProbePhaseCompleted:
         work_dir = tmp_path / "work"
         work_dir.mkdir()
 
-        source_vm    = _make_source_vm(tmp_path / "source.mkv")
-        extracted_vm = _make_source_vm(tmp_path / "extracted.mkv")
-        job_result   = _make_job_result(work_dir, source_vm)
-        extended_vm  = ExtendedVideoMetadata.from_base(
-            source_vm, frame_count=self._DETECTED_FRAME_COUNT
-        )
-        extraction_result = _make_extraction_result(video=extracted_vm)
+        source_vm         = _make_source_vm(tmp_path / "source.mkv")
+        job_result        = _make_job_result(work_dir, source_vm)
+        extraction_result = _make_extraction_result(
+            _make_video_stream(tmp_path / "source.mkv"))
         phase             = _make_probe_phase(job_result, extraction_result, crop_params=None)
 
-        with (
-            patch("pyqenc.utils.crop.detect_crop_parameters", return_value=self._DETECTED_CROP),
-            patch.object(VideoMetadata, "probe_extended", return_value=extended_vm),
-        ):
+        # Extraction result exposes a timestamps path → the frame count is
+        # read from it (timestamps.txt is the primary source).
+        timestamps = work_dir / "extracted" / "timestamps.txt"
+        timestamps.parent.mkdir(parents=True, exist_ok=True)
+        body = "".join(f"{i * 42}\n" for i in range(self._DETECTED_FRAME_COUNT))
+        timestamps.write_text("# timestamp format v2\n" + body, encoding="utf-8")
+        object.__setattr__(extraction_result, "timestamps_path", timestamps)
+
+        with patch("pyqenc.utils.crop.detect_crop_parameters", return_value=self._DETECTED_CROP):
             result = phase.run()
 
         return result, work_dir
@@ -257,8 +264,8 @@ class TestProbePhaseCompleted:
         result, _ = self._run_with_mocks(tmp_path)
 
         assert result.outcome == PhaseOutcome.COMPLETED
-        assert result.source is not None
-        assert result.source.frame_count == self._DETECTED_FRAME_COUNT
+        assert result.stream is not None
+        assert result.stream.frame_count == self._DETECTED_FRAME_COUNT
         assert result.crop.top    == self._DETECTED_CROP.top
         assert result.crop.bottom == self._DETECTED_CROP.bottom
 
@@ -302,19 +309,16 @@ class TestProbeTiming:
         source.write_bytes(bytes(64))
         source_vm = _make_source_vm(source)
         job_result = _make_job_result(tmp_path, source_vm)
-        video_vm = _make_source_vm(tmp_path / "extracted" / "video.mkv")
-        extraction_result = _make_extraction_result(video_vm)
+        extraction_result = _make_extraction_result(_make_video_stream(source))
 
         phase = _make_probe_phase(
             job_result, extraction_result, collector=collector
         )
 
-        extended_vm = ExtendedVideoMetadata.from_base(
-            source_vm, frame_count=self._DETECTED_FRAME_COUNT
-        )
+        # Frame count via the null-count fallback (no timestamps file).
         with (
             patch("pyqenc.utils.crop.detect_crop_parameters", return_value=self._DETECTED_CROP),
-            patch.object(VideoMetadata, "probe_extended", return_value=extended_vm),
+            patch("pyqenc.phases.probe.get_frame_count", return_value=self._DETECTED_FRAME_COUNT),
         ):
             result = phase.run()
 
@@ -338,8 +342,7 @@ class TestProbeTiming:
         source.write_bytes(bytes(64))
         source_vm = _make_source_vm(source)
         job_result = _make_job_result(tmp_path, source_vm)
-        video_vm = _make_source_vm(tmp_path / "extracted" / "video.mkv")
-        extraction_result = _make_extraction_result(video_vm)
+        extraction_result = _make_extraction_result(_make_video_stream(source))
 
         phase = _make_probe_phase(
             job_result, extraction_result, collector=collector

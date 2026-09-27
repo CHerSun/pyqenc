@@ -4,8 +4,12 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from pyqenc.models import ChunkMetadata, CodecConfig, CropParams, Strategy
+from pyqenc.models import CodecConfig, CropParams, Strategy
 from pyqenc.phases.encoding import ChunkEncoder
+from pyqenc.stream_model import (
+    CropParams as _CP,
+)
+from pyqenc.stream_model import ExtendedVideoStream, File, VideoStream, VideoStreamChunk, VideoStreamInfo
 from pyqenc.utils.ffmpeg_runner import (
     _PROGRESS_FLAGS,
     FFmpegRequest,
@@ -34,8 +38,8 @@ def _make_strategy() -> Strategy:
         default_quality = 28.0,
         default_preset  = "fast",
         quality_range   = (0.0, 51.0),
+        pre_input_args  = [],
         encoder_args    = [
-            "-i", "{input}",
             "-c:v", "libx265",
             "-preset", "{preset}",
             "-crf", "{quality}",
@@ -48,13 +52,21 @@ def _make_strategy() -> Strategy:
     return Strategy(preset="fast", profile="h265", codec=codec, profile_args=[])
 
 
-def _make_chunk() -> ChunkMetadata:
-    return ChunkMetadata(
-        path=Path("/tmp/chunk.mkv"),
-        chunk_id="00꞉00꞉00․000-00꞉00꞉10․000",
-        start_timestamp=0.0,
-        end_timestamp=10.0,
-        frame_count=250,
+def _make_chunk() -> VideoStreamChunk:
+    stream = ExtendedVideoStream(
+        stream = VideoStream(
+            file = File(path="/tmp/source.mkv", file_size_bytes=64),
+            info = VideoStreamInfo(
+                track_id=0, codec_name="hevc", fps=25.0,
+                fps_fraction=__import__("fractions").Fraction(25, 1),
+                resolution="1920x1080", duration_seconds=10.0,
+            ),
+        ),
+        frame_count = 250,
+        crop        = _CP(),
+    )
+    return VideoStreamChunk(
+        stream=stream, start_timestamp=0.0, end_timestamp=10.0, frame_count=250,
     )
 
 
@@ -95,16 +107,19 @@ def _captured_cmd(encoder: ChunkEncoder, crop: CropParams | None) -> list[str]:
 
 class TestEncodeCommandGolden:
     def test_golden_argv(self) -> None:
-        """Bug prevented: the encode call-site conversion drifting from the
-        original hand-built command (strategy template split, ``-f matroska``
-        tmp output, chapter guard)."""
+        """Bug prevented: the direct-from-source encode drifting from the
+        intended windowed command — source + selector + input-side window,
+        strategy output stage, ``-f matroska`` tmp output, chapter guard."""
         crop = CropParams(top=140, bottom=140, left=0, right=0)
         encoder = _make_encoder(crop)
         cmd = _captured_cmd(encoder, crop)
 
         assert cmd == [
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
-            "-i", str(Path("/tmp/chunk.mkv")),
+            "-ss", "0.0",
+            "-t", "10.0",
+            "-i", str(Path("/tmp/source.mkv")),
+            "-map", "0:0",
             "-c:v", "libx265",
             "-preset", "fast",
             "-crf", "28.0",

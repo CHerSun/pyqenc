@@ -270,7 +270,7 @@ def test_generate_metrics_vif_shares_vmaf_path(tmp_path: Path) -> None:
     # Feature: vif-metric-support, Property 15: _generate_metrics VIF shares vmaf path
     """
     from pyqenc.quality import MetricType as _MetricType
-    from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
+    from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRunResult
 
     evaluator = QualityEvaluator(work_dir=tmp_path)
 
@@ -300,7 +300,7 @@ def test_generate_metrics_vif_shares_vmaf_path(tmp_path: Path) -> None:
         artifacts = asyncio.run(
             evaluator._generate_metrics(
                 encoded          = tmp_path / "encoded.mkv",
-                reference        = tmp_path / "reference.mkv",
+                reference        = FFmpegInput(path=tmp_path / "reference.mkv"),
                 ref_crop         = __import__("pyqenc.models", fromlist=["CropParams"]).CropParams(),
                 output_prefix    = str(tmp_path / "test."),
                 metrics_sampling = 1,

@@ -912,7 +912,6 @@ class TestAppConfigRoundTrip:
         assert round_tripped.encoding.visual_hash       == config.encoding.visual_hash
         assert round_tripped.extraction.include         == config.extraction.include
         assert round_tripped.extraction.exclude         == config.extraction.exclude
-        assert round_tripped.chunking.mode              == config.chunking.mode
         assert round_tripped.chunking.scene_threshold   == config.chunking.scene_threshold
         assert round_tripped.chunking.min_scene_length  == config.chunking.min_scene_length
         assert set(round_tripped.audio.filters.keys())  == set(config.audio.filters.keys())

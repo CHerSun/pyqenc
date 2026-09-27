@@ -20,7 +20,6 @@ from pyqenc.constants import (
     SUCCESS_SYMBOL_MAJOR,
 )
 from pyqenc.models import (
-    ChunkingMode,
     CleanupLevel,
     CropParams,
 )
@@ -186,17 +185,6 @@ def _add_crop_arguments(parser: argparse.ArgumentParser) -> None:
 def _add_chunking_arguments(parser: argparse.ArgumentParser) -> None:
     """Add chunking arguments (used by subcommands that depend on ChunkingPhase)."""
     parser.add_argument(
-        "--chunking-mode",
-        choices=["lossless", "remux"],
-        default=None,
-        dest="chunking_mode",
-        metavar="CHUNKING_MODE",
-        help=(
-            "Chunking method: 'lossless' (default) re-encodes chunks to FFV1 for frame-perfect boundaries; "
-            "'remux' uses stream-copy for faster chunking and smaller intermediate files but boundaries snap to the nearest I-frame."
-        ),
-    )
-    parser.add_argument(
         "--scene-threshold",
         type=float,
         default=None,
@@ -302,12 +290,6 @@ def _build_config(args: argparse.Namespace) -> "AppConfig":
         config.extraction.exclude = args.exclude
 
     # --- chunking ---
-    chunking_val = getattr(args, "chunking_mode", None)
-    if chunking_val is not None:
-        config.chunking.mode = (
-            ChunkingMode.REMUX if chunking_val == ChunkingMode.REMUX.value
-            else ChunkingMode.LOSSLESS
-        )
     if getattr(args, "scene_threshold", None) is not None:
         config.chunking.scene_threshold = args.scene_threshold
     if getattr(args, "min_scene_length", None) is not None:

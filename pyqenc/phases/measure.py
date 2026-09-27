@@ -309,10 +309,12 @@ def _resolve_crop(
         logger.debug("Using explicit crop params: %s", crop_params)
         return crop_params
 
-    # Prefer probe.yaml — crop is now owned by ProbePhase
+    # Prefer probe.yaml — crop is owned by ProbePhase. Loading materializes
+    # an empty CropParams when the key is absent, and an empty crop is a
+    # concrete resolution ("no crop") — never a reason to keep probing.
     from pyqenc.state import ProbeState
     probe = ProbeState.load(work_dir / "probe.yaml")
-    if probe is not None and probe.crop is not None:
+    if probe is not None:
         logger.debug("Loaded crop from probe.yaml: %s", probe.crop)
         return probe.crop
 
@@ -374,6 +376,8 @@ async def _run_metrics(
     graph_path:       Path,
     subsample_factor: int,
     bar_title:        str,
+    duration_seconds: float,
+    fps_value:        Fraction | None,
 ) -> ChunkQualityStats:
     """Run quality metric computation for one source/target pair.
 
@@ -389,6 +393,8 @@ async def _run_metrics(
         metrics_dir:      Directory for raw metric log files (PSNR/SSIM/VMAF).
         graph_path:       Destination path for the quality metrics PNG plot.
         subsample_factor: Frame subsampling factor (≥1).
+        duration_seconds: The comparison duration (progress/plot extent).
+        fps_value:        Average fps for plot x-axis conversion.
 
     Returns:
         ``ChunkQualityStats`` mapping each ``MetricType`` to its key statistics.
@@ -398,10 +404,12 @@ async def _run_metrics(
     evaluator  = QualityEvaluator(metrics_dir)
     evaluation = await evaluator.evaluate_chunk_async(
         encoded          = target_video,
-        reference        = source_video,
+        reference        = FFmpegInput(path=source_video),
         ref_crop         = crop_params,
         targets          = [],
         output_dir       = metrics_dir,
+        duration_seconds = duration_seconds,
+        fps_value        = fps_value,
         subsample_factor = subsample_factor,
         show_progress    = True,
         plot_path        = graph_path,
@@ -1199,6 +1207,8 @@ async def run_measure(
             graph_path       = graph_paths[target_video],
             subsample_factor = metrics_sampling,
             bar_title        = f"measuring target {idx:>2}",
+            duration_seconds = eff_dur or 0.0,
+            fps_value        = source_meta.fps_fraction if source_meta is not None else None,
         )
 
         _write_sidecar(

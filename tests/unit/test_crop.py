@@ -11,7 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-from pyqenc.models import CropParams, VideoMetadata
+from pyqenc.models import CropParams
+from pyqenc.stream_model import File, VideoStream, VideoStreamInfo
 from pyqenc.utils.crop import detect_crop_parameters
 from pyqenc.utils.ffmpeg_runner import (
     _PROGRESS_FLAGS,
@@ -21,13 +22,16 @@ from pyqenc.utils.ffmpeg_runner import (
 )
 
 
-def _video() -> VideoMetadata:
-    """A video with 100 s duration, 24 fps, 1920x1080 — deterministic sampling."""
-    vm = VideoMetadata(path=Path("/src/source.mkv"))
-    vm._duration_seconds = 100.0
-    vm._fps              = 24.0
-    vm._resolution       = "1920x1080"
-    return vm
+def _video() -> VideoStream:
+    """A video stream with 100 s duration, 24 fps, 1920x1080 — deterministic sampling."""
+    return VideoStream(
+        file = File(path="/src/source.mkv"),
+        info = VideoStreamInfo(
+            track_id=0, duration_seconds=100.0, fps=24.0,
+            fps_fraction=__import__("fractions").Fraction(24, 1),
+            resolution="1920x1080",
+        ),
+    )
 
 
 class TestCropDetectCommand:
@@ -49,6 +53,7 @@ class TestCropDetectCommand:
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
             "-ss", "10.0",
             "-i", str(Path("/src/source.mkv")),
+            "-map", "0:0",
             "-vf", "select='not(mod(n\\,39))',cropdetect=24:2:0",
             "-vframes", "50",
             "-map_chapters", "-1",
@@ -57,11 +62,13 @@ class TestCropDetectCommand:
 
     def test_no_duration_returns_empty_crop_without_running(self) -> None:
         """A video without duration info skips crop detection entirely."""
-        vm = VideoMetadata(path=Path("/src/source.mkv"))
-        vm._duration_seconds = None
+        stream = VideoStream(
+            file = File(path="/src/source.mkv"),
+            info = VideoStreamInfo(track_id=0),
+        )
 
         with patch("pyqenc.utils.crop.run_ffmpeg") as mock_run:
-            crop = detect_crop_parameters(vm)
+            crop = detect_crop_parameters(stream)
 
         assert crop == CropParams()
         mock_run.assert_not_called()

@@ -8,6 +8,7 @@ algorithms for iterative encoding optimization.
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
@@ -16,7 +17,6 @@ from typing import (
     TypedDict,
     TypeVar,
 )
-from collections.abc import Iterable
 
 import pandas as pd
 
@@ -301,11 +301,10 @@ class _MetricStatistics(TypedDict):
 
 async def run_metrics(
     metrics:           Iterable[MetricType],
-    distorted:         Path,
-    reference:         Path,
+    distorted:         FFmpegInput,
+    reference:         FFmpegInput,
     crop_distorted:    CropParams,
     crop_reference:    CropParams,
-    duration:          int,
     width:             int,
     use_gpu:           bool,
     subsample:         int,
@@ -330,11 +329,14 @@ async def run_metrics(
     Args:
         metrics:           Metrics to compute.  VIF is automatically included when
                            VMAF is present (or when VIF is requested, VMAF is added).
-        distorted:         Path to the distorted (encoded) video.
-        reference:         Path to the reference video.
+        distorted:         The distorted (encoded) video as a runner input —
+                           attempts are read whole.
+        reference:         The reference video as a runner input — a chunk
+                           window arrives as ``chunk.as_input()`` (per-input
+                           ``-ss``/``-t``), so the window is fully bound to the
+                           input and the output timeline starts at ~0.
         crop_distorted:    Crop parameters for the distorted input.
         crop_reference:    Crop parameters for the reference input.
-        duration:          Limit comparison to this many seconds (0 = full video).
         width:             Scale both inputs to this width (0 = no scaling).
         use_gpu:           Use GPU-accelerated VMAF (``libvmaf_cuda``).
         subsample:         Frame subsampling factor (1 = every frame).
@@ -355,7 +357,7 @@ async def run_metrics(
         ValueError: If ``metrics`` is empty after deduplication.
     """
     if cwd is None:
-        cwd = distorted.parent
+        cwd = distorted.path.parent
 
     # Deduplicate and ensure VMAF is present when VIF is requested
     active: set[MetricType] = set(metrics)
@@ -438,18 +440,11 @@ async def run_metrics(
 
     filter_complex = f"{f_dist};{f_ref};" + ";".join(metric_filters)
 
-    # Both inputs share the comparison window; input-side -t bounds each input
-    # and the output timeline starts at ~0 automatically.
-    window  = duration if duration else None
     request = FFmpegRequest(
-        inputs = [
-            FFmpegInput(path=distorted.resolve(), duration_seconds=window),
-            FFmpegInput(path=reference.resolve(), duration_seconds=window),
-        ],
+        inputs         = [distorted, reference],
         output_args    = (),
         filter_complex = filter_complex,
     )
-
     return await run_ffmpeg_async(request, progress_callback=progress_callback, cwd=cwd)
 
 

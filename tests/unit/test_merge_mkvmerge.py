@@ -31,7 +31,6 @@ from pyqenc.constants import EXTRACTED_DIR, FINAL_OUTPUT_DIR, TIMESTAMPS_FILENAM
 from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import (
     CleanupLevel,
-    ExtendedVideoMetadata,
     PhaseOutcome,
     VideoMetadata,
 )
@@ -51,6 +50,31 @@ from pyqenc.phases.merge import (
 )
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import ArtifactState, JobState
+
+
+def _extended_stream(path: Path, frame_count: int) -> "ExtendedVideoStream":
+    """An ExtendedVideoStream for the source (fast facet + frame count)."""
+    from fractions import Fraction
+
+    from pyqenc.stream_model import (
+        ExtendedVideoStream,
+        File,
+        VideoStream,
+        VideoStreamInfo,
+    )
+
+    return ExtendedVideoStream(
+        stream=VideoStream(
+            file=File(path=path, file_size_bytes=64),
+            info=VideoStreamInfo(
+                track_id=0, codec_name="hevc", fps=24.0,
+                fps_fraction=Fraction(24, 1), resolution="1920x1080",
+                duration_seconds=3600.0,
+            ),
+        ),
+        frame_count=frame_count,
+        crop=__import__("pyqenc.models", fromlist=["CropParams"]).CropParams(),
+    )
 
 _APP_CONFIG = load_app_config(default_only=True)
 
@@ -144,7 +168,7 @@ def _make_merge_phase(
         outcome   = PhaseOutcome.COMPLETED,
         artifacts = [Artifact(path=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
         message   = "probe complete",
-        source    = ExtendedVideoMetadata.from_base(source_vm, frame_count=frame_count),
+        stream    = _extended_stream(source_vm.path, frame_count),
     )
     registry[ProbePhase] = probe
 

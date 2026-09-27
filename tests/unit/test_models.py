@@ -217,8 +217,8 @@ class TestStrategy:
             default_quality = 20.0,
             default_preset  = "slow",
             quality_range   = (0.0, 51.0),
+            pre_input_args  = [],
             encoder_args    = [
-                "-i", "{input}",
                 "-c:v", "libx265",
                 "-preset", "{preset}",
                 "-crf", "{quality}",
@@ -237,9 +237,8 @@ class TestStrategy:
         )
 
         # Without crop — -vf and {vf} both dropped
-        args = strategy.to_ffmpeg_args(18.5)
+        args = strategy.to_output_args(18.5)
         assert args == [
-            "-i", "{input}",
             "-c:v", "libx265",
             "-preset", "slow",
             "-crf", "18.5",
@@ -248,9 +247,8 @@ class TestStrategy:
         ]
 
         # With crop — -vf kept, {vf} replaced with filter
-        args_crop = strategy.to_ffmpeg_args(18.5, vf_filter="crop=1920:800:0:140")
+        args_crop = strategy.to_output_args(18.5, vf_filter="crop=1920:800:0:140")
         assert args_crop == [
-            "-i", "{input}",
             "-c:v", "libx265",
             "-preset", "slow",
             "-crf", "18.5",
@@ -267,9 +265,8 @@ class TestStrategy:
             default_preset  = "p7",
             quality_range   = (1.0, 51.0),
             quality_label   = "CQ",
+            pre_input_args  = ["-hwaccel", "cuda"],
             encoder_args    = [
-                "-hwaccel", "cuda",
-                "-i", "{input}",
                 "-c:v", "hevc_nvenc",
                 "-cq:v", "{quality}",
                 "-vf", "scale_cuda=format=p010le:{vf}",
@@ -281,11 +278,11 @@ class TestStrategy:
         strategy = Strategy(preset="p7", profile="hevc-nvenc-hq", codec=codec, profile_args=["-tune:v", "hq"])
 
         # Without crop — trailing : left in place (ffmpeg tolerates it)
-        args = strategy.to_ffmpeg_args(28.0)
+        args = strategy.to_output_args(28.0)
         vf_idx = args.index("-vf")
         assert args[vf_idx + 1] == "scale_cuda=format=p010le:"
 
         # With crop — filter appended after the colon
-        args_crop = strategy.to_ffmpeg_args(28.0, vf_filter="crop=1920:800:0:140")
+        args_crop = strategy.to_output_args(28.0, vf_filter="crop=1920:800:0:140")
         vf_idx = args_crop.index("-vf")
         assert args_crop[vf_idx + 1] == "scale_cuda=format=p010le:crop=1920:800:0:140"

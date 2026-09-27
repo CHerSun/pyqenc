@@ -135,15 +135,16 @@ class PhaseOutcome(Enum):
 class Strategy(BaseModel):
     """Resolved encoding strategy — single owner of identity, codec, and ffmpeg args.
 
-    Carries everything needed to identify the strategy (``name``/``safe_name``
-    for logs, YAML keys, and filesystem paths) and to encode with it
-    (codec config, profile args, ffmpeg arg generation).
+    Carries everything needed to identify the strategy (``name`` for logs,
+    YAML keys, and filesystem paths — safe by construction via config-load
+    validation of profile/preset names) and to encode with it: the codec's
+    two argument stages and the ffmpeg arg generation.
 
     Attributes:
         preset:       FFmpeg preset (e.g. ``'slow'``, ``'veryslow'``).
         profile:      Profile name (e.g. ``'h265-aq'``, ``'h264-anime'``).
         codec:        Resolved codec configuration.
-        profile_args: Resolved profile extra ffmpeg arguments.
+        profile_args: Resolved profile extra ffmpeg arguments (output stage).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -161,23 +162,23 @@ class Strategy(BaseModel):
 
     @property
     def name(self) -> str:
-        """Display name used in logs and YAML (e.g. ``'slow+h265-aq'``)."""
+        """Display name used in logs, YAML and filesystem paths (e.g. ``'slow+h265-aq'``)."""
         return f"{self.preset}+{self.profile}"
 
     @property
-    def safe_name(self) -> str:
-        """Filesystem-safe name for directory paths (e.g. ``'slow+h265-aq'``)."""
-        return self.name.replace(":", "_")
+    def pre_input_args(self) -> tuple[str, ...]:
+        """The codec's pre-input stage (``-hwaccel`` / ``-init_hw_device`` / vulkan setup).
 
-    def to_ffmpeg_args(self, quality: Decimal, vf_filter: str | None = None) -> list[str]:
-        """Expand the codec's ``encoder_args`` template into a concrete ffmpeg argument list.
+        The encoder merges these into the encode request's input; the runner
+        emits them before the input's window flags and ``-i``.
+        """
+        return tuple(self.codec.pre_input_args)
+
+    def to_output_args(self, quality: Decimal, vf_filter: str | None = None) -> list[str]:
+        """Expand the codec's ``encoder_args`` template into the output-stage args.
 
         Substitution rules applied to every element of ``codec.encoder_args``:
 
-        - ``'{input}'``       → kept as-is for the caller to replace with the
-          actual input ``Path``.  The preceding ``'-i'`` flag is a separate
-          element in the template.  Everything before ``'-i'`` is pre-input
-          (e.g. ``-hwaccel`` options).
         - ``'{quality}'``     → replaced with ``str(quality)``.  The ``Decimal``
           value is already quantized to the codec's granularity, so ``str()``
           produces the correct representation (e.g. ``'18.5'``, ``'19'``).
@@ -198,53 +199,44 @@ class Strategy(BaseModel):
             vf_filter: Optional ffmpeg video filter expression (e.g. ``'crop=1920:800:0:140'``).
 
         Returns:
-            Expanded argument list with ``'{input}'`` still present as a string
-            sentinel for the caller to substitute with the actual ``Path``.
+            The expanded output-stage argument list (the runner owns ``-i``,
+            ``-y`` and the ``.tmp`` muxer stage).
 
         Raises:
-            ValueError: If ``codec.encoder_args`` contains no ``'{input}'`` sentinel.
+            ValueError: If ``codec.encoder_args`` still contains a legacy
+                        ``'{input}'`` sentinel.
         """
-        quality_str = str(quality)
-        result: list[str] = []
-        for arg in self.codec.encoder_args:
-            if arg == "{profile_args}":
-                result.extend(self.profile_args)
-            elif arg == "{vf}":
-                if vf_filter:
-                    result.append(vf_filter)
-                else:
-                    # Standalone {vf} with no filter — also drop the preceding -vf flag
-                    if result and result[-1] == "-vf":
-                        result.pop()
-            else:
-                expanded = arg.replace("{quality}", quality_str).replace("{preset}", self.preset)
-                # {vf} embedded inside a larger filter chain string
-                if "{vf}" in expanded:
-                    expanded = expanded.replace("{vf}", vf_filter or "")
-                result.append(expanded)
-        # repeat templating for profile args
-        expanded_args = result
-        result = []
-        for arg in expanded_args:
-            if arg == "{profile_args}":
-                result.extend(self.profile_args)
-            elif arg == "{vf}":
-                if vf_filter:
-                    result.append(vf_filter)
-                else:
-                    # Standalone {vf} with no filter — also drop the preceding -vf flag
-                    if result and result[-1] == "-vf":
-                        result.pop()
-            else:
-                expanded = arg.replace("{quality}", quality_str).replace("{preset}", self.preset)
-                # {vf} embedded inside a larger filter chain string
-                if "{vf}" in expanded:
-                    expanded = expanded.replace("{vf}", vf_filter or "")
-                result.append(expanded)
 
-        if "{input}" not in result:
+        def _expand(args: list[str]) -> list[str]:
+            quality_str = str(quality)
+            result: list[str] = []
+            for arg in args:
+                if arg == "{profile_args}":
+                    result.extend(self.profile_args)
+                elif arg == "{vf}":
+                    if vf_filter:
+                        result.append(vf_filter)
+                    else:
+                        # Standalone {vf} with no filter — also drop the preceding -vf flag
+                        if result and result[-1] == "-vf":
+                            result.pop()
+                else:
+                    expanded = arg.replace("{quality}", quality_str).replace("{preset}", self.preset)
+                    # {vf} embedded inside a larger filter chain string
+                    if "{vf}" in expanded:
+                        expanded = expanded.replace("{vf}", vf_filter or "")
+                    result.append(expanded)
+            return result
+
+        result = _expand(self.codec.encoder_args)
+        # repeat templating for profile args (they may carry sentinels too)
+        result = _expand(result)
+
+        if "{input}" in result:
             raise ValueError(
-                f"Codec '{self.codec.name}' encoder_args must contain a '{{input}}' sentinel"
+                f"Codec '{self.codec.name}' encoder_args contains a legacy "
+                f"'{{input}}' sentinel — the runner owns '-i <path>'; move any "
+                f"pre-input tokens to the codec's pre_input_args."
             )
         return result
 
@@ -347,11 +339,15 @@ class CodecConfig(BaseModel):
                              typically use ``0.5``; QP-based codecs prefer ``1.0`` (integer
                              steps).  The search result is rounded to the nearest multiple
                              of this value.
-        encoder_args:        Full ffmpeg argument template for this codec.  Sentinels:
+        pre_input_args:      Input-stage tokens emitted before the input's
+                             window flags and ``-i`` (e.g. ``-hwaccel`` /
+                             ``-init_hw_device`` vulkan setup). The single
+                             source of truth for the default is here in the
+                             bundled config.
+        encoder_args:        The output-stage ffmpeg argument template (the
+                         ``"-i", "{input}"`` pair is gone — the runner owns
+                         ``-i <path>``).  Sentinels:
 
-                         - ``'-i'`` + ``'{input}'`` — two consecutive items; ``{input}``
-                           is replaced with the actual input ``Path`` at runtime.
-                           Args before ``'-i'`` are pre-input (e.g. ``-hwaccel``).
                          - ``'{quality}'`` — replaced with the quality value; may appear
                            multiple times (e.g. ``-cq:v {quality} -qmin {quality}``).
                          - ``'{preset}'`` — replaced with the strategy preset name.
@@ -370,6 +366,7 @@ class CodecConfig(BaseModel):
     quality_label:       str            = "CRF"
     quality_granularity: Decimal        = Decimal("0.5")
     quality_max_step:    Decimal|None   = None
+    pre_input_args:      list[str]      = Field(default_factory=list)
     encoder_args:        list[str]      = Field(default_factory=list)
     presets:             list[str]      = Field(default_factory=list)
 
