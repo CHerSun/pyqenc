@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 
 def _drive(
     config:   "AppConfig",
-    source:   Path,
+    source:   LongPath,
     work_dir: Path,
     target:   type[Phase],
     *,

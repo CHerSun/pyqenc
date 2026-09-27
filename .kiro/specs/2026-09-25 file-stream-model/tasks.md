@@ -35,7 +35,7 @@ Staged so every task lands green: the runner converts first (pure mechanical, co
   - Sidecar (de)serialization for the new slices: `job.yaml` shrunk schema, `extraction.yaml` inventory, `chunking.yaml` scenes without `chunking_mode` — `model_dump(exclude_none=True)`/`model_validate` only, no hand-written pairs; type conversions (Fraction/Decimal/Path) declared once on annotated types
   - Unit tests: unique-slice dumps (no parent fields leak), `dump → load → dump` byte-identity, source-identity validation, naming round-trips (`parse(format(x)) == x`)
 
-- [ ] 3. JobPhase + CLI (Req 1)
+- [x] 3. JobPhase + CLI (Req 1)
   - CLI `source` → `type=LongPath`; `api._drive` passes it through
   - JobPhase: eager `File`, shrunk `job.yaml`, path+size mismatch check, drop the estimation call and the resolution re-probe
   - `JobPhaseResult` carries `File`

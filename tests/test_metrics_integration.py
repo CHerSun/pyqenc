@@ -18,11 +18,13 @@ from pyqenc.app_config import AppConfig, load_app_config
 from pyqenc.metrics import MetricKey, MetricsCollector, NoOpMetricsCollector
 from pyqenc.models import (
     CleanupLevel,
+    PhaseOutcome,
     Strategy,
     VideoMetadata,
 )
 from pyqenc.phase import Recovery
 from pyqenc.utils.ffmpeg_runner import FFmpegRequest
+from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 _SHARED_APP_CONFIG: AppConfig = load_app_config(default_only=True)
 
@@ -107,7 +109,6 @@ class TestJobPhaseTiming:
         # Patch VideoMetadata so no real ffprobe/ffmpeg calls happen.
         with (
             patch("pyqenc.phases.job.VideoMetadata", return_value=stub_vm),
-            patch("pyqenc.phases.job.log_disk_space_info"),
         ):
             phase.run()
 
@@ -118,36 +119,39 @@ class TestJobPhaseTiming:
         )
 
     def test_job_probe_not_recorded_when_reused(self, tmp_path: Path) -> None:
-        """When ``job.yaml`` already exists and source matches, probing is skipped.
+        """When ``job.yaml`` already exists and the source identity matches,
+        the sidecar is kept untouched and the phase returns REUSED.
 
-        The phase returns REUSED without re-probing, so ``time(JOB_PROBE)``
-        must NOT be called.
+        The shrunk sidecar no longer persists fast metadata, so a reuse run
+        still re-probes it in-memory (interim, until downstream phases migrate
+        to the stream model) — the observable reuse contract is the outcome
+        plus an unmodified ``job.yaml``.
 
         Validates: Requirements 6.5
         """
         from pyqenc.phases.job import JobPhase
-        from pyqenc.state import JobState
+        from pyqenc.stream_model import File, JobSidecar
 
         config   = _make_config(tmp_path)
         volatile = _make_volatile(tmp_path)
         collector = _spy_collector()
         phase    = JobPhase(config, collector=collector, **volatile)
 
-        # Pre-create a valid job.yaml so the phase takes the REUSED path.
+        # Pre-create a valid job.yaml (the File dump) so the phase takes the
+        # REUSED path.
         volatile["work_dir"].mkdir(parents=True, exist_ok=True)
-        stub_vm = _stub_video_metadata(volatile["source"])
-        job = JobState(source=stub_vm)
-        job.save(volatile["work_dir"] / "job.yaml")
+        sidecar = JobSidecar(source=File(
+            path            = volatile["source"],
+            file_size_bytes = volatile["source"].stat().st_size,
+        ))
+        job_yaml = volatile["work_dir"] / "job.yaml"
+        write_yaml_atomic(job_yaml, sidecar.model_dump(exclude_none=True))
+        before = job_yaml.read_bytes()
 
-        with (
-            patch("pyqenc.phases.job.log_disk_space_info"),
-        ):
-            phase.run()
+        result = phase.run()
 
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.JOB not in time_keys_called, (
-            f"Expected JOB_PROBE NOT called on reuse, but got: {time_keys_called}"
-        )
+        assert result.outcome == PhaseOutcome.REUSED
+        assert job_yaml.read_bytes() == before, "reuse must not rewrite job.yaml"
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
         """``JobPhase`` must run without error when given a ``NoOpMetricsCollector``.
@@ -165,7 +169,6 @@ class TestJobPhaseTiming:
 
         with (
             patch("pyqenc.phases.job.VideoMetadata", return_value=stub_vm),
-            patch("pyqenc.phases.job.log_disk_space_info"),
         ):
             result = phase.run()
 

@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
+import yaml
+
 from pyqenc.constants import (
     FFMPEG_ARG_VF,
     FFMPEG_MUXER_IMAGE2,
@@ -24,8 +26,10 @@ from pyqenc.constants import (
 )
 from pyqenc.models import CropParams, VideoMetadata
 from pyqenc.quality import ChunkQualityStats, MetricType
-from pyqenc.state import JobState, MeasureSidecar
+from pyqenc.state import MeasureSidecar
+from pyqenc.stream_model import JobSidecar
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg_async
+from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 logger = logging.getLogger(__name__)
@@ -314,22 +318,46 @@ def _resolve_crop(
 
     # Fall back: validate source via job.yaml, then give up
     job_yaml = work_dir / "job.yaml"
-    job = JobState.load(job_yaml)
+    job = _load_job_source_path(job_yaml)
 
     if job is None:
         logger.info("No job.yaml found in %s — proceeding without crop", work_dir)
         return CropParams()
 
-    if job.source.path.resolve() != source_video.resolve():
+    if job.resolve() != source_video.resolve():
         logger.info(
             "job.yaml source (%s) does not match source video (%s) — proceeding without crop",
-            job.source.path,
+            job,
             source_video,
         )
         return CropParams()
 
     logger.info("probe.yaml found but contains no crop data — proceeding without crop")
     return CropParams()
+
+
+def _load_job_source_path(job_yaml: Path) -> LongPath | None:
+    """Read the source path recorded in ``job.yaml`` (the File dump).
+
+    Interim reader for the crop fallback's source-identity check; measure
+    adopts the stream-model loaders when its phase migrates.
+
+    Args:
+        job_yaml: The ``job.yaml`` path.
+
+    Returns:
+        The recorded source path, or ``None`` when absent/unparseable.
+    """
+    if not job_yaml.exists():
+        return None
+    try:
+        with job_yaml.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        sidecar = JobSidecar.model_validate(data)
+    except Exception as exc:  # noqa: BLE001 — any parse failure means "no crop"
+        logger.warning("Could not load %s: %s", job_yaml, exc)
+        return None
+    return sidecar.source.path
 
 
 # ---------------------------------------------------------------------------

@@ -352,7 +352,7 @@ def _create_auto_subcommand(subparsers: argparse._SubParsersAction) -> None:
         "auto",
         help="Execute complete pipeline from extraction to final merge",
     )
-    p.add_argument("source", type=Path, help="Source MKV video file")
+    p.add_argument("source", type=LongPath, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
     _add_filter_arguments(p)
@@ -368,7 +368,7 @@ def _create_extract_subcommand(subparsers: argparse._SubParsersAction) -> None:
         "extract",
         help="Extract video and audio streams from source MKV",
     )
-    p.add_argument("source", type=Path, help="Source MKV video file")
+    p.add_argument("source", type=LongPath, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
     _add_filter_arguments(p)
@@ -382,7 +382,7 @@ def _create_chunk_subcommand(subparsers: argparse._SubParsersAction) -> None:
         "chunk",
         help="Split extracted video into scene-based chunks",
     )
-    p.add_argument("source", type=Path, help="Source MKV video file")
+    p.add_argument("source", type=LongPath, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
     _add_filter_arguments(p)
@@ -397,7 +397,7 @@ def _create_encode_subcommand(subparsers: argparse._SubParsersAction) -> None:
         "encode",
         help="Encode chunks to meet quality targets",
     )
-    p.add_argument("source", type=Path, help="Source MKV video file")
+    p.add_argument("source", type=LongPath, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
     _add_filter_arguments(p)
@@ -413,7 +413,7 @@ def _create_audio_subcommand(subparsers: argparse._SubParsersAction) -> None:
         "audio",
         help="Process audio streams with normalization",
     )
-    p.add_argument("source", type=Path, help="Source MKV video file")
+    p.add_argument("source", type=LongPath, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
     _add_filter_arguments(p)
@@ -426,7 +426,7 @@ def _create_merge_subcommand(subparsers: argparse._SubParsersAction) -> None:
         "merge",
         help="Merge encoded chunks and audio into final MKV files",
     )
-    p.add_argument("source", type=Path, help="Source MKV video file")
+    p.add_argument("source", type=LongPath, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
     _add_filter_arguments(p)

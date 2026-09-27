@@ -145,61 +145,15 @@ class ProbeState(BaseModel):
 
 
 class JobState(BaseModel):
-    """Stable source video parameters stored in ``job.yaml``.
+    """Interim in-memory fast source metadata, carried on ``JobPhaseResult.job``.
 
-    Contains only run-invariant metadata — no phase status, no chunk tracking.
-    Crop and frame count are owned by ProbePhase and stored in ``probe.yaml``.
+    ``job.yaml`` persists only the :class:`~pyqenc.stream_model.File` dump —
+    the fast facet is re-probed each run until downstream phases migrate to
+    the stream model (spec ``2026-09-25 file-stream-model``); this model then
+    disappears with its last consumer.
     """
 
     source: VideoMetadata
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict using ``model_dump_full``."""
-        data = self.source.model_dump_full()
-        # Convert Path to str for YAML serialisation
-        data["path"] = str(data["path"])
-        return {"source": data}
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict) -> JobState:
-        """Restore from a dict loaded from ``job.yaml``.
-
-        Any ``crop`` field present in old files is silently ignored — crop
-        is now owned by ``ProbePhase`` and stored in ``probe.yaml``.
-        """
-        source_data = data["source"]
-        source_data = {**source_data, "path": Path(source_data["path"])}
-        source = VideoMetadata.model_validate_full(source_data)
-        return cls(source=source)
-
-    @classmethod
-    def load(cls, path: Path) -> Self | None:
-        """Load ``JobState`` from *path*.
-
-        Returns:
-            ``JobState`` if the file exists and is valid, ``None`` otherwise.
-        """
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return cls.from_yaml_dict(data)
-        except Exception as exc:
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
-
-    def save(self, path: Path) -> None:
-        """Write this ``JobState`` to *path* atomically.
-
-        Creates parent directories as needed.
-
-        Args:
-            path: Destination YAML file path.
-        """
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_yaml_atomic(path, self.to_yaml_dict())
-        logger.debug("Saved %s", path.name)
 
 
 class ChunkingParams(BaseModel):
