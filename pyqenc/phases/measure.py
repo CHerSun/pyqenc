@@ -24,10 +24,10 @@ from pyqenc.constants import (
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
-from pyqenc.models import CropParams, VideoMetadata
+from pyqenc.models import CropParams
 from pyqenc.quality import ChunkQualityStats, MetricType
 from pyqenc.state import MeasureSidecar
-from pyqenc.stream_model import JobSidecar
+from pyqenc.stream_model import File, JobSidecar, VideoStream, VideoStreamInfo
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg_async
 from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.yaml_utils import write_yaml_atomic
@@ -67,7 +67,7 @@ class ScreenshotPositions:
     rational arithmetic via fractions.Fraction to avoid float drift.
     """
     frame_nums: list[int]   # canonical 0-based frame indices
-    fps:        Fraction    # from source VideoMetadata.fps_fraction
+    fps:        Fraction    # exact rational source fps (info.fps_fraction)
     step:       int         # frame step used for A4 fallback
 
     def seek_ts(self, frame_num: int) -> str:
@@ -112,7 +112,7 @@ def compute_screenshot_positions(
 
     Args:
         total_frames:  Total frame count of the source video.
-        fps:           Exact rational FPS from VideoMetadata.fps_fraction.
+        fps:           Exact rational FPS (``VideoStreamInfo.fps_fraction``).
         count:         Number of interior screenshot positions.
         include_edges: When True, also include frame 0 and the last frame.
 
@@ -144,7 +144,7 @@ def compute_screenshot_positions_interval(
     bound of 24 hours is used so ffmpeg naturally stops at EOF.
 
     Args:
-        fps:          Exact rational FPS from VideoMetadata.fps_fraction.
+        fps:          Exact rational FPS (``VideoStreamInfo.fps_fraction``).
         interval_s:   Interval between screenshots in seconds (> 0).
         total_frames: Total frame count of the source video, or None if unknown.
         cap:          Maximum number of positions to return, or None for no cap.
@@ -420,15 +420,47 @@ async def _run_metrics(
 
 
 
+def _load_video_stream(path: Path) -> VideoStream:
+    """Load an arbitrary video file as a :class:`VideoStream` (measure loader).
+
+    Composes a :class:`~pyqenc.stream_model.File` with a freshly probed
+    :class:`~pyqenc.stream_model.VideoStreamInfo` (fast facet of the first
+    video stream) — the stream-model replacement for the ad-hoc
+    ``VideoMetadata`` instances this module used to build.
+
+    Args:
+        path: The video file to probe.
+
+    Returns:
+        The video stream; missing ffprobe fields stay ``None``.
+    """
+    from pyqenc.phases.extraction import _probe_streams_json, _video_info
+
+    try:
+        data = _probe_streams_json(path)
+        raw = next(
+            (r for r in data.get("streams", [])
+             if r.get("codec_type") == "video" and not (
+                 (r.get("disposition") or {}).get("attached_pic", 0) == 1
+             )),
+            None,
+        )
+    except (RuntimeError, OSError) as exc:
+        logger.warning("Could not probe %s: %s", path.name, exc)
+        raw = None
+    info = _video_info(raw) if raw is not None else VideoStreamInfo(track_id=0)
+    return VideoStream(file=File(path=path), info=info)
+
+
 def _effective_resolution(
-    meta:        VideoMetadata,
+    stream:     VideoStream,
     crop_params: CropParams,
     width:       int | None,
 ) -> tuple[int, int]:
     """Compute effective (width, height) after crop and optional scale.
 
     Args:
-        meta:        Video metadata with a populated ``resolution`` string.
+        stream:      Video stream with a probed ``resolution`` string.
         crop_params: Crop to apply (may be empty/no-op).
         width:       Target scale width, or ``None`` for no scaling.
 
@@ -436,14 +468,15 @@ def _effective_resolution(
         ``(effective_width, effective_height)`` as integers.
 
     Raises:
-        ValueError: If ``meta.resolution`` is unavailable or unparseable.
+        ValueError: If the stream's resolution is unavailable or unparseable.
     """
-    if not meta.resolution:
-        raise ValueError(f"Resolution unavailable for {meta.path}")
+    resolution = stream.info.resolution
+    if not resolution:
+        raise ValueError(f"Resolution unavailable for {stream.file.path}")
 
-    parts = meta.resolution.split("x")
+    parts = resolution.split("x")
     if len(parts) != 2:
-        raise ValueError(f"Unexpected resolution format: {meta.resolution!r}")
+        raise ValueError(f"Unexpected resolution format: {resolution!r}")
 
     raw_w = int(parts[0])
     raw_h = int(parts[1])
@@ -463,10 +496,10 @@ def _effective_resolution(
 
 
 def _check_resolution_match(
-    source_meta: VideoMetadata,
-    target_meta: VideoMetadata,
-    crop_params: CropParams,
-    width:       int | None,
+    source_stream: VideoStream,
+    target_stream: VideoStream,
+    crop_params:   CropParams,
+    width:         int | None,
 ) -> None:
     """Verify source and target have matching effective resolution after crop and scale.
 
@@ -475,7 +508,7 @@ def _check_resolution_match(
     to *width* if provided.
 
     Args:
-        source_meta: Metadata for the source (reference) video.
+        source_stream: The source (reference) video stream.
         target_meta: Metadata for the target (encoded) video.
         crop_params: Crop applied to the source.
         width:       Optional scale width applied to both after cropping.
@@ -484,17 +517,17 @@ def _check_resolution_match(
         ValueError: If effective resolutions differ, with an actionable
                     suggestion for ``--crop`` / ``--width`` arguments.
     """
-    src_w, src_h = _effective_resolution(source_meta, crop_params, width)
+    src_w, src_h = _effective_resolution(source_stream, crop_params, width)
     # Target is never cropped — pass empty CropParams
-    tgt_w, tgt_h = _effective_resolution(target_meta, CropParams(), width)
+    tgt_w, tgt_h = _effective_resolution(target_stream, CropParams(), width)
 
     if src_w == tgt_w and src_h == tgt_h:
         return  # match — nothing to do
 
     # Build an actionable suggestion.
     # Raw dimensions (before any crop/scale applied here)
-    src_parts = source_meta.resolution.split("x") if source_meta.resolution else ["?", "?"]
-    tgt_parts = target_meta.resolution.split("x") if target_meta.resolution else ["?", "?"]
+    src_parts = (source_stream.info.resolution or "?x?").split("x")
+    tgt_parts = (target_stream.info.resolution or "?x?").split("x")
     src_raw_w = int(src_parts[0]) if src_parts[0].isdigit() else 0
     src_raw_h = int(src_parts[1]) if src_parts[1].isdigit() else 0
     tgt_raw_w = int(tgt_parts[0]) if tgt_parts[0].isdigit() else 0
@@ -996,20 +1029,20 @@ async def run_measure(
     # Resolution validation and parameter summary logging
     # ------------------------------------------------------------------
 
-    source_meta = VideoMetadata(path=source_video)
+    source_stream = _load_video_stream(source_video)
 
     if not screenshots_only:
-        target_metas: list[VideoMetadata] = [VideoMetadata(path=t) for t in target_videos]
+        target_streams: list[VideoStream] = [_load_video_stream(t) for t in target_videos]
 
-        for target_video, target_meta in zip(target_videos, target_metas):
+        for target_video, target_stream in zip(target_videos, target_streams):
             try:
-                _check_resolution_match(source_meta, target_meta, resolved_crop, width)
+                _check_resolution_match(source_stream, target_stream, resolved_crop, width)
             except ValueError as exc:
                 raise ValueError(
                     f"Resolution check failed for {target_video.name}: {exc}"
                 ) from exc
     else:
-        target_metas = []
+        target_streams = []
 
     fmt_key_value_table({
         "source":      str(source_video),
@@ -1051,13 +1084,13 @@ async def run_measure(
     # Duration probing (needed for sidecar and duration-mismatch warnings)
     # ------------------------------------------------------------------
 
-    source_duration: float | None = source_meta.duration_seconds
+    source_duration: float | None = source_stream.info.duration_seconds
     if source_duration is None:
         logger.warning("Duration unavailable for source video: %s", source_video.name)
 
     target_durations: dict[Path, float | None] = {}
-    for target_video, target_meta in zip(target_videos, target_metas):
-        dur = target_meta.duration_seconds
+    for target_video, target_stream in zip(target_videos, target_streams):
+        dur = target_stream.info.duration_seconds
         if dur is None:
             logger.warning("Duration unavailable for target video: %s", target_video.name)
         target_durations[target_video] = dur
@@ -1086,7 +1119,7 @@ async def run_measure(
     positions: ScreenshotPositions | None = None
 
     # Probe fps first (fast ffprobe call, already triggered by resolution check above)
-    source_fps_frac = source_meta.fps_fraction
+    source_fps_frac = source_stream.info.fps_fraction
 
     # frame_count is only available from ExtendedVideoMetadata (e.g. ProbePhase result).
     # The standalone measure command does not have it — use duration-based estimate as fallback.
@@ -1208,7 +1241,7 @@ async def run_measure(
             subsample_factor = metrics_sampling,
             bar_title        = f"measuring target {idx:>2}",
             duration_seconds = eff_dur or 0.0,
-            fps_value        = source_meta.fps_fraction if source_meta is not None else None,
+            fps_value        = source_stream.info.fps_fraction,
         )
 
         _write_sidecar(

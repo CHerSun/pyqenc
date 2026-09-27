@@ -20,14 +20,12 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar
 
 import yaml
 from scenedetect import ContentDetector, detect
 
-from pyqenc.constants import CHUNKS_DIR
 from pyqenc.metrics import MetricKey
 from pyqenc.models import PhaseOutcome, SceneBoundary
 from pyqenc.phase import (
@@ -249,12 +247,8 @@ class ChunkingPhase(Phase):
         yaml_path  = work_dir / _CHUNKING_YAML
         force_wipe = job_result.force_wipe
 
-        # Step 1: force-wipe (plus legacy chunks/ leftovers).
+        # Step 1: force-wipe.
         if force_wipe:
-            legacy_chunks = work_dir / CHUNKS_DIR
-            if legacy_chunks.exists():
-                shutil.rmtree(legacy_chunks)
-                logger.debug("force_wipe: deleted legacy %s", legacy_chunks)
             yaml_path.unlink(missing_ok=True)
 
         # Step 2: load boundaries.
@@ -377,25 +371,12 @@ class ChunkingPhase(Phase):
         """Perform end-of-run housekeeping for the chunking phase.
 
         The phase owns no output artifacts — windows live in memory and the
-        boundaries in ``chunking.yaml`` (a recovery sidecar, kept). Legacy
-        ``chunks/`` directories from the pre-spec pipeline are removed on deep
-        cleanup.
+        boundaries in ``chunking.yaml`` (a recovery sidecar, kept).
 
         Args:
             ctx: Pre-resolved end-of-run decisions from the runner.
         """
-        if not ctx.deep_cleanup:
-            return
-        job = self._dep(JobPhase)
-        if job.result is None:
-            return
-        legacy_chunks = job.result.work_dir / CHUNKS_DIR
-        if legacy_chunks.exists():
-            try:
-                shutil.rmtree(legacy_chunks)
-                logger.debug("deep cleanup: deleted legacy %s", legacy_chunks)
-            except OSError as exc:
-                logger.warning("deep cleanup: could not delete %s: %s", legacy_chunks, exc)
+        return
 
     # ------------------------------------------------------------------
     # Internals

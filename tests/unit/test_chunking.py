@@ -264,9 +264,10 @@ class TestChunkingPhaseLifecycle:
         assert result.outcome == PhaseOutcome.PENDING
         assert not (work_dir / "chunking.yaml").exists()
 
-    def test_force_wipe_deletes_sidecar_and_legacy_chunks(self, tmp_path):
-        """force_wipe clears chunking.yaml (and legacy chunks/) so detection
-        re-runs."""
+    def test_force_wipe_invalidates_cached_scenes(self, tmp_path):
+        """force_wipe clears chunking.yaml so detection re-runs. Legacy
+        pre-spec ``chunks/`` leftovers are nobody's concern (no-migration
+        policy) and are left in place."""
         work_dir = tmp_path / "work"
         work_dir.mkdir(parents=True)
         legacy = work_dir / "chunks"
@@ -289,5 +290,5 @@ class TestChunkingPhaseLifecycle:
             phase2.run(dry_run=False)
 
         assert detect_mock.called, "force_wipe must invalidate the cached scenes"
-        assert not legacy.exists(), "legacy chunks/ must be wiped"
+        assert legacy.exists(), "legacy leftovers are deliberately untouched"
         assert (work_dir / "chunking.yaml").exists()

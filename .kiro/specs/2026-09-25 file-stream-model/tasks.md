@@ -71,7 +71,7 @@ Staged so every task lands green: the runner converts first (pure mechanical, co
   - Merge consumes `EncodedChunk`/`Strategy` objects; output name derived in one place from `File.path.stem` + the strategy name (safe by construction); mechanics (mkvmerge append + `--timestamps`) untouched; final frame-count verify stays
   - Update `test_audio_phase.py`, `test_merge_mkvmerge.py`
 
-- [ ] 8. measure + cleanup levels (Req 11.4, 8.8)
+- [x] 8. measure + cleanup levels (Req 11.4, 8.8)
   - `measure.py` adopts `File`/stream loaders; drop ad-hoc `VideoMetadata` usage
   - Single-frame screenshots routed through the tmp protocol via `output_format: "image2"`; pattern sequences stay in caller-managed temp dirs
   - Cleanup: INTERMEDIATE = encoding workspace; ALL = + `encoded/`; remove `chunks/` paths
