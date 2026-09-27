@@ -20,7 +20,6 @@ from pyqenc.models import (
     CleanupLevel,
     PhaseOutcome,
     Strategy,
-    VideoMetadata,
 )
 from pyqenc.phase import Recovery
 from pyqenc.stream_model import File
@@ -53,6 +52,22 @@ def _make_chunk_window(source: Path, start: float, end: float) -> "VideoStreamCh
     stream = _make_extended_stream(source, frame_count=640, duration=end)
     return VideoStreamChunk(
         stream=stream, start_timestamp=start, end_timestamp=end, frame_count=24,
+    )
+
+
+def _make_video_stream_fixture(path: Path):
+    """A VideoStream fixture for registry stubs."""
+    from fractions import Fraction
+
+    from pyqenc.stream_model import VideoStream, VideoStreamInfo
+
+    return VideoStream(
+        file=File(path=path, file_size_bytes=64),
+        info=VideoStreamInfo(
+            track_id=0, codec_name="hevc", fps=24.0,
+            fps_fraction=Fraction(24, 1), resolution="1920x1080",
+            duration_seconds=120.0,
+        ),
     )
 
 
@@ -107,19 +122,6 @@ def _spy_collector() -> MagicMock:
     return collector
 
 
-def _stub_video_metadata(source: Path) -> VideoMetadata:
-    """Return a ``VideoMetadata`` with all private fields pre-populated.
-
-    Avoids any real ffprobe / ffmpeg calls during tests.
-    """
-    vm = VideoMetadata(path=source)
-    vm._file_size_bytes  = 64
-    vm._duration_seconds = 120.0
-    vm._fps              = 24.0
-    vm._resolution       = "1920x1080"
-    return vm
-
-
 # ---------------------------------------------------------------------------
 # JobPhase — JOB_PROBE timing
 # ---------------------------------------------------------------------------
@@ -139,15 +141,9 @@ class TestJobPhaseTiming:
         collector = _spy_collector()
         phase    = JobPhase(config, collector=collector, **volatile)
 
-        stub_vm = _stub_video_metadata(volatile["source"])
+        phase.run()
 
-        # Patch VideoMetadata so no real ffprobe/ffmpeg calls happen.
-        with (
-            patch("pyqenc.phases.job.VideoMetadata", return_value=stub_vm),
-        ):
-            phase.run()
-
-        # Verify time() was called with JOB_PROBE
+        # Verify the execute span was recorded under the job metric key
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
         assert MetricKey.JOB in time_keys_called, (
             f"Expected MetricKey.JOB in time() calls, got: {time_keys_called}"
@@ -200,12 +196,7 @@ class TestJobPhaseTiming:
         collector = NoOpMetricsCollector()
         phase    = JobPhase(config, collector=collector, **volatile)
 
-        stub_vm = _stub_video_metadata(volatile["source"])
-
-        with (
-            patch("pyqenc.phases.job.VideoMetadata", return_value=stub_vm),
-        ):
-            result = phase.run()
+        result = phase.run()
 
         assert result is not None
 
@@ -240,6 +231,7 @@ class TestExtractionPhaseTiming:
             artifacts  = [],
             message    = "ok",
             force_wipe = False,
+            file       = File(path=source, file_size_bytes=64),
         )
         result.source   = source                          # type: ignore[attr-defined]
         result.work_dir = source.parent / "work"          # type: ignore[attr-defined]
@@ -535,33 +527,29 @@ class TestAudioPhaseTiming:
         from pyqenc.phases.audio import AudioPhase
         from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
         from pyqenc.phases.job import JobPhase, JobPhaseResult
-        from pyqenc.state import JobState
 
         source = tmp_path / "source.mkv"
         source.write_bytes(b"\x00" * 64)
-        stub_vm = _stub_video_metadata(source)
 
         config   = _make_config(tmp_path)
         work_dir = tmp_path / "work"
         work_dir.mkdir(parents=True, exist_ok=True)
-
-        job_state = JobState(source=stub_vm)
         job_result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             artifacts  = [],
             message    = "ok",
             force_wipe = False,
+            file       = File(path=source, file_size_bytes=64),
         )
-        job_result.job      = job_state   # type: ignore[attr-defined]
         job_result.source   = source      # type: ignore[attr-defined]
         job_result.work_dir = work_dir    # type: ignore[attr-defined]
         job_result.config   = config      # type: ignore[attr-defined]
 
         extraction_result = ExtractionPhaseResult(
-            outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
-            message   = "ok",
-            video     = stub_vm,
+            outcome      = PhaseOutcome.COMPLETED,
+            artifacts    = [],
+            message      = "ok",
+            video_stream = _make_video_stream_fixture(source),
         )
 
         job_mock = MagicMock(spec=JobPhase)
@@ -688,20 +676,17 @@ class TestOptimizationPhaseTiming:
         """Return a minimal complete ``JobPhaseResult`` stub."""
         from pyqenc.models import PhaseOutcome
         from pyqenc.phases.job import JobPhaseResult
-        from pyqenc.state import JobState
 
         source = tmp_path / "source.mkv"
         source.write_bytes(b"\x00" * 64)
-        stub_vm = _stub_video_metadata(source)
-        job_state = JobState(source=stub_vm)
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             artifacts  = [],
             message    = "ok",
             force_wipe = False,
+            file       = File(path=source, file_size_bytes=64),
         )
-        result.job      = job_state                                    # type: ignore[attr-defined]
         result.source   = source                                       # type: ignore[attr-defined]
         result.work_dir = tmp_path / "work"                            # type: ignore[attr-defined]
         result.config   = config if config is not None else _make_config(tmp_path)  # type: ignore[attr-defined]
@@ -979,20 +964,17 @@ class TestEncodingPhaseTiming:
         """Return a minimal complete ``JobPhaseResult`` stub."""
         from pyqenc.models import PhaseOutcome
         from pyqenc.phases.job import JobPhaseResult
-        from pyqenc.state import JobState
 
         source = tmp_path / "source.mkv"
         source.write_bytes(b"\x00" * 64)
-        stub_vm = _stub_video_metadata(source)
-        job_state = JobState(source=stub_vm)
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             artifacts  = [],
             message    = "ok",
             force_wipe = False,
+            file       = File(path=source, file_size_bytes=64),
         )
-        result.job      = job_state           # type: ignore[attr-defined]
         result.source   = source              # type: ignore[attr-defined]
         result.work_dir = tmp_path / "work"   # type: ignore[attr-defined]
         result.config   = _make_config(tmp_path)  # type: ignore[attr-defined]
@@ -1000,14 +982,10 @@ class TestEncodingPhaseTiming:
 
     def _make_chunking_result(self, tmp_path: Path) -> ChunkingPhaseResult:
         """Return a minimal complete ``ChunkingPhaseResult`` stub with one chunk."""
-        from pyqenc.models import ChunkMetadata, PhaseOutcome
+        from pyqenc.models import PhaseOutcome
         from pyqenc.phases.chunking import ChunkingPhaseResult
 
-        chunk = MagicMock(spec=ChunkMetadata)
-        chunk.chunk_id        = "chunk_0"
-        chunk.start_timestamp = 0.0
-        chunk.end_timestamp   = 1.0
-        chunk.path            = tmp_path / "chunks" / "chunk_0.mkv"
+        chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
 
         return ChunkingPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
@@ -1275,20 +1253,17 @@ class TestMergePhaseTiming:
         """Return a minimal complete ``JobPhaseResult`` stub."""
         from pyqenc.models import PhaseOutcome
         from pyqenc.phases.job import JobPhaseResult
-        from pyqenc.state import JobState
 
         source = tmp_path / "source.mkv"
         source.write_bytes(b"\x00" * 64)
-        stub_vm = _stub_video_metadata(source)
-        job_state = JobState(source=stub_vm)
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             artifacts  = [],
             message    = "ok",
             force_wipe = False,
+            file       = File(path=source, file_size_bytes=64),
         )
-        result.job      = job_state           # type: ignore[attr-defined]
         result.source   = source              # type: ignore[attr-defined]
         result.work_dir = tmp_path / "work"   # type: ignore[attr-defined]
         result.config   = _make_config(tmp_path)  # type: ignore[attr-defined]

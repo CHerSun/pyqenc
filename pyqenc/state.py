@@ -4,7 +4,7 @@ This module provides:
 
 - ``ArtifactState`` — three-value enum classifying each artifact's
   completeness (``ABSENT`` / ``PARTIAL`` / ``COMPLETE``).
-- Data models: ``JobState``,
+- Data models:
   ``OptimizationParams``, ``EncodingParams``, ``MetricsSidecar``,
   ``ProbeState``, ``EncodingResultSidecar``, ``MeasureSidecar``.
 
@@ -27,7 +27,6 @@ from pydantic import BaseModel, Field
 from pyqenc.audio.chain import ResolvedChain, chain_signature
 from pyqenc.models import (
     CropParams,
-    VideoMetadata,
 )
 from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.yaml_utils import write_yaml_atomic
@@ -142,18 +141,6 @@ class ProbeState(BaseModel):
         path.parent.mkdir(parents=True, exist_ok=True)
         write_yaml_atomic(path, self.to_yaml_dict())
         logger.debug("Saved %s", path.name)
-
-
-class JobState(BaseModel):
-    """Interim in-memory fast source metadata, carried on ``JobPhaseResult.job``.
-
-    ``job.yaml`` persists only the :class:`~pyqenc.stream_model.File` dump —
-    the fast facet is re-probed each run until downstream phases migrate to
-    the stream model (spec ``2026-09-25 file-stream-model``); this model then
-    disappears with its last consumer.
-    """
-
-    source: VideoMetadata
 
 
 class StrategyTestResult(BaseModel):

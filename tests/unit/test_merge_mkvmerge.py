@@ -32,7 +32,6 @@ from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import (
     CleanupLevel,
     PhaseOutcome,
-    VideoMetadata,
 )
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
@@ -48,7 +47,7 @@ from pyqenc.phases.merge import (
     _write_mkvmerge_options_file,
 )
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
-from pyqenc.state import ArtifactState, JobState
+from pyqenc.state import ArtifactState
 
 
 def _extended_stream(path: Path, frame_count: int) -> "ExtendedVideoStream":
@@ -85,14 +84,6 @@ _SAFE_NAME = _STRATEGY.replace(":", "_")
 # ---------------------------------------------------------------------------
 # Real-construction helper
 # ---------------------------------------------------------------------------
-
-def _make_source_vm(path: Path) -> VideoMetadata:
-    """Return a VideoMetadata with fast-probe fields pre-populated (no probing)."""
-    meta = VideoMetadata(path=path)
-    meta._duration_seconds = 3600.0
-    meta._fps              = 24.0
-    meta._resolution       = "1920x1080"
-    return meta
 
 def _by_strategy_name(encoded) -> dict:
     """Key an EncodedChunk by its own strategy name (as encoding.py does)."""
@@ -199,7 +190,6 @@ def _make_merge_phase(
     """
     collector = NoOpMetricsCollector()
     config    = _APP_CONFIG.model_copy(deep=True)
-    source_vm = _make_source_vm(source)
 
     job = JobPhase(
         config, None,
@@ -214,7 +204,6 @@ def _make_merge_phase(
         outcome    = PhaseOutcome.COMPLETED,
         artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message    = "job complete",
-        job        = JobState(source=source_vm),
         force_wipe = False,
         config     = config,
         work_dir   = work_dir,
@@ -233,7 +222,6 @@ def _make_merge_phase(
         outcome         = PhaseOutcome.COMPLETED,
         artifacts       = ts_artifacts,
         message         = "extraction complete",
-        video           = source_vm,
         timestamps_path = timestamps_path,
     )
     registry[ExtractionPhase] = extraction
@@ -243,7 +231,7 @@ def _make_merge_phase(
         outcome   = PhaseOutcome.COMPLETED,
         artifacts = [Artifact(path=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
         message   = "probe complete",
-        stream    = _extended_stream(source_vm.path, frame_count),
+        stream    = _extended_stream(source, frame_count),
     )
     registry[ProbePhase] = probe
 

@@ -93,7 +93,6 @@ RIGHT_ARROW="→"
 # Directory names for phase output
 EXTRACTED_DIR          = "extracted"
 """Output directory for extracted streams (ExtractionPhase)."""
-CHUNKS_DIR             = "chunks"
 """Output directory for video chunks (ChunkingPhase)."""
 ENCODING_WORKSPACE_DIR = "encoding"
 """Working directory for CRF search attempt files (intermediate, per-strategy)."""
@@ -139,9 +138,6 @@ TIMESTAMPS_FILENAME = "timestamps.txt"
 """Filename for the per-frame PTS timestamp file produced by ExtractionPhase."""
 
 # Artifact discovery patterns
-CHUNK_GLOB_PATTERN = "*.mkv"
-"""Glob mask used to discover chunk files in a chunk output directory."""
-
 CHUNK_NAME_PATTERN = re.compile(
     r"^(?:\d{2,}꞉\d{2}꞉\d{2}․\d{3})-(?:\d{2,}꞉\d{2}꞉\d{2}․\d{3})$"
 )

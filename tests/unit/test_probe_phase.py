@@ -32,13 +32,12 @@ from pyqenc.models import (
     CleanupLevel,
     CropParams,
     PhaseOutcome,
-    VideoMetadata,
 )
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
-from pyqenc.state import ArtifactState, JobState, ProbeState
+from pyqenc.state import ArtifactState, ProbeState
 from pyqenc.stream_model import File, VideoStream, VideoStreamInfo
 
 # ---------------------------------------------------------------------------
@@ -48,24 +47,14 @@ from pyqenc.stream_model import File, VideoStream, VideoStreamInfo
 _APP_CONFIG = load_app_config(default_only=True)
 
 
-def _make_source_vm(path: Path) -> VideoMetadata:
-    """Return a VideoMetadata with fast-probe fields pre-populated."""
-    meta = VideoMetadata(path=path)
-    meta._duration_seconds = 3600.0
-    meta._fps              = 24.0
-    meta._resolution       = "1920x1080"
-    return meta
-
-
-def _make_job_result(work_dir: Path, source_vm: VideoMetadata) -> JobPhaseResult:
+def _make_job_result(work_dir: Path, source: Path) -> JobPhaseResult:
     """Return a COMPLETED JobPhaseResult carrying the source and work_dir."""
     return JobPhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
         artifacts = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message   = "job complete",
-        job       = JobState(source=source_vm),
         work_dir  = work_dir,
-        source    = source_vm.path,
+        source    = source,
     )
 
 
@@ -152,8 +141,7 @@ class TestProbePhaseFailedNoVideo:
     def test_failed_outcome_with_no_source_and_error(self, tmp_path: Path):
         work_dir          = tmp_path / "work"
         work_dir.mkdir()
-        source_vm         = _make_source_vm(tmp_path / "source.mkv")
-        job_result        = _make_job_result(work_dir, source_vm)
+        job_result        = _make_job_result(work_dir, tmp_path / "source.mkv")
         extraction_result = _make_extraction_result(video_stream=None)
         phase             = _make_probe_phase(job_result, extraction_result)
 
@@ -183,7 +171,7 @@ class TestProbePhaseReused:
         cached_crop = CropParams(top=140, bottom=140)
         _write_probe_yaml(work_dir, frame_count=72000, crop=cached_crop)
 
-        job_result        = _make_job_result(work_dir, _make_source_vm(tmp_path / "source.mkv"))
+        job_result        = _make_job_result(work_dir, tmp_path / "source.mkv")
         extraction_result = _make_extraction_result(
             _make_video_stream(tmp_path / "source.mkv"))
         phase             = _make_probe_phase(job_result, extraction_result, crop_params=None)
@@ -206,7 +194,7 @@ class TestProbePhaseReused:
         work_dir.mkdir()
         _write_probe_yaml(work_dir, frame_count=1440, crop=CropParams(top=140, bottom=140))
 
-        job_result        = _make_job_result(work_dir, _make_source_vm(tmp_path / "source.mkv"))
+        job_result        = _make_job_result(work_dir, tmp_path / "source.mkv")
         extraction_result = _make_extraction_result(
             _make_video_stream(tmp_path / "source.mkv"))
         override_crop     = CropParams(top=0, bottom=0)
@@ -239,9 +227,7 @@ class TestProbePhaseCompleted:
     def _run_with_mocks(self, tmp_path: Path) -> tuple[ProbePhaseResult, Path]:
         work_dir = tmp_path / "work"
         work_dir.mkdir()
-
-        source_vm         = _make_source_vm(tmp_path / "source.mkv")
-        job_result        = _make_job_result(work_dir, source_vm)
+        job_result        = _make_job_result(work_dir, tmp_path / "source.mkv")
         extraction_result = _make_extraction_result(
             _make_video_stream(tmp_path / "source.mkv"))
         phase             = _make_probe_phase(job_result, extraction_result, crop_params=None)
@@ -306,8 +292,7 @@ class TestProbeTiming:
 
         source = tmp_path / "source.mkv"
         source.write_bytes(bytes(64))
-        source_vm = _make_source_vm(source)
-        job_result = _make_job_result(tmp_path, source_vm)
+        job_result = _make_job_result(tmp_path, source)
         extraction_result = _make_extraction_result(_make_video_stream(source))
 
         phase = _make_probe_phase(
@@ -339,8 +324,7 @@ class TestProbeTiming:
 
         source = tmp_path / "source.mkv"
         source.write_bytes(bytes(64))
-        source_vm = _make_source_vm(source)
-        job_result = _make_job_result(tmp_path, source_vm)
+        job_result = _make_job_result(tmp_path, source)
         extraction_result = _make_extraction_result(_make_video_stream(source))
 
         phase = _make_probe_phase(

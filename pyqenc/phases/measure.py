@@ -426,7 +426,7 @@ def _load_video_stream(path: Path) -> VideoStream:
     Composes a :class:`~pyqenc.stream_model.File` with a freshly probed
     :class:`~pyqenc.stream_model.VideoStreamInfo` (fast facet of the first
     video stream) — the stream-model replacement for the ad-hoc
-    ``VideoMetadata`` instances this module used to build.
+    ``VideoMetadata`` instances this module used to build (deleted in Task 9).
 
     Args:
         path: The video file to probe.
@@ -440,9 +440,8 @@ def _load_video_stream(path: Path) -> VideoStream:
         data = _probe_streams_json(path)
         raw = next(
             (r for r in data.get("streams", [])
-             if r.get("codec_type") == "video" and not (
-                 (r.get("disposition") or {}).get("attached_pic", 0) == 1
-             )),
+             if r.get("codec_type") == "video"
+             and (r.get("disposition") or {}).get("attached_pic", 0) != 1),
             None,
         )
     except (RuntimeError, OSError) as exc:
@@ -1121,8 +1120,8 @@ async def run_measure(
     # Probe fps first (fast ffprobe call, already triggered by resolution check above)
     source_fps_frac = source_stream.info.fps_fraction
 
-    # frame_count is only available from ExtendedVideoMetadata (e.g. ProbePhase result).
-    # The standalone measure command does not have it — use duration-based estimate as fallback.
+    # frame_count is not available to the standalone measure command (it has
+    # no ProbePhase result) — use a duration-based estimate as the fallback.
     source_frame_count: int | None = None
 
     if source_fps_frac is not None:
@@ -1227,7 +1226,7 @@ async def run_measure(
 
     target_results: list[TargetMeasureResult] = []
 
-    for idx, (target_video, target_meta) in enumerate(zip(target_videos, target_metas), start=1):
+    for idx, target_video in enumerate(target_videos, start=1):
         eff_dur = effective_durations[target_video]
 
         logger.info("Measuring target %d of %d: %s", idx, len(target_videos), target_video.stem)

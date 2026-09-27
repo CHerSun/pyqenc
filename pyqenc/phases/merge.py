@@ -40,7 +40,7 @@ from pyqenc.constants import (
     WARNING_SYMBOL,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import CropParams, PhaseOutcome, QualityTarget, VideoMetadata
+from pyqenc.models import CropParams, PhaseOutcome, QualityTarget
 from pyqenc.phase import (
     Artifact,
     ArtifactState,
@@ -55,8 +55,8 @@ from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import MergeParams, MergeStrategySummary, ProbeState
-from pyqenc.stream_model import EncodedChunk
-from pyqenc.utils.ffmpeg_runner import FFmpegInput, get_frame_count
+from pyqenc.stream_model import EncodedChunk, ExtendedVideoStream
+from pyqenc.utils.ffmpeg_runner import get_frame_count
 from pyqenc.utils.log_format import (
     fmt_key_value_table,
     fmt_metric_value,
@@ -227,13 +227,13 @@ def _write_merge_sidecar(
 
 def _measure_quality(
     final_result:     Path,
-    source_video:     VideoMetadata,
+    source_stream:    ExtendedVideoStream,
     ref_crop:         CropParams | None,
     quality_targets:  list[QualityTarget],
     output_dir:       Path,
     metrics_sampling: int,
 ) -> tuple[dict[str, float], bool, Path | None]:
-    """Measure final quality metrics for *final_result* against *source_video*.
+    """Measure final quality metrics for *final_result* against *source_stream*.
 
     Raw metric ``.tmp`` files are written directly to ``output_dir`` and deleted
     immediately after parsing.  The quality plot PNG is written to
@@ -247,11 +247,11 @@ def _measure_quality(
 
     evaluation = evaluator.evaluate_chunk(
         encoded            = final_result,
-        reference          = FFmpegInput(path=source_video.path),
+        reference          = source_stream.stream.as_input(),
         ref_crop           = ref_crop,
         targets            = quality_targets,
         output_dir         = output_dir,
-        duration_seconds   = source_video.duration_seconds or 0.0,
+        duration_seconds   = source_stream.stream.info.duration_seconds or 0.0,
         fps_value          = None,
         metrics_output_dir = output_dir,
         subsample_factor   = metrics_sampling,
@@ -867,8 +867,8 @@ class MergePhase(Phase):
         job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
         probe_result = cast(ProbePhaseResult, self._dep(ProbePhase).result)
         crop: CropParams | None = probe_result.crop if probe_result is not None else None
-        source_video: VideoMetadata | None = (
-            job_result.job.source if job_result.job is not None else None
+        source_stream: ExtendedVideoStream | None = (
+            probe_result.stream if probe_result is not None else None
         )
         source_frame_count: int = (
             probe_result.stream.frame_count
@@ -955,19 +955,6 @@ class MergePhase(Phase):
 
                 logger.debug("  Concatenation complete: %s", output_file.name)
 
-                # Write concat list to a temp file (kept for reference / dead code after mkvmerge switch)
-                concat_file = final_dir / f"concat_{strategy_name}{TEMP_SUFFIX}.txt"
-                concat_cmd: list[str | os.PathLike] = [
-                    "ffmpeg",
-                    "-f",      "concat",
-                    "-safe",   "0",
-                    "-i",      concat_file,
-                    "-c",      "copy",
-                    "-fflags", "+genpts",
-                    "-y",
-                    output_file,
-                ]
-
                 # Verify frame count
                 frame_count:       int | None = None
                 frame_count_ok:    bool       = False
@@ -990,12 +977,12 @@ class MergePhase(Phase):
                 targets_met:  bool             = False
                 plot_path:    Path | None       = None
 
-                if source_video and job_result.config.encoding.resolved_targets:
+                if source_stream is not None and job_result.config.encoding.resolved_targets:
                     try:
                         with self._collector.time(MetricKey.MERGE, METRIC_KEY_QUALITY_MEASURE):
                             metrics_dict, targets_met, plot_path = _measure_quality(
                                 final_result     = output_file,
-                                source_video     = source_video,
+                                source_stream    = source_stream,
                                 ref_crop         = crop,
                                 quality_targets  = job_result.config.encoding.resolved_targets,
                                 output_dir       = final_dir,
@@ -1069,7 +1056,9 @@ class MergePhase(Phase):
         _log_merge_summary(
             artifacts          = [a for a in final_artifacts if a.state == ArtifactState.COMPLETE],
             source_stem        = source_stem,
-            source_size_bytes  = _safe_file_size(source_video.path) if source_video else 0,
+            source_size_bytes  = (
+                _safe_file_size(source_stream.stream.file.path) if source_stream is not None else 0
+            ),
             quality_targets    = self._dep(JobPhase).result.config.encoding.resolved_targets,  # type: ignore[union-attr]
             metrics_sampling   = self._dep(JobPhase).result.config.measurement.sampling,  # type: ignore[union-attr]
         )
@@ -1081,7 +1070,7 @@ class MergePhase(Phase):
         if complete_count > 0:
             source_size_bytes, strategy_summaries = _build_strategy_summaries(
                 final_artifacts,
-                source_video.path if source_video else None,
+                source_stream.stream.file.path if source_stream is not None else None,
             )
             MergeParams(
                 quality_targets    = self.params.quality_targets,

@@ -32,7 +32,7 @@ import yaml
 from pyqenc.app_config import load_app_config
 from pyqenc.constants import EXTRACTED_DIR, TIMESTAMPS_FILENAME
 from pyqenc.metrics import NoOpMetricsCollector
-from pyqenc.models import CleanupLevel, PhaseOutcome, VideoMetadata
+from pyqenc.models import CleanupLevel, PhaseOutcome
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import (
     ExtractionPhase,
@@ -42,7 +42,7 @@ from pyqenc.phases.extraction import (
     _extract_timestamps,
 )
 from pyqenc.phases.job import JobPhase, JobPhaseResult
-from pyqenc.state import ArtifactState, JobState
+from pyqenc.state import ArtifactState
 from pyqenc.stream_model import File
 from pyqenc.utils.ffmpeg_runner import (
     _PROGRESS_FLAGS,
@@ -60,13 +60,7 @@ _APP_CONFIG = load_app_config(default_only=True)
 # Shared real-construction helpers
 # ---------------------------------------------------------------------------
 
-def _make_source_vm(path: Path) -> VideoMetadata:
-    """Return a VideoMetadata with fast-probe fields pre-populated (no probing)."""
-    meta = VideoMetadata(path=path)
-    meta._duration_seconds = 3600.0
-    meta._fps              = 24.0
-    meta._resolution       = "1920x1080"
-    return meta
+
 
 
 def _make_extraction_phase(
@@ -92,13 +86,11 @@ def _make_extraction_phase(
     config.extraction.include = include
     config.extraction.exclude = exclude
 
-    source_vm  = _make_source_vm(source)
     job_result = JobPhaseResult(
         outcome    = PhaseOutcome.COMPLETED,
         artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message    = "job complete",
         file       = File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64),
-        job        = JobState(source=source_vm),
         force_wipe = force_wipe,
         config     = config,
         work_dir   = work_dir,
@@ -378,9 +370,9 @@ class TestNoVideoAudioExtraction:
         assert result.video_stream.info.fps_fraction is not None
         assert len(result.audio_streams) == 1
         assert result.audio_streams[0].info.layout is not None
-        # The interim legacy video view points at the source, not an
-        # extracted file (the legacy audio view died with Task 7).
-        assert result.video is not None and result.video.path == source
+        # Stream objects compose the job File — path is the source.
+        assert result.video_stream is not None
+        assert result.video_stream.file.path == File(path=source).path
 
 
 # ---------------------------------------------------------------------------

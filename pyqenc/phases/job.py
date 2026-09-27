@@ -13,9 +13,6 @@ Responsibilities:
   file (path + size); the resolution re-probe comparison is gone.
 - Propagate ``force_wipe=True`` to downstream phases when ``--force`` is
   provided and a source mismatch is detected.
-- Interim (until downstream phases migrate to the stream model): re-probe the
-  source's fast metadata in-memory every run and carry it on
-  ``JobPhaseResult.job`` — the shrunk sidecar no longer persists it.
 """
 # CHerSun 2026
 
@@ -33,7 +30,6 @@ from pyqenc.metrics import MetricKey, MetricsCollector
 from pyqenc.models import (
     CleanupLevel,
     PhaseOutcome,
-    VideoMetadata,
 )
 from pyqenc.phase import (
     Artifact,
@@ -44,7 +40,6 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
-from pyqenc.state import JobState
 from pyqenc.stream_model import File, JobSidecar
 from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.yaml_utils import write_yaml_atomic
@@ -82,7 +77,6 @@ class JobPhaseResult(PhaseResult):
     """
 
     file:       File | None       = field(default=None)
-    job:        JobState | None   = field(default=None)
     force_wipe: bool              = field(default=False)
     config:     AppConfig | None = field(default=None)
     work_dir:   Path | None       = field(default=None)
@@ -145,10 +139,9 @@ class JobPhase(Phase):
         self._cleanup:     CleanupLevel     = cleanup
         self._no_metrics:  bool             = no_metrics
 
-        # Recovery stash — the run's File and the interim in-memory state,
-        # resolved during _recover(); consumed by _execute()/_make_result().
+        # Recovery stash — the run's File, resolved during _recover();
+        # consumed by _execute()/_make_result().
         self._file:        File | None      = None
-        self._loaded_job:  JobState | None  = None
         self._force_wipe:  bool             = False
 
     # ------------------------------------------------------------------
@@ -238,11 +231,6 @@ class JobPhase(Phase):
 
         # Fresh identity (job.yaml absent, or force_wipe after a source mismatch).
         self._file = self._probe_file()
-        source = VideoMetadata(path=self._source)
-        logger.info("Probing source metadata: %s", source.path.name)
-        with self._collector.time(MetricKey.JOB, "probe"):
-            self._probe_metadata(source)
-        self._loaded_job = JobState(source=source)
         if not dry_run:
             write_yaml_atomic(
                 job_yaml,
@@ -254,10 +242,6 @@ class JobPhase(Phase):
     def _reused_result(self, wanted: list[Artifact], message: str) -> JobPhaseResult:
         """Build the reused result; rebuild the interim in-memory state.
 
-        The sidecar persists only the ``File`` dump, so the fast metadata that
-        downstream phases still read (interim, until they migrate to the
-        stream model) is re-probed from the live source on every reuse run.
-
         Args:
             wanted:  Always empty (job.yaml is state, not artifacts).
             message: Unused — the reused message is fixed.
@@ -266,10 +250,6 @@ class JobPhase(Phase):
             ``JobPhaseResult`` with outcome ``REUSED``.
         """
         assert self._file is not None, "file guaranteed by the _recover reuse path"
-        source = VideoMetadata(path=self._source)
-        with self._collector.time(MetricKey.JOB, "probe"):
-            self._probe_metadata(source)
-        self._loaded_job = JobState(source=source)
         return self._make_result(PhaseOutcome.REUSED, [], "job.yaml already up to date")
 
     def _make_result(
@@ -296,7 +276,6 @@ class JobPhase(Phase):
             message     = message,
             error       = error,
             file        = self._file,
-            job         = self._loaded_job,
             force_wipe  = self._force_wipe,
             config      = self._config,
             work_dir    = self._work_dir,
@@ -390,16 +369,3 @@ class JobPhase(Phase):
 
         return mismatches
 
-    def _probe_metadata(self, source: VideoMetadata) -> None:
-        """Eagerly touch all fast-probe fields on ``source`` to populate them.
-
-        Interim scaffolding: the fast facet moves to ExtractionPhase's stream
-        objects as the direct-from-source migration proceeds.
-
-        Args:
-            source: ``VideoMetadata`` instance to probe in-place.
-        """
-        _ = source.file_size_bytes
-        _ = source.duration_seconds
-        _ = source.fps
-        _ = source.resolution

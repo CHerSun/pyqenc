@@ -24,7 +24,7 @@ from hypothesis import strategies as st
 from pyqenc.app_config import load_app_config
 from pyqenc.constants import EXTRACTED_DIR, TIMESTAMPS_FILENAME
 from pyqenc.metrics import NoOpMetricsCollector
-from pyqenc.models import CleanupLevel, PhaseOutcome, VideoMetadata
+from pyqenc.models import CleanupLevel, PhaseOutcome
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import (
     ExtractionPhase,
@@ -32,7 +32,7 @@ from pyqenc.phases.extraction import (
     _extract_timestamps,
 )
 from pyqenc.phases.job import JobPhase, JobPhaseResult
-from pyqenc.state import ArtifactState, JobState
+from pyqenc.state import ArtifactState
 from pyqenc.stream_model import File
 
 
@@ -113,13 +113,7 @@ def _extended_stream(path: Path, frame_count: int):
 _APP_CONFIG = load_app_config(default_only=True)
 
 
-def _make_source_vm(path: Path) -> VideoMetadata:
-    """Return a VideoMetadata with fast-probe fields pre-populated (no probing)."""
-    meta = VideoMetadata(path=path)
-    meta._duration_seconds = 3600.0
-    meta._fps              = 24.0
-    meta._resolution       = "1920x1080"
-    return meta
+
 
 
 def _make_extraction_phase(
@@ -141,14 +135,11 @@ def _make_extraction_phase(
     config = _APP_CONFIG.model_copy(deep=True)
     config.extraction.include = include
     config.extraction.exclude = exclude
-
-    source_vm  = _make_source_vm(source)
     job_result = JobPhaseResult(
         file       = File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64),
         outcome    = PhaseOutcome.COMPLETED,
         artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message    = "job complete",
-        job        = JobState(source=source_vm),
         force_wipe = False,
         config     = config,
         work_dir   = work_dir,
@@ -427,8 +418,6 @@ def test_frame_count_preservation(frame_count: int) -> None:
         # Empty quality targets → quality measurement is skipped (no shell-out).
         config = _APP_CONFIG.model_copy(deep=True)
 
-        source_vm = _make_source_vm(source)
-
         # --- Real dependency phases with pre-set COMPLETED results ---
         job = JobPhase(
             config, None,
@@ -443,7 +432,6 @@ def test_frame_count_preservation(frame_count: int) -> None:
             outcome    = PhaseOutcome.COMPLETED,
             artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
             message    = "job complete",
-            job        = JobState(source=source_vm),
             force_wipe = False,
             config     = config,
             work_dir   = work_dir,
@@ -457,7 +445,6 @@ def test_frame_count_preservation(frame_count: int) -> None:
             outcome         = PhaseOutcome.COMPLETED,
             artifacts       = [Artifact(path=ts_file, state=ArtifactState.COMPLETE)],
             message         = "extraction complete",
-            video           = source_vm,
             timestamps_path = ts_file,
         )
         registry[ExtractionPhase] = extraction
@@ -467,7 +454,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
             outcome   = PhaseOutcome.COMPLETED,
             artifacts = [Artifact(path=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
             message   = "probe complete",
-            stream    = _extended_stream(source_vm.path, frame_count),
+            stream    = _extended_stream(source, frame_count),
         )
         registry[ProbePhase] = probe
 

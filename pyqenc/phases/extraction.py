@@ -39,7 +39,7 @@ from pyqenc.constants import (
     TIMESTAMPS_FILENAME,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import PhaseOutcome, VideoMetadata
+from pyqenc.models import PhaseOutcome
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -446,8 +446,6 @@ class ExtractionPhaseResult(PhaseResult):
         audio_streams:    All enumerated audio streams in track order.
         subtitle_streams: Enumerated subtitle streams (extracted paths set when complete).
         attachment_streams: Enumerated attachment streams (extracted paths set when complete).
-        video:            Interim legacy view for phases not yet migrated to the
-                          stream model (derived from ``video_stream``).
         timestamps_path:  Path to the extracted timestamps.txt; ``None`` when absent.
         chapters_path:    Path to the extracted chapters.xml; ``None`` when absent.
     """
@@ -456,7 +454,6 @@ class ExtractionPhaseResult(PhaseResult):
     audio_streams:      list[AudioStream]   = field(default_factory=list)
     subtitle_streams:   list[SubtitleStream] = field(default_factory=list)
     attachment_streams: list[AttachmentStream] = field(default_factory=list)
-    video:              VideoMetadata | None = None
     timestamps_path:    Path | None          = None
     chapters_path:      Path | None          = None
 
@@ -464,17 +461,6 @@ class ExtractionPhaseResult(PhaseResult):
 # ---------------------------------------------------------------------------
 # Interim legacy adapters (deleted with the last legacy consumer)
 # ---------------------------------------------------------------------------
-
-def _legacy_video_metadata(stream: VideoStream) -> VideoMetadata:
-    """Derive the legacy ``VideoMetadata`` view from a video stream's info."""
-    vm = VideoMetadata(path=stream.file.path)
-    vm._fps               = stream.info.fps
-    vm._resolution        = stream.info.resolution
-    vm._pix_fmt           = stream.info.pix_fmt
-    vm._duration_seconds  = stream.info.duration_seconds
-    vm._file_size_bytes   = stream.file.file_size_bytes
-    return vm
-
 
 # ---------------------------------------------------------------------------
 # ExtractionPhase
@@ -764,7 +750,6 @@ class ExtractionPhase(Phase):
             audio_streams     = list(self._audio),
             subtitle_streams  = subtitles,
             attachment_streams = attachments,
-            video             = _legacy_video_metadata(self._video) if self._video is not None else None,
             timestamps_path   = ts.path if ts is not None and ts.state == ArtifactState.COMPLETE else None,
             chapters_path     = chapters.path if chapters is not None and chapters.state == ArtifactState.COMPLETE else None,
         )
@@ -897,7 +882,6 @@ class ExtractionPhase(Phase):
             audio_streams     = list(self._audio),
             subtitle_streams  = subtitles,
             attachment_streams = attachments,
-            video             = _legacy_video_metadata(self._video) if self._video is not None else None,
             timestamps_path   = ts.path if ts is not None and ts.state == ArtifactState.COMPLETE else None,
             chapters_path     = chapters.path if chapters is not None and chapters.state == ArtifactState.COMPLETE else None,
         )

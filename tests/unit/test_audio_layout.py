@@ -1,4 +1,4 @@
-"""Unit tests for ``ChannelLayout`` and ``AudioMetadata.selector_string()``.
+"""Unit tests for ``ChannelLayout`` and ``AudioStream.selector_string()``.
 
 Each test names the concrete bug it guards against, per project standards, and
 checks observable behaviour (parsed fields, the conventional string), never
@@ -9,7 +9,7 @@ internal representation.
 from pathlib import Path
 
 from pyqenc.audio.layout import ChannelLayout
-from pyqenc.models import AudioMetadata
+from pyqenc.stream_model import AudioStream, AudioStreamInfo, File
 
 
 class TestChannelLayoutNormalization:
@@ -61,40 +61,41 @@ class TestSelectorString:
     """``selector_string()`` builds the conventional, regex-friendly track string."""
 
     @staticmethod
-    def _meta(language: str, raw_layout: str, title: str | None = None) -> AudioMetadata:
-        return AudioMetadata(
-            path     = Path("/fake/track.mka"),
-            language = language,
-            layout   = ChannelLayout.parse(raw_layout),
-            title    = title,
+    def _stream(language: str, raw_layout: str, title: str | None = None) -> AudioStream:
+        return AudioStream(
+            file = File(path="/fake/source.mkv"),
+            info = AudioStreamInfo(
+                track_id=1, language=language, title=title,
+                layout=ChannelLayout.parse(raw_layout),
+            ),
         )
 
     def test_ch_token_uses_original_layout_71(self) -> None:
         # Bug: a `ch=` token built from the normalized layout would not match a
         # user regex written against the faithful source token.
-        s = self._meta("eng", "7.1").selector_string()
+        s = self._stream("eng", "7.1").selector_string()
         assert "lang=eng" in s
         assert "ch=7.1" in s
 
     def test_ch_token_preserves_51_side_qualifier(self) -> None:
         # Bug: dropping `(side)` from `ch=` breaks faithful-layout matching.
-        s = self._meta("rus", "5.1(side)", title="Surround").selector_string()
+        s = self._stream("rus", "5.1(side)", title="Surround").selector_string()
         assert "ch=5.1(side)" in s
         assert "title=Surround" in s
 
     def test_ch_token_for_20_and_stereo_both_show_original(self) -> None:
         # Bug: the conventional string must show the faithful source token so a
         # regex can distinguish (or deliberately match) how the source tagged it.
-        assert "ch=2.0" in self._meta("eng", "2.0").selector_string()
-        assert "ch=stereo" in self._meta("eng", "stereo").selector_string()
+        assert "ch=2.0" in self._stream("eng", "2.0").selector_string()
+        assert "ch=stereo" in self._stream("eng", "stereo").selector_string()
 
     def test_title_omitted_when_absent(self) -> None:
         # Bug: emitting an empty `title=` token invites accidental regex matches
         # on tracks that have no title.
-        s = self._meta("eng", "5.1").selector_string()
+        s = self._stream("eng", "5.1").selector_string()
         assert "title=" not in s
 
     def test_tokens_are_space_separated(self) -> None:
         # Bug: tokens run together would let a `ch=` regex bleed into the title.
-        s = self._meta("eng", "5.1", title="Main").selector_string()
+        s = self._stream("eng", "5.1", title="Main").selector_string()
         assert s == "lang=eng ch=5.1 title=Main"

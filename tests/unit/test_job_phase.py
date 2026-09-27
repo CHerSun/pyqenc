@@ -74,7 +74,7 @@ def _persist_job(work_dir: Path, source: Path, file_size: int | None = None) -> 
 
 class TestJobPhaseRunDryRun:
     def test_dry_run_absent_probes_but_writes_no_file(self, tmp_path: Path) -> None:
-        """Dry-run on a fresh work-dir builds the JobState (read-only) without writing job.yaml.
+        """Dry-run on a fresh work-dir establishes the File (read-only) without writing job.yaml.
 
         Bug guarded: if JobPhase returned PENDING (or otherwise not-complete) in
         dry-run, the whole dry-run pipeline would cascade to "pending at: Job"
@@ -87,7 +87,7 @@ class TestJobPhaseRunDryRun:
         phase = _make_phase(tmp_path, src)
         result = phase.run(dry_run=True)
         assert result.is_complete is True
-        assert result.job is not None
+        assert result.file is not None
         assert not (work_dir / "job.yaml").exists()
 
     def test_dry_run_existing_returns_reused(self, tmp_path: Path) -> None:
@@ -270,8 +270,8 @@ class TestJobPhaseSourceMismatchWithForce:
 
         # job.yaml must exist and carry the real current file size
         assert (work_dir / "job.yaml").exists()
-        assert result.job is not None
-        assert result.job.source._file_size_bytes == src.stat().st_size
+        assert result.file is not None
+        assert result.file.file_size_bytes == src.stat().st_size
 
     def test_mismatch_with_force_logs_warning(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

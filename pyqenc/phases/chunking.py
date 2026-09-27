@@ -305,7 +305,7 @@ class ChunkingPhase(Phase):
                         min_scene_length = self._config.chunking.min_scene_length,
                     )
             except Exception as exc:
-                logger.exception("Scene detection failed: %s", exc)
+                logger.exception("Scene detection failed")
                 return self._make_result(PhaseOutcome.FAILED, [], str(exc), error=str(exc))
             self._persist_scenes(work_dir / _CHUNKING_YAML, boundaries)
 

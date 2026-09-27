@@ -25,7 +25,7 @@ Selection model (Requirement 5):
   (Req 5.9). Order follows the original track order for determinism.
 
 Dedup key: the track's ``path``. Each extracted audio track is written to its
-own file, so ``AudioMetadata.path`` is unique per track and is the robust,
+combination, so ``(file path, track_id)`` is the robust,
 stable identity for de-duplicating overlapping entry picks.
 """
 # CHerSun 2026
@@ -45,7 +45,7 @@ def resolve_selection(
 
     Pure function over the already-extracted audio metadata — no I/O, no
     re-probe. Regexes are matched case-insensitively against each track's
-    :meth:`~pyqenc.models.AudioMetadata.selector_string`.
+    :meth:`~pyqenc.stream_model.AudioStream.selector_string`.
 
     Args:
         tracks: Extracted audio tracks, in extraction order.
