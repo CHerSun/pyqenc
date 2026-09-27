@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
 from pyqenc.models import ChunkMetadata, VideoMetadata
 
 # ---------------------------------------------------------------------------

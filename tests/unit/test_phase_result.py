@@ -17,11 +17,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 from pyqenc.models import PhaseOutcome
 from pyqenc.phase import Artifact, PhaseResult
 from pyqenc.state import ArtifactState
-
 
 # ---------------------------------------------------------------------------
 # Helpers

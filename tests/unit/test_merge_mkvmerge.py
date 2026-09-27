@@ -37,7 +37,6 @@ from pyqenc.models import (
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
 from pyqenc.phases.encoding import (
-    EncodedArtifact,
     EncodingPhase,
     EncodingPhaseResult,
 )
@@ -94,6 +93,82 @@ def _make_source_vm(path: Path) -> VideoMetadata:
     meta._fps              = 24.0
     meta._resolution       = "1920x1080"
     return meta
+
+def _by_strategy_name(encoded) -> dict:
+    """Key an EncodedChunk by its own strategy name (as encoding.py does)."""
+    return {encoded.strategy.name: encoded}
+
+
+def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
+    """A minimal EncodedChunk fixture for merge consumption."""
+    from decimal import Decimal
+
+    from pyqenc.models import CodecConfig, CropParams, Strategy
+    from pyqenc.stream_model import (
+        EncodedChunk,
+        ExtendedVideoStream,
+        File,
+        VideoStream,
+        VideoStreamInfo,
+    )
+
+    codec = CodecConfig(
+        name="h265-10bit", default_quality=Decimal("20"), default_preset="slow",
+        quality_range=(Decimal("0"), Decimal("51")), presets=["slow"],
+    )
+    preset, _, profile = strategy_name.partition("+")
+    strategy = Strategy(preset=preset, profile=profile or "h265", codec=codec, profile_args=[])
+    return EncodedChunk(
+        stream = ExtendedVideoStream(
+            stream = VideoStream(
+                file = File(path=path, file_size_bytes=path.stat().st_size if path.exists() else 64),
+                info = VideoStreamInfo(track_id=0, resolution="1920x1080"),
+            ),
+            frame_count = 24,
+            crop        = CropParams(),
+        ),
+        chunk    = _make_chunk_window(path.parent / "source.mkv", chunk_id),
+        strategy = strategy,
+        crf      = Decimal("20"),
+    )
+
+
+def _make_chunk_window(source, chunk_id):
+    """A minimal VideoStreamChunk for the fixture."""
+    from pyqenc.models import CropParams
+    from pyqenc.stream_model import (
+        ExtendedVideoStream,
+        File,
+        VideoStream,
+        VideoStreamChunk,
+        VideoStreamInfo,
+    )
+
+    start, end = 0.0, 1.0
+    if "-" in chunk_id:
+        try:
+            from pyqenc.stream_model import VideoStreamChunk as _VSC
+            bounds = _VSC.parse_chunk_id(chunk_id, ExtendedVideoStream(
+                stream=VideoStream(file=File(path=source), info=VideoStreamInfo(track_id=0)),
+                frame_count=24, crop=CropParams(),
+            ))
+            start, end = bounds.start_timestamp, bounds.end_timestamp
+        except Exception:
+            pass
+    return VideoStreamChunk(
+        stream = ExtendedVideoStream(
+            stream = VideoStream(
+                file = File(path=source),
+                info = VideoStreamInfo(track_id=0, resolution="1920x1080"),
+            ),
+            frame_count = 24,
+            crop        = CropParams(),
+        ),
+        start_timestamp = start,
+        end_timestamp   = end,
+        frame_count     = 24,
+    )
+
 
 
 def _make_merge_phase(
@@ -174,15 +249,12 @@ def _make_merge_phase(
 
     encoding = EncodingPhase(config, registry, collector=collector)
     encoding.result = EncodingPhaseResult(
-        outcome   = PhaseOutcome.COMPLETED,
-        artifacts = [],
-        message   = "encoding complete",
-        encoded   = [EncodedArtifact(
-            path     = chunk,
-            state    = ArtifactState.COMPLETE,
-            chunk_id = "chunk1",
-            strategy = _STRATEGY,
-        )],
+        outcome        = PhaseOutcome.COMPLETED,
+        artifacts      = [],
+        message        = "encoding complete",
+        encoded_chunks = {
+            "chunk1": _by_strategy_name(_encoded_chunk(chunk, "chunk1", _STRATEGY)),
+        },
     )
     registry[EncodingPhase] = encoding
 

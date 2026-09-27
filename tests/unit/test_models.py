@@ -4,6 +4,7 @@ from fractions import Fraction
 from pathlib import Path
 
 import pytest
+
 from pyqenc.models import (
     CodecConfig,
     CropParams,

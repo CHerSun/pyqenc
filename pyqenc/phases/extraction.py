@@ -39,7 +39,7 @@ from pyqenc.constants import (
     TIMESTAMPS_FILENAME,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import AudioMetadata, PhaseOutcome, VideoMetadata
+from pyqenc.models import PhaseOutcome, VideoMetadata
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -448,8 +448,6 @@ class ExtractionPhaseResult(PhaseResult):
         attachment_streams: Enumerated attachment streams (extracted paths set when complete).
         video:            Interim legacy view for phases not yet migrated to the
                           stream model (derived from ``video_stream``).
-        audio:            Interim legacy view (``AudioMetadata`` per stream,
-                          pointing at the source).
         timestamps_path:  Path to the extracted timestamps.txt; ``None`` when absent.
         chapters_path:    Path to the extracted chapters.xml; ``None`` when absent.
     """
@@ -459,7 +457,6 @@ class ExtractionPhaseResult(PhaseResult):
     subtitle_streams:   list[SubtitleStream] = field(default_factory=list)
     attachment_streams: list[AttachmentStream] = field(default_factory=list)
     video:              VideoMetadata | None = None
-    audio:              list[AudioMetadata]  = field(default_factory=list)
     timestamps_path:    Path | None          = None
     chapters_path:      Path | None          = None
 
@@ -477,18 +474,6 @@ def _legacy_video_metadata(stream: VideoStream) -> VideoMetadata:
     vm._duration_seconds  = stream.info.duration_seconds
     vm._file_size_bytes   = stream.file.file_size_bytes
     return vm
-
-
-def _legacy_audio_metadata(stream: AudioStream) -> AudioMetadata:
-    """Derive the legacy ``AudioMetadata`` view (input = the source file)."""
-    return AudioMetadata(
-        path            = stream.file.path,
-        codec           = stream.info.codec_name or None,
-        layout          = stream.info.layout,
-        language        = stream.info.language or None,
-        title           = stream.info.title or None,
-        start_timestamp = stream.info.start_timestamp,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -780,7 +765,6 @@ class ExtractionPhase(Phase):
             subtitle_streams  = subtitles,
             attachment_streams = attachments,
             video             = _legacy_video_metadata(self._video) if self._video is not None else None,
-            audio             = [_legacy_audio_metadata(s) for s in self._audio],
             timestamps_path   = ts.path if ts is not None and ts.state == ArtifactState.COMPLETE else None,
             chapters_path     = chapters.path if chapters is not None and chapters.state == ArtifactState.COMPLETE else None,
         )

@@ -22,13 +22,12 @@ Covered observable paths:
 
 from __future__ import annotations
 
+from fractions import Fraction
 from pathlib import Path
 from unittest.mock import patch
 
 from pyqenc.app_config import load_app_config
 from pyqenc.metrics import MetricKey, NoOpMetricsCollector
-from fractions import Fraction
-
 from pyqenc.models import (
     CleanupLevel,
     CropParams,

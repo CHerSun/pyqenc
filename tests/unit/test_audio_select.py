@@ -11,9 +11,21 @@ Tracks are built with distinct ``path`` values because the resolver dedups on
 from pathlib import Path
 
 from pyqenc.app_config import SelectEntry
-from pyqenc.audio.layout import ChannelLayout
 from pyqenc.audio.select import resolve_selection
-from pyqenc.models import AudioMetadata
+from pyqenc.stream_model import AudioStream, AudioStreamInfo, File
+
+
+def _stream(path, *, language=None, layout=None, title=None):
+    """Build an AudioStream fixture from the old AudioMetadata fields."""
+    from pyqenc.audio.layout import ChannelLayout
+
+    return AudioStream(
+        file=File(path=path),
+        info=AudioStreamInfo(
+            track_id=1, language=language, title=title,
+            layout=ChannelLayout.parse(layout) if layout else None,
+        ),
+    )
 
 
 def _track(
@@ -21,19 +33,17 @@ def _track(
     language: str,
     layout:   str,
     title:    str | None = None,
-) -> AudioMetadata:
-    """Build an ``AudioMetadata`` with a unique path (the dedup key)."""
-    return AudioMetadata(
-        path     = Path(f"/fake/{name}.mka"),
-        language = language,
-        layout   = ChannelLayout.parse(layout),
+) -> AudioStream:
+    """Build an ``AudioStream`` with a unique path (the dedup key)."""
+    return _stream(Path(f"/fake/{name}.mkv"), language=language,
+        layout   = layout,
         title    = title,
     )
 
 
-def _names(tracks: list[AudioMetadata]) -> list[str]:
+def _names(tracks: list[AudioStream]) -> list[str]:
     """Return each track's file stem for readable assertions."""
-    return [t.path.stem for t in tracks]
+    return [t.file.path.stem for t in tracks]
 
 
 class TestEmptySelect:

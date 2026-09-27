@@ -1599,10 +1599,14 @@ class EncodingPhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying encoding-specific payload.
 
     Attributes:
-        encoded: All ``(chunk, strategy)`` artifacts in any state.
+        encoded:        All ``(chunk, strategy)`` artifacts in any state.
+        encoded_chunks: The winning :class:`~pyqenc.stream_model.EncodedChunk`
+                        per ``(chunk_id, strategy name)`` — the composed objects
+                        merge consumes (path via ``stream.file.path``).
     """
 
-    encoded: list[EncodedArtifact] = None  # type: ignore[assignment]
+    encoded:        list[EncodedArtifact] = None  # type: ignore[assignment]
+    encoded_chunks: dict[str, dict[str, EncodedChunk]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.encoded is None:
@@ -1637,6 +1641,8 @@ class EncodingPhase(Phase):
         super().__init__(config, phases, collector=collector)
 
         self.params:        EncodingParams | None     = None
+        # Winning EncodedChunk objects from the last encode run (result view).
+        self._encoded_chunks: dict[str, dict[str, EncodedChunk]] = {}
         self.quality_labels: dict[str, str]           = {}
         """Maps strategy name → quality_label (e.g. ``'CRF'``, ``'CQ'``) for all
         strategies resolved during the last ``run()`` call.  Empty until ``run()``
@@ -1837,24 +1843,28 @@ class EncodingPhase(Phase):
         artifacts: list[EncodedArtifact],
         message:   str,
         error:     str | None = None,
+        encoded_chunks: dict[str, dict[str, EncodedChunk]] | None = None,
     ) -> "EncodingPhaseResult":
         """Assemble an ``EncodingPhaseResult`` from the pair artifacts.
 
         Args:
-            outcome:   The phase outcome.
-            artifacts: The wanted artifact list.
-            message:   Human-readable summary.
-            error:     Error description when ``outcome`` is ``FAILED``.
+            outcome:        The phase outcome.
+            artifacts:      The wanted artifact list.
+            message:        Human-readable summary.
+            error:          Error description when ``outcome`` is ``FAILED``.
+            encoded_chunks: The winning ``EncodedChunk`` objects (defaults to
+                            the stash from the last ``encode_all_chunks`` run).
 
         Returns:
             The populated result (``encoded`` mirrors ``artifacts``).
         """
         return EncodingPhaseResult(
-            outcome   = outcome,
-            artifacts = artifacts,
-            message   = message,
-            error     = error,
-            encoded   = artifacts,
+            outcome        = outcome,
+            artifacts      = artifacts,
+            message        = message,
+            error          = error,
+            encoded        = artifacts,
+            encoded_chunks = encoded_chunks if encoded_chunks is not None else self._encoded_chunks,
         )
 
     def _execute(
@@ -1935,6 +1945,8 @@ class EncodingPhase(Phase):
             err = enc_result.error or "Encoding failed"
             logger.critical(err)
             return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+
+        self._encoded_chunks = enc_result.encoded_chunks
 
         # Preservation invariant (Req 9.1/9.7): Σ winning-attempt frame counts
         # must equal the source count. Recovered winners without a known count

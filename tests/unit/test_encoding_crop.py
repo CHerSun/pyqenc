@@ -9,7 +9,13 @@ from pyqenc.phases.encoding import ChunkEncoder
 from pyqenc.stream_model import (
     CropParams as _CP,
 )
-from pyqenc.stream_model import ExtendedVideoStream, File, VideoStream, VideoStreamChunk, VideoStreamInfo
+from pyqenc.stream_model import (
+    ExtendedVideoStream,
+    File,
+    VideoStream,
+    VideoStreamChunk,
+    VideoStreamInfo,
+)
 from pyqenc.utils.ffmpeg_runner import (
     _PROGRESS_FLAGS,
     FFmpegRequest,

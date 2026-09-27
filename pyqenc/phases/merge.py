@@ -55,6 +55,7 @@ from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import MergeParams, MergeStrategySummary, ProbeState
+from pyqenc.stream_model import EncodedChunk
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, get_frame_count
 from pyqenc.utils.log_format import (
     fmt_key_value_table,
@@ -814,27 +815,26 @@ class MergePhase(Phase):
     # ------------------------------------------------------------------
 
     def _get_expected_strategies(self) -> list[tuple[str, str]]:
-        """Return ``(display_name, safe_name)`` pairs for all expected strategies.
+        """Return ``(strategy_name, strategy_name)`` pairs for the expected outputs.
 
-        Reads the already-cached ``EncodingPhase.result.encoded`` — the list of
-        winning encoding attempts — resolved once by the shared dependency walk.
-        Quality-target re-evaluation and crop-mismatch detection are owned by
-        ``EncodingPhase._recover()`` and are already reflected in the cached
-        artifact states, so this helper only reads them.
+        Reads the already-cached ``EncodingPhase.result.encoded_chunks`` — the
+        winning :class:`~pyqenc.stream_model.EncodedChunk` objects composed
+        with their :class:`~pyqenc.models.Strategy` — resolved once by the
+        shared dependency walk. Names are safe by construction (Req 15.6), so
+        the display pair is the name twice.
 
         Returns:
-            List of ``(strategy_name, safe_name)`` tuples.
+            List of ``(strategy_name, strategy_name)`` tuples.
         """
         encoding = self._dep(EncodingPhase)
         if encoding.result is None:
             return []
 
-        encoded = cast(EncodingPhaseResult, encoding.result).encoded
+        encoded_chunks = cast(EncodingPhaseResult, encoding.result).encoded_chunks
         seen: dict[str, str] = {}
-        for artifact in encoded:
-            if artifact.state == ArtifactState.COMPLETE:
-                strategy_name = artifact.strategy
-                seen[strategy_name] = strategy_name
+        for by_strategy in encoded_chunks.values():
+            for encoded in by_strategy.values():
+                seen[encoded.strategy.name] = encoded.strategy.name
         return list(seen.items())
 
     def _execute(
@@ -898,7 +898,7 @@ class MergePhase(Phase):
                 # Collect and sort chunks for this strategy
                 strategy_chunks: list[Path] = sorted(
                     (
-                        encoded_chunks[chunk_id][strategy_name]
+                        encoded_chunks[chunk_id][strategy_name].stream.stream.file.path
                         for chunk_id in sorted(encoded_chunks.keys())
                         if strategy_name in encoded_chunks[chunk_id]
                     ),
@@ -1106,32 +1106,19 @@ class MergePhase(Phase):
             f"{complete_count} output file(s) complete",
         )
 
-    def _collect_encoded_chunks(self) -> dict[str, dict[str, Path]]:
-        """Build ``{chunk_id: {strategy_name: path}}`` from ``EncodingPhase.result``.
+    def _collect_encoded_chunks(self) -> dict[str, dict[str, EncodedChunk]]:
+        """Read the winning ``EncodedChunk`` objects from ``EncodingPhase.result``.
 
-        Reads the already-cached ``EncodingPhase.result.encoded`` — the list of
-        winning encoding attempts — resolved once by the shared dependency walk.
-        Quality-target re-evaluation and crop-mismatch detection are owned by
-        ``EncodingPhase._recover()`` and are already reflected in the cached
-        artifact states, so this helper only reads them.
+        The composed objects are resolved once by the shared dependency walk —
+        path via ``stream.file.path`` (Req 14: no duplicated fields).
 
         Returns:
-            Nested dict mapping chunk IDs to strategy-to-path mappings.
+            Nested dict mapping chunk IDs to strategy-name-to-``EncodedChunk``.
         """
         encoding = self._dep(EncodingPhase)
         if encoding.result is None:
             return {}
-
-        encoded = cast(EncodingPhaseResult, encoding.result).encoded
-        chunks: dict[str, dict[str, Path]] = {}
-        for artifact in encoded:
-            if artifact.state == ArtifactState.COMPLETE and artifact.path.exists():
-                chunk_id      = artifact.chunk_id
-                strategy_name = artifact.strategy
-                if chunk_id not in chunks:
-                    chunks[chunk_id] = {}
-                chunks[chunk_id][strategy_name] = artifact.path
-        return chunks
+        return cast(EncodingPhaseResult, encoding.result).encoded_chunks
 
 
 # ---------------------------------------------------------------------------

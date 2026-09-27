@@ -403,8 +403,7 @@ class TestChunkingPhaseTiming:
         from pyqenc.models import PhaseOutcome
         from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
         from pyqenc.phases.job import JobPhase
-        from pyqenc.phases.probe import ProbePhase
-        from pyqenc.phases.probe import ProbePhaseResult
+        from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 
         config = _make_config(tmp_path)
         work_dir = tmp_path / "work"
@@ -441,8 +440,11 @@ class TestChunkingPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.phases.chunking import ChunkingSidecar  # noqa: F401 — via stream_model
-        from pyqenc.stream_model import ChunkingSidecar as _CS, SceneRecord
+        from pyqenc.phases.chunking import (
+            ChunkingSidecar,  # noqa: F401 — via stream_model
+        )
+        from pyqenc.stream_model import ChunkingSidecar as _CS
+        from pyqenc.stream_model import SceneRecord
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
@@ -479,7 +481,8 @@ class TestChunkingPhaseTiming:
 
     def test_scene_detect_not_recorded_when_boundaries_cached(self, tmp_path: Path) -> None:
         """Cached boundaries skip detection entirely — no scene_detect span."""
-        from pyqenc.stream_model import ChunkingSidecar as _CS, SceneRecord
+        from pyqenc.stream_model import ChunkingSidecar as _CS
+        from pyqenc.stream_model import SceneRecord
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)

@@ -13,9 +13,8 @@ import tempfile
 from pathlib import Path
 
 import yaml
-from hypothesis import HealthCheck, given, settings
+from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
-from hypothesis import assume
 
 from pyqenc.metrics import (
     AttemptStats,
@@ -27,9 +26,9 @@ from pyqenc.metrics import (
     TimeDistribution,
     TopLevelEntry,
     YamlMetricsCollector,
-    _ConvergenceAccumulator,
     _build_key,
     _compute_convergence,
+    _ConvergenceAccumulator,
     _last_dot_prefix,
     _update_accumulator,
 )

@@ -32,8 +32,9 @@ from pyqenc.app_config import AudioConfig, ChainSpec, FilterInstance, SelectEntr
 from pyqenc.audio.chain import ResolvedChain, chain_output_path
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import AUDIO_OUTPUT_DIR
-from pyqenc.models import AudioMetadata, PhaseOutcome
+from pyqenc.models import PhaseOutcome
 from pyqenc.state import AudioSidecar
+from pyqenc.stream_model import AudioStream, AudioStreamInfo, File
 from pyqenc.utils.long_path import LongPath
 
 _AUDIO_YAML = "audio.yaml"
@@ -65,15 +66,21 @@ def _audio_config(chains: list[ChainSpec], select: list[SelectEntry] | None = No
     return AudioConfig(filters=palette, chains=chains, select=select or [])
 
 
-def _track(tmp_path: Path, stem: str, *, language: str = "eng", layout: str = "5.1") -> AudioMetadata:
-    """Create a real source-track file and its ``AudioMetadata``.
+def _track(tmp_path: Path, stem: str, *, language: str = "eng", layout: str = "5.1") -> AudioStream:
+    """Create a real source file and its ``AudioStream``.
 
     The file must exist so the source stem is real; the chain output is written
     by the fake executor into the phase's dedicated ``work_dir/audio`` dir.
     """
-    src = LongPath(tmp_path) / f"{stem}.mka"
+    src = LongPath(tmp_path) / f"{stem}.mkv"
     src.write_bytes(b"\x00" * 16)
-    return AudioMetadata(path=src, language=language, layout=ChannelLayout.parse(layout))
+    return AudioStream(
+        file = File(path=src, file_size_bytes=16),
+        info = AudioStreamInfo(
+            track_id=1, codec_name="flac", language=language,
+            layout=ChannelLayout.parse(layout),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +108,7 @@ def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioMetadata]
     job_mock.result = job_result
 
     extraction_result = MagicMock()
-    extraction_result.audio = tracks
+    extraction_result.audio_streams = tracks
 
     extraction_mock = MagicMock()
     extraction_mock.result = extraction_result
@@ -128,15 +135,14 @@ def _fake_execute_chain_factory(record: list[tuple[str, str]]):
     """
     async def _fake(
         resolved:   ResolvedChain,
-        source:     LongPath,
-        layout:     ChannelLayout,
+        stream:     AudioStream,
         output_dir: LongPath,
         **_kw,
     ) -> LongPath:
-        out = chain_output_path(source, resolved.name, resolved.encode.extension, output_dir)
+        out = chain_output_path(stream, resolved.name, resolved.encode.extension, output_dir)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"\x00")
-        record.append((resolved.name, source.stem))
+        record.append((resolved.name, stream.file.path.stem))
         return out
     return _fake
 

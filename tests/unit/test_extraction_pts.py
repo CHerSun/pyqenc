@@ -378,9 +378,9 @@ class TestNoVideoAudioExtraction:
         assert result.video_stream.info.fps_fraction is not None
         assert len(result.audio_streams) == 1
         assert result.audio_streams[0].info.layout is not None
-        # Interim legacy views point at the source, not at extracted files.
+        # The interim legacy video view points at the source, not an
+        # extracted file (the legacy audio view died with Task 7).
         assert result.video is not None and result.video.path == source
-        assert len(result.audio) == 1 and result.audio[0].path == source
 
 
 # ---------------------------------------------------------------------------

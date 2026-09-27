@@ -36,6 +36,52 @@ from pyqenc.state import ArtifactState, JobState
 from pyqenc.stream_model import File
 
 
+def _merge_encoded_chunk(path, chunk_id: str, strategy_name: str):
+    """A minimal EncodedChunk fixture for merge consumption (Req 14 shape)."""
+    from decimal import Decimal
+
+    from pyqenc.models import CodecConfig, CropParams, Strategy
+    from pyqenc.stream_model import (
+        EncodedChunk,
+        ExtendedVideoStream,
+        File,
+        VideoStream,
+        VideoStreamChunk,
+        VideoStreamInfo,
+    )
+
+    codec = CodecConfig(
+        name="h265-10bit", default_quality=Decimal("20"), default_preset="slow",
+        quality_range=(Decimal("0"), Decimal("51")), presets=["slow"],
+    )
+    preset, _, profile = strategy_name.partition("+")
+    strategy = Strategy(preset=preset, profile=profile or "h265", codec=codec, profile_args=[])
+    base_stream = ExtendedVideoStream(
+        stream=VideoStream(
+            file=File(path=path.parent / "source.mkv"),
+            info=VideoStreamInfo(track_id=0, resolution="1920x1080"),
+        ),
+        frame_count=24,
+        crop=CropParams(),
+    )
+    return EncodedChunk(
+        stream=ExtendedVideoStream(
+            stream=VideoStream(
+                file=File(path=path, file_size_bytes=128),
+                info=VideoStreamInfo(track_id=0, resolution="1920x1080"),
+            ),
+            frame_count=24,
+            crop=CropParams(),
+        ),
+        chunk=VideoStreamChunk(
+            stream=base_stream, start_timestamp=0.0, end_timestamp=1.0, frame_count=24,
+        ),
+        strategy=strategy,
+        crf=Decimal("20"),
+    )
+
+
+
 def _extended_stream(path: Path, frame_count: int):
     """An ExtendedVideoStream for the source (fast facet + frame count)."""
     from fractions import Fraction
@@ -350,7 +396,6 @@ def test_frame_count_preservation(frame_count: int) -> None:
     from pyqenc.constants import FINAL_OUTPUT_DIR
     from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
     from pyqenc.phases.encoding import (
-        EncodedArtifact,
         EncodingPhase,
         EncodingPhaseResult,
     )
@@ -427,16 +472,12 @@ def test_frame_count_preservation(frame_count: int) -> None:
         registry[ProbePhase] = probe
 
         encoding = EncodingPhase(config, registry, collector=collector)
+        encoded_chunk = _merge_encoded_chunk(chunk, "chunk1", "slow+h265")
         encoding.result = EncodingPhaseResult(
-            outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
-            message   = "encoding complete",
-            encoded   = [EncodedArtifact(
-                path     = chunk,
-                state    = ArtifactState.COMPLETE,
-                chunk_id = "chunk1",
-                strategy = "slow+h265",
-            )],
+            outcome        = PhaseOutcome.COMPLETED,
+            artifacts      = [],
+            message        = "encoding complete",
+            encoded_chunks = {"chunk1": {encoded_chunk.strategy.name: encoded_chunk}},
         )
         registry[EncodingPhase] = encoding
 
@@ -452,8 +493,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
         merge = MergePhase(config, registry, collector=collector)
 
         source_stem = source.stem
-        safe_name   = "slow+h265".replace(":", "_")
-        output_file = work_dir / FINAL_OUTPUT_DIR / f"{source_stem} {safe_name}.mkv"
+        output_file = work_dir / FINAL_OUTPUT_DIR / f"{source_stem} {encoded_chunk.strategy.name}.mkv"
 
         def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
             output_file.parent.mkdir(parents=True, exist_ok=True)

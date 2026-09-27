@@ -66,7 +66,7 @@ Staged so every task lands green: the runner converts first (pure mechanical, co
   - Visualization x-axes → timestamps via `fps_fraction`
   - Update `test_encoding_phase.py`, `test_optimization_phase.py`, `tests/integration/test_encoding_quality.py`
 
-- [ ] 7. AudioPhase + MergePhase (Req 7.5, 15.6, 15.8)
+- [x] 7. AudioPhase + MergePhase (Req 7.5, 15.6, 15.8)
   - Audio chains consume `AudioStream.as_input()`; delete `.mka` extraction consumption; measurement passes parse `result.stderr_lines`; `-vn/-sn/-dn` dropped (explicit single-stream `-map` subsumes them); injectable runner signature becomes `FFmpegRequest → FFmpegRunResult`; audio.yaml signatures/sidecar unchanged
   - Merge consumes `EncodedChunk`/`Strategy` objects; output name derived in one place from `File.path.stem` + the strategy name (safe by construction); mechanics (mkvmerge append + `--timestamps`) untouched; final frame-count verify stays
   - Update `test_audio_phase.py`, `test_merge_mkvmerge.py`

@@ -46,6 +46,9 @@ from pyqenc.constants import (
     ENCODED_ATTEMPT_NAME_PATTERN,
     FFMPEG_SELECTOR_PREFIX,
     RANGE_SEPARATOR,
+    SELECTOR_KEY_CH,
+    SELECTOR_KEY_LANG,
+    SELECTOR_KEY_TITLE,
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
@@ -263,6 +266,27 @@ class AudioStream(Stream[AudioStreamInfo]):
         if self.info.layout is not None:
             tags.append(f"ch={self.info.layout.original}")
         return _format_display_name("audio", self.info, tags)
+
+    def selector_string(self) -> str:
+        """The conventional, regex-friendly targeting string for ``audio.select``.
+
+        Contains ``lang=<code>``, ``ch=<layout>``, and ``title=<text>`` tokens
+        (title omitted when absent), space-separated. The ``ch=`` token uses
+        the layout's faithful source token (``ChannelLayout.original``) so a
+        user's select regex matches the source layout exactly (e.g.
+        ``ch=5.1(side)``). Derived purely from the enumerated info fields —
+        a display string (Req 15.2), never used on disk.
+
+        Returns:
+            The conventional string (e.g. ``"lang=eng ch=5.1(side) title=Surround"``).
+        """
+        tokens: list[str] = [
+            f"{SELECTOR_KEY_LANG}={self.info.language or ''}",
+            f"{SELECTOR_KEY_CH}={self.info.layout.original if self.info.layout is not None else ''}",
+        ]
+        if self.info.title:
+            tokens.append(f"{SELECTOR_KEY_TITLE}={self.info.title}")
+        return " ".join(tokens)
 
 
 class SubtitleStream(Stream[SubtitleStreamInfo]):

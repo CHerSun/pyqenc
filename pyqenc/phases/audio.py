@@ -39,6 +39,7 @@ from pyqenc.audio.chain import (
     chain_output_path,
     execute_chain,
     resolve_chain,
+    track_layout,
 )
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.audio.select import resolve_selection
@@ -50,7 +51,7 @@ from pyqenc.constants import (
     THICK_LINE,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import AudioMetadata, PhaseOutcome
+from pyqenc.models import PhaseOutcome
 from pyqenc.phase import (
     Artifact,
     Phase,
@@ -61,6 +62,7 @@ from pyqenc.phase import (
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.state import ArtifactState, AudioSidecar
+from pyqenc.stream_model import AudioStream
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.long_path import LongPath
 
@@ -82,13 +84,13 @@ class AudioArtifact(Artifact):
     produced); ``wanted`` marks whether the current config still expects it.
 
     Attributes:
-        source_track: The extracted track this output is produced from.
-        chain_name:   The producing chain's configured name.
-        out_layout:   The resolved output channel layout (after any downmix).
-        codec:        The effective output codec (e.g. ``flac``, ``aac``).
+        source_stream: The source audio stream this output is produced from.
+        chain_name:    The producing chain's configured name.
+        out_layout:    The resolved output channel layout (after any downmix).
+        codec:         The effective output codec (e.g. ``flac``, ``aac``).
     """
 
-    source_track: AudioMetadata | None = None
+    source_stream: AudioStream | None = None
     chain_name:   str | None           = None
     out_layout:   ChannelLayout | None = None
     codec:        str | None           = None
@@ -212,7 +214,7 @@ class AudioPhase(Phase):
         # Step 6 — classify expected outputs (completion from disk only).
         return Recovery.from_artifacts(self._classify(audio_dir, tracks, resolved))
 
-    def _output_dir(self, tracks: list[AudioMetadata], work_dir: LongPath) -> LongPath:
+    def _output_dir(self, tracks: list[AudioStream], work_dir: LongPath) -> LongPath:
         """Return the phase's DEDICATED audio output directory (``work_dir/audio``).
 
         The audio phase owns this folder (Phase Contract). Chain outputs are
@@ -269,12 +271,12 @@ class AudioPhase(Phase):
             except OSError as exc:
                 logger.warning("Could not remove temp file %s: %s", tmp, exc)
 
-    def _selected_tracks(self) -> list[AudioMetadata]:
+    def _selected_tracks(self) -> list[AudioStream]:
         """Resolve the working track set from extraction + ``audio.select`` (Req 9.1)."""
         extraction_result = cast(ExtractionPhaseResult, self._dep(ExtractionPhase).result)
-        audio_meta: list[AudioMetadata] = extraction_result.audio or []
+        audio_streams: list[AudioStream] = extraction_result.audio_streams
         audio_cfg = cast(JobPhaseResult, self._dep(JobPhase).result).config.audio
-        return resolve_selection(audio_meta, audio_cfg.select)
+        return resolve_selection(audio_streams, audio_cfg.select)
 
     def _invalidate_and_commit(
         self,
@@ -351,7 +353,7 @@ class AudioPhase(Phase):
     def _classify(
         self,
         audio_dir: LongPath,
-        tracks:    list[AudioMetadata],
+        tracks:    list[AudioStream],
         resolved:  dict[str, ResolvedChain],
     ) -> list[AudioArtifact]:
         """Build one artifact per expected (track, chain), classified from disk.
@@ -372,20 +374,19 @@ class AudioPhase(Phase):
         artifacts: list[AudioArtifact] = []
         expected_names: set[str]       = set()
 
-        for track in tracks:
-            source = LongPath(track.path)
-            layout = self._track_layout(track)
+        for stream in tracks:
+            layout = self._track_layout(stream)
             for name, chain in resolved.items():
-                out = chain_output_path(source, name, chain.encode.extension, audio_dir)
+                out = chain_output_path(stream, name, chain.encode.extension, audio_dir)
                 expected_names.add(out.name)
                 state = ArtifactState.COMPLETE if out.exists() else ArtifactState.ABSENT
                 artifacts.append(AudioArtifact(
-                    path         = out,
-                    state        = state,
-                    source_track = track,
-                    chain_name   = name,
-                    out_layout   = layout,
-                    codec        = chain.encode.codec,
+                    path          = out,
+                    state         = state,
+                    source_stream = stream,
+                    chain_name    = name,
+                    out_layout    = layout,
+                    codec         = chain.encode.codec,
                 ))
 
         # Surface present-but-unwanted surplus files (a stale output whose chain
@@ -406,26 +407,19 @@ class AudioPhase(Phase):
 
         return artifacts
 
-    def _track_layout(self, track: AudioMetadata) -> ChannelLayout:
-        """Return the track's channel layout, falling back gracefully when absent.
+    def _track_layout(self, stream: AudioStream) -> ChannelLayout:
+        """Return the stream's channel layout, falling back gracefully when absent.
 
-        The extraction-provided ``AudioMetadata.layout`` is preferred (Task 4);
-        when it is ``None`` a stereo fallback keeps chain execution viable rather
-        than crashing on a missing layout.
+        The stream info's layout is preferred; when it is ``None`` a stereo
+        fallback keeps chain execution viable rather than crashing.
 
         Args:
-            track: The selected extracted audio track.
+            stream: The selected source audio stream.
 
         Returns:
             A concrete :class:`ChannelLayout`.
         """
-        if track.layout is not None:
-            return track.layout
-        logger.warning(
-            "Track %s has no extraction layout — falling back to %s",
-            track.path.name, _FALLBACK_LAYOUT_TOKEN,
-        )
-        return ChannelLayout.parse(_FALLBACK_LAYOUT_TOKEN)
+        return track_layout(stream)
 
     # ------------------------------------------------------------------
     # Execution
@@ -466,7 +460,7 @@ class AudioPhase(Phase):
         failed   = 0
         with ProgressBar(total=len(pending), title="AUDIO", total_count=len(pending)) as advance:
             for art in pending:
-                label = f"[{art.chain_name}] {art.source_track.path.stem if art.source_track else '?'}"
+                label = f"[{art.chain_name}] {art.source_stream.file.path.stem if art.source_stream else '?'}"
                 logger.debug("Producing %s", label)
                 try:
                     self._produce_one(art, resolved[art.chain_name], audio_dir)  # type: ignore[index]
@@ -518,10 +512,8 @@ class AudioPhase(Phase):
             NotImplementedError: For a ``passthrough`` chain (Req 11).
             ChainExecutionError: When a measurement or application pass fails.
         """
-        assert artifact.source_track is not None
-        source = LongPath(artifact.source_track.path)
-        layout = artifact.out_layout or self._track_layout(artifact.source_track)
-        asyncio.run(execute_chain(chain, source, layout, output_dir))
+        assert artifact.source_stream is not None
+        asyncio.run(execute_chain(chain, artifact.source_stream, output_dir))
 
     def _make_result(
         self,
