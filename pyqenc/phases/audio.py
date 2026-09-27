@@ -299,11 +299,11 @@ class AudioPhase(Phase):
             resolved:     Current resolved chains, keyed by name.
         """
         persisted   = AudioSidecar.load(sidecar_path)
-        prior_sigs  = persisted.signatures if persisted is not None else {}
+        prior_sigs  = persisted.chains if persisted is not None else {}
 
         # Current chain signatures (the same canonical string the sidecar stores).
         current      = AudioSidecar.from_resolved(resolved)
-        current_sigs = current.signatures
+        current_sigs = current.chains
 
         # Chains whose signature changed → invalidate (reproduce).
         changed = {

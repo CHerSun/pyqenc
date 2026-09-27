@@ -440,7 +440,7 @@ def _log_merge_summary_from_params(
         source_stem       = params.source_stem,
         source_size_bytes = params.source_size_bytes,
         quality_targets   = quality_targets,
-        metrics_sampling  = params.metrics_sampling or 1,
+        metrics_sampling  = params.sampling or 1,
     )
 
 
@@ -578,11 +578,11 @@ class MergePhase(Phase):
         if job_result is not None:
             return MergeParams(
                 quality_targets  = _targets_as_strings(job_result.config.encoding.resolved_targets),
-                metrics_sampling = job_result.config.measurement.sampling,
+                sampling = job_result.config.measurement.sampling,
                 probe            = probe,
             )
         # Fallback: empty params before job result is available
-        return MergeParams(quality_targets=[], metrics_sampling=1)
+        return MergeParams(quality_targets=[], sampling=1)
 
     # ------------------------------------------------------------------
     # Phase hooks
@@ -658,7 +658,7 @@ class MergePhase(Phase):
             persisted = MergeParams.load(merge_yaml)
             if persisted is not None and persisted != self.params:
                 targets_changed  = bool(persisted.quality_targets) and persisted.quality_targets != self.params.quality_targets
-                sampling_changed = persisted.metrics_sampling is not None and persisted.metrics_sampling != self.params.metrics_sampling
+                sampling_changed = persisted.sampling is not None and persisted.sampling != self.params.sampling
                 probe_changed    = (
                     persisted.probe is not None
                     and self.params.probe is not None
@@ -1074,7 +1074,7 @@ class MergePhase(Phase):
             )
             MergeParams(
                 quality_targets    = self.params.quality_targets,
-                metrics_sampling   = self.params.metrics_sampling,
+                sampling           = self.params.sampling,
                 probe              = self.params.probe,
                 source_stem        = source_stem,
                 source_size_bytes  = source_size_bytes,

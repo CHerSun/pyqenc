@@ -192,7 +192,7 @@ class OptimizationPhase(Phase):
            the ``encoding/`` test workspace.
         2. Probe mismatch against ``optimization.yaml`` — fatal without
            ``--force`` (handled in step 1 when forced).
-        3. Quality-target / ``metrics_sampling`` change → wipe ``encoded/``
+        3. Quality-target / metrics-sampling change → wipe ``encoded/``
            result dirs and treat all cached strategy results as stale.
         4. All results cached with a differing tolerance → cheap pending work
            (re-select without re-encoding).
@@ -237,7 +237,7 @@ class OptimizationPhase(Phase):
                     "Re-run with --force to delete stale optimization artifacts and continue."
                 )
 
-        # Step 3 — quality-target / metrics_sampling change detection.
+        # Step 3 — quality-target / sampling change detection.
         current_targets  = _targets_as_strings(self._config.encoding.resolved_targets)
         current_sampling = self._config.measurement.sampling
         targets_changed = (
@@ -247,14 +247,14 @@ class OptimizationPhase(Phase):
         )
         sampling_changed = (
             persisted is not None
-            and persisted.metrics_sampling is not None
-            and persisted.metrics_sampling != current_sampling
+            and persisted.sampling is not None
+            and persisted.sampling != current_sampling
         )
         if (targets_changed or sampling_changed) and persisted is not None and persisted.strategy_results:
             if sampling_changed:
                 logger.debug(
-                    "metrics_sampling changed (%d → %d) — wiping encoded/ dirs",
-                    persisted.metrics_sampling, current_sampling,
+                    "metrics sampling changed (%d → %d) — wiping encoded/ dirs",
+                    persisted.sampling, current_sampling,
                 )
             # Wipe encoded/ for every strategy — contents are hard-linked attempts
             # and result sidecars; EncodingPhase will re-discover from encoding/.
@@ -267,7 +267,7 @@ class OptimizationPhase(Phase):
                 tolerance_pct    = persisted.tolerance_pct,
                 selected         = [],
                 quality_targets  = persisted.quality_targets,
-                metrics_sampling = persisted.metrics_sampling,
+                sampling         = persisted.sampling,
             )
         self._persisted = persisted
 
@@ -275,7 +275,7 @@ class OptimizationPhase(Phase):
         cached_results: dict[str, StrategyTestResult] = {}
         if persisted is not None:
             for r in persisted.strategy_results:
-                cached_results[r.strategy_name] = r
+                cached_results[r.strategy] = r
         self._cached_results = cached_results
 
         self._strategies_to_test = [s for s in strategies if s.name not in cached_results]
@@ -351,7 +351,7 @@ class OptimizationPhase(Phase):
                 tolerance_pct    = tolerance,
                 selected         = selected,
                 quality_targets  = current_targets,
-                metrics_sampling = current_sampling,
+                sampling = current_sampling,
             ).save(opt_yaml)
             self._selected_names   = selected
             self._strategy_results = persisted.strategy_results
@@ -390,7 +390,7 @@ class OptimizationPhase(Phase):
             tolerance_pct    = tolerance,
             selected         = [],
             quality_targets  = current_targets,
-            metrics_sampling = current_sampling,
+            sampling = current_sampling,
         ).save(opt_yaml)
 
         # Run test encodes for all pending strategies in parallel (unified
@@ -400,7 +400,7 @@ class OptimizationPhase(Phase):
             collector        = self._collector,
             crop_params      = crop,
             visual_hash      = self._config.encoding.visual_hash,
-            metrics_sampling = self._config.measurement.sampling,
+            sampling = self._config.measurement.sampling,
             cleanup_level    = job_result.cleanup,
             metric_prefix    = MetricKey.OPTIMIZATION,
         )
@@ -449,7 +449,7 @@ class OptimizationPhase(Phase):
                 if encoded is not None and encoded.stream.file.path.exists():
                     file_sizes.append(encoded.stream.file.file_size_bytes or 0)
             new_results.append(StrategyTestResult(
-                strategy_name = strategy.name,
+                strategy     = strategy.name,
                 total_size    = int(sum(file_sizes)),
             ))
 
@@ -467,7 +467,7 @@ class OptimizationPhase(Phase):
             tolerance_pct    = tolerance,
             selected         = selected,
             quality_targets  = current_targets,
-            metrics_sampling = current_sampling,
+            sampling = current_sampling,
         ).save(opt_yaml)
 
         self._selected_names   = selected
@@ -561,19 +561,19 @@ class OptimizationPhase(Phase):
                 persisted is not None
                 and (
                     (bool(persisted.quality_targets) and persisted.quality_targets != current_targets)
-                    or (persisted.metrics_sampling is not None and persisted.metrics_sampling != current_sampling)
+                    or (persisted.sampling is not None and persisted.sampling != current_sampling)
                 )
             )
             if params_stale:
                 logger.info(
-                    "All-strategies mode: quality targets or metrics_sampling changed"
+                    "All-strategies mode: quality targets or metrics sampling changed"
                     " — wiping encoded/ dirs"
                 )
                 _wipe_encoded_dir(work_dir, self._config.encoding.resolved_strategies)
             elif persisted is not None:
                 logger.debug(
                     "All-strategies mode: params unchanged (sampling=%s, targets=%s) — encoded/ kept",
-                    persisted.metrics_sampling, persisted.quality_targets,
+                    persisted.sampling, persisted.quality_targets,
                 )
 
             # Always write optimization.yaml with current targets and sampling
@@ -585,7 +585,7 @@ class OptimizationPhase(Phase):
                 tolerance_pct    = 0.0,
                 selected         = [s.name for s in self._config.encoding.resolved_strategies],
                 quality_targets  = current_targets,
-                metrics_sampling = current_sampling,
+                sampling = current_sampling,
             ).save(opt_yaml)
 
         return OptimizationPhaseResult(
@@ -639,7 +639,7 @@ class OptimizationPhase(Phase):
         best_size = successful[0].total_size
         threshold = best_size * (1.0 + tolerance_pct / 100.0)
 
-        return [r.strategy_name for r in successful if r.total_size <= threshold]
+        return [r.strategy for r in successful if r.total_size <= threshold]
 
     def _log_optimization_summary(
         self,
@@ -667,11 +667,11 @@ class OptimizationPhase(Phase):
         for res in results:
             size_mb  = res.total_size / (1024 * 1024) if res.total_size > 0 else 0.0
             size_str = f"{size_mb:,.1f}".replace(",", "\u202f")
-            marker   = " ◀ selected" if res.strategy_name in selected_names else ""
+            marker   = " ◀ selected" if res.strategy in selected_names else ""
             status   = "passed" if res.total_size > 0 else "failed"
             logger.info(
                 "  %-30s  %12s  %8s%s",
-                res.strategy_name[:30], size_str, status, marker,
+                res.strategy[:30], size_str, status, marker,
             )
 
         logger.info("")

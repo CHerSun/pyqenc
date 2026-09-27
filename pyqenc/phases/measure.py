@@ -659,7 +659,7 @@ def _write_sidecar(
     )
 
     try:
-        write_yaml_atomic(path, sidecar.to_yaml_dict())
+        write_yaml_atomic(path, sidecar.model_dump(exclude_none=True))
         logger.debug("Wrote metrics sidecar: %s", path)
     except Exception as exc:
         logger.warning("Failed to write metrics sidecar %s: %s", path, exc)
@@ -951,7 +951,7 @@ async def run_measure(
     target_videos:            list[Path],
     work_dir:                 Path,
     crop_params:              CropParams | None,
-    metrics_sampling:         int,
+    sampling:                int,
     width:                    int | None,
     screenshot_count:         int | None,
     screenshot_interval:      float | None      = None,
@@ -973,7 +973,7 @@ async def run_measure(
         crop_params:              Explicit crop (or empty ``CropParams`` for no-crop).
                                   Pass ``None`` to auto-load from ``job.yaml`` if
                                   present.
-        metrics_sampling:         Frame subsampling factor (≥1).  Ignored in
+        sampling:                Frame subsampling factor (≥1).  Ignored in
                                   screenshots-only mode.
         width:                    Scale both inputs to this width during metric
                                   computation (after cropping).  ``None`` = no
@@ -996,7 +996,7 @@ async def run_measure(
     Raises:
         FileNotFoundError: If ``source_video`` or any path in ``target_videos``
                            does not exist.
-        ValueError:        If ``metrics_sampling < 1``, ``screenshot_count < 1``,
+        ValueError:        If ``sampling < 1``, ``screenshot_count < 1``,
                            or any resolution mismatch is detected.
     """
     from pyqenc.constants import MEASURE_DIR
@@ -1013,8 +1013,8 @@ async def run_measure(
         if not target.exists():
             raise FileNotFoundError(f"Target video not found: {target}")
 
-    if metrics_sampling < 1:
-        raise ValueError(f"metrics_sampling must be ≥ 1, got {metrics_sampling}")
+    if sampling < 1:
+        raise ValueError(f"sampling must be ≥ 1, got {sampling}")
 
     from pyqenc.constants import DEFAULT_SCREENSHOT_COUNT
     effective_screenshot_count = screenshot_count if screenshot_count is not None else DEFAULT_SCREENSHOT_COUNT
@@ -1048,7 +1048,7 @@ async def run_measure(
         "targets":     [f"{i+1:>2} - {t.name}" for i, t in enumerate(target_videos)] if target_videos else ["(none — screenshots only)"],
         "crop":        str(resolved_crop) if not resolved_crop.is_empty() else "none",
         "width":       str(width) if width else "none",
-        "sampling":    str(metrics_sampling),
+        "sampling":    str(sampling),
         "screenshots": f"every {screenshot_interval}s (cap {effective_screenshot_count})" if screenshot_interval else str(effective_screenshot_count),
     })
 
@@ -1237,7 +1237,7 @@ async def run_measure(
             width            = width,
             metrics_dir      = measure_dir,
             graph_path       = graph_paths[target_video],
-            subsample_factor = metrics_sampling,
+            subsample_factor = sampling,
             bar_title        = f"measuring target {idx:>2}",
             duration_seconds = eff_dur or 0.0,
             fps_value        = source_stream.info.fps_fraction,
@@ -1247,7 +1247,7 @@ async def run_measure(
             path                       = sidecar_paths[target_video],
             source_video               = source_video,
             target_video               = target_video,
-            subsample_factor           = metrics_sampling,
+            subsample_factor           = sampling,
             crop_params                = resolved_crop,
             metrics                    = metrics,
             source_duration_seconds    = source_duration,

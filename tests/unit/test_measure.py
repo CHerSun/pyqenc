@@ -448,13 +448,13 @@ class TestWriteSidecar:
         assert "source_video" in data
         assert "target_video" in data
         assert "source_duration_seconds" in data
-        assert "target_duration_seconds" in data
-        assert "effective_duration_seconds" in data
+        assert "target_duration_seconds" not in data  # None → omitted (exclude_none)
+        assert "effective_duration_seconds" not in data  # None → omitted (exclude_none)
         assert "sampling" in data
         assert "crop_params" in data
         assert "metrics" in data
         assert data["sampling"] == 5
-        assert data["target_duration_seconds"] is None
+        assert "target_duration_seconds" not in data  # None → omitted (exclude_none)
         assert data["crop_params"] == {"top": 10, "bottom": 20, "left": 0, "right": 0}
         # metrics are flat: vmaf_min, vmaf_median, etc.
         assert f"{MetricType.VMAF.value}_min" in data["metrics"]

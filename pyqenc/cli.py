@@ -865,7 +865,7 @@ def _cmd_measure(args: argparse.Namespace) -> int:
             work_dir                 = args.work_dir,
             target_videos            = args.targets,
             crop_params              = crop_params,
-            metrics_sampling         = metrics_sampling,
+            sampling                 = metrics_sampling,
             screenshot_count         = args.screenshots,
             screenshot_interval      = args.every,
             screenshot_include_edges = args.screenshot_include_edges,

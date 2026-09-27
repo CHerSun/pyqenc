@@ -779,13 +779,13 @@ class TestOptimizationPhaseTiming:
             probe            = ProbeState(frame_count=0, crop=CropParams()),
             test_chunks      = ["chunk_0"],
             strategy_results = [
-                StrategyTestResult(strategy_name=strategy.name, total_size=1024),
-                StrategyTestResult(strategy_name=_STRATEGY_H265_AQ.name, total_size=512),
+                StrategyTestResult(strategy=strategy.name, total_size=1024),
+                StrategyTestResult(strategy=_STRATEGY_H265_AQ.name, total_size=512),
             ],
             tolerance_pct    = 5.0,   # matches AppConfig.encoding.strategy_selection_tolerance default
             selected         = [strategy.name],
             quality_targets  = [],
-            metrics_sampling = 1,     # matches AppConfig.encoding.metrics_sampling default
+            sampling = 1,     # matches AppConfig.encoding.sampling default
         )
 
         # All results cached with matching tolerance → reuse path (step 4 in run())
@@ -937,13 +937,13 @@ class TestOptimizationPhaseTiming:
             probe            = ProbeState(frame_count=0, crop=CropParams()),
             test_chunks      = ["chunk_0"],
             strategy_results = [
-                StrategyTestResult(strategy_name=strategy.name, total_size=1024),
-                StrategyTestResult(strategy_name=_STRATEGY_H265_AQ.name, total_size=512),
+                StrategyTestResult(strategy=strategy.name, total_size=1024),
+                StrategyTestResult(strategy=_STRATEGY_H265_AQ.name, total_size=512),
             ],
             tolerance_pct    = 0.0,
             selected         = [strategy.name],
             quality_targets  = [],
-            metrics_sampling = 1,
+            sampling = 1,
         )
 
         with patch.object(OptimizationParams, "load", return_value=persisted):
@@ -1006,7 +1006,7 @@ class TestEncodingPhaseTiming:
             artifacts         = [],
             message           = "ok",
             selected_strategies = [strategy],
-            strategy_results  = [StrategyTestResult(strategy_name=strategy.name, total_size=1024)],
+            strategy_results  = [StrategyTestResult(strategy=strategy.name, total_size=1024)],
         )
 
     def _make_phase(

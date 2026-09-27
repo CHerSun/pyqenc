@@ -119,15 +119,12 @@ def _probe_resolution(path: Path) -> str | None:
 def _read_metrics_sidecar(attempt_path: Path) -> dict | None:
     """Read a per-attempt metrics sidecar for an encoded attempt.
 
-    Tries the new YAML format (``.yaml``) first; falls back to the legacy
-    JSON format (``.metrics.json``) for backward compatibility (Req 8.2).
-
     Args:
         attempt_path: Path to the encoded attempt ``.mkv`` file.
 
     Returns:
-        Parsed sidecar dict (keys: ``targets_met``, ``crf``, ``metrics``),
-        or ``None`` if no sidecar exists or it cannot be parsed.
+        Parsed sidecar dict (keys: ``targets_met``, ``crf``, ``metrics``,
+        ``sampling``), or ``None`` if no sidecar exists or it cannot be parsed.
     """
     import yaml as _yaml
 
@@ -136,16 +133,6 @@ def _read_metrics_sidecar(attempt_path: Path) -> dict | None:
         try:
             with yaml_sidecar.open("r", encoding="utf-8") as fh:
                 return _yaml.safe_load(fh)
-        except Exception:
-            pass
-
-    # Legacy fallback
-    json_sidecar = attempt_path.with_suffix(".metrics.json")
-    if json_sidecar.exists():
-        import json as _json
-        try:
-            with json_sidecar.open("r", encoding="utf-8") as fh:
-                return _json.load(fh)
         except Exception:
             pass
 
@@ -174,13 +161,13 @@ def _write_metrics_sidecar(
     """
     sidecar = attempt_path.with_suffix(".yaml")
     data    = MetricsSidecar(
-        crf              = crf,
-        targets_met      = targets_met,
-        metrics          = metrics,
-        metrics_sampling = metrics_sampling,
+        crf         = crf,
+        targets_met = targets_met,
+        metrics     = metrics,
+        sampling    = metrics_sampling,
     )
     try:
-        write_yaml_atomic(sidecar, data.to_yaml_dict())
+        write_yaml_atomic(sidecar, data.model_dump(exclude_none=True))
     except Exception as e:
         logger.warning("Failed to write metrics sidecar for %s: %s", attempt_path.name, e)
 
@@ -240,7 +227,7 @@ def _write_encoding_result_sidecar(
         targets_met     = targets_met,
     )
     try:
-        write_yaml_atomic(sidecar_path, data.to_yaml_dict())
+        write_yaml_atomic(sidecar_path, data.model_dump(exclude_none=True))
         logger.debug(
             "Wrote encoding result sidecar: %s (crf=%s, targets_met=%s)",
             sidecar_path.name, crf, targets_met,

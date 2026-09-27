@@ -309,7 +309,7 @@ class TestResumability:
         # Sidecar was committed in _recover, BEFORE the crashing production.
         sidecar = AudioSidecar.load(LongPath(tmp_path) / _AUDIO_YAML)
         assert sidecar is not None
-        assert "normal" in sidecar.signatures
+        assert "normal" in sidecar.chains
 
 
 class TestPassthrough:

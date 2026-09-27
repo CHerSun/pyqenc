@@ -219,7 +219,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         encoder = ChunkEncoder(
             quality_evaluator = evaluator,
             work_dir          = tmp_path,
-            metrics_sampling  = 10,
+            sampling = 10,
         )
 
         reference = MagicMock()

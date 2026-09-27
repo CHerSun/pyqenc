@@ -77,7 +77,7 @@ Staged so every task lands green: the runner converts first (pure mechanical, co
   - Cleanup: INTERMEDIATE = encoding workspace; ALL = + `encoded/`; remove `chunks/` paths
   - E2E smoke on real media
 
-- [ ] 9. Dead-code sweep + full verification (Req 6.4)
+- [x] 9. Dead-code sweep + full verification (Req 6.4)
   - Delete `VideoMetadata`/`ExtendedVideoMetadata`/`ChunkMetadata`, `StreamBase`/`StreamFactory`/`MKVTrackExtractor`, `populate_from_ffmpeg_output`, `ChunkingParams.chunking_mode` remnant, `probe_extended`, FFV1/remux constants, and all remaining `to_yaml_dict`/`from_yaml_dict` pairs (Req 5.4)
   - Project-wide search for leftovers; `uv run ruff check .`; full `uv run python -m pytest`
   - Full e2e on real media; verify the invariant chain end-to-end (source == Σ attempts == final)
