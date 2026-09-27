@@ -25,6 +25,20 @@
 - **In-memory stream objects (no on-disk extraction).** A future spec moves targeting to source stream objects and lets `passthrough` avoid producing a file entirely. This spec adds `passthrough` to the config surface but leaves its executor as a `NotImplementedError` stub.
   - 2026-09-25: partially realized by `2026-09-25 file-stream-model` — chain *inputs* become source stream objects (`AudioStream.as_input()` reads the source via a `-map` selector; no `.mka` intermediates are extracted). The `passthrough`-without-output-file idea remains open (merge still requires external audio files).
 
+## Cross-Spec Notes
+
+**Realized in part by `2026-09-25 file-stream-model` (2026-09-27).** The
+forward reference "in-memory stream objects (no on-disk extraction)" is
+realized for chain *inputs*: chains read the source directly via
+``AudioStream.as_input()`` (source file + per-track ``0:<track_id>``
+selector) — the extracted ``.mka`` intermediates are gone, along with the
+``-vn/-sn/-dn`` drops (the explicit single-stream map subsumes them).
+Measurement passes scrape ``FFmpegRunResult.stderr_lines`` as before. The
+executor signature is ``execute_chain(resolved, stream, output_dir, runner)``
+with the track layout derived from the stream info. The
+``passthrough``-without-file idea remains out of scope (merge still needs
+external audio files) — unchanged forward reference.
+
 ## Introduction
 
 Audio processing today produces every possible transformation variation and offers no way to express which outputs are actually wanted. The engine fans out combinatorially through hard-coded strategy classes whose eligibility is decided by parsing filenames, and the only user lever is a single `convert_pattern` regex that picks which of the auto-generated variations get a delivery file. The phase itself was merged from another project and does not follow the project's Phase pattern (no proper result object, no artifact metadata, no uniform logging).

@@ -16,6 +16,20 @@
 | `VideoMetadata` holds `frame_count: int \| None` as a lazy property | `pipeline-maturity-refactor` Req 1 AC 1, Glossary | `frame_count` removed from `VideoMetadata` entirely; moved to **`ExtendedVideoMetadata`** as a required plain field; slow probe is now an explicit method call (`probe_extended()`) not a property |
 | `CropParams` stored on `VideoMetadata.crop_params` and `PipelineState.source_video.crop_params` | `pipeline-correctness-refactor` Req 2 (all ACs) | Crop now lives in **`probe.yaml`** via `ProbeState`; `VideoMetadata` no longer carries crop; the orchestrator no longer reads crop from `tracker._state.source_video.crop_params` |
 
+## Cross-Spec Notes
+
+**Amended by `2026-09-25 file-stream-model` (2026-09-27).** ProbePhase keeps its
+sidecar and slow-facet ownership; ``probe.yaml`` keeps its shape (the crop key
+is omitted when empty, materialized empty on load — crop is never ``None``
+past config). Its frame-count source changed: the primary source is the total
+line count of ``extracted/timestamps.txt`` (exact and free); the null-encode
+pass this spec introduced is now fallback (timestamps absent/unreadable) and
+final-merge verification. Cropdetect reads the source through the stream's own
+``-map`` selector. ProbePhase is the sole producer of
+``ExtendedVideoStream`` — the input type of every downstream video phase —
+composed over ExtractionPhase's enumerated ``VideoStream`` (the
+``VideoMetadata``/lazy-property hierarchy this spec built on is deleted).
+
 ## Introduction
 
 This spec covers a cluster of related changes to the job initialisation and extraction phases, motivated by the introduction of the audio-only pipeline path and a desire to eliminate hidden slow operations from the source-video probe.

@@ -9,6 +9,19 @@
 
 **Superseded in part by `artifact-state-refactor` (2026-09-15).** This spec's glossary describes the four-value `ArtifactState` (`ABSENT`/`ARTIFACT_ONLY`/`STALE`/`COMPLETE`). That enum is re-scoped to completeness only: `STALE` is removed (selection now lives in a new `Artifact.wanted` field) and `ARTIFACT_ONLY` is renamed `PARTIAL`. The `TimestampArtifact` requirements here are unchanged in spirit — it stays `COMPLETE`/`ABSENT` (never `STALE`) and now also carries `wanted`.
 
+## Cross-Spec Notes
+
+**Extended by `2026-09-25 file-stream-model` (2026-09-27).** Global PTS
+restoration via ``mkvmerge --timestamps`` at merge is unchanged and remains the
+mechanism. This spec adds the frame-preservation invariant on top:
+``source.frame_count == Σ chunk.frame_count == Σ winning-attempt.frame_count ==
+final.frame_count`` — chunk counts telescope from detector boundary frames by
+construction, attempt counts come free from the encode runs'
+``progress=end``, and the source count is read primarily from the total line
+count of this spec's own ``timestamps.txt`` (the null-count ffmpeg pass is now
+fallback and merge verification only). Seek targets are floored to
+microseconds so rounding never drops a boundary frame.
+
 ## Introduction
 
 The pyqenc pipeline produces a final merged MKV whose PTS (Presentation Timestamps)

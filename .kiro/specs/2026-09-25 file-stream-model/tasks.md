@@ -3,7 +3,7 @@
 <!-- markdownlint-disable MD024 -->
 
 - Created: 2026-09-25
-- Completed:
+- Completed: 2026-09-27
 
 ## Overview
 
@@ -83,11 +83,11 @@ Staged so every task lands green: the runner converts first (pure mechanical, co
   - Full e2e on real media; verify the invariant chain end-to-end (source == Σ attempts == final)
   - setpts comparison experiment on real media (Req 12.3) — record results in this spec; drop the flag in a follow-up only if measurably redundant
 
-- [ ] 10. Cross-spec review + TODO reconciliation
+- [x] 10. Cross-spec review + TODO reconciliation
   - Review this spec against `2026-03-17 ffmpeg-unified-runner`, `2026-04-29 pts-preservation`, `2026-09-01 probe-phase-refactor`, `2026-09-11 audio-chains`; add difference summaries to the tops of both specs
   - `2026-03-15 ffv1-lossless-chunking` archived with successor note (done at spec creation)
   - Prune TODO.md entries covered here (§8, §25, §26, §28, §29, §31); annotate §33
   - Docs: replace `docs/Pipeline flow overview.mmd` with `docs/Pipeline flow target.mmd` content (delete the target file once merged)
 
-- [ ] 11. Finalize
+- [x] 11. Finalize
   - Update `- Completed:` date in all three files

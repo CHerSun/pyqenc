@@ -418,9 +418,9 @@ lookup) or replaceable? De-quote remaining casts where imports allow.
   insufficient-space FAILED branch is commented out — "I don't want to block,
   just notify" (`job.py:167-181`). Not per-phase, not based on actual
   extraction/chunking results, no partial scanning.
-- 2026-09-25: the `2026-09-25 file-stream-model` spec moves estimation to
-  ExtractionPhase on real enumerated stream data and reworks the constants
-  (FFV1/remux/extraction terms die with the intermediates). The remaining
+- 2026-09-27: landed with `2026-09-25 file-stream-model` (Task 4) — estimation
+  now runs in ExtractionPhase on the enumerated `VideoStreamInfo` (attempts +
+  finals only; the FFV1/remux/extraction terms are deleted). The remaining
   open question is unchanged:
 
 **Questions to think about:** per-phase re-estimates later in the pipeline?
@@ -558,10 +558,6 @@ Explicitly triggered once in reversed order (from end). And only after that is t
 Or... should we remove it completely? 
 - The only true usecase is when crop changed between runs. And here it works as a safeguard against accidentally deleting a lot of work (all attempts become invalid; not detectable with current light invalidation checks; don't want per-attempt sidecar reading for heavy invalidation checks for this usecase as that will affect all runs).
 - If user wants another file - he can either use new dir or purge current dir. So this one isn't a true usecase.
-
-## 40. Attachements are not extractable currently
-
-Attachments should be extracted as standalone files. Pictures, fonts, etc. But currently pyqenc fails to do that, so we have to exclude them using filter.
 
 ## 41. Assertions and exhaustiveness checks are rarely used.
 
