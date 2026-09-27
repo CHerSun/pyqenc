@@ -23,6 +23,7 @@ from pyqenc.models import (
     VideoMetadata,
 )
 from pyqenc.phase import Recovery
+from pyqenc.stream_model import File
 from pyqenc.utils.ffmpeg_runner import FFmpegRequest
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
@@ -209,6 +210,9 @@ class TestExtractionPhaseTiming:
         result.source   = source                          # type: ignore[attr-defined]
         result.work_dir = source.parent / "work"          # type: ignore[attr-defined]
         result.config   = _make_config(source.parent)     # type: ignore[attr-defined]
+        result.file     = File(                           # type: ignore[attr-defined]
+            path=source, file_size_bytes=source.stat().st_size,
+        )
         return result
 
     def _make_phase(
@@ -234,15 +238,17 @@ class TestExtractionPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.phases.extraction import ExtractionPhase, VideoArtifact
+        from pyqenc.phases.extraction import ExtractionPhase, SubtitleArtifact
         from pyqenc.state import ArtifactState
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
         # Stub a complete artifact so _recover returns all-complete → REUSED path
-        stub_artifact = MagicMock(spec=VideoArtifact)
+        stub_artifact = MagicMock(spec=SubtitleArtifact)
         stub_artifact.state = ArtifactState.COMPLETE
+        stub_artifact.path  = tmp_path / "sub.srt"
+        stub_artifact.wanted = True
 
         with patch.object(
             ExtractionPhase, "_recover",
@@ -265,13 +271,7 @@ class TestExtractionPhaseTiming:
 
         Validates: Requirements 6.5, 2.5
         """
-        from pyqenc.phases.extraction import (
-            ExtractionPhase,
-            MKVTrackExtractor,
-            OtherArtifact,
-            SubtitleStream,
-            VideoStream,
-        )
+        from pyqenc.phases.extraction import ExtractionPhase, SubtitleArtifact
         from pyqenc.state import ArtifactState
 
         collector = _spy_collector()
@@ -281,35 +281,19 @@ class TestExtractionPhaseTiming:
         extracted_dir.mkdir(parents=True, exist_ok=True)
 
         absent_path = extracted_dir / "sub_0_eng.srt"
-        stub_sub = MagicMock(spec=SubtitleStream)
-        stub_sub.codec_type = "subtitle"
-        stub_sub.display_name.return_value = absent_path.name
 
-        stub_video = MagicMock(spec=VideoStream)
-        stub_video.codec_type = "video"
-        stub_video.track_id   = 0
-        stub_video.display_name.return_value = "video_0.mkv"
-
-        stub_extractor = MagicMock(spec=MKVTrackExtractor)
-        stub_extractor.tracks = [stub_video, stub_sub]
-
-        stub_artifact = MagicMock(spec=OtherArtifact)
+        stub_artifact = MagicMock(spec=SubtitleArtifact)
         stub_artifact.state = ArtifactState.ABSENT
         stub_artifact.path  = absent_path
+        stub_artifact.wanted = True
 
         with (
             patch.object(
                 ExtractionPhase, "_recover",
                 return_value=Recovery.from_artifacts([stub_artifact]),
             ),
-            patch(
-                "pyqenc.phases.extraction.MKVTrackExtractor",
-                return_value=stub_extractor,
-            ),
-            patch(
-                "pyqenc.phases.extraction.streams_filter_plain_regex",
-                return_value=[stub_video, stub_sub],
-            ),
+            patch("pyqenc.phases.extraction._probe_streams_json",
+                  return_value={"streams": [], "chapters": []}),
             patch("pyqenc.phases.extraction._extract_timestamps"),
             patch("pyqenc.phases.extraction.run_ffmpeg") as mock_ffmpeg,
         ):
@@ -329,14 +313,16 @@ class TestExtractionPhaseTiming:
 
         Validates: Requirements 6.4, 6.5
         """
-        from pyqenc.phases.extraction import ExtractionPhase, VideoArtifact
+        from pyqenc.phases.extraction import ExtractionPhase, SubtitleArtifact
         from pyqenc.state import ArtifactState
 
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
 
-        stub_artifact = MagicMock(spec=VideoArtifact)
+        stub_artifact = MagicMock(spec=SubtitleArtifact)
         stub_artifact.state = ArtifactState.COMPLETE
+        stub_artifact.path  = tmp_path / "sub.srt"
+        stub_artifact.wanted = True
 
         with patch.object(
             ExtractionPhase, "_recover",

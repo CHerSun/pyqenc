@@ -41,7 +41,7 @@ Staged so every task lands green: the runner converts first (pure mechanical, co
   - `JobPhaseResult` carries `File`
   - Update `test_job_phase.py` for the new mismatch semantics
 
-- [ ] 4. ExtractionPhase (Req 2, 7.4, 7.7, 11.1, 13, 15.7)
+- [x] 4. ExtractionPhase (Req 2, 7.4, 7.7, 11.1, 13, 15.7)
   - Full ffprobe enumeration → typed stream objects, persisted to `extraction.yaml`; reuse-run loads the sidecar (no re-probe) and validates source identity
   - Stream classes own `extracted_file_name()` generation — `#N (type-codec) lang=…` with N = track_id, `#NN ID=N ` prefix collapsed (absorbing `StreamBase` naming; titles via the shared sanitize) — no parser needed, the sidecar carries paths
   - Extract only timestamps/chapters/subtitles/attachments; delete video/audio track copy paths

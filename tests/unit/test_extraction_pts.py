@@ -1,22 +1,24 @@
-"""Unit tests for timestamp / stream extraction (PTS preservation).
+"""Unit tests for stream enumeration and container-artifact extraction.
 
 Observable-behavior only. Every ExtractionPhase test constructs a REAL phase
 through its public constructor and a real phase registry whose ``JobPhase``
-dependency carries a pre-set COMPLETED ``JobPhaseResult`` (so the shared
-dependency walk is a no-op), then drives the public ``run()`` entry point and
-asserts on the public ``ExtractionPhaseResult`` and on-disk ``extracted/``.
-The only things mocked are genuine external shell-outs: ``MKVTrackExtractor``
-(ffprobe), ``run_ffmpeg`` and ``subprocess.run`` — boundaries, never phase
-internals. No ``__new__``, no private ``_recover`` / ``_execute_extraction``
-calls, no private-attr poking.
+dependency carries a pre-set COMPLETED ``JobPhaseResult`` (including the
+job's ``File``), then drives the public ``run()`` entry point and asserts on
+the public ``ExtractionPhaseResult``, on-disk ``extracted/`` and
+``extraction.yaml``. The only things mocked are genuine external shell-outs:
+``_probe_streams_json`` (ffprobe enumeration — fed canned ffprobe JSON),
+``run_ffmpeg`` and ``subprocess.run`` / ``_extract_timestamps`` — boundaries,
+never phase internals.
 
 Covers:
-- 2.1  _extract_timestamps: correct header and integer-ms values per line
-- 2.3  TimestampArtifact classified COMPLETE when file exists, ABSENT otherwise
-- 2.3  force_wipe deletes timestamps.txt (via wipe of extracted/)
-- 2.4  ExtractionPhaseResult.timestamps_path set correctly
-- 4.1/4.2/4.3  video/audio ffmpeg command correctness (no -avoid_negative_ts, -f matroska)
-- 1.1/1.4-1.7  subtitle / chapter / attachment ffmpeg command correctness
+- Enumeration: typed streams from ffprobe JSON (fps fraction, layout, forced,
+  attachment detection, multi-video warning)
+- Video/audio tracks are NEVER extracted (direct-from-source model)
+- Subtitle / attachment / chapters extraction commands and file-trust wrapping
+- ``extraction.yaml``: persisted on execute, loaded on reuse (no re-probe),
+  re-enumerated on source-identity mismatch
+- Result payload: stream objects plus the interim legacy views
+- ``_extract_timestamps``: correct header and integer-ms values per line
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import subprocess as _subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
+import yaml
 
 from pyqenc.app_config import load_app_config
 from pyqenc.constants import EXTRACTED_DIR, TIMESTAMPS_FILENAME
@@ -36,23 +38,27 @@ from pyqenc.phases.extraction import (
     ExtractionPhase,
     ExtractionPhaseResult,
     TimestampArtifact,
+    _enumerate_streams,
     _extract_timestamps,
 )
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.state import ArtifactState, JobState
+from pyqenc.stream_model import File
 from pyqenc.utils.ffmpeg_runner import (
     _PROGRESS_FLAGS,
     FFmpegRequest,
+    FFmpegRunResult,
     compose_command,
 )
+from pyqenc.utils.long_path import LongPath
+from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 _APP_CONFIG = load_app_config(default_only=True)
 
 
 # ---------------------------------------------------------------------------
-# Shared real-construction helpers (mirror tests/test_pts_preservation_properties.py)
+# Shared real-construction helpers
 # ---------------------------------------------------------------------------
-
 
 def _make_source_vm(path: Path) -> VideoMetadata:
     """Return a VideoMetadata with fast-probe fields pre-populated (no probing)."""
@@ -75,9 +81,10 @@ def _make_extraction_phase(
     """Construct a REAL ExtractionPhase via its constructor and a real registry.
 
     A real ``JobPhase`` is placed in the registry with its public ``result``
-    pre-set to a COMPLETED ``JobPhaseResult`` carrying the config (include/exclude
-    filters) and the ``force_wipe`` flag under test, so the shared dependency
-    walk treats the job as already-run without any mocking of phase internals.
+    pre-set to a COMPLETED ``JobPhaseResult`` carrying the config (include/
+    exclude filters), the job's ``File`` and the ``force_wipe`` flag under
+    test, so the shared dependency walk treats the job as already-run without
+    any mocking of phase internals.
     """
     collector = NoOpMetricsCollector()
 
@@ -90,6 +97,7 @@ def _make_extraction_phase(
         outcome    = PhaseOutcome.COMPLETED,
         artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message    = "job complete",
+        file       = File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64),
         job        = JobState(source=source_vm),
         force_wipe = force_wipe,
         config     = config,
@@ -114,18 +122,111 @@ def _make_extraction_phase(
     )
 
 
-def _no_tracks_extractor() -> MagicMock:
-    """Return a patched-in MKVTrackExtractor instance with an empty track set."""
-    extractor = MagicMock()
-    extractor.tracks = []
-    return extractor
+def _make_work_and_source(tmp_path: Path) -> tuple[Path, Path]:
+    """Create a work dir and a fake source video; return (work_dir, source)."""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    source = tmp_path / "source.mkv"
+    source.write_bytes(b"\x00" * 64)
+    return work_dir, source
 
 
 # ---------------------------------------------------------------------------
-# 2.1  _extract_timestamps format  (KEPT AS-IS — tests the real public helper at
-# its subprocess boundary; no phase internals involved)
+# Canned ffprobe JSON (the enumeration boundary)
 # ---------------------------------------------------------------------------
 
+def _video_json(track_id: int = 0, codec: str = "hevc") -> dict:
+    return {
+        "index": track_id, "codec_type": "video", "codec_name": codec,
+        "r_frame_rate": "24000/1001", "width": 1920, "height": 1080,
+        "pix_fmt": "yuv420p10le", "duration": "5964.48", "start_time": "0.000000",
+        "tags": {"language": "eng"},
+    }
+
+
+def _audio_json(track_id: int = 1, codec: str = "flac") -> dict:
+    return {
+        "index": track_id, "codec_type": "audio", "codec_name": codec,
+        "channel_layout": "5.1(side)", "duration": "5964.50",
+        "tags": {"language": "eng", "title": "Surround 5.1"},
+    }
+
+
+def _subtitle_json(track_id: int = 3, codec: str = "subrip", forced: int = 0) -> dict:
+    return {
+        "index": track_id, "codec_type": "subtitle", "codec_name": codec,
+        "duration": "5964.48",
+        "disposition": {"forced": forced},
+        "tags": {"language": "eng", "title": "Full"},
+    }
+
+
+def _attachment_json(track_id: int = 4, filename: str = "font.ttf") -> dict:
+    return {
+        "index": track_id, "codec_type": "video", "codec_name": "ttf",
+        "disposition": {"attached_pic": 1},
+        "tags": {"filename": filename, "mimetype": "image/x-font"},
+    }
+
+
+def _ffprobe_json(*streams: dict, chapters: list | None = None) -> dict:
+    data: dict = {"streams": list(streams)}
+    if chapters is not None:
+        data["chapters"] = chapters
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Enumeration (pure function on parsed ffprobe JSON)
+# ---------------------------------------------------------------------------
+
+class TestEnumerateStreams:
+    def test_typed_streams_built_from_ffprobe_json(self) -> None:
+        """Bug prevented: enumeration losing type-specific fast-facet fields —
+        fps fraction, channel layout, forced flag, attachment filename."""
+        file = File(path=LongPath("D:/media/source.mkv"), file_size_bytes=5)
+        video, audio, subs, attachments, has_chapters = _enumerate_streams(
+            _ffprobe_json(
+                _video_json(), _audio_json(), _subtitle_json(), _attachment_json(),
+                chapters=[{"id": 0}],
+            ),
+            file,
+        )
+
+        assert len(video) == 1 and video[0].info.fps_fraction == __import__("fractions").Fraction(24000, 1001)
+        assert video[0].info.resolution == "1920x1080"
+        assert len(audio) == 1 and audio[0].info.layout is not None
+        assert audio[0].info.layout.normalized == "5.1"
+        assert len(subs) == 1 and subs[0].info.is_forced is False
+        assert len(attachments) == 1 and attachments[0].info.filename == "font.ttf"
+        assert has_chapters is True
+        # Every stream composes the single job File.
+        assert all(s.file is file for s in [*video, *audio, *subs, *attachments])
+
+    def test_data_streams_are_skipped(self) -> None:
+        file = File(path=LongPath("src.mkv"))
+        video, audio, subs, attachments, has_chapters = _enumerate_streams(
+            _ffprobe_json(_video_json(), {"index": 9, "codec_type": "data", "codec_name": "bin_data"}),
+            file,
+        )
+        assert len(video) == 1 and not audio and not subs and not attachments
+        assert has_chapters is False
+
+    def test_multi_video_streams_warn(self) -> None:
+        """Req 13: more than one video stream triggers a prominent warning —
+        scene detection and default-selector consumers use the first."""
+        import pyqenc.phases.extraction as ex_mod
+
+        file = File(path=LongPath("src.mkv"))
+        with patch.object(ex_mod.logger, "warning") as warn_mock:
+            _enumerate_streams(_ffprobe_json(_video_json(0), _video_json(2)), file)
+
+        assert any("video stream" in str(call) for call in warn_mock.call_args_list)
+
+
+# ---------------------------------------------------------------------------
+# 2.1  _extract_timestamps format (real public helper at its subprocess boundary)
+# ---------------------------------------------------------------------------
 
 def _make_ffprobe_stdout(pts_ms_values: list[int]) -> str:
     """Build a fake ffprobe stdout string from a list of integer-ms PTS values."""
@@ -140,9 +241,10 @@ class TestExtractTimestampsFormat:
     (milliseconds) directly — no float-to-int conversion in the test layer.
     """
 
-    def _mock_run(self, pts_ms: list[int]) -> MagicMock:
+    def _mock_run(self, pts_ms: list[int]) -> object:
         """Return a patch side_effect: mkvextract fails, ffprobe returns integer ms."""
         stdout = _make_ffprobe_stdout(pts_ms)
+
         def _side_effect(cmd: list, **kwargs: object) -> MagicMock:
             result = MagicMock()
             if cmd and str(cmd[0]) == "mkvextract":
@@ -151,250 +253,293 @@ class TestExtractTimestampsFormat:
             result.stdout     = stdout
             result.stderr     = ""
             return result
+
         return _side_effect
 
     def test_header_is_timestamp_format_v2(self, tmp_path: Path) -> None:
-        pts_ms = [0, 42, 83]
         output = tmp_path / TIMESTAMPS_FILENAME
-
-        with patch("subprocess.run", side_effect=self._mock_run(pts_ms)):
+        with patch("subprocess.run", side_effect=self._mock_run([0, 42, 83])):
             _extract_timestamps(Path("source.mkv"), 0, output)
-
         lines = output.read_text(encoding="utf-8").splitlines()
         assert lines[0] == "# timestamp format v2"
 
     def test_values_are_integer_ms(self, tmp_path: Path) -> None:
-        pts_ms = [0, 42, 83, 125]
         output = tmp_path / TIMESTAMPS_FILENAME
-
-        with patch("subprocess.run", side_effect=self._mock_run(pts_ms)):
+        with patch("subprocess.run", side_effect=self._mock_run([0, 42, 83, 125])):
             _extract_timestamps(Path("source.mkv"), 0, output)
-
         lines = output.read_text(encoding="utf-8").splitlines()
-        data_lines = lines[1:]  # skip header
-        assert [int(l) for l in data_lines] == sorted(pts_ms)
-
-    def test_one_value_per_line(self, tmp_path: Path) -> None:
-        pts_ms = [0, 33, 66]
-        output = tmp_path / TIMESTAMPS_FILENAME
-
-        with patch("subprocess.run", side_effect=self._mock_run(pts_ms)):
-            _extract_timestamps(Path("source.mkv"), 0, output)
-
-        lines = output.read_text(encoding="utf-8").splitlines()
-        # header + one line per value
-        assert len(lines) == 1 + len(pts_ms)
+        assert [int(line) for line in lines[1:]] == sorted([0, 42, 83, 125])
 
     def test_output_file_created(self, tmp_path: Path) -> None:
         output = tmp_path / TIMESTAMPS_FILENAME
-
         with patch("subprocess.run", side_effect=self._mock_run([0, 42])):
             _extract_timestamps(Path("source.mkv"), 0, output)
-
         assert output.exists()
 
     def test_tmp_file_not_left_behind(self, tmp_path: Path) -> None:
         output = tmp_path / TIMESTAMPS_FILENAME
-
         with patch("subprocess.run", side_effect=self._mock_run([0, 42])):
             _extract_timestamps(Path("source.mkv"), 0, output)
+        assert not (tmp_path / "timestamps.tmp").exists()
 
-        tmp_file = tmp_path / "timestamps.tmp"
-        assert not tmp_file.exists()
 
-    def test_raises_on_ffprobe_failure(self, tmp_path: Path) -> None:
-        output = tmp_path / TIMESTAMPS_FILENAME
+# ---------------------------------------------------------------------------
+# Command-capture harness — drive a REAL phase through run(dry_run=False)
+# ---------------------------------------------------------------------------
 
-        def _both_fail(cmd: list, **kwargs: object) -> MagicMock:
-            raise _subprocess.CalledProcessError(1, cmd, stderr=b"error")
+def _run_and_capture(
+    tmp_path:  Path,
+    ffprobe_data: dict,
+    *,
+    subprocess_side_effect: object | None = None,
+    make_outputs: bool = True,
+):
+    """Drive a REAL ExtractionPhase.run(dry_run=False) with canned ffprobe JSON.
 
+    Returns ``(ffmpeg_cmds, subprocess_cmds, work_dir, source)`` where
+    ``ffmpeg_cmds`` holds composed launch argvs in call order.
+
+    External boundaries patched: ``_probe_streams_json`` (canned JSON),
+    ``run_ffmpeg`` (composed-argv sink), ``_extract_timestamps`` (own boundary),
+    and — when a side effect is given — ``subprocess.run`` (chapters path).
+    """
+    work_dir, source = _make_work_and_source(tmp_path)
+    phase = _make_extraction_phase(work_dir, source)
+
+    ffmpeg_cmds:     list[list[str]] = []
+    subprocess_cmds: list[list] = []
+
+    def fake_run_ffmpeg(request: FFmpegRequest, **kwargs: object) -> FFmpegRunResult:
+        ffmpeg_cmds.append([str(a) for a in compose_command(request)])
+        result = MagicMock()
+        result.success = True
+        result.returncode = 0
+        result.stderr_lines = []
+        result.frame_count = None
+        if make_outputs and request.output is not None:
+            request.output.parent.mkdir(parents=True, exist_ok=True)
+            request.output.write_bytes(b"x" * 16)
+        return result
+
+    def default_subprocess(cmd: list, **kwargs: object) -> MagicMock:
+        subprocess_cmds.append(list(cmd))
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout     = ""
+        result.stderr     = ""
+        return result
+
+    def recording_subprocess(cmd: list, **kwargs: object) -> MagicMock:
+        subprocess_cmds.append(list(cmd))
+        return subprocess_side_effect(cmd, **kwargs)  # type: ignore[operator]
+
+    sp_effect = recording_subprocess if subprocess_side_effect is not None else default_subprocess
+
+    with (
+        patch("pyqenc.phases.extraction._probe_streams_json", return_value=ffprobe_data),
+        patch("pyqenc.phases.extraction.run_ffmpeg", side_effect=fake_run_ffmpeg),
+        patch("pyqenc.phases.extraction._extract_timestamps"),
+        patch("pyqenc.phases.extraction.log_disk_space_info"),
+        patch("subprocess.run", side_effect=sp_effect),
+    ):
+        phase.run(dry_run=False)
+
+    return ffmpeg_cmds, subprocess_cmds, work_dir, source
+
+
+# ---------------------------------------------------------------------------
+# Direct-from-source: video/audio are never extracted
+# ---------------------------------------------------------------------------
+
+class TestNoVideoAudioExtraction:
+    def test_video_and_audio_produce_no_ffmpeg_commands(self, tmp_path: Path) -> None:
+        """Req 7.4: video and audio tracks are never copied to extracted/ —
+        the phase extracts only container artifacts."""
+        ffmpeg_cmds, _, work_dir, _ = _run_and_capture(
+            tmp_path, _ffprobe_json(_video_json(), _audio_json()),
+        )
+        assert ffmpeg_cmds == [], f"Unexpected extraction commands: {ffmpeg_cmds}"
+        extracted = list((work_dir / EXTRACTED_DIR).glob("*")) if (work_dir / EXTRACTED_DIR).exists() else []
+        assert extracted == [], f"Unexpected extracted files: {extracted}"
+
+    def test_result_carries_streams_and_legacy_views(self, tmp_path: Path) -> None:
+        """ExtractionPhaseResult exposes the stream objects; the interim
+        legacy views derive from them and point at the SOURCE."""
+        work_dir, source = _make_work_and_source(tmp_path)
+        phase = _make_extraction_phase(work_dir, source)
         with (
-            patch("subprocess.run", side_effect=_both_fail),
-            pytest.raises(_subprocess.CalledProcessError),
+            patch("pyqenc.phases.extraction._probe_streams_json",
+                  return_value=_ffprobe_json(_video_json(), _audio_json())),
+            patch("pyqenc.phases.extraction.log_disk_space_info"),
         ):
-            _extract_timestamps(Path("source.mkv"), 0, output)
+            result = phase.run(dry_run=True)
 
-    def test_raises_on_empty_output(self, tmp_path: Path) -> None:
-        output = tmp_path / TIMESTAMPS_FILENAME
+        assert result.video_stream is not None
+        assert result.video_stream.info.fps_fraction is not None
+        assert len(result.audio_streams) == 1
+        assert result.audio_streams[0].info.layout is not None
+        # Interim legacy views point at the source, not at extracted files.
+        assert result.video is not None and result.video.path == source
+        assert len(result.audio) == 1 and result.audio[0].path == source
 
-        def _mkvextract_fail_ffprobe_empty(cmd: list, **kwargs: object) -> MagicMock:
+
+# ---------------------------------------------------------------------------
+# Golden composed argv — subtitle and attachment call sites
+# ---------------------------------------------------------------------------
+
+class TestExtractionCommandGolden:
+    """Pin the full composed argv for the remaining extraction call sites."""
+
+    def test_text_subtitle_copy_golden(self, tmp_path: Path) -> None:
+        """Text subtitles: selector from as_input, single srt muxer for the
+        .tmp output, file name owned by the stream class."""
+        ffmpeg_cmds, _, work_dir, _ = _run_and_capture(
+            tmp_path, _ffprobe_json(_video_json(), _subtitle_json(track_id=3)),
+        )
+        sub_cmds = [c for c in ffmpeg_cmds if "-map" in c and c[c.index("-map") + 1] == "0:3"]
+        assert sub_cmds, f"Expected a subtitle extraction command: {ffmpeg_cmds}"
+        out_tmp = work_dir / EXTRACTED_DIR / "#3 (subrip) lang=eng title=Full.tmp"
+        assert sub_cmds[0] == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(work_dir.parent / "source.mkv"),
+            "-map", "0:3",
+            "-c", "copy",
+            "-map_chapters", "-1",
+            "-f", "srt", str(out_tmp),
+        ]
+
+    def test_attachment_dump_golden(self, tmp_path: Path) -> None:
+        """Attachments dump to a .tmp sibling (file-trust rule, Req 7.7) — the
+        phase renames only on verified success."""
+        ffmpeg_cmds, _, work_dir, _ = _run_and_capture(
+            tmp_path, _ffprobe_json(_video_json(), _attachment_json(track_id=4)),
+            make_outputs=False,
+        )
+        att_cmds = [c for c in ffmpeg_cmds if "-dump_attachment:4" in c]
+        assert att_cmds, f"Expected an attachment command: {ffmpeg_cmds}"
+        tmp_target = work_dir / EXTRACTED_DIR / "#4 (attachment) font.tmp"
+        assert att_cmds[0] == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(work_dir.parent / "source.mkv"),
+            "-dump_attachment:4", str(tmp_target),
+            "-t", "0",
+            "-map_chapters", "-1",
+            "-f", "null", "-",
+        ]
+
+    def test_bitmap_subtitle_stays_on_matroska_muxer(self, tmp_path: Path) -> None:
+        ffmpeg_cmds, _, _, _ = _run_and_capture(
+            tmp_path, _ffprobe_json(_video_json(), _subtitle_json(track_id=5, codec="hdmv_pgs_subtitle")),
+        )
+        sub_cmds = [c for c in ffmpeg_cmds if "-map" in c and c[c.index("-map") + 1] == "0:5"]
+        assert sub_cmds
+        muxers = [sub_cmds[0][i + 1] for i, a in enumerate(sub_cmds[0]) if a == "-f"]
+        assert muxers == ["matroska"]
+
+
+# ---------------------------------------------------------------------------
+# Subtitle / chapters dispatch
+# ---------------------------------------------------------------------------
+
+class TestSubtitleChaptersDispatch:
+    def test_chapters_fall_back_to_ffprobe_xml(self, tmp_path: Path) -> None:
+        """Chapter extraction falls back to ffprobe -show_chapters xml when
+        mkvextract is unavailable (subprocess boundary)."""
+
+        def _sp(cmd: list, **kwargs: object) -> MagicMock:
             result = MagicMock()
             if cmd and str(cmd[0]) == "mkvextract":
                 raise _subprocess.CalledProcessError(1, cmd, stderr=b"not an mkv")
             result.returncode = 0
-            result.stdout     = ""
+            result.stdout     = "<chapters/>"
             result.stderr     = ""
             return result
 
+        _, subprocess_cmds, _, _ = _run_and_capture(
+            tmp_path, _ffprobe_json(_video_json(), chapters=[{"id": 0}]),
+            subprocess_side_effect=_sp,
+        )
+        ffprobe_calls = [c for c in subprocess_cmds if c and str(c[0]) == "ffprobe" and "-show_chapters" in c]
+        assert ffprobe_calls, f"Expected ffprobe chapters fallback: {subprocess_cmds}"
+        flat = [str(a) for a in ffprobe_calls[0]]
+        assert "-print_format" in flat and flat[flat.index("-print_format") + 1] == "xml"
+
+    def test_subtitles_use_run_ffmpeg_never_mkvextract(self, tmp_path: Path) -> None:
+        """Subtitle tracks extract through the unified runner, never mkvextract."""
+        ffmpeg_cmds, subprocess_cmds, _, _ = _run_and_capture(
+            tmp_path, _ffprobe_json(_video_json(), _subtitle_json(track_id=2)),
+        )
+        assert any("-map" in c for c in ffmpeg_cmds)
+        assert not [c for c in subprocess_cmds if c and str(c[0]) == "mkvextract"]
+
+
+# ---------------------------------------------------------------------------
+# extraction.yaml — persistence, reuse without re-probe, identity mismatch
+# ---------------------------------------------------------------------------
+
+class TestExtractionSidecarLifecycle:
+    def test_sidecar_persisted_on_execute(self, tmp_path: Path) -> None:
+        """A fresh run writes extraction.yaml with the stream inventory
+        (info slices + source identity)."""
+        _, _, work_dir, source = _run_and_capture(
+            tmp_path, _ffprobe_json(_video_json(), _audio_json(), _subtitle_json()),
+        )
+        data = yaml.safe_load((work_dir / "extraction.yaml").read_text(encoding="utf-8"))
+        assert set(data) == {"source", "streams", "timestamps_path"}
+        assert data["source"]["path"] == str(source)
+        assert data["streams"]["video"]["fps_fraction"] == [24000, 1001]
+        assert len(data["streams"]["audio"]) == 1
+        assert data["streams"]["subtitles"][0]["track_id"] == 3
+
+    def test_reuse_run_loads_sidecar_without_ffprobe(self, tmp_path: Path) -> None:
+        """Bug prevented: the every-run ffprobe re-probe — a matching sidecar
+        must be loaded instead."""
+        _, _, work_dir, source = _run_and_capture(
+            tmp_path, _ffprobe_json(_video_json(), _audio_json()),
+        )
+        assert (work_dir / "extraction.yaml").exists()
+
+        phase = _make_extraction_phase(work_dir, source)
         with (
-            patch("subprocess.run", side_effect=_mkvextract_fail_ffprobe_empty),
-            pytest.raises(ValueError, match="empty output"),
+            patch("pyqenc.phases.extraction._probe_streams_json") as probe_mock,
+            patch("pyqenc.phases.extraction.log_disk_space_info"),
         ):
-            _extract_timestamps(Path("source.mkv"), 0, output)
+            result = phase.run(dry_run=True)
 
-    def test_raises_on_unparseable_line(self, tmp_path: Path) -> None:
-        output = tmp_path / TIMESTAMPS_FILENAME
+        probe_mock.assert_not_called()
+        assert result.video_stream is not None
+        assert result.video_stream.info.codec_name == "hevc"
+        assert len(result.audio_streams) == 1
 
-        def _mkvextract_fail_ffprobe_bad(cmd: list, **kwargs: object) -> MagicMock:
-            result = MagicMock()
-            if cmd and str(cmd[0]) == "mkvextract":
-                raise _subprocess.CalledProcessError(1, cmd, stderr=b"not an mkv")
-            result.returncode = 0
-            result.stdout     = "0\nN/A\n83\n"
-            result.stderr     = ""
-            return result
+    def test_identity_mismatch_reenumerates(self, tmp_path: Path) -> None:
+        """A sidecar recorded for a different source identity is ignored and
+        the source is re-enumerated (Req 2.8)."""
+        _, _, work_dir, source = _run_and_capture(
+            tmp_path, _ffprobe_json(_video_json()),
+        )
+        # Corrupt the recorded identity.
+        sidecar_path = work_dir / "extraction.yaml"
+        data = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
+        data["source"]["file_size_bytes"] = 999999
+        write_yaml_atomic(sidecar_path, data)
 
+        phase = _make_extraction_phase(work_dir, source)
         with (
-            patch("subprocess.run", side_effect=_mkvextract_fail_ffprobe_bad),
-            pytest.raises(ValueError, match="Unparseable"),
+            patch("pyqenc.phases.extraction._probe_streams_json",
+                  return_value=_ffprobe_json(_video_json())) as probe_mock,
+            patch("pyqenc.phases.extraction.log_disk_space_info"),
         ):
-            _extract_timestamps(Path("source.mkv"), 0, output)
+            phase.run(dry_run=True)
 
-    def test_creates_parent_dirs(self, tmp_path: Path) -> None:
-        output = tmp_path / "nested" / "deep" / TIMESTAMPS_FILENAME
-
-        with patch("subprocess.run", side_effect=self._mock_run([0, 42])):
-            _extract_timestamps(Path("source.mkv"), 0, output)
-
-        assert output.exists()
+        assert probe_mock.called
 
 
 # ---------------------------------------------------------------------------
-# 2.3  TimestampArtifact recovery classification (driven through run())
+# Timestamps artifact result plumbing
 # ---------------------------------------------------------------------------
-
-
-def _make_work_and_source(tmp_path: Path) -> tuple[Path, Path]:
-    """Create a work dir and a fake source video; return (work_dir, source)."""
-    work_dir = tmp_path / "work"
-    work_dir.mkdir(parents=True, exist_ok=True)
-    source = tmp_path / "source.mkv"
-    source.write_bytes(b"\x00" * 64)
-    return work_dir, source
-
-
-def _write_timestamps(work_dir: Path) -> Path:
-    """Write a valid extracted/timestamps.txt and return its path."""
-    extracted_dir = work_dir / EXTRACTED_DIR
-    extracted_dir.mkdir(parents=True, exist_ok=True)
-    ts_file = extracted_dir / TIMESTAMPS_FILENAME
-    ts_file.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
-    return ts_file
-
-
-class TestTimestampArtifactRecoveryComplete:
-    """timestamps.txt present -> TimestampArtifact state is COMPLETE.
-
-    Bug guarded: a present timestamps.txt reported as ABSENT would trigger a
-    needless re-extraction and could lose the source PTS mapping the merge
-    phase relies on.
-    """
-
-    def test_complete_when_file_exists(self, tmp_path: Path) -> None:
-        work_dir, source = _make_work_and_source(tmp_path)
-        ts_file = _write_timestamps(work_dir)
-
-        phase = _make_extraction_phase(work_dir, source)
-
-        with patch("pyqenc.phases.extraction.MKVTrackExtractor") as mock_cls:
-            mock_cls.return_value = _no_tracks_extractor()
-            result = phase.run(dry_run=True)
-
-        ts_artifacts = [a for a in result.artifacts if isinstance(a, TimestampArtifact)]
-        assert len(ts_artifacts) == 1
-        assert ts_artifacts[0].state == ArtifactState.COMPLETE
-        assert ts_artifacts[0].path == ts_file
-        assert result.timestamps_path == ts_file
-
-
-class TestTimestampArtifactRecoveryAbsent:
-    """timestamps.txt absent -> TimestampArtifact state is ABSENT.
-
-    Bug guarded: a missing timestamps.txt reported as COMPLETE would let the
-    merge phase proceed without PTS data, silently corrupting VFR timing.
-    """
-
-    def test_absent_when_no_extracted_dir(self, tmp_path: Path) -> None:
-        work_dir, source = _make_work_and_source(tmp_path)
-
-        phase = _make_extraction_phase(work_dir, source)
-
-        with patch("pyqenc.phases.extraction.MKVTrackExtractor") as mock_cls:
-            mock_cls.return_value = _no_tracks_extractor()
-            result = phase.run(dry_run=True)
-
-        ts_artifacts = [a for a in result.artifacts if isinstance(a, TimestampArtifact)]
-        assert len(ts_artifacts) == 1
-        assert ts_artifacts[0].state == ArtifactState.ABSENT
-        assert result.timestamps_path is None
-
-    def test_absent_when_file_not_present(self, tmp_path: Path) -> None:
-        work_dir, source = _make_work_and_source(tmp_path)
-        # An extracted/ dir exists with an unrelated file but NO timestamps.txt.
-        extracted_dir = work_dir / EXTRACTED_DIR
-        extracted_dir.mkdir(parents=True, exist_ok=True)
-        (extracted_dir / "video.mkv").write_bytes(b"\x00" * 64)
-
-        phase = _make_extraction_phase(work_dir, source)
-
-        with patch("pyqenc.phases.extraction.MKVTrackExtractor") as mock_cls:
-            mock_cls.return_value = _no_tracks_extractor()
-            result = phase.run(dry_run=True)
-
-        ts_artifacts = [a for a in result.artifacts if isinstance(a, TimestampArtifact)]
-        assert len(ts_artifacts) == 1
-        assert ts_artifacts[0].state == ArtifactState.ABSENT
-        assert result.timestamps_path is None
-
-
-# ---------------------------------------------------------------------------
-# 2.3  force_wipe deletes timestamps.txt (driven through run())
-# ---------------------------------------------------------------------------
-
-
-class TestTimestampArtifactForceWipe:
-    """force_wipe=True (carried on the job result) -> extracted/ is wiped.
-
-    The wipe is an observable side effect of running the phase when the job
-    result requests a forced invalidation. With an empty track set there is
-    nothing to re-extract, so after the run the previously-present
-    timestamps.txt is gone and the resulting TimestampArtifact is ABSENT.
-
-    Bug guarded: if force_wipe failed to clear stale extraction artifacts, a
-    forced re-run would silently reuse outdated files instead of regenerating
-    them from the (possibly changed) source.
-    """
-
-    def test_force_wipe_removes_timestamps_file(self, tmp_path: Path) -> None:
-        work_dir, source = _make_work_and_source(tmp_path)
-        ts_file = _write_timestamps(work_dir)
-        assert ts_file.exists()
-
-        phase = _make_extraction_phase(work_dir, source, force_wipe=True)
-
-        with patch("pyqenc.phases.extraction.MKVTrackExtractor") as mock_cls:
-            mock_cls.return_value = _no_tracks_extractor()
-            # Execute run so the wipe actually happens; empty tracks => no ffmpeg.
-            result = phase.run(dry_run=False)
-
-        assert not ts_file.exists()
-        ts_artifacts = [a for a in result.artifacts if isinstance(a, TimestampArtifact)]
-        assert len(ts_artifacts) == 1
-        assert ts_artifacts[0].state == ArtifactState.ABSENT
-        assert result.timestamps_path is None
-
-
-# ---------------------------------------------------------------------------
-# 2.4  timestamps_path on ExtractionPhaseResult (public result dataclass field)
-# ---------------------------------------------------------------------------
-
 
 class TestTimestampsPathOnResult:
-    """ExtractionPhaseResult.timestamps_path carries the value it is built with.
-
-    Constructs the public result type directly (a dataclass) with a real
-    PhaseOutcome — no phase internals, no MagicMock outcome.
-    """
+    """ExtractionPhaseResult.timestamps_path carries the value it is built with."""
 
     def test_timestamps_path_none_when_absent(self) -> None:
         result = ExtractionPhaseResult(
@@ -417,492 +562,20 @@ class TestTimestampsPathOnResult:
         assert result.timestamps_path == ts_path
 
 
-# ---------------------------------------------------------------------------
-# 5.3  extraction result exposes timestamps_path=None when the artifact is ABSENT
-# ---------------------------------------------------------------------------
-
-
 class TestMergeFailsWithoutTimestamps:
-    """The public run() result carries timestamps_path=None when no file exists.
-
-    This is what causes the merge phase to fail with a clear message (merge
-    integration is covered elsewhere). Driven end-to-end through run().
-
-    Bug guarded: if the result reported a non-None timestamps_path despite an
-    ABSENT artifact, the merge phase would attempt PTS restoration against a
-    missing file.
-    """
+    """The public run() result carries timestamps_path=None when no file exists."""
 
     def test_extraction_result_timestamps_path_none_when_artifact_absent(
-        self, tmp_path: Path
+        self, tmp_path: Path,
     ) -> None:
         work_dir, source = _make_work_and_source(tmp_path)
-
         phase = _make_extraction_phase(work_dir, source)
 
-        with patch("pyqenc.phases.extraction.MKVTrackExtractor") as mock_cls:
-            mock_cls.return_value = _no_tracks_extractor()
+        with patch("pyqenc.phases.extraction._probe_streams_json",
+                   return_value=_ffprobe_json(_video_json())):
             result = phase.run(dry_run=True)
 
         ts_artifacts = [a for a in result.artifacts if isinstance(a, TimestampArtifact)]
         assert len(ts_artifacts) == 1
         assert ts_artifacts[0].state == ArtifactState.ABSENT
         assert result.timestamps_path is None
-
-
-# ---------------------------------------------------------------------------
-# Command-capture harness — drive a REAL phase through run(dry_run=False) with
-# controlled tracks and capture the ffmpeg / subprocess commands it builds.
-# ---------------------------------------------------------------------------
-
-
-def _fake_video_track() -> MagicMock:
-    """Return a minimal fake video track (MKVTrackExtractor output)."""
-    track = MagicMock()
-    track.track_id   = 0
-    track.codec_type = "video"
-    track.display_name.return_value = "video.mkv"
-    return track
-
-
-def _run_and_capture(
-    tmp_path: Path,
-    extra_tracks: list[MagicMock],
-    *,
-    subprocess_side_effect: object | None = None,
-) -> tuple[list[list], list[list]]:
-    """Drive a REAL ExtractionPhase.run(dry_run=False) and capture commands.
-
-    A video track is always present (required for timestamp extraction). Only
-    external boundaries are patched: ``MKVTrackExtractor`` (track discovery),
-    ``run_ffmpeg`` (ffmpeg command sink), ``_extract_timestamps`` (its own
-    subprocess boundary), and — when ``subprocess_side_effect`` is given —
-    ``subprocess.run`` (for the chapter mkvextract/ffprobe path).
-
-    Returns ``(ffmpeg_cmds, subprocess_cmds)`` where ``ffmpeg_cmds`` is the list
-    of composed launch argvs (runner-composed from the requests) in call order
-    (index 0 is the video extraction), and ``subprocess_cmds`` records
-    ``subprocess.run`` invocations when a side effect is supplied.
-    """
-    work_dir, source = _make_work_and_source(tmp_path)
-    phase = _make_extraction_phase(work_dir, source)
-
-    all_tracks = [_fake_video_track(), *extra_tracks]
-
-    ffmpeg_cmds:     list[list[str]] = []
-    subprocess_cmds: list[list] = []
-
-    def fake_run_ffmpeg(request: FFmpegRequest, **kwargs: object) -> MagicMock:
-        ffmpeg_cmds.append([str(a) for a in compose_command(request)])
-        result = MagicMock()
-        result.success = True
-        return result
-
-    def default_subprocess(cmd: list, **kwargs: object) -> MagicMock:
-        subprocess_cmds.append(list(cmd))
-        result = MagicMock()
-        result.returncode = 0
-        result.stdout     = ""
-        result.stderr     = ""
-        return result
-
-    def recording_subprocess(cmd: list, **kwargs: object) -> MagicMock:
-        subprocess_cmds.append(list(cmd))
-        return subprocess_side_effect(cmd, **kwargs)  # type: ignore[operator]
-
-    sp_effect = recording_subprocess if subprocess_side_effect is not None else default_subprocess
-
-    extractor = MagicMock()
-    extractor.tracks = all_tracks
-
-    with (
-        patch("pyqenc.phases.extraction.MKVTrackExtractor", return_value=extractor),
-        patch("pyqenc.phases.extraction.run_ffmpeg", side_effect=fake_run_ffmpeg),
-        patch("pyqenc.phases.extraction._extract_timestamps"),
-        patch("subprocess.run", side_effect=sp_effect),
-    ):
-        phase.run(dry_run=False)
-
-    return ffmpeg_cmds, subprocess_cmds
-
-
-# ---------------------------------------------------------------------------
-# 4.1 / 4.2 / 4.3  video / audio extraction command correctness
-# ---------------------------------------------------------------------------
-
-
-class TestExtractionCommandCorrectness:
-    """The ffmpeg commands built for video/audio extraction preserve source PTS.
-
-    Observable behavior: the commands handed to run_ffmpeg (the external
-    boundary) must not carry -avoid_negative_ts (which would rewrite source
-    timestamps) and video must be muxed with -f matroska.
-    """
-
-    def test_video_extraction_no_avoid_negative_ts(self, tmp_path: Path) -> None:
-        """Requirement 2.1: -avoid_negative_ts must not appear in the video command."""
-        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [])
-        assert ffmpeg_cmds, "Expected a run_ffmpeg call for video extraction"
-        flat = [str(a) for a in ffmpeg_cmds[0]]
-        assert "-avoid_negative_ts" not in flat, (
-            f"-avoid_negative_ts must not be in video command; got: {flat}"
-        )
-
-    def test_video_extraction_has_matroska_format(self, tmp_path: Path) -> None:
-        """Requirement 2.3: -f matroska must be present in the video command."""
-        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [])
-        assert ffmpeg_cmds, "Expected a run_ffmpeg call for video extraction"
-        flat = [str(a) for a in ffmpeg_cmds[0]]
-        assert "-f" in flat, f"-f flag must be in video command; got: {flat}"
-        assert flat[flat.index("-f") + 1] == "matroska", (
-            f"Expected 'matroska' after -f; full cmd: {flat}"
-        )
-
-    def test_audio_extraction_no_avoid_negative_ts(self, tmp_path: Path) -> None:
-        """Requirement 2.2: -avoid_negative_ts must not appear in the audio command."""
-        audio = MagicMock()
-        audio.track_id   = 1
-        audio.codec_type = "audio"
-        audio.display_name.return_value = "audio.mka"
-
-        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [audio])
-        # Video is command 0; audio follows. Identify by its -map 0:1 track ref.
-        audio_cmds = [
-            c for c in ffmpeg_cmds
-            if "-map" in [str(a) for a in c]
-            and [str(a) for a in c][[str(a) for a in c].index("-map") + 1] == "0:1"
-        ]
-        assert audio_cmds, "Expected a run_ffmpeg call for audio extraction"
-        flat = [str(a) for a in audio_cmds[0]]
-        assert "-avoid_negative_ts" not in flat, (
-            f"-avoid_negative_ts must not be in audio command; got: {flat}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Golden composed argv — one per extraction ffmpeg call site
-# ---------------------------------------------------------------------------
-
-
-class TestExtractionCommandGolden:
-    """Pin the full composed argv for every extraction ffmpeg call site.
-
-    Bug prevented: the request-model conversion drifting from the original
-    hand-built commands — same source, same ``-map`` selectors, same copy
-    codec; the runner contributes progress flags, ``-y``, the chapter guard,
-    and the single explicit ``.tmp`` muxer.
-    """
-
-    def test_video_track_copy_golden(self, tmp_path: Path) -> None:
-        work_dir, source = _make_work_and_source(tmp_path)
-        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [])
-        assert ffmpeg_cmds, "Expected a run_ffmpeg call for video extraction"
-        out_tmp = work_dir / EXTRACTED_DIR / "video.tmp"
-        assert ffmpeg_cmds[0] == [
-            "ffmpeg", *_PROGRESS_FLAGS, "-y",
-            "-i", str(source),
-            "-map", "0:0",
-            "-c", "copy",
-            "-map_chapters", "-1",
-            "-f", "matroska", str(out_tmp),
-        ]
-
-    def test_audio_track_copy_golden(self, tmp_path: Path) -> None:
-        work_dir, source = _make_work_and_source(tmp_path)
-        audio = MagicMock()
-        audio.track_id   = 1
-        audio.codec_type = "audio"
-        audio.display_name.return_value = "audio.mka"
-
-        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [audio])
-        audio_cmds = [c for c in ffmpeg_cmds if "-map" in c and c[c.index("-map") + 1] == "0:1"]
-        assert audio_cmds, "Expected a run_ffmpeg call for audio extraction"
-        out_tmp = work_dir / EXTRACTED_DIR / "audio.tmp"
-        assert audio_cmds[0] == [
-            "ffmpeg", *_PROGRESS_FLAGS, "-y",
-            "-i", str(source),
-            "-map", "0:1",
-            "-c", "copy",
-            "-map_chapters", "-1",
-            "-f", "matroska", str(out_tmp),
-        ]
-
-    def test_text_subtitle_copy_golden(self, tmp_path: Path) -> None:
-        """Text subtitles carry exactly one ``-f`` — the srt muxer for the
-        ``.tmp`` output (the pre-request code emitted ``-f srt -f matroska``,
-        where the runner-injected Matroska silently overrode the srt muxer)."""
-        from pyqenc.phases.extraction import SubtitleStream
-        work_dir, source = _make_work_and_source(tmp_path)
-        sub = MagicMock(spec=SubtitleStream)
-        sub.track_id       = 7
-        sub.codec_type     = "subtitle"
-        sub.file_extension = "srt"
-        sub.display_name.return_value = "subtitle.srt"
-
-        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [sub])
-        sub_cmds = [c for c in ffmpeg_cmds if "-map" in c and c[c.index("-map") + 1] == "0:7"]
-        assert sub_cmds, "Expected a run_ffmpeg call for subtitle extraction"
-        out_tmp = work_dir / EXTRACTED_DIR / "subtitle.tmp"
-        assert sub_cmds[0] == [
-            "ffmpeg", *_PROGRESS_FLAGS, "-y",
-            "-i", str(source),
-            "-map", "0:7",
-            "-c", "copy",
-            "-map_chapters", "-1",
-            "-f", "srt", str(out_tmp),
-        ]
-
-    def test_attachment_dump_golden(self, tmp_path: Path) -> None:
-        from pyqenc.phases.extraction import AttachmentStream
-        work_dir, source = _make_work_and_source(tmp_path)
-        att = MagicMock(spec=AttachmentStream)
-        att.track_id       = 8
-        att.codec_type     = "attachment"
-        att.file_extension = "ttf"
-        att.display_name.return_value = "font.ttf"
-
-        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [att])
-        att_cmds = [c for c in ffmpeg_cmds if "-dump_attachment:8" in c]
-        assert att_cmds, "Expected a run_ffmpeg call for attachment extraction"
-        out_file = work_dir / EXTRACTED_DIR / "font.ttf"
-        assert att_cmds[0] == [
-            "ffmpeg", *_PROGRESS_FLAGS, "-y",
-            "-i", str(source),
-            "-dump_attachment:8", str(out_file),
-            "-t", "0",
-            "-map_chapters", "-1",
-            "-f", "null", "-",
-        ]
-
-
-# ---------------------------------------------------------------------------
-# 1.1 / 1.4-1.7  subtitle / chapter / attachment extraction command correctness
-# ---------------------------------------------------------------------------
-
-
-class TestFfmpegStreamExtraction:
-    """Subtitle, chapter, and attachment extraction build correct ffmpeg commands.
-
-    Observable behavior at the run_ffmpeg / subprocess boundary:
-    - text subtitles carry the right -f (srt/ass); bitmap subtitles carry no -f
-    - subtitles use -map 0:<id> -c copy
-    - attachments use -dump_attachment:<id> and a null-output terminator
-    - chapters fall back to ffprobe -show_chapters -print_format xml
-    """
-
-    def _other_cmds(self, ffmpeg_cmds: list[list]) -> list[list]:
-        """Return ffmpeg commands excluding the always-first video extraction."""
-        return ffmpeg_cmds[1:]
-
-    # -- Subtitles -----------------------------------------------------
-
-    def _fake_subtitle(self, track_id: int, ext: str) -> MagicMock:
-        from pyqenc.phases.extraction import SubtitleStream
-        sub = MagicMock(spec=SubtitleStream)
-        sub.track_id       = track_id
-        sub.codec_type     = "subtitle"
-        sub.file_extension = ext
-        sub.display_name.return_value = f"subtitle.{ext}"
-        return sub
-
-    def test_subtitle_srt_uses_ffmpeg_srt_format(self, tmp_path: Path) -> None:
-        """Requirement 1.5: SRT subtitle extraction passes -f srt."""
-        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [self._fake_subtitle(2, "srt")])
-        cmds = self._other_cmds(ffmpeg_cmds)
-        assert cmds, "Expected a run_ffmpeg call for subtitle extraction"
-        flat = [str(a) for a in cmds[0]]
-        assert "-f" in flat and flat[flat.index("-f") + 1] == "srt", (
-            f"Expected '-f srt' for SRT subtitle; got: {flat}"
-        )
-
-    def test_subtitle_ssa_uses_ffmpeg_ass_format(self, tmp_path: Path) -> None:
-        """Requirement 1.5: SSA subtitle extraction passes -f ass."""
-        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [self._fake_subtitle(3, "ssa")])
-        cmds = self._other_cmds(ffmpeg_cmds)
-        assert cmds, "Expected a run_ffmpeg call for SSA subtitle extraction"
-        flat = [str(a) for a in cmds[0]]
-        assert "-f" in flat and flat[flat.index("-f") + 1] == "ass", (
-            f"Expected '-f ass' for SSA subtitle; got: {flat}"
-        )
-
-    def test_subtitle_ass_uses_ffmpeg_ass_format(self, tmp_path: Path) -> None:
-        """Requirement 1.5: ASS subtitle extraction passes -f ass."""
-        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [self._fake_subtitle(4, "ass")])
-        cmds = self._other_cmds(ffmpeg_cmds)
-        assert cmds, "Expected a run_ffmpeg call for ASS subtitle extraction"
-        flat = [str(a) for a in cmds[0]]
-        assert "-f" in flat and flat[flat.index("-f") + 1] == "ass", (
-            f"Expected '-f ass' for ASS subtitle; got: {flat}"
-        )
-
-    def test_subtitle_bitmap_pgs_has_no_format_flag(self, tmp_path: Path) -> None:
-        """Requirement 1.5: PGS (bitmap) subtitle extraction must NOT pick a
-        subtitle-format muxer — the ``.tmp`` output stays on the Matroska default."""
-        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [self._fake_subtitle(5, "pgs")])
-        cmds = self._other_cmds(ffmpeg_cmds)
-        assert cmds, "Expected a run_ffmpeg call for PGS subtitle extraction"
-        flat = [str(a) for a in cmds[0]]
-        assert "srt" not in flat and "ass" not in flat, (
-            f"Bitmap subtitle must not carry a text-subtitle -f; got: {flat}"
-        )
-        muxers = [flat[i + 1] for i, a in enumerate(flat) if a == "-f"]
-        assert muxers == ["matroska"], (
-            f"Expected only the default Matroska tmp muxer; got: {flat}"
-        )
-
-    def test_subtitle_bitmap_sub_has_no_format_flag(self, tmp_path: Path) -> None:
-        """Requirement 1.5: VobSub (bitmap) subtitle extraction must NOT pick a
-        subtitle-format muxer — the ``.tmp`` output stays on the Matroska default."""
-        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [self._fake_subtitle(6, "sub")])
-        cmds = self._other_cmds(ffmpeg_cmds)
-        assert cmds, "Expected a run_ffmpeg call for VobSub subtitle extraction"
-        flat = [str(a) for a in cmds[0]]
-        assert "srt" not in flat and "ass" not in flat, (
-            f"Bitmap subtitle must not carry a text-subtitle -f; got: {flat}"
-        )
-        muxers = [flat[i + 1] for i, a in enumerate(flat) if a == "-f"]
-        assert muxers == ["matroska"], (
-            f"Expected only the default Matroska tmp muxer; got: {flat}"
-        )
-
-    def test_subtitle_extraction_uses_map_and_copy(self, tmp_path: Path) -> None:
-        """Requirement 1.5: subtitle extraction uses -map 0:<id> -c copy."""
-        ffmpeg_cmds, _ = _run_and_capture(tmp_path, [self._fake_subtitle(7, "srt")])
-        cmds = self._other_cmds(ffmpeg_cmds)
-        assert cmds, "Expected a run_ffmpeg call for subtitle extraction"
-        flat = [str(a) for a in cmds[0]]
-        assert "-map" in flat and flat[flat.index("-map") + 1] == "0:7", (
-            f"Expected '-map 0:7'; got: {flat}"
-        )
-        assert "-c" in flat and flat[flat.index("-c") + 1] == "copy", (
-            f"Expected '-c copy'; got: {flat}"
-        )
-
-    # -- Chapters ------------------------------------------------------
-
-    def test_chapter_extraction_falls_back_to_ffprobe_xml(self, tmp_path: Path) -> None:
-        """Chapter extraction falls back to ffprobe -show_chapters -print_format xml
-        when mkvextract is unavailable (verified at the subprocess boundary)."""
-        from pyqenc.phases.extraction import ChaptersStream
-
-        chapters = MagicMock(spec=ChaptersStream)
-        chapters.track_id       = -2
-        chapters.codec_type     = "chapters"
-        chapters.file_extension = "xml"
-        chapters.display_name.return_value = "chapters.xml"
-
-        def _sp(cmd: list, **kwargs: object) -> MagicMock:
-            result = MagicMock()
-            if cmd and str(cmd[0]) == "mkvextract":
-                raise _subprocess.CalledProcessError(1, cmd, stderr=b"not an mkv")
-            result.returncode = 0
-            result.stdout     = "<chapters/>"
-            result.stderr     = ""
-            return result
-
-        _, subprocess_cmds = _run_and_capture(
-            tmp_path, [chapters], subprocess_side_effect=_sp,
-        )
-
-        ffprobe_chapter_calls = [
-            c for c in subprocess_cmds
-            if c and str(c[0]) == "ffprobe" and "-show_chapters" in [str(a) for a in c]
-        ]
-        assert ffprobe_chapter_calls, (
-            f"Expected an ffprobe -show_chapters fallback call; got: {subprocess_cmds}"
-        )
-        flat = [str(a) for a in ffprobe_chapter_calls[0]]
-        assert "-print_format" in flat and flat[flat.index("-print_format") + 1] == "xml", (
-            f"Expected '-print_format xml' in chapter fallback; got: {flat}"
-        )
-
-    # -- Attachments ---------------------------------------------------
-
-    def _fake_attachment(self, track_id: int, ext: str, name: str) -> MagicMock:
-        from pyqenc.phases.extraction import AttachmentStream
-        att = MagicMock(spec=AttachmentStream)
-        att.track_id       = track_id
-        att.codec_type     = "attachment"
-        att.file_extension = ext
-        att.display_name.return_value = name
-        return att
-
-    def test_attachment_extraction_uses_dump_attachment(self, tmp_path: Path) -> None:
-        """Requirement 1.7: attachment extraction uses -dump_attachment:<track_id>."""
-        ffmpeg_cmds, _ = _run_and_capture(
-            tmp_path, [self._fake_attachment(8, "ttf", "font.ttf")],
-        )
-        cmds = self._other_cmds(ffmpeg_cmds)
-        assert cmds, "Expected a run_ffmpeg call for attachment extraction"
-        flat = [str(a) for a in cmds[0]]
-        assert "-dump_attachment:8" in flat, (
-            f"-dump_attachment:8 must be in attachment command; got: {flat}"
-        )
-
-    def test_attachment_extraction_has_null_output(self, tmp_path: Path) -> None:
-        """Requirement 1.7: attachment extraction terminates with -t 0 -f null -."""
-        ffmpeg_cmds, _ = _run_and_capture(
-            tmp_path, [self._fake_attachment(9, "png", "cover.png")],
-        )
-        cmds = self._other_cmds(ffmpeg_cmds)
-        assert cmds, "Expected a run_ffmpeg call for attachment extraction"
-        flat = [str(a) for a in cmds[0]]
-        assert "-t" in flat and flat[flat.index("-t") + 1] == "0", (
-            f"Expected '-t 0'; got: {flat}"
-        )
-        assert "-f" in flat and flat[flat.index("-f") + 1] == "null", (
-            f"Expected '-f null'; got: {flat}"
-        )
-        assert flat[-1] == "-", f"Last argument must be '-'; got: {flat[-1]!r}"
-
-    # -- mkvextract is not used for subtitle / attachment tracks -------
-
-    def test_no_mkvextract_for_subtitle_or_attachment(self, tmp_path: Path) -> None:
-        """Subtitle and attachment tracks use run_ffmpeg, never mkvextract.
-
-        mkvextract is only permitted for chapters. This guards against a
-        regression where a track type is routed back through mkvextract.
-        """
-        from pyqenc.phases.extraction import (
-            AttachmentStream,
-            ChaptersStream,
-            SubtitleStream,
-        )
-
-        sub = MagicMock(spec=SubtitleStream)
-        sub.track_id       = 2
-        sub.codec_type     = "subtitle"
-        sub.file_extension = "srt"
-        sub.display_name.return_value = "subtitle.srt"
-
-        chapters = MagicMock(spec=ChaptersStream)
-        chapters.track_id       = -2
-        chapters.codec_type     = "chapters"
-        chapters.file_extension = "xml"
-        chapters.display_name.return_value = "chapters.xml"
-
-        att = MagicMock(spec=AttachmentStream)
-        att.track_id       = 3
-        att.codec_type     = "attachment"
-        att.file_extension = "ttf"
-        att.display_name.return_value = "font.ttf"
-
-        mkvextract_non_chapter: list[str] = []
-
-        def _sp(cmd: list, **kwargs: object) -> MagicMock:
-            if cmd and str(cmd[0]) == "mkvextract":
-                if len(cmd) > 2 and str(cmd[2]) not in ("chapters", "timecodes_v2"):
-                    mkvextract_non_chapter.append(str(cmd[2]))
-                raise _subprocess.CalledProcessError(1, cmd, stderr=b"not an mkv")
-            result = MagicMock()
-            result.returncode = 0
-            result.stdout     = "<chapters/>"
-            result.stderr     = ""
-            return result
-
-        _run_and_capture(tmp_path, [sub, chapters, att], subprocess_side_effect=_sp)
-
-        assert not mkvextract_non_chapter, (
-            f"mkvextract must not be called for non-chapter tracks; "
-            f"called for: {mkvextract_non_chapter}"
-        )

@@ -10,15 +10,11 @@ from pathlib import Path
 from pyqenc.constants import (
     AVG_ATTEMPTS_PER_CHUNK,
     BITS_PER_PIXEL_ENCODED,
-    BYTES_PER_PIXEL_FFV1,
-    OVERHEAD_CHUNKING_LOSSLESS_FALLBACK,
-    OVERHEAD_CHUNKING_REMUX,
-    OVERHEAD_EXTRACTION_AND_AUDIO,
     OVERHEAD_PER_STRATEGY_FALLBACK,
     OVERHEAD_TIGHT_MARGIN,
     SUCCESS_SYMBOL_MINOR,
 )
-from pyqenc.models import ChunkingMode, VideoMetadata
+from pyqenc.stream_model import VideoStream
 from pyqenc.utils.log_format import fmt_key_value_table
 
 logger = logging.getLogger(__name__)
@@ -86,19 +82,19 @@ def _parse_resolution(resolution: str) -> tuple[int, int] | None:
         return None
 
 
-def _estimate_total_pixels(video: VideoMetadata) -> int | None:
-    """Derive total pixel count from resolution and fps * duration.
+def _estimate_total_pixels(stream: VideoStream) -> int | None:
+    """Derive total pixel count from the stream's real fast-facet data.
 
-    Uses ``fps * duration_seconds`` from fast ffprobe — never triggers the
-    slow null-encode probe.  Properties cache their results on first access.
-    Returns ``None`` if insufficient data is available.
+    Uses ``resolution`` and ``fps * duration_seconds`` from the enumerated
+    :class:`~pyqenc.stream_model.VideoStreamInfo`; returns ``None`` if
+    insufficient data is available.
     """
-    res = _parse_resolution(video.resolution) if video.resolution else None
+    res = _parse_resolution(stream.info.resolution) if stream.info.resolution else None
     if res is None:
         return None
 
-    fps      = video.fps
-    duration = video.duration_seconds
+    fps      = stream.info.fps
+    duration = stream.info.duration_seconds
     if fps is None or duration is None or fps <= 0:
         return None
 
@@ -106,79 +102,57 @@ def _estimate_total_pixels(video: VideoMetadata) -> int | None:
 
 
 def estimate_required_space(
-    video:          VideoMetadata,
-    num_strategies: int          = 1,
-    chunking_mode:  ChunkingMode = ChunkingMode.LOSSLESS,
+    stream:         VideoStream,
+    num_strategies: int = 1,
 ) -> float:
     """Estimate required disk space for pipeline execution.
 
-    Derives source path and file size directly from ``video``.  Uses
-    pixel-based estimation when cached metadata fields are available, which is
-    significantly more accurate than source-size multipliers.  Never triggers
-    additional I/O probes — reads only already-cached private fields.
+    The direct-from-source pipeline materializes only encoding attempts and
+    final outputs, so the estimate covers exactly those (the extraction and
+    chunk-tree multiplier terms are gone with the files they described):
 
-    Estimation components (pixel-based path):
-
-    - Extraction + audio: ``source_size x OVERHEAD_EXTRACTION_AND_AUDIO``
-      (audio folded into this rough multiplier — good enough without AudioMetadata)
-    - FFV1 chunks:  ``total_pixels x BYTES_PER_PIXEL_FFV1``
-    - Remux chunks: ``source_size x OVERHEAD_CHUNKING_REMUX``
-    - Attempts:     ``total_pixels x (BITS_PER_PIXEL_ENCODED / 8) x AVG_ATTEMPTS_PER_CHUNK x num_strategies``
+    - Attempts: ``total_pixels x (BITS_PER_PIXEL_ENCODED / 8) x AVG_ATTEMPTS_PER_CHUNK x num_strategies``
     - Final output: ``total_pixels x (BITS_PER_PIXEL_ENCODED / 8) x num_strategies``
 
-    Falls back to source-size multipliers when pixel data is unavailable.
+    Pixel data comes from the enumerated :class:`~pyqenc.stream_model.VideoStreamInfo`;
+    falls back to a source-size multiplier per strategy when it is unavailable.
 
     Args:
-        video:          ``VideoMetadata`` for the source file — provides path,
-                        file size, and cached pixel data.
+        stream:         The source's video stream — file size and pixel data.
         num_strategies: Number of encoding strategies to estimate for.
-        chunking_mode:  Chunking strategy — affects chunk size estimate.
 
     Returns:
         Estimated required space in GB.
     """
-    size_bytes = video._file_size_bytes
+    size_bytes = stream.file.file_size_bytes
     if size_bytes is None:
-        size_bytes = video.file_size_bytes  # triggers one stat() if not cached
-    if size_bytes is None:
-        logger.warning("Cannot determine source file size for %s", video.path)
+        logger.warning("Cannot determine source file size for %s", stream.file.path)
         return 0.0
 
     source_size_gb = size_bytes / (1024 ** 3)
-    total_pixels   = _estimate_total_pixels(video)
+    total_pixels   = _estimate_total_pixels(stream)
 
     if total_pixels is not None:
         logger.debug("Space estimate: pixel-based (%d Mpx total)", total_pixels // 1_000_000)
-        extraction_gb        = source_size_gb * OVERHEAD_EXTRACTION_AND_AUDIO
         bytes_per_encoded_px = BITS_PER_PIXEL_ENCODED / 8
-        chunks_gb   = (total_pixels * BYTES_PER_PIXEL_FFV1 / (1024 ** 3)
-                       if chunking_mode == ChunkingMode.LOSSLESS
-                       else source_size_gb * OVERHEAD_CHUNKING_REMUX)
         attempts_gb = total_pixels * bytes_per_encoded_px * AVG_ATTEMPTS_PER_CHUNK * num_strategies / (1024 ** 3)
         final_gb    = total_pixels * bytes_per_encoded_px * num_strategies / (1024 ** 3)
-        total_gb    = extraction_gb + chunks_gb + attempts_gb + final_gb
+        total_gb    = attempts_gb + final_gb
         logger.debug(
-            "Space estimate breakdown: extraction=%.2f GB, chunks=%.2f GB, "
-            "attempts=%.2f GB, final=%.2f GB -> total=%.2f GB",
-            extraction_gb, chunks_gb, attempts_gb, final_gb, total_gb,
+            "Space estimate breakdown: attempts=%.2f GB, final=%.2f GB -> total=%.2f GB",
+            attempts_gb, final_gb, total_gb,
         )
         return total_gb
 
-    logger.debug("Space estimate: falling back to source-size multipliers (no pixel data cached)")
-    chunks_mult = OVERHEAD_CHUNKING_LOSSLESS_FALLBACK if chunking_mode == ChunkingMode.LOSSLESS else OVERHEAD_CHUNKING_REMUX
-    return source_size_gb * (
-        OVERHEAD_EXTRACTION_AND_AUDIO
-        + chunks_mult
-        + OVERHEAD_PER_STRATEGY_FALLBACK * num_strategies
-    )
+    logger.debug("Space estimate: falling back to source-size multipliers (no pixel data)")
+    return source_size_gb * OVERHEAD_PER_STRATEGY_FALLBACK * num_strategies
 
 
 def check_disk_space(
-    video:          VideoMetadata,
+    stream:         VideoStream,
     work_dir:       Path,
-    min_strategies: int          = 1,
-    max_strategies: int          = 1,
-    chunking_mode:  ChunkingMode = ChunkingMode.LOSSLESS,
+    min_strategies: int = 1,
+    max_strategies: int = 1,
 ) -> SpaceEstimate:
     """Check if sufficient disk space is available for pipeline execution.
 
@@ -188,19 +162,17 @@ def check_disk_space(
     top of the upper-bound estimate.
 
     Args:
-        video:          ``VideoMetadata`` for the source file.
+        stream:         The source's video stream.
         work_dir:       Working directory where files will be stored.
         min_strategies: Minimum number of strategies (lower-bound estimate).
         max_strategies: Maximum number of strategies (upper-bound estimate).
-        chunking_mode:  Chunking strategy — affects chunk size estimate.
 
     Returns:
         ``SpaceEstimate`` with min/max required and available space.
     """
-    min_required_gb = estimate_required_space(video, min_strategies, chunking_mode)
-    max_required_gb = estimate_required_space(video, max_strategies, chunking_mode)
-    # Read after estimate calls so file_size_bytes is already cached by estimate_required_space
-    source_size_gb  = (video._file_size_bytes or 0) / (1024 ** 3)
+    min_required_gb = estimate_required_space(stream, min_strategies)
+    max_required_gb = estimate_required_space(stream, max_strategies)
+    source_size_gb  = (stream.file.file_size_bytes or 0) / (1024 ** 3)
     recommended_gb  = max_required_gb * OVERHEAD_TIGHT_MARGIN
 
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -224,11 +196,10 @@ def check_disk_space(
 
 
 def log_disk_space_info(
-    video:          VideoMetadata,
+    stream:         VideoStream,
     work_dir:       Path,
-    min_strategies: int          = 1,
-    max_strategies: int          = 1,
-    chunking_mode:  ChunkingMode = ChunkingMode.LOSSLESS,
+    min_strategies: int = 1,
+    max_strategies: int = 1,
 ) -> AvailableSpaceLevel:
     """Check and log disk space information.
 
@@ -238,16 +209,15 @@ def log_disk_space_info(
     understands the uncertainty.
 
     Args:
-        video:          ``VideoMetadata`` for the source file.
+        stream:         The source's video stream.
         work_dir:       Working directory where files will be stored.
         min_strategies: Minimum number of strategies (lower-bound estimate).
         max_strategies: Maximum number of strategies (upper-bound estimate).
-        chunking_mode:  Chunking strategy — affects chunk size estimate.
 
     Returns:
         ``AvailableSpaceLevel`` indicating whether space is sufficient.
     """
-    estimate = check_disk_space(video, work_dir, min_strategies, max_strategies, chunking_mode)
+    estimate = check_disk_space(stream, work_dir, min_strategies, max_strategies)
 
     is_range = min_strategies != max_strategies
     if is_range:

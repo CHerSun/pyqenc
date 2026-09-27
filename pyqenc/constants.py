@@ -17,22 +17,11 @@ TEMP_SUFFIX = ".tmp"
 """A suffix to append to temporary files during processing. This helps avoid confusion with final output files and allows for easy cleanup of incomplete files."""
 
 # Disk space estimation constants
-OVERHEAD_EXTRACTION_AND_AUDIO = 3.5
-"""Multiplier for the source video size to account for extraction and audio processing overhead.
-Covers the extracted video stream (~1x source) plus intermediate FLAC files from normalization
-of typically 2 surround audio tracks with multiple normalization variants (~2.5x source).
-Audio is the dominant component for multi-track releases."""
-OVERHEAD_CHUNKING_REMUX = 1.0
-"""Multiplier for the source video size to account for overhead from remuxing (stream-copying). This is typically close to the original source video size."""
 OVERHEAD_TIGHT_MARGIN = 1.2
 """Multiplier applied to the max estimated space to derive the recommended space threshold.
 A 20% buffer on top of the upper-bound estimate."""
 
-# Pixel-based space estimation constants (used when VideoMetadata is available)
-BYTES_PER_PIXEL_FFV1 = 0.30
-"""Estimated bytes per pixel for FFV1 lossless all-intra chunks. FFV1 achieves roughly 5x compression
-over uncompressed YUV420 (1.5 bytes/pixel), giving ~0.30 bytes/pixel. Measured at ~0.24 B/px on
-typical movie content; 0.30 adds a conservative safety margin. Tune if estimates diverge."""
+# Pixel-based space estimation constants
 BITS_PER_PIXEL_ENCODED = 0.10
 """Estimated bits per pixel for encoded video output (attempts, final). Covers a wide range of
 content at typical quality targets. Tune this constant if estimates are consistently off."""
@@ -40,13 +29,10 @@ AVG_ATTEMPTS_PER_CHUNK = 5.5
 """Average number of CRF search attempts per chunk per strategy. Used to estimate space consumed
 by intermediate attempt files during the encoding phase."""
 
-# Fallback source-size multipliers (used only when VideoMetadata is unavailable)
-OVERHEAD_CHUNKING_LOSSLESS_FALLBACK = 5.0
-"""Fallback multiplier for FFV1 lossless chunking overhead relative to source size.
-Used only when pixel-based estimation is not possible (no VideoMetadata available)."""
+# Fallback source-size multiplier (used only when stream pixel data is unavailable)
 OVERHEAD_PER_STRATEGY_FALLBACK = 2.5
 """Fallback multiplier per encoding strategy relative to source size.
-Used only when pixel-based estimation is not possible (no VideoMetadata available)."""
+Used only when pixel-based estimation is not possible (no VideoStreamInfo available)."""
 
 # Vertical delimiters
 LINE_WIDTH  = 72

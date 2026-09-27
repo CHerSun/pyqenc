@@ -51,6 +51,7 @@ from pyqenc.constants import (
 from pyqenc.models import CropParams, Strategy
 from pyqenc.utils.ffmpeg_runner import FFmpegInput
 from pyqenc.utils.long_path import LongPath
+from pyqenc.utils.naming import sanitize_filesystem_text
 
 # ---------------------------------------------------------------------------
 # YAML-annotated types — conversions declared once, never per model
@@ -244,17 +245,99 @@ class Stream[InfoT: StreamInfo](BaseModel):
 class VideoStream(Stream[VideoStreamInfo]):
     """A video stream — ``info`` is statically :class:`VideoStreamInfo`."""
 
+    def display_name(self) -> str:
+        """Display name for logs and include/exclude filtering (never on disk)."""
+        tags = _display_tags(self.info)
+        if self.info.resolution:
+            tags.append(f"res={self.info.resolution}")
+        return _format_display_name("video", self.info, tags)
+
 
 class AudioStream(Stream[AudioStreamInfo]):
     """An audio stream — ``info`` is statically :class:`AudioStreamInfo`."""
+
+    def display_name(self) -> str:
+        """Display name for logs and include/exclude filtering (never on disk)."""
+        tags = _display_tags(self.info)
+        if self.info.layout is not None:
+            tags.append(f"ch={self.info.layout.original}")
+        return _format_display_name("audio", self.info, tags)
 
 
 class SubtitleStream(Stream[SubtitleStreamInfo]):
     """A subtitle stream — ``info`` is statically :class:`SubtitleStreamInfo`."""
 
+    def display_name(self) -> str:
+        """Display name for logs and include/exclude filtering (never on disk)."""
+        tags = _display_tags(self.info)
+        if self.info.is_forced:
+            tags.append("forced")
+        return _format_display_name("subtitle", self.info, tags)
+
+    @property
+    def file_extension(self) -> str:
+        """The subtitle's file extension, derived from its codec."""
+        codec = (self.info.codec_name or "").lower()
+        if "subrip"      in codec: return "srt"
+        if "dvd"         in codec: return "sub"
+        if "pgs"         in codec: return "pgs"
+        # ffmpeg reports ASS/SSA text subtitles as 'ass' (modern) or 'ssa'/
+        # 'substation' (older); all are ASS-family text subs written as .ass.
+        if "ass"         in codec: return "ass"
+        if "ssa"         in codec or "substation" in codec: return "ssa"
+        raise ValueError(f"Unknown subtitle codec: {self.info.codec_name}")
+
+    def extracted_file_name(self) -> str:
+        """The extracted subtitle file name — owned by this class (Req 15.7).
+
+        ``#<track_id> (<codec>) lang=… title=….<ext>`` — title sanitized through
+        the shared primitive; absent optional parts are omitted. No parser
+        exists: ``extraction.yaml`` carries the resulting paths.
+        """
+        parts = [f"#{self.info.track_id} ({self.info.codec_name})"]
+        if self.info.language:
+            parts.append(f"lang={self.info.language}")
+        if self.info.title:
+            parts.append(f"title={sanitize_filesystem_text(self.info.title)}")
+        return " ".join(parts) + f".{self.file_extension}"
+
 
 class AttachmentStream(Stream[AttachmentStreamInfo]):
     """An attachment stream — ``info`` is statically :class:`AttachmentStreamInfo`."""
+
+    def display_name(self) -> str:
+        """Display name for logs and include/exclude filtering (never on disk)."""
+        tags = _display_tags(self.info)
+        if self.info.filename:
+            tags.append(f"filename={self.info.filename}")
+        return _format_display_name("attachment", self.info, tags)
+
+    def extracted_file_name(self) -> str:
+        """The dumped attachment file name — owned by this class (Req 15.7).
+
+        ``#<track_id> (attachment) <filename>`` — the attachment's own filename
+        verbatim (it is already a plain filename, not free text with separators).
+        """
+        filename = self.info.filename or "attachment"
+        return f"#{self.info.track_id} (attachment) {filename}"
+
+
+def _display_tags(info: StreamInfo) -> list[str]:
+    """Shared identity tags for display names: language and sanitized title."""
+    tags: list[str] = []
+    if info.language:
+        tags.append(f"lang={info.language}")
+    if info.title:
+        tags.append(f"title={sanitize_filesystem_text(info.title)}")
+    return tags
+
+
+def _format_display_name(stream_type: str, info: StreamInfo, tags: list[str]) -> str:
+    """Assemble ``#N (type-codec) tag…`` — display names never touch the disk."""
+    return " ".join(filter(None, [
+        f"#{info.track_id} ({stream_type}-{info.codec_name})",
+        *tags,
+    ]))
 
 
 # ---------------------------------------------------------------------------

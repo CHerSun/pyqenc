@@ -6,7 +6,7 @@ Observable-behavior only: phases are constructed through their real public
 constructors with a real phase registry whose dependency ``result`` fields are
 pre-set to completed typed results (so the shared dependency walk is a no-op),
 then driven through the public ``run()`` entry point. The only things mocked are
-genuine external shell-outs (``MKVTrackExtractor`` → ffprobe, ``subprocess.run``
+genuine external shell-outs (``_probe_streams_json`` → ffprobe, ``subprocess.run``
 → mkvmerge, ``get_frame_count`` → ffmpeg) — boundaries, never phase internals.
 No ``__new__``, no private ``_recover``/``_execute_merge`` calls, no private-attr
 poking.
@@ -33,6 +33,7 @@ from pyqenc.phases.extraction import (
 )
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.state import ArtifactState, JobState
+from pyqenc.stream_model import File
 
 # ---------------------------------------------------------------------------
 # Shared helpers — build a REAL ExtractionPhase via its real constructor
@@ -72,6 +73,7 @@ def _make_extraction_phase(
 
     source_vm  = _make_source_vm(source)
     job_result = JobPhaseResult(
+        file       = File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64),
         outcome    = PhaseOutcome.COMPLETED,
         artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message    = "job complete",
@@ -222,11 +224,8 @@ def test_timestamp_filter_independence(
 
         # Mock only the external ffprobe boundary: no tracks discovered so the
         # filter varies over a real (empty) stream set without shelling out.
-        with patch("pyqenc.phases.extraction.MKVTrackExtractor") as mock_extractor_cls:
-            mock_extractor = MagicMock()
-            mock_extractor.tracks = []
-            mock_extractor_cls.return_value = mock_extractor
-
+        with patch("pyqenc.phases.extraction._probe_streams_json",
+                   return_value={"streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc"}], "chapters": []}):
             result = phase.run(dry_run=True)
 
     ts_artifacts = [a for a in result.artifacts if isinstance(a, TimestampArtifact)]
@@ -276,11 +275,8 @@ def test_timestamp_artifact_classification(file_present: bool) -> None:
 
         phase = _make_extraction_phase(work_dir, source, include=None, exclude=None)
 
-        with patch("pyqenc.phases.extraction.MKVTrackExtractor") as mock_extractor_cls:
-            mock_extractor = MagicMock()
-            mock_extractor.tracks = []
-            mock_extractor_cls.return_value = mock_extractor
-
+        with patch("pyqenc.phases.extraction._probe_streams_json",
+                   return_value={"streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc"}], "chapters": []}):
             result = phase.run(dry_run=True)
 
     ts_artifacts = [a for a in result.artifacts if isinstance(a, TimestampArtifact)]
