@@ -8,7 +8,7 @@ extraction:
   exclude: null   # regex — drop matching streams; overrides include
 
 chunking:
-  scene_threshold: 27.0 # PySceneDetect content threshold: mean per-pixel distance between adjacent frames (8-bit HSV planes, 0-255 float). 27.0 is the library default. Raise for fewer/stronger cuts; below ~1 every frame fires and the flash filter merges cuts back into one giant scene.
+  scene_threshold: 27.0 # ~15-50 is meaningful range (0.0-255.0 max range). 27.0 is the default. Lower = more sensitive, but there is coalescense inbuilt - too low values can give unexpected results.
   min_scene_length: 24  # minimum frames per chunk
 
 encoding:
