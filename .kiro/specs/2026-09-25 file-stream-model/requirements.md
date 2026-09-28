@@ -19,6 +19,7 @@
 
 ### Related, not superseded
 
+- `2026-09-28 artifact-model` (successor for the artifact layer) — defines the generic `Artifact[PayloadT]` recovery/contract layer above this spec's entity family: which entities become artifacts, internal ledger vs external result contracts, and the per-phase artifact flow. The stream model, naming ownership (Req 15), unique-property dumps and sidecar schemas here are unchanged. The `timestamps.txt` extraction row becomes the video artifact's material component there.
 - `2026-04-29 pts-preservation` — global PTS restoration via `timestamps.txt` at merge is unchanged; this spec adds the frame-preservation invariant on top of it.
 - `2026-09-01 probe-phase-refactor` — ProbePhase keeps its sidecar and slow-facet ownership; its frame-count source changes (see Req 9).
 
@@ -192,15 +193,30 @@ Frame-exactness stops being a positioning concern and becomes a verification inv
 3. Estimation SHALL remain log-only (the blocked branch stays disabled — the open question in TODO §33 is unchanged).
 4. `CleanupLevel.INTERMEDIATE` SHALL cover the encoding workspace; `CleanupLevel.ALL` additionally the encoded winners tree; `extracted/` shrinks to its surviving content; the `chunks/` cleanup path is deleted.
 
-### Requirement 12 — `setpts=PTS-STARTPTS` scoping
+### Requirement 12 — `setpts` scoping
 
 **User Story:** As a developer, I want the timeline normalization flag scoped to where it is load-bearing and verified, so that it is not cargo-culted.
 
+> **E2E finding (2026-09-28, post-completion):** the flag's original form
+> `PTS-STARTPTS` was empirically a no-op in the quality graph (identical
+> metrics with and without it) and insufficient for its purpose. ffmpeg's
+> framesync pairs metric inputs **by PTS**; both sides' Matroska ms-rounded
+> timestamp grids carry different rounding phases, so their relative offsets
+> oscillate ±1 ms and framesync intermittently duplicates/skips a frame —
+> single-frame mispairings (~14 dB PSNR drops, `vmaf_min=0.0`, constant
+> across CRFs, ~3.5-frame beat). The formula was replaced with
+> `setpts=N/(FRAME_RATE*TB)` on **both** metric branches: it rewrites PTS to
+> the exact index-based CFR grid (frame *N* at *N*/fps), making pairing
+> index-perfect — verified against per-frame PNG comparison on real media
+> (14/57 mispaired → 0, avg PSNR 21.6 → 48.5). The synthetic grid exists
+> only inside the metric process; attempts on disk and the final merge keep
+> original timestamps (AC 2). This resolves the AC 3 experiment: the flag was
+> not redundant — it was the wrong formula.
+
 #### Acceptance Criteria
 
-1. `setpts=PTS-STARTPTS` SHALL be kept in the quality filter graph only, as the explicit co-basing of the two metric inputs' timelines.
-2. It SHALL NOT appear in any encode path or merge command; encoded attempts keep natural 0-based PTS and merge restores global PTS via `mkvmerge --timestamps` from `timestamps.txt` (unchanged).
-3. A one-time e2e task SHALL compare quality metrics with and without the flag on real media; the flag SHALL be dropped in a follow-up if measurably redundant.
+1. The quality filter graph SHALL re-time both metric inputs to the exact index-based CFR grid via `setpts=N/(FRAME_RATE*TB)`, so framesync pairing matches frame-index alignment (the verified truth of both streams).
+2. `setpts` SHALL NOT appear in any encode path or merge command; encoded attempts keep natural 0-based PTS and merge restores global PTS via `mkvmerge --timestamps` from `timestamps.txt` (unchanged).
 
 ### Requirement 13 — Multi-video-stream guard
 
