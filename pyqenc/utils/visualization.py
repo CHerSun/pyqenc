@@ -483,6 +483,12 @@ def create_unified_plot(
     Raises:
         ValueError: If ``df_norm`` contains no recognized metric columns.
     """
+    # Callers pass the exact rational ``fps_fraction`` (Req 9.9) — coerce to
+    # float here so every x-axis arithmetic stays float (Fraction + float
+    # index would produce object-dtype arrays matplotlib cannot plot).
+    if fps is not None:
+        fps = float(fps)
+
     # Derive per-metric Series from DataFrame columns
     metrics: dict[MetricType, pd.Series] = {}
     for col in df_norm.columns:
