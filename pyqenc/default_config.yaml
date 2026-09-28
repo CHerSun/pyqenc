@@ -8,7 +8,7 @@ extraction:
   exclude: null   # regex — drop matching streams; overrides include
 
 chunking:
-  scene_threshold: 0.25 # 0.0–1.0; lower = more sensitive
+  scene_threshold: 4.0  # content-delta threshold (~0-255 scale, PySceneDetect); ~3-6 splits movies well — too low (<~1) makes the flash filter merge cuts back into one giant scene
   min_scene_length: 24  # minimum frames per chunk
 
 encoding:

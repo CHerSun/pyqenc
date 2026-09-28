@@ -65,8 +65,8 @@ _CHUNKING_YAML = "chunking.yaml"
 
 def detect_scenes(
     stream:           ExtendedVideoStream,
-    scene_threshold:  float = 27.0,
-    min_scene_length: int   = 15,
+    scene_threshold:  float,
+    min_scene_length: int,
 ) -> list[SceneBoundary]:
     """Detect scene boundaries in the source using PySceneDetect.
 
@@ -78,8 +78,10 @@ def detect_scenes(
 
     Args:
         stream:           The source's extended video stream (reads the file).
-        scene_threshold:  PySceneDetect content-change threshold (default 27.0).
-        min_scene_length: Minimum frames per scene (default 15).
+        scene_threshold:  PySceneDetect content-delta threshold (see
+                          ``chunking.scene_threshold`` in default_config.yaml —
+                          the config is the single source of truth).
+        min_scene_length: Minimum frames per scene.
 
     Returns:
         List of ``SceneBoundary`` objects.
