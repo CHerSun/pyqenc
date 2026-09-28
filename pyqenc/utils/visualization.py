@@ -1327,7 +1327,6 @@ class QualityEvaluator:
             reference        = reference,
             crop_distorted   = CropParams(),
             crop_reference   = ref_crop,
-            duration         = 0,
             width            = width,
             use_gpu          = False,
             subsample        = metrics_sampling,

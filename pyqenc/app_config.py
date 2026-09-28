@@ -51,6 +51,9 @@ def _deep_merge(base: dict, override: dict) -> dict:
     """Recursively merge *override* on top of *base* and return a new dict.
 
     Merge rules:
+    - **``None`` override values are dropped**: a section present in the YAML
+      but empty (only comments) parses as ``None`` and must not clobber the
+      bundled default — the intent is "nothing overridden", never "delete".
     - **Scalar values** (anything that is not a ``dict`` or ``list``):
       the override value wins unconditionally.
     - **Dict values**: the two sub-dicts are merged recursively using the
@@ -72,6 +75,8 @@ def _deep_merge(base: dict, override: dict) -> dict:
     result: dict = dict(base)
 
     for key, override_value in override.items():
+        if override_value is None:
+            continue  # empty YAML section — "nothing overridden", never a clobber
         base_value = result.get(key)
 
         if isinstance(base_value, dict) and isinstance(override_value, dict):

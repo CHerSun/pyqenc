@@ -139,6 +139,25 @@ def _float_or_none(value: object) -> float | None:
         return None
 
 
+def _duration_from_tags(tags: dict) -> float | None:
+    """Parse a Matroska ``DURATION`` tag (``HH:MM:SS.nnnnnnnnn``) to seconds.
+
+    MKV streams carry no ffprobe-level ``duration`` float — the stream duration
+    lives only in the per-track ``DURATION`` tag.
+    """
+    raw = tags.get("DURATION")
+    if not isinstance(raw, str):
+        return None
+    parts = raw.split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        hours, minutes, seconds = (float(part) for part in parts)
+    except ValueError:
+        return None
+    return hours * 3600 + minutes * 60 + seconds
+
+
 def _base_info_fields(raw: dict) -> dict:
     """The container-level ``StreamInfo`` fields from one ffprobe stream dict."""
     tags = _tags_of(raw)
@@ -148,7 +167,11 @@ def _base_info_fields(raw: dict) -> dict:
         "language":         tags.get("language"),
         "title":            tags.get("title") or tags.get("TITLE"),
         "start_timestamp":  _float_or_none(raw.get("start_time")),
-        "duration_seconds": _float_or_none(raw.get("duration")),
+        "duration_seconds": (
+            _float_or_none(raw.get("duration"))
+            if raw.get("duration") is not None
+            else _duration_from_tags(tags)
+        ),
     }
 
 
@@ -298,10 +321,12 @@ def _extract_timestamps(
     """Extract per-frame PTS values from source and write timestamps.txt.
 
     Tries ``mkvextract timecodes_v2`` first (native format, already sorted,
-    includes the final duration entry). Falls back to ``ffprobe packet=pts``
-    for non-MKV containers or when mkvextract is unavailable — in that case
-    values are sorted ascending and ``duration_ms`` is appended as the final
-    entry (approximating the mkvextract trailing timestamp).
+    plus a trailing end-of-stream entry at full precision). Falls back to
+    ``ffprobe packet=pts`` for non-MKV containers or when mkvextract is
+    unavailable — in that case values are sorted ascending. Both writers
+    produce frame lines only (one per frame/packet); the frame-count parser
+    recognises mkvextract's fractional trailing marker as the end-of-stream
+    entry, not a frame.
 
     Both paths use the ``.tmp``-then-rename protocol for atomicity.
 
@@ -309,9 +334,9 @@ def _extract_timestamps(
         source:         Path to the source video file.
         video_track_id: The ffprobe stream index of the video track.
         output:         Destination path (``extracted/timestamps.txt``).
-        duration_ms:    Source video duration in milliseconds, used as the
-                        trailing entry in the ffprobe fallback path.  When
-                        ``None`` the trailing entry is omitted.
+        duration_ms:    Unused (kept for signature stability of the phase's
+                        internal call); the fallback writer emits frame
+                        lines only.
 
     Raises:
         subprocess.CalledProcessError: If both mkvextract and ffprobe fail.
@@ -374,10 +399,6 @@ def _extract_timestamps(
             raise ValueError(msg) from exc
 
     pts_ms.sort()
-
-    # Append duration as trailing entry (approximates mkvextract's final timestamp)
-    if duration_ms is not None and (not pts_ms or duration_ms > pts_ms[-1]):
-        pts_ms.append(duration_ms)
 
     with tmp.open("w", encoding="utf-8") as fh:
         fh.write("# timestamp format v2\n")

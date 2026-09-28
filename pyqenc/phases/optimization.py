@@ -400,7 +400,7 @@ class OptimizationPhase(Phase):
             collector        = self._collector,
             crop_params      = crop,
             visual_hash      = self._config.encoding.visual_hash,
-            sampling = self._config.measurement.sampling,
+            metrics_sampling = self._config.measurement.sampling,
             cleanup_level    = job_result.cleanup,
             metric_prefix    = MetricKey.OPTIMIZATION,
         )
@@ -446,8 +446,8 @@ class OptimizationPhase(Phase):
             file_sizes: list[float] = []
             for chunk in test_chunks:
                 encoded = enc_result.encoded_chunks.get(chunk.chunk_id, {}).get(strategy.name)
-                if encoded is not None and encoded.stream.file.path.exists():
-                    file_sizes.append(encoded.stream.file.file_size_bytes or 0)
+                if encoded is not None and encoded.stream.stream.file.path.exists():
+                    file_sizes.append(encoded.stream.stream.file.file_size_bytes or 0)
             new_results.append(StrategyTestResult(
                 strategy     = strategy.name,
                 total_size    = int(sum(file_sizes)),
