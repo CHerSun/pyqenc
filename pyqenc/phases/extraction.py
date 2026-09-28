@@ -454,8 +454,43 @@ class TimestampArtifact(Artifact):
     stream: VideoStream | None = None
 
 
+@dataclass
+class VideoStreamArtifact(Artifact):
+    """Virtual artifact for the enumerated video stream.
+
+    The stream exists in the source file — ``COMPLETE`` by construction, never
+    extracted, never pending. ``wanted`` comes from the same include/exclude
+    filter as every extractable (plus ``video_required`` for the audio-only
+    registry), so the recovery summary and the Want/Present table account for
+    it exactly like any other stream.
+
+    Attributes:
+        stream: The enumerated video stream.
+    """
+
+    stream: VideoStream | None = None
+
+
+@dataclass
+class AudioStreamArtifact(Artifact):
+    """Virtual artifact for an enumerated audio stream (see VideoStreamArtifact).
+
+    Attributes:
+        stream: The enumerated audio stream.
+    """
+
+    stream: AudioStream | None = None
+
+
 # Type alias for all extraction artifacts — use this in annotations throughout
-type ExtractionArtifact = SubtitleArtifact | AttachmentArtifact | ChaptersArtifact | TimestampArtifact
+type ExtractionArtifact = (
+    VideoStreamArtifact
+    | AudioStreamArtifact
+    | SubtitleArtifact
+    | AttachmentArtifact
+    | ChaptersArtifact
+    | TimestampArtifact
+)
 
 
 @dataclass
@@ -594,7 +629,12 @@ class ExtractionPhase(Phase):
         self._load_or_enumerate(job_result.file, sidecar_path)
 
         selected = streams_filter_plain_regex(
-            [*self._subtitles, *self._attachments],
+            [
+                *([self._video] if self._video is not None else []),
+                *self._audio,
+                *self._subtitles,
+                *self._attachments,
+            ],
             include_pattern = job_result.config.extraction.include,
             exclude_pattern = job_result.config.extraction.exclude,
         )
@@ -609,6 +649,21 @@ class ExtractionPhase(Phase):
             on_disk_names = set()
 
         artifacts: list[ExtractionArtifact] = []
+
+        if self._video is not None:
+            artifacts.append(VideoStreamArtifact(
+                path   = self._video.file.path,
+                state  = ArtifactState.COMPLETE,  # exists in the source file
+                wanted = (self._video in selected) and self._video_required,
+                stream = self._video,
+            ))
+        for stream in self._audio:
+            artifacts.append(AudioStreamArtifact(
+                path   = stream.file.path,
+                state  = ArtifactState.COMPLETE,  # exists in the source file
+                wanted = stream in selected,
+                stream = stream,
+            ))
 
         for stream in self._subtitles:
             artifacts.append(self._make_stream_artifact(
@@ -639,141 +694,8 @@ class ExtractionPhase(Phase):
             stream = self._video,
         ))
 
-        self._log_inventory()
         _log_stream_table(artifacts)
         return Recovery.from_artifacts(artifacts)
-
-    def _load_or_enumerate(self, source_file: File, sidecar_path: Path) -> None:
-        """Resolve the run's stream inventory from the sidecar or ffprobe.
-
-        Args:
-            source_file: The job's live ``File`` (identity for validation).
-            sidecar_path: Path to ``extraction.yaml``.
-
-        Raises:
-            RecoveryError: When ffprobe enumeration fails.
-        """
-        sidecar = self._load_sidecar(sidecar_path)
-        if sidecar is not None:
-            try:
-                sidecar.validate_source(source_file)
-            except SourceMismatchError as exc:
-                logger.info("extraction.yaml source identity mismatch — re-enumerating: %s", exc)
-            else:
-                inv = sidecar.streams
-                self._video = (
-                    VideoStream(file=source_file, info=inv.video)
-                    if inv.video is not None else None
-                )
-                self._audio       = [AudioStream(file=source_file, info=i) for i in inv.audio]
-                self._subtitles   = [SubtitleStream(file=source_file, info=i) for i in inv.subtitles]
-                self._attachments = [AttachmentStream(file=source_file, info=i) for i in inv.attachments]
-                self._has_chapters = sidecar.chapters is not None
-                return
-
-        try:
-            data = _probe_streams_json(source_file.path)
-            video, audio, subtitles, attachments, has_chapters = _enumerate_streams(data, source_file)
-        except Exception as exc:
-            raise RecoveryError(f"Failed to analyse source video: {exc}") from exc
-        self._video, self._audio = video[0] if video else None, audio
-        self._subtitles, self._attachments, self._has_chapters = subtitles, attachments, has_chapters
-        self._sidecar_dirty = True
-
-    @staticmethod
-    def _load_sidecar(path: Path) -> ExtractionSidecar | None:
-        """Load ``extraction.yaml``; ``None`` when absent or unparseable."""
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return ExtractionSidecar.model_validate(data)
-        except Exception as exc:  # noqa: BLE001 — any parse failure means "re-enumerate"
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
-
-    def _persist_sidecar(self, sidecar_path: Path) -> None:
-        """Write the inventory to ``extraction.yaml`` (the unique info slices)."""
-        sidecar = ExtractionSidecar(
-            source          = self._sidecar_source(),
-            streams         = StreamsInventory(
-                video       = self._video.info if self._video is not None else None,
-                audio       = [s.info for s in self._audio],
-                subtitles   = [s.info for s in self._subtitles],
-                attachments = [s.info for s in self._attachments],
-            ),
-            chapters = (ContainerArtifact(extracted_path=self._stream_artifact_path(_CHAPTERS_DISPLAY_NAME))
-                        if self._has_chapters else None),
-            timestamps_path = (self._stream_artifact_path(TIMESTAMPS_FILENAME)
-                               if self._video is not None else None),
-        )
-        write_yaml_atomic(sidecar_path, sidecar.model_dump(exclude_none=True))
-        self._sidecar_dirty = False
-        logger.debug("Wrote stream inventory: %s", sidecar_path.name)
-
-    def _sidecar_source(self) -> File:
-        """The inventory's source identity — the first enumerated stream's File."""
-        stream = self._video or next(iter(self._audio), None) \
-            or next(iter(self._subtitles), None) or next(iter(self._attachments), None)
-        assert stream is not None, "inventory has at least one stream (video required for timestamps)"
-        return stream.file
-
-    # ------------------------------------------------------------------
-    # Result / finalize
-    # ------------------------------------------------------------------
-
-    def _make_result(
-        self,
-        outcome:   PhaseOutcome,
-        artifacts: list[ExtractionArtifact],
-        message:   str,
-        error:     str | None = None,
-    ) -> ExtractionPhaseResult:
-        """Assemble an ``ExtractionPhaseResult`` deriving payloads from artifacts.
-
-        Args:
-            outcome:   The phase outcome.
-            artifacts: The wanted artifact list.
-            message:   Human-readable summary.
-            error:     Error description when ``outcome`` is ``FAILED``.
-
-        Returns:
-            The populated result.
-        """
-        ts = next((a for a in artifacts if isinstance(a, TimestampArtifact)), None)
-        chapters = next((a for a in artifacts if isinstance(a, ChaptersArtifact)), None)
-
-        complete_paths = {
-            a.path for a in artifacts if a.state == ArtifactState.COMPLETE
-        }
-        subtitles = [
-            s if (s.info.extracted_path and s.info.extracted_path in complete_paths)
-            else s.model_copy(update={"info": s.info.model_copy(update={
-                "extracted_path": a.path if a.path in complete_paths else None,
-            })})
-            for s, a in zip(self._subtitles, [x for x in artifacts if isinstance(x, SubtitleArtifact)])
-        ]
-        attachments = [
-            s if (s.info.extracted_path and s.info.extracted_path in complete_paths)
-            else s.model_copy(update={"info": s.info.model_copy(update={
-                "extracted_path": a.path if a.path in complete_paths else None,
-            })})
-            for s, a in zip(self._attachments, [x for x in artifacts if isinstance(x, AttachmentArtifact)])
-        ]
-
-        return ExtractionPhaseResult(
-            outcome           = outcome,
-            artifacts         = artifacts,
-            message           = message,
-            error             = error,
-            video_stream      = self._video,
-            audio_streams     = list(self._audio),
-            subtitle_streams  = subtitles,
-            attachment_streams = attachments,
-            timestamps_path   = ts.path if ts is not None and ts.state == ArtifactState.COMPLETE else None,
-            chapters_path     = chapters.path if chapters is not None and chapters.state == ArtifactState.COMPLETE else None,
-        )
 
     def _load_or_enumerate(self, source_file: File, sidecar_path: Path) -> None:
         """Resolve the run's stream inventory from the sidecar or ffprobe.
@@ -1173,16 +1095,6 @@ class ExtractionPhase(Phase):
         work_dir = cast(JobPhaseResult, self._dep(JobPhase).result).work_dir
         return work_dir / EXTRACTED_DIR / file_name
 
-    def _log_inventory(self) -> None:
-        """Log the enumerated video/audio streams (not extraction artifacts)."""
-        if self._video is not None:
-            logger.info("Video stream: %s", self._video.display_name())
-        else:
-            logger.info("Video stream: none")
-        for stream in self._audio:
-            logger.info("Audio stream: %s", stream.display_name())
-
-
 class _ChaptersProxy:
     """Filter stand-in exposing the chapters artifact's display name."""
 
@@ -1218,4 +1130,8 @@ def _log_stream_table(
             if artifact.state == ArtifactState.COMPLETE
             else FAILURE_SYMBOL_MINOR
         )
-        logger.info("   %s  %s  \"%s\"", w_sym, p_sym, artifact.path.name)
+        if isinstance(artifact, (VideoStreamArtifact, AudioStreamArtifact)):
+            name = artifact.stream.display_name() if artifact.stream is not None else "?"
+        else:
+            name = artifact.path.name
+        logger.info("   %s  %s  \"%s\"", w_sym, p_sym, name)
