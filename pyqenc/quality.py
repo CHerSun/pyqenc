@@ -374,12 +374,20 @@ async def run_metrics(
     crop_d    = crop_distorted.to_ffmpeg_filter()
     crop_r    = crop_reference.to_ffmpeg_filter()
 
-    # Build shared input streams with split
+    # Re-time both inputs to exact index-based CFR before the metric filters.
+    # framesync (the dualinput core of psnr/ssim/libvmaf) pairs frames by PTS:
+    # the attempt's and the source window's ms-rounded timestamp grids carry
+    # different rounding phases, and where they diverge framesync duplicates/
+    # skips a frame — intermittent single-frame mispairings (~14 dB PSNR drops
+    # every few frames, vmaf_min=0). setpts=N/(FRAME_RATE*TB) rewrites PTS to
+    # the frame index on both sides, so pairing is index-perfect — verified
+    # against per-frame PNG comparison on real media. PTS-STARTPTS only rebases
+    # the origin and preserves the grid mismatch (empirically a no-op here).
     if n_branches == 1:
         # No split needed — single branch uses [main]/[ref] directly
-        sel = f",select='not(mod(n,{subsample}))',setpts=PTS-STARTPTS" if (
+        sel = f",select='not(mod(n,{subsample}))',setpts=N/(FRAME_RATE*TB)" if (
             subsample > 1 and branches[0].info.subsample_via_filter
-        ) else ",setpts=PTS-STARTPTS"
+        ) else ",setpts=N/(FRAME_RATE*TB)"
         f_dist = f"[0:v]{crop_d}{width_str}{sel}[main]"
         f_ref  = f"[1:v]{crop_r}{width_str}{sel}[ref]"
         branch_labels_d = ["main"]
@@ -400,12 +408,12 @@ async def run_metrics(
             label_d = f"main{i}"
             label_r = f"ref{i}"
             if subsample > 1 and branch.info.subsample_via_filter:
-                sel = f"select='not(mod(n,{subsample}))',setpts=PTS-STARTPTS"
+                sel = f"select='not(mod(n,{subsample}))',setpts=N/(FRAME_RATE*TB)"
                 branch_parts_d.append(f"[d{i}]{sel}[{label_d}]")
                 branch_parts_r.append(f"[r{i}]{sel}[{label_r}]")
             else:
-                branch_parts_d.append(f"[d{i}]setpts=PTS-STARTPTS[{label_d}]")
-                branch_parts_r.append(f"[r{i}]setpts=PTS-STARTPTS[{label_r}]")
+                branch_parts_d.append(f"[d{i}]setpts=N/(FRAME_RATE*TB)[{label_d}]")
+                branch_parts_r.append(f"[r{i}]setpts=N/(FRAME_RATE*TB)[{label_r}]")
             branch_labels_d.append(label_d)
             branch_labels_r.append(label_r)
 

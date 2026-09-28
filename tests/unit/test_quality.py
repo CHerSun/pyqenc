@@ -1434,8 +1434,8 @@ class TestRunMetricsCommandGolden:
 
         assert len(captured) == 1
         graph = (
-            "[0:v]crop=iw-0:ih-0:0:0,setpts=PTS-STARTPTS[main];"
-            "[1:v]crop=iw-0:ih-0:0:0,setpts=PTS-STARTPTS[ref];"
+            "[0:v]crop=iw-0:ih-0:0:0,setpts=N/(FRAME_RATE*TB)[main];"
+            "[1:v]crop=iw-0:ih-0:0:0,setpts=N/(FRAME_RATE*TB)[ref];"
             "[main][ref]psnr=stats_file=uuidpsnr.log"
         )
         argv = [str(a) for a in compose_command(captured[0])]
