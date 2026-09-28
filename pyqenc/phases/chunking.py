@@ -78,9 +78,10 @@ def detect_scenes(
 
     Args:
         stream:           The source's extended video stream (reads the file).
-        scene_threshold:  PySceneDetect content-delta threshold (see
-                          ``chunking.scene_threshold`` in default_config.yaml —
-                          the config is the single source of truth).
+        scene_threshold:  PySceneDetect content threshold — the mean per-pixel
+                          distance between adjacent frames (0-255 float; see
+                          ``chunking.scene_threshold`` in default_config.yaml,
+                          the single source of truth).
         min_scene_length: Minimum frames per scene.
 
     Returns:

@@ -208,7 +208,7 @@ class TestDetectScenes:
             }),
         })
         with patch("pyqenc.phases.chunking.detect", return_value=[]):
-            boundaries = detect_scenes(stream, scene_threshold=4.0, min_scene_length=24)
+            boundaries = detect_scenes(stream, scene_threshold=27.0, min_scene_length=24)
         assert boundaries == [SceneBoundary(frame=0, timestamp_seconds=0.0)]
 
 
