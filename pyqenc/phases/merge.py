@@ -298,6 +298,37 @@ def _fmt_inline_metrics(
     return "  ".join(parts)
 
 
+def _log_missed_targets_warning(
+    strategy_name:  str,
+    metrics_dict:   dict[str, float],
+    quality_targets: list[QualityTarget],
+) -> None:
+    """Log a WARNING naming every target this strategy missed, with wanted vs actual.
+
+    The completion line and the summary table stay neutral; this is the single
+    place a missed target is escalated to warning level so the reason is
+    immediately visible where the merge happened.
+
+    Args:
+        strategy_name:   The merged strategy.
+        metrics_dict:    Measured metrics keyed by ``"{metric}_{statistic}"``.
+        quality_targets: The targets that were checked.
+    """
+    missed: list[str] = []
+    for target in quality_targets:
+        value = metrics_dict.get(f"{target.metric}_{target.statistic}")
+        if value is not None and value < target.value:
+            missed.append(
+                f"{target.metric}-{target.statistic} = {fmt_metric_value(value)} "
+                f"(target ≥ {fmt_metric_value(target.value)})"
+            )
+    if missed:
+        logger.warning(
+            "%s %s missed quality targets: %s",
+            WARNING_SYMBOL, strategy_name, ";  ".join(missed),
+        )
+
+
 def _log_merge_summary(
     artifacts:        list[MergeArtifact],
     source_stem:      str,
@@ -1044,15 +1075,19 @@ class MergePhase(Phase):
                     plot_path       = plot_path,
                 )
 
-                symbol      = SUCCESS_SYMBOL_MAJOR if targets_met else WARNING_SYMBOL
                 frames_sym  = SUCCESS_SYMBOL_MINOR if frame_count_ok else FAILURE_SYMBOL_MINOR
                 frames_str  = str(frame_count) if frame_count is not None else "unknown"
                 metrics_str = _fmt_inline_metrics(metrics_dict, self._dep(JobPhase).result.config.encoding.resolved_targets)  # type: ignore[union-attr]
                 logger.info(
                     "%s Merged %s:  frames=%s %s%s",
-                    symbol, strategy_name, frames_str, frames_sym,
+                    SUCCESS_SYMBOL_MAJOR, strategy_name, frames_str, frames_sym,
                     f"  {metrics_str}" if metrics_str else "",
                 )
+                if metrics_dict and not targets_met:
+                    _log_missed_targets_warning(
+                        strategy_name, metrics_dict,
+                        self._dep(JobPhase).result.config.encoding.resolved_targets,  # type: ignore[union-attr]
+                    )
 
                 final_artifacts.append(MergeArtifact(
                     path          = output_file,

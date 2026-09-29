@@ -50,6 +50,7 @@ from pyqenc.phases.merge import (
     _build_mkvmerge_options,
     _build_mkvpropedit_args,
     _default_duration_ns,
+    _log_missed_targets_warning,
     _write_mkvmerge_options_file,
 )
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
@@ -706,3 +707,52 @@ class TestMergeFailsWithoutTimestamps:
             assert "fail" in combined.lower() or "timestamps" in combined.lower(), (
                 f"Expected failure message to mention 'fail' or 'timestamps', got: {combined!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Missed-targets warning (completion-line escalation)
+# ---------------------------------------------------------------------------
+
+class TestMissedTargetsWarning:
+    """A missed quality target escalates to a WARNING naming every miss.
+
+    Bug guarded: the miss was previously signalled only by a ⚠ symbol on an
+    INFO-level completion line — wrong level for a warning, and no
+    wanted-vs-actual detail anywhere near the merge that produced it.
+    """
+
+    def test_warning_names_missed_metrics_with_both_values(self, caplog) -> None:
+        """The warning is WARNING level, names the strategy and each missed
+        metric with its measured AND target value; met metrics stay out."""
+        import logging as _logging
+
+        from pyqenc.models import QualityTarget
+
+        targets = [
+            QualityTarget(metric="vmaf", statistic="min", value=93.0),
+            QualityTarget(metric="psnr", statistic="min", value=43.0),
+        ]
+        metrics = {"vmaf_min": 88.3, "psnr_min": 43.5}   # vmaf missed, psnr met
+
+        with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
+            _log_missed_targets_warning("ultrafast+h265", metrics, targets)
+
+        warnings = [r for r in caplog.records if r.levelno == _logging.WARNING]
+        assert len(warnings) == 1, "exactly one warning expected"
+        msg = warnings[0].getMessage()
+        assert "ultrafast+h265" in msg
+        assert "vmaf-min" in msg and "88.3" in msg and "93.0" in msg
+        assert "psnr-min" not in msg, "met metrics must not appear in the warning"
+
+    def test_no_warning_when_all_targets_met(self, caplog) -> None:
+        import logging as _logging
+
+        from pyqenc.models import QualityTarget
+
+        targets = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
+        metrics = {"vmaf_min": 96.5}
+
+        with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
+            _log_missed_targets_warning("ultrafast+h265", metrics, targets)
+
+        assert not [r for r in caplog.records if r.levelno == _logging.WARNING]

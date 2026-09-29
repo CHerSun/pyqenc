@@ -251,21 +251,23 @@ def _scale_bitrate(per_channel: str, channels: int) -> str:
 # ---------------------------------------------------------------------------
 
 def chain_output_path(
-    source:     LongPath,
+    stream:     AudioStream,
     chain_name: str,
     extension:  str,
     output_dir: LongPath,
 ) -> LongPath:
     """Build the output path for a (track, chain) job.
 
-    The name is ``<source-stem> chain=<chain-name>.<ext>`` (Req 8.1–8.3),
-    preserving the source stem unchanged. The output **directory** is supplied by
-    the caller (the phase owns its dedicated audio dir) rather than derived from
-    the source's parent, so chain outputs never land next to the source tracks
-    (Phase Contract: each phase owns its own folder).
+    The name is ``<stream safe name> chain=<chain-name>.<ext>`` — the
+    stream's display name made filesystem-safe (Req 15.2 two-name pattern),
+    carrying the full per-track identity (track id, codec, lang, title,
+    channels) so outputs never collide across tracks. The output **directory**
+    is supplied by the caller (the phase owns its dedicated audio dir) rather
+    than derived from the source's parent, so chain outputs never land next to
+    the source tracks (Phase Contract: each phase owns its own folder).
 
     Args:
-        source:     The extracted source track path (its stem names the output).
+        stream:     The source audio stream (its safe name names the output).
         chain_name: The chain's configured name.
         extension:  The output extension without the dot (from the effective
                     encode, or ``flac``).
@@ -274,7 +276,7 @@ def chain_output_path(
     Returns:
         The final output path (a :class:`LongPath`).
     """
-    name = f"{source.file.path.stem}{CHAIN_FILENAME_SUFFIX}{chain_name}.{extension}"
+    name = f"{stream.safe_name()}{CHAIN_FILENAME_SUFFIX}{chain_name}.{extension}"
     return output_dir / name
 
 

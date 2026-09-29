@@ -79,7 +79,7 @@ class AudioArtifact(Artifact):
     """Audio phase artifact for one (source track, chain) output.
 
     One artifact per expected chain output. ``path`` is the deterministic
-    ``<source-stem> chain=<name>.<ext>`` output location; ``state`` reflects
+    ``<stream safe name> chain=<name>.<ext>`` output location; ``state`` reflects
     on-disk presence (COMPLETE when the file exists, ABSENT when it must be
     produced); ``wanted`` marks whether the current config still expects it.
 
@@ -329,7 +329,7 @@ class AudioPhase(Phase):
     def _delete_chain_outputs(self, audio_dir: LongPath, chain_name: str) -> None:
         """Delete on-disk outputs of ``chain_name`` by EXACT chain-name (Req 9.4).
 
-        Output files are ``<stem> chain=<name>.<ext>``. The trailing
+        Output files are ``<stream safe name> chain=<name>.<ext>``. The trailing
         ``chain=<name>`` token is parsed from each candidate and compared for
         equality — never a substring/prefix match — so ``chain=nightlong`` is not
         deleted when invalidating ``night``.
@@ -550,7 +550,7 @@ class AudioPhase(Phase):
 # ---------------------------------------------------------------------------
 
 def _parse_chain_name(filename: str) -> str | None:
-    """Return the exact chain name from a ``<stem> chain=<name>.<ext>`` filename.
+    """Return the exact chain name from a ``<stream safe name> chain=<name>.<ext>`` filename.
 
     Splits on the ``chain=`` suffix delimiter and strips the extension, returning
     the chain name verbatim for exact-match invalidation (Req 9.4). Returns

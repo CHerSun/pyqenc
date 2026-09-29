@@ -245,6 +245,22 @@ class Stream[InfoT: StreamInfo](BaseModel):
             selector = f"{FFMPEG_SELECTOR_PREFIX}{self.info.track_id}",
         )
 
+    def display_name(self) -> str:
+        """Display name — identity fields verbatim, any symbols, never on disk (Req 15.2).
+
+        Contract method: every concrete stream class overrides it.
+        """
+        raise NotImplementedError
+
+    def safe_name(self) -> str:
+        """The display name made filesystem-safe (Req 15.2 two-name pattern).
+
+        The same name with every filesystem-unsafe character replaced through
+        the shared sanitize primitive — the form used wherever a stream's
+        name becomes part of a filename (audio chain outputs).
+        """
+        return sanitize_filesystem_text(self.display_name())
+
 
 class VideoStream(Stream[VideoStreamInfo]):
     """A video stream — ``info`` is statically :class:`VideoStreamInfo`."""
@@ -348,12 +364,16 @@ class AttachmentStream(Stream[AttachmentStreamInfo]):
 
 
 def _display_tags(info: StreamInfo) -> list[str]:
-    """Shared identity tags for display names: language and sanitized title."""
+    """Shared identity tags for display names: language and the title verbatim.
+
+    Display names carry identity fields as-is (Req 15.2); the filesystem-safe
+    form is :meth:`Stream.safe_name`, never a pre-sanitized display name.
+    """
     tags: list[str] = []
     if info.language:
         tags.append(f"lang={info.language}")
     if info.title:
-        tags.append(f"title={sanitize_filesystem_text(info.title)}")
+        tags.append(f"title={info.title}")
     return tags
 
 

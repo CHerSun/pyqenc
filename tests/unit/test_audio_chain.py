@@ -469,20 +469,52 @@ class TestScaleBitrate:
 
 
 class TestChainOutputPath:
-    """Output naming follows ``<stem> chain=<name>.<ext>`` (Req 8.1)."""
+    """Output naming follows ``<stream safe name> chain=<name>.<ext>`` (Req 15.2)."""
+
+    def _stream(self, tmp_path, **info_kwargs) -> AudioStream:
+        from pyqenc.stream_model import AudioStreamInfo, File
+
+        defaults: dict = {"track_id": 1, "codec_name": "flac", "language": "eng"}
+        defaults.update(info_kwargs)
+        return AudioStream(
+            file = File(path=LongPath(tmp_path) / "movie.mkv"),
+            info = AudioStreamInfo(**defaults),
+        )
 
     def test_name_format(self, tmp_path) -> None:
-        from pyqenc.stream_model import AudioStream, AudioStreamInfo, File
-
-        source = AudioStream(
-            file = File(path=tmp_path / "movie track1.mkv"),
-            info = AudioStreamInfo(track_id=1),
-        )
+        """The name carries the full stream identity — the display-name theme
+        made filesystem-safe — so a consumer can trace an output to its track."""
+        stream = self._stream(tmp_path, title="Surround", layout=ChannelLayout.parse("stereo"))
         output_dir = LongPath(tmp_path) / "audio"
-        out = chain_output_path(source, "night", "flac", output_dir)
-        assert out.name == "movie track1 chain=night.flac"
+        out = chain_output_path(stream, "night", "flac", output_dir)
+        assert out.name == "#1 (audio-flac) lang=eng title=Surround ch=stereo chain=night.flac"
         # The output lives in the supplied dedicated dir, NOT next to the source.
         assert out.parent == output_dir
+
+    def test_tracks_do_not_collide(self, tmp_path) -> None:
+        """Bug guarded: under virtual streams every track points at the source
+        file — naming from the source stem made all tracks' outputs share one
+        filename and silently overwrite each other (last-one-wins)."""
+        t1 = self._stream(tmp_path, track_id=1, language="rus")
+        t2 = self._stream(tmp_path, track_id=2, language="eng")
+        output_dir = LongPath(tmp_path) / "audio"
+
+        out1 = chain_output_path(t1, "night", "flac", output_dir)
+        out2 = chain_output_path(t2, "night", "flac", output_dir)
+
+        assert out1 != out2, "outputs of different tracks must never share a filename"
+
+    def test_unsafe_title_sanitized(self, tmp_path) -> None:
+        """Bug guarded: a human-defined title may carry filesystem-forbidden
+        characters (slashes, colons) — the output name must sanitize them
+        while the display name keeps the title verbatim."""
+        stream = self._stream(tmp_path, title='Bad: "Title/1?')
+        output_dir = LongPath(tmp_path) / "audio"
+
+        out = chain_output_path(stream, "night", "flac", output_dir)
+
+        assert stream.display_name() == '#1 (audio-flac) lang=eng title=Bad: "Title/1?'
+        assert out.name == "#1 (audio-flac) lang=eng title=Bad_ _Title_1_ chain=night.flac"
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +554,7 @@ class TestChainCommandGolden:
 
         await execute_chain(resolved, source, out_dir, runner=spy)
 
-        out_tmp = out_dir / "movie chain=enc_only.tmp"
+        out_tmp = chain_output_path(source, "enc_only", "m4a", out_dir).with_suffix(".tmp")
         assert spy.argv_of(0) == [
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
             "-i", str(source.file.path),

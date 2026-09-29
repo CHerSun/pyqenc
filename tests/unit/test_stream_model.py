@@ -360,3 +360,35 @@ class TestSanitizeFilesystemText:
     def test_unicode_outside_forbidden_set_preserved(self) -> None:
         from pyqenc.utils.naming import sanitize_filesystem_text
         assert sanitize_filesystem_text("Русские субтитры") == "Русские субтитры"
+
+
+class TestStreamTwoNames:
+    """The display/safe name pair on streams (Req 15.2).
+
+    ``display_name`` carries identity fields verbatim; ``safe_name`` is the
+    SAME name made filesystem-safe through the shared primitive.
+    """
+
+    def _audio(self) -> AudioStream:
+        from pyqenc.audio.layout import ChannelLayout
+        from pyqenc.stream_model import AudioStream, AudioStreamInfo, File
+
+        return AudioStream(
+            file = File(path=_file().path),
+            info = AudioStreamInfo(
+                track_id=1, codec_name="ac3", language="rus",
+                title='Дубляж: "часть 1/2"?', layout=ChannelLayout.parse("stereo"),
+            ),
+        )
+
+    def test_display_name_is_verbatim(self) -> None:
+        """Bug guarded: display names pre-sanitized their titles, hiding the real
+        title (slashes, quotes) from logs and include/exclude matching."""
+        assert self._audio().display_name() == \
+            '#1 (audio-ac3) lang=rus title=Дубляж: "часть 1/2"? ch=stereo'
+
+    def test_safe_name_is_sanitized_display_name(self) -> None:
+        """The safe name is the display name with forbidden chars replaced —
+        same identity, disk-consumable form (audio chain outputs)."""
+        assert self._audio().safe_name() == \
+            "#1 (audio-ac3) lang=rus title=Дубляж_ _часть 1_2__ ch=stereo"
