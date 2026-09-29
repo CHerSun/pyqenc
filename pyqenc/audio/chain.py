@@ -68,27 +68,6 @@ from pyqenc.utils.ffmpeg_runner import (
 )
 from pyqenc.utils.long_path import LongPath
 
-
-def track_layout(stream: AudioStream) -> ChannelLayout:
-    """The stream's channel layout — a producer-contract guard, not a resolver.
-
-    ExtractionPhase guarantees every audio stream carries a layout: ffprobe's
-    ``channel_layout`` when named, else derived from the always-present
-    ``channels`` count. Reaching the assert means a stream bypassed extraction
-    — a programming bug, not a media condition.
-
-    Args:
-        stream: The source audio stream.
-
-    Returns:
-        The stream's own :class:`ChannelLayout`.
-    """
-    assert stream.info.layout is not None, (
-        "audio stream layout is guaranteed by ExtractionPhase "
-        "(_audio_info derives it from the channels count when unnamed)"
-    )
-    return stream.info.layout
-
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -399,7 +378,7 @@ async def execute_chain(
 
     af_parts:      list[str]              = []            # frozen fragments (invariant)
     output_format: EncodeParams           = resolved.encode  # authoritative effective target
-    layout:        ChannelLayout          = track_layout(stream)
+    layout:        ChannelLayout          = stream.layout()
     last_output:   FFmpegRunResult | None = None         # only the CURRENT filter's latest pass
 
     while runnable:

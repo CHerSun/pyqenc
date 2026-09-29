@@ -39,7 +39,6 @@ from pyqenc.audio.chain import (
     chain_output_path,
     execute_chain,
     resolve_chain,
-    track_layout,
 )
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.audio.select import resolve_selection
@@ -375,7 +374,7 @@ class AudioPhase(Phase):
         expected_names: set[str]       = set()
 
         for stream in tracks:
-            layout = track_layout(stream)
+            layout = stream.layout()
             for name, chain in resolved.items():
                 out = chain_output_path(stream, name, chain.encode.extension, audio_dir)
                 expected_names.add(out.name)
