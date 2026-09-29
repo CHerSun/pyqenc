@@ -329,18 +329,14 @@ class SubtitleStream(Stream[SubtitleStreamInfo]):
         raise ValueError(f"Unknown subtitle codec: {self.info.codec_name}")
 
     def extracted_file_name(self) -> str:
-        """The extracted subtitle file name — owned by this class (Req 15.7).
+        """The extracted subtitle file name — the safe name plus its extension (Req 15.2/15.7).
 
-        ``#<track_id> (<codec>) lang=… title=….<ext>`` — title sanitized through
-        the shared primitive; absent optional parts are omitted. No parser
-        exists: ``extraction.yaml`` carries the resulting paths.
+        Derived, never re-generated: :meth:`display_name` is this stream's
+        single name generator; the disk form is its sanitized counterpart with
+        the codec-derived extension appended. No parser exists:
+        ``extraction.yaml`` carries the resulting paths.
         """
-        parts = [f"#{self.info.track_id} ({self.info.codec_name})"]
-        if self.info.language:
-            parts.append(f"lang={self.info.language}")
-        if self.info.title:
-            parts.append(f"title={sanitize_filesystem_text(self.info.title)}")
-        return " ".join(parts) + f".{self.file_extension}"
+        return f"{self.safe_name()}.{self.file_extension}"
 
 
 class AttachmentStream(Stream[AttachmentStreamInfo]):
@@ -354,13 +350,13 @@ class AttachmentStream(Stream[AttachmentStreamInfo]):
         return _format_display_name("attachment", self.info, tags)
 
     def extracted_file_name(self) -> str:
-        """The dumped attachment file name — owned by this class (Req 15.7).
+        """The dumped attachment file name — the safe name as-is (Req 15.2/15.7).
 
-        ``#<track_id> (attachment) <filename>`` — the attachment's own filename
-        verbatim (it is already a plain filename, not free text with separators).
+        Derived, never re-generated: :meth:`display_name` is this stream's
+        single name generator and already carries the attachment's own
+        filename; attachments add no extension of their own.
         """
-        filename = self.info.filename or "attachment"
-        return f"#{self.info.track_id} (attachment) {filename}"
+        return self.safe_name()
 
 
 def _display_tags(info: StreamInfo) -> list[str]:

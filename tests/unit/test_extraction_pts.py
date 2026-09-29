@@ -390,7 +390,7 @@ class TestExtractionCommandGolden:
         )
         sub_cmds = [c for c in ffmpeg_cmds if "-map" in c and c[c.index("-map") + 1] == "0:3"]
         assert sub_cmds, f"Expected a subtitle extraction command: {ffmpeg_cmds}"
-        out_tmp = work_dir / EXTRACTED_DIR / "#3 (subrip) lang=eng title=Full.tmp"
+        out_tmp = work_dir / EXTRACTED_DIR / "#3 (subtitle-subrip) lang=eng title=Full.tmp"
         assert sub_cmds[0] == [
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
             "-i", str(work_dir.parent / "source.mkv"),
@@ -409,7 +409,7 @@ class TestExtractionCommandGolden:
         )
         att_cmds = [c for c in ffmpeg_cmds if "-dump_attachment:4" in c]
         assert att_cmds, f"Expected an attachment command: {ffmpeg_cmds}"
-        tmp_target = work_dir / EXTRACTED_DIR / "#4 (attachment) font.tmp"
+        tmp_target = work_dir / EXTRACTED_DIR / "#4 (attachment-ttf) filename=font.tmp"
         assert att_cmds[0] == [
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
             "-i", str(work_dir.parent / "source.mkv"),

@@ -257,11 +257,11 @@ def _extraction_sidecar() -> ExtractionSidecar:
             )],
             "subtitles": [SubtitleStreamInfo(
                 track_id=3, codec_name="subrip", language="eng", title="Full",
-                extracted_path=LongPath("extracted/#3 (subrip) lang=eng.srt"),
+                extracted_path=LongPath("extracted/#3 (subtitle-subrip) lang=eng.srt"),
             )],
             "attachments": [AttachmentStreamInfo(
                 track_id=4, filename="font.ttf",
-                extracted_path=LongPath("extracted/#4 (attachment) font.ttf"),
+                extracted_path=LongPath("extracted/#4 (attachment-ttf) filename=font.ttf"),
             )],
         },
         chapters = {"extracted_path": LongPath("extracted/chapters.xml")},
@@ -392,3 +392,32 @@ class TestStreamTwoNames:
         same identity, disk-consumable form (audio chain outputs)."""
         assert self._audio().safe_name() == \
             "#1 (audio-ac3) lang=rus title=Дубляж_ _часть 1_2__ ch=stereo"
+
+    def test_subtitle_disk_name_derives_from_display(self) -> None:
+        """Bug guarded: the subtitle disk name was a SECOND generator with its
+        own token rules (``#3 (ass)`` on disk vs ``#3 (subtitle-ass)`` in the
+        table) — the disk form must be the sanitized display name plus the
+        extension, nothing else changed (type token included, so include/
+        exclude patterns match one family)."""
+        from pyqenc.stream_model import SubtitleStream, SubtitleStreamInfo
+
+        sub = SubtitleStream(
+            file = File(path=_file().path),
+            info = SubtitleStreamInfo(track_id=3, codec_name="ass", language="rus",
+                                      title='Часть "1"?'),
+        )
+        assert sub.display_name() == '#3 (subtitle-ass) lang=rus title=Часть "1"?'
+        assert sub.extracted_file_name() == "#3 (subtitle-ass) lang=rus title=Часть _1__.ass"
+
+    def test_attachment_disk_name_derives_from_display(self) -> None:
+        """Bug guarded: same second-generator defect — the attachment disk
+        name must be the sanitized display name (which already carries the
+        attachment's own filename), with no independent assembly."""
+        from pyqenc.stream_model import AttachmentStream, AttachmentStreamInfo
+
+        att = AttachmentStream(
+            file = File(path=_file().path),
+            info = AttachmentStreamInfo(track_id=4, codec_name="ttf", filename="font.ttf"),
+        )
+        assert att.display_name() == "#4 (attachment-ttf) filename=font.ttf"
+        assert att.extracted_file_name() == att.safe_name()

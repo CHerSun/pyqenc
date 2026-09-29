@@ -1132,7 +1132,11 @@ def _log_stream_table(
             if artifact.state == ArtifactState.COMPLETE
             else FAILURE_SYMBOL_MINOR
         )
-        if isinstance(artifact, (VideoStreamArtifact, AudioStreamArtifact)):
+        if isinstance(artifact, (
+            VideoStreamArtifact, AudioStreamArtifact, SubtitleArtifact, AttachmentArtifact,
+        )):
+            # One name family in the table: the owning stream's display name
+            # (Req 15.2) — disk names are its derived safe forms.
             name = artifact.stream.display_name() if artifact.stream is not None else "?"
         else:
             name = artifact.path.name
