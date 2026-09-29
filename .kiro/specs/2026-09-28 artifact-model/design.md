@@ -95,12 +95,12 @@ class Chapters(BaseModel):
     file: File                      # owns the chapters.xml name convention
 
 class AudioOutput(BaseModel):
-    """One processed (track, chain) output; owns '<stem> chain=<name>.<ext>'."""
+    """One processed (track, chain) output; disk name = stream safe_name + ' chain=<name>.<ext>'."""
     stream: AudioStream
     chain_name: str                 # resolved output facts reachable via the chain
 
 class MergedVideo(BaseModel):
-    """One merged output per strategy; owns '<file stem> <strategy>.mkv'."""
+    """One merged output per strategy; '<file stem> <strategy.safe_name()>.mkv' (single site)."""
     source_stem: str                # or File reference — tasks decide
     strategy: Strategy
     frame_count: int | None = None
