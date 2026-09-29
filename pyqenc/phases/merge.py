@@ -27,11 +27,9 @@ from typing import TYPE_CHECKING, ClassVar, cast
 import yaml
 
 from pyqenc.constants import (
-    ENCODED_ATTEMPT_NAME_PATTERN,
     FAILURE_SYMBOL_MINOR,
     FINAL_OUTPUT_DIR,
     METRIC_KEY_QUALITY_MEASURE,
-    RANGE_SEPARATOR,
     SUCCESS_SYMBOL_MAJOR,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
@@ -68,7 +66,6 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
-    from pyqenc.phases.encoding import EncodedArtifact
 
 logger = logging.getLogger(__name__)
 
@@ -487,58 +484,27 @@ def _log_merge_summary_from_params(
 
 
 def _collect_crf_data(
-    encoded:     list[EncodedArtifact],
-    strategy:    str,
+    winners:  list[Artifact[EncodedChunk]],
+    strategy: str,
 ) -> list[tuple[float, float, Decimal]]:
-    """Extract ``(start_seconds, end_seconds, crf)`` tuples for winning chunks of *strategy*.
+    """Extract ``(start_seconds, end_seconds, crf)`` tuples for a strategy's winners.
 
-    Timestamps are parsed from the ``chunk_id`` stem, which encodes the range
-    as ``HH꞉MM꞉SS․mmm-HH꞉MM꞉SS․mmm`` using filesystem-safe separators.
+    Reads the winning attempts via their payloads — ``payload.crf`` and the
+    window through ``payload.chunk`` (the chunk id re-parser is gone: chunk-id
+    parsing belongs to :meth:`VideoStreamChunk.parse_chunk_id`).
 
     Args:
-        encoded:  All ``EncodedArtifact`` objects from the encoding phase.
-        strategy: Strategy name to filter by.
+        winners:  The encoding phase's winner rows.
+        strategy: Strategy display name to filter by.
 
     Returns:
         List of ``(start_s, end_s, crf)`` sorted by start time.
-        Chunks with missing CRF or unparseable IDs are silently skipped.
     """
-    def _parse_ts(ts_str: str) -> float:
-        """Parse ``HH꞉MM꞉SS․mmm`` into seconds."""
-        parts = ts_str.split(TIME_SEPARATOR_SAFE)
-        if len(parts) != 3:
-            raise ValueError(f"Unexpected timestamp format: {ts_str!r}")
-        h, m, s_ms = parts
-        s, ms = s_ms.split(TIME_SEPARATOR_MS)
-        return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
-
-    result: list[tuple[float, float, float]] = []
-    for artifact in encoded:
-        if artifact.strategy != strategy:
-            continue
-
-        crf = artifact.crf
-        if crf is None:
-            # Fallback: parse quality from the artifact filename (e.g. "…q26.5.mkv")
-            m = ENCODED_ATTEMPT_NAME_PATTERN.match(artifact.path.name)
-            if m:
-                try:
-                    crf = Decimal(str(m.group("quality")))
-                except (ValueError, IndexError):
-                    pass
-
-        if crf is None:
-            logger.debug("No CRF available for chunk %r — skipping", artifact.chunk_id)
-            continue
-
-        try:
-            start_str, end_str = artifact.chunk_id.split(RANGE_SEPARATOR, 1)
-            start_s = _parse_ts(start_str)
-            end_s   = _parse_ts(end_str)
-            result.append((start_s, end_s, crf))
-        except Exception as exc:
-            logger.debug("Could not parse chunk_id %r for CRF plot: %s", artifact.chunk_id, exc)
-
+    result: list[tuple[float, float, Decimal]] = [
+        (payload.chunk.start_timestamp, payload.chunk.end_timestamp, payload.crf)
+        for payload in (row.payload for row in winners)
+        if payload.strategy.display_name() == strategy
+    ]
     result.sort(key=lambda t: t[0])
     return result
 
@@ -651,7 +617,7 @@ class MergePhase(Phase):
             A typed ``FAILED`` result, or ``None`` when the phase may proceed.
         """
         incomplete = [
-            a for a in cast(EncodingPhaseResult, self._dep(EncodingPhase).result).encoded
+            a for a in cast(EncodingPhaseResult, self._dep(EncodingPhase).result).winners
             if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)
         ]
         if incomplete:
@@ -1051,11 +1017,11 @@ class MergePhase(Phase):
                     except Exception as exc:
                         logger.warning("  Could not measure quality: %s", exc)
 
-                # CRF distribution plot
-                encoded_artifacts = cast(
-                    EncodingPhaseResult, self._dep(EncodingPhase).result
-                ).encoded
-                crf_data = _collect_crf_data(encoded_artifacts, strategy_name)
+                # CRF distribution plot — reads the typed winners field
+                crf_data = _collect_crf_data(
+                    cast(EncodingPhaseResult, self._dep(EncodingPhase).result).winners,
+                    strategy_name,
+                )
                 if crf_data:
                     crf_plot_path = final_dir / f"{output_file.stem}.crf.png"
                     try:

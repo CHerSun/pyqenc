@@ -56,6 +56,39 @@ def _make_chunk_window(source: Path, start: float, end: float) -> "VideoStreamCh
     )
 
 
+def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
+    """An EncodedChunk payload over a one-window chunk of the named strategy."""
+    from decimal import Decimal
+
+    from pyqenc.stream_model import EncodedChunk
+
+    strategy = _make_strategy_by_name(strategy_name)
+    return EncodedChunk(
+        stream=_make_extended_stream(path, frame_count=24, duration=1.0),
+        chunk=_make_chunk_window(path.parent / "source.mkv", 0.0, 1.0),
+        strategy=strategy,
+        crf=Decimal(20),
+    )
+
+
+def _make_strategy_by_name(name: str) -> Strategy:
+    """A minimal Strategy for a ``preset+profile`` display name."""
+    from decimal import Decimal
+
+    from pyqenc.models import CodecConfig, Strategy
+
+    preset, _, profile = name.partition("+")
+    return Strategy(
+        preset=preset, profile=profile,
+        codec=CodecConfig(
+            name="h265-10bit", default_quality=Decimal(20),
+            default_preset="ultrafast",
+            quality_range=(Decimal(0), Decimal(51)), presets=["ultrafast"],
+        ),
+        profile_args=[],
+    )
+
+
 def _make_video_stream_fixture(path: Path):
     """A VideoStream fixture for registry stubs."""
     from fractions import Fraction
@@ -1091,18 +1124,17 @@ class TestEncodingPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.phases.encoding import EncodedArtifact, EncodingPhase
-        from pyqenc.state import ArtifactState
+        from pyqenc.phases.encoding import EncodingPhase
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        stub_artifact = MagicMock(spec=EncodedArtifact)
-        stub_artifact.state    = ArtifactState.COMPLETE
-        stub_artifact.chunk_id = "chunk_0"
-        stub_artifact.strategy = "slow+h265"
+        stub_row = Artifact(
+            payload=_encoded_chunk(tmp_path / "chunk_0.mkv", "chunk_0", "slow+h265"),
+            state=ArtifactState.COMPLETE,
+        )
 
-        with patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
+        with patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -1121,19 +1153,17 @@ class TestEncodingPhaseTiming:
         """
         from pyqenc.models import PhaseOutcome
         from pyqenc.phases.encoding import (
-            EncodedArtifact,
             EncodingPhase,
             EncodingPhaseResult,
         )
-        from pyqenc.state import ArtifactState
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        stub_artifact = MagicMock(spec=EncodedArtifact)
-        stub_artifact.state    = ArtifactState.ABSENT
-        stub_artifact.chunk_id = "chunk_0"
-        stub_artifact.strategy = "slow+h265"
+        stub_artifact = Artifact(
+            payload=_encoded_chunk(tmp_path / "chunk_0.mkv", "chunk_0", "slow+h265"),
+            state=ArtifactState.ABSENT,
+        )
 
         stub_result = EncodingPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
@@ -1257,18 +1287,17 @@ class TestEncodingPhaseTiming:
 
         Validates: Requirements 6.4, 6.5
         """
-        from pyqenc.phases.encoding import EncodedArtifact, EncodingPhase
-        from pyqenc.state import ArtifactState
+        from pyqenc.phases.encoding import EncodingPhase
 
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
 
-        stub_artifact = MagicMock(spec=EncodedArtifact)
-        stub_artifact.state    = ArtifactState.COMPLETE
-        stub_artifact.chunk_id = "chunk_0"
-        stub_artifact.strategy = "slow+h265"
+        stub_row = Artifact(
+            payload=_encoded_chunk(tmp_path / "chunk_0.mkv", "chunk_0", "slow+h265"),
+            state=ArtifactState.COMPLETE,
+        )
 
-        with patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
+        with patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
             result = phase.run()
 
         assert result is not None
@@ -1303,27 +1332,23 @@ class TestMergePhaseTiming:
         return result
 
     def _make_encoding_result(self, tmp_path: Path) -> EncodingPhaseResult:
-        """Return a minimal complete ``EncodingPhaseResult`` stub with one encoded artifact."""
+        """Return a minimal complete ``EncodingPhaseResult`` with one winner row."""
         from pyqenc.models import PhaseOutcome
-        from pyqenc.phases.encoding import EncodedArtifact, EncodingPhaseResult
-        from pyqenc.state import ArtifactState
+        from pyqenc.phases.encoding import EncodingPhaseResult
 
         encoded_path = tmp_path / "work" / "encoded" / "slow+h265" / "chunk_0.mkv"
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
         encoded_path.write_bytes(b"\x00" * 128)
 
-        artifact = EncodedArtifact(
-            path     = encoded_path,
+        winner = Artifact(
+            payload  = _encoded_chunk(encoded_path, "chunk_0", "slow+h265"),
             state    = ArtifactState.COMPLETE,
-            chunk_id = "chunk_0",
-            strategy = "slow+h265",
-            crf      = 28.0,
         )
         return EncodingPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [artifact],
+            artifacts = [winner],
             message   = "ok",
-            encoded   = [artifact],
+            winners   = [winner],
         )
 
     def _make_audio_result(self) -> AudioPhaseResult:

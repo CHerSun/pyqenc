@@ -255,13 +255,15 @@ def _make_merge_phase(
     registry[ProbePhase] = probe
 
     encoding = EncodingPhase(config, registry, collector=collector)
+    winner   = Artifact(
+        payload = _encoded_chunk(chunk, "chunk1", _STRATEGY),
+        state   = ArtifactState.COMPLETE,
+    )
     encoding.result = EncodingPhaseResult(
-        outcome        = PhaseOutcome.COMPLETED,
-        artifacts      = [],
-        message        = "encoding complete",
-        encoded_chunks = {
-            "chunk1": _by_strategy_name(_encoded_chunk(chunk, "chunk1", _STRATEGY)),
-        },
+        outcome   = PhaseOutcome.COMPLETED,
+        artifacts = [winner],
+        message   = "encoding complete",
+        winners   = [winner],
     )
     registry[EncodingPhase] = encoding
 

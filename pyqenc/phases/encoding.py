@@ -1682,44 +1682,33 @@ def encode_all_chunks(
 # ---------------------------------------------------------------------------
 
 @_dataclass
-class EncodedArtifact(Artifact):
-    """Encoding artifact for a single ``(chunk_id, strategy)`` pair.
-
-    Transitional (deleted in task 6 with the generic-row migration): the base
-    wrapper carries no ``path``; the extra fields are redeclared so
-    construction sites keep working.
-
-    Attributes:
-        chunk_id: Chunk identifier.
-        strategy: Strategy used to produce this artifact.
-        crf:      Winning CRF value; ``None`` when state is not ``COMPLETE``.
-    """
-
-    payload:  EncodedChunk | None = None
-    state:    ArtifactState       = ArtifactState.ABSENT
-    path:     Path | None         = None
-    chunk_id: str                 = ""
-    strategy: str                 = ""
-    crf:      Decimal | None      = None
-
-
-@_dataclass
 class EncodingPhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying encoding-specific payload.
 
     Attributes:
-        encoded:        All ``(chunk, strategy)`` artifacts in any state.
-        encoded_chunks: The winning :class:`~pyqenc.stream_model.EncodedChunk`
-                        per ``(chunk_id, strategy name)`` — the composed objects
-                        merge consumes (path via ``stream.file.path``).
+        winners:        The winning attempts — one ``Artifact[EncodedChunk]``
+                        per (chunk, selected strategy); consumed by Merge.
+        quality_labels: Strategy display name -> quality label (settings —
+                        consumed by Merge to label plots).
     """
 
-    encoded:        list[EncodedArtifact] = None  # type: ignore[assignment]
-    encoded_chunks: dict[str, dict[str, EncodedChunk]] = field(default_factory=dict)
+    winners:        list[Artifact[EncodedChunk]] = field(default_factory=list)
+    quality_labels: dict[str, str]               = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        if self.encoded is None:
-            self.encoded = []
+    # Transitional population (deleted in task 9 when the base field becomes
+    # the derived concatenation).
+
+    @property
+    def encoded_chunks(self) -> dict[str, dict[str, EncodedChunk]]:
+        """Derived lookup over the winners: chunk safe name -> strategy name
+        -> the composed payload (path via ``stream.file.path``)."""
+        lookup: dict[str, dict[str, EncodedChunk]] = {}
+        for row in self.winners:
+            payload = row.payload
+            lookup.setdefault(
+                payload.chunk.safe_name(), {}
+            )[payload.strategy.display_name()] = payload
+        return lookup
 
 
 class EncodingPhase(Phase):
@@ -1750,8 +1739,6 @@ class EncodingPhase(Phase):
         super().__init__(config, phases, collector=collector)
 
         self.params:        EncodingParams | None     = None
-        # Winning EncodedChunk objects from the last encode run (result view).
-        self._encoded_chunks: dict[str, dict[str, EncodedChunk]] = {}
         self.quality_labels: dict[str, str]           = {}
         """Maps strategy name → quality_label (e.g. ``'CRF'``, ``'CQ'``) for all
         strategies resolved during the last ``run()`` call.  Empty until ``run()``
@@ -1822,10 +1809,10 @@ class EncodingPhase(Phase):
         2. Check crop mismatch against ``encoding.yaml`` — a probe change
            without ``--force`` is a fatal invalidation.
         3. Clean up leftover ``.tmp`` files.
-        4. Call ``_recover_encoding_attempts`` to classify all pairs; strategy
-           directories under ``encoded/`` that no longer correspond to a
-           selected strategy surface as ``wanted=False`` artifacts (kept in
-           place; deletion only via explicit cleanup).
+        4. Classify all (chunk, strategy) pairs via the shared pair-ledger
+           builders; orphaned ``encoded/<strategy>/`` directories surface as
+           ``wanted=False`` rows (kept in place; deletion only via explicit
+           cleanup).
 
         Returns:
             The :class:`Recovery` single source of truth.
@@ -1892,112 +1879,47 @@ class EncodingPhase(Phase):
         if not strategies:
             raise RecoveryError("No strategies available from OptimizationPhase")
 
-        chunk_ids      = [c.safe_name() for c in chunks]
-        strategy_names = [s.display_name() for s in strategies]
-
-        # Step 5: recover pairs
-        phase_recovery = _recover_encoding_attempts(
-            work_dir   = work_dir,
-            chunk_ids  = chunk_ids,
-            strategies = strategy_names,
-        )
-
-        # Convert to EncodedArtifact list; COMPLETE pairs also rebuild the
-        # composed EncodedChunk objects so a REUSED run's result carries them
-        # (merge derives its expected strategies from encoded_chunks — without
-        # this, a reuse run with deleted finals finds nothing to re-merge).
-        chunk_by_id   = {c.safe_name(): c for c in chunks}
-        strategy_by_name = {st.display_name(): st for st in strategies}
-        artifacts: list[EncodedArtifact] = []
-        for chunk_id in chunk_ids:
-            for strategy_name in strategy_names:
-                pair_rec = phase_recovery.pairs.get((chunk_id, strategy_name))
-                if pair_rec is None or pair_rec.state == ArtifactState.ABSENT:
-                    artifacts.append(EncodedArtifact(
-                        path     = work_dir / ENCODED_OUTPUT_DIR / strategy_name / f"{chunk_id}.mkv",
-                        state    = ArtifactState.ABSENT,
-                        chunk_id = chunk_id,
-                        strategy = strategy_name,
-                    ))
-                    continue
-
-                if (
-                    pair_rec.state == ArtifactState.COMPLETE
-                    and pair_rec.winning_file is not None
-                    and chunk_id in chunk_by_id
-                    and strategy_name in strategy_by_name
-                ):
-                    name_record = EncodedChunk.parse_file_name(pair_rec.winning_file.name)
-                    self._encoded_chunks.setdefault(chunk_id, {})[strategy_name] = build_encoded_chunk(
-                        chunk        = chunk_by_id[chunk_id],
-                        strategy     = strategy_by_name[strategy_name],
-                        crf          = name_record.crf,
-                        path         = pair_rec.winning_file,
-                        resolution   = name_record.resolution,
-                        frame_count  = 0,  # unknown on recovery (Req 14.2)
-                    )
-
-                artifacts.append(EncodedArtifact(
-                    path     = pair_rec.winning_file or (
-                        _enc_encoded_strategy_dir(work_dir, strategy_name) / f"{chunk_id}.mkv"
-                    ),
-                    state    = pair_rec.state,
-                    chunk_id = chunk_id,
-                    strategy = strategy_name,
-                ))
-
-        # Surface orphaned encoded/<strategy>/ directories — produced under a
-        # strategy list that no longer selects them. Present-but-unwanted per
-        # the Phase Contract: retained in place, never pending; deletion only
-        # via explicit cleanup.
-        expected_dir_names = {s.display_name() for s in strategies}
-        if out_dir.exists():
-            for strategy_dir in sorted(out_dir.iterdir()):
-                if strategy_dir.is_dir() and strategy_dir.name not in expected_dir_names:
-                    artifacts.append(EncodedArtifact(
-                        path     = strategy_dir,
-                        state    = ArtifactState.COMPLETE,
-                        wanted   = False,
-                        chunk_id = "",
-                        strategy = strategy_dir.name,
-                    ))
-                    logger.debug(
-                        "encoded/%s is orphaned (strategy no longer selected) — unwanted", strategy_dir.name,
-                    )
-
-        return Recovery.from_artifacts(artifacts)
+        # Step 5: the per-pair ledger (winning attempt per chunk x strategy,
+        # presence-based) plus the orphaned-strategy rows. COMPLETE rows carry
+        # the composed winners — a REUSED run's result carries them (merge
+        # derives its expected strategies from the winners; without this, a
+        # reuse run with deleted finals finds nothing to re-merge).
+        rows: list[Artifact] = _pair_rows(work_dir, chunks, strategies)
+        rows += _orphan_strategy_rows(work_dir, strategies)
+        return Recovery.from_artifacts(rows)
 
     def _make_result(
         self,
         outcome:   PhaseOutcome,
-        artifacts: list[EncodedArtifact],
+        artifacts: list[Artifact[EncodedChunk]],
         message:   str,
-        encoded_chunks: dict[str, dict[str, EncodedChunk]] | None = None,
     ) -> "EncodingPhaseResult":
-        """Assemble an ``EncodingPhaseResult`` from the pair artifacts.
+        """Assemble an ``EncodingPhaseResult`` from the pair rows.
 
         Args:
-            outcome:        The phase outcome.
-            artifacts:      The wanted artifact list.
-            message:        Human-readable summary — on ``FAILED``, the error
-                            description (count plus identifiers).
-            encoded_chunks: The winning ``EncodedChunk`` objects (defaults to
-                            the stash from the last ``encode_all_chunks`` run).
+            outcome:   The phase outcome.
+            artifacts: The wanted pair rows (the winners field takes the
+                       complete ones).
+            message:   Human-readable summary — on ``FAILED``, the error
+                       description (count plus identifiers).
 
         Returns:
-            The populated result (``encoded`` mirrors ``artifacts``).
+            The populated result.
         """
         return EncodingPhaseResult(
             outcome        = outcome,
-            artifacts      = artifacts,
+            artifacts      = artifacts,  # transitional (task 9 derives it)
             message        = message,
-            encoded        = artifacts,
-            encoded_chunks = encoded_chunks if encoded_chunks is not None else self._encoded_chunks,
+            winners        = [
+                r for r in artifacts
+                if isinstance(r.payload, EncodedChunk) and r.state == ArtifactState.COMPLETE
+            ],
+            quality_labels = dict(self.quality_labels),
         )
 
     def _execute(
         self,
-        wanted:  list[EncodedArtifact],
+        wanted:  list[Artifact[EncodedChunk]],
         dry_run: bool,
     ) -> "EncodingPhaseResult":
         """Encode all pending ``(chunk, strategy)`` pairs.
@@ -2036,8 +1958,6 @@ class EncodingPhase(Phase):
             logger.critical(err)
             return self._make_result(PhaseOutcome.FAILED, [], err)
 
-        strategy_names = [s.display_name() for s in strategies]
-
         # Cache quality labels for downstream phases (e.g. MergePhase CRF plot)
         self.quality_labels = {s.display_name(): s.codec.quality_label for s in strategies}
 
@@ -2073,8 +1993,6 @@ class EncodingPhase(Phase):
             err = enc_result.error or "Encoding failed"
             logger.critical(err)
             return self._make_result(PhaseOutcome.FAILED, [], err)
-
-        self._encoded_chunks = enc_result.encoded_chunks
 
         # Preservation invariant (Req 9.1/9.7): Σ winning-attempt frame counts
         # must equal the source count. Recovered winners without a known count
@@ -2113,59 +2031,40 @@ class EncodingPhase(Phase):
                     source_total,
                 )
 
-        # Re-run recovery to get final artifact states
-        chunk_ids = [c.safe_name() for c in chunks]
-        final_recovery = _recover_encoding_attempts(
-            work_dir   = work_dir,
-            chunk_ids  = chunk_ids,
-            strategies = strategy_names,
-        )
-
-        # Build final artifact list
-        final_artifacts: list[EncodedArtifact] = []
-        failed_pairs: list[str] = []
-
-        for chunk_id in chunk_ids:
-            for strategy_name in strategy_names:
-                pair_rec = final_recovery.pairs.get((chunk_id, strategy_name))
-                state    = pair_rec.state if pair_rec else ArtifactState.ABSENT
-
-                encoded_strategy_dir = _enc_encoded_strategy_dir(work_dir, strategy_name)
-                artifact_path = encoded_strategy_dir / f"{chunk_id}.mkv"
-
-                crf: Decimal | None = None
-                if state == ArtifactState.COMPLETE and pair_rec and pair_rec.winning_file:
-                    artifact_path = pair_rec.winning_file
-                    m = ENCODED_ATTEMPT_NAME_PATTERN.match(pair_rec.winning_file.name)
-                    if m:
-                        try:
-                            crf = Decimal(str(m.group("quality")))
-                        except (ValueError, TypeError):
-                            pass
-
-                if state != ArtifactState.COMPLETE:
-                    failed_pairs.append(f"{chunk_id}/{strategy_name}")
-
-                final_artifacts.append(EncodedArtifact(
-                    path     = artifact_path,
-                    state    = state,
-                    chunk_id = chunk_id,
-                    strategy = strategy_name,
-                    crf      = crf,
-                ))
+        # Winners come from the fresh encode result — every complete pair,
+        # with freshly measured payloads (frame counts from the run itself).
+        winners = [
+            Artifact(payload=payload, state=ArtifactState.COMPLETE)
+            for chunk_id in sorted(enc_result.encoded_chunks)
+            for payload in (
+                enc_result.encoded_chunks[chunk_id][name]
+                for name in sorted(enc_result.encoded_chunks[chunk_id])
+            )
+        ]
+        complete_pairs = {
+            (p.chunk.safe_name(), p.strategy.display_name()) for p in
+            (row.payload for row in winners)
+        }
+        failed_pairs = [
+            f"{c.safe_name()}/{st.display_name()}"
+            for c in chunks for st in strategies
+            if (c.safe_name(), st.display_name()) not in complete_pairs
+        ]
 
         # Log phase summary
-        complete_count = sum(1 for a in final_artifacts if a.state == ArtifactState.COMPLETE)
+        complete_count = len(winners)
 
         if failed_pairs:
+            final_rows = _pair_rows(work_dir, chunks, strategies)
             return self._make_result(
-                PhaseOutcome.FAILED, final_artifacts,
+                PhaseOutcome.FAILED,
+                [r for r in final_rows if r.wanted],
                 f"{len(failed_pairs)} pair(s) failed: {', '.join(failed_pairs[:5])}",
             )
 
         outcome = PhaseOutcome.COMPLETED if enc_result.encoded_count > 0 else PhaseOutcome.REUSED
         return self._make_result(
-            outcome, final_artifacts, f"{complete_count} pair(s) complete",
+            outcome, winners, f"{complete_count} pair(s) complete",
         )
 
 # ---------------------------------------------------------------------------
