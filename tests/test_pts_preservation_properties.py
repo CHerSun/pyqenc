@@ -485,7 +485,6 @@ def test_frame_count_preservation(frame_count: int) -> None:
             outcome   = PhaseOutcome.COMPLETED,
             artifacts = [],
             message   = "audio complete",
-            audio_files = [],
         )
         registry[AudioPhase] = audio
 

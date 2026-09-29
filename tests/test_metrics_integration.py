@@ -71,6 +71,24 @@ def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
     )
 
 
+def _audio_output(out_path: Path):
+    """An AudioOutput payload over a minimal audio stream."""
+    from pyqenc.audio.layout import ChannelLayout
+    from pyqenc.stream_model import AudioOutput, AudioStream, AudioStreamInfo
+
+    return AudioOutput(
+        stream=AudioStream(
+            file=File(path=out_path.parent.parent / "source.mkv", file_size_bytes=64),
+            info=AudioStreamInfo(
+                track_id=1, codec_name="flac", language="eng",
+                layout=ChannelLayout.parse("stereo"), duration_seconds=100.0,
+            ),
+        ),
+        chain_name="normal",
+        output_path=out_path,
+    )
+
+
 def _make_strategy_by_name(name: str) -> Strategy:
     """A minimal Strategy for a ``preset+profile`` display name."""
     from decimal import Decimal
@@ -642,17 +660,17 @@ class TestAudioPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.phases.audio import AudioArtifact, AudioPhase
-        from pyqenc.state import ArtifactState
+        from pyqenc.phases.audio import AudioPhase
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        stub_artifact = MagicMock(spec=AudioArtifact)
-        stub_artifact.state = ArtifactState.COMPLETE
-        stub_artifact.path  = tmp_path / "track.aac"
+        stub_row = Artifact(
+            payload=_audio_output(tmp_path / "work" / "audio" / "track.aac"),
+            state=ArtifactState.COMPLETE,
+        )
 
-        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
+        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -666,20 +684,20 @@ class TestAudioPhaseTiming:
         Validates: Requirements 6.5
         """
         from pyqenc.models import PhaseOutcome
-        from pyqenc.phases.audio import AudioArtifact, AudioPhase, AudioPhaseResult
-        from pyqenc.state import ArtifactState
+        from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        stub_artifact = MagicMock(spec=AudioArtifact)
-        stub_artifact.state = ArtifactState.ABSENT
+        stub_artifact = Artifact(
+            payload=_audio_output(tmp_path / "work" / "audio" / "track.aac"),
+            state=ArtifactState.ABSENT,
+        )
 
         stub_result = AudioPhaseResult(
-            outcome     = PhaseOutcome.COMPLETED,
-            artifacts   = [],
-            message     = "ok",
-            audio_files = [],
+            outcome   = PhaseOutcome.COMPLETED,
+            artifacts = [],
+            message   = "ok",
         )
 
         with (
@@ -698,17 +716,17 @@ class TestAudioPhaseTiming:
 
         Validates: Requirements 6.5
         """
-        from pyqenc.phases.audio import AudioArtifact, AudioPhase
-        from pyqenc.state import ArtifactState
+        from pyqenc.phases.audio import AudioPhase
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        stub_artifact = MagicMock(spec=AudioArtifact)
-        stub_artifact.state = ArtifactState.COMPLETE
-        stub_artifact.path  = tmp_path / "track.aac"
+        stub_row = Artifact(
+            payload=_audio_output(tmp_path / "work" / "audio" / "track.aac"),
+            state=ArtifactState.COMPLETE,
+        )
 
-        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
+        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -721,17 +739,17 @@ class TestAudioPhaseTiming:
 
         Validates: Requirements 6.4, 6.5
         """
-        from pyqenc.phases.audio import AudioArtifact, AudioPhase
-        from pyqenc.state import ArtifactState
+        from pyqenc.phases.audio import AudioPhase
 
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
 
-        stub_artifact = MagicMock(spec=AudioArtifact)
-        stub_artifact.state = ArtifactState.COMPLETE
-        stub_artifact.path  = tmp_path / "track.aac"
+        stub_row = Artifact(
+            payload=_audio_output(tmp_path / "work" / "audio" / "track.aac"),
+            state=ArtifactState.COMPLETE,
+        )
 
-        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
+        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
             result = phase.run()
 
         assert result is not None

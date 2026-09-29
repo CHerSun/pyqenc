@@ -269,10 +269,9 @@ def _make_merge_phase(
 
     audio = AudioPhase(config, registry, collector=collector)
     audio.result = AudioPhaseResult(
-        outcome     = PhaseOutcome.COMPLETED,
-        artifacts   = [],
-        message     = "audio complete",
-        audio_files = [],
+        outcome   = PhaseOutcome.COMPLETED,
+        artifacts = [],
+        message   = "audio complete",
     )
     registry[AudioPhase] = audio
 

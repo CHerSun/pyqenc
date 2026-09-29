@@ -40,7 +40,6 @@ from pyqenc.audio.chain import (
     execute_chain,
     resolve_chain,
 )
-from pyqenc.audio.layout import ChannelLayout
 from pyqenc.audio.select import resolve_selection
 from pyqenc.constants import (
     AUDIO_OUTPUT_DIR,
@@ -74,52 +73,33 @@ _FALLBACK_LAYOUT_TOKEN = "stereo"
 
 
 @_dataclass
-class AudioArtifact(Artifact):
-    """Audio phase artifact for one (source track, chain) output.
-
-    One artifact per expected chain output. ``path`` is the deterministic
-    ``<stream safe name> chain=<name>.<ext>`` output location; ``state`` reflects
-    on-disk presence (COMPLETE when the file exists, ABSENT when it must be
-    produced); ``wanted`` marks whether the current config still expects it.
-
-    Transitional (deleted in task 7 with the generic-row migration): the base
-    wrapper carries no ``path``; the extra fields are redeclared so
-    construction sites keep working.
-
-    Attributes:
-        source_stream: The source audio stream this output is produced from.
-        chain_name:    The producing chain's configured name.
-        out_layout:    The resolved output channel layout (after any downmix).
-        codec:         The effective output codec (e.g. ``flac``, ``aac``).
-    """
-
-    payload:       AudioOutput | None  = None
-    state:         ArtifactState       = ArtifactState.ABSENT
-    path:          Path | None         = None
-    source_stream: AudioStream | None  = None
-    chain_name:   str | None           = None
-    out_layout:   ChannelLayout | None = None
-    codec:        str | None           = None
-
-
-@_dataclass
 class AudioPhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying the audio phase's typed outputs.
 
-    ``artifacts`` (inherited) holds the wanted artifacts, driving the standard
-    ``pending`` / ``complete`` / ``is_complete`` machinery so MergePhase — which
-    lists AudioPhase purely for ordering — resolves the dependency as
-    COMPLETE / REUSED. ``outputs`` is the audio-specific view (one
-    :class:`AudioArtifact` per produced chain output). ``audio_files`` is the
-    convenience list of the produced delivery-file paths.
+    ``outputs`` is the single storage — one ``Artifact[AudioOutput]`` per
+    expected (track, chain) row — driving the standard ``pending`` /
+    ``complete`` / ``is_complete`` machinery so MergePhase (which lists
+    AudioPhase purely for ordering) resolves the dependency as COMPLETE /
+    REUSED. ``audio_files`` is the derived list of produced delivery-file
+    paths.
 
     Attributes:
-        outputs:     Typed chain-output artifacts (all wanted outputs).
-        audio_files: Paths of the produced/present delivery files.
+        outputs: Typed chain-output rows (all wanted outputs).
     """
 
-    outputs:     list[AudioArtifact] = _field(default_factory=list)
-    audio_files: list[Path]          = _field(default_factory=list)
+    outputs: list[Artifact[AudioOutput]] = _field(default_factory=list)
+
+    # Transitional population (deleted in task 9 when the base field becomes
+    # the derived concatenation).
+
+    @property
+    def audio_files(self) -> list[Path]:
+        """Paths of the complete outputs' delivery files."""
+        return [
+            row.payload.output_path
+            for row in self.outputs
+            if row.state == ArtifactState.COMPLETE
+        ]
 
 
 class AudioPhase(Phase):
@@ -363,13 +343,17 @@ class AudioPhase(Phase):
         audio_dir: LongPath,
         tracks:    list[AudioStream],
         resolved:  dict[str, ResolvedChain],
-    ) -> list[AudioArtifact]:
-        """Build one artifact per expected (track, chain), classified from disk.
+    ) -> list[Artifact]:
+        """Build one row per expected (track, chain), classified from disk.
 
         Completion is read solely from output-file presence (Req 9.6): present →
-        COMPLETE, missing → ABSENT. Any present file that is not an expected
-        output of a configured chain is surfaced as present-but-unwanted
-        (COMPLETE, ``wanted=False``) per the Phase Contract (Req 9.8).
+        COMPLETE, missing → ABSENT. Expected rows carry an
+        :class:`~pyqenc.stream_model.AudioOutput` payload composed at the
+        chain-output materialization site. Any present file that is not an
+        expected output of a configured chain is surfaced as present-but-
+        unwanted (``COMPLETE``, ``wanted=False``) per the Phase Contract
+        (Req 9.8) — the producing entity no longer exists, so the on-disk
+        product itself (a :class:`~pyqenc.stream_model.File`) is the payload.
 
         Args:
             audio_dir: The dedicated audio output directory.
@@ -377,25 +361,21 @@ class AudioPhase(Phase):
             resolved:  Current resolved chains, keyed by name.
 
         Returns:
-            The internal artifact list (expected outputs + surplus files).
+            The internal ledger (expected outputs + surplus files).
         """
-        artifacts: list[AudioArtifact] = []
-        expected_names: set[str]       = set()
+        from pyqenc.stream_model import File
+
+        rows: list[Artifact] = []
+        expected_names: set[str] = set()
 
         for stream in tracks:
             assert stream.info.layout is not None, "layout guaranteed by ExtractionPhase"
-            layout = stream.info.layout
             for name, chain in resolved.items():
                 out = chain_output_path(stream, name, chain.encode.extension, audio_dir)
                 expected_names.add(out.name)
-                state = ArtifactState.COMPLETE if out.exists() else ArtifactState.ABSENT
-                artifacts.append(AudioArtifact(
-                    path          = out,
-                    state         = state,
-                    source_stream = stream,
-                    chain_name    = name,
-                    out_layout    = layout,
-                    codec         = chain.encode.codec,
+                rows.append(Artifact(
+                    payload = AudioOutput(stream=stream, chain_name=name, output_path=out),
+                    state   = ArtifactState.COMPLETE if out.exists() else ArtifactState.ABSENT,
                 ))
 
         # Surface present-but-unwanted surplus files (a stale output whose chain
@@ -408,13 +388,13 @@ class AudioPhase(Phase):
                     and _parse_chain_name(path.name) is not None
                     and path.name not in expected_names
                 ):
-                    artifacts.append(AudioArtifact(
-                        path   = LongPath(path),
-                        state  = ArtifactState.COMPLETE,
-                        wanted = False,
+                    rows.append(Artifact(
+                        payload = File(path=LongPath(path), file_size_bytes=_safe_size(path)),
+                        state   = ArtifactState.COMPLETE,
+                        wanted  = False,
                     ))
 
-        return artifacts
+        return rows
 
     # ------------------------------------------------------------------
     # Execution
@@ -455,10 +435,11 @@ class AudioPhase(Phase):
         failed   = 0
         with ProgressBar(total=len(pending), title="AUDIO", total_count=len(pending)) as advance:
             for art in pending:
-                label = f"[{art.chain_name}] {art.source_stream.file.path.stem if art.source_stream else '?'}"
+                output = art.payload
+                label = f"[{output.chain_name}] {output.stream.file.path.stem}"
                 logger.debug("Producing %s", label)
                 try:
-                    self._produce_one(art, resolved[art.chain_name], audio_dir)  # type: ignore[index]
+                    self._produce_one(output, resolved[output.chain_name], audio_dir)
                     art.state = ArtifactState.COMPLETE
                     produced += 1
                     advance(1, AdvanceState.SUCCESS)
@@ -491,15 +472,15 @@ class AudioPhase(Phase):
             f"produced {produced}, reused {max(reused, 0)}, failed {failed}",
         )
 
-    def _produce_one(self, artifact: AudioArtifact, chain: ResolvedChain, output_dir: LongPath) -> None:
-        """Execute one (track, chain) job, writing the artifact's output file.
+    def _produce_one(self, output: AudioOutput, chain: ResolvedChain, output_dir: LongPath) -> None:
+        """Execute one (track, chain) job, writing the output's delivery file.
 
         Runs the async chain executor to completion. The executor enforces the
-        ``.tmp``-then-rename protocol and the correct output container muxer, and
-        writes into the phase's dedicated ``output_dir``.
+        ``.tmp``-then-rename protocol and the correct output container muxer,
+        and writes into the phase's dedicated ``output_dir``.
 
         Args:
-            artifact:   The pending artifact (carries source track + layout).
+            output:     The pending row's payload (the source track + chain).
             chain:      The resolved chain to apply.
             output_dir: The dedicated audio output directory.
 
@@ -507,40 +488,47 @@ class AudioPhase(Phase):
             NotImplementedError: For a ``passthrough`` chain (Req 11).
             ChainExecutionError: When a measurement or application pass fails.
         """
-        assert artifact.source_stream is not None
-        asyncio.run(execute_chain(chain, artifact.source_stream, output_dir))
+        asyncio.run(execute_chain(chain, output.stream, output_dir))
 
     def _make_result(
         self,
         outcome:   PhaseOutcome,
-        artifacts: list[AudioArtifact],
+        artifacts: list[Artifact],
         message:   str,
     ) -> AudioPhaseResult:
-        """Assemble an ``AudioPhaseResult`` from the wanted artifacts.
+        """Assemble an ``AudioPhaseResult`` from the wanted rows.
 
         Args:
             outcome:   The phase outcome.
-            artifacts: The wanted artifact list.
+            artifacts: The wanted row list (the AudioOutput rows only —
+                       surplus rows are wanted=False and stay internal).
             message:   Human-readable summary — on ``FAILED``, the error
                        description.
 
         Returns:
-            The populated result (``artifacts`` drive dependency resolution;
-            ``outputs`` / ``audio_files`` are the audio-specific views).
+            The populated result (``outputs`` is the single storage driving
+            dependency resolution and the derived ``audio_files``).
         """
-        complete = [a for a in artifacts if a.state == ArtifactState.COMPLETE]
+        outputs = [r for r in artifacts if isinstance(r.payload, AudioOutput)]
         return AudioPhaseResult(
-            outcome     = outcome,
-            artifacts   = artifacts,
-            message     = message,
-            outputs     = artifacts,
-            audio_files = [a.path for a in complete],
+            outcome   = outcome,
+            artifacts = artifacts,  # transitional (task 9 derives it)
+            message   = message,
+            outputs   = outputs,
         )
 
 
 # ---------------------------------------------------------------------------
 # AudioPhase module-level helpers
 # ---------------------------------------------------------------------------
+
+def _safe_size(path: Path) -> int | None:
+    """The file's size in bytes, or ``None`` when the stat fails."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
 
 def _parse_chain_name(filename: str) -> str | None:
     """Return the exact chain name from a ``<stream safe name> chain=<name>.<ext>`` filename.
