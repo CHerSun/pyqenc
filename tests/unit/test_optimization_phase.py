@@ -21,9 +21,15 @@ from pyqenc.models import (
     QualityTarget,
     Strategy,
 )
+from pyqenc.phase import Artifact
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.optimization import OptimizationPhase
-from pyqenc.state import OptimizationParams, ProbeState, StrategyTestResult
+from pyqenc.state import (
+    ArtifactState,
+    OptimizationParams,
+    ProbeState,
+    StrategyTestResult,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -136,6 +142,8 @@ def _persist_optimization(
     strategy_results: list[StrategyTestResult],
     tolerance_pct: float,
     selected: list[str],
+    *,
+    test_chunks: list[str] | None = None,
 ) -> None:
     """Write optimization.yaml with given results.
 
@@ -146,7 +154,7 @@ def _persist_optimization(
     work_dir.mkdir(parents=True, exist_ok=True)
     OptimizationParams(
         probe            = ProbeState(frame_count=0, crop=CropParams()),
-        test_chunks      = ["chunk-001", "chunk-002"],
+        test_chunks      = test_chunks if test_chunks is not None else ["chunk-001", "chunk-002"],
         strategy_results = strategy_results,
         tolerance_pct    = tolerance_pct,
         selected         = selected,
@@ -356,8 +364,152 @@ class TestAllStrategiesMode:
         assert result.is_complete is True
         assert sorted(s.display_name() for s in result.selected_strategies) == sorted(s.display_name() for s in strategies)
 
-    def test_no_strategy_results_in_all_strategies_mode(self, tmp_path: Path) -> None:
+    def test_no_winners_in_all_strategies_mode(self, tmp_path: Path) -> None:
+        """All-strategies mode runs no test encodes — no winner rows, no
+        aggregated records on the result (they stay in optimization.yaml)."""
         phase, _ = _make_phase(tmp_path, [_S1, _S2], optimize=False)
         result = phase.run(dry_run=False)
 
-        assert result.strategy_results == []
+        assert result.winners == []
+
+# ---------------------------------------------------------------------------
+# The per-pair ledger (Req 8 — Correctness Property 5)
+# ---------------------------------------------------------------------------
+
+def _make_chunk(cid_start: float, cid_end: float, tmp_path: Path):
+    """A real VideoStreamChunk over a minimal extended stream."""
+    from fractions import Fraction
+
+    from pyqenc.stream_model import (
+        ExtendedVideoStream,
+        File,
+        VideoStream,
+        VideoStreamChunk,
+        VideoStreamInfo,
+    )
+    return VideoStreamChunk(
+        stream=ExtendedVideoStream(
+            stream=VideoStream(
+                file=File(path=tmp_path / "source.mkv", file_size_bytes=64),
+                info=VideoStreamInfo(
+                    track_id=0, codec_name="hevc", fps=24.0,
+                    fps_fraction=Fraction(24, 1), resolution="1920x1080",
+                    duration_seconds=100.0,
+                ),
+            ),
+            frame_count=2400,
+            crop=CropParams(),
+        ),
+        start_timestamp=cid_start,
+        end_timestamp=cid_end,
+        frame_count=24,
+    )
+
+
+class TestPairLedger:
+    def _phase_with_chunks(
+        self,
+        tmp_path: Path,
+        n_strategies: int,
+        chunks: list,
+    ):
+        """Wire a real chunk set into the phase's ChunkingPhase dependency.
+
+        ``chunks`` are used verbatim as the test set (no random selection):
+        the persisted-selection path in ``_resolve_test_chunks`` reads them
+        back by id.
+        """
+        from pyqenc.phases.chunking import ChunkingPhaseResult
+        phase, work_dir = _make_phase(tmp_path, [_S1, _S2, _S3][:n_strategies])
+        chunking = next(
+            ph for cls, ph in phase._phases.items() if cls.__name__ == "ChunkingPhase"
+        )
+        chunking.result = ChunkingPhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            artifacts = [],
+            message   = "chunking complete",
+            chunks    = [Artifact(payload=c, state=ArtifactState.COMPLETE) for c in chunks],
+        )
+        # Persist the full chunk set as the test selection so recovery is
+        # deterministic (the fresh random pick stays covered by the e2e run).
+        _persist_optimization(
+            work_dir, tmp_path / "source.mkv", [],
+            tolerance_pct=5.0, selected=[],
+            test_chunks=[c.safe_name() for c in chunks],
+        )
+        return phase, work_dir, chunks
+
+    def test_fresh_ledger_counts_attempts_not_strategies(self, tmp_path: Path, caplog) -> None:
+        """Bug guarded (Req 8.1): the recovery line counting per-strategy
+        records instead of winning attempts — 3 test chunks x 3 strategies
+        is 9 attempts to produce, and the line must say so."""
+        import logging as _logging
+
+        chunks = [_make_chunk(float(i * 10), float((i + 1) * 10), tmp_path) for i in range(3)]
+        phase, _, _ = self._phase_with_chunks(tmp_path, 3, chunks)
+        with caplog.at_level(_logging.INFO):
+            result = phase.run(dry_run=True)
+
+        assert result.outcome == PhaseOutcome.PENDING
+        assert any(
+            "Recovery: 9 total, 9 wanted (0 complete, 0 partial, 9 absent) — full run needed"
+            in r.message
+            for r in caplog.records
+        ), [r.message for r in caplog.records if "Recovery" in r.message]
+
+    def test_ledger_size_is_chunks_times_strategies(self, tmp_path: Path) -> None:
+        """Correctness Property 5: ledger size == |test chunks| x |strategies|;
+        row states are per-pair and presence-based."""
+        chunks = [_make_chunk(float(i * 10), float((i + 1) * 10), tmp_path) for i in range(2)]
+        phase, _, chunks = self._phase_with_chunks(tmp_path, 3, chunks)
+        recovery = phase._recover()
+        assert len(recovery.artifacts) == 6
+        assert all(
+            a.state == ArtifactState.ABSENT for a in recovery.artifacts
+        )
+        assert {a.payload.strategy.display_name() for a in recovery.artifacts} == {
+            _S1.display_name(), _S2.display_name(), _S3.display_name(),
+        }
+        assert {a.payload.chunk.safe_name() for a in recovery.artifacts} == {
+            c.safe_name() for c in chunks
+        }
+
+    def test_complete_only_when_winner_on_disk(self, tmp_path: Path) -> None:
+        """Bug guarded (Req 8.2): a row aggregated as cached while its winner
+        is missing on disk — the attempt would silently re-run or, worse, be
+        reported as produced."""
+        chunks = [_make_chunk(0.0, 10.0, tmp_path)]
+        phase, work_dir, chunks = self._phase_with_chunks(tmp_path, 1, chunks)
+        recovery = phase._recover()
+        assert all(a.state == ArtifactState.ABSENT for a in recovery.artifacts)
+        assert recovery.pending is True
+
+        # Fabricate the winner (file + result sidecar) for the single pair.
+        from decimal import Decimal
+
+        from pyqenc.constants import ENCODED_OUTPUT_DIR
+        from pyqenc.phases.encoding import EncodingResultSidecar
+        from pyqenc.stream_model import EncodedChunk as _EC
+        from pyqenc.utils.yaml_utils import write_yaml_atomic
+
+        chunk = chunks[0]
+        strat = _S1
+        strategy_dir = work_dir / ENCODED_OUTPUT_DIR / strat.safe_name()
+        strategy_dir.mkdir(parents=True, exist_ok=True)
+        winner = strategy_dir / _EC.format_file_name(
+            chunk.safe_name(), "1920x1080", Decimal(20))
+        winner.write_bytes(b"x" * 16)
+        write_yaml_atomic(
+            strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
+            EncodingResultSidecar(
+                winning_attempt=winner.name, crf=Decimal(20),
+                metrics={}, targets_met=True,
+            ).model_dump(exclude_none=True),
+        )
+
+        phase2, _, _ = self._phase_with_chunks(tmp_path, 1, chunks)
+        recovery2 = phase2._recover()
+        assert [a.state for a in recovery2.artifacts] == [ArtifactState.COMPLETE]
+        assert recovery2.pending is False
+        assert recovery2.artifacts[0].payload.crf == Decimal(20)
+

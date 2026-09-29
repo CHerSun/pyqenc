@@ -82,6 +82,7 @@ from pyqenc.utils.log_format import (
     fmt_chunk_start,
     fmt_metric_summary,
 )
+from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.visualization import QualityEvaluator
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
@@ -238,6 +239,119 @@ def _write_encoding_result_sidecar(
             "Failed to write encoding result sidecar for %s/%s: %s",
             chunk_id, resolution, e,
         )
+
+
+# ---------------------------------------------------------------------------
+# The per-pair ledger — one Artifact[EncodedChunk] per (chunk, strategy)
+# ---------------------------------------------------------------------------
+
+def _pair_placeholder(work_dir: Path, chunk: VideoStreamChunk, strategy: Strategy) -> EncodedChunk:
+    """A placeholder payload for a pair row with no winner on disk.
+
+    The pair identity (chunk + strategy) is real; the attempt-specific facts
+    (file, crf, resolution) are unknown until a winner exists — the row's
+    ``ABSENT``/``PARTIAL`` state says so. Consumers read attempt facts from
+    ``COMPLETE`` rows only. The placeholder file path uses the attempt-in-
+    progress naming convention (the CRF-less fallback of the encoder's own
+    path builder).
+    """
+    source_info = chunk.stream.stream.info
+    in_progress = (
+        work_dir / ENCODING_WORKSPACE_DIR / strategy.safe_name() / f"{chunk.safe_name()}.mkv"
+    )
+    return EncodedChunk(
+        stream = ExtendedVideoStream(
+            stream      = VideoStream(
+                file = StreamFile(path=in_progress),
+                info = VideoStreamInfo(
+                    track_id     = 0,
+                    resolution   = source_info.resolution,
+                    fps          = source_info.fps,
+                    fps_fraction = source_info.fps_fraction,
+                ),
+            ),
+            frame_count = 0,
+            crop        = CropParams(),
+        ),
+        chunk    = chunk,
+        strategy = strategy,
+        crf      = strategy.codec.default_quality,
+    )
+
+
+def _pair_rows(
+    work_dir:   Path,
+    chunks:     list[VideoStreamChunk],
+    strategies: list[Strategy],
+) -> list[Artifact[EncodedChunk]]:
+    """Build the per-pair ledger: one row per (chunk, strategy) pair.
+
+    States come from the shared attempt-recovery machinery — a row is
+    ``COMPLETE`` only when that pair's winner actually exists on disk (result
+    sidecar + winning file); such rows carry the composed winner payload.
+    Rows without a winner carry the placeholder pair payload. Shared by
+    OptimizationPhase (test pairs) and EncodingPhase (full set).
+    """
+    chunk_ids      = [c.safe_name() for c in chunks]
+    strategy_names = [s.display_name() for s in strategies]
+    pair_recovery  = _recover_encoding_attempts(work_dir, chunk_ids, strategy_names)
+    chunk_by_id    = {c.safe_name(): c for c in chunks}
+    strategy_by_name = {s.display_name(): s for s in strategies}
+
+    rows: list[Artifact[EncodedChunk]] = []
+    for chunk_id in chunk_ids:
+        for name in strategy_names:
+            pair = pair_recovery.pairs.get((chunk_id, name))
+            if (
+                pair is not None
+                and pair.state == ArtifactState.COMPLETE
+                and pair.winning_file is not None
+            ):
+                record = EncodedChunk.parse_file_name(pair.winning_file.name)
+                rows.append(Artifact(
+                    payload = build_encoded_chunk(
+                        chunk      = chunk_by_id[chunk_id],
+                        strategy   = strategy_by_name[name],
+                        crf        = record.crf,
+                        path       = pair.winning_file,
+                        resolution = record.resolution,
+                        frame_count= 0,  # unknown on recovery (Req 14.2)
+                    ),
+                    state   = ArtifactState.COMPLETE,
+                ))
+            else:
+                rows.append(Artifact(
+                    payload = _pair_placeholder(work_dir, chunk_by_id[chunk_id], strategy_by_name[name]),
+                    state   = pair.state if pair is not None else ArtifactState.ABSENT,
+                ))
+    return rows
+
+
+def _orphan_strategy_rows(work_dir: Path, strategies: list[Strategy]) -> list[Artifact[StreamFile]]:
+    """Rows for orphaned ``encoded/<strategy>/`` directories.
+
+    A strategy directory no longer selected by the current configuration has
+    no reconstructible entity (its Strategy object is gone) — the on-disk
+    product itself is the only identity left. Ledger-only rows (``wanted=
+    False``): retained in place, never pending; deletion only via explicit
+    cleanup.
+    """
+    out_dir = work_dir / ENCODED_OUTPUT_DIR
+    if not out_dir.exists():
+        return []
+    expected = {s.display_name() for s in strategies}
+    rows: list[Artifact[StreamFile]] = []
+    for strategy_dir in sorted(out_dir.iterdir()):
+        if strategy_dir.is_dir() and strategy_dir.name not in expected:
+            rows.append(Artifact(
+                payload = StreamFile(path=LongPath(strategy_dir)),
+                state   = ArtifactState.COMPLETE,
+                wanted  = False,
+            ))
+            logger.debug(
+                "encoded/%s is orphaned (strategy no longer selected) — unwanted", strategy_dir.name,
+            )
+    return rows
 
 
 # ---------------------------------------------------------------------------

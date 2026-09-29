@@ -743,7 +743,7 @@ class TestOptimizationPhaseTiming:
             outcome   = PhaseOutcome.COMPLETED,
             artifacts = [],
             message   = "ok",
-            chunks    = [chunk],
+            chunks    = [Artifact(payload=chunk, state=ArtifactState.COMPLETE)],
         )
 
     def _make_phase(
@@ -1029,21 +1029,18 @@ class TestEncodingPhaseTiming:
             outcome   = PhaseOutcome.COMPLETED,
             artifacts = [],
             message   = "ok",
-            chunks    = [chunk],
+            chunks    = [Artifact(payload=chunk, state=ArtifactState.COMPLETE)],
         )
 
     def _make_optimization_result(self, tmp_path: Path) -> OptimizationPhaseResult:
         """Return a minimal complete ``OptimizationPhaseResult`` stub."""
         from pyqenc.phases.optimization import OptimizationPhaseResult
-        from pyqenc.state import StrategyTestResult
 
-        strategy = _STRATEGY_SLOW_H265
         return OptimizationPhaseResult(
             outcome           = PhaseOutcome.COMPLETED,
             artifacts         = [],
             message           = "ok",
-            selected_strategies = [strategy],
-            strategy_results  = [StrategyTestResult(strategy=strategy.display_name(), total_size=1024)],
+            selected_strategies = [_STRATEGY_SLOW_H265],
         )
 
     def _make_phase(
