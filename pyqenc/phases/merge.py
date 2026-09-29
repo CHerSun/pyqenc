@@ -20,6 +20,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, cast
 
@@ -76,6 +77,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _MERGE_YAML = "merge.yaml"
+
+_NS_PER_SECOND = 1_000_000_000
+_MKVPROPEDIT_VIDEO_TRACK = "track:v1"
 
 
 def _targets_as_strings(targets: list[QualityTarget]) -> list[str]:
@@ -927,10 +931,7 @@ class MergePhase(Phase):
 
                 # Write mkvmerge options file
                 options_file = final_dir / f"concat_{strategy_name}.json"
-                args = _build_mkvmerge_options(
-                    strategy_chunks, output_file, timestamps_path,
-                    fps=float(source_stream.stream.info.fps_fraction),
-                )
+                args = _build_mkvmerge_options(strategy_chunks, output_file, timestamps_path)
                 _write_mkvmerge_options_file(options_file, args)
 
                 # Run mkvmerge via options file (avoids OS command-line length limits)
@@ -957,6 +958,22 @@ class MergePhase(Phase):
                 options_file.unlink(missing_ok=True)
 
                 logger.debug("  Concatenation complete: %s", output_file.name)
+
+                # Restore the true frame rate in the track header —
+                # see _build_mkvpropedit_args for why mkvmerge cannot do it.
+                propedit_cmd: list[str] = _build_mkvpropedit_args(
+                    output_file, source_stream.stream.info.fps_fraction,
+                )
+                propedit_result = subprocess.run(propedit_cmd, capture_output=True, text=True, check=False)
+                if propedit_result.returncode != 0:
+                    logger.error(
+                        "mkvpropedit failed for strategy %s (exit %d) — frame-rate header not restored",
+                        strategy_name, propedit_result.returncode,
+                    )
+                    for line in propedit_result.stderr.splitlines()[-20:]:
+                        logger.error("mkvpropedit stderr: %s", line)
+                    failed_strategies.append(strategy_name)
+                    continue
 
                 # Verify frame count
                 frame_count:       int | None = None
@@ -1121,24 +1138,21 @@ def _build_mkvmerge_options(
     chunks:          list[Path],
     output:          Path,
     timestamps_path: Path,
-    fps:             float,
 ) -> list[str]:
     """Build the mkvmerge argument list for chunk concatenation with PTS restoration.
 
     The first chunk is listed without a prefix; each subsequent chunk is
     preceded by ``"+"`` as a separate element (mkvmerge append syntax).
-    ``--timestamps`` is applied to track 0 of the first chunk only.
-    ``--default-duration`` declares the track's true frame rate: without it
-    mkvmerge guesses from the ms-rounded restored timestamps (observed
-    500/21 instead of 24000/1001), and any consumer trusting the container
-    metadata — including our own index-based metric re-timing — mispairs
-    frames at file scale.
+    ``--timestamps`` is applied to track 0 of the first chunk only.  The
+    output's track-header ``DefaultDuration`` is restored afterwards by
+    ``mkvpropedit`` (see :func:`_build_mkvpropedit_args`): mkvmerge derives it
+    from the ms-rounded restored timestamps, and ``--default-duration`` cannot
+    override that — it only reinterprets *input* tracks that lack timing.
 
     Args:
         chunks:          Ordered list of encoded chunk paths.
         output:          Destination output MKV path.
         timestamps_path: Path to the timestamps.txt file.
-        fps:             The source stream's true average frame rate.
 
     Returns:
         List of strings suitable for writing to a JSON options file.
@@ -1146,12 +1160,43 @@ def _build_mkvmerge_options(
     args: list[str] = [
         "-o",          str(output),
         "--timestamps", f"0:{timestamps_path}",
-        "--default-duration", f"0:{fps}fps",
         str(chunks[0]),
     ]
     for chunk in chunks[1:]:
         args.append(f"+{chunk}")
     return args
+
+
+def _default_duration_ns(fps: Fraction) -> int:
+    """Convert *fps* to a track-header ``DefaultDuration`` in nanoseconds.
+
+    Exact rational arithmetic: the float path drifts at NTSC rates
+    (24000/1001 → 41 708 333.33 ns).
+    """
+    return round(_NS_PER_SECOND / fps)
+
+
+def _build_mkvpropedit_args(output: Path, fps: Fraction) -> list[str]:
+    """Build the mkvpropedit argument list restoring the video track's frame-rate header.
+
+    mkvmerge derives ``DefaultDuration`` from the ms-rounded timestamps that
+    ``--timestamps`` restores (observed 42 ms → 500/21 for a 24000/1001
+    stream).  Header-only consumers then misdeclare the frame rate and flag
+    the output VFR (MediaInfo: "Frame rate mode: Variable").  The edit is
+    instant, does not touch block data, and takes an integer ns value.
+
+    Args:
+        output: The merged MKV whose track header is patched in place.
+        fps:    The source stream's true frame rate.
+
+    Returns:
+        The mkvpropedit command as a list of strings.
+    """
+    return [
+        "mkvpropedit", str(output),
+        "--edit", _MKVPROPEDIT_VIDEO_TRACK,
+        "--set", f"default-duration={_default_duration_ns(fps)}",
+    ]
 
 
 def _write_mkvmerge_options_file(path: Path, args: list[str]) -> None:

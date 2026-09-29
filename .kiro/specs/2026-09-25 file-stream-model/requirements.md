@@ -225,6 +225,19 @@ Frame-exactness stops being a positioning concern and becomes a verification inv
 > measurement call sites (encode per-chunk, merge final, measure standalone)
 > all pass the stream's `fps_fraction`. Verified on the produced final:
 > psnr-median 24.7 → 48.8, vmaf-median 4.0 → 96.6.
+>
+> **Third e2e finding (2026-09-29) — supersedes fix (a) above:** the
+> `--default-duration` mkvmerge option is empirically a no-op here — it is an
+> *input-track reinterpretation* option and never reaches the output header;
+> mkvmerge kept deriving `DefaultDuration` from the ms-rounded timestamps
+> (42 ms → 500/21), which also made MediaInfo report "Frame rate mode:
+> Variable" for finals whose per-frame PTS are bit-identical to the CFR
+> source (0.000 ms max deviation, identical frame-grid histogram). Verified
+> resolution: a post-merge header patch, `mkvpropedit <final> --edit
+> track:v1 --set default-duration=<round(1e9/fps_fraction)>` (integer ns;
+> suffixed values are rejected), restores `41708333` — after which MediaInfo
+> reports CFR 23.976 and the container-declared rate agrees with the
+> bitstream VUI. Fix (b) (`run_metrics(fps=...)`) stands unchanged.
 
 #### Acceptance Criteria
 

@@ -14,8 +14,10 @@ no private-attr poking.
 
 Covers:
 - _build_mkvmerge_options: single chunk, multiple chunks, timestamps placement
+- _default_duration_ns / _build_mkvpropedit_args: exact ns conversion, argv pin
 - _write_mkvmerge_options_file: JSON written atomically
 - Options file deleted on success, retained on failure (via run())
+- mkvpropedit failure fails the strategy without writing a sidecar (via run())
 - Merge fails with a clear message when timestamps_path is None / missing (via run())
 """
 
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from fractions import Fraction
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -44,6 +47,8 @@ from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.merge import (
     MergePhase,
     _build_mkvmerge_options,
+    _build_mkvpropedit_args,
+    _default_duration_ns,
     _write_mkvmerge_options_file,
 )
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
@@ -271,7 +276,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options([chunk], output, ts_path, fps=24000/1001)
+        args = _build_mkvmerge_options([chunk], output, ts_path)
 
         # The chunk path must appear without a '+' prefix
         assert str(chunk) in args
@@ -283,7 +288,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options(chunks, output, ts_path, fps=24000/1001)
+        args = _build_mkvmerge_options(chunks, output, ts_path)
 
         assert str(chunks[0]) in args
         assert f"+{chunks[0]}" not in args
@@ -294,7 +299,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options(chunks, output, ts_path, fps=24000/1001)
+        args = _build_mkvmerge_options(chunks, output, ts_path)
 
         for chunk in chunks[1:]:
             assert f"+{chunk}" in args, (
@@ -307,7 +312,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options([chunk], output, ts_path, fps=24000/1001)
+        args = _build_mkvmerge_options([chunk], output, ts_path)
 
         assert "-o" in args
         o_index = args.index("-o")
@@ -319,7 +324,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options(chunks, output, ts_path, fps=24000/1001)
+        args = _build_mkvmerge_options(chunks, output, ts_path)
 
         assert "--timestamps" in args
         ts_index    = args.index("--timestamps")
@@ -339,25 +344,25 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options(chunks, output, ts_path, fps=24000/1001)
+        args = _build_mkvmerge_options(chunks, output, ts_path)
 
         assert args.count("--timestamps") == 1, (
             f"Expected exactly 1 '--timestamps', got {args.count('--timestamps')}"
         )
 
-    def test_default_duration_declares_true_fps(self, tmp_path: Path) -> None:
-        """Bug guarded: mkvmerge guesses the track fps from ms-rounded restored
-        timestamps (observed 500/21 for a 24000/1001 stream) — any consumer
-        trusting container metadata mispairs frames. --default-duration must
-        declare the true rate."""
+    def test_no_default_duration_flag(self, tmp_path: Path) -> None:
+        """Bug guarded: ``--default-duration`` is an mkvmerge *input-track*
+        reinterpretation option — it never reaches the output header, so its
+        presence would imply a false guarantee while mkvmerge keeps deriving
+        DefaultDuration from the ms-rounded restored timestamps. The header is
+        restored by the post-merge mkvpropedit step instead."""
         chunk   = tmp_path / "chunk1.mkv"
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options([chunk], output, ts_path, fps=24000/1001)
+        args = _build_mkvmerge_options([chunk], output, ts_path)
 
-        assert "--default-duration" in args
-        assert args[args.index("--default-duration") + 1] == "0:23.976023976023978fps"
+        assert "--default-duration" not in args
 
     def test_returns_list_of_strings(self, tmp_path: Path) -> None:
         """Return type must be list[str]."""
@@ -365,10 +370,53 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options([chunk], output, ts_path, fps=24000/1001)
+        args = _build_mkvmerge_options([chunk], output, ts_path)
 
         assert isinstance(args, list)
         assert all(isinstance(a, str) for a in args)
+
+
+# ---------------------------------------------------------------------------
+# _default_duration_ns / _build_mkvpropedit_args
+# ---------------------------------------------------------------------------
+
+class TestDefaultDurationNs:
+    """fps → nanosecond DefaultDuration conversion is exact at NTSC rates."""
+
+    def test_ntsc_rate_rounds_exactly(self) -> None:
+        """Bug guarded: float math drifts at NTSC rates — the exact rational
+        path must produce the canonical 24000/1001 duration of 41 708 333 ns
+        (the value the source container itself carries)."""
+        assert _default_duration_ns(Fraction(24000, 1001)) == 41_708_333
+
+    def test_integer_rate(self) -> None:
+        """24 fps → 1e9/24 ns rounded to the nearest integer."""
+        assert _default_duration_ns(Fraction(24, 1)) == 41_666_667
+
+    def test_common_rates_stay_exact(self) -> None:
+        """25/50/60 fps divide 1e9 exactly — no rounding may occur."""
+        for fps, expected in ((Fraction(25), 40_000_000),
+                              (Fraction(50), 20_000_000),
+                              (Fraction(60), 16_666_667)):
+            assert _default_duration_ns(fps) == expected
+
+
+class TestBuildMkvpropeditArgs:
+    """The post-merge header patch command shape."""
+
+    def test_full_command_pinned(self, tmp_path: Path) -> None:
+        """Bug guarded: mkvpropedit rejects suffixed values ('41708333ns' is
+        not an unsigned integer) — the value must be a bare integer, applied
+        to the first video track of the merged file."""
+        output = tmp_path / "output.mkv"
+
+        args = _build_mkvpropedit_args(output, Fraction(24000, 1001))
+
+        assert args == [
+            "mkvpropedit", str(output),
+            "--edit", "track:v1",
+            "--set", "default-duration=41708333",
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -417,8 +465,8 @@ class TestMkvmergeOptionsFileLifecycle:
     """The concat options file is deleted on success and retained on failure.
 
     Driven through the public ``merge.run(dry_run=False)`` surface against a
-    real MergePhase; only mkvmerge (``subprocess.run``) and ``get_frame_count``
-    are mocked.
+    real MergePhase; only the external shell-outs (mkvmerge + mkvpropedit via
+    ``subprocess.run``) and ``get_frame_count`` are mocked.
     """
 
     def test_options_file_deleted_on_success(self) -> None:
@@ -447,6 +495,13 @@ class TestMkvmergeOptionsFileLifecycle:
             options_file = final_dir / f"concat_{_SAFE_NAME}.json"
 
             def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
+                if cmd[0] == "mkvpropedit":
+                    # Header patch runs after the options file is cleaned up.
+                    assert output_file.exists(), "Output file must exist when mkvpropedit is called"
+                    result = MagicMock()
+                    result.returncode = 0
+                    result.stderr = ""
+                    return result
                 # Options file must exist at the moment mkvmerge is invoked.
                 assert options_file.exists(), "Options file must exist when mkvmerge is called"
                 output_file.write_bytes(b"\x00" * 128)
@@ -495,7 +550,7 @@ class TestMkvmergeOptionsFileLifecycle:
             def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
                 result = MagicMock()
                 result.returncode = 1
-                result.stderr = "mkvmerge: error: something went wrong"
+                result.stderr = "error: something went wrong"
                 return result
 
             with patch("pyqenc.phases.merge.subprocess.run", side_effect=fake_subprocess_run):
@@ -506,6 +561,56 @@ class TestMkvmergeOptionsFileLifecycle:
             )
             assert options_file.exists(), (
                 "Options file must be retained after a failed merge"
+            )
+
+    def test_propedit_failure_fails_strategy(self) -> None:
+        """Bug guarded: silently swallowing a mkvpropedit failure would
+        deliver a final whose header misdeclares the frame rate and reads as
+        VFR — the exact defect the patch step exists to fix. A non-zero exit
+        must fail the strategy merge (no sidecar → output stays PARTIAL for
+        recovery to re-merge).
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            work_dir = tmp_path / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            source = tmp_path / "source.mkv"
+            source.write_bytes(b"\x00" * 64)
+
+            ts_file = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+            ts_file.parent.mkdir(parents=True, exist_ok=True)
+            ts_file.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
+
+            chunk = work_dir / "chunk1.mkv"
+            chunk.write_bytes(b"\x00" * 64)
+
+            merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=ts_file)
+
+            final_dir   = work_dir / FINAL_OUTPUT_DIR
+            output_file = final_dir / f"{source.stem} {_SAFE_NAME}.mkv"
+
+            def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
+                result = MagicMock()
+                if cmd[0] == "mkvpropedit":
+                    result.returncode = 2
+                    result.stderr = "Error: The changes could not be written."
+                else:
+                    output_file.write_bytes(b"\x00" * 128)
+                    result.returncode = 0
+                    result.stderr = ""
+                return result
+
+            with patch("pyqenc.phases.merge.subprocess.run", side_effect=fake_subprocess_run):
+                result = merge.run(dry_run=False)
+
+            assert result.outcome == PhaseOutcome.FAILED, (
+                f"Expected FAILED, got {result.outcome}"
+            )
+            sidecar = output_file.with_suffix(".yaml")
+            assert output_file.exists(), "Concatenated output stays on disk for debugging"
+            assert not sidecar.exists(), (
+                "No sidecar may be written when the header patch fails — "
+                "the artifact must stay PARTIAL so recovery re-merges"
             )
 
 
