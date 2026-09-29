@@ -934,8 +934,10 @@ class MergePhase(Phase):
                 args = _build_mkvmerge_options(strategy_chunks, output_file, timestamps_path)
                 _write_mkvmerge_options_file(options_file, args)
 
-                # Run mkvmerge via options file (avoids OS command-line length limits)
-                cmd_mkvmerge: list[str | os.PathLike] = ["mkvmerge", f"@{os.fspath(options_file)}"]
+                # Run mkvmerge via options file (avoids OS command-line length limits).
+                # The "@<file>" option embeds the path in a sub-string mkvmerge
+                # parses itself — plain form only, no extended-length prefix.
+                cmd_mkvmerge: list[str | os.PathLike] = ["mkvmerge", f"@{options_file}"]
                 logger.debug("mkvmerge command: %s", " ".join(str(a) for a in cmd_mkvmerge))
 
                 with self._collector.time(MetricKey.MERGE, "concat"):
@@ -1149,9 +1151,11 @@ def _build_mkvmerge_options(
     from the ms-rounded restored timestamps, and ``--default-duration`` cannot
     override that — it only reinterprets *input* tracks that lack timing.
 
-    Paths are converted with ``os.fspath`` — the same string a subprocess
-    would resolve for a path-like — so extended-length prefixes survive the
-    JSON options-file serialization.
+    Paths converted for the JSON file are standalone argv elements there, so
+    they use ``os.fspath`` — the same string a subprocess would resolve for a
+    path-like. The ``--timestamps`` value is a sub-string argument (track
+    spec) and keeps the plain form: mkvmerge parses it itself and may not
+    accept an extended-length prefix inside it.
 
     Args:
         chunks:          Ordered list of encoded chunk paths.
@@ -1163,7 +1167,7 @@ def _build_mkvmerge_options(
     """
     args: list[str] = [
         "-o",              os.fspath(output),
-        "--timestamps", f"0:{os.fspath(timestamps_path)}",
+        "--timestamps", f"0:{timestamps_path}",
         os.fspath(chunks[0]),
     ]
     for chunk in chunks[1:]:

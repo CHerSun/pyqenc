@@ -332,8 +332,8 @@ class TestBuildMkvmergeOptions:
         ts_value    = args[ts_index + 1]
         chunk0_index = args.index(os.fspath(chunks[0]))
 
-        assert ts_value == f"0:{os.fspath(ts_path)}", (
-            f"Expected '0:{os.fspath(ts_path)}', got {ts_value!r}"
+        assert ts_value == f"0:{ts_path}", (
+            f"Expected '0:{ts_path}', got {ts_value!r}"
         )
         assert ts_index < chunk0_index, (
             "--timestamps must appear before the first chunk"
