@@ -375,7 +375,7 @@ class AudioPhase(Phase):
         expected_names: set[str]       = set()
 
         for stream in tracks:
-            layout = self._track_layout(stream)
+            layout = track_layout(stream)
             for name, chain in resolved.items():
                 out = chain_output_path(stream, name, chain.encode.extension, audio_dir)
                 expected_names.add(out.name)
@@ -406,20 +406,6 @@ class AudioPhase(Phase):
                     ))
 
         return artifacts
-
-    def _track_layout(self, stream: AudioStream) -> ChannelLayout:
-        """Return the stream's channel layout, falling back gracefully when absent.
-
-        The stream info's layout is preferred; when it is ``None`` a stereo
-        fallback keeps chain execution viable rather than crashing.
-
-        Args:
-            stream: The selected source audio stream.
-
-        Returns:
-            A concrete :class:`ChannelLayout`.
-        """
-        return track_layout(stream)
 
     # ------------------------------------------------------------------
     # Execution

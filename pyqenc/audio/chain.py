@@ -68,26 +68,26 @@ from pyqenc.utils.ffmpeg_runner import (
 )
 from pyqenc.utils.long_path import LongPath
 
-_FALLBACK_LAYOUT_TOKEN = "stereo"
-"""Default channel layout when a stream carries no layout in its info."""
-
 
 def track_layout(stream: AudioStream) -> ChannelLayout:
-    """Resolve the stream's channel layout with a graceful stereo fallback.
+    """The stream's channel layout — a producer-contract guard, not a resolver.
+
+    ExtractionPhase guarantees every audio stream carries a layout: ffprobe's
+    ``channel_layout`` when named, else derived from the always-present
+    ``channels`` count. Reaching the assert means a stream bypassed extraction
+    — a programming bug, not a media condition.
 
     Args:
         stream: The source audio stream.
 
     Returns:
-        A concrete :class:`ChannelLayout` (the stream's own, or stereo).
+        The stream's own :class:`ChannelLayout`.
     """
-    if stream.info.layout is not None:
-        return stream.info.layout
-    logger.warning(
-        "Track has no layout in its stream info — falling back to %s",
-        _FALLBACK_LAYOUT_TOKEN,
+    assert stream.info.layout is not None, (
+        "audio stream layout is guaranteed by ExtractionPhase "
+        "(_audio_info derives it from the channels count when unnamed)"
     )
-    return ChannelLayout.parse(_FALLBACK_LAYOUT_TOKEN)
+    return stream.info.layout
 
 logger = logging.getLogger(__name__)
 
