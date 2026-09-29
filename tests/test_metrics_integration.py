@@ -264,17 +264,30 @@ class TestExtractionPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.phases.extraction import ExtractionPhase, SubtitleArtifact
+        from pyqenc.phase import Artifact
+        from pyqenc.phases.extraction import ExtractionPhase
         from pyqenc.state import ArtifactState
+        from pyqenc.stream_model import (
+            File,
+            SubtitleStream,
+            SubtitleStreamInfo,
+        )
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        # Stub a complete artifact so _recover returns all-complete → REUSED path
-        stub_artifact = MagicMock(spec=SubtitleArtifact)
-        stub_artifact.state = ArtifactState.COMPLETE
-        stub_artifact.path  = tmp_path / "sub.srt"
-        stub_artifact.wanted = True
+        # A complete subtitle row so _recover returns all-complete → REUSED path
+        stub_artifact = Artifact(
+            payload = SubtitleStream(
+                file = File(path=tmp_path / "source.mkv"),
+                info = SubtitleStreamInfo(
+                    track_id=3, codec_name="subrip",
+                    extracted_path=tmp_path / "work" / "extracted" / "sub.srt",
+                ),
+            ),
+            state   = ArtifactState.COMPLETE,
+            wanted  = True,
+        )
 
         with patch.object(
             ExtractionPhase, "_recover",
@@ -297,8 +310,14 @@ class TestExtractionPhaseTiming:
 
         Validates: Requirements 6.5, 2.5
         """
-        from pyqenc.phases.extraction import ExtractionPhase, SubtitleArtifact
+        from pyqenc.phase import Artifact
+        from pyqenc.phases.extraction import ExtractionPhase
         from pyqenc.state import ArtifactState
+        from pyqenc.stream_model import (
+            File,
+            SubtitleStream,
+            SubtitleStreamInfo,
+        )
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
@@ -308,10 +327,17 @@ class TestExtractionPhaseTiming:
 
         absent_path = extracted_dir / "sub_0_eng.srt"
 
-        stub_artifact = MagicMock(spec=SubtitleArtifact)
-        stub_artifact.state = ArtifactState.ABSENT
-        stub_artifact.path  = absent_path
-        stub_artifact.wanted = True
+        stub_artifact = Artifact(
+            payload = SubtitleStream(
+                file = File(path=tmp_path / "source.mkv"),
+                info = SubtitleStreamInfo(
+                    track_id=3, codec_name="subrip",
+                    extracted_path=absent_path,
+                ),
+            ),
+            state   = ArtifactState.ABSENT,
+            wanted  = True,
+        )
 
         with (
             patch.object(
@@ -339,16 +365,29 @@ class TestExtractionPhaseTiming:
 
         Validates: Requirements 6.4, 6.5
         """
-        from pyqenc.phases.extraction import ExtractionPhase, SubtitleArtifact
+        from pyqenc.phase import Artifact
+        from pyqenc.phases.extraction import ExtractionPhase
         from pyqenc.state import ArtifactState
+        from pyqenc.stream_model import (
+            File,
+            SubtitleStream,
+            SubtitleStreamInfo,
+        )
 
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
 
-        stub_artifact = MagicMock(spec=SubtitleArtifact)
-        stub_artifact.state = ArtifactState.COMPLETE
-        stub_artifact.path  = tmp_path / "sub.srt"
-        stub_artifact.wanted = True
+        stub_artifact = Artifact(
+            payload = SubtitleStream(
+                file = File(path=tmp_path / "source.mkv"),
+                info = SubtitleStreamInfo(
+                    track_id=3, codec_name="subrip",
+                    extracted_path=tmp_path / "work" / "extracted" / "sub.srt",
+                ),
+            ),
+            state   = ArtifactState.COMPLETE,
+            wanted  = True,
+        )
 
         with patch.object(
             ExtractionPhase, "_recover",
@@ -1329,11 +1368,31 @@ class TestMergePhaseTiming:
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
 
+        from pyqenc.phase import Artifact as _Artifact
+        from pyqenc.state import ArtifactState as _ArtifactState
+        from pyqenc.stream_model import (
+            File as _File,
+        )
+        from pyqenc.stream_model import (
+            VideoStream as _VideoStream,
+        )
+        from pyqenc.stream_model import (
+            VideoStreamInfo as _VideoStreamInfo,
+        )
+
+        video_row = _Artifact(
+            payload = _VideoStream(
+                file = _File(path=work_dir / "source.mkv"),
+                info = _VideoStreamInfo(track_id=0),
+            ),
+            state   = _ArtifactState.COMPLETE,
+        )
         extraction_result = ExtractionPhaseResult(
-            outcome         = PhaseOutcome.COMPLETED,
-            artifacts       = [],
-            message         = "ok",
-            timestamps_path = ts_file,
+            outcome      = PhaseOutcome.COMPLETED,
+            artifacts    = [video_row],
+            message      = "ok",
+            video_stream = video_row,
+            work_dir     = work_dir,
         )
         extraction_mock = MagicMock(spec=ExtractionPhase)
         extraction_mock.result = extraction_result
@@ -1468,11 +1527,31 @@ class TestMergePhaseTiming:
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
 
+        from pyqenc.phase import Artifact as _Artifact
+        from pyqenc.state import ArtifactState as _ArtifactState
+        from pyqenc.stream_model import (
+            File as _File,
+        )
+        from pyqenc.stream_model import (
+            VideoStream as _VideoStream,
+        )
+        from pyqenc.stream_model import (
+            VideoStreamInfo as _VideoStreamInfo,
+        )
+
+        video_row = _Artifact(
+            payload = _VideoStream(
+                file = _File(path=work_dir / "source.mkv"),
+                info = _VideoStreamInfo(track_id=0),
+            ),
+            state   = _ArtifactState.COMPLETE,
+        )
         extraction_result = ExtractionPhaseResult(
-            outcome         = PhaseOutcome.COMPLETED,
-            artifacts       = [],
-            message         = "ok",
-            timestamps_path = ts_file,
+            outcome      = PhaseOutcome.COMPLETED,
+            artifacts    = [video_row],
+            message      = "ok",
+            video_stream = video_row,
+            work_dir     = work_dir,
         )
         extraction_mock = MagicMock(spec=ExtractionPhase)
         extraction_mock.result = extraction_result

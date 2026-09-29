@@ -57,6 +57,7 @@ from pyqenc.stream_model import (
     AttachmentStreamInfo,
     AudioStream,
     AudioStreamInfo,
+    Chapters,
     ExtractionSidecar,
     File,
     SourceMismatchError,
@@ -306,16 +307,26 @@ def streams_filter_plain_regex(
 
 
 # ---------------------------------------------------------------------------
-# Timestamps extraction (mkvextract first, ffprobe fallback — tmp-then-rename)
+# Per-frame PTS index — the video artifact's material component
+# (mkvextract first, ffprobe fallback — tmp-then-rename)
 # ---------------------------------------------------------------------------
+
+def _expected_index_path(work_dir: Path) -> Path:
+    """The per-frame PTS index location — the single owning site (Req 3.4)."""
+    return work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+
+
+def _expected_chapters_path(work_dir: Path) -> Path:
+    """The extracted chapter edition location (fixed-constant name, Req 2.2)."""
+    return work_dir / EXTRACTED_DIR / CHAPTERS_FILENAME
+
 
 def _extract_timestamps(
     source:         Path,
     video_track_id: int,
     output:         Path,
-    duration_ms:    int | None = None,
 ) -> None:
-    """Extract per-frame PTS values from source and write timestamps.txt.
+    """Extract per-frame PTS values from source and write the index file.
 
     Tries ``mkvextract timecodes_v2`` first (native format, already sorted,
     plus a trailing end-of-stream entry at full precision). Falls back to
@@ -330,10 +341,7 @@ def _extract_timestamps(
     Args:
         source:         Path to the source video file.
         video_track_id: The ffprobe stream index of the video track.
-        output:         Destination path (``extracted/timestamps.txt``).
-        duration_ms:    Unused (kept for signature stability of the phase's
-                        internal call); the fallback writer emits frame
-                        lines only.
+        output:         Destination path (the expected index location).
 
     Raises:
         subprocess.CalledProcessError: If both mkvextract and ffprobe fail.
@@ -408,131 +416,60 @@ def _extract_timestamps(
 
 
 # ---------------------------------------------------------------------------
-# Artifacts and result
+# Result — typed artifact fields as the external contract
 # ---------------------------------------------------------------------------
-# Transitional (deleted in task 3 with the generic-row migration): the base
-# wrapper carries no ``path``; each subclass redeclares its extra fields so
-# construction sites keep working.
 
-@dataclass
-class SubtitleArtifact(Artifact):
-    """Extraction artifact for one subtitle stream.
-
-    Attributes:
-        stream: The subtitle stream owning the artifact's name and selector.
-    """
-
-    payload: SubtitleStream | None      = None
-    state:   ArtifactState              = ArtifactState.ABSENT
-    path:    Path | None                = None
-    stream:  SubtitleStream | None      = None
-
-
-@dataclass
-class AttachmentArtifact(Artifact):
-    """Extraction artifact for one attachment stream.
-
-    Attributes:
-        stream: The attachment stream owning the artifact's name.
-    """
-
-    payload: AttachmentStream | None = None
-    state:   ArtifactState           = ArtifactState.ABSENT
-    path:    Path | None             = None
-    stream:  AttachmentStream | None = None
-
-
-@dataclass
-class ChaptersArtifact(Artifact):
-    """Extraction artifact for the container's chapter edition (chapters.xml)."""
-
-    payload: File | None = None
-    state:   ArtifactState = ArtifactState.ABSENT
-    path:    Path | None   = None
-
-
-@dataclass
-class TimestampArtifact(Artifact):
-    """Extraction artifact for the per-frame PTS timestamp file.
-
-    Path: extracted/timestamps.txt
-    States: COMPLETE (file exists and non-empty) or ABSENT only.
-    Not subject to include/exclude stream filtering.
-
-    Attributes:
-        stream: The video stream whose PTS values are extracted.
-    """
-
-    payload: VideoStream | None = None
-    state:   ArtifactState      = ArtifactState.ABSENT
-    path:    Path | None        = None
-    stream:  VideoStream | None = None
-
-
-@dataclass
-class VideoStreamArtifact(Artifact):
-    """Virtual artifact for the enumerated video stream.
-
-    The stream exists in the source file — ``COMPLETE`` by construction, never
-    extracted, never pending. ``wanted`` comes from the same include/exclude
-    filter as every extractable (plus ``video_required`` for the audio-only
-    registry), so the recovery summary and the Want/Present table account for
-    it exactly like any other stream.
-
-    Attributes:
-        stream: The enumerated video stream.
-    """
-
-    payload: VideoStream | None = None
-    state:   ArtifactState      = ArtifactState.ABSENT
-    path:    Path | None        = None
-    stream:  VideoStream | None = None
-
-
-@dataclass
-class AudioStreamArtifact(Artifact):
-    """Virtual artifact for an enumerated audio stream (see VideoStreamArtifact).
-
-    Attributes:
-        stream: The enumerated audio stream.
-    """
-
-    payload: AudioStream | None = None
-    state:   ArtifactState      = ArtifactState.ABSENT
-    path:    Path | None        = None
-    stream:  AudioStream | None = None
-
-
-# Type alias for all extraction artifacts — use this in annotations throughout
-type ExtractionArtifact = (
-    VideoStreamArtifact
-    | AudioStreamArtifact
-    | SubtitleArtifact
-    | AttachmentArtifact
-    | ChaptersArtifact
-    | TimestampArtifact
-)
+type _ExtractionRow = Artifact[
+    VideoStream | AudioStream | SubtitleStream | AttachmentStream | Chapters
+]
+"""One ledger row of the extraction phase (Req 7)."""
 
 
 @dataclass
 class ExtractionPhaseResult(PhaseResult):
-    """``PhaseResult`` subclass carrying extraction-specific payload.
+    """``PhaseResult`` subclass carrying extraction's typed artifact contract.
 
     Attributes:
-        video_stream:     The (first) enumerated video stream; ``None`` when absent.
-        audio_streams:    All enumerated audio streams in track order.
-        subtitle_streams: Enumerated subtitle streams (extracted paths set when complete).
-        attachment_streams: Enumerated attachment streams (extracted paths set when complete).
-        timestamps_path:  Path to the extracted timestamps.txt; ``None`` when absent.
-        chapters_path:    Path to the extracted chapters.xml; ``None`` when absent.
+        video_stream:       The video artifact — the virtual stream whose
+                            single expected material component is the
+                            per-frame PTS index (``COMPLETE`` iff the index
+                            is present); ``None`` when the source has no
+                            video track.
+        audio_streams:      Virtual audio stream rows (``COMPLETE`` by
+                            construction).
+        subtitle_streams:   File-backed subtitle stream rows.
+        attachment_streams: File-backed attachment stream rows.
+        chapters:           The chapter-edition row, when the source has one.
+        work_dir:           Run parameter feeding the derived component-path
+                            properties below.
     """
 
-    video_stream:       VideoStream | None  = None
-    audio_streams:      list[AudioStream]   = field(default_factory=list)
-    subtitle_streams:   list[SubtitleStream] = field(default_factory=list)
-    attachment_streams: list[AttachmentStream] = field(default_factory=list)
-    timestamps_path:    Path | None          = None
-    chapters_path:      Path | None          = None
+    video_stream:       Artifact[VideoStream] | None      = None
+    audio_streams:      list[Artifact[AudioStream]]       = field(default_factory=list)
+    subtitle_streams:   list[Artifact[SubtitleStream]]    = field(default_factory=list)
+    attachment_streams: list[Artifact[AttachmentStream]]  = field(default_factory=list)
+    chapters:           Artifact[Chapters] | None         = None
+    work_dir:           Path | None                       = None
+
+    # Transitional population (deleted in task 9 when the base field becomes
+    # the derived concatenation): the base ``artifacts`` field is populated
+    # from these fields by ``_make_result`` so generic consumers stay fed.
+
+    @property
+    def timestamps_path(self) -> Path | None:
+        """The per-frame PTS index path — derived; ``None`` when absent (Req 3.5)."""
+        if self.video_stream is None or self.video_stream.state != ArtifactState.COMPLETE:
+            return None
+        assert self.work_dir is not None, "work_dir set on every phase-built result"
+        return _expected_index_path(self.work_dir)
+
+    @property
+    def chapters_path(self) -> Path | None:
+        """The extracted chapters.xml path — derived; ``None`` when absent."""
+        if self.chapters is None or self.chapters.state != ArtifactState.COMPLETE:
+            return None
+        assert self.work_dir is not None, "work_dir set on every phase-built result"
+        return _expected_chapters_path(self.work_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -648,10 +585,12 @@ class ExtractionPhase(Phase):
         assert job_result.file is not None, "File guaranteed by JobPhase"
         self._source_file = job_result.file
         self._load_or_enumerate(job_result.file, sidecar_path)
+        self._normalize_extracted_paths(work_dir)
 
+        # The filter selects extractable streams only — the video row's wanted
+        # is the pipeline mode, never the filter (Req 3.3).
         selected = streams_filter_plain_regex(
             [
-                *([self._video] if self._video is not None else []),
                 *self._audio,
                 *self._subtitles,
                 *self._attachments,
@@ -669,57 +608,92 @@ class ExtractionPhase(Phase):
         else:
             on_disk_names = set()
 
-        artifacts: list[ExtractionArtifact] = []
+        rows: list[_ExtractionRow] = []
 
         if self._video is not None:
-            artifacts.append(VideoStreamArtifact(
-                path   = self._video.file.path,
-                state  = ArtifactState.COMPLETE,  # exists in the source file
-                wanted = (self._video in selected) and self._video_required,
-                stream = self._video,
+            # The video artifact: a virtual stream whose single expected
+            # material component is the per-frame PTS index (Req 3.1/3.2) —
+            # COMPLETE iff the index is present; no PARTIAL (both producer
+            # paths write through .tmp-then-rename, so presence implies a
+            # complete write). The stream's existence in the source is a
+            # precondition of the row, not a state.
+            rows.append(Artifact(
+                payload = self._video,
+                state   = (
+                    ArtifactState.COMPLETE
+                    if TIMESTAMPS_FILENAME in on_disk_names
+                    else ArtifactState.ABSENT
+                ),
+                wanted  = self._video_required,
             ))
         for stream in self._audio:
-            artifacts.append(AudioStreamArtifact(
-                path   = stream.file.path,
-                state  = ArtifactState.COMPLETE,  # exists in the source file
-                wanted = stream in selected,
-                stream = stream,
+            rows.append(Artifact(
+                payload = stream,
+                state   = ArtifactState.COMPLETE,  # virtual — exists in the source
+                wanted  = stream in selected,
             ))
-
         for stream in self._subtitles:
-            # Disk name = safe name + codec-derived extension (Req 15.10).
-            artifacts.append(self._make_stream_artifact(
-                SubtitleArtifact, stream, f"{stream.safe_name()}.{stream.file_extension}",
-                on_disk_names, selected,
+            assert stream.info.extracted_path is not None
+            rows.append(Artifact(
+                payload = stream,
+                state   = (
+                    ArtifactState.COMPLETE
+                    if stream.info.extracted_path.name in on_disk_names
+                    else ArtifactState.ABSENT
+                ),
+                wanted  = stream in selected,
             ))
         for stream in self._attachments:
-            # Attachments carry their own filename inside the display name —
-            # safe name as-is, no extension appended.
-            artifacts.append(self._make_stream_artifact(
-                AttachmentArtifact, stream, stream.safe_name(),
-                on_disk_names, selected,
+            assert stream.info.extracted_path is not None
+            rows.append(Artifact(
+                payload = stream,
+                state   = (
+                    ArtifactState.COMPLETE
+                    if stream.info.extracted_path.name in on_disk_names
+                    else ArtifactState.ABSENT
+                ),
+                wanted  = stream in selected,
             ))
 
         if self._has_chapters:
-            path = extracted_dir / CHAPTERS_FILENAME
-            artifacts.append(ChaptersArtifact(
-                path   = path,
-                state  = ArtifactState.COMPLETE if path.name in on_disk_names else ArtifactState.ABSENT,
-                wanted = bool(streams_filter_plain_regex(
+            rows.append(Artifact(
+                payload = Chapters(file=self._source_file),
+                state   = (
+                    ArtifactState.COMPLETE
+                    if CHAPTERS_FILENAME in on_disk_names
+                    else ArtifactState.ABSENT
+                ),
+                wanted  = bool(streams_filter_plain_regex(
                     [_ChaptersProxy()], job_result.config.extraction.include, job_result.config.extraction.exclude,
                 )),
             ))
 
-        timestamps_file = extracted_dir / TIMESTAMPS_FILENAME
-        artifacts.append(TimestampArtifact(
-            path   = timestamps_file,
-            state  = ArtifactState.COMPLETE if timestamps_file.name in on_disk_names else ArtifactState.ABSENT,
-            wanted = self._video_required and self._video is not None,
-            stream = self._video,
-        ))
+        _log_stream_table(rows)
+        return Recovery.from_artifacts(rows)
 
-        _log_stream_table(artifacts)
-        return Recovery.from_artifacts(artifacts)
+    def _normalize_extracted_paths(self, work_dir: Path) -> None:
+        """Set each file-backed stream's expected extracted location eagerly.
+
+        The location is a pure function of the stream's identity (safe name +
+        codec-derived extension for subtitles; safe name as-is for
+        attachments) — set once here, never reconciled with artifact states.
+
+        Args:
+            work_dir: The run's work directory (``extracted/`` lives below it).
+        """
+        extracted_dir = work_dir / EXTRACTED_DIR
+        self._subtitles = [
+            s.model_copy(update={"info": s.info.model_copy(update={
+                "extracted_path": extracted_dir / f"{s.safe_name()}.{s.file_extension}",
+            })})
+            for s in self._subtitles
+        ]
+        self._attachments = [
+            s.model_copy(update={"info": s.info.model_copy(update={
+                "extracted_path": extracted_dir / s.safe_name(),
+            })})
+            for s in self._attachments
+        ]
 
     def _load_or_enumerate(self, source_file: File, sidecar_path: Path) -> None:
         """Resolve the run's stream inventory from the sidecar or ffprobe.
@@ -782,8 +756,6 @@ class ExtractionPhase(Phase):
                 attachments = [s.info for s in self._attachments],
             ),
             chapters = self._has_chapters,
-            timestamps_path = (self._stream_artifact_path(TIMESTAMPS_FILENAME)
-                               if self._video is not None else None),
         )
         write_yaml_atomic(sidecar_path, sidecar.model_dump(exclude_none=True))
         self._sidecar_dirty = False
@@ -803,10 +775,14 @@ class ExtractionPhase(Phase):
     def _make_result(
         self,
         outcome:   PhaseOutcome,
-        artifacts: list[ExtractionArtifact],
+        artifacts: list[_ExtractionRow],
         message:   str,
     ) -> ExtractionPhaseResult:
-        """Assemble an ``ExtractionPhaseResult`` deriving payloads from artifacts.
+        """Assemble an ``ExtractionPhaseResult`` by sorting rows into fields.
+
+        Wanted rows are placed into the declared fields by payload type — the
+        payload's ``extracted_path`` is already the expected location (a pure
+        function of identity); completeness is read from the row's ``state``.
 
         Args:
             outcome:   The phase outcome.
@@ -817,59 +793,43 @@ class ExtractionPhase(Phase):
         Returns:
             The populated result.
         """
-        ts = next((a for a in artifacts if isinstance(a, TimestampArtifact)), None)
-        chapters = next((a for a in artifacts if isinstance(a, ChaptersArtifact)), None)
-
-        complete_paths = {
-            a.path for a in artifacts if a.state == ArtifactState.COMPLETE
-        }
-        subtitles = [
-            s if (s.info.extracted_path and s.info.extracted_path in complete_paths)
-            else s.model_copy(update={"info": s.info.model_copy(update={
-                "extracted_path": a.path if a.path in complete_paths else None,
-            })})
-            for s, a in zip(self._subtitles, [x for x in artifacts if isinstance(x, SubtitleArtifact)])
-        ]
-        attachments = [
-            s if (s.info.extracted_path and s.info.extracted_path in complete_paths)
-            else s.model_copy(update={"info": s.info.model_copy(update={
-                "extracted_path": a.path if a.path in complete_paths else None,
-            })})
-            for s, a in zip(self._attachments, [x for x in artifacts if isinstance(x, AttachmentArtifact)])
-        ]
-
         return ExtractionPhaseResult(
-            outcome           = outcome,
-            artifacts         = artifacts,
-            message           = message,
-            video_stream      = self._video,
-            audio_streams     = list(self._audio),
-            subtitle_streams  = subtitles,
-            attachment_streams = attachments,
-            timestamps_path   = ts.path if ts is not None and ts.state == ArtifactState.COMPLETE else None,
-            chapters_path     = chapters.path if chapters is not None and chapters.state == ArtifactState.COMPLETE else None,
+            outcome            = outcome,
+            artifacts          = list(artifacts),  # transitional (task 9 derives it)
+            message            = message,
+            video_stream       = next(
+                (r for r in artifacts if isinstance(r.payload, VideoStream)), None),
+            audio_streams      = [r for r in artifacts if isinstance(r.payload, AudioStream)],
+            subtitle_streams   = [r for r in artifacts if isinstance(r.payload, SubtitleStream)],
+            attachment_streams = [r for r in artifacts if isinstance(r.payload, AttachmentStream)],
+            chapters           = next(
+                (r for r in artifacts if isinstance(r.payload, Chapters)), None),
+            work_dir           = cast(
+                JobPhaseResult, self._dep(JobPhase).result).work_dir,
         )
 
     def _execute(
         self,
-        wanted:  list[ExtractionArtifact],
+        wanted:  list[_ExtractionRow],
         dry_run: bool,
     ) -> ExtractionPhaseResult:
-        """Extract the ``ABSENT`` artifacts among the given wanted artifacts.
+        """Extract the ``ABSENT`` rows among the given wanted rows.
 
         Pure executor: ``_recover()`` already enumerated the inventory and
         decided what is wanted. Persists ``extraction.yaml`` first (the
         freshly enumerated inventory), runs the disk-space estimate on the
-        real video stream data, then extracts each ``ABSENT`` artifact using
-        its concrete type. ``dry_run`` is never ``True`` here (extraction is
-        not a readonly-execute phase; the template previews instead).
+        real video stream data, then produces each ``ABSENT`` row's component
+        by payload type — the video row's extractor path IS the per-frame PTS
+        index path (the TimestampArtifact fold, Req 3.1). ``dry_run`` is never
+        ``True`` here (extraction is not a readonly-execute phase; the
+        template previews instead).
 
         Args:
             wanted:  Wanted artifacts from ``_recover()`` (``wanted=True``).
             dry_run: Unused for this phase (template guarantees ``False``).
 
         Returns:
-            ``ExtractionPhaseResult`` built directly from the updated artifacts.
+            ``ExtractionPhaseResult`` built directly from the updated rows.
         """
         artifacts = wanted
         job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
@@ -901,14 +861,17 @@ class ExtractionPhase(Phase):
         for artifact in artifacts:
             if artifact.state != ArtifactState.ABSENT:
                 continue
-            if isinstance(artifact, TimestampArtifact):
-                self._extract_timestamp_artifact(artifact, errors)
-            elif isinstance(artifact, SubtitleArtifact):
-                self._extract_subtitle_artifact(artifact, source, errors)
-            elif isinstance(artifact, AttachmentArtifact):
-                self._extract_attachment_artifact(artifact, source, errors)
-            elif isinstance(artifact, ChaptersArtifact):
-                self._extract_chapters_artifact(artifact, source, errors)
+            match artifact.payload:
+                case VideoStream():
+                    self._extract_index(artifact, work_dir, errors)
+                case SubtitleStream():
+                    self._extract_subtitle(artifact, source, errors)
+                case AttachmentStream():
+                    self._extract_attachment(artifact, source, errors)
+                case Chapters():
+                    self._extract_chapters(artifact, work_dir, source, errors)
+                case AudioStream():
+                    pass  # virtual — exists in the source, nothing to extract
 
         if errors:
             failed_count = sum(1 for a in artifacts if a.state == ArtifactState.ABSENT)
@@ -933,62 +896,60 @@ class ExtractionPhase(Phase):
     # Per-artifact extractors — pure "how to extract" helpers
     # ------------------------------------------------------------------
 
-    def _extract_timestamp_artifact(
+    def _extract_index(
         self,
-        artifact: TimestampArtifact,
-        errors:   list[str],
+        artifact:  Artifact[VideoStream],
+        work_dir:  Path,
+        errors:    list[str],
     ) -> None:
-        """Extract per-frame PTS timestamps for the carried video stream.
+        """Produce the video row's material component: the per-frame PTS index.
 
-        Updates ``artifact.state`` to ``COMPLETE`` on success.
+        Flips the row to ``COMPLETE`` on success (the writer follows the
+        ``.tmp``-then-rename protocol, so presence implies a complete write).
         """
-        if artifact.stream is None:
-            return
-        duration_s = artifact.stream.info.duration_seconds
-        duration_ms = int(duration_s * 1000) if duration_s is not None else None
+        video = artifact.payload
         try:
             _extract_timestamps(
-                artifact.stream.file.path, artifact.stream.info.track_id,
-                artifact.path, duration_ms=duration_ms,
+                video.file.path, video.info.track_id,
+                _expected_index_path(work_dir),
             )
-            if artifact.path.exists() and artifact.path.stat().st_size > 0:
-                artifact.state = ArtifactState.COMPLETE
+            artifact.state = ArtifactState.COMPLETE
         except Exception as exc:
             err = f"Failed to extract timestamps: {exc}"
             logger.critical(err)
             errors.append(err)
 
-    def _extract_subtitle_artifact(
+    def _extract_subtitle(
         self,
-        artifact: SubtitleArtifact,
-        source:   Path,
-        errors:   list[str],
+        artifact:  Artifact[SubtitleStream],
+        source:    Path,
+        errors:    list[str],
     ) -> None:
-        """Copy one subtitle stream to its artifact path via the runner."""
-        if artifact.stream is None:
-            return
-        stream = artifact.stream
+        """Copy one subtitle stream to its expected location via the runner."""
+        stream = artifact.payload
+        target = stream.info.extracted_path
+        assert target is not None, "expected location set by _normalize_extracted_paths"
         fmt = _SUBTITLE_FFMPEG_FORMAT.get(stream.file_extension)
         request = FFmpegRequest(
             inputs       = [stream.as_input()],
             output_args  = ("-c", FFMPEG_CODEC_COPY),
-            output       = artifact.path,
+            output       = target,
             output_format = fmt,
         )
-        logger.debug("Extracting subtitle track %d: %s", stream.info.track_id, artifact.path.name)
+        logger.debug("Extracting subtitle track %d: %s", stream.info.track_id, target.name)
         res = run_ffmpeg(request)
-        if res.success and artifact.path.exists():
+        if res.success and target.exists():
             artifact.state = ArtifactState.COMPLETE
         else:
             err = f"ffmpeg failed extracting subtitle track {stream.info.track_id}"
             logger.error(err)
             errors.append(err)
 
-    def _extract_attachment_artifact(
+    def _extract_attachment(
         self,
-        artifact: AttachmentArtifact,
-        source:   Path,
-        errors:   list[str],
+        artifact:  Artifact[AttachmentStream],
+        source:    Path,
+        errors:    list[str],
     ) -> None:
         """Dump one attachment through the file-trust rule (Req 7.7).
 
@@ -997,10 +958,9 @@ class ExtractionPhase(Phase):
         final name only on verified success — presence at the final name
         always implies a complete write.
         """
-        if artifact.stream is None:
-            return
-        stream  = artifact.stream
-        final   = artifact.path
+        stream = artifact.payload
+        final  = stream.info.extracted_path
+        assert final is not None, "expected location set by _normalize_extracted_paths"
         tmp     = final.parent / f"{final.stem}{TEMP_SUFFIX}"
         request = FFmpegRequest(
             inputs = [FFmpegInput(path=source)],
@@ -1020,17 +980,18 @@ class ExtractionPhase(Phase):
             logger.error(err)
             errors.append(err)
 
-    def _extract_chapters_artifact(
+    def _extract_chapters(
         self,
-        artifact: ChaptersArtifact,
-        source:   Path,
-        errors:   list[str],
+        artifact:  Artifact[Chapters],
+        work_dir:  Path,
+        source:    Path,
+        errors:    list[str],
     ) -> None:
         """Extract chapters (mkvextract first, ffprobe-xml fallback).
 
         Both paths already follow the ``.tmp``-then-rename protocol.
         """
-        output_file = artifact.path
+        output_file = _expected_chapters_path(work_dir)
         tmp = output_file.parent / f"{output_file.stem}{TEMP_SUFFIX}"
         logger.debug("Extracting chapters: %s", output_file.name)
 
@@ -1091,28 +1052,6 @@ class ExtractionPhase(Phase):
     # Internals
     # ------------------------------------------------------------------
 
-    def _make_stream_artifact(
-        self,
-        cls:        type,
-        stream:     SubtitleStream | AttachmentStream,
-        file_name:  str,
-        on_disk:    set[str],
-        selected:   list[Any],
-    ) -> ExtractionArtifact:
-        """Build one stream artifact with orthogonal want/present facts."""
-        present = file_name in on_disk
-        return cls(  # type: ignore[call-arg]
-            path    = self._stream_artifact_path(file_name),
-            state   = ArtifactState.COMPLETE if present else ArtifactState.ABSENT,
-            wanted  = stream in selected,
-            stream  = stream,
-        )
-
-    def _stream_artifact_path(self, file_name: str) -> Path:
-        """The artifact path inside ``extracted/``."""
-        work_dir = cast(JobPhaseResult, self._dep(JobPhase).result).work_dir
-        return work_dir / EXTRACTED_DIR / file_name
-
 class _ChaptersProxy:
     """Filter stand-in exposing the chapters artifact's display name."""
 
@@ -1121,39 +1060,42 @@ class _ChaptersProxy:
 
 
 def _log_stream_table(
-    artifacts: list[ExtractionArtifact],
+    rows: list[_ExtractionRow],
 ) -> None:
-    """Log a 3-column artifact table: wanted, present, artifact name.
+    """Log a 3-column table over the ledger: wanted, present, row name.
 
     Columns (orthogonal — neither influences the other):
-    - Want:    ``✔`` if ``artifact.wanted`` else ``✘`` (selection only).
-    - Present: ``✔`` if ``artifact.state`` is ``COMPLETE`` else ``✘``
+    - Want:    ``✔`` if ``row.wanted`` else ``✘`` (selection only).
+    - Present: ``✔`` if ``row.state`` is ``COMPLETE`` else ``✘``
                (completeness only; ``ABSENT`` and ``PARTIAL`` both show ``✘``).
-    - Name:    The output filename for the artifact.
+    - Name:    The payload's ``display_name()`` — no per-artifact-type
+               dispatch (Req 9.4); the chapters row shows its fixed-constant
+               file name (nothing generated to pair, Req 2.5).
+
+    Stream-table asymmetry is honest: the video row's "Present" means
+    "index extracted" (real work); audio rows are pure virtual.
 
     Args:
-        artifacts: Internal artifact list produced by ``_recover()`` (includes
-                   both wanted and unwanted entries).
+        rows: Internal ledger produced by ``_recover()`` (includes both
+              wanted and unwanted entries).
     """
     logger.info("Streams:")
     logger.info("Want  Present      Name")
-    if not artifacts:
+    if not rows:
         logger.warning("NO extractable artifacts found.")
         return
 
-    for artifact in artifacts:
-        w_sym = SUCCESS_SYMBOL_MINOR if artifact.wanted else FAILURE_SYMBOL_MINOR
+    for row in rows:
+        w_sym = SUCCESS_SYMBOL_MINOR if row.wanted else FAILURE_SYMBOL_MINOR
         p_sym = (
             SUCCESS_SYMBOL_MINOR
-            if artifact.state == ArtifactState.COMPLETE
+            if row.state == ArtifactState.COMPLETE
             else FAILURE_SYMBOL_MINOR
         )
-        if isinstance(artifact, (
-            VideoStreamArtifact, AudioStreamArtifact, SubtitleArtifact, AttachmentArtifact,
-        )):
-            # One name family in the table: the owning stream's display name
-            # (Req 15.2) — disk names are its derived safe forms.
-            name = artifact.stream.display_name() if artifact.stream is not None else "?"
-        else:
-            name = artifact.path.name
+        payload = row.payload
+        name = (
+            CHAPTERS_FILENAME
+            if isinstance(payload, Chapters)
+            else payload.display_name()
+        )
         logger.info("   %s  %s  \"%s\"", w_sym, p_sym, name)

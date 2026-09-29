@@ -773,17 +773,15 @@ class ExtractionSidecar(_SourceSidecarBase):
     :meth:`validate_source` deciding whether the inventory is still valid.
 
     Attributes:
-        source:          The source identity for invalidation.
-        streams:         The per-type stream inventory (info slices).
-        chapters:        Whether the source carries a chapter edition (the
-                         extracted location is the fixed ``chapters.xml``
-                         convention — nothing per-run to record).
-        timestamps_path: Path of the extracted per-frame PTS file, or ``None``.
+        source:   The source identity for invalidation.
+        streams:  The per-type stream inventory (info slices).
+        chapters: Whether the source carries a chapter edition (the extracted
+                  location is the fixed ``chapters.xml`` convention — nothing
+                  per-run to record).
     """
 
-    streams:          StreamsInventory
-    chapters:         bool                  = False
-    timestamps_path:  LongPathYaml | None   = None
+    streams:  StreamsInventory
+    chapters: bool = False
 
 
 class SceneRecord(BaseModel):

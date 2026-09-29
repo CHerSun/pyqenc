@@ -280,7 +280,9 @@ class AudioPhase(Phase):
     def _selected_tracks(self) -> list[AudioStream]:
         """Resolve the working track set from extraction + ``audio.select`` (Req 9.1)."""
         extraction_result = cast(ExtractionPhaseResult, self._dep(ExtractionPhase).result)
-        audio_streams: list[AudioStream] = extraction_result.audio_streams
+        audio_streams: list[AudioStream] = [
+            a.payload for a in extraction_result.audio_streams
+        ]
         audio_cfg = cast(JobPhaseResult, self._dep(JobPhase).result).config.audio
         return resolve_selection(audio_streams, audio_cfg.select)
 

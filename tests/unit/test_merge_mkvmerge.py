@@ -55,6 +55,7 @@ from pyqenc.phases.merge import (
 )
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import ArtifactState
+from pyqenc.stream_model import File, VideoStream, VideoStreamInfo
 
 
 def _extended_stream(path: Path, frame_count: int) -> "ExtendedVideoStream":
@@ -191,8 +192,9 @@ def _make_merge_phase(
         work_dir:        Pipeline work directory.
         source:          Source video path.
         chunk:           A real encoded chunk file on disk.
-        timestamps_path: Timestamps file for the ExtractionPhase result; may be
-                         ``None`` (or a missing path) to exercise the guard.
+        timestamps_path: The index location the extraction result reports;
+                         ``None`` reports the video component absent, a missing
+                         path exercises the merge guard's existence check.
         frame_count:     Source frame count recorded by the ProbePhase result.
     """
     collector = NoOpMetricsCollector()
@@ -220,16 +222,23 @@ def _make_merge_phase(
     registry: PhaseRegistry = {JobPhase: job}
 
     extraction = ExtractionPhase(config, registry, video_required=True, collector=collector)
-    ts_artifacts = (
-        [Artifact(payload=timestamps_path, state=ArtifactState.COMPLETE)]
-        if timestamps_path is not None
-        else []
+    video_row = Artifact(
+        payload = VideoStream(
+            file = File(path=source),
+            info = VideoStreamInfo(track_id=0, resolution="1920x1080"),
+        ),
+        state   = (
+            ArtifactState.COMPLETE
+            if timestamps_path is not None
+            else ArtifactState.ABSENT
+        ),
     )
     extraction.result = ExtractionPhaseResult(
-        outcome         = PhaseOutcome.COMPLETED,
-        artifacts       = ts_artifacts,
-        message         = "extraction complete",
-        timestamps_path = timestamps_path,
+        outcome      = PhaseOutcome.COMPLETED,
+        artifacts    = [video_row],
+        message      = "extraction complete",
+        video_stream = video_row,
+        work_dir     = work_dir,
     )
     registry[ExtractionPhase] = extraction
 

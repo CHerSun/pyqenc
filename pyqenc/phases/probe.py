@@ -157,11 +157,12 @@ class ProbePhase(Phase):
         probe_yaml        = job_result.work_dir / _PROBE_YAML_NAME  # type: ignore[operator]
 
         # Step 1 — no video stream: fatal for all downstream video phases.
-        if extraction_result.video_stream is None:  # type: ignore[union-attr]
+        video_artifact = extraction_result.video_stream  # type: ignore[union-attr]
+        if video_artifact is None:
             raise RecoveryError(
                 "No video stream in the source — video processing cannot continue"
             )
-        self._video_stream = extraction_result.video_stream  # type: ignore[union-attr]
+        self._video_stream = video_artifact.payload
 
         # Step 2 — .tmp pre-clean (probe.yaml is written via .tmp-then-rename).
         tmp = probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX)
