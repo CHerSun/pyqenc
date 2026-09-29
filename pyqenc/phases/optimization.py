@@ -374,7 +374,7 @@ class OptimizationPhase(Phase):
 
         test_chunk_ids = persisted.test_chunks if persisted and persisted.test_chunks else []
         if test_chunk_ids:
-            chunk_by_id = {c.chunk_id: c for c in chunks}
+            chunk_by_id = {c.safe_name(): c for c in chunks}
             test_chunks = [chunk_by_id[cid] for cid in test_chunk_ids if cid in chunk_by_id]
             if not test_chunks:
                 logger.warning("Persisted test chunk IDs not found — re-selecting")
@@ -385,7 +385,7 @@ class OptimizationPhase(Phase):
         # Persist test chunk selection early (before encoding starts).
         OptimizationParams(
             probe            = self._current_probe,
-            test_chunks      = [c.chunk_id for c in test_chunks],
+            test_chunks      = [c.safe_name() for c in test_chunks],
             strategy_results = list(cached_results.values()),
             tolerance_pct    = tolerance,
             selected         = [],
@@ -408,7 +408,7 @@ class OptimizationPhase(Phase):
         total_seconds      = test_chunk_seconds * len(strategies_to_test)
         total_count        = len(test_chunks) * len(strategies_to_test)
 
-        test_chunk_ids = [c.chunk_id for c in test_chunks]
+        test_chunk_ids = [c.safe_name() for c in test_chunks]
         strategy_names = [s.display_name() for s in strategies_to_test]
         from pyqenc.phases.encoding import (
             _encode_chunks_parallel,
@@ -419,7 +419,7 @@ class OptimizationPhase(Phase):
 
         with ProgressBar(total_seconds, title="Optimization", total_count=total_count) as advance:
             # Pre-advance bar for already-complete pairs
-            chunks_by_id = {c.chunk_id: c for c in test_chunks}
+            chunks_by_id = {c.safe_name(): c for c in test_chunks}
             for r in phase_recovery.pairs.values():
                 if r.state == ArtifactState.COMPLETE:
                     advance((chunks_by_id[r.chunk_id].end_timestamp - chunks_by_id[r.chunk_id].start_timestamp), AdvanceState.SKIPPED)
@@ -462,7 +462,7 @@ class OptimizationPhase(Phase):
         # Persist final state with current quality targets and sampling.
         OptimizationParams(
             probe            = self._current_probe,
-            test_chunks      = [c.chunk_id for c in test_chunks],
+            test_chunks      = [c.safe_name() for c in test_chunks],
             strategy_results = final_results,
             tolerance_pct    = tolerance,
             selected         = selected,
@@ -817,7 +817,7 @@ def _select_test_chunks(
     num = min(num, len(eligible))
 
     selected = random.sample(eligible, num)
-    selected.sort(key=lambda c: c.chunk_id)
+    selected.sort(key=lambda c: c.safe_name())
     return selected
 
 

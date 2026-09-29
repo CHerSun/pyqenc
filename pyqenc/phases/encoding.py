@@ -1793,7 +1793,7 @@ class EncodingPhase(Phase):
         # (merge derives its expected strategies from encoded_chunks — without
         # this, a reuse run with deleted finals finds nothing to re-merge).
         chunk_by_id   = {c.safe_name(): c for c in chunks}
-        strategy_by_name = {st.name: st for st in strategies}
+        strategy_by_name = {st.display_name(): st for st in strategies}
         artifacts: list[EncodedArtifact] = []
         for chunk_id in chunk_ids:
             for strategy_name in strategy_names:
