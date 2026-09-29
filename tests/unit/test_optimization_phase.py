@@ -114,7 +114,6 @@ def _make_phase(
         artifacts = [Artifact(payload=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
         message   = "probe complete",
         stream    = None,
-        crop      = CropParams(),
     )
     phases[_PP] = probe
 

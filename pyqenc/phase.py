@@ -224,13 +224,14 @@ class Recovery:
     remains this run.
 
     Attributes:
-        artifacts: Full internal artifact list — wanted AND unwanted entries.
-                   Phases whose outputs are state sidecars rather than
-                   artifacts (job, probe) return an empty list and signal
-                   everything through ``pending``.
+        artifacts: The full internal artifact ledger — wanted AND unwanted
+                   rows. Every phase emits a real ledger (job's source File,
+                   probe's extended stream, chunking's windows included); the
+                   only empty-ledger case is a phase whose row set is
+                   unknowable before its work runs (chunking before scene
+                   detection), which signals ``pending`` directly.
         pending:   Whether any work remains this run (any wanted artifact
-                   ``ABSENT`` / ``PARTIAL``, or — for state phases — the
-                   sidecar is absent or invalidated). The template maps it
+                   ``ABSENT`` / ``PARTIAL``). The template maps it
                    mechanically: ``pending and dry_run`` → ``PENDING``,
                    ``not pending`` → ``REUSED``, ``pending`` → execute.
     """

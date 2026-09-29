@@ -247,7 +247,10 @@ def _make_merge_phase(
         outcome   = PhaseOutcome.COMPLETED,
         artifacts = [Artifact(payload=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
         message   = "probe complete",
-        stream    = _extended_stream(source, frame_count),
+        stream    = Artifact(
+            payload = _extended_stream(source, frame_count),
+            state   = ArtifactState.COMPLETE,
+        ),
     )
     registry[ProbePhase] = probe
 

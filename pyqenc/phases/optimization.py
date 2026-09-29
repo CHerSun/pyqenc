@@ -216,7 +216,7 @@ class OptimizationPhase(Phase):
 
         crop           = probe_result.crop
         current_probe  = ProbeState(
-            frame_count = probe_result.stream.frame_count if probe_result.stream is not None else 0,
+            frame_count = probe_result.stream.payload.frame_count if probe_result.stream is not None else 0,
             crop        = crop if crop else None,
         )
         self._current_probe = current_probe
@@ -366,7 +366,7 @@ class OptimizationPhase(Phase):
 
         # Test encodes need chunks from ChunkingPhase.
         chunking_result = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result)
-        chunks: list[VideoStreamChunk] = chunking_result.chunks
+        chunks: list[VideoStreamChunk] = [a.payload for a in chunking_result.chunks]
         if strategies_to_test and not chunks:
             err = "No chunks available from ChunkingPhase"
             logger.critical(err)

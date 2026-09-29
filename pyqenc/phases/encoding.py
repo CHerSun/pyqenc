@@ -1744,7 +1744,7 @@ class EncodingPhase(Phase):
             probe_result  = self._dep(ProbePhase).result  # type: ignore[union-attr]
             crop          = probe_result.crop if probe_result is not None else None
             current_probe = ProbeState(
-                frame_count = probe_result.stream.frame_count if (probe_result is not None and probe_result.stream is not None) else 0,
+                frame_count = probe_result.stream.payload.frame_count if (probe_result is not None and probe_result.stream is not None) else 0,
                 crop        = crop if crop is not None else CropParams(),
             ) if probe_result is not None else None
             self.params   = EncodingParams(probe=current_probe)
@@ -1770,7 +1770,7 @@ class EncodingPhase(Phase):
         chunking_result     = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result)
         optimization_result = cast(OptimizationPhaseResult, self._dep(OptimizationPhase).result)
 
-        chunks: list[VideoStreamChunk] = chunking_result.chunks
+        chunks: list[VideoStreamChunk] = [a.payload for a in chunking_result.chunks]
         strategies = optimization_result.selected_strategies
 
         if not chunks:
@@ -1909,7 +1909,7 @@ class EncodingPhase(Phase):
         chunking_result     = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result)
         optimization_result = cast(OptimizationPhaseResult, self._dep(OptimizationPhase).result)
 
-        chunks: list[VideoStreamChunk] = chunking_result.chunks
+        chunks: list[VideoStreamChunk] = [a.payload for a in chunking_result.chunks]
         strategies = optimization_result.selected_strategies
 
         if not chunks:
@@ -1931,7 +1931,7 @@ class EncodingPhase(Phase):
         encoding_yaml = work_dir / _ENCODING_YAML
         if self.params is None:
             current_probe = ProbeState(
-                frame_count = probe_result.stream.frame_count if (probe_result is not None and probe_result.stream is not None) else 0,
+                frame_count = probe_result.stream.payload.frame_count if (probe_result is not None and probe_result.stream is not None) else 0,
                 crop        = crop if crop is not None else CropParams(),
             ) if probe_result is not None else None
             self.params = EncodingParams(probe=current_probe)
@@ -1967,7 +1967,7 @@ class EncodingPhase(Phase):
         # (0 sentinel) skip the check with a warning — the final-merge
         # verification remains the hard backstop.
         source_total = (
-            probe_result.stream.frame_count
+            probe_result.stream.payload.frame_count
             if probe_result is not None and probe_result.stream is not None else 0
         )
         winners = [

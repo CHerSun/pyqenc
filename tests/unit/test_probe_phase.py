@@ -191,7 +191,9 @@ class TestProbePhaseReused:
 
         assert result.outcome == PhaseOutcome.REUSED
         assert result.stream is not None
-        assert result.stream.frame_count == 72000
+        assert result.stream is not None
+        assert result.stream.state == ArtifactState.COMPLETE
+        assert result.stream.payload.frame_count == 72000
         assert result.crop.top    == 140
         assert result.crop.bottom == 140
 
@@ -260,7 +262,9 @@ class TestProbePhaseCompleted:
 
         assert result.outcome == PhaseOutcome.COMPLETED
         assert result.stream is not None
-        assert result.stream.frame_count == self._DETECTED_FRAME_COUNT
+        assert result.stream is not None
+        assert result.stream.state == ArtifactState.COMPLETE
+        assert result.stream.payload.frame_count == self._DETECTED_FRAME_COUNT
         assert result.crop.top    == self._DETECTED_CROP.top
         assert result.crop.bottom == self._DETECTED_CROP.bottom
 

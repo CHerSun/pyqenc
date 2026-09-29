@@ -20,7 +20,7 @@ import pytest
 from pyqenc.app_config import load_app_config
 from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import CleanupLevel, PhaseOutcome, SceneBoundary
-from pyqenc.phase import PhaseRegistry
+from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.chunking import (
     ChunkingPhase,
     build_chunks,
@@ -29,6 +29,7 @@ from pyqenc.phases.chunking import (
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
+from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
     CropParams,
     ExtendedVideoStream,
@@ -81,7 +82,7 @@ def _make_registry(
         outcome   = PhaseOutcome.COMPLETED,
         artifacts = [],
         message   = "job complete",
-        file      = File(path=source, file_size_bytes=64),
+        file      = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         config    = config,
         work_dir  = work_dir,
         source    = source,
@@ -93,13 +94,19 @@ def _make_registry(
     extraction = ExtractionPhase(config, None, collector=collector)
     extraction.result = ExtractionPhaseResult(
         outcome=PhaseOutcome.COMPLETED, artifacts=[], message="extraction",
-        video_stream=(stream.stream if stream is not None else None),
+        video_stream=(
+            Artifact(payload=stream.stream, state=ArtifactState.COMPLETE)
+            if stream is not None else None
+        ),
     )
 
     probe = ProbePhase(config, None, collector=collector)
     probe.result = ProbePhaseResult(
         outcome=PhaseOutcome.COMPLETED, artifacts=[], message="probe",
-        stream=stream, crop=stream.crop if stream is not None else CropParams(),
+        stream=(
+            Artifact(payload=stream, state=ArtifactState.COMPLETE)
+            if stream is not None else None
+        ),
     )
 
     registry: PhaseRegistry = {JobPhase: job, ExtractionPhase: extraction, ProbePhase: probe}
@@ -229,7 +236,8 @@ class TestChunkingPhaseLifecycle:
 
         assert result.outcome == PhaseOutcome.COMPLETED
         assert len(result.chunks) == 2
-        assert sum(c.frame_count for c in result.chunks) == 640
+        assert all(a.state == ArtifactState.COMPLETE for a in result.chunks)
+        assert sum(a.payload.frame_count for a in result.chunks) == 640
 
         import yaml
         data = yaml.safe_load((work_dir / "chunking.yaml").read_text(encoding="utf-8"))

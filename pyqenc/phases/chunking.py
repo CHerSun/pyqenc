@@ -29,6 +29,7 @@ from scenedetect import ContentDetector, detect
 from pyqenc.metrics import MetricKey
 from pyqenc.models import PhaseOutcome, SceneBoundary
 from pyqenc.phase import (
+    Artifact,
     FinalizeContext,
     Phase,
     PhaseRegistry,
@@ -39,7 +40,7 @@ from pyqenc.phase import (
 from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
-from pyqenc.state import ArtifactState  # noqa: F401 — re-exported for legacy imports
+from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
     ChunkingSidecar,
     ExtendedVideoStream,
@@ -183,10 +184,15 @@ class ChunkingPhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying chunking-specific payload.
 
     Attributes:
-        chunks: The chunk windows in scene order.
+        chunks: The chunk-window artifacts in scene order (virtual windows —
+                ``COMPLETE`` together once the persisted boundaries are
+                current; empty while detection is still pending).
     """
 
-    chunks: list[VideoStreamChunk] = field(default_factory=list)
+    chunks: list[Artifact[VideoStreamChunk]] = field(default_factory=list)
+
+    # Transitional population (deleted in task 9 when the base field becomes
+    # the derived concatenation).
 
 
 # ---------------------------------------------------------------------------
@@ -196,11 +202,13 @@ class ChunkingPhaseResult(PhaseResult):
 class ChunkingPhase(Phase):
     """Phase object turning scene boundaries into timestamp-window chunks.
 
-    Owns scene detection and the ``chunking.yaml`` boundary sidecar. Chunks
-    are derived objects (windows over the probe stream) — no artifacts, no
-    per-chunk state; ``pending`` comes from the sidecar's currency (absent
-    boundaries → run detection). The uniform run footprint is inherited from
-    :class:`Phase`.
+    Owns scene detection and the ``chunking.yaml`` boundary sidecar. The
+    ledger emits one ``Artifact[VideoStreamChunk]`` row per chunk window — a
+    virtual entity with no per-chunk on-disk presence, so all rows share one
+    state (set-flip): ``COMPLETE`` once the persisted boundaries are current,
+    and while boundaries are absent the chunk set itself is unknown — the
+    ledger is empty and detection must run. The uniform run footprint is
+    inherited from :class:`Phase`.
 
     Args:
         config: Full pipeline configuration.
@@ -241,9 +249,13 @@ class ChunkingPhase(Phase):
         2. Load scene boundaries from ``chunking.yaml``; pending when absent
            or empty (detection must run), current otherwise.
 
+        The set-flip ledger: with current boundaries the chunk windows are
+        fully derivable and every row is ``COMPLETE`` (the set flips
+        together — chunks derive wholly from the sidecar); with absent
+        boundaries the chunk set is unknowable, so the ledger is empty.
+
         Returns:
-            ``Recovery(artifacts=[], pending=...)`` — chunking.yaml is state,
-            not an artifact; the loaded boundaries are stashed.
+            The :class:`Recovery` single source of truth.
         """
         job_result: JobPhaseResult = self._dep(JobPhase).result  # type: ignore[assignment]
         work_dir   = job_result.work_dir
@@ -262,7 +274,14 @@ class ChunkingPhase(Phase):
                 for record in sidecar.scenes
             ]
             logger.info("Scenes:  %d (from chunking.yaml)", len(self._recovered_scenes))
-            return Recovery(pending=False)
+            probe_result = self._dep(ProbePhase).result  # type: ignore[union-attr]
+            stream = probe_result.stream  # type: ignore[union-attr]
+            assert stream is not None, "probe guaranteed complete by the dependency walk"
+            # RecoveryError (unknown duration) propagates — the template
+            # converts it to the typed FAILED result.
+            chunks = build_chunks(self._recovered_scenes, stream.payload)
+            rows = [Artifact(payload=c, state=ArtifactState.COMPLETE) for c in chunks]
+            return Recovery.from_artifacts(rows)
 
         logger.debug("Chunking recovery: chunking.yaml absent or empty — scene detection needed")
         return Recovery(pending=True)
@@ -272,17 +291,17 @@ class ChunkingPhase(Phase):
         wanted:  list,
         dry_run: bool,
     ) -> ChunkingPhaseResult:
-        """Detect scenes (when no boundaries are cached) and emit chunk windows.
+        """Detect scenes (when no boundaries are cached) and emit chunk rows.
 
         ``dry_run`` is never ``True`` here (chunking is not a readonly-execute
         phase; the template previews instead).
 
         Args:
-            wanted:  Always empty (chunking.yaml is state, not artifacts).
+            wanted:  The wanted row list (empty until boundaries exist).
             dry_run: Unused for this phase (template guarantees ``False``).
 
         Returns:
-            ``ChunkingPhaseResult`` with the chunk windows.
+            ``ChunkingPhaseResult`` with the chunk-window rows.
         """
         job_result   = self._dep(JobPhase).result  # type: ignore[union-attr]
         probe_result = self._dep(ProbePhase).result  # type: ignore[union-attr]
@@ -292,6 +311,7 @@ class ChunkingPhase(Phase):
             err = "No extended video stream available for chunking"
             logger.critical(err)
             return self._make_result(PhaseOutcome.FAILED, [], err)
+        extended = stream.payload
 
         boundaries = self._recovered_scenes
         if boundaries:
@@ -303,7 +323,7 @@ class ChunkingPhase(Phase):
             try:
                 with self._collector.time(MetricKey.CHUNKING, "scene_detect"):
                     boundaries = detect_scenes(
-                        stream           = stream,
+                        stream           = extended,
                         scene_threshold  = self._config.chunking.scene_threshold,
                         min_scene_length = self._config.chunking.min_scene_length,
                     )
@@ -313,15 +333,16 @@ class ChunkingPhase(Phase):
             self._persist_scenes(work_dir / _CHUNKING_YAML, boundaries)
 
         try:
-            chunks = build_chunks(boundaries, stream)
+            chunks = build_chunks(boundaries, extended)
         except RecoveryError as exc:
             return self._make_result(PhaseOutcome.FAILED, [], str(exc))
 
         logger.info("%d chunk window(s) — no files produced (direct-from-source)", len(chunks))
+        rows = [Artifact(payload=c, state=ArtifactState.COMPLETE) for c in chunks]
         return self._make_result(
             PhaseOutcome.COMPLETED, [],
             f"chunked into {len(chunks)} window(s)",
-            chunks=chunks,
+            chunks=rows,
         )
 
     def _reused_result(self, wanted: list, message: str) -> ChunkingPhaseResult:
@@ -333,13 +354,13 @@ class ChunkingPhase(Phase):
             logger.critical(err)
             return self._make_result(PhaseOutcome.FAILED, [], err)
         try:
-            chunks = build_chunks(self._recovered_scenes, stream)
+            chunks = build_chunks(self._recovered_scenes, stream.payload)
         except RecoveryError as exc:
             return self._make_result(PhaseOutcome.FAILED, [], str(exc))
         return self._make_result(
             PhaseOutcome.REUSED, [],
             "chunking.yaml reused",
-            chunks=chunks,
+            chunks=[Artifact(payload=c, state=ArtifactState.COMPLETE) for c in chunks],
         )
 
     def _make_result(
@@ -347,16 +368,16 @@ class ChunkingPhase(Phase):
         outcome:   PhaseOutcome,
         artifacts: list,
         message:   str,
-        chunks:    list[VideoStreamChunk] | None = None,
+        chunks:    list[Artifact[VideoStreamChunk]] | None = None,
     ) -> ChunkingPhaseResult:
         """Assemble a ``ChunkingPhaseResult``.
 
         Args:
             outcome:   The phase outcome.
-            artifacts: Always empty (chunking.yaml is state, not an artifact).
+            artifacts: The wanted row list (transitional population).
             message:   Human-readable summary — on ``FAILED``, the error
                        description.
-            chunks:    The chunk windows (empty on failure paths).
+            chunks:    The chunk-window rows (empty on failure paths).
 
         Returns:
             The populated result.

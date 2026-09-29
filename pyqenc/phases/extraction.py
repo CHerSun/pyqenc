@@ -583,8 +583,8 @@ class ExtractionPhase(Phase):
 
         # Step 3: resolve the stream inventory (sidecar first, no re-probe).
         assert job_result.file is not None, "File guaranteed by JobPhase"
-        self._source_file = job_result.file
-        self._load_or_enumerate(job_result.file, sidecar_path)
+        self._source_file = job_result.file.payload
+        self._load_or_enumerate(job_result.file.payload, sidecar_path)
         self._normalize_extracted_paths(work_dir)
 
         # The filter selects extractable streams only — the video row's wanted

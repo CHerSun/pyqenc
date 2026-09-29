@@ -25,6 +25,7 @@ from pyqenc.models import (
     QualityTarget,
 )
 from pyqenc.phases.job import JobPhase
+from pyqenc.state import ArtifactState
 from pyqenc.stream_model import File, JobSidecar
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
@@ -155,8 +156,9 @@ class TestJobPhaseRunExecuteNoMismatch:
         phase = _make_phase(tmp_path, src)
         result = phase.run(dry_run=False)
         assert result.file is not None
-        assert result.file.path == src
-        assert result.file.file_size_bytes == src.stat().st_size
+        assert result.file.state == ArtifactState.COMPLETE
+        assert result.file.payload.path == src
+        assert result.file.payload.file_size_bytes == src.stat().st_size
 
     def test_reused_result_carries_file_too(self, tmp_path: Path) -> None:
         src = _make_source(tmp_path)
@@ -166,7 +168,8 @@ class TestJobPhaseRunExecuteNoMismatch:
         result = phase.run(dry_run=False)
         assert result.outcome == PhaseOutcome.REUSED
         assert result.file is not None
-        assert result.file.path == src
+        assert result.file.state == ArtifactState.COMPLETE
+        assert result.file.payload.path == src
 
     def test_first_run_force_wipe_false(self, tmp_path: Path) -> None:
         src = _make_source(tmp_path)
@@ -271,7 +274,8 @@ class TestJobPhaseSourceMismatchWithForce:
         # job.yaml must exist and carry the real current file size
         assert (work_dir / "job.yaml").exists()
         assert result.file is not None
-        assert result.file.file_size_bytes == src.stat().st_size
+        assert result.file.state == ArtifactState.COMPLETE
+        assert result.file.payload.file_size_bytes == src.stat().st_size
 
     def test_mismatch_with_force_logs_warning(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

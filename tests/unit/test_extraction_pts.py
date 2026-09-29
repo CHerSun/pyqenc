@@ -88,7 +88,7 @@ def _make_extraction_phase(
         outcome    = PhaseOutcome.COMPLETED,
         artifacts  = [Artifact(payload=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message    = "job complete",
-        file       = File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64),
+        file       = Artifact(payload=File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64), state=ArtifactState.COMPLETE),
         force_wipe = force_wipe,
         config     = config,
         work_dir   = work_dir,

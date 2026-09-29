@@ -612,7 +612,7 @@ class MergePhase(Phase):
         probe_result = cast(ProbePhaseResult, self._dep(ProbePhase).result)
         if probe_result is not None:
             probe = ProbeState(
-                frame_count = probe_result.stream.frame_count if probe_result.stream is not None else 0,
+                frame_count = probe_result.stream.payload.frame_count if probe_result.stream is not None else 0,
                 crop        = probe_result.crop,
             )
 
@@ -910,10 +910,10 @@ class MergePhase(Phase):
         probe_result = cast(ProbePhaseResult, self._dep(ProbePhase).result)
         crop: CropParams | None = probe_result.crop if probe_result is not None else None
         source_stream: ExtendedVideoStream | None = (
-            probe_result.stream if probe_result is not None else None
+            probe_result.stream.payload if (probe_result is not None and probe_result.stream is not None) else None
         )
         source_frame_count: int = (
-            probe_result.stream.frame_count
+            probe_result.stream.payload.frame_count
             if (probe_result is not None and probe_result.stream is not None) else 0
         )
         source_stem = job_result.source.stem

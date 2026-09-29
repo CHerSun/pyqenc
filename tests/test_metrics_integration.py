@@ -21,7 +21,8 @@ from pyqenc.models import (
     PhaseOutcome,
     Strategy,
 )
-from pyqenc.phase import Recovery
+from pyqenc.phase import Artifact, Recovery
+from pyqenc.state import ArtifactState
 from pyqenc.stream_model import File
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
@@ -231,7 +232,7 @@ class TestExtractionPhaseTiming:
             artifacts  = [],
             message    = "ok",
             force_wipe = False,
-            file       = File(path=source, file_size_bytes=64),
+            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         )
         result.source   = source                          # type: ignore[attr-defined]
         result.work_dir = source.parent / "work"          # type: ignore[attr-defined]
@@ -418,7 +419,7 @@ class TestChunkingPhaseTiming:
             artifacts  = [],
             message    = "ok",
             force_wipe = False,
-            file       = File(path=source, file_size_bytes=64),
+            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         )
         result.source   = source              # type: ignore[attr-defined]
         result.work_dir = tmp_path / "work"   # type: ignore[attr-defined]
@@ -455,7 +456,7 @@ class TestChunkingPhaseTiming:
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = ProbePhaseResult(
             outcome=PhaseOutcome.COMPLETED, artifacts=[], message="ok",
-            stream=stream,
+            stream=Artifact(payload=stream, state=ArtifactState.COMPLETE),
         )
 
         from pyqenc.phases.chunking import ChunkingPhase
@@ -578,7 +579,7 @@ class TestAudioPhaseTiming:
             artifacts  = [],
             message    = "ok",
             force_wipe = False,
-            file       = File(path=source, file_size_bytes=64),
+            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         )
         job_result.source   = source      # type: ignore[attr-defined]
         job_result.work_dir = work_dir    # type: ignore[attr-defined]
@@ -724,7 +725,7 @@ class TestOptimizationPhaseTiming:
             artifacts  = [],
             message    = "ok",
             force_wipe = False,
-            file       = File(path=source, file_size_bytes=64),
+            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         )
         result.source   = source                                       # type: ignore[attr-defined]
         result.work_dir = tmp_path / "work"                            # type: ignore[attr-defined]
@@ -779,7 +780,6 @@ class TestOptimizationPhaseTiming:
         # completed probe result must be present for the reuse path to be reached.
         # The result is a REAL typed result (recovery builds a ProbeState from
         # .source/.crop — bare Mocks would fail pydantic validation).
-        from pyqenc.models import CropParams
         from pyqenc.phases.probe import ProbePhaseResult
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = ProbePhaseResult(
@@ -787,7 +787,6 @@ class TestOptimizationPhaseTiming:
             artifacts = [],
             message   = "probe complete",
             stream    = None,
-            crop      = CropParams(),
         )
 
         chunking_mock = MagicMock(spec=ChunkingPhase)
@@ -819,7 +818,7 @@ class TestOptimizationPhaseTiming:
             test_chunks      = ["chunk_0"],
             strategy_results = [
                 StrategyTestResult(strategy=strategy.display_name(), total_size=1024),
-                StrategyTestResult(strategy=_STRATEGY_H265_AQ.name, total_size=512),
+                StrategyTestResult(strategy=_STRATEGY_H265_AQ.display_name(), total_size=512),
             ],
             tolerance_pct    = 5.0,   # matches AppConfig.encoding.strategy_selection_tolerance default
             selected         = [strategy.display_name()],
@@ -977,7 +976,7 @@ class TestOptimizationPhaseTiming:
             test_chunks      = ["chunk_0"],
             strategy_results = [
                 StrategyTestResult(strategy=strategy.display_name(), total_size=1024),
-                StrategyTestResult(strategy=_STRATEGY_H265_AQ.name, total_size=512),
+                StrategyTestResult(strategy=_STRATEGY_H265_AQ.display_name(), total_size=512),
             ],
             tolerance_pct    = 0.0,
             selected         = [strategy.display_name()],
@@ -1012,7 +1011,7 @@ class TestEncodingPhaseTiming:
             artifacts  = [],
             message    = "ok",
             force_wipe = False,
-            file       = File(path=source, file_size_bytes=64),
+            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         )
         result.source   = source              # type: ignore[attr-defined]
         result.work_dir = tmp_path / "work"   # type: ignore[attr-defined]
@@ -1035,7 +1034,6 @@ class TestEncodingPhaseTiming:
 
     def _make_optimization_result(self, tmp_path: Path) -> OptimizationPhaseResult:
         """Return a minimal complete ``OptimizationPhaseResult`` stub."""
-        from pyqenc.models import PhaseOutcome
         from pyqenc.phases.optimization import OptimizationPhaseResult
         from pyqenc.state import StrategyTestResult
 
@@ -1054,7 +1052,7 @@ class TestEncodingPhaseTiming:
         collector: MagicMock,
     ) -> EncodingPhase:
         """Return an ``EncodingPhase`` with pre-wired job, probe, chunking, and optimization deps."""
-        from pyqenc.models import CropParams, PhaseOutcome
+        from pyqenc.models import PhaseOutcome
         from pyqenc.phases.chunking import ChunkingPhase
         from pyqenc.phases.encoding import EncodingPhase
         from pyqenc.phases.job import JobPhase
@@ -1073,7 +1071,6 @@ class TestEncodingPhaseTiming:
             artifacts = [],
             message   = "ok",
             stream    = None,
-            crop      = CropParams(),
         )
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = probe_result
@@ -1208,7 +1205,7 @@ class TestEncodingPhaseTiming:
         call_update = step_calls[0].kwargs.get("convergence_update")
         assert call_key == MetricKey.ENCODING, f"Wrong key: {call_key}"
         assert isinstance(call_update, ConvergenceUpdate), f"Expected ConvergenceUpdate, got: {call_update}"
-        assert call_update.strategy      == _STRATEGY_SLOW_H265.name, f"Wrong strategy: {call_update.strategy}"
+        assert call_update.strategy      == _STRATEGY_SLOW_H265.display_name(), f"Wrong strategy: {call_update.strategy}"
         assert call_update.attempt_count == 3,                         f"Wrong attempt_count: {call_update.attempt_count}"
 
     def test_step_not_called_for_reused_pairs(self, tmp_path: Path) -> None:
@@ -1301,7 +1298,7 @@ class TestMergePhaseTiming:
             artifacts  = [],
             message    = "ok",
             force_wipe = False,
-            file       = File(path=source, file_size_bytes=64),
+            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         )
         result.source   = source              # type: ignore[attr-defined]
         result.work_dir = tmp_path / "work"   # type: ignore[attr-defined]
@@ -1403,7 +1400,6 @@ class TestMergePhaseTiming:
         audio_mock = MagicMock(spec=AudioPhase)
         audio_mock.result = self._make_audio_result()
 
-        from pyqenc.models import CropParams
         from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = ProbePhaseResult(
@@ -1411,7 +1407,6 @@ class TestMergePhaseTiming:
             artifacts = [],
             message   = "probe complete",
             stream    = None,
-            crop      = CropParams(),
         )
 
         registry: dict[type, object] = {}
@@ -1562,7 +1557,6 @@ class TestMergePhaseTiming:
         audio_mock = MagicMock(spec=AudioPhase)
         audio_mock.result = self._make_audio_result()
 
-        from pyqenc.models import CropParams
         from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = ProbePhaseResult(
@@ -1570,7 +1564,6 @@ class TestMergePhaseTiming:
             artifacts = [],
             message   = "probe complete",
             stream    = None,
-            crop      = CropParams(),
         )
 
         registry: dict[type, object] = {}
