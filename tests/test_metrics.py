@@ -5,7 +5,6 @@ Covers enum membership, protocol conformance, and lifecycle behaviour.
 
 from pyqenc.metrics import MetricKey, NoOpMetricsCollector
 
-
 # ---------------------------------------------------------------------------
 # MetricKey enum membership
 # ---------------------------------------------------------------------------
@@ -94,7 +93,6 @@ import yaml
 from pyqenc.metrics import (
     METRICS_YAML_FILENAME,
     ConvergenceUpdate,
-    MetricKey,
     YamlMetricsCollector,
 )
 
@@ -202,10 +200,8 @@ def test_resume_bad_file_starts_fresh(
 # Task 9.8 — Phase constructor collector injection
 # ---------------------------------------------------------------------------
 
-from unittest.mock import MagicMock
 
 from pyqenc.app_config import AppConfig, load_app_config
-from pyqenc.metrics import NoOpMetricsCollector
 
 
 def _make_app_config() -> AppConfig:
@@ -215,8 +211,8 @@ def _make_app_config() -> AppConfig:
 
 def test_job_phase_stores_collector(tmp_path: Path) -> None:
     """JobPhase must store the injected collector as self._collector."""
-    from pyqenc.phases.job import JobPhase
     from pyqenc.models import CleanupLevel
+    from pyqenc.phases.job import JobPhase
     config    = _make_app_config()
     collector = NoOpMetricsCollector()
     source    = tmp_path / "source.mkv"

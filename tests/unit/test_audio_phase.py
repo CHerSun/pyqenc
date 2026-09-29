@@ -4,7 +4,7 @@ Each test names the concrete bug it guards against and asserts observable
 behaviour — which output files exist on disk and which artifacts the phase
 result reports — never internal loop state. A **fake** ``execute_chain``
 replaces the real chain executor so no ffmpeg runs; it writes a placeholder byte
-to the deterministic ``<stem> chain=<name>.<ext>`` output so completion (read
+to the deterministic ``<stream safe name> chain=<name>.<ext>`` output so completion (read
 from disk) behaves exactly as production.
 
 Bugs guarded:
@@ -32,16 +32,17 @@ from pyqenc.app_config import AudioConfig, ChainSpec, FilterInstance, SelectEntr
 from pyqenc.audio.chain import ResolvedChain, chain_output_path
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import AUDIO_OUTPUT_DIR
-from pyqenc.models import AudioMetadata, PhaseOutcome
+from pyqenc.models import PhaseOutcome
 from pyqenc.state import AudioSidecar
+from pyqenc.stream_model import AudioStream, AudioStreamInfo, File
 from pyqenc.utils.long_path import LongPath
 
 _AUDIO_YAML = "audio.yaml"
 
 
-def _audio_out(tmp_path: Path, name: str) -> LongPath:
-    """Expected output path in the phase's DEDICATED audio dir (``work_dir/audio``)."""
-    return LongPath(tmp_path) / AUDIO_OUTPUT_DIR / name
+def _chain_out(tmp_path: Path, track: AudioStream, chain: str, ext: str = "flac") -> LongPath:
+    """Expected chain-output path for *track* — the phase's deterministic name."""
+    return chain_output_path(track, chain, ext, LongPath(tmp_path) / AUDIO_OUTPUT_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -65,22 +66,30 @@ def _audio_config(chains: list[ChainSpec], select: list[SelectEntry] | None = No
     return AudioConfig(filters=palette, chains=chains, select=select or [])
 
 
-def _track(tmp_path: Path, stem: str, *, language: str = "eng", layout: str = "5.1") -> AudioMetadata:
-    """Create a real source-track file and its ``AudioMetadata``.
+def _track(tmp_path: Path, stem: str, *, track_id: int = 1, language: str = "eng", layout: str = "5.1") -> AudioStream:
+    """Create a real source file and its ``AudioStream``.
 
-    The file must exist so the source stem is real; the chain output is written
+    The file must exist so the source is real; the chain output is written
     by the fake executor into the phase's dedicated ``work_dir/audio`` dir.
+    ``track_id`` disambiguates multi-track fixtures — the chain output name is
+    derived from the stream's safe name, not the source stem.
     """
-    src = LongPath(tmp_path) / f"{stem}.mka"
+    src = LongPath(tmp_path) / f"{stem}.mkv"
     src.write_bytes(b"\x00" * 16)
-    return AudioMetadata(path=src, language=language, layout=ChannelLayout.parse(layout))
+    return AudioStream(
+        file = File(path=src, file_size_bytes=16),
+        info = AudioStreamInfo(
+            track_id=track_id, codec_name="flac", language=language,
+            layout=ChannelLayout.parse(layout),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
 # Phase builder with mocked Job + Extraction dependencies
 # ---------------------------------------------------------------------------
 
-def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioMetadata]) -> object:
+def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioStream]) -> object:
     """Return an ``AudioPhase`` wired to mock Job + Extraction results.
 
     ``work_dir`` is ``tmp_path`` so chain outputs land in the phase's dedicated
@@ -101,7 +110,7 @@ def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioMetadata]
     job_mock.result = job_result
 
     extraction_result = MagicMock()
-    extraction_result.audio = tracks
+    extraction_result.audio_streams = tracks
 
     extraction_mock = MagicMock()
     extraction_mock.result = extraction_result
@@ -128,15 +137,14 @@ def _fake_execute_chain_factory(record: list[tuple[str, str]]):
     """
     async def _fake(
         resolved:   ResolvedChain,
-        source:     LongPath,
-        layout:     ChannelLayout,
+        stream:     AudioStream,
         output_dir: LongPath,
         **_kw,
     ) -> LongPath:
-        out = chain_output_path(source, resolved.name, resolved.encode.extension, output_dir)
+        out = chain_output_path(stream, resolved.name, resolved.encode.extension, output_dir)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"\x00")
-        record.append((resolved.name, source.stem))
+        record.append((resolved.name, stream.file.path.stem))
         return out
     return _fake
 
@@ -149,7 +157,7 @@ class TestProduceAndReuse:
     def test_produces_one_output_per_track_per_chain(self, tmp_path: Path) -> None:
         """Bug: a chain must produce exactly one output per selected track."""
         config = _audio_config([ChainSpec(name="normal", filters=["peaknorm"])])
-        tracks = [_track(tmp_path, "t1"), _track(tmp_path, "t2")]
+        tracks = [_track(tmp_path, "t1", track_id=1), _track(tmp_path, "t2", track_id=2)]
         phase  = _make_phase(tmp_path, config, tracks)
 
         record: list[tuple[str, str]] = []
@@ -158,8 +166,11 @@ class TestProduceAndReuse:
 
         assert result.outcome == PhaseOutcome.COMPLETED
         assert sorted(record) == [("normal", "t1"), ("normal", "t2")]
-        assert _audio_out(tmp_path, "t1 chain=normal.flac").exists()
-        assert _audio_out(tmp_path, "t2 chain=normal.flac").exists()
+        assert _chain_out(tmp_path, tracks[0], "normal").exists()
+        assert _chain_out(tmp_path, tracks[1], "normal").exists()
+        # Bug guarded: each track's output carries its OWN stream name —
+        # identical names across tracks silently overwrite each other.
+        assert _chain_out(tmp_path, tracks[0], "normal") != _chain_out(tmp_path, tracks[1], "normal")
 
     def test_unchanged_chain_is_reused_not_reprocessed(self, tmp_path: Path) -> None:
         """Bug: an unchanged chain with its output present must NOT be re-run."""
@@ -189,15 +200,15 @@ class TestInvalidation:
 
         The reprocess must cover every selected track, not just one.
         """
-        tracks = [_track(tmp_path, "t1"), _track(tmp_path, "t2")]
+        tracks = [_track(tmp_path, "t1", track_id=1), _track(tmp_path, "t2", track_id=2)]
 
         # First run with peaknorm(target=-1.0).
         cfg_v1 = _audio_config([ChainSpec(name="norm", filters=["peaknorm"])])
         phase1 = _make_phase(tmp_path, cfg_v1, tracks)
         with patch("pyqenc.phases.audio.execute_chain", _fake_execute_chain_factory([])):
             phase1.run()
-        out1 = _audio_out(tmp_path, "t1 chain=norm.flac")
-        out2 = _audio_out(tmp_path, "t2 chain=norm.flac")
+        out1 = _chain_out(tmp_path, tracks[0], "norm")
+        out2 = _chain_out(tmp_path, tracks[1], "norm")
         assert out1.exists() and out2.exists()
 
         # Second run: the chain now references a DIFFERENT peaknorm (target=-2.0).
@@ -221,8 +232,8 @@ class TestInvalidation:
         phase1 = _make_phase(tmp_path, cfg_v1, tracks)
         with patch("pyqenc.phases.audio.execute_chain", _fake_execute_chain_factory([])):
             phase1.run()
-        drop_out = _audio_out(tmp_path, "t1 chain=drop.flac")
-        keep_out = _audio_out(tmp_path, "t1 chain=keep.flac")
+        drop_out = _chain_out(tmp_path, tracks[0], "drop")
+        keep_out = _chain_out(tmp_path, tracks[0], "keep")
         assert drop_out.exists() and keep_out.exists()
 
         # Second run: 'drop' is gone from config.
@@ -245,7 +256,7 @@ class TestInvalidation:
         phase1 = _make_phase(tmp_path, cfg_v1, tracks)
         with patch("pyqenc.phases.audio.execute_chain", _fake_execute_chain_factory([])):
             phase1.run()
-        nightlong_out = _audio_out(tmp_path, "t1 chain=nightlong.flac")
+        nightlong_out = _chain_out(tmp_path, tracks[0], "nightlong")
         assert nightlong_out.exists()
 
         # Change ONLY 'night' (different peaknorm). 'nightlong' is unchanged.
@@ -265,8 +276,8 @@ class TestInvalidation:
 class TestSelection:
     def test_selection_recomputed_picks_right_tracks(self, tmp_path: Path) -> None:
         """Bug: selection must be recomputed each run and drive which tracks process."""
-        eng = _track(tmp_path, "t_eng", language="eng")
-        rus = _track(tmp_path, "t_rus", language="rus")
+        eng = _track(tmp_path, "t_eng", track_id=1, language="eng")
+        rus = _track(tmp_path, "t_rus", track_id=2, language="rus")
         config = _audio_config(
             [ChainSpec(name="normal", filters=["peaknorm"])],
             select=[SelectEntry.model_validate({"for": "lang=eng"})],
@@ -278,7 +289,7 @@ class TestSelection:
             phase.run()
 
         assert record == [("normal", "t_eng")]                    # only eng selected
-        assert not _audio_out(tmp_path, "t_rus chain=normal.flac").exists()
+        assert not _chain_out(tmp_path, rus, "normal").exists()
 
 
 class TestResumability:
@@ -303,7 +314,7 @@ class TestResumability:
         # Sidecar was committed in _recover, BEFORE the crashing production.
         sidecar = AudioSidecar.load(LongPath(tmp_path) / _AUDIO_YAML)
         assert sidecar is not None
-        assert "normal" in sidecar.signatures
+        assert "normal" in sidecar.chains
 
 
 class TestPassthrough:
@@ -319,4 +330,4 @@ class TestPassthrough:
         result = phase.run()
 
         assert result.outcome == PhaseOutcome.FAILED
-        assert not _audio_out(tmp_path, "t1 chain=copy.flac").exists()
+        assert not _chain_out(tmp_path, tracks[0], "copy").exists()

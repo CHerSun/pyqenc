@@ -1,16 +1,20 @@
-"""ProbePhase — resolves crop parameters and source frame count after extraction.
+"""ProbePhase — resolves the slow video facet (frame count, crop) after extraction.
 
-This phase sits between ``ExtractionPhase`` and ``ChunkingPhase`` in the pipeline
-and owns the two slow video-only operations:
+This phase sits between ``ExtractionPhase`` and ``ChunkingPhase`` in the
+pipeline and owns the two slow video-only operations:
 
-1. **Crop detection** — samples the extracted video file to find black borders.
-2. **Frame count probing** — runs a null-encode on the source file to count frames.
+1. **Frame count** — read primarily from the total line count of the
+   extracted ``timestamps.txt`` (exact per-frame PTS list, free); falls back
+   to a null-count ffmpeg pass when the file is absent/unreadable.
+2. **Crop detection** — samples the source (through the video stream's own
+   selector) to find black borders; failure falls back to an empty crop with
+   a warning.
 
 Both operations are skipped for audio-only runs because ``ProbePhase`` is not
-inserted into the audio registry.  When no video was extracted, ``ProbePhase``
-returns ``FAILED`` which cascades to all downstream video phases.
-
-Results are persisted in ``probe.yaml`` so subsequent runs skip re-probing.
+inserted into the audio registry.  The phase is the sole producer/owner of
+:class:`~pyqenc.stream_model.ExtendedVideoStream` — the type every
+downstream video phase consumes.  The facet persists in ``probe.yaml`` so
+subsequent runs skip re-probing.
 """
 # CHerSun 2026
 
@@ -24,9 +28,7 @@ from pyqenc.constants import TEMP_SUFFIX, THICK_LINE
 from pyqenc.metrics import MetricKey
 from pyqenc.models import (
     CropParams,
-    ExtendedVideoMetadata,
     PhaseOutcome,
-    VideoMetadata,
 )
 from pyqenc.phase import (
     Artifact,
@@ -39,11 +41,13 @@ from pyqenc.phase import (
 from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.state import ProbeState
+from pyqenc.stream_model import ExtendedVideoStream, VideoStream
+from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
+from pyqenc.utils.timestamps import count_frames
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
-    from pyqenc.phases.job import JobPhaseResult
 
 logger = logging.getLogger(__name__)
 
@@ -59,14 +63,15 @@ class ProbePhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying probe-specific payload.
 
     Attributes:
-        source: Source video with guaranteed frame count; ``None`` when no
-                video was extracted and ``ProbePhase`` returned ``FAILED``.
-        crop:   Resolved crop parameters; all-zero when no cropping is needed
-                or when ``ProbePhase`` returned ``FAILED``.
+        stream: The source's extended video stream (fast facet + frame count
+                + crop); ``None`` when no video stream exists and
+                ``ProbePhase`` returned ``FAILED``.
+        crop:   Resolved crop parameters (mirror of ``stream.crop`` for
+                convenience); all-zero when no cropping is needed.
     """
 
-    source: ExtendedVideoMetadata | None = field(default=None)
-    crop:   CropParams                   = field(default_factory=CropParams)
+    stream: ExtendedVideoStream | None = field(default=None)
+    crop:   CropParams                 = field(default_factory=CropParams)
 
 
 # ---------------------------------------------------------------------------
@@ -74,24 +79,26 @@ class ProbePhaseResult(PhaseResult):
 # ---------------------------------------------------------------------------
 
 class ProbePhase(Phase):
-    """Phase object that resolves crop parameters and source frame count.
+    """Phase object that resolves crop parameters and the source frame count.
 
     Depends on ``JobPhase`` and ``ExtractionPhase``.  Returns ``FAILED`` when
-    no video was extracted, which cascades to all downstream video phases via
-    their ``_ensure_dependencies()`` mechanism.
+    the source has no video stream, which cascades to all downstream video
+    phases via their ``_ensure_dependencies()`` mechanism.
 
-    Results are written to ``probe.yaml`` after a successful run so subsequent
-    runs can skip re-probing. ``probe.yaml`` is phase STATE, not an artifact:
-    the result carries no artifacts and ``pending`` comes from the sidecar's
-    currency (absent, or invalidated by a manual ``--crop`` override). The
-    phase emits no banner — it logs a concise INFO line when the slow probe
-    starts and a result line with the probed (or cached) details.
+    The facet is written to ``probe.yaml`` after a successful run so
+    subsequent runs skip re-probing. ``probe.yaml`` is phase STATE, not an
+    artifact: the result carries no artifacts and ``pending`` comes from the
+    sidecar's currency (absent, or invalidated by a manual ``--crop``
+    override). The phase emits no banner — it logs a concise INFO line when
+    the slow probe starts and a result line with the probed (or cached)
+    details.
 
     Args:
         config:      Full validated application configuration.
         phases:      Phase registry; used to resolve typed dependency references.
-        collector:   Metrics collector; recovery and probe work are timed under
-                     ``probe`` / ``probe.crop_detect`` / ``probe.frame_count``.
+        collector:   Metrics collector for timing instrumentation; recovery and
+                     probe work are timed under ``probe`` /
+                     ``probe.crop_detect`` / ``probe.frame_count``.
         crop_params: Optional manual ``--crop`` override forwarded from the CLI.
                      When ``not None`` it invalidates the cached sidecar (cheap
                      rewrite reusing the cached frame count).
@@ -114,11 +121,11 @@ class ProbePhase(Phase):
 
         self._crop_params: CropParams | None = crop_params
 
-        # Recovery stash — the loaded probe.yaml state and the resolved payload
-        # (source / crop) for result construction.
-        self._probe_state:     ProbeState | None           = None
-        self._resolved_source: ExtendedVideoMetadata | None = None
-        self._resolved_crop:   CropParams                  = CropParams()
+        # Recovery stash — the loaded probe.yaml state, the extraction stream
+        # and the resolved payload for result construction.
+        self._probe_state:     ProbeState | None          = None
+        self._video_stream:    VideoStream | None          = None
+        self._resolved:        ExtendedVideoStream | None  = None
 
     # ------------------------------------------------------------------
     # Phase hooks
@@ -129,8 +136,8 @@ class ProbePhase(Phase):
 
         Steps:
 
-        1. Fail fast when no video was extracted — a fatal invalidation for
-           every downstream video phase.
+        1. Fail fast when the source has no video stream — a fatal
+           invalidation for every downstream video phase.
         2. Remove a leftover ``probe.yaml.tmp`` from an interrupted write.
         3. Load ``probe.yaml``. Pending when absent (full probe needed) or
            when a manual ``--crop`` override invalidates the cached crop
@@ -143,17 +150,18 @@ class ProbePhase(Phase):
             not an artifact; the loaded state is stashed on ``self._probe_state``.
 
         Raises:
-            RecoveryError: When extraction produced no video track.
+            RecoveryError: When the source has no video stream.
         """
         job_result        = self._dep(JobPhase).result        # type: ignore[union-attr]
         extraction_result = self._dep(ExtractionPhase).result # type: ignore[union-attr]
         probe_yaml        = job_result.work_dir / _PROBE_YAML_NAME  # type: ignore[operator]
 
-        # Step 1 — no video extracted: fatal for all downstream video phases.
-        if extraction_result.video is None:  # type: ignore[union-attr]
+        # Step 1 — no video stream: fatal for all downstream video phases.
+        if extraction_result.video_stream is None:  # type: ignore[union-attr]
             raise RecoveryError(
-                "No video tracks extracted — video processing cannot continue"
+                "No video stream in the source — video processing cannot continue"
             )
+        self._video_stream = extraction_result.video_stream  # type: ignore[union-attr]
 
         # Step 2 — .tmp pre-clean (probe.yaml is written via .tmp-then-rename).
         tmp = probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX)
@@ -180,8 +188,8 @@ class ProbePhase(Phase):
         The slow operations are individually timed under the dotted keys
         ``probe.crop_detect`` and ``probe.frame_count`` (the top-level
         ``probe`` span belongs to the template). Cache hits skip the slow
-        operation entirely. ``dry_run`` is never ``True`` here (probe is not a
-        readonly-execute phase; the template previews instead).
+        operation entirely. ``dry_run`` is never ``True`` here (probe is not
+        a readonly-execute phase; the template previews instead).
 
         Args:
             wanted:  Always empty (probe.yaml is state, not artifacts).
@@ -192,16 +200,13 @@ class ProbePhase(Phase):
         """
         from pyqenc.utils.crop import detect_crop_parameters
 
-        job_result        = self._dep(JobPhase).result         # type: ignore[union-attr]
-        extraction_result = self._dep(ExtractionPhase).result  # type: ignore[union-attr]
-        probe_yaml        = job_result.work_dir / _PROBE_YAML_NAME  # type: ignore[operator]
-        probe_state       = self._probe_state
-        extracted_vm      = extraction_result.video   # type: ignore[union-attr]
+        job_result  = self._dep(JobPhase).result         # type: ignore[union-attr]
+        probe_yaml  = job_result.work_dir / _PROBE_YAML_NAME  # type: ignore[operator]
+        probe_state = self._probe_state
+        video       = self._video_stream
+        assert video is not None  # recovery guarantees a video stream
 
-        needs_crop_detect = (
-            self._crop_params is None
-            and (probe_state is None or probe_state.crop is None)
-        )
+        needs_crop_detect = self._crop_params is None and probe_state is None
         needs_frame_probe = probe_state is None or probe_state.frame_count <= 0
         if needs_crop_detect or needs_frame_probe:
             logger.info(
@@ -210,35 +215,31 @@ class ProbePhase(Phase):
                 " + frame count" if needs_frame_probe else "",
             )
 
-        # Resolve crop: manual → cached → auto-detect (timed when slow).
         if self._crop_params is not None:
             crop = self._crop_params
             logger.info("Crop: %s (manual)", crop.display())
-        elif probe_state is not None and probe_state.crop is not None:
+        elif probe_state is not None:
             crop = probe_state.crop
             logger.info("Crop: %s (cached)", crop.display())
         else:
-            logger.info("Detecting crop: %s", extracted_vm.path.name)
+            logger.info("Detecting crop: %s", video.file.path.name)
             with self._collector.time(MetricKey.PROBE, "crop_detect"):
-                crop = detect_crop_parameters(extracted_vm)
+                crop = detect_crop_parameters(video)
 
-        # Resolve frame count: cached → slow null-encode probe (timed).
-        source_vm = self._get_source_vm(job_result)
+        # Resolve frame count: cached → timestamps.txt count → null-count pass.
         if probe_state is not None and probe_state.frame_count > 0:
-            frame_count        = probe_state.frame_count
-            extended_vm        = ExtendedVideoMetadata.from_base(
-                source_vm, frame_count=frame_count
-            )
+            frame_count = probe_state.frame_count
             logger.debug("Frame count: %d (cached)", frame_count)
         else:
-            with self._collector.time(MetricKey.PROBE, "frame_count"):
-                extended_vm = source_vm.probe_extended()
-            frame_count = extended_vm.frame_count
+            frame_count = self._count_source_frames()
 
         # Persist and stash the payload.
         ProbeState(frame_count=frame_count, crop=crop).save(probe_yaml)
-        self._resolved_source = extended_vm
-        self._resolved_crop   = crop
+        self._resolved = ExtendedVideoStream(
+            stream      = video,
+            frame_count = frame_count,
+            crop        = crop,
+        )
 
         logger.info(
             "Probe: done — frame_count=%d, crop=%s",
@@ -249,13 +250,14 @@ class ProbePhase(Phase):
     def _reused_result(self, wanted: list[Artifact], message: str) -> ProbePhaseResult:
         """Build the reused result from the cached ``probe.yaml`` state."""
         state = self._probe_state
+        video = self._video_stream
         assert state is not None  # current currency implies a loaded state
-        source_vm   = self._get_source_vm(self._dep(JobPhase).result)  # type: ignore[union-attr]
-        extended_vm = ExtendedVideoMetadata.from_base(
-            source_vm, frame_count=state.frame_count
+        assert video is not None  # recovery guarantees a video stream
+        self._resolved = ExtendedVideoStream(
+            stream      = video,
+            frame_count = state.frame_count,
+            crop        = state.crop,
         )
-        self._resolved_source = extended_vm
-        self._resolved_crop   = state.crop if state.crop is not None else CropParams()
         logger.info("Probe: all values cached — reusing probe.yaml")
         logger.info(THICK_LINE)
         return self._make_result(PhaseOutcome.REUSED, [], "probe.yaml reused")
@@ -271,38 +273,53 @@ class ProbePhase(Phase):
 
         Args:
             outcome:   The phase outcome.
-            artifacts: Always empty (probe.yaml is state, not artifacts).
+            artifacts: Always empty (probe.yaml is state, not an artifact).
             message:   Human-readable summary.
             error:     Error description when ``outcome`` is ``FAILED``.
 
         Returns:
-            The populated result (``source``/``crop`` default to ``None`` /
-            all-zero on non-complete paths).
+            The populated result (``stream`` defaults to ``None`` on
+            non-complete paths).
         """
         return ProbePhaseResult(
             outcome   = outcome,
             artifacts = artifacts,
             message   = message,
             error     = error,
-            source    = self._resolved_source,
-            crop      = self._resolved_crop,
+            stream    = self._resolved,
+            crop      = self._resolved.crop if self._resolved is not None else CropParams(),
         )
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _get_source_vm(self, job_result: JobPhaseResult) -> VideoMetadata:
+    def _count_source_frames(self) -> int:
+        """The source frame count: timestamps.txt count, null-count fallback.
 
-        """Return the source ``VideoMetadata`` from job state, or a bare instance.
-
-        Args:
-            job_result: Completed ``JobPhaseResult``.
-
-        Returns:
-            Source ``VideoMetadata`` with any cached fast-probe fields.
+        The timestamps total is exact and free; when the file is unavailable
+        the null-count pass runs (timed under ``probe.frame_count``). Zero —
+        the unknown sentinel — only when both paths fail.
         """
-        if job_result.job is not None:
-            return job_result.job.source
-        # Fallback: construct bare instance from the source path
-        return VideoMetadata(path=job_result.source)  # type: ignore[arg-type]
+        video = self._video_stream
+        assert video is not None
+        timestamps_path = self._dep(ExtractionPhase).result.timestamps_path  # type: ignore[union-attr]
+
+        if timestamps_path is not None:
+            counted = count_frames(timestamps_path)
+            if counted is not None and counted > 0:
+                logger.debug("Frame count: %d (timestamps.txt)", counted)
+                return counted
+            logger.warning(
+                "Frame count not derivable from %s — falling back to a null-count pass",
+                timestamps_path,
+            )
+
+        with self._collector.time(MetricKey.PROBE, "frame_count"):
+            try:
+                counted = get_frame_count(video.file.path)
+            except FrameCountError as exc:
+                logger.error("Could not determine source frame count: %s", exc)
+                return 0
+        logger.debug("Frame count: %d (null-count pass)", counted)
+        return counted

@@ -4,13 +4,12 @@ from fractions import Fraction
 from pathlib import Path
 
 import pytest
+
 from pyqenc.models import (
     CodecConfig,
     CropParams,
-    ExtendedVideoMetadata,
     QualityTarget,
     Strategy,
-    VideoMetadata,
 )
 
 
@@ -108,105 +107,6 @@ class TestCropParams:
         assert str(crop) == "140,140,10,10"
 
 
-class TestExtendedVideoMetadataFromBase:
-    """Tests for ExtendedVideoMetadata.from_base()."""
-
-    def _make_populated_meta(self) -> VideoMetadata:
-        """Return a VideoMetadata with all private fields populated."""
-        meta = VideoMetadata(path=Path("/fake/source.mkv"))
-        meta._duration_seconds = 5400.0
-        meta._fps              = 24.0
-        meta._fps_fraction     = Fraction(24, 1)
-        meta._resolution       = "1920x1080"
-        meta._pix_fmt          = "yuv420p10le"
-        meta._file_size_bytes  = 12_345_678
-        return meta
-
-    def test_returns_extended_video_metadata_type(self):
-        """from_base() must return an ExtendedVideoMetadata instance, not a plain VideoMetadata.
-
-        Bug: if from_base() returned the wrong type, downstream frame_count accesses would fail.
-        """
-        meta = self._make_populated_meta()
-        extended = ExtendedVideoMetadata.from_base(meta, frame_count=1440)
-        assert isinstance(extended, ExtendedVideoMetadata)
-
-    def test_frame_count_set_correctly(self):
-        """from_base() must set frame_count to the supplied value.
-
-        Bug: frame_count could be silently zeroed or omitted if from_base()
-        didn't pass it through model_validate_full correctly.
-        """
-        meta = self._make_populated_meta()
-        extended = ExtendedVideoMetadata.from_base(meta, frame_count=1440)
-        assert extended.frame_count == 1440
-
-    def test_frame_count_zero_sentinel(self):
-        """from_base() with frame_count=0 must store 0 as the 'unknown' sentinel.
-
-        Bug: a 0 sentinel could be overwritten by a default value or guard clause.
-        """
-        meta = self._make_populated_meta()
-        extended = ExtendedVideoMetadata.from_base(meta, frame_count=0)
-        assert extended.frame_count == 0
-
-    def test_all_cached_private_fields_copied(self):
-        """from_base() must copy all cached private fields from the base VideoMetadata.
-
-        Bug: if from_base() didn't transfer private attrs, properties would
-        re-trigger lazy probes and potentially lose data.
-        """
-        meta = self._make_populated_meta()
-        extended = ExtendedVideoMetadata.from_base(meta, frame_count=1440)
-
-        assert extended._duration_seconds == pytest.approx(5400.0)
-        assert extended._fps              == pytest.approx(24.0)
-        assert extended._fps_fraction     == Fraction(24, 1)
-        assert extended._resolution       == "1920x1080"
-        assert extended._pix_fmt          == "yuv420p10le"
-        assert extended._file_size_bytes  == 12_345_678
-
-    def test_path_preserved(self):
-        """from_base() must preserve the source path.
-
-        Bug: path could be lost during model_dump_full/model_validate_full round-trip.
-        """
-        meta = self._make_populated_meta()
-        extended = ExtendedVideoMetadata.from_base(meta, frame_count=100)
-        assert extended.path == Path("/fake/source.mkv")
-
-    def test_no_probe_triggered_on_property_access(self):
-        """Properties on the returned ExtendedVideoMetadata must not re-probe.
-
-        Bug: if private fields weren't transferred, any property access would
-        trigger a real ffprobe subprocess call.
-        """
-        from unittest.mock import patch
-
-        meta = self._make_populated_meta()
-        extended = ExtendedVideoMetadata.from_base(meta, frame_count=1440)
-
-        with patch.object(extended, "_probe_metadata") as mock_probe:
-            _ = extended.duration_seconds
-            _ = extended.fps
-            _ = extended.resolution
-            assert mock_probe.call_count == 0
-
-    def test_uncached_base_fields_remain_none(self):
-        """from_base() with a bare VideoMetadata transfers only what was cached.
-
-        Bug: uncached fields should stay None; they shouldn't be fabricated.
-        """
-        meta = VideoMetadata(path=Path("/fake/source.mkv"))
-        # Don't populate anything
-        extended = ExtendedVideoMetadata.from_base(meta, frame_count=42)
-
-        assert extended._duration_seconds is None
-        assert extended._fps              is None
-        assert extended._resolution       is None
-        assert extended.frame_count       == 42
-
-
 class TestStrategy:
     """Tests for Strategy FFmpeg argument generation."""
 
@@ -217,8 +117,8 @@ class TestStrategy:
             default_quality = 20.0,
             default_preset  = "slow",
             quality_range   = (0.0, 51.0),
+            pre_input_args  = [],
             encoder_args    = [
-                "-i", "{input}",
                 "-c:v", "libx265",
                 "-preset", "{preset}",
                 "-crf", "{quality}",
@@ -237,9 +137,8 @@ class TestStrategy:
         )
 
         # Without crop — -vf and {vf} both dropped
-        args = strategy.to_ffmpeg_args(18.5)
+        args = strategy.to_output_args(18.5)
         assert args == [
-            "-i", "{input}",
             "-c:v", "libx265",
             "-preset", "slow",
             "-crf", "18.5",
@@ -248,9 +147,8 @@ class TestStrategy:
         ]
 
         # With crop — -vf kept, {vf} replaced with filter
-        args_crop = strategy.to_ffmpeg_args(18.5, vf_filter="crop=1920:800:0:140")
+        args_crop = strategy.to_output_args(18.5, vf_filter="crop=1920:800:0:140")
         assert args_crop == [
-            "-i", "{input}",
             "-c:v", "libx265",
             "-preset", "slow",
             "-crf", "18.5",
@@ -267,9 +165,8 @@ class TestStrategy:
             default_preset  = "p7",
             quality_range   = (1.0, 51.0),
             quality_label   = "CQ",
+            pre_input_args  = ["-hwaccel", "cuda"],
             encoder_args    = [
-                "-hwaccel", "cuda",
-                "-i", "{input}",
                 "-c:v", "hevc_nvenc",
                 "-cq:v", "{quality}",
                 "-vf", "scale_cuda=format=p010le:{vf}",
@@ -281,11 +178,11 @@ class TestStrategy:
         strategy = Strategy(preset="p7", profile="hevc-nvenc-hq", codec=codec, profile_args=["-tune:v", "hq"])
 
         # Without crop — trailing : left in place (ffmpeg tolerates it)
-        args = strategy.to_ffmpeg_args(28.0)
+        args = strategy.to_output_args(28.0)
         vf_idx = args.index("-vf")
         assert args[vf_idx + 1] == "scale_cuda=format=p010le:"
 
         # With crop — filter appended after the colon
-        args_crop = strategy.to_ffmpeg_args(28.0, vf_filter="crop=1920:800:0:140")
+        args_crop = strategy.to_output_args(28.0, vf_filter="crop=1920:800:0:140")
         vf_idx = args_crop.index("-vf")
         assert args_crop[vf_idx + 1] == "scale_cuda=format=p010le:crop=1920:800:0:140"

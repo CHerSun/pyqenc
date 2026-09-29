@@ -17,22 +17,11 @@ TEMP_SUFFIX = ".tmp"
 """A suffix to append to temporary files during processing. This helps avoid confusion with final output files and allows for easy cleanup of incomplete files."""
 
 # Disk space estimation constants
-OVERHEAD_EXTRACTION_AND_AUDIO = 3.5
-"""Multiplier for the source video size to account for extraction and audio processing overhead.
-Covers the extracted video stream (~1x source) plus intermediate FLAC files from normalization
-of typically 2 surround audio tracks with multiple normalization variants (~2.5x source).
-Audio is the dominant component for multi-track releases."""
-OVERHEAD_CHUNKING_REMUX = 1.0
-"""Multiplier for the source video size to account for overhead from remuxing (stream-copying). This is typically close to the original source video size."""
 OVERHEAD_TIGHT_MARGIN = 1.2
 """Multiplier applied to the max estimated space to derive the recommended space threshold.
 A 20% buffer on top of the upper-bound estimate."""
 
-# Pixel-based space estimation constants (used when VideoMetadata is available)
-BYTES_PER_PIXEL_FFV1 = 0.30
-"""Estimated bytes per pixel for FFV1 lossless all-intra chunks. FFV1 achieves roughly 5x compression
-over uncompressed YUV420 (1.5 bytes/pixel), giving ~0.30 bytes/pixel. Measured at ~0.24 B/px on
-typical movie content; 0.30 adds a conservative safety margin. Tune if estimates diverge."""
+# Pixel-based space estimation constants
 BITS_PER_PIXEL_ENCODED = 0.10
 """Estimated bits per pixel for encoded video output (attempts, final). Covers a wide range of
 content at typical quality targets. Tune this constant if estimates are consistently off."""
@@ -40,13 +29,10 @@ AVG_ATTEMPTS_PER_CHUNK = 5.5
 """Average number of CRF search attempts per chunk per strategy. Used to estimate space consumed
 by intermediate attempt files during the encoding phase."""
 
-# Fallback source-size multipliers (used only when VideoMetadata is unavailable)
-OVERHEAD_CHUNKING_LOSSLESS_FALLBACK = 5.0
-"""Fallback multiplier for FFV1 lossless chunking overhead relative to source size.
-Used only when pixel-based estimation is not possible (no VideoMetadata available)."""
+# Fallback source-size multiplier (used only when stream pixel data is unavailable)
 OVERHEAD_PER_STRATEGY_FALLBACK = 2.5
 """Fallback multiplier per encoding strategy relative to source size.
-Used only when pixel-based estimation is not possible (no VideoMetadata available)."""
+Used only when pixel-based estimation is not possible (no VideoStreamInfo available)."""
 
 # Vertical delimiters
 LINE_WIDTH  = 72
@@ -80,6 +66,8 @@ NEUTRAL_INDICATOR_SYMBOL = "•"
 """Symbol to mark the metric with the least surplus on a passing attempt — the bottleneck constraining CRF search."""
 RANGE_SEPARATOR = "-"
 """Separator used in filename patterns to indicate ranges, such as frame ranges or chunk ranges."""
+TIME_SEPARATOR = ":"
+"""Natural time-component separator for display names; replaced by TIME_SEPARATOR_SAFE on disk."""
 TIME_SEPARATOR_SAFE = "꞉"
 """A visually similar but filesystem-safe separator for time components in filenames, replacing the standard colon (:) which can cause issues on some filesystems."""
 TIME_SEPARATOR_MS = "․"
@@ -107,7 +95,6 @@ RIGHT_ARROW="→"
 # Directory names for phase output
 EXTRACTED_DIR          = "extracted"
 """Output directory for extracted streams (ExtractionPhase)."""
-CHUNKS_DIR             = "chunks"
 """Output directory for video chunks (ChunkingPhase)."""
 ENCODING_WORKSPACE_DIR = "encoding"
 """Working directory for CRF search attempt files (intermediate, per-strategy)."""
@@ -153,9 +140,6 @@ TIMESTAMPS_FILENAME = "timestamps.txt"
 """Filename for the per-frame PTS timestamp file produced by ExtractionPhase."""
 
 # Artifact discovery patterns
-CHUNK_GLOB_PATTERN = "*.mkv"
-"""Glob mask used to discover chunk files in a chunk output directory."""
-
 CHUNK_NAME_PATTERN = re.compile(
     r"^(?:\d{2,}꞉\d{2}꞉\d{2}․\d{3})-(?:\d{2,}꞉\d{2}꞉\d{2}․\d{3})$"
 )
@@ -187,6 +171,24 @@ FFMPEG_ARG_INPUT    = "-i"
 """ffmpeg input-file flag."""
 FFMPEG_ARG_MAP      = "-map"
 """ffmpeg stream-map flag."""
+FFMPEG_ARG_SEEK     = "-ss"
+"""ffmpeg seek flag; input-side (cue-point seek + decode to the exact frame)
+when emitted before ``-i``."""
+FFMPEG_ARG_DURATION = "-t"
+"""ffmpeg duration-limit flag; bound to its input when emitted before ``-i``."""
+FFMPEG_ARG_YES              = "-y"
+"""ffmpeg overwrite-output flag. Injected by the unified runner into every
+request — a stale ``.tmp`` from a crashed run must never hang ffmpeg on a prompt."""
+FFMPEG_ARG_FILTER_COMPLEX   = "-filter_complex"
+"""ffmpeg multi-input filter-graph flag."""
+FFMPEG_ARG_VF               = "-vf"
+"""ffmpeg video-filter-chain flag; its value is a comma-joined filter chain."""
+FFMPEG_ARG_MAP_CHAPTERS     = "-map_chapters"
+"""ffmpeg chapter-mapping flag. The runner injects it into every request with
+``FFMPEG_MAP_CHAPTERS_DISABLED``: chapters copy to the output regardless of
+``-map``, and no ffmpeg output in this pipeline intentionally carries them."""
+FFMPEG_MAP_CHAPTERS_DISABLED = "-1"
+"""``-map_chapters`` value that copies no chapters from the input."""
 FFMPEG_ARG_AF       = "-af"
 """ffmpeg audio-filter-chain flag; its value is a comma-joined filter chain."""
 FFMPEG_ARG_CODEC_A  = "-c:a"
@@ -198,6 +200,17 @@ FFMPEG_ARG_FORMAT   = "-f"
 
 FFMPEG_MAP_FIRST_AUDIO = "0:a:0"
 """Maps the first audio stream of the (single) input — chain sources are single-stream extracts."""
+
+FFMPEG_MAP_FIRST_VIDEO = "0:v:0"
+"""Maps the first video stream of the (single) input — null-count passes."""
+
+FFMPEG_SELECTOR_PREFIX = "0:"
+"""Input-index prefix of a ``-map`` selector built from a track id
+(``0:<track_id>`` — input 0, absolute stream index); consumed by the stream
+model's ``as_input()`` adapter."""
+
+FFMPEG_CODEC_COPY = "copy"
+"""Stream-copy codec token — remux-style extraction and null-count passes."""
 
 FFMPEG_ARG_NO_AUDIO = "-an"
 """ffmpeg flag dropping all audio streams — keeps chain outputs video-only."""
@@ -232,6 +245,9 @@ FFMPEG_MUXER_FLAC     = "flac"
 FFMPEG_MUXER_IPOD     = "ipod"
 """``-f`` muxer for MP4/M4A audio outputs (``.m4a``) — the conventional ffmpeg
 muxer for an ``.m4a`` audio-only container."""
+FFMPEG_MUXER_IMAGE2   = "image2"
+"""``-f`` muxer for single-frame PNG screenshot outputs written through the
+``.tmp`` protocol (the ``.tmp`` extension hides the image container hint)."""
 
 AF_CHAIN_SEPARATOR = ","
 """ffmpeg's audio-filter-chain separator; chain fragments are joined with it."""
@@ -257,6 +273,14 @@ FILENAME_FORBIDDEN_CHARS: frozenset[str] = frozenset('<>:"/\\|?*')
 """Characters forbidden in a chain name because they are unsafe in filenames on
 common filesystems (Windows especially). A chain name containing any of these —
 or any control character (U+0000–U+001F) — is rejected at config load (Req 8.4)."""
+
+FILENAME_CONTROL_CHARS: frozenset[str] = frozenset(chr(code) for code in range(0x20))
+"""Control characters (U+0000–U+001F) — unsafe in filenames alongside
+:data:`FILENAME_FORBIDDEN_CHARS`; shared by every filesystem-name check."""
+
+FILENAME_SANITIZATION_REPLACEMENT = "_"
+"""Replacement character for :func:`pyqenc.utils.naming.sanitize_filesystem_text`
+— media-sourced free text is sanitized by replacement, never rejected (Req 15.2)."""
 
 SELECTOR_KEY_LANG  = "lang"
 """Conventional-string token key for an audio track's language (e.g. ``lang=eng``)."""

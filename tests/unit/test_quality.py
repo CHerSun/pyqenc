@@ -605,7 +605,6 @@ class TestEncodeChunkIntegration:
 
     def test_qualitysearchv2_imported_in_encoding(self) -> None:
         """QualitySearchV3 is importable from pyqenc.phases.encoding (verifies the import exists)."""
-        import importlib
 
         import pyqenc.phases.encoding as enc_mod
 
@@ -1386,3 +1385,118 @@ class TestQualitySearchV3:
                 f'Result {result} is not snapped to granularity {gran}'
             )
             current_q = result
+
+
+# ---------------------------------------------------------------------------
+# run_metrics composed command (golden)
+# ---------------------------------------------------------------------------
+
+class TestRunMetricsCommandGolden:
+    def test_golden_argv(self, tmp_path) -> None:
+        """Bug prevented: the quality call-site conversion drifting from the
+        original hand-built command — per-input ``-t`` windows before each
+        ``-i``, the metric filter graph, null output."""
+        import asyncio
+        from unittest.mock import patch
+
+        from pyqenc.models import CropParams
+        from pyqenc.quality import MetricType, run_metrics
+        from pyqenc.utils.ffmpeg_runner import (
+            _PROGRESS_FLAGS,
+            FFmpegInput,
+            FFmpegRunResult,
+            compose_command,
+        )
+
+        distorted = tmp_path / "enc" / "dist.mkv"
+        reference = tmp_path / "chunks" / "ref.mkv"
+
+        captured: list = []
+
+        async def fake_async(request, **_kwargs):
+            captured.append(request)
+            return FFmpegRunResult(returncode=0, success=True)
+
+        with patch("pyqenc.quality.run_ffmpeg_async", side_effect=fake_async):
+            asyncio.run(
+                run_metrics(
+                    metrics         = {MetricType.PSNR},
+                    distorted       = FFmpegInput(path=distorted),
+                    reference       = FFmpegInput(path=reference, start_seconds=584.917, duration_seconds=116.5),
+                    crop_distorted  = CropParams(),
+                    crop_reference  = CropParams(),
+                    width           = 0,
+                    use_gpu         = False,
+                    subsample       = 1,
+                    output_prefix   = "uuid",
+                )
+            )
+
+        assert len(captured) == 1
+        graph = (
+            "[0:v]crop=iw-0:ih-0:0:0,setpts=N/(FRAME_RATE*TB)[main];"
+            "[1:v]crop=iw-0:ih-0:0:0,setpts=N/(FRAME_RATE*TB)[ref];"
+            "[main][ref]psnr=stats_file=uuidpsnr.log"
+        )
+        argv = [str(a) for a in compose_command(captured[0])]
+        assert argv == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(distorted),
+            "-ss", "584.917", "-t", "116.5", "-i", str(reference),
+            "-filter_complex", graph,
+            "-map_chapters", "-1",
+            "-f", "null", "-",
+        ]
+
+    def test_golden_argv_with_fps(self, tmp_path) -> None:
+        """Bug guarded: the re-timing must substitute the caller-known fps
+        numerically — per-input FRAME_RATE trusts container declarations, and
+        mkvmerge-written finals declare guessed rates (500/21 for 24000/1001),
+        mispairing frames at file scale."""
+        import asyncio
+        from unittest.mock import patch
+
+        from pyqenc.models import CropParams
+        from pyqenc.quality import MetricType, run_metrics
+        from pyqenc.utils.ffmpeg_runner import (
+            _PROGRESS_FLAGS,
+            FFmpegInput,
+            FFmpegRunResult,
+            compose_command,
+        )
+
+        distorted = tmp_path / "enc" / "dist.mkv"
+        reference = tmp_path / "chunks" / "ref.mkv"
+
+        captured: list = []
+
+        async def fake_async(request, **_kwargs):
+            captured.append(request)
+            return FFmpegRunResult(returncode=0, success=True)
+
+        with patch("pyqenc.quality.run_ffmpeg_async", side_effect=fake_async):
+            asyncio.run(
+                run_metrics(
+                    metrics         = {MetricType.PSNR},
+                    distorted       = FFmpegInput(path=distorted),
+                    reference       = FFmpegInput(path=reference),
+                    crop_distorted  = CropParams(),
+                    crop_reference  = CropParams(),
+                    width           = 0,
+                    use_gpu         = False,
+                    subsample       = 1,
+                    output_prefix   = "uuid",
+                    fps             = 24000 / 1001,
+                )
+            )
+
+        graph = "[0:v]crop=iw-0:ih-0:0:0,setpts=N/(23.976023976023978*TB)[main];[1:v]crop=iw-0:ih-0:0:0,setpts=N/(23.976023976023978*TB)[ref];[main][ref]psnr=stats_file=uuidpsnr.log"
+        argv = [str(a) for a in compose_command(captured[0])]
+        assert argv == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(distorted),
+            "-i", str(reference),
+            "-filter_complex", graph,
+            "-map_chapters", "-1",
+            "-f", "null", "-",
+        ]

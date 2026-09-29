@@ -15,15 +15,21 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
+import yaml
+
 from pyqenc.constants import (
+    FFMPEG_ARG_VF,
+    FFMPEG_MUXER_IMAGE2,
     TEMP_SUFFIX,
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
-from pyqenc.models import CropParams, VideoMetadata
+from pyqenc.models import CropParams
 from pyqenc.quality import ChunkQualityStats, MetricType
-from pyqenc.state import JobState, MeasureSidecar
-from pyqenc.utils.ffmpeg_runner import run_ffmpeg_async
+from pyqenc.state import MeasureSidecar
+from pyqenc.stream_model import File, JobSidecar, VideoStream, VideoStreamInfo
+from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg_async
+from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 logger = logging.getLogger(__name__)
@@ -61,7 +67,7 @@ class ScreenshotPositions:
     rational arithmetic via fractions.Fraction to avoid float drift.
     """
     frame_nums: list[int]   # canonical 0-based frame indices
-    fps:        Fraction    # from source VideoMetadata.fps_fraction
+    fps:        Fraction    # exact rational source fps (info.fps_fraction)
     step:       int         # frame step used for A4 fallback
 
     def seek_ts(self, frame_num: int) -> str:
@@ -106,7 +112,7 @@ def compute_screenshot_positions(
 
     Args:
         total_frames:  Total frame count of the source video.
-        fps:           Exact rational FPS from VideoMetadata.fps_fraction.
+        fps:           Exact rational FPS (``VideoStreamInfo.fps_fraction``).
         count:         Number of interior screenshot positions.
         include_edges: When True, also include frame 0 and the last frame.
 
@@ -138,7 +144,7 @@ def compute_screenshot_positions_interval(
     bound of 24 hours is used so ffmpeg naturally stops at EOF.
 
     Args:
-        fps:          Exact rational FPS from VideoMetadata.fps_fraction.
+        fps:          Exact rational FPS (``VideoStreamInfo.fps_fraction``).
         interval_s:   Interval between screenshots in seconds (> 0).
         total_frames: Total frame count of the source video, or None if unknown.
         cap:          Maximum number of positions to return, or None for no cap.
@@ -303,31 +309,57 @@ def _resolve_crop(
         logger.debug("Using explicit crop params: %s", crop_params)
         return crop_params
 
-    # Prefer probe.yaml — crop is now owned by ProbePhase
+    # Prefer probe.yaml — crop is owned by ProbePhase. Loading materializes
+    # an empty CropParams when the key is absent, and an empty crop is a
+    # concrete resolution ("no crop") — never a reason to keep probing.
     from pyqenc.state import ProbeState
     probe = ProbeState.load(work_dir / "probe.yaml")
-    if probe is not None and probe.crop is not None:
+    if probe is not None:
         logger.debug("Loaded crop from probe.yaml: %s", probe.crop)
         return probe.crop
 
     # Fall back: validate source via job.yaml, then give up
     job_yaml = work_dir / "job.yaml"
-    job = JobState.load(job_yaml)
+    job = _load_job_source_path(job_yaml)
 
     if job is None:
         logger.info("No job.yaml found in %s — proceeding without crop", work_dir)
         return CropParams()
 
-    if job.source.path.resolve() != source_video.resolve():
+    if job.resolve() != source_video.resolve():
         logger.info(
             "job.yaml source (%s) does not match source video (%s) — proceeding without crop",
-            job.source.path,
+            job,
             source_video,
         )
         return CropParams()
 
     logger.info("probe.yaml found but contains no crop data — proceeding without crop")
     return CropParams()
+
+
+def _load_job_source_path(job_yaml: Path) -> LongPath | None:
+    """Read the source path recorded in ``job.yaml`` (the File dump).
+
+    Interim reader for the crop fallback's source-identity check; measure
+    adopts the stream-model loaders when its phase migrates.
+
+    Args:
+        job_yaml: The ``job.yaml`` path.
+
+    Returns:
+        The recorded source path, or ``None`` when absent/unparseable.
+    """
+    if not job_yaml.exists():
+        return None
+    try:
+        with job_yaml.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        sidecar = JobSidecar.model_validate(data)
+    except Exception as exc:  # noqa: BLE001 — any parse failure means "no crop"
+        logger.warning("Could not load %s: %s", job_yaml, exc)
+        return None
+    return sidecar.source.path
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +376,8 @@ async def _run_metrics(
     graph_path:       Path,
     subsample_factor: int,
     bar_title:        str,
+    duration_seconds: float,
+    fps_value:        Fraction | None,
 ) -> ChunkQualityStats:
     """Run quality metric computation for one source/target pair.
 
@@ -359,6 +393,8 @@ async def _run_metrics(
         metrics_dir:      Directory for raw metric log files (PSNR/SSIM/VMAF).
         graph_path:       Destination path for the quality metrics PNG plot.
         subsample_factor: Frame subsampling factor (≥1).
+        duration_seconds: The comparison duration (progress/plot extent).
+        fps_value:        Average fps for plot x-axis conversion.
 
     Returns:
         ``ChunkQualityStats`` mapping each ``MetricType`` to its key statistics.
@@ -368,10 +404,12 @@ async def _run_metrics(
     evaluator  = QualityEvaluator(metrics_dir)
     evaluation = await evaluator.evaluate_chunk_async(
         encoded          = target_video,
-        reference        = source_video,
+        reference        = FFmpegInput(path=source_video),
         ref_crop         = crop_params,
         targets          = [],
         output_dir       = metrics_dir,
+        duration_seconds = duration_seconds,
+        fps_value        = fps_value,
         subsample_factor = subsample_factor,
         show_progress    = True,
         plot_path        = graph_path,
@@ -382,15 +420,46 @@ async def _run_metrics(
 
 
 
+def _load_video_stream(path: Path) -> VideoStream:
+    """Load an arbitrary video file as a :class:`VideoStream` (measure loader).
+
+    Composes a :class:`~pyqenc.stream_model.File` with a freshly probed
+    :class:`~pyqenc.stream_model.VideoStreamInfo` (fast facet of the first
+    video stream) — the stream-model replacement for the ad-hoc
+    ``VideoMetadata`` instances this module used to build (deleted in Task 9).
+
+    Args:
+        path: The video file to probe.
+
+    Returns:
+        The video stream; missing ffprobe fields stay ``None``.
+    """
+    from pyqenc.phases.extraction import _probe_streams_json, _video_info
+
+    try:
+        data = _probe_streams_json(path)
+        raw = next(
+            (r for r in data.get("streams", [])
+             if r.get("codec_type") == "video"
+             and (r.get("disposition") or {}).get("attached_pic", 0) != 1),
+            None,
+        )
+    except (RuntimeError, OSError) as exc:
+        logger.warning("Could not probe %s: %s", path.name, exc)
+        raw = None
+    info = _video_info(raw) if raw is not None else VideoStreamInfo(track_id=0)
+    return VideoStream(file=File(path=path), info=info)
+
+
 def _effective_resolution(
-    meta:        VideoMetadata,
+    stream:     VideoStream,
     crop_params: CropParams,
     width:       int | None,
 ) -> tuple[int, int]:
     """Compute effective (width, height) after crop and optional scale.
 
     Args:
-        meta:        Video metadata with a populated ``resolution`` string.
+        stream:      Video stream with a probed ``resolution`` string.
         crop_params: Crop to apply (may be empty/no-op).
         width:       Target scale width, or ``None`` for no scaling.
 
@@ -398,14 +467,15 @@ def _effective_resolution(
         ``(effective_width, effective_height)`` as integers.
 
     Raises:
-        ValueError: If ``meta.resolution`` is unavailable or unparseable.
+        ValueError: If the stream's resolution is unavailable or unparseable.
     """
-    if not meta.resolution:
-        raise ValueError(f"Resolution unavailable for {meta.path}")
+    resolution = stream.info.resolution
+    if not resolution:
+        raise ValueError(f"Resolution unavailable for {stream.file.path}")
 
-    parts = meta.resolution.split("x")
+    parts = resolution.split("x")
     if len(parts) != 2:
-        raise ValueError(f"Unexpected resolution format: {meta.resolution!r}")
+        raise ValueError(f"Unexpected resolution format: {resolution!r}")
 
     raw_w = int(parts[0])
     raw_h = int(parts[1])
@@ -425,10 +495,10 @@ def _effective_resolution(
 
 
 def _check_resolution_match(
-    source_meta: VideoMetadata,
-    target_meta: VideoMetadata,
-    crop_params: CropParams,
-    width:       int | None,
+    source_stream: VideoStream,
+    target_stream: VideoStream,
+    crop_params:   CropParams,
+    width:         int | None,
 ) -> None:
     """Verify source and target have matching effective resolution after crop and scale.
 
@@ -437,7 +507,7 @@ def _check_resolution_match(
     to *width* if provided.
 
     Args:
-        source_meta: Metadata for the source (reference) video.
+        source_stream: The source (reference) video stream.
         target_meta: Metadata for the target (encoded) video.
         crop_params: Crop applied to the source.
         width:       Optional scale width applied to both after cropping.
@@ -446,17 +516,17 @@ def _check_resolution_match(
         ValueError: If effective resolutions differ, with an actionable
                     suggestion for ``--crop`` / ``--width`` arguments.
     """
-    src_w, src_h = _effective_resolution(source_meta, crop_params, width)
+    src_w, src_h = _effective_resolution(source_stream, crop_params, width)
     # Target is never cropped — pass empty CropParams
-    tgt_w, tgt_h = _effective_resolution(target_meta, CropParams(), width)
+    tgt_w, tgt_h = _effective_resolution(target_stream, CropParams(), width)
 
     if src_w == tgt_w and src_h == tgt_h:
         return  # match — nothing to do
 
     # Build an actionable suggestion.
     # Raw dimensions (before any crop/scale applied here)
-    src_parts = source_meta.resolution.split("x") if source_meta.resolution else ["?", "?"]
-    tgt_parts = target_meta.resolution.split("x") if target_meta.resolution else ["?", "?"]
+    src_parts = (source_stream.info.resolution or "?x?").split("x")
+    tgt_parts = (target_stream.info.resolution or "?x?").split("x")
     src_raw_w = int(src_parts[0]) if src_parts[0].isdigit() else 0
     src_raw_h = int(src_parts[1]) if src_parts[1].isdigit() else 0
     tgt_raw_w = int(tgt_parts[0]) if tgt_parts[0].isdigit() else 0
@@ -589,7 +659,7 @@ def _write_sidecar(
     )
 
     try:
-        write_yaml_atomic(path, sidecar.to_yaml_dict())
+        write_yaml_atomic(path, sidecar.model_dump(exclude_none=True))
         logger.debug("Wrote metrics sidecar: %s", path)
     except Exception as exc:
         logger.warning("Failed to write metrics sidecar %s: %s", path, exc)
@@ -611,12 +681,20 @@ async def _capture_single_frame(
     Returns:
         None on success, or a short human-readable failure reason string.
     """
-    cmd: list[str | Path] = ["ffmpeg", "-y", "-ss", seek_ts, "-i", video_path]
+    # Single-frame capture goes through the runner's .tmp protocol with the
+    # image2 muxer (the .tmp extension hides the image container hint).
+    output_args: tuple[str, ...] = ()
     if crop_params is not None and not crop_params.is_empty():
-        cmd += ["-vf", crop_params.to_ffmpeg_filter()]
-    cmd += ["-frames:v", "1", "-f", "image2", "-c:v", "png", output_path]
+        output_args += (FFMPEG_ARG_VF, crop_params.to_ffmpeg_filter())
+    output_args += ("-frames:v", "1", "-c:v", "png")
+    request = FFmpegRequest(
+        inputs        = [FFmpegInput(path=video_path, start_seconds=float(seek_ts))],
+        output_args   = output_args,
+        output        = output_path,
+        output_format = FFMPEG_MUXER_IMAGE2,
+    )
     try:
-        result = await run_ffmpeg_async(cmd, output_file=None)
+        result = await run_ffmpeg_async(request)
         if not result.success:
             reason = f"ffmpeg exit {result.returncode}"
             logger.debug("Strategy C frame failed (%s) seek_ts=%s output=%s", reason, seek_ts, output_path.name)
@@ -644,15 +722,20 @@ async def _capture_single_pass(
     if crop_params is not None and not crop_params.is_empty():
         vf_parts.append(crop_params.to_ffmpeg_filter())
     vf_parts.append("setpts=N/FRAME_RATE/TB")
-    cmd: list[str | Path] = [
-        "ffmpeg", "-y", "-i", video_path,
-        "-vf", ",".join(vf_parts),
-        "-vsync", "0",
-        str(output_pattern),
-    ]
+    # Multi-frame pattern output: writes into this caller-managed temp
+    # directory with its own lifecycle — the sanctioned bypass of the .tmp
+    # substitution protocol (the trailing null sink shares the input decode).
+    request = FFmpegRequest(
+        inputs      = [FFmpegInput(path=video_path)],
+        output_args = (
+            FFMPEG_ARG_VF, ",".join(vf_parts),
+            "-vsync", "0",
+            str(output_pattern),
+        ),
+    )
     try:
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        result = await run_ffmpeg_async(cmd, output_file=None)
+        result = await run_ffmpeg_async(request)
         if not result.success:
             logger.debug("Single-pass capture failed (ffmpeg non-zero) tmp_dir=%s", tmp_dir)
             return []
@@ -868,7 +951,7 @@ async def run_measure(
     target_videos:            list[Path],
     work_dir:                 Path,
     crop_params:              CropParams | None,
-    metrics_sampling:         int,
+    sampling:                int,
     width:                    int | None,
     screenshot_count:         int | None,
     screenshot_interval:      float | None      = None,
@@ -890,7 +973,7 @@ async def run_measure(
         crop_params:              Explicit crop (or empty ``CropParams`` for no-crop).
                                   Pass ``None`` to auto-load from ``job.yaml`` if
                                   present.
-        metrics_sampling:         Frame subsampling factor (≥1).  Ignored in
+        sampling:                Frame subsampling factor (≥1).  Ignored in
                                   screenshots-only mode.
         width:                    Scale both inputs to this width during metric
                                   computation (after cropping).  ``None`` = no
@@ -913,7 +996,7 @@ async def run_measure(
     Raises:
         FileNotFoundError: If ``source_video`` or any path in ``target_videos``
                            does not exist.
-        ValueError:        If ``metrics_sampling < 1``, ``screenshot_count < 1``,
+        ValueError:        If ``sampling < 1``, ``screenshot_count < 1``,
                            or any resolution mismatch is detected.
     """
     from pyqenc.constants import MEASURE_DIR
@@ -930,8 +1013,8 @@ async def run_measure(
         if not target.exists():
             raise FileNotFoundError(f"Target video not found: {target}")
 
-    if metrics_sampling < 1:
-        raise ValueError(f"metrics_sampling must be ≥ 1, got {metrics_sampling}")
+    if sampling < 1:
+        raise ValueError(f"sampling must be ≥ 1, got {sampling}")
 
     from pyqenc.constants import DEFAULT_SCREENSHOT_COUNT
     effective_screenshot_count = screenshot_count if screenshot_count is not None else DEFAULT_SCREENSHOT_COUNT
@@ -945,27 +1028,27 @@ async def run_measure(
     # Resolution validation and parameter summary logging
     # ------------------------------------------------------------------
 
-    source_meta = VideoMetadata(path=source_video)
+    source_stream = _load_video_stream(source_video)
 
     if not screenshots_only:
-        target_metas: list[VideoMetadata] = [VideoMetadata(path=t) for t in target_videos]
+        target_streams: list[VideoStream] = [_load_video_stream(t) for t in target_videos]
 
-        for target_video, target_meta in zip(target_videos, target_metas):
+        for target_video, target_stream in zip(target_videos, target_streams):
             try:
-                _check_resolution_match(source_meta, target_meta, resolved_crop, width)
+                _check_resolution_match(source_stream, target_stream, resolved_crop, width)
             except ValueError as exc:
                 raise ValueError(
                     f"Resolution check failed for {target_video.name}: {exc}"
                 ) from exc
     else:
-        target_metas = []
+        target_streams = []
 
     fmt_key_value_table({
         "source":      str(source_video),
         "targets":     [f"{i+1:>2} - {t.name}" for i, t in enumerate(target_videos)] if target_videos else ["(none — screenshots only)"],
         "crop":        str(resolved_crop) if not resolved_crop.is_empty() else "none",
         "width":       str(width) if width else "none",
-        "sampling":    str(metrics_sampling),
+        "sampling":    str(sampling),
         "screenshots": f"every {screenshot_interval}s (cap {effective_screenshot_count})" if screenshot_interval else str(effective_screenshot_count),
     })
 
@@ -1000,13 +1083,13 @@ async def run_measure(
     # Duration probing (needed for sidecar and duration-mismatch warnings)
     # ------------------------------------------------------------------
 
-    source_duration: float | None = source_meta.duration_seconds
+    source_duration: float | None = source_stream.info.duration_seconds
     if source_duration is None:
         logger.warning("Duration unavailable for source video: %s", source_video.name)
 
     target_durations: dict[Path, float | None] = {}
-    for target_video, target_meta in zip(target_videos, target_metas):
-        dur = target_meta.duration_seconds
+    for target_video, target_stream in zip(target_videos, target_streams):
+        dur = target_stream.info.duration_seconds
         if dur is None:
             logger.warning("Duration unavailable for target video: %s", target_video.name)
         target_durations[target_video] = dur
@@ -1035,10 +1118,10 @@ async def run_measure(
     positions: ScreenshotPositions | None = None
 
     # Probe fps first (fast ffprobe call, already triggered by resolution check above)
-    source_fps_frac = source_meta.fps_fraction
+    source_fps_frac = source_stream.info.fps_fraction
 
-    # frame_count is only available from ExtendedVideoMetadata (e.g. ProbePhase result).
-    # The standalone measure command does not have it — use duration-based estimate as fallback.
+    # frame_count is not available to the standalone measure command (it has
+    # no ProbePhase result) — use a duration-based estimate as the fallback.
     source_frame_count: int | None = None
 
     if source_fps_frac is not None:
@@ -1143,7 +1226,7 @@ async def run_measure(
 
     target_results: list[TargetMeasureResult] = []
 
-    for idx, (target_video, target_meta) in enumerate(zip(target_videos, target_metas), start=1):
+    for idx, target_video in enumerate(target_videos, start=1):
         eff_dur = effective_durations[target_video]
 
         logger.info("Measuring target %d of %d: %s", idx, len(target_videos), target_video.stem)
@@ -1154,15 +1237,17 @@ async def run_measure(
             width            = width,
             metrics_dir      = measure_dir,
             graph_path       = graph_paths[target_video],
-            subsample_factor = metrics_sampling,
+            subsample_factor = sampling,
             bar_title        = f"measuring target {idx:>2}",
+            duration_seconds = eff_dur or 0.0,
+            fps_value        = source_stream.info.fps_fraction,
         )
 
         _write_sidecar(
             path                       = sidecar_paths[target_video],
             source_video               = source_video,
             target_video               = target_video,
-            subsample_factor           = metrics_sampling,
+            subsample_factor           = sampling,
             crop_params                = resolved_crop,
             metrics                    = metrics,
             source_duration_seconds    = source_duration,

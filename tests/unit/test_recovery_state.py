@@ -173,24 +173,3 @@ class TestWriteYamlAtomic:
         path = tmp_path / "nested" / "deep" / "out.yaml"
         write_yaml_atomic(path, {"x": 1})
         assert path.exists()
-
-
-class TestResolveTmpPathsOutputValidation:
-    """_resolve_tmp_paths raises ValueError when output path is not in cmd."""
-
-    def test_raises_when_output_not_in_cmd(self) -> None:
-        from pyqenc.utils.ffmpeg_runner import _resolve_tmp_paths
-
-        out = Path("/tmp/output.mkv")
-        cmd: list = ["ffmpeg", "-i", "input.mkv", "/tmp/other.mkv"]
-        with pytest.raises(ValueError, match="not found in ffmpeg cmd"):
-            _resolve_tmp_paths(cmd, out)
-
-    def test_no_error_when_output_in_cmd(self) -> None:
-        from pyqenc.utils.ffmpeg_runner import _resolve_tmp_paths
-
-        out = Path("/tmp/output.mkv")
-        cmd: list = ["ffmpeg", "-i", "input.mkv", out]
-        modified_cmd, mapping = _resolve_tmp_paths(cmd, out)
-        assert len(mapping) == 1
-        assert out in mapping.values()

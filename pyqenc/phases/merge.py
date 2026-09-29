@@ -20,6 +20,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, cast
 
@@ -40,7 +41,7 @@ from pyqenc.constants import (
     WARNING_SYMBOL,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import CropParams, PhaseOutcome, QualityTarget, VideoMetadata
+from pyqenc.models import CropParams, PhaseOutcome, QualityTarget
 from pyqenc.phase import (
     Artifact,
     ArtifactState,
@@ -55,6 +56,7 @@ from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import MergeParams, MergeStrategySummary, ProbeState
+from pyqenc.stream_model import EncodedChunk, ExtendedVideoStream
 from pyqenc.utils.ffmpeg_runner import get_frame_count
 from pyqenc.utils.log_format import (
     fmt_key_value_table,
@@ -75,6 +77,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _MERGE_YAML = "merge.yaml"
+
+_NS_PER_SECOND = 1_000_000_000
+_MKVPROPEDIT_VIDEO_TRACK = "track:v1"
 
 
 def _targets_as_strings(targets: list[QualityTarget]) -> list[str]:
@@ -226,13 +231,13 @@ def _write_merge_sidecar(
 
 def _measure_quality(
     final_result:     Path,
-    source_video:     VideoMetadata,
+    source_stream:    ExtendedVideoStream,
     ref_crop:         CropParams | None,
     quality_targets:  list[QualityTarget],
     output_dir:       Path,
     metrics_sampling: int,
 ) -> tuple[dict[str, float], bool, Path | None]:
-    """Measure final quality metrics for *final_result* against *source_video*.
+    """Measure final quality metrics for *final_result* against *source_stream*.
 
     Raw metric ``.tmp`` files are written directly to ``output_dir`` and deleted
     immediately after parsing.  The quality plot PNG is written to
@@ -246,10 +251,12 @@ def _measure_quality(
 
     evaluation = evaluator.evaluate_chunk(
         encoded            = final_result,
-        reference          = source_video.path,
+        reference          = source_stream.stream.as_input(),
         ref_crop           = ref_crop,
         targets            = quality_targets,
         output_dir         = output_dir,
+        duration_seconds   = source_stream.stream.info.duration_seconds or 0.0,
+        fps_value          = source_stream.stream.info.fps_fraction,
         metrics_output_dir = output_dir,
         subsample_factor   = metrics_sampling,
         show_progress      = True,
@@ -289,6 +296,37 @@ def _fmt_inline_metrics(
         symbol = SUCCESS_SYMBOL_MINOR if value >= target.value else FAILURE_SYMBOL_MINOR
         parts.append(f"{target.metric}-{target.statistic}={fmt_metric_value(value)} {symbol}")
     return "  ".join(parts)
+
+
+def _log_missed_targets_warning(
+    strategy_name:  str,
+    metrics_dict:   dict[str, float],
+    quality_targets: list[QualityTarget],
+) -> None:
+    """Log a WARNING naming every target this strategy missed, with wanted vs actual.
+
+    The completion line and the summary table stay neutral; this is the single
+    place a missed target is escalated to warning level so the reason is
+    immediately visible where the merge happened.
+
+    Args:
+        strategy_name:   The merged strategy.
+        metrics_dict:    Measured metrics keyed by ``"{metric}_{statistic}"``.
+        quality_targets: The targets that were checked.
+    """
+    missed: list[str] = []
+    for target in quality_targets:
+        value = metrics_dict.get(f"{target.metric}_{target.statistic}")
+        if value is not None and value < target.value:
+            missed.append(
+                f"{target.metric}-{target.statistic} = {fmt_metric_value(value)} "
+                f"(target ≥ {fmt_metric_value(target.value)})"
+            )
+    if missed:
+        logger.warning(
+            "%s %s missed quality targets: %s",
+            WARNING_SYMBOL, strategy_name, ";  ".join(missed),
+        )
 
 
 def _log_merge_summary(
@@ -437,7 +475,7 @@ def _log_merge_summary_from_params(
         source_stem       = params.source_stem,
         source_size_bytes = params.source_size_bytes,
         quality_targets   = quality_targets,
-        metrics_sampling  = params.metrics_sampling or 1,
+        metrics_sampling  = params.sampling or 1,
     )
 
 
@@ -529,7 +567,7 @@ class MergePhase(Phase):
 
     In pipeline mode encoded chunks are read directly from
     ``EncodingPhase.result`` without rescanning the filesystem.  In standalone
-    mode the phase scans ``encoded/<strategy.safe_name>/`` for each strategy.
+    mode the phase scans ``encoded/<strategy.safe_name()>/`` for each strategy.
 
     Args:
         config: Full pipeline configuration.
@@ -567,19 +605,19 @@ class MergePhase(Phase):
         probe_result = cast(ProbePhaseResult, self._dep(ProbePhase).result)
         if probe_result is not None:
             probe = ProbeState(
-                frame_count = probe_result.source.frame_count if probe_result.source else 0,
-                crop        = probe_result.crop if probe_result.crop else None,
+                frame_count = probe_result.stream.frame_count if probe_result.stream is not None else 0,
+                crop        = probe_result.crop,
             )
 
         job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
         if job_result is not None:
             return MergeParams(
                 quality_targets  = _targets_as_strings(job_result.config.encoding.resolved_targets),
-                metrics_sampling = job_result.config.measurement.sampling,
+                sampling = job_result.config.measurement.sampling,
                 probe            = probe,
             )
         # Fallback: empty params before job result is available
-        return MergeParams(quality_targets=[], metrics_sampling=1)
+        return MergeParams(quality_targets=[], sampling=1)
 
     # ------------------------------------------------------------------
     # Phase hooks
@@ -655,7 +693,7 @@ class MergePhase(Phase):
             persisted = MergeParams.load(merge_yaml)
             if persisted is not None and persisted != self.params:
                 targets_changed  = bool(persisted.quality_targets) and persisted.quality_targets != self.params.quality_targets
-                sampling_changed = persisted.metrics_sampling is not None and persisted.metrics_sampling != self.params.metrics_sampling
+                sampling_changed = persisted.sampling is not None and persisted.sampling != self.params.sampling
                 probe_changed    = (
                     persisted.probe is not None
                     and self.params.probe is not None
@@ -703,8 +741,8 @@ class MergePhase(Phase):
         # Step 5: classify each expected output
         artifacts: list[MergeArtifact] = []
         expected_names: set[str] = set()
-        for strategy_name, safe_name in strategies:
-            output_file = final_dir / f"{source_stem} {safe_name}.mkv"
+        for strategy_name, strategy_display in strategies:
+            output_file = final_dir / f"{source_stem} {strategy_display}.mkv"
             expected_names.add(output_file.name)
             sidecar     = _load_merge_sidecar(output_file)
 
@@ -812,28 +850,28 @@ class MergePhase(Phase):
     # ------------------------------------------------------------------
 
     def _get_expected_strategies(self) -> list[tuple[str, str]]:
-        """Return ``(display_name, safe_name)`` pairs for all expected strategies.
+        """Return ``(strategy_name, strategy_name)`` pairs for the expected outputs.
 
-        Reads the already-cached ``EncodingPhase.result.encoded`` — the list of
-        winning encoding attempts — resolved once by the shared dependency walk.
-        Quality-target re-evaluation and crop-mismatch detection are owned by
-        ``EncodingPhase._recover()`` and are already reflected in the cached
-        artifact states, so this helper only reads them.
+        Reads the already-cached ``EncodingPhase.result.encoded_chunks`` — the
+        winning :class:`~pyqenc.stream_model.EncodedChunk` objects composed
+        with their :class:`~pyqenc.models.Strategy` — resolved once by the
+        shared dependency walk. Names are safe by construction (Req 15.6), so
+        the display pair is the name twice.
 
         Returns:
-            List of ``(strategy_name, safe_name)`` tuples.
+            List of ``(strategy_name, strategy_name)`` tuples.
         """
         encoding = self._dep(EncodingPhase)
         if encoding.result is None:
             return []
 
-        encoded = cast(EncodingPhaseResult, encoding.result).encoded
+        encoded_chunks = cast(EncodingPhaseResult, encoding.result).encoded_chunks
         seen: dict[str, str] = {}
-        for artifact in encoded:
-            if artifact.state == ArtifactState.COMPLETE:
-                strategy_name = artifact.strategy
-                safe_name     = strategy_name.replace(":", "_")
-                seen[strategy_name] = safe_name
+        for by_strategy in encoded_chunks.values():
+            for encoded in by_strategy.values():
+                # Filesystem form throughout — merge outputs and the concat
+                # options file embed this name (Req 15.10).
+                seen[encoded.strategy.safe_name()] = encoded.strategy.safe_name()
         return list(seen.items())
 
     def _execute(
@@ -866,11 +904,12 @@ class MergePhase(Phase):
         job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
         probe_result = cast(ProbePhaseResult, self._dep(ProbePhase).result)
         crop: CropParams | None = probe_result.crop if probe_result is not None else None
-        source_video: VideoMetadata | None = (
-            job_result.job.source if job_result.job is not None else None
+        source_stream: ExtendedVideoStream | None = (
+            probe_result.stream if probe_result is not None else None
         )
         source_frame_count: int = (
-            probe_result.source.frame_count if (probe_result is not None and probe_result.source) else 0
+            probe_result.stream.frame_count
+            if (probe_result is not None and probe_result.stream is not None) else 0
         )
         source_stem = job_result.source.stem
 
@@ -882,20 +921,21 @@ class MergePhase(Phase):
 
         for artifact in artifacts:
             strategy_name = artifact.strategy_name
-            safe_name     = strategy_name.replace(":", "_")
 
             if artifact.state == ArtifactState.COMPLETE:
                 final_artifacts.append(artifact)
                 continue
 
-            output_file = final_dir / f"{source_stem} {safe_name}.mkv"
+            # The merge output name derives in one place from the source stem
+            # + the strategy name (filesystem-safe by construction, Req 15.8).
+            output_file = final_dir / f"{source_stem} {strategy_name}.mkv"
             logger.info("Merging: %s", strategy_name)
 
             try:
                 # Collect and sort chunks for this strategy
                 strategy_chunks: list[Path] = sorted(
                     (
-                        encoded_chunks[chunk_id][strategy_name]
+                        encoded_chunks[chunk_id][strategy_name].stream.stream.file.path
                         for chunk_id in sorted(encoded_chunks.keys())
                         if strategy_name in encoded_chunks[chunk_id]
                     ),
@@ -923,11 +963,13 @@ class MergePhase(Phase):
                     continue
 
                 # Write mkvmerge options file
-                options_file = final_dir / f"concat_{safe_name}.json"
+                options_file = final_dir / f"concat_{strategy_name}.json"
                 args = _build_mkvmerge_options(strategy_chunks, output_file, timestamps_path)
                 _write_mkvmerge_options_file(options_file, args)
 
-                # Run mkvmerge via options file (avoids OS command-line length limits)
+                # Run mkvmerge via options file (avoids OS command-line length limits).
+                # The "@<file>" option embeds the path in a sub-string mkvmerge
+                # parses itself — plain form only, no extended-length prefix.
                 cmd_mkvmerge: list[str | os.PathLike] = ["mkvmerge", f"@{options_file}"]
                 logger.debug("mkvmerge command: %s", " ".join(str(a) for a in cmd_mkvmerge))
 
@@ -952,18 +994,21 @@ class MergePhase(Phase):
 
                 logger.debug("  Concatenation complete: %s", output_file.name)
 
-                # Write concat list to a temp file (kept for reference / dead code after mkvmerge switch)
-                concat_file = final_dir / f"concat_{safe_name}{TEMP_SUFFIX}.txt"
-                concat_cmd: list[str | os.PathLike] = [
-                    "ffmpeg",
-                    "-f",      "concat",
-                    "-safe",   "0",
-                    "-i",      concat_file,
-                    "-c",      "copy",
-                    "-fflags", "+genpts",
-                    "-y",
-                    output_file,
-                ]
+                # Restore the true frame rate in the track header —
+                # see _build_mkvpropedit_args for why mkvmerge cannot do it.
+                propedit_cmd: list[str | os.PathLike] = _build_mkvpropedit_args(
+                    output_file, source_stream.stream.info.fps_fraction,
+                )
+                propedit_result = subprocess.run(propedit_cmd, capture_output=True, text=True, check=False)
+                if propedit_result.returncode != 0:
+                    logger.error(
+                        "mkvpropedit failed for strategy %s (exit %d) — frame-rate header not restored",
+                        strategy_name, propedit_result.returncode,
+                    )
+                    for line in propedit_result.stderr.splitlines()[-20:]:
+                        logger.error("mkvpropedit stderr: %s", line)
+                    failed_strategies.append(strategy_name)
+                    continue
 
                 # Verify frame count
                 frame_count:       int | None = None
@@ -987,12 +1032,12 @@ class MergePhase(Phase):
                 targets_met:  bool             = False
                 plot_path:    Path | None       = None
 
-                if source_video and job_result.config.encoding.resolved_targets:
+                if source_stream is not None and job_result.config.encoding.resolved_targets:
                     try:
                         with self._collector.time(MetricKey.MERGE, METRIC_KEY_QUALITY_MEASURE):
                             metrics_dict, targets_met, plot_path = _measure_quality(
                                 final_result     = output_file,
-                                source_video     = source_video,
+                                source_stream    = source_stream,
                                 ref_crop         = crop,
                                 quality_targets  = job_result.config.encoding.resolved_targets,
                                 output_dir       = final_dir,
@@ -1032,15 +1077,19 @@ class MergePhase(Phase):
                     plot_path       = plot_path,
                 )
 
-                symbol      = SUCCESS_SYMBOL_MAJOR if targets_met else WARNING_SYMBOL
                 frames_sym  = SUCCESS_SYMBOL_MINOR if frame_count_ok else FAILURE_SYMBOL_MINOR
                 frames_str  = str(frame_count) if frame_count is not None else "unknown"
                 metrics_str = _fmt_inline_metrics(metrics_dict, self._dep(JobPhase).result.config.encoding.resolved_targets)  # type: ignore[union-attr]
                 logger.info(
                     "%s Merged %s:  frames=%s %s%s",
-                    symbol, strategy_name, frames_str, frames_sym,
+                    SUCCESS_SYMBOL_MAJOR, strategy_name, frames_str, frames_sym,
                     f"  {metrics_str}" if metrics_str else "",
                 )
+                if metrics_dict and not targets_met:
+                    _log_missed_targets_warning(
+                        strategy_name, metrics_dict,
+                        self._dep(JobPhase).result.config.encoding.resolved_targets,  # type: ignore[union-attr]
+                    )
 
                 final_artifacts.append(MergeArtifact(
                     path          = output_file,
@@ -1066,7 +1115,9 @@ class MergePhase(Phase):
         _log_merge_summary(
             artifacts          = [a for a in final_artifacts if a.state == ArtifactState.COMPLETE],
             source_stem        = source_stem,
-            source_size_bytes  = _safe_file_size(source_video.path) if source_video else 0,
+            source_size_bytes  = (
+                _safe_file_size(source_stream.stream.file.path) if source_stream is not None else 0
+            ),
             quality_targets    = self._dep(JobPhase).result.config.encoding.resolved_targets,  # type: ignore[union-attr]
             metrics_sampling   = self._dep(JobPhase).result.config.measurement.sampling,  # type: ignore[union-attr]
         )
@@ -1078,11 +1129,11 @@ class MergePhase(Phase):
         if complete_count > 0:
             source_size_bytes, strategy_summaries = _build_strategy_summaries(
                 final_artifacts,
-                source_video.path if source_video else None,
+                source_stream.stream.file.path if source_stream is not None else None,
             )
             MergeParams(
                 quality_targets    = self.params.quality_targets,
-                metrics_sampling   = self.params.metrics_sampling,
+                sampling           = self.params.sampling,
                 probe              = self.params.probe,
                 source_stem        = source_stem,
                 source_size_bytes  = source_size_bytes,
@@ -1103,32 +1154,19 @@ class MergePhase(Phase):
             f"{complete_count} output file(s) complete",
         )
 
-    def _collect_encoded_chunks(self) -> dict[str, dict[str, Path]]:
-        """Build ``{chunk_id: {strategy_name: path}}`` from ``EncodingPhase.result``.
+    def _collect_encoded_chunks(self) -> dict[str, dict[str, EncodedChunk]]:
+        """Read the winning ``EncodedChunk`` objects from ``EncodingPhase.result``.
 
-        Reads the already-cached ``EncodingPhase.result.encoded`` — the list of
-        winning encoding attempts — resolved once by the shared dependency walk.
-        Quality-target re-evaluation and crop-mismatch detection are owned by
-        ``EncodingPhase._recover()`` and are already reflected in the cached
-        artifact states, so this helper only reads them.
+        The composed objects are resolved once by the shared dependency walk —
+        path via ``stream.file.path`` (Req 14: no duplicated fields).
 
         Returns:
-            Nested dict mapping chunk IDs to strategy-to-path mappings.
+            Nested dict mapping chunk IDs to strategy-name-to-``EncodedChunk``.
         """
         encoding = self._dep(EncodingPhase)
         if encoding.result is None:
             return {}
-
-        encoded = cast(EncodingPhaseResult, encoding.result).encoded
-        chunks: dict[str, dict[str, Path]] = {}
-        for artifact in encoded:
-            if artifact.state == ArtifactState.COMPLETE and artifact.path.exists():
-                chunk_id      = artifact.chunk_id
-                strategy_name = artifact.strategy
-                if chunk_id not in chunks:
-                    chunks[chunk_id] = {}
-                chunks[chunk_id][strategy_name] = artifact.path
-        return chunks
+        return cast(EncodingPhaseResult, encoding.result).encoded_chunks
 
 
 # ---------------------------------------------------------------------------
@@ -1144,7 +1182,17 @@ def _build_mkvmerge_options(
 
     The first chunk is listed without a prefix; each subsequent chunk is
     preceded by ``"+"`` as a separate element (mkvmerge append syntax).
-    ``--timestamps`` is applied to track 0 of the first chunk only.
+    ``--timestamps`` is applied to track 0 of the first chunk only.  The
+    output's track-header ``DefaultDuration`` is restored afterwards by
+    ``mkvpropedit`` (see :func:`_build_mkvpropedit_args`): mkvmerge derives it
+    from the ms-rounded restored timestamps, and ``--default-duration`` cannot
+    override that — it only reinterprets *input* tracks that lack timing.
+
+    Paths converted for the JSON file are standalone argv elements there, so
+    they use ``os.fspath`` — the same string a subprocess would resolve for a
+    path-like. The ``--timestamps`` value is a sub-string argument (track
+    spec) and keeps the plain form: mkvmerge parses it itself and may not
+    accept an extended-length prefix inside it.
 
     Args:
         chunks:          Ordered list of encoded chunk paths.
@@ -1155,13 +1203,47 @@ def _build_mkvmerge_options(
         List of strings suitable for writing to a JSON options file.
     """
     args: list[str] = [
-        "-o",          str(output),
+        "-o",              os.fspath(output),
         "--timestamps", f"0:{timestamps_path}",
-        str(chunks[0]),
+        os.fspath(chunks[0]),
     ]
     for chunk in chunks[1:]:
-        args.append(f"+{chunk}")
+        args.append(f"+{os.fspath(chunk)}")
     return args
+
+
+def _default_duration_ns(fps: Fraction) -> int:
+    """Convert *fps* to a track-header ``DefaultDuration`` in nanoseconds.
+
+    Exact rational arithmetic: the float path drifts at NTSC rates
+    (24000/1001 → 41 708 333.33 ns).
+    """
+    return round(_NS_PER_SECOND / fps)
+
+
+def _build_mkvpropedit_args(output: Path, fps: Fraction) -> list[str | os.PathLike]:
+    """Build the mkvpropedit argument list restoring the video track's frame-rate header.
+
+    mkvmerge derives ``DefaultDuration`` from the ms-rounded timestamps that
+    ``--timestamps`` restores (observed 42 ms → 500/21 for a 24000/1001
+    stream).  Header-only consumers then misdeclare the frame rate and flag
+    the output VFR (MediaInfo: "Frame rate mode: Variable").  The edit is
+    instant, does not touch block data, and takes an integer ns value.
+
+    Args:
+        output: The merged MKV whose track header is patched in place.
+        fps:    The source stream's true frame rate.
+
+    Returns:
+        The mkvpropedit command; *output* is passed as a path-like so the
+        extended-length ``\\?`` prefix is injected only when the runner
+        resolves it.
+    """
+    return [
+        "mkvpropedit", output,
+        "--edit", _MKVPROPEDIT_VIDEO_TRACK,
+        "--set", f"default-duration={_default_duration_ns(fps)}",
+    ]
 
 
 def _write_mkvmerge_options_file(path: Path, args: list[str]) -> None:

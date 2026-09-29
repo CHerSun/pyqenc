@@ -8,20 +8,21 @@ algorithms for iterative encoding optimization.
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
-from os import PathLike
 from pathlib import Path
 from typing import (
     TypedDict,
     TypeVar,
 )
-from collections.abc import Iterable
 
 import pandas as pd
 
 from pyqenc.utils.ffmpeg_runner import (
+    FFmpegInput,
+    FFmpegRequest,
     FFmpegRunResult,
     ProgressCallback,
     run_ffmpeg_async,
@@ -300,11 +301,10 @@ class _MetricStatistics(TypedDict):
 
 async def run_metrics(
     metrics:           Iterable[MetricType],
-    distorted:         Path,
-    reference:         Path,
+    distorted:         FFmpegInput,
+    reference:         FFmpegInput,
     crop_distorted:    CropParams,
     crop_reference:    CropParams,
-    duration:          int,
     width:             int,
     use_gpu:           bool,
     subsample:         int,
@@ -312,6 +312,7 @@ async def run_metrics(
     cwd:               Path | None             = None,
     progress_callback: ProgressCallback | None = None,
     output_extension:  str | None              = None,
+    fps:               float | None            = None,
 ) -> FFmpegRunResult:
     """Build and run a single ffmpeg pass computing all requested metrics simultaneously.
 
@@ -329,11 +330,14 @@ async def run_metrics(
     Args:
         metrics:           Metrics to compute.  VIF is automatically included when
                            VMAF is present (or when VIF is requested, VMAF is added).
-        distorted:         Path to the distorted (encoded) video.
-        reference:         Path to the reference video.
+        distorted:         The distorted (encoded) video as a runner input —
+                           attempts are read whole.
+        reference:         The reference video as a runner input — a chunk
+                           window arrives as ``chunk.as_input()`` (per-input
+                           ``-ss``/``-t``), so the window is fully bound to the
+                           input and the output timeline starts at ~0.
         crop_distorted:    Crop parameters for the distorted input.
         crop_reference:    Crop parameters for the reference input.
-        duration:          Limit comparison to this many seconds (0 = full video).
         width:             Scale both inputs to this width (0 = no scaling).
         use_gpu:           Use GPU-accelerated VMAF (``libvmaf_cuda``).
         subsample:         Frame subsampling factor (1 = every frame).
@@ -344,7 +348,14 @@ async def run_metrics(
         progress_callback: Optional ``(frame, out_time_seconds)`` callable
                            invoked once per completed progress block.
         output_extension:  Override the default file extension for metric output
-                           files (e.g. ``".tmp"``).  When ``None``, defaults are
+                           files (e.g. ``".tmp"``).
+        fps:               The true average frame rate of BOTH inputs, when
+                           known. The index-based re-timing substitutes it
+                           numerically so both grids are identical regardless
+                           of what the containers declare (mkvmerge-written
+                           finals have been observed declaring 500/21 for a
+                           24000/1001 stream). ``None`` falls back to each
+                           input's self-declared ``FRAME_RATE``.  When ``None``, defaults are
                            used (``.log`` for PSNR/SSIM, ``.json`` for VMAF).
 
     Returns:
@@ -354,7 +365,7 @@ async def run_metrics(
         ValueError: If ``metrics`` is empty after deduplication.
     """
     if cwd is None:
-        cwd = distorted.parent
+        cwd = distorted.path.parent
 
     # Deduplicate and ensure VMAF is present when VIF is requested
     active: set[MetricType] = set(metrics)
@@ -371,12 +382,24 @@ async def run_metrics(
     crop_d    = crop_distorted.to_ffmpeg_filter()
     crop_r    = crop_reference.to_ffmpeg_filter()
 
-    # Build shared input streams with split
+    # The re-timing rate: the caller-known truth when available (both inputs
+    # are the same content), else each input's self-declared rate.
+    retime_rate = repr(fps) if fps is not None else "FRAME_RATE"
+
+    # Re-time both inputs to exact index-based CFR before the metric filters.
+    # framesync (the dualinput core of psnr/ssim/libvmaf) pairs frames by PTS:
+    # the attempt's and the source window's ms-rounded timestamp grids carry
+    # different rounding phases, and where they diverge framesync duplicates/
+    # skips a frame — intermittent single-frame mispairings (~14 dB PSNR drops
+    # every few frames, vmaf_min=0). setpts=N/(FRAME_RATE*TB) rewrites PTS to
+    # the frame index on both sides, so pairing is index-perfect — verified
+    # against per-frame PNG comparison on real media. PTS-STARTPTS only rebases
+    # the origin and preserves the grid mismatch (empirically a no-op here).
     if n_branches == 1:
         # No split needed — single branch uses [main]/[ref] directly
-        sel = f",select='not(mod(n,{subsample}))',setpts=PTS-STARTPTS" if (
+        sel = f",select='not(mod(n,{subsample}))',setpts=N/({retime_rate}*TB)" if (
             subsample > 1 and branches[0].info.subsample_via_filter
-        ) else ",setpts=PTS-STARTPTS"
+        ) else f",setpts=N/({retime_rate}*TB)"
         f_dist = f"[0:v]{crop_d}{width_str}{sel}[main]"
         f_ref  = f"[1:v]{crop_r}{width_str}{sel}[ref]"
         branch_labels_d = ["main"]
@@ -397,12 +420,12 @@ async def run_metrics(
             label_d = f"main{i}"
             label_r = f"ref{i}"
             if subsample > 1 and branch.info.subsample_via_filter:
-                sel = f"select='not(mod(n,{subsample}))',setpts=PTS-STARTPTS"
+                sel = f"select='not(mod(n,{subsample}))',setpts=N/({retime_rate}*TB)"
                 branch_parts_d.append(f"[d{i}]{sel}[{label_d}]")
                 branch_parts_r.append(f"[r{i}]{sel}[{label_r}]")
             else:
-                branch_parts_d.append(f"[d{i}]setpts=PTS-STARTPTS[{label_d}]")
-                branch_parts_r.append(f"[r{i}]setpts=PTS-STARTPTS[{label_r}]")
+                branch_parts_d.append(f"[d{i}]setpts=N/({retime_rate}*TB)[{label_d}]")
+                branch_parts_r.append(f"[r{i}]setpts=N/({retime_rate}*TB)[{label_r}]")
             branch_labels_d.append(label_d)
             branch_labels_r.append(label_r)
 
@@ -437,18 +460,12 @@ async def run_metrics(
 
     filter_complex = f"{f_dist};{f_ref};" + ";".join(metric_filters)
 
-    cmd: list[str | PathLike] = ["ffmpeg", "-hide_banner", "-nostats", "-progress", "pipe:1"]
-    if duration:
-        cmd.extend(["-t", str(duration)])
-    cmd.extend(["-i", distorted.resolve()])
-    if duration:
-        cmd.extend(["-t", str(duration)])
-    cmd.extend(["-i", reference.resolve()])
-    cmd.extend(["-filter_complex", filter_complex, "-f", "null", "-"])
-
-    return await run_ffmpeg_async(
-        cmd, output_file=None, progress_callback=progress_callback, video_meta=None, cwd=cwd,
+    request = FFmpegRequest(
+        inputs         = [distorted, reference],
+        output_args    = (),
+        filter_complex = filter_complex,
     )
+    return await run_ffmpeg_async(request, progress_callback=progress_callback, cwd=cwd)
 
 
 @dataclass

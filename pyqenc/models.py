@@ -7,88 +7,39 @@ All models use Pydantic BaseModel for validation and serialisation.
 """
 # CHerSun 2026
 
-import json
 import logging
-import os
-import re
-import subprocess
 from decimal import Decimal
 from enum import Enum, IntEnum
-from fractions import Fraction
 from pathlib import Path
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    PrivateAttr,
     field_validator,
     model_validator,
 )
 
-from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import (
     DOWN_ARROW,
     LEFT_ARROW,
     RIGHT_ARROW,
-    SELECTOR_KEY_CH,
-    SELECTOR_KEY_LANG,
-    SELECTOR_KEY_TITLE,
     TIME_SEPARATOR_MS,
-    TIMEOUT_SECONDS_SHORT,
     UP_ARROW,
 )
+from pyqenc.utils.naming import sanitize_filesystem_text
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
 # Internal probe helpers (module-level, not part of public API)
-# ---------------------------------------------------------------------------
-
-def _run_ffprobe_streams(path: Path) -> dict | None:
-    """Run ``ffprobe -show_streams -show_format`` and return parsed JSON.
-
-    Returns ``None`` on any failure; caller is responsible for logging.
-    """
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=duration,r_frame_rate,avg_frame_rate,width,height,pix_fmt:format=duration",
-        "-of", "json",
-        str(path),
-    ]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=TIMEOUT_SECONDS_SHORT,
-        )
-        return json.loads(result.stdout)
-    except Exception:
-        return None
 
 
 
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
-
-class ChunkingMode(Enum):
-    """Controls how chunks are split from the source video.
-
-    LOSSLESS: Re-encode each chunk to FFV1 all-intra (``-g 1``) for
-              frame-perfect boundaries.  Default.
-    REMUX:    Stream-copy (``-c copy``); faster and smaller chunks but
-              boundaries snap to the nearest I-frame.
-    """
-
-    LOSSLESS = "lossless"
-    REMUX    = "remux"
-
 
 class CleanupLevel(IntEnum):
     """Controls how aggressively intermediate files are removed.
@@ -136,15 +87,17 @@ class PhaseOutcome(Enum):
 class Strategy(BaseModel):
     """Resolved encoding strategy — single owner of identity, codec, and ffmpeg args.
 
-    Carries everything needed to identify the strategy (``name``/``safe_name``
-    for logs, YAML keys, and filesystem paths) and to encode with it
-    (codec config, profile args, ffmpeg arg generation).
+    Carries everything needed to identify the strategy — the uniform name pair
+    (:meth:`display_name` for logs/sidecars, :meth:`safe_name` for filesystem
+    paths; both passthroughs since profile/preset names are validated safe at
+    config load) — and to encode with it: the codec's two argument stages and
+    the ffmpeg arg generation.
 
     Attributes:
         preset:       FFmpeg preset (e.g. ``'slow'``, ``'veryslow'``).
         profile:      Profile name (e.g. ``'h265-aq'``, ``'h264-anime'``).
         codec:        Resolved codec configuration.
-        profile_args: Resolved profile extra ffmpeg arguments.
+        profile_args: Resolved profile extra ffmpeg arguments (output stage).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -157,28 +110,39 @@ class Strategy(BaseModel):
     @field_validator("preset", "profile", mode="before")
     @classmethod
     def _sanitize_dots(cls, v: str) -> str:
-        """Replace ASCII dots with ``TIME_SEPARATOR_MS`` so ``strategy.name`` is dot-free."""
+        """Replace ASCII dots with ``TIME_SEPARATOR_MS`` so the strategy name is dot-free."""
         return v.replace(".", TIME_SEPARATOR_MS)
 
-    @property
-    def name(self) -> str:
-        """Display name used in logs and YAML (e.g. ``'slow+h265-aq'``)."""
+    def display_name(self) -> str:
+        """Display name — the composed identity, verbatim (``'slow+h265-aq'``).
+
+        The single generator (Req 15.10); the safe form is :meth:`safe_name`.
+        """
         return f"{self.preset}+{self.profile}"
 
-    @property
     def safe_name(self) -> str:
-        """Filesystem-safe name for directory paths (e.g. ``'slow+h265-aq'``)."""
-        return self.name.replace(":", "_")
+        """Filesystem-safe name — passthrough sanitize (validated safe at load).
 
-    def to_ffmpeg_args(self, quality: Decimal, vf_filter: str | None = None) -> list[str]:
-        """Expand the codec's ``encoder_args`` template into a concrete ffmpeg argument list.
+        Uniform pair with :meth:`display_name` (methods, like every named
+        element): consumers touching the filesystem always take the safe
+        name, no per-type thinking.
+        """
+        return sanitize_filesystem_text(self.display_name())
+
+    @property
+    def pre_input_args(self) -> tuple[str, ...]:
+        """The codec's pre-input stage (``-hwaccel`` / ``-init_hw_device`` / vulkan setup).
+
+        The encoder merges these into the encode request's input; the runner
+        emits them before the input's window flags and ``-i``.
+        """
+        return tuple(self.codec.pre_input_args)
+
+    def to_output_args(self, quality: Decimal, vf_filter: str | None = None) -> list[str]:
+        """Expand the codec's ``encoder_args`` template into the output-stage args.
 
         Substitution rules applied to every element of ``codec.encoder_args``:
 
-        - ``'{input}'``       → kept as-is for the caller to replace with the
-          actual input ``Path``.  The preceding ``'-i'`` flag is a separate
-          element in the template.  Everything before ``'-i'`` is pre-input
-          (e.g. ``-hwaccel`` options).
         - ``'{quality}'``     → replaced with ``str(quality)``.  The ``Decimal``
           value is already quantized to the codec's granularity, so ``str()``
           produces the correct representation (e.g. ``'18.5'``, ``'19'``).
@@ -199,53 +163,44 @@ class Strategy(BaseModel):
             vf_filter: Optional ffmpeg video filter expression (e.g. ``'crop=1920:800:0:140'``).
 
         Returns:
-            Expanded argument list with ``'{input}'`` still present as a string
-            sentinel for the caller to substitute with the actual ``Path``.
+            The expanded output-stage argument list (the runner owns ``-i``,
+            ``-y`` and the ``.tmp`` muxer stage).
 
         Raises:
-            ValueError: If ``codec.encoder_args`` contains no ``'{input}'`` sentinel.
+            ValueError: If ``codec.encoder_args`` still contains a legacy
+                        ``'{input}'`` sentinel.
         """
-        quality_str = str(quality)
-        result: list[str] = []
-        for arg in self.codec.encoder_args:
-            if arg == "{profile_args}":
-                result.extend(self.profile_args)
-            elif arg == "{vf}":
-                if vf_filter:
-                    result.append(vf_filter)
-                else:
-                    # Standalone {vf} with no filter — also drop the preceding -vf flag
-                    if result and result[-1] == "-vf":
-                        result.pop()
-            else:
-                expanded = arg.replace("{quality}", quality_str).replace("{preset}", self.preset)
-                # {vf} embedded inside a larger filter chain string
-                if "{vf}" in expanded:
-                    expanded = expanded.replace("{vf}", vf_filter or "")
-                result.append(expanded)
-        # repeat templating for profile args
-        expanded_args = result
-        result = []
-        for arg in expanded_args:
-            if arg == "{profile_args}":
-                result.extend(self.profile_args)
-            elif arg == "{vf}":
-                if vf_filter:
-                    result.append(vf_filter)
-                else:
-                    # Standalone {vf} with no filter — also drop the preceding -vf flag
-                    if result and result[-1] == "-vf":
-                        result.pop()
-            else:
-                expanded = arg.replace("{quality}", quality_str).replace("{preset}", self.preset)
-                # {vf} embedded inside a larger filter chain string
-                if "{vf}" in expanded:
-                    expanded = expanded.replace("{vf}", vf_filter or "")
-                result.append(expanded)
 
-        if "{input}" not in result:
+        def _expand(args: list[str]) -> list[str]:
+            quality_str = str(quality)
+            result: list[str] = []
+            for arg in args:
+                if arg == "{profile_args}":
+                    result.extend(self.profile_args)
+                elif arg == "{vf}":
+                    if vf_filter:
+                        result.append(vf_filter)
+                    else:
+                        # Standalone {vf} with no filter — also drop the preceding -vf flag
+                        if result and result[-1] == "-vf":
+                            result.pop()
+                else:
+                    expanded = arg.replace("{quality}", quality_str).replace("{preset}", self.preset)
+                    # {vf} embedded inside a larger filter chain string
+                    if "{vf}" in expanded:
+                        expanded = expanded.replace("{vf}", vf_filter or "")
+                    result.append(expanded)
+            return result
+
+        result = _expand(self.codec.encoder_args)
+        # repeat templating for profile args (they may carry sentinels too)
+        result = _expand(result)
+
+        if "{input}" in result:
             raise ValueError(
-                f"Codec '{self.codec.name}' encoder_args must contain a '{{input}}' sentinel"
+                f"Codec '{self.codec.name}' encoder_args contains a legacy "
+                f"'{{input}}' sentinel — the runner owns '-i <path>'; move any "
+                f"pre-input tokens to the codec's pre_input_args."
             )
         return result
 
@@ -348,11 +303,15 @@ class CodecConfig(BaseModel):
                              typically use ``0.5``; QP-based codecs prefer ``1.0`` (integer
                              steps).  The search result is rounded to the nearest multiple
                              of this value.
-        encoder_args:        Full ffmpeg argument template for this codec.  Sentinels:
+        pre_input_args:      Input-stage tokens emitted before the input's
+                             window flags and ``-i`` (e.g. ``-hwaccel`` /
+                             ``-init_hw_device`` vulkan setup). The single
+                             source of truth for the default is here in the
+                             bundled config.
+        encoder_args:        The output-stage ffmpeg argument template (the
+                         ``"-i", "{input}"`` pair is gone — the runner owns
+                         ``-i <path>``).  Sentinels:
 
-                         - ``'-i'`` + ``'{input}'`` — two consecutive items; ``{input}``
-                           is replaced with the actual input ``Path`` at runtime.
-                           Args before ``'-i'`` are pre-input (e.g. ``-hwaccel``).
                          - ``'{quality}'`` — replaced with the quality value; may appear
                            multiple times (e.g. ``-cq:v {quality} -qmin {quality}``).
                          - ``'{preset}'`` — replaced with the strategy preset name.
@@ -371,6 +330,7 @@ class CodecConfig(BaseModel):
     quality_label:       str            = "CRF"
     quality_granularity: Decimal        = Decimal("0.5")
     quality_max_step:    Decimal|None   = None
+    pre_input_args:      list[str]      = Field(default_factory=list)
     encoder_args:        list[str]      = Field(default_factory=list)
     presets:             list[str]      = Field(default_factory=list)
 
@@ -441,416 +401,6 @@ class CodecConfig(BaseModel):
         return Decimal(str(v))
 
 
-
-
-# ---------------------------------------------------------------------------
-# Video metadata — lazy-loading Pydantic model
-# ---------------------------------------------------------------------------
-
-class VideoMetadata(BaseModel):
-    """Metadata about a video file with transparent lazy-loading.
-
-    Fast-probe fields (``duration_seconds``, ``fps``, ``fps_fraction``,
-    ``resolution``, ``pix_fmt``, ``file_size_bytes``) are exposed as
-    properties backed by ``PrivateAttr`` fields.  On first access each
-    property triggers ``_probe_metadata()`` and caches the result so
-    subsequent accesses are free.
-
-    Only one probe strategy is used here:
-
-    * ``_probe_metadata()`` — fast ``ffprobe -show_streams -show_format``
-      (~175 ms).  Populates ``duration_seconds``, ``fps``, ``fps_fraction``,
-      ``resolution``, and ``pix_fmt`` in a single call.
-
-    Frame count is intentionally absent — it requires a slow null-encode
-    (seconds to ~15 minutes on large UHD sources) and is provided by
-    ``probe_extended()``, which returns an ``ExtendedVideoMetadata``.
-
-    Pass the same instance through all phases to reuse cached values.
-
-    Attributes:
-        path: Path to the video file.
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    path: Path
-
-    # Backing fields — populated lazily or via populate_from_* helpers.
-    _duration_seconds: float    | None = PrivateAttr(default=None)
-    _fps:              float    | None = PrivateAttr(default=None)
-    _fps_fraction:     Fraction | None = PrivateAttr(default=None)
-    _resolution:       str      | None = PrivateAttr(default=None)
-    _pix_fmt:          str      | None = PrivateAttr(default=None)
-    _file_size_bytes:  int      | None = PrivateAttr(default=None)
-
-    # ------------------------------------------------------------------
-    # Lazy properties
-    # ------------------------------------------------------------------
-
-    @property
-    def duration_seconds(self) -> float | None:
-        """Video duration in seconds; probed on first access."""
-        if self._duration_seconds is None:
-            self._probe_metadata()
-        return self._duration_seconds
-
-    @property
-    def fps(self) -> float | None:
-        """Frames per second; probed on first access."""
-        if self._fps is None:
-            self._probe_metadata()
-        return self._fps
-
-    @property
-    def fps_fraction(self) -> Fraction | None:
-        """Exact rational FPS as a Fraction; probed on first access via avg_frame_rate."""
-        if self._fps_fraction is None:
-            self._probe_metadata()
-        return self._fps_fraction
-
-    @property
-    def resolution(self) -> str | None:
-        """Resolution string (e.g. ``'1920x1080'``); probed on first access."""
-        if self._resolution is None:
-            self._probe_metadata()
-        return self._resolution
-
-    @property
-    def pix_fmt(self) -> str | None:
-        """Pixel format of the first video stream (e.g. ``'yuv420p'``); probed on first access."""
-        if self._pix_fmt is None:
-            self._probe_metadata()
-        return self._pix_fmt
-
-    @property
-    def file_size_bytes(self) -> int | None:
-        """File size in bytes; read from filesystem on first access."""
-        if self._file_size_bytes is None:
-            try:
-                self._file_size_bytes = self.path.stat().st_size
-            except OSError:
-                pass
-        return self._file_size_bytes
-
-    # ------------------------------------------------------------------
-    # Internal probe methods
-    # ------------------------------------------------------------------
-
-    def _probe_metadata(self) -> None:
-        """Populate duration, fps, and resolution via a fast ffprobe call.
-
-        On failure each field stays ``None`` and a warning is logged.
-        """
-        data = _run_ffprobe_streams(self.path)
-        if data is None:
-            logger.warning("ffprobe failed for %s; duration/fps/resolution unavailable", self.path)
-            return
-        self.populate_from_ffprobe(data)
-
-    def probe_extended(self) -> "ExtendedVideoMetadata":
-        """Run the slow null-encode probe and return an ExtendedVideoMetadata.
-
-        Runs ``ffmpeg -i {path} -map 0:v:0 -c copy -f null -`` to count frames.
-        This can take seconds to ~15 minutes on large UHD sources.
-        Call only when frame count is genuinely needed and the cost is acceptable.
-
-        Returns:
-            ``ExtendedVideoMetadata`` with frame_count populated (0 on failure).
-        """
-        from pyqenc.utils.ffmpeg_runner import run_ffmpeg  # deferred — circular import
-
-        logger.info("Counting source frames: %s", self.path.name)
-        cmd: list[str | os.PathLike] = [
-            "ffmpeg", "-i", self.path,
-            "-map", "0:v:0", "-c", "copy", "-f", "null", "-",
-        ]
-        result = run_ffmpeg(cmd, output_file=None)
-        if result.frame_count is None:
-            logger.warning(
-                "Could not determine frame count for %s — using 0", self.path.name
-            )
-            return ExtendedVideoMetadata.from_base(self, frame_count=0)
-        return ExtendedVideoMetadata.from_base(self, frame_count=result.frame_count)
-
-    def populate_from_ffprobe(self, data: dict) -> None:
-        """Fill backing fields from a pre-parsed ffprobe JSON dict.
-
-        Does not trigger any probe call.  Only fills fields that are
-        currently ``None`` so existing cached values are preserved.
-
-        Args:
-            data: Parsed JSON output from ``ffprobe -show_streams -show_format``.
-        """
-        streams = data.get("streams", [])
-        stream  = streams[0] if streams else {}
-        fmt     = data.get("format", {})
-
-        if self._duration_seconds is None:
-            raw = stream.get("duration") or fmt.get("duration")
-            if raw is not None:
-                try:
-                    self._duration_seconds = float(raw)
-                except (ValueError, TypeError):
-                    pass
-
-        if self._fps is None:
-            fps_str = stream.get("r_frame_rate", "")
-            if fps_str and "/" in fps_str:
-                try:
-                    num, den = fps_str.split("/")
-                    if float(den) != 0:
-                        self._fps = float(num) / float(den)
-                except (ValueError, ZeroDivisionError):
-                    pass
-            elif fps_str:
-                try:
-                    self._fps = float(fps_str)
-                except ValueError:
-                    pass
-
-        if self._resolution is None:
-            w = stream.get("width")
-            h = stream.get("height")
-            if w and h:
-                try:
-                    self._resolution = f"{int(w)}x{int(h)}"
-                except (ValueError, TypeError):
-                    pass
-
-        if self._pix_fmt is None:
-            pix_fmt = stream.get("pix_fmt")
-            if pix_fmt:
-                self._pix_fmt = str(pix_fmt)
-
-        if self._fps_fraction is None:
-            avg_fps_str = stream.get("avg_frame_rate", "")
-            if avg_fps_str and "/" in avg_fps_str:
-                try:
-                    num_s, den_s = avg_fps_str.split("/")
-                    num, den = int(num_s), int(den_s)
-                    if den != 0:
-                        self._fps_fraction = Fraction(num, den)
-                except (ValueError, TypeError):
-                    pass
-
-    def populate_from_ffmpeg_output(self, stderr_lines: list[str]) -> None:
-        """Fill backing fields by parsing ffmpeg stderr output.
-
-        Parses lines such as::
-
-            Duration: 01:30:00.04, start: 0.000000, bitrate: ...
-            Stream #0:0: Video: ..., 1920x1080, 24 fps, ...
-
-        Only fills fields that are currently ``None``.
-
-        Args:
-            stderr_lines: Lines from ffmpeg stderr.
-        """
-        for line in stderr_lines:
-            # Duration line: "  Duration: HH:MM:SS.ss, ..."
-            if self._duration_seconds is None:
-                m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", line)
-                if m:
-                    try:
-                        h, mn, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
-                        self._duration_seconds = h * 3600 + mn * 60 + s
-                    except (ValueError, TypeError):
-                        pass
-
-            # Video stream line: "Stream #0:0: Video: ..., WxH, N fps, ..."
-            if self._resolution is None or self._fps is None or self._pix_fmt is None:
-                if "Video:" in line:
-                    if self._resolution is None:
-                        m = re.search(r"(\d{2,5})x(\d{2,5})", line)
-                        if m:
-                            self._resolution = f"{m.group(1)}x{m.group(2)}"
-                    if self._fps is None:
-                        m = re.search(r"([\d.]+)\s+fps", line)
-                        if m:
-                            try:
-                                self._fps = float(m.group(1))
-                            except ValueError:
-                                pass
-                    if self._pix_fmt is None:
-                        # e.g. "Stream #0:0: Video: h264 (High), yuv420p(tv, bt709, progressive), ..."
-                        m = re.search(r"Video:\s+\S+.*?,\s+(\w+)\(", line)
-                        if not m:
-                            # fallback: plain "yuv420p," without parentheses
-                            m = re.search(r"Video:\s+\S+.*?,\s+(\w+),", line)
-                        if m:
-                            self._pix_fmt = m.group(1)
-
-    # ------------------------------------------------------------------
-    # Serialisation
-    # ------------------------------------------------------------------
-
-    def model_dump_full(self) -> dict:
-        """Serialize including cached private fields for round-trip persistence."""
-        base = self.model_dump()
-
-        # We do not serialize properties, we serialize backing private fields. This:
-        #  - allows not to trigger lazy-loading properties
-        #  - allows to omit None fields.
-        for key, value in [
-            ("duration_seconds", self._duration_seconds),
-            ("fps",              self._fps),
-            ("resolution",       self._resolution),
-            ("pix_fmt",          self._pix_fmt),
-            ("file_size_bytes",  self._file_size_bytes),
-        ]:
-            if value is not None:
-                base[key] = value
-        if self._fps_fraction is not None:
-            base["fps_fraction"] = [self._fps_fraction.numerator, self._fps_fraction.denominator]
-        return base
-
-    @classmethod
-    def model_validate_full(cls, data: dict) -> "VideoMetadata":
-        """Restore a ``VideoMetadata`` from a ``model_dump_full()`` dict."""
-        instance = cls.model_validate(data)
-        # Manual private fields deserialization override:
-        #  - allows not to trigger lazy-loading properties, while properly restoring the state.
-        instance._duration_seconds = data.get("duration_seconds")
-        instance._fps              = data.get("fps")
-        instance._resolution       = data.get("resolution")
-        instance._pix_fmt          = data.get("pix_fmt")
-        instance._file_size_bytes  = data.get("file_size_bytes")
-        fps_frac = data.get("fps_fraction")
-        if isinstance(fps_frac, list) and len(fps_frac) == 2:
-            instance._fps_fraction = Fraction(int(fps_frac[0]), int(fps_frac[1]))
-        return instance
-
-
-class ExtendedVideoMetadata(VideoMetadata):
-    """VideoMetadata with a guaranteed frame count.
-
-    Only constructed when ``frame_count`` is already known — either from
-    ``ProbePhase`` (source) or from ffmpeg progress output (chunks).
-    Never triggers a probe on construction.
-
-    The sentinel value ``0`` means "could not determine" — no valid video
-    has zero frames.
-
-    Attributes:
-        frame_count: Number of frames; required, ``0`` means unknown.
-    """
-
-    frame_count: int
-
-    @classmethod
-    def from_base(
-        cls,
-        base:        VideoMetadata,
-        frame_count: int,
-    ) -> "ExtendedVideoMetadata":
-        """Construct from an existing ``VideoMetadata`` plus a known frame count.
-
-        Transfers all cached private attrs from ``base`` via
-        ``base.model_dump_full()`` / ``cls.model_validate_full()`` so the
-        method is automatically correct when ``VideoMetadata`` gains new
-        fields — no manual attr enumeration needed here.
-
-        Args:
-            base:        Source ``VideoMetadata`` instance (cached state is copied).
-            frame_count: Known frame count; use ``0`` when count is unavailable.
-
-        Returns:
-            A new ``ExtendedVideoMetadata`` with all cached attrs from ``base``
-            and the supplied ``frame_count``.
-        """
-        data = base.model_dump_full()
-        data["frame_count"] = frame_count
-        return cls.model_validate_full(data)
-
-    def model_dump_full(self) -> dict:
-        """Serialize including ``frame_count`` and all inherited cached private fields."""
-        base = super().model_dump_full()
-        base["frame_count"] = self.frame_count
-        return base
-
-    @classmethod
-    def model_validate_full(cls, data: dict) -> "ExtendedVideoMetadata":
-        """Restore an ``ExtendedVideoMetadata`` from a ``model_dump_full()`` dict."""
-        instance = cls.model_validate(data)
-        # Restore inherited private backing fields — mirrors VideoMetadata.model_validate_full().
-        instance._duration_seconds = data.get("duration_seconds")
-        instance._fps              = data.get("fps")
-        instance._resolution       = data.get("resolution")
-        instance._pix_fmt          = data.get("pix_fmt")
-        instance._file_size_bytes  = data.get("file_size_bytes")
-        fps_frac = data.get("fps_fraction")
-        if isinstance(fps_frac, list) and len(fps_frac) == 2:
-            instance._fps_fraction = Fraction(int(fps_frac[0]), int(fps_frac[1]))
-        return instance
-
-
-class ChunkMetadata(ExtendedVideoMetadata):
-    """ExtendedVideoMetadata for a video chunk, adding timestamp-based identification.
-
-    The ``chunk_id`` is derived from the timestamp range using
-    ``_chunk_name_duration(start_timestamp, end_timestamp)``.
-
-    Attributes:
-        chunk_id:        Stable identifier derived from the timestamp range.
-        start_timestamp: Start timestamp of the chunk in seconds.
-        end_timestamp:   End timestamp of the chunk in seconds.
-    """
-
-    chunk_id:        str
-    start_timestamp: float
-    end_timestamp:   float
-
-
-# ---------------------------------------------------------------------------
-# Audio / attempt metadata
-# ---------------------------------------------------------------------------
-
-class AudioMetadata(BaseModel):
-    """Metadata about an extracted audio track.
-
-    Attributes:
-        path:             Path to the extracted audio file.
-        codec:            Audio codec name (e.g. ``'aac'``, ``'ac3'``).
-        layout:           Channel layout as a :class:`~pyqenc.audio.layout.ChannelLayout`
-                          (carries the faithful source token plus its normalized form
-                          and channel count).
-        language:         Language tag (e.g. ``'eng'``, ``'rus'``).
-        title:            Descriptive title from track metadata (e.g. ``'Surround 5.1'``).
-        duration_seconds: Duration of the audio track in seconds.
-        start_timestamp:  Delay relative to video in seconds (e.g. ``0.007`` for 7 ms).
-    """
-
-    path:             Path
-    codec:            str            | None = None
-    layout:           ChannelLayout  | None = None
-    language:         str            | None = None
-    title:            str            | None = None
-    duration_seconds: float          | None = None
-    start_timestamp:  float          | None = None
-
-    def selector_string(self) -> str:
-        """Return the conventional, regex-friendly string describing this track.
-
-        The string contains ``lang=<code>``, ``ch=<layout>``, and ``title=<text>``
-        tokens (title omitted when absent), space-separated. The ``ch=`` token uses
-        the layout's faithful source token (``ChannelLayout.original``) so a user's
-        select regex matches the source layout exactly (e.g. ``ch=5.1(side)``).
-
-        Select-entry regexes (``for``/``exclude``/``prefer``) match against this
-        string. It is derived purely from already-extracted metadata fields, so no
-        re-probe is required.
-
-        Returns:
-            The conventional string (e.g. ``"lang=eng ch=5.1(side) title=Surround"``).
-        """
-        tokens: list[str] = [
-            f"{SELECTOR_KEY_LANG}={self.language or ''}",
-            f"{SELECTOR_KEY_CH}={self.layout.original if self.layout else ''}",
-        ]
-        if self.title:
-            tokens.append(f"{SELECTOR_KEY_TITLE}={self.title}")
-        return " ".join(tokens)
 
 
 class AttemptMetadata(BaseModel):

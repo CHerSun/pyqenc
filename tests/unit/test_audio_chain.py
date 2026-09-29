@@ -43,7 +43,13 @@ from pyqenc.audio.filters import (
 )
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import FFMPEG_ARG_AF
-from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
+from pyqenc.stream_model import AudioStream
+from pyqenc.utils.ffmpeg_runner import (
+    _PROGRESS_FLAGS,
+    FFmpegRequest,
+    FFmpegRunResult,
+    compose_command,
+)
 from pyqenc.utils.long_path import LongPath
 
 _STEREO = ChannelLayout.parse("2.0")
@@ -66,29 +72,33 @@ _LOUDNORM_STDERR = [
 class _SpyRunner:
     """Records every ffmpeg invocation and returns a canned result.
 
-    Signature-compatible with ``run_ffmpeg_async`` for the two arguments the
-    executor passes: ``cmd`` positionally and ``output_file`` by keyword.
+    Signature-compatible with ``run_ffmpeg_async``: the executor passes the
+    :class:`FFmpegRequest` positionally.
 
     Attributes:
-        calls: One ``(cmd, output_file)`` tuple per invocation, in order.
+        calls: One recorded :class:`FFmpegRequest` per invocation, in order.
     """
 
     def __init__(self, stderr_per_call: list[list[str]] | None = None) -> None:
-        self.calls: list[tuple[list, object]] = []
+        self.calls: list[FFmpegRequest] = []
         self._stderr_per_call = stderr_per_call or []
 
-    async def __call__(self, cmd, output_file=None, **_kwargs) -> FFmpegRunResult:
+    async def __call__(self, request: FFmpegRequest, **_kwargs) -> FFmpegRunResult:
         idx = len(self.calls)
-        self.calls.append((list(cmd), output_file))
+        self.calls.append(request)
         stderr = self._stderr_per_call[idx] if idx < len(self._stderr_per_call) else []
         return FFmpegRunResult(returncode=0, success=True, stderr_lines=stderr)
 
+    def argv_of(self, call_index: int) -> list[str]:
+        """The composed launch argv of the recorded call, as plain strings."""
+        return [str(a) for a in compose_command(self.calls[call_index])]
+
     def af_of(self, call_index: int) -> str | None:
         """Return the ``-af`` value of the recorded call, or ``None`` if absent."""
-        cmd = self.calls[call_index][0]
-        for i, arg in enumerate(cmd):
+        argv = self.argv_of(call_index)
+        for i, arg in enumerate(argv):
             if arg == FFMPEG_ARG_AF:
-                return cmd[i + 1]
+                return argv[i + 1]
         return None
 
 
@@ -103,9 +113,48 @@ def _resolved(name: str, palette: dict[str, FilterInstance], order: list[str]) -
 
 
 @pytest.fixture
-def source(tmp_path) -> LongPath:
-    """A dummy source track path (never actually read — the runner is a spy)."""
-    return LongPath(tmp_path) / "#02 lang=eng ch=5.1.mka"
+def source(tmp_path) -> AudioStream:
+    """A dummy source audio stream (never actually read — the runner is a spy)."""
+    from pyqenc.audio.layout import ChannelLayout
+    from pyqenc.stream_model import AudioStream, AudioStreamInfo, File
+
+    return AudioStream(
+        file = File(path=tmp_path / "movie.mkv"),
+        info = AudioStreamInfo(
+            track_id=2, codec_name="flac", language="eng",
+            layout=ChannelLayout.parse("stereo"),
+        ),
+    )
+
+
+@pytest.fixture
+def source_51(tmp_path) -> AudioStream:
+    """A 5.1(side)-layout source stream (drives downmix/bitrate-scaling paths)."""
+    from pyqenc.audio.layout import ChannelLayout
+    from pyqenc.stream_model import AudioStream, AudioStreamInfo, File
+
+    return AudioStream(
+        file = File(path=tmp_path / "movie.mkv"),
+        info = AudioStreamInfo(
+            track_id=2, codec_name="flac", language="eng",
+            layout=ChannelLayout.parse("5.1(side)"),
+        ),
+    )
+
+
+@pytest.fixture
+def source_stereo(tmp_path) -> AudioStream:
+    """A stereo-layout source stream (downmix no-op)."""
+    from pyqenc.audio.layout import ChannelLayout
+    from pyqenc.stream_model import AudioStream, AudioStreamInfo, File
+
+    return AudioStream(
+        file = File(path=tmp_path / "movie.mkv"),
+        info = AudioStreamInfo(
+            track_id=1, codec_name="flac", language="eng",
+            layout=ChannelLayout.parse("stereo"),
+        ),
+    )
 
 
 @pytest.fixture
@@ -118,32 +167,32 @@ class TestInvocationCount:
     """K measuring filters ⇒ exactly K+1 ffmpeg invocations (Req 6.2, 6.4)."""
 
     @pytest.mark.asyncio
-    async def test_k0_single_application_pass(self, source: LongPath, out_dir: LongPath) -> None:
+    async def test_k0_single_application_pass(self, source: AudioStream, out_dir: LongPath) -> None:
         """No measuring filter ⇒ one application invocation (bug: needless passes)."""
         palette = {"dyn": _fi("dynaudnorm", framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0)}
         resolved = _resolved("normal", palette, ["dyn"])
         spy = _SpyRunner()
 
-        await execute_chain(resolved, source, _STEREO, out_dir, runner=spy)
+        await execute_chain(resolved, source, out_dir, runner=spy)
 
         assert len(spy.calls) == 1
 
     @pytest.mark.asyncio
-    async def test_k1_two_invocations(self, source: LongPath, out_dir: LongPath) -> None:
+    async def test_k1_two_invocations(self, source: AudioStream, out_dir: LongPath) -> None:
         """One two-pass filter ⇒ 1 measurement + 1 application (bug: wrong count)."""
         palette = {"peak": _fi("peaknorm", target_dbfs=-1.0)}
         resolved = _resolved("peak", palette, ["peak"])
         spy = _SpyRunner(stderr_per_call=[_VOLUMEDETECT_STDERR])
 
-        await execute_chain(resolved, source, _STEREO, out_dir, runner=spy)
+        await execute_chain(resolved, source, out_dir, runner=spy)
 
         assert len(spy.calls) == 2
         # First call is a measurement (no output file), second is the application.
-        assert spy.calls[0][1] is None
-        assert spy.calls[1][1] is not None
+        assert spy.calls[0].output is None
+        assert spy.calls[1].output is not None
 
     @pytest.mark.asyncio
-    async def test_k2_three_invocations(self, source: LongPath, out_dir: LongPath) -> None:
+    async def test_k2_three_invocations(self, source: AudioStream, out_dir: LongPath) -> None:
         """Two two-pass filters ⇒ K+1 = 3 invocations (bug: wrong count on stacking)."""
         palette = {
             "peak": _fi("peaknorm", target_dbfs=-1.0),
@@ -152,17 +201,17 @@ class TestInvocationCount:
         resolved = _resolved("both", palette, ["peak", "loud"])
         spy = _SpyRunner(stderr_per_call=[_VOLUMEDETECT_STDERR, _LOUDNORM_STDERR])
 
-        await execute_chain(resolved, source, _STEREO, out_dir, runner=spy)
+        await execute_chain(resolved, source, out_dir, runner=spy)
 
         assert len(spy.calls) == 3
-        assert [c[1] for c in spy.calls] == [None, None, spy.calls[2][1]]
+        assert [c.output for c in spy.calls] == [None, None, spy.calls[2].output]
 
 
 class TestMeasurementAfIncludesFrozenFragments:
     """Each measurement pass carries all already-finalized fragments (Req 6.2)."""
 
     @pytest.mark.asyncio
-    async def test_second_filters_measurement_includes_first(self, source: LongPath, out_dir: LongPath) -> None:
+    async def test_second_filters_measurement_includes_first(self, source: AudioStream, out_dir: LongPath) -> None:
         """peaknorm frozen fragment must precede loudnorm's analysis in the 2nd measure.
 
         Bug: measuring loudnorm on the raw signal instead of on the already-peak-
@@ -175,7 +224,7 @@ class TestMeasurementAfIncludesFrozenFragments:
         resolved = _resolved("both", palette, ["peak", "loud"])
         spy = _SpyRunner(stderr_per_call=[_VOLUMEDETECT_STDERR, _LOUDNORM_STDERR])
 
-        await execute_chain(resolved, source, _STEREO, out_dir, runner=spy)
+        await execute_chain(resolved, source, out_dir, runner=spy)
 
         # Call 0: peaknorm measurement — just "volumedetect".
         assert spy.af_of(0) == "volumedetect"
@@ -187,7 +236,7 @@ class TestMeasurementAfIncludesFrozenFragments:
         assert "print_format=json" in loud_measure_af
 
     @pytest.mark.asyncio
-    async def test_last_output_cleared_between_filters(self, source: LongPath, out_dir: LongPath) -> None:
+    async def test_last_output_cleared_between_filters(self, source: AudioStream, out_dir: LongPath) -> None:
         """A finished filter's measurement must not drive the next filter.
 
         loudnorm's pass-1 ``resolve`` gets ``last_output=None`` (fresh), not
@@ -206,7 +255,7 @@ class TestMeasurementAfIncludesFrozenFragments:
         resolved = _resolved("both", palette, ["peak", "loud"])
         spy = _SpyRunner(stderr_per_call=[_VOLUMEDETECT_STDERR, _LOUDNORM_STDERR])
 
-        await execute_chain(resolved, source, _STEREO, out_dir, runner=spy)
+        await execute_chain(resolved, source, out_dir, runner=spy)
 
         # Exactly K+1 = 3 calls proves loudnorm ran its own analysis pass with a
         # cleared last_output (it did not consume peaknorm's result).
@@ -223,40 +272,42 @@ class TestExtensionCorrectness:
     """Output extension: FLAC default, else last encode's extension (Req 8.3)."""
 
     @pytest.mark.asyncio
-    async def test_flac_default_when_no_encode(self, source: LongPath, out_dir: LongPath) -> None:
+    async def test_flac_default_when_no_encode(self, source: AudioStream, out_dir: LongPath) -> None:
         """No encode filter ⇒ .flac and no -b:a (bug: wrong ext / bitrate on FLAC)."""
         palette = {"dyn": _fi("dynaudnorm", framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0)}
         resolved = _resolved("normal", palette, ["dyn"])
         assert resolved.encode == FLAC_DEFAULT
         spy = _SpyRunner()
 
-        out = await execute_chain(resolved, source, _STEREO, out_dir, runner=spy)
+        out = await execute_chain(resolved, source, out_dir, runner=spy)
 
         assert out.suffix == ".flac"
         assert out.name.endswith(" chain=normal.flac")
         # Output lands in the dedicated audio dir, not next to the source.
         assert out.parent == out_dir
-        assert "-b:a" not in spy.calls[0][0]     # FLAC ignores bitrate
-        assert "-c:a" in spy.calls[0][0]
+        assert "-b:a" not in spy.argv_of(0)     # FLAC ignores bitrate
+        assert "-c:a" in spy.argv_of(0)
 
     @pytest.mark.asyncio
-    async def test_application_cmd_is_audio_only(self, source: LongPath, out_dir: LongPath) -> None:
-        """The application cmd drops video/subs/data streams (bug: stray data stream).
+    async def test_application_cmd_maps_single_stream(self, source: AudioStream, out_dir: LongPath) -> None:
+        """The application cmd maps exactly the one audio stream (bug: stray
+        data streams carried through by the muxer).
 
-        A regression that re-introduces a ``bin_data``/data stream in the output
-        is caught here: the audio-only flags ``-vn -sn -dn`` must all be present.
+        The explicit single-stream ``-map 0:<track_id>`` subsumes the old
+        ``-vn/-sn/-dn`` drops (Req 7.5) — anything unmapped cannot leak.
         """
         palette = {"aac": _fi("encode", codec="aac", bitrate_per_channel="64k", extension="m4a")}
         resolved = _resolved("enc_only", palette, ["aac"])
         spy = _SpyRunner()
 
-        await execute_chain(resolved, source, _STEREO, out_dir, runner=spy)
+        await execute_chain(resolved, source, out_dir, runner=spy)
 
-        cmd = spy.calls[0][0]
-        assert "-vn" in cmd and "-sn" in cmd and "-dn" in cmd
+        cmd = spy.argv_of(0)
+        maps = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
+        assert maps == ["0:2"], f"Expected the single track selector, got: {maps}"
 
     @pytest.mark.asyncio
-    async def test_last_encode_wins(self, source: LongPath, out_dir: LongPath) -> None:
+    async def test_last_encode_wins(self, source_51: AudioStream, out_dir: LongPath) -> None:
         """Two encode filters ⇒ the last one's extension/codec wins (bug: first wins)."""
         palette = {
             "flac_enc": _fi("encode", codec="flac", bitrate_per_channel="0k", extension="flac"),
@@ -266,10 +317,10 @@ class TestExtensionCorrectness:
         assert resolved.encode.extension == "m4a"
         spy = _SpyRunner()
 
-        out = await execute_chain(resolved, source, _51, out_dir, runner=spy)
+        out = await execute_chain(resolved, source_51, out_dir, runner=spy)
 
         assert out.name.endswith(" chain=dual.m4a")
-        cmd = spy.calls[0][0]
+        cmd = spy.argv_of(0)
         assert "aac" in cmd
         # Bitrate scaled by the 5.1 channel count: 64k * 6 = 384k.
         assert "-b:a" in cmd
@@ -280,7 +331,7 @@ class TestAfJoining:
     """The -af argument is a clean comma-join; all-empty chains omit it (Req 6.1, 6.6)."""
 
     @pytest.mark.asyncio
-    async def test_downmix_noop_contributes_no_stray_comma(self, source: LongPath, out_dir: LongPath) -> None:
+    async def test_downmix_noop_contributes_no_stray_comma(self, source: AudioStream, out_dir: LongPath) -> None:
         """A no-op downmix (source ≤ target) must not add a comma or empty fragment.
 
         Bug: a downmix no-op contributing ``""`` produces a leading/doubled comma
@@ -293,7 +344,7 @@ class TestAfJoining:
         resolved = _resolved("norm2", palette, ["down", "dyn"])
         spy = _SpyRunner()
 
-        await execute_chain(resolved, source, _STEREO, out_dir, runner=spy)
+        await execute_chain(resolved, source, out_dir, runner=spy)
 
         af = spy.af_of(0)
         assert af is not None
@@ -302,7 +353,7 @@ class TestAfJoining:
         assert not af.endswith(",")
 
     @pytest.mark.asyncio
-    async def test_all_empty_chain_omits_af(self, source: LongPath, out_dir: LongPath) -> None:
+    async def test_all_empty_chain_omits_af(self, source: AudioStream, out_dir: LongPath) -> None:
         """A chain whose only filter is an encode (af="") must omit -af entirely.
 
         Bug: emitting ``-af ""`` (empty filter chain) which ffmpeg rejects.
@@ -311,13 +362,13 @@ class TestAfJoining:
         resolved = _resolved("enc_only", palette, ["aac"])
         spy = _SpyRunner()
 
-        await execute_chain(resolved, source, _STEREO, out_dir, runner=spy)
+        await execute_chain(resolved, source, out_dir, runner=spy)
 
         assert len(spy.calls) == 1
-        assert "-af" not in spy.calls[0][0]
+        assert "-af" not in spy.argv_of(0)
 
     @pytest.mark.asyncio
-    async def test_downmix_active_then_dyn_joined_with_single_comma(self, source: LongPath, out_dir: LongPath) -> None:
+    async def test_downmix_active_then_dyn_joined_with_single_comma(self, source_51: AudioStream, out_dir: LongPath) -> None:
         """An active downmix (5.1→2.0) then dynaudnorm join with exactly one comma."""
         palette = {
             "down": _fi("downmix", to="2.0", matrix="std"),
@@ -326,7 +377,7 @@ class TestAfJoining:
         resolved = _resolved("down_norm", palette, ["down", "dyn"])
         spy = _SpyRunner()
 
-        await execute_chain(resolved, source, _51, out_dir, runner=spy)
+        await execute_chain(resolved, source_51, out_dir, runner=spy)
 
         af = spy.af_of(0) or ""
         assert af.startswith("pan=stereo|")
@@ -375,13 +426,13 @@ class TestExecutorHasNoFilterTypeBranch:
         resolved = _resolved("custom", palette, ["tp"])
         spy = _SpyRunner(stderr_per_call=[["astats output"]])
 
-        await execute_chain(resolved, source, _STEREO, out_dir, runner=spy)
+        await execute_chain(resolved, source, out_dir, runner=spy)
 
         assert len(spy.calls) == 2               # K=1 ⇒ K+1
         assert spy.af_of(0) == "astats"          # measurement fragment
-        assert spy.calls[0][1] is None           # measurement writes no file
+        assert spy.calls[0].output is None       # measurement writes no file
         assert spy.af_of(1) == "volume=1.0"      # final measured fragment
-        assert spy.calls[1][1] is not None       # application writes a file
+        assert spy.calls[1].output is not None   # application writes a file
 
 
 class TestResolveChain:
@@ -418,12 +469,98 @@ class TestScaleBitrate:
 
 
 class TestChainOutputPath:
-    """Output naming follows ``<stem> chain=<name>.<ext>`` (Req 8.1)."""
+    """Output naming follows ``<stream safe name> chain=<name>.<ext>`` (Req 15.2)."""
+
+    def _stream(self, tmp_path, **info_kwargs) -> AudioStream:
+        from pyqenc.stream_model import AudioStreamInfo, File
+
+        defaults: dict = {"track_id": 1, "codec_name": "flac", "language": "eng"}
+        defaults.update(info_kwargs)
+        return AudioStream(
+            file = File(path=LongPath(tmp_path) / "movie.mkv"),
+            info = AudioStreamInfo(**defaults),
+        )
 
     def test_name_format(self, tmp_path) -> None:
-        source = LongPath(tmp_path) / "movie track1.mka"
+        """The name carries the full stream identity — the display-name theme
+        made filesystem-safe — so a consumer can trace an output to its track."""
+        stream = self._stream(tmp_path, title="Surround", layout=ChannelLayout.parse("stereo"))
         output_dir = LongPath(tmp_path) / "audio"
-        out = chain_output_path(source, "night", "flac", output_dir)
-        assert out.name == "movie track1 chain=night.flac"
+        out = chain_output_path(stream, "night", "flac", output_dir)
+        assert out.name == "#1 (audio-flac) lang=eng title=Surround ch=stereo chain=night.flac"
         # The output lives in the supplied dedicated dir, NOT next to the source.
         assert out.parent == output_dir
+
+    def test_tracks_do_not_collide(self, tmp_path) -> None:
+        """Bug guarded: under virtual streams every track points at the source
+        file — naming from the source stem made all tracks' outputs share one
+        filename and silently overwrite each other (last-one-wins)."""
+        t1 = self._stream(tmp_path, track_id=1, language="rus")
+        t2 = self._stream(tmp_path, track_id=2, language="eng")
+        output_dir = LongPath(tmp_path) / "audio"
+
+        out1 = chain_output_path(t1, "night", "flac", output_dir)
+        out2 = chain_output_path(t2, "night", "flac", output_dir)
+
+        assert out1 != out2, "outputs of different tracks must never share a filename"
+
+    def test_unsafe_title_sanitized(self, tmp_path) -> None:
+        """Bug guarded: a human-defined title may carry filesystem-forbidden
+        characters (slashes, colons) — the output name must sanitize them
+        while the display name keeps the title verbatim."""
+        stream = self._stream(tmp_path, title='Bad: "Title/1?')
+        output_dir = LongPath(tmp_path) / "audio"
+
+        out = chain_output_path(stream, "night", "flac", output_dir)
+
+        assert stream.display_name() == '#1 (audio-flac) lang=eng title=Bad: "Title/1?'
+        assert out.name == "#1 (audio-flac) lang=eng title=Bad_ _Title_1_ chain=night.flac"
+
+
+# ---------------------------------------------------------------------------
+# Golden composed argv — measurement and application passes
+# ---------------------------------------------------------------------------
+
+class TestChainCommandGolden:
+    """Pin the composed argv for the chain executor's two ffmpeg call sites.
+
+    Bug prevented: the request-model conversion drifting from the original
+    hand-built commands — first-audio selector, audio-only flags, ``-af``
+    chain, codec/bitrate stage, muxer override for the ``.tmp`` output.
+    """
+
+    @pytest.mark.asyncio
+    async def test_measurement_pass_golden_argv(self, source: AudioStream, out_dir: LongPath) -> None:
+        palette = {"peak": _fi("peaknorm", target_dbfs=-1.0)}
+        resolved = _resolved("peak", palette, ["peak"])
+        spy = _SpyRunner(stderr_per_call=[["[Parsed_astats_0 @ 0x1] Peak level dB: -6.0"]])
+
+        await execute_chain(resolved, source, out_dir, runner=spy)
+
+        assert spy.argv_of(0) == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(source.file.path),
+            "-map", "0:2",
+            "-af", "astats",
+            "-map_chapters", "-1",
+            "-f", "null", "-",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_application_pass_golden_argv(self, source: AudioStream, out_dir: LongPath) -> None:
+        palette = {"aac": _fi("encode", codec="aac", bitrate_per_channel="64k", extension="m4a")}
+        resolved = _resolved("enc_only", palette, ["aac"])
+        spy = _SpyRunner()
+
+        await execute_chain(resolved, source, out_dir, runner=spy)
+
+        out_tmp = chain_output_path(source, "enc_only", "m4a", out_dir).with_suffix(".tmp")
+        assert spy.argv_of(0) == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(source.file.path),
+            "-map", "0:2",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-map_chapters", "-1",
+            "-f", "ipod", str(out_tmp),
+        ]

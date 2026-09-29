@@ -28,13 +28,11 @@ from typing import TYPE_CHECKING, ClassVar, cast
 from alive_progress import config_handler
 
 from pyqenc.constants import (
-    CHUNKS_DIR,
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
 )
 from pyqenc.metrics import MetricKey
 from pyqenc.models import (
-    ChunkMetadata,
     CleanupLevel,
     CropParams,
     PhaseOutcome,
@@ -58,6 +56,7 @@ from pyqenc.state import (
     ProbeState,
     StrategyTestResult,
 )
+from pyqenc.stream_model import VideoStreamChunk
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.visualization import QualityEvaluator
 
@@ -177,7 +176,7 @@ class OptimizationPhase(Phase):
 
     def _log_key_params(self) -> None:
         """Log the strategy list and tolerance (key parameters)."""
-        logger.info("Strategies:  %s", ", ".join(s.name for s in self._config.encoding.resolved_strategies))
+        logger.info("Strategies:  %s", ", ".join(s.display_name() for s in self._config.encoding.resolved_strategies))
         logger.info("Tolerance:   %.1f%%", self._config.encoding.optimize_tolerance)
 
     def _recovery_unit(self) -> str:
@@ -193,7 +192,7 @@ class OptimizationPhase(Phase):
            the ``encoding/`` test workspace.
         2. Probe mismatch against ``optimization.yaml`` — fatal without
            ``--force`` (handled in step 1 when forced).
-        3. Quality-target / ``metrics_sampling`` change → wipe ``encoded/``
+        3. Quality-target / metrics-sampling change → wipe ``encoded/``
            result dirs and treat all cached strategy results as stale.
         4. All results cached with a differing tolerance → cheap pending work
            (re-select without re-encoding).
@@ -217,7 +216,7 @@ class OptimizationPhase(Phase):
 
         crop           = probe_result.crop
         current_probe  = ProbeState(
-            frame_count = probe_result.source.frame_count if probe_result.source else 0,
+            frame_count = probe_result.stream.frame_count if probe_result.stream is not None else 0,
             crop        = crop if crop else None,
         )
         self._current_probe = current_probe
@@ -238,7 +237,7 @@ class OptimizationPhase(Phase):
                     "Re-run with --force to delete stale optimization artifacts and continue."
                 )
 
-        # Step 3 — quality-target / metrics_sampling change detection.
+        # Step 3 — quality-target / sampling change detection.
         current_targets  = _targets_as_strings(self._config.encoding.resolved_targets)
         current_sampling = self._config.measurement.sampling
         targets_changed = (
@@ -248,14 +247,14 @@ class OptimizationPhase(Phase):
         )
         sampling_changed = (
             persisted is not None
-            and persisted.metrics_sampling is not None
-            and persisted.metrics_sampling != current_sampling
+            and persisted.sampling is not None
+            and persisted.sampling != current_sampling
         )
         if (targets_changed or sampling_changed) and persisted is not None and persisted.strategy_results:
             if sampling_changed:
                 logger.debug(
-                    "metrics_sampling changed (%d → %d) — wiping encoded/ dirs",
-                    persisted.metrics_sampling, current_sampling,
+                    "metrics sampling changed (%d → %d) — wiping encoded/ dirs",
+                    persisted.sampling, current_sampling,
                 )
             # Wipe encoded/ for every strategy — contents are hard-linked attempts
             # and result sidecars; EncodingPhase will re-discover from encoding/.
@@ -268,7 +267,7 @@ class OptimizationPhase(Phase):
                 tolerance_pct    = persisted.tolerance_pct,
                 selected         = [],
                 quality_targets  = persisted.quality_targets,
-                metrics_sampling = persisted.metrics_sampling,
+                sampling         = persisted.sampling,
             )
         self._persisted = persisted
 
@@ -276,10 +275,10 @@ class OptimizationPhase(Phase):
         cached_results: dict[str, StrategyTestResult] = {}
         if persisted is not None:
             for r in persisted.strategy_results:
-                cached_results[r.strategy_name] = r
+                cached_results[r.strategy] = r
         self._cached_results = cached_results
 
-        self._strategies_to_test = [s for s in strategies if s.name not in cached_results]
+        self._strategies_to_test = [s for s in strategies if s.display_name() not in cached_results]
         if (
             not self._strategies_to_test
             and cached_results
@@ -302,7 +301,7 @@ class OptimizationPhase(Phase):
         # Step 5 — one artifact per strategy result.
         artifacts = _strategy_artifacts(
             complete_names = list(cached_results.keys()),
-            absent_names   = [s.name for s in self._strategies_to_test],
+            absent_names   = [s.display_name() for s in self._strategies_to_test],
         )
         return Recovery.from_artifacts(artifacts)
 
@@ -352,7 +351,7 @@ class OptimizationPhase(Phase):
                 tolerance_pct    = tolerance,
                 selected         = selected,
                 quality_targets  = current_targets,
-                metrics_sampling = current_sampling,
+                sampling = current_sampling,
             ).save(opt_yaml)
             self._selected_names   = selected
             self._strategy_results = persisted.strategy_results
@@ -367,7 +366,7 @@ class OptimizationPhase(Phase):
 
         # Test encodes need chunks from ChunkingPhase.
         chunking_result = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result)
-        chunks: list[ChunkMetadata] = chunking_result.chunks
+        chunks: list[VideoStreamChunk] = chunking_result.chunks
         if strategies_to_test and not chunks:
             err = "No chunks available from ChunkingPhase"
             logger.critical(err)
@@ -391,7 +390,7 @@ class OptimizationPhase(Phase):
             tolerance_pct    = tolerance,
             selected         = [],
             quality_targets  = current_targets,
-            metrics_sampling = current_sampling,
+            sampling = current_sampling,
         ).save(opt_yaml)
 
         # Run test encodes for all pending strategies in parallel (unified
@@ -405,14 +404,12 @@ class OptimizationPhase(Phase):
             cleanup_level    = job_result.cleanup,
             metric_prefix    = MetricKey.OPTIMIZATION,
         )
-        reference_dir = work_dir / CHUNKS_DIR
-
         test_chunk_seconds = sum(c.end_timestamp - c.start_timestamp for c in test_chunks)
         total_seconds      = test_chunk_seconds * len(strategies_to_test)
         total_count        = len(test_chunks) * len(strategies_to_test)
 
         test_chunk_ids = [c.chunk_id for c in test_chunks]
-        strategy_names = [s.name for s in strategies_to_test]
+        strategy_names = [s.display_name() for s in strategies_to_test]
         from pyqenc.phases.encoding import (
             _encode_chunks_parallel,
             _recover_encoding_attempts,
@@ -431,7 +428,6 @@ class OptimizationPhase(Phase):
                 _encode_chunks_parallel(
                     encoder           = encoder,
                     chunks            = test_chunks,
-                    reference_dir     = reference_dir,
                     strategies        = strategies_to_test,
                     quality_targets   = self._config.encoding.resolved_targets,
                     max_parallel      = self._config.encoding.concurrency,
@@ -449,11 +445,11 @@ class OptimizationPhase(Phase):
         for strategy in strategies_to_test:
             file_sizes: list[float] = []
             for chunk in test_chunks:
-                encoded_path = enc_result.encoded_chunks.get(chunk.chunk_id, {}).get(strategy.name)
-                if encoded_path is not None and encoded_path.exists():
-                    file_sizes.append(encoded_path.stat().st_size)
+                encoded = enc_result.encoded_chunks.get(chunk.safe_name(), {}).get(strategy.display_name())
+                if encoded is not None and encoded.stream.stream.file.path.exists():
+                    file_sizes.append(encoded.stream.stream.file.file_size_bytes or 0)
             new_results.append(StrategyTestResult(
-                strategy_name = strategy.name,
+                strategy     = strategy.display_name(),
                 total_size    = int(sum(file_sizes)),
             ))
 
@@ -471,7 +467,7 @@ class OptimizationPhase(Phase):
             tolerance_pct    = tolerance,
             selected         = selected,
             quality_targets  = current_targets,
-            metrics_sampling = current_sampling,
+            sampling = current_sampling,
         ).save(opt_yaml)
 
         self._selected_names   = selected
@@ -534,7 +530,7 @@ class OptimizationPhase(Phase):
             Matching ``Strategy`` objects from the resolved strategies,
             preserving the order of *selected_names*.
         """
-        by_name = {s.name: s for s in self._config.encoding.resolved_strategies}
+        by_name = {s.display_name(): s for s in self._config.encoding.resolved_strategies}
         return [by_name[n] for n in selected_names if n in by_name]
 
     def _all_strategies(self, dry_run: bool) -> OptimizationPhaseResult:
@@ -565,19 +561,19 @@ class OptimizationPhase(Phase):
                 persisted is not None
                 and (
                     (bool(persisted.quality_targets) and persisted.quality_targets != current_targets)
-                    or (persisted.metrics_sampling is not None and persisted.metrics_sampling != current_sampling)
+                    or (persisted.sampling is not None and persisted.sampling != current_sampling)
                 )
             )
             if params_stale:
                 logger.info(
-                    "All-strategies mode: quality targets or metrics_sampling changed"
+                    "All-strategies mode: quality targets or metrics sampling changed"
                     " — wiping encoded/ dirs"
                 )
                 _wipe_encoded_dir(work_dir, self._config.encoding.resolved_strategies)
             elif persisted is not None:
                 logger.debug(
                     "All-strategies mode: params unchanged (sampling=%s, targets=%s) — encoded/ kept",
-                    persisted.metrics_sampling, persisted.quality_targets,
+                    persisted.sampling, persisted.quality_targets,
                 )
 
             # Always write optimization.yaml with current targets and sampling
@@ -587,9 +583,9 @@ class OptimizationPhase(Phase):
                 test_chunks      = [],
                 strategy_results = [],
                 tolerance_pct    = 0.0,
-                selected         = [s.name for s in self._config.encoding.resolved_strategies],
+                selected         = [s.display_name() for s in self._config.encoding.resolved_strategies],
                 quality_targets  = current_targets,
-                metrics_sampling = current_sampling,
+                sampling = current_sampling,
             ).save(opt_yaml)
 
         return OptimizationPhaseResult(
@@ -643,7 +639,7 @@ class OptimizationPhase(Phase):
         best_size = successful[0].total_size
         threshold = best_size * (1.0 + tolerance_pct / 100.0)
 
-        return [r.strategy_name for r in successful if r.total_size <= threshold]
+        return [r.strategy for r in successful if r.total_size <= threshold]
 
     def _log_optimization_summary(
         self,
@@ -671,11 +667,11 @@ class OptimizationPhase(Phase):
         for res in results:
             size_mb  = res.total_size / (1024 * 1024) if res.total_size > 0 else 0.0
             size_str = f"{size_mb:,.1f}".replace(",", "\u202f")
-            marker   = " ◀ selected" if res.strategy_name in selected_names else ""
+            marker   = " ◀ selected" if res.strategy in selected_names else ""
             status   = "passed" if res.total_size > 0 else "failed"
             logger.info(
                 "  %-30s  %12s  %8s%s",
-                res.strategy_name[:30], size_str, status, marker,
+                res.strategy[:30], size_str, status, marker,
             )
 
         logger.info("")
@@ -749,7 +745,7 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
 
     Args:
         work_dir:   Pipeline working directory.
-        strategies: All configured strategies (safe_name used for directory lookup).
+        strategies: All configured strategies (name used for directory lookup).
     """
     encoded_base = work_dir / ENCODED_OUTPUT_DIR
     if not encoded_base.exists():
@@ -757,7 +753,7 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
 
     # Collect all existing strategy subdirs
     existing_dirs = [d for d in encoded_base.iterdir() if d.is_dir()]
-    expected_names = {s.safe_name for s in strategies}
+    expected_names = {s.display_name() for s in strategies}
     unexpected = [d for d in existing_dirs if d.name not in expected_names]
 
     if unexpected:
@@ -774,7 +770,7 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
         return
 
     for strategy in strategies:
-        strategy_dir = encoded_base / strategy.safe_name
+        strategy_dir = encoded_base / strategy.safe_name()
         if not strategy_dir.exists():
             continue
         try:
@@ -785,12 +781,12 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
 
 
 def _select_test_chunks(
-    chunks:                list[ChunkMetadata],
+    chunks:                list[VideoStreamChunk],
     percentage:            float = 0.01,
     min_chunks:            int   = 3,
     exclude_start_percent: float = 0.10,
     exclude_end_percent:   float = 0.10,
-) -> list[ChunkMetadata]:
+) -> list[VideoStreamChunk]:
     """Select representative test chunks for optimization.
 
     Selects approximately 1% of chunks (minimum 3) from the middle 80% of

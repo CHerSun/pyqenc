@@ -14,12 +14,9 @@ import re
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-import pytest
-
 from pyqenc.constants import TEMP_SUFFIX
 from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
 from pyqenc.utils.long_path import LongPath
-
 
 # ---------------------------------------------------------------------------
 # Helpers

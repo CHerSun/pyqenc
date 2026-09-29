@@ -6,7 +6,7 @@ Observable-behavior only: phases are constructed through their real public
 constructors with a real phase registry whose dependency ``result`` fields are
 pre-set to completed typed results (so the shared dependency walk is a no-op),
 then driven through the public ``run()`` entry point. The only things mocked are
-genuine external shell-outs (``MKVTrackExtractor`` → ffprobe, ``subprocess.run``
+genuine external shell-outs (``_probe_streams_json`` → ffprobe, ``subprocess.run``
 → mkvmerge, ``get_frame_count`` → ffmpeg) — boundaries, never phase internals.
 No ``__new__``, no private ``_recover``/``_execute_merge`` calls, no private-attr
 poking.
@@ -24,7 +24,7 @@ from hypothesis import strategies as st
 from pyqenc.app_config import load_app_config
 from pyqenc.constants import EXTRACTED_DIR, TIMESTAMPS_FILENAME
 from pyqenc.metrics import NoOpMetricsCollector
-from pyqenc.models import CleanupLevel, PhaseOutcome, VideoMetadata
+from pyqenc.models import CleanupLevel, PhaseOutcome
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import (
     ExtractionPhase,
@@ -32,7 +32,79 @@ from pyqenc.phases.extraction import (
     _extract_timestamps,
 )
 from pyqenc.phases.job import JobPhase, JobPhaseResult
-from pyqenc.state import ArtifactState, JobState
+from pyqenc.state import ArtifactState
+from pyqenc.stream_model import File
+
+
+def _merge_encoded_chunk(path, chunk_id: str, strategy_name: str):
+    """A minimal EncodedChunk fixture for merge consumption (Req 14 shape)."""
+    from decimal import Decimal
+
+    from pyqenc.models import CodecConfig, CropParams, Strategy
+    from pyqenc.stream_model import (
+        EncodedChunk,
+        ExtendedVideoStream,
+        File,
+        VideoStream,
+        VideoStreamChunk,
+        VideoStreamInfo,
+    )
+
+    codec = CodecConfig(
+        name="h265-10bit", default_quality=Decimal("20"), default_preset="slow",
+        quality_range=(Decimal("0"), Decimal("51")), presets=["slow"],
+    )
+    preset, _, profile = strategy_name.partition("+")
+    strategy = Strategy(preset=preset, profile=profile or "h265", codec=codec, profile_args=[])
+    base_stream = ExtendedVideoStream(
+        stream=VideoStream(
+            file=File(path=path.parent / "source.mkv"),
+            info=VideoStreamInfo(track_id=0, resolution="1920x1080"),
+        ),
+        frame_count=24,
+        crop=CropParams(),
+    )
+    return EncodedChunk(
+        stream=ExtendedVideoStream(
+            stream=VideoStream(
+                file=File(path=path, file_size_bytes=128),
+                info=VideoStreamInfo(track_id=0, resolution="1920x1080"),
+            ),
+            frame_count=24,
+            crop=CropParams(),
+        ),
+        chunk=VideoStreamChunk(
+            stream=base_stream, start_timestamp=0.0, end_timestamp=1.0, frame_count=24,
+        ),
+        strategy=strategy,
+        crf=Decimal("20"),
+    )
+
+
+
+def _extended_stream(path: Path, frame_count: int):
+    """An ExtendedVideoStream for the source (fast facet + frame count)."""
+    from fractions import Fraction
+
+    from pyqenc.stream_model import (
+        ExtendedVideoStream,
+        File,
+        VideoStream,
+        VideoStreamInfo,
+    )
+
+    return ExtendedVideoStream(
+        stream=VideoStream(
+            file=File(path=path, file_size_bytes=64),
+            info=VideoStreamInfo(
+                track_id=0, codec_name="hevc", fps=24.0,
+                fps_fraction=Fraction(24, 1), resolution="1920x1080",
+                duration_seconds=3600.0,
+            ),
+        ),
+        frame_count=frame_count,
+        crop=__import__("pyqenc.models", fromlist=["CropParams"]).CropParams(),
+    )
 
 # ---------------------------------------------------------------------------
 # Shared helpers — build a REAL ExtractionPhase via its real constructor
@@ -41,13 +113,7 @@ from pyqenc.state import ArtifactState, JobState
 _APP_CONFIG = load_app_config(default_only=True)
 
 
-def _make_source_vm(path: Path) -> VideoMetadata:
-    """Return a VideoMetadata with fast-probe fields pre-populated (no probing)."""
-    meta = VideoMetadata(path=path)
-    meta._duration_seconds = 3600.0
-    meta._fps              = 24.0
-    meta._resolution       = "1920x1080"
-    return meta
+
 
 
 def _make_extraction_phase(
@@ -69,13 +135,11 @@ def _make_extraction_phase(
     config = _APP_CONFIG.model_copy(deep=True)
     config.extraction.include = include
     config.extraction.exclude = exclude
-
-    source_vm  = _make_source_vm(source)
     job_result = JobPhaseResult(
+        file       = File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64),
         outcome    = PhaseOutcome.COMPLETED,
         artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message    = "job complete",
-        job        = JobState(source=source_vm),
         force_wipe = False,
         config     = config,
         work_dir   = work_dir,
@@ -222,11 +286,8 @@ def test_timestamp_filter_independence(
 
         # Mock only the external ffprobe boundary: no tracks discovered so the
         # filter varies over a real (empty) stream set without shelling out.
-        with patch("pyqenc.phases.extraction.MKVTrackExtractor") as mock_extractor_cls:
-            mock_extractor = MagicMock()
-            mock_extractor.tracks = []
-            mock_extractor_cls.return_value = mock_extractor
-
+        with patch("pyqenc.phases.extraction._probe_streams_json",
+                   return_value={"streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc"}], "chapters": []}):
             result = phase.run(dry_run=True)
 
     ts_artifacts = [a for a in result.artifacts if isinstance(a, TimestampArtifact)]
@@ -276,11 +337,8 @@ def test_timestamp_artifact_classification(file_present: bool) -> None:
 
         phase = _make_extraction_phase(work_dir, source, include=None, exclude=None)
 
-        with patch("pyqenc.phases.extraction.MKVTrackExtractor") as mock_extractor_cls:
-            mock_extractor = MagicMock()
-            mock_extractor.tracks = []
-            mock_extractor_cls.return_value = mock_extractor
-
+        with patch("pyqenc.phases.extraction._probe_streams_json",
+                   return_value={"streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc"}], "chapters": []}):
             result = phase.run(dry_run=True)
 
     ts_artifacts = [a for a in result.artifacts if isinstance(a, TimestampArtifact)]
@@ -327,10 +385,8 @@ def test_frame_count_preservation(frame_count: int) -> None:
     **Validates: Requirement 6.1**
     """
     from pyqenc.constants import FINAL_OUTPUT_DIR
-    from pyqenc.models import ExtendedVideoMetadata
     from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
     from pyqenc.phases.encoding import (
-        EncodedArtifact,
         EncodingPhase,
         EncodingPhaseResult,
     )
@@ -362,8 +418,6 @@ def test_frame_count_preservation(frame_count: int) -> None:
         # Empty quality targets → quality measurement is skipped (no shell-out).
         config = _APP_CONFIG.model_copy(deep=True)
 
-        source_vm = _make_source_vm(source)
-
         # --- Real dependency phases with pre-set COMPLETED results ---
         job = JobPhase(
             config, None,
@@ -378,7 +432,6 @@ def test_frame_count_preservation(frame_count: int) -> None:
             outcome    = PhaseOutcome.COMPLETED,
             artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
             message    = "job complete",
-            job        = JobState(source=source_vm),
             force_wipe = False,
             config     = config,
             work_dir   = work_dir,
@@ -392,7 +445,6 @@ def test_frame_count_preservation(frame_count: int) -> None:
             outcome         = PhaseOutcome.COMPLETED,
             artifacts       = [Artifact(path=ts_file, state=ArtifactState.COMPLETE)],
             message         = "extraction complete",
-            video           = source_vm,
             timestamps_path = ts_file,
         )
         registry[ExtractionPhase] = extraction
@@ -402,21 +454,17 @@ def test_frame_count_preservation(frame_count: int) -> None:
             outcome   = PhaseOutcome.COMPLETED,
             artifacts = [Artifact(path=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
             message   = "probe complete",
-            source    = ExtendedVideoMetadata.from_base(source_vm, frame_count=frame_count),
+            stream    = _extended_stream(source, frame_count),
         )
         registry[ProbePhase] = probe
 
         encoding = EncodingPhase(config, registry, collector=collector)
+        encoded_chunk = _merge_encoded_chunk(chunk, "chunk1", "slow+h265")
         encoding.result = EncodingPhaseResult(
-            outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
-            message   = "encoding complete",
-            encoded   = [EncodedArtifact(
-                path     = chunk,
-                state    = ArtifactState.COMPLETE,
-                chunk_id = "chunk1",
-                strategy = "slow+h265",
-            )],
+            outcome        = PhaseOutcome.COMPLETED,
+            artifacts      = [],
+            message        = "encoding complete",
+            encoded_chunks = {"chunk1": {encoded_chunk.strategy.display_name(): encoded_chunk}},
         )
         registry[EncodingPhase] = encoding
 
@@ -432,8 +480,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
         merge = MergePhase(config, registry, collector=collector)
 
         source_stem = source.stem
-        safe_name   = "slow+h265".replace(":", "_")
-        output_file = work_dir / FINAL_OUTPUT_DIR / f"{source_stem} {safe_name}.mkv"
+        output_file = work_dir / FINAL_OUTPUT_DIR / f"{source_stem} {encoded_chunk.strategy.display_name()}.mkv"
 
         def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
             output_file.parent.mkdir(parents=True, exist_ok=True)

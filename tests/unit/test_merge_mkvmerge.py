@@ -14,15 +14,19 @@ no private-attr poking.
 
 Covers:
 - _build_mkvmerge_options: single chunk, multiple chunks, timestamps placement
+- _default_duration_ns / _build_mkvpropedit_args: exact ns conversion, argv pin
 - _write_mkvmerge_options_file: JSON written atomically
 - Options file deleted on success, retained on failure (via run())
+- mkvpropedit failure fails the strategy without writing a sidecar (via run())
 - Merge fails with a clear message when timestamps_path is None / missing (via run())
 """
 
 from __future__ import annotations
 
 import json
+import os
 import tempfile
+from fractions import Fraction
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -31,14 +35,11 @@ from pyqenc.constants import EXTRACTED_DIR, FINAL_OUTPUT_DIR, TIMESTAMPS_FILENAM
 from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import (
     CleanupLevel,
-    ExtendedVideoMetadata,
     PhaseOutcome,
-    VideoMetadata,
 )
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
 from pyqenc.phases.encoding import (
-    EncodedArtifact,
     EncodingPhase,
     EncodingPhaseResult,
 )
@@ -47,10 +48,38 @@ from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.merge import (
     MergePhase,
     _build_mkvmerge_options,
+    _build_mkvpropedit_args,
+    _default_duration_ns,
+    _log_missed_targets_warning,
     _write_mkvmerge_options_file,
 )
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
-from pyqenc.state import ArtifactState, JobState
+from pyqenc.state import ArtifactState
+
+
+def _extended_stream(path: Path, frame_count: int) -> "ExtendedVideoStream":
+    """An ExtendedVideoStream for the source (fast facet + frame count)."""
+    from fractions import Fraction
+
+    from pyqenc.stream_model import (
+        ExtendedVideoStream,
+        File,
+        VideoStream,
+        VideoStreamInfo,
+    )
+
+    return ExtendedVideoStream(
+        stream=VideoStream(
+            file=File(path=path, file_size_bytes=64),
+            info=VideoStreamInfo(
+                track_id=0, codec_name="hevc", fps=24.0,
+                fps_fraction=Fraction(24, 1), resolution="1920x1080",
+                duration_seconds=3600.0,
+            ),
+        ),
+        frame_count=frame_count,
+        crop=__import__("pyqenc.models", fromlist=["CropParams"]).CropParams(),
+    )
 
 _APP_CONFIG = load_app_config(default_only=True)
 
@@ -63,13 +92,81 @@ _SAFE_NAME = _STRATEGY.replace(":", "_")
 # Real-construction helper
 # ---------------------------------------------------------------------------
 
-def _make_source_vm(path: Path) -> VideoMetadata:
-    """Return a VideoMetadata with fast-probe fields pre-populated (no probing)."""
-    meta = VideoMetadata(path=path)
-    meta._duration_seconds = 3600.0
-    meta._fps              = 24.0
-    meta._resolution       = "1920x1080"
-    return meta
+def _by_strategy_name(encoded) -> dict:
+    """Key an EncodedChunk by its own strategy name (as encoding.py does)."""
+    return {encoded.strategy.display_name(): encoded}
+
+
+def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
+    """A minimal EncodedChunk fixture for merge consumption."""
+    from decimal import Decimal
+
+    from pyqenc.models import CodecConfig, CropParams, Strategy
+    from pyqenc.stream_model import (
+        EncodedChunk,
+        ExtendedVideoStream,
+        File,
+        VideoStream,
+        VideoStreamInfo,
+    )
+
+    codec = CodecConfig(
+        name="h265-10bit", default_quality=Decimal("20"), default_preset="slow",
+        quality_range=(Decimal("0"), Decimal("51")), presets=["slow"],
+    )
+    preset, _, profile = strategy_name.partition("+")
+    strategy = Strategy(preset=preset, profile=profile or "h265", codec=codec, profile_args=[])
+    return EncodedChunk(
+        stream = ExtendedVideoStream(
+            stream = VideoStream(
+                file = File(path=path, file_size_bytes=path.stat().st_size if path.exists() else 64),
+                info = VideoStreamInfo(track_id=0, resolution="1920x1080"),
+            ),
+            frame_count = 24,
+            crop        = CropParams(),
+        ),
+        chunk    = _make_chunk_window(path.parent / "source.mkv", chunk_id),
+        strategy = strategy,
+        crf      = Decimal("20"),
+    )
+
+
+def _make_chunk_window(source, chunk_id):
+    """A minimal VideoStreamChunk for the fixture."""
+    from pyqenc.models import CropParams
+    from pyqenc.stream_model import (
+        ExtendedVideoStream,
+        File,
+        VideoStream,
+        VideoStreamChunk,
+        VideoStreamInfo,
+    )
+
+    start, end = 0.0, 1.0
+    if "-" in chunk_id:
+        try:
+            from pyqenc.stream_model import VideoStreamChunk as _VSC
+            bounds = _VSC.parse_chunk_id(chunk_id, ExtendedVideoStream(
+                stream=VideoStream(file=File(path=source), info=VideoStreamInfo(track_id=0)),
+                frame_count=24, crop=CropParams(),
+            ))
+            start, end = bounds.start_timestamp, bounds.end_timestamp
+        except Exception:
+            pass
+    return VideoStreamChunk(
+        stream = ExtendedVideoStream(
+            stream = VideoStream(
+                file = File(path=source),
+                info = VideoStreamInfo(track_id=0, resolution="1920x1080"),
+            ),
+            frame_count = 24,
+            crop        = CropParams(),
+        ),
+        start_timestamp = start,
+        end_timestamp   = end,
+        frame_count     = 24,
+    )
+
 
 
 def _make_merge_phase(
@@ -100,7 +197,6 @@ def _make_merge_phase(
     """
     collector = NoOpMetricsCollector()
     config    = _APP_CONFIG.model_copy(deep=True)
-    source_vm = _make_source_vm(source)
 
     job = JobPhase(
         config, None,
@@ -115,7 +211,6 @@ def _make_merge_phase(
         outcome    = PhaseOutcome.COMPLETED,
         artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message    = "job complete",
-        job        = JobState(source=source_vm),
         force_wipe = False,
         config     = config,
         work_dir   = work_dir,
@@ -134,7 +229,6 @@ def _make_merge_phase(
         outcome         = PhaseOutcome.COMPLETED,
         artifacts       = ts_artifacts,
         message         = "extraction complete",
-        video           = source_vm,
         timestamps_path = timestamps_path,
     )
     registry[ExtractionPhase] = extraction
@@ -144,21 +238,18 @@ def _make_merge_phase(
         outcome   = PhaseOutcome.COMPLETED,
         artifacts = [Artifact(path=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
         message   = "probe complete",
-        source    = ExtendedVideoMetadata.from_base(source_vm, frame_count=frame_count),
+        stream    = _extended_stream(source, frame_count),
     )
     registry[ProbePhase] = probe
 
     encoding = EncodingPhase(config, registry, collector=collector)
     encoding.result = EncodingPhaseResult(
-        outcome   = PhaseOutcome.COMPLETED,
-        artifacts = [],
-        message   = "encoding complete",
-        encoded   = [EncodedArtifact(
-            path     = chunk,
-            state    = ArtifactState.COMPLETE,
-            chunk_id = "chunk1",
-            strategy = _STRATEGY,
-        )],
+        outcome        = PhaseOutcome.COMPLETED,
+        artifacts      = [],
+        message        = "encoding complete",
+        encoded_chunks = {
+            "chunk1": _by_strategy_name(_encoded_chunk(chunk, "chunk1", _STRATEGY)),
+        },
     )
     registry[EncodingPhase] = encoding
 
@@ -213,7 +304,7 @@ class TestBuildMkvmergeOptions:
         args = _build_mkvmerge_options(chunks, output, ts_path)
 
         for chunk in chunks[1:]:
-            assert f"+{chunk}" in args, (
+            assert f"+{os.fspath(chunk)}" in args, (
                 f"Expected '+{chunk}' in args, got: {args}"
             )
 
@@ -227,7 +318,7 @@ class TestBuildMkvmergeOptions:
 
         assert "-o" in args
         o_index = args.index("-o")
-        assert args[o_index + 1] == str(output)
+        assert args[o_index + 1] == os.fspath(output)
 
     def test_timestamps_placement_before_first_chunk(self, tmp_path: Path) -> None:
         """'--timestamps 0:<path>' must appear before the first chunk."""
@@ -240,7 +331,7 @@ class TestBuildMkvmergeOptions:
         assert "--timestamps" in args
         ts_index    = args.index("--timestamps")
         ts_value    = args[ts_index + 1]
-        chunk0_index = args.index(str(chunks[0]))
+        chunk0_index = args.index(os.fspath(chunks[0]))
 
         assert ts_value == f"0:{ts_path}", (
             f"Expected '0:{ts_path}', got {ts_value!r}"
@@ -261,6 +352,20 @@ class TestBuildMkvmergeOptions:
             f"Expected exactly 1 '--timestamps', got {args.count('--timestamps')}"
         )
 
+    def test_no_default_duration_flag(self, tmp_path: Path) -> None:
+        """Bug guarded: ``--default-duration`` is an mkvmerge *input-track*
+        reinterpretation option — it never reaches the output header, so its
+        presence would imply a false guarantee while mkvmerge keeps deriving
+        DefaultDuration from the ms-rounded restored timestamps. The header is
+        restored by the post-merge mkvpropedit step instead."""
+        chunk   = tmp_path / "chunk1.mkv"
+        output  = tmp_path / "output.mkv"
+        ts_path = tmp_path / "timestamps.txt"
+
+        args = _build_mkvmerge_options([chunk], output, ts_path)
+
+        assert "--default-duration" not in args
+
     def test_returns_list_of_strings(self, tmp_path: Path) -> None:
         """Return type must be list[str]."""
         chunk   = tmp_path / "chunk1.mkv"
@@ -271,6 +376,52 @@ class TestBuildMkvmergeOptions:
 
         assert isinstance(args, list)
         assert all(isinstance(a, str) for a in args)
+
+
+# ---------------------------------------------------------------------------
+# _default_duration_ns / _build_mkvpropedit_args
+# ---------------------------------------------------------------------------
+
+class TestDefaultDurationNs:
+    """fps → nanosecond DefaultDuration conversion is exact at NTSC rates."""
+
+    def test_ntsc_rate_rounds_exactly(self) -> None:
+        """Bug guarded: float math drifts at NTSC rates — the exact rational
+        path must produce the canonical 24000/1001 duration of 41 708 333 ns
+        (the value the source container itself carries)."""
+        assert _default_duration_ns(Fraction(24000, 1001)) == 41_708_333
+
+    def test_integer_rate(self) -> None:
+        """24 fps → 1e9/24 ns rounded to the nearest integer."""
+        assert _default_duration_ns(Fraction(24, 1)) == 41_666_667
+
+    def test_common_rates_stay_exact(self) -> None:
+        """25/50/60 fps divide 1e9 exactly — no rounding may occur."""
+        for fps, expected in ((Fraction(25), 40_000_000),
+                              (Fraction(50), 20_000_000),
+                              (Fraction(60), 16_666_667)):
+            assert _default_duration_ns(fps) == expected
+
+
+class TestBuildMkvpropeditArgs:
+    """The post-merge header patch command shape."""
+
+    def test_full_command_pinned(self, tmp_path: Path) -> None:
+        """Bug guarded: mkvpropedit rejects suffixed values ('41708333ns' is
+        not an unsigned integer) — the value must be a bare integer, applied
+        to the first video track of the merged file. The output is passed as
+        a path-like (str(Path) in command building is forbidden — it can drop
+        the extended-length prefix)."""
+        output = tmp_path / "output.mkv"
+
+        args = _build_mkvpropedit_args(output, Fraction(24000, 1001))
+
+        assert args == [
+            "mkvpropedit", output,
+            "--edit", "track:v1",
+            "--set", "default-duration=41708333",
+        ]
+        assert all(isinstance(a, (str, Path)) for a in args)
 
 
 # ---------------------------------------------------------------------------
@@ -319,8 +470,8 @@ class TestMkvmergeOptionsFileLifecycle:
     """The concat options file is deleted on success and retained on failure.
 
     Driven through the public ``merge.run(dry_run=False)`` surface against a
-    real MergePhase; only mkvmerge (``subprocess.run``) and ``get_frame_count``
-    are mocked.
+    real MergePhase; only the external shell-outs (mkvmerge + mkvpropedit via
+    ``subprocess.run``) and ``get_frame_count`` are mocked.
     """
 
     def test_options_file_deleted_on_success(self) -> None:
@@ -349,6 +500,13 @@ class TestMkvmergeOptionsFileLifecycle:
             options_file = final_dir / f"concat_{_SAFE_NAME}.json"
 
             def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
+                if cmd[0] == "mkvpropedit":
+                    # Header patch runs after the options file is cleaned up.
+                    assert output_file.exists(), "Output file must exist when mkvpropedit is called"
+                    result = MagicMock()
+                    result.returncode = 0
+                    result.stderr = ""
+                    return result
                 # Options file must exist at the moment mkvmerge is invoked.
                 assert options_file.exists(), "Options file must exist when mkvmerge is called"
                 output_file.write_bytes(b"\x00" * 128)
@@ -397,7 +555,7 @@ class TestMkvmergeOptionsFileLifecycle:
             def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
                 result = MagicMock()
                 result.returncode = 1
-                result.stderr = "mkvmerge: error: something went wrong"
+                result.stderr = "error: something went wrong"
                 return result
 
             with patch("pyqenc.phases.merge.subprocess.run", side_effect=fake_subprocess_run):
@@ -408,6 +566,56 @@ class TestMkvmergeOptionsFileLifecycle:
             )
             assert options_file.exists(), (
                 "Options file must be retained after a failed merge"
+            )
+
+    def test_propedit_failure_fails_strategy(self) -> None:
+        """Bug guarded: silently swallowing a mkvpropedit failure would
+        deliver a final whose header misdeclares the frame rate and reads as
+        VFR — the exact defect the patch step exists to fix. A non-zero exit
+        must fail the strategy merge (no sidecar → output stays PARTIAL for
+        recovery to re-merge).
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            work_dir = tmp_path / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            source = tmp_path / "source.mkv"
+            source.write_bytes(b"\x00" * 64)
+
+            ts_file = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+            ts_file.parent.mkdir(parents=True, exist_ok=True)
+            ts_file.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
+
+            chunk = work_dir / "chunk1.mkv"
+            chunk.write_bytes(b"\x00" * 64)
+
+            merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=ts_file)
+
+            final_dir   = work_dir / FINAL_OUTPUT_DIR
+            output_file = final_dir / f"{source.stem} {_SAFE_NAME}.mkv"
+
+            def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
+                result = MagicMock()
+                if cmd[0] == "mkvpropedit":
+                    result.returncode = 2
+                    result.stderr = "Error: The changes could not be written."
+                else:
+                    output_file.write_bytes(b"\x00" * 128)
+                    result.returncode = 0
+                    result.stderr = ""
+                return result
+
+            with patch("pyqenc.phases.merge.subprocess.run", side_effect=fake_subprocess_run):
+                result = merge.run(dry_run=False)
+
+            assert result.outcome == PhaseOutcome.FAILED, (
+                f"Expected FAILED, got {result.outcome}"
+            )
+            sidecar = output_file.with_suffix(".yaml")
+            assert output_file.exists(), "Concatenated output stays on disk for debugging"
+            assert not sidecar.exists(), (
+                "No sidecar may be written when the header patch fails — "
+                "the artifact must stay PARTIAL so recovery re-merges"
             )
 
 
@@ -499,3 +707,52 @@ class TestMergeFailsWithoutTimestamps:
             assert "fail" in combined.lower() or "timestamps" in combined.lower(), (
                 f"Expected failure message to mention 'fail' or 'timestamps', got: {combined!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Missed-targets warning (completion-line escalation)
+# ---------------------------------------------------------------------------
+
+class TestMissedTargetsWarning:
+    """A missed quality target escalates to a WARNING naming every miss.
+
+    Bug guarded: the miss was previously signalled only by a ⚠ symbol on an
+    INFO-level completion line — wrong level for a warning, and no
+    wanted-vs-actual detail anywhere near the merge that produced it.
+    """
+
+    def test_warning_names_missed_metrics_with_both_values(self, caplog) -> None:
+        """The warning is WARNING level, names the strategy and each missed
+        metric with its measured AND target value; met metrics stay out."""
+        import logging as _logging
+
+        from pyqenc.models import QualityTarget
+
+        targets = [
+            QualityTarget(metric="vmaf", statistic="min", value=93.0),
+            QualityTarget(metric="psnr", statistic="min", value=43.0),
+        ]
+        metrics = {"vmaf_min": 88.3, "psnr_min": 43.5}   # vmaf missed, psnr met
+
+        with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
+            _log_missed_targets_warning("ultrafast+h265", metrics, targets)
+
+        warnings = [r for r in caplog.records if r.levelno == _logging.WARNING]
+        assert len(warnings) == 1, "exactly one warning expected"
+        msg = warnings[0].getMessage()
+        assert "ultrafast+h265" in msg
+        assert "vmaf-min" in msg and "88.3" in msg and "93.0" in msg
+        assert "psnr-min" not in msg, "met metrics must not appear in the warning"
+
+    def test_no_warning_when_all_targets_met(self, caplog) -> None:
+        import logging as _logging
+
+        from pyqenc.models import QualityTarget
+
+        targets = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
+        metrics = {"vmaf_min": 96.5}
+
+        with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
+            _log_missed_targets_warning("ultrafast+h265", metrics, targets)
+
+        assert not [r for r in caplog.records if r.levelno == _logging.WARNING]

@@ -1,17 +1,17 @@
 """Unified async ffmpeg runner for the pyqenc pipeline.
 
-This module provides a single async entry point for all ffmpeg subprocess
-calls. It injects ``-hide_banner -nostats -progress pipe:1`` automatically,
-reads stdout and stderr concurrently via ``readline()`` (safe because
-``-nostats`` eliminates all ``\\r`` from stderr), parses structured progress
-blocks from stdout, and returns a clean ``FFmpegRunResult``.
+All ffmpeg subprocess calls go through this module with a structured
+:class:`FFmpegRequest` — inputs with per-input seek windows and ``-map``
+selectors, the output stage, an optional ``-filter_complex`` graph. The runner
+owns the whole command: it composes the argv (progress flags, ``-y``, the
+``.tmp``-then-rename protocol with an explicit muxer, ``-map_chapters -1``),
+launches the subprocess, reads stdout and stderr concurrently via
+``readline()`` (safe because ``-nostats`` eliminates all ``\\r`` from stderr),
+parses structured progress blocks from stdout, and returns a clean
+:class:`FFmpegRunResult`.
 
-Callers optionally supply a ``ProgressCallback`` and/or a ``VideoMetadata``
-instance to be populated in-place from the ffmpeg output.
-
-The mandatory ``output_file`` parameter enforces the ``.tmp``-then-rename
-protocol for all file-producing calls.  Pass ``None`` explicitly for
-null-encode / metadata-probe commands that produce no file output.
+Callers optionally supply a :data:`ProgressCallback` for live progress updates;
+:frame counts are read from ``FFmpegRunResult.frame_count``.
 """
 # CHerSun 2026
 
@@ -25,17 +25,27 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from pyqenc.constants import (
+    FFMPEG_ARG_DURATION,
+    FFMPEG_ARG_FILTER_COMPLEX,
     FFMPEG_ARG_FORMAT,
+    FFMPEG_ARG_INPUT,
+    FFMPEG_ARG_MAP,
+    FFMPEG_ARG_MAP_CHAPTERS,
+    FFMPEG_ARG_SEEK,
+    FFMPEG_ARG_YES,
+    FFMPEG_CODEC_COPY,
+    FFMPEG_EXECUTABLE,
+    FFMPEG_MAP_CHAPTERS_DISABLED,
+    FFMPEG_MAP_FIRST_VIDEO,
     FFMPEG_MUXER_MATROSKA,
+    FFMPEG_NULL_MUXER,
+    FFMPEG_NULL_SINK,
     STDERR_TAIL_LINES,
     TEMP_SUFFIX,
 )
-
-if TYPE_CHECKING:
-    from pyqenc.models import VideoMetadata
+from pyqenc.utils.long_path import LongPath
 
 logger = logging.getLogger(__name__)
 
@@ -69,13 +79,64 @@ ProgressCallback = Callable[[int, float], None]
 """Signature: ``(frame: int, out_time_seconds: float) -> None``"""
 
 
+@dataclass(frozen=True)
+class FFmpegInput:
+    """One ffmpeg input: a file plus its per-input window and ``-map`` selector.
+
+    Attributes:
+        path:             The input file. Kept as a path object so subprocess
+                          launch can apply :class:`LongPath` semantics.
+        selector:         ``-map`` target identifying the stream inside its
+                          container (e.g. ``"0:2"``); ``None`` emits no ``-map``
+                          for this input.
+        start_seconds:    Input-side seek target emitted as ``-ss`` before
+                          ``-i`` (cue-point seek + decode to the exact frame).
+        duration_seconds: Window duration emitted as ``-t`` before ``-i``,
+                          bounding the frames read from this input.
+        pre_input_args:   Tokens emitted before the window flags and ``-i``
+                          (e.g. ``-hwaccel`` / ``-init_hw_device`` setup).
+    """
+
+    path:             LongPath
+    selector:         str | None          = None
+    start_seconds:    float | None        = None
+    duration_seconds: float | None        = None
+    pre_input_args:   tuple[str, ...]     = ()
+
+
+@dataclass(frozen=True)
+class FFmpegRequest:
+    """A structured ffmpeg invocation composed and owned by the runner.
+
+    Attributes:
+        inputs:         Every input with its window/selector; windows are fully
+                        bound to their input, multi-input graphs (quality
+                        measurement) just carry two entries.
+        output_args:    The output stage — codec / ``-vf`` / muxer-agnostic
+                        tokens — emitted after the maps and any filter graph.
+        filter_complex: Optional multi-input ``-filter_complex`` graph.
+        output:         Intended final output path; ``None`` runs a null-output
+                        command (``-f null -``, no ``.tmp`` protocol).
+        output_format:  ffmpeg ``-f`` muxer token for the ``.tmp`` output (the
+                        ``.tmp`` extension hides the container hint); ``None``
+                        uses the Matroska default.
+    """
+
+    inputs:         list[FFmpegInput]
+    output_args:    tuple[str, ...]
+    filter_complex: str | None        = None
+    output:         LongPath | None   = None
+    output_format:  str | None        = None
+
+
 @dataclass
 class FFmpegRunResult:
     """Result of an ffmpeg subprocess execution.
 
     Attributes:
         returncode:   Raw process exit code.
-        success:      ``True`` when ``returncode == 0``.
+        success:      ``True`` when ``returncode == 0`` (and, for file outputs,
+                      the ``.tmp`` file exists and is non-empty).
         stderr_lines: All non-empty lines from stderr (~20–60 with ``-nostats``).
         frame_count:  ``frame`` value from the final ``progress=end`` block on
                       stdout; ``None`` if no ``progress=end`` was seen (e.g.
@@ -89,42 +150,87 @@ class FFmpegRunResult:
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Command composition
 # ---------------------------------------------------------------------------
 
 _PROGRESS_FLAGS: list[str] = ["-hide_banner", "-nostats", "-progress", "pipe:1"]
-"""Flags injected after the ffmpeg executable by ``_inject_flags``."""
+"""Flags injected after the ffmpeg executable in every composed command."""
 
 
-def _inject_flags(cmd: list[str | os.PathLike]) -> list[str | os.PathLike]:
-    """Insert ``-hide_banner -nostats -progress pipe:1`` after the ffmpeg executable.
+def _format_seconds(value: float) -> str:
+    """Format a window bound for ``-ss``/``-t``.
 
-    The injection is idempotent — if all four flags are already present
-    immediately after the executable the command is returned unchanged.
+    Plain ``str(float)`` reproduces the pre-request formatting at every
+    converted call site (seek-target flooring to microseconds is a
+    direct-from-source wiring decision and lands with that spec task).
+    """
+    return str(value)
+
+
+def _launch_argv(
+    request: FFmpegRequest,
+) -> tuple[list[str | os.PathLike], tuple[Path, Path] | None]:
+    """Compose the exact argv ffmpeg is launched with.
+
+    Layout, in order: progress flags and ``-y``; per input
+    ``pre_input_args [-ss start] [-t duration] -i path``; ``-map <selector>``
+    per input in order; optional ``-filter_complex``; ``output_args``;
+    ``-map_chapters -1``; the output stage — a ``<stem>.tmp`` sibling with an
+    explicit ``-f <muxer>`` (returned as the tmp→final pair, renamed by the
+    runner on success) or ``-f null -`` when ``output`` is ``None``.
 
     Args:
-        cmd: Full ffmpeg command including the executable as the first element.
+        request: The structured invocation.
 
     Returns:
-        New list with the flags injected (original list is not mutated).
+        ``(argv, tmp_to_final)`` — the launch argv and, for file outputs, the
+        ``(tmp_path, final_path)`` pair driving the rename protocol.
     """
-    # Locate the ffmpeg executable (first element whose name contains "ffmpeg")
-    ffmpeg_idx: int = 0
-    for i, arg in enumerate(cmd):
-        if "ffmpeg" in str(arg).lower():
-            ffmpeg_idx = i
-            break
+    argv: list[str | os.PathLike] = [FFMPEG_EXECUTABLE, *_PROGRESS_FLAGS, FFMPEG_ARG_YES]
 
-    # Check whether all flags are already present right after the executable
-    after = [str(a) for a in cmd[ffmpeg_idx + 1 : ffmpeg_idx + 1 + len(_PROGRESS_FLAGS)]]
-    if after == _PROGRESS_FLAGS:
-        return list(cmd)
+    for inp in request.inputs:
+        argv.extend(inp.pre_input_args)
+        if inp.start_seconds is not None:
+            argv.extend([FFMPEG_ARG_SEEK, _format_seconds(inp.start_seconds)])
+        if inp.duration_seconds is not None:
+            argv.extend([FFMPEG_ARG_DURATION, _format_seconds(inp.duration_seconds)])
+        argv.extend([FFMPEG_ARG_INPUT, inp.path])
 
-    result: list[str | os.PathLike] = list(cmd[: ffmpeg_idx + 1])
-    result.extend(_PROGRESS_FLAGS)
-    result.extend(cmd[ffmpeg_idx + 1 :])
-    return result
+    for inp in request.inputs:
+        if inp.selector is not None:
+            argv.extend([FFMPEG_ARG_MAP, inp.selector])
 
+    if request.filter_complex is not None:
+        argv.extend([FFMPEG_ARG_FILTER_COMPLEX, request.filter_complex])
+
+    argv.extend(request.output_args)
+    argv.extend([FFMPEG_ARG_MAP_CHAPTERS, FFMPEG_MAP_CHAPTERS_DISABLED])
+
+    if request.output is None:
+        argv.extend([FFMPEG_ARG_FORMAT, FFMPEG_NULL_MUXER, FFMPEG_NULL_SINK])
+        return argv, None
+
+    output = request.output
+    tmp    = output.parent / f"{output.stem}{TEMP_SUFFIX}"
+    muxer  = request.output_format if request.output_format is not None else FFMPEG_MUXER_MATROSKA
+    argv.extend([FFMPEG_ARG_FORMAT, muxer, tmp])
+    return argv, (tmp, output)
+
+
+def compose_command(request: FFmpegRequest) -> list[str | os.PathLike]:
+    """Return the exact argv ffmpeg is launched with for ``request``.
+
+    The single argv authority: the runner launches this composition and the
+    golden command tests pin it, so a request's meaning is inspectable without
+    running ffmpeg.
+    """
+    argv, _tmp_to_final = _launch_argv(request)
+    return argv
+
+
+# ---------------------------------------------------------------------------
+# Stdout / stderr readers
+# ---------------------------------------------------------------------------
 
 async def _read_stdout(
     stdout:   asyncio.StreamReader,
@@ -245,147 +351,80 @@ async def _read_stderr(stderr: asyncio.StreamReader) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Output finalization
+# ---------------------------------------------------------------------------
+
+def _finalize_output(
+    tmp_to_final: tuple[Path, Path] | None,
+    success:      bool,
+) -> None:
+    """Rename the temp file to its final name on success, or delete it on failure.
+
+    Args:
+        tmp_to_final: ``(tmp_path, final_path)`` pair, or ``None`` for null outputs.
+        success:      Whether ffmpeg exited successfully with a non-empty output.
+    """
+    if tmp_to_final is None:
+        return
+    tmp_path, final_path = tmp_to_final
+    if success:
+        try:
+            tmp_path.replace(final_path)
+            logger.debug("Renamed %s → %s", tmp_path.name, final_path.name)
+        except OSError:
+            # Cross-device move — fall back to copy-then-delete
+            logger.warning(
+                "Cross-device rename for %s → %s; falling back to copy+delete",
+                tmp_path.name, final_path.name,
+            )
+            shutil.copy2(tmp_path, final_path)
+            tmp_path.unlink(missing_ok=True)
+    else:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.debug("Could not delete temp file %s: %s", tmp_path, exc)
+
+
+# ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
 
-def _resolve_tmp_paths(
-    cmd:           list[str | os.PathLike],
-    output_file:   Path | list[Path],
-    output_format: str | None = None,
-) -> tuple[list[str | os.PathLike], dict[Path, Path]]:
-    """Validate output paths appear in cmd and substitute with ``.tmp`` siblings.
-
-    Each final output path in ``cmd`` is replaced with ``-f <muxer> <tmp>``. The
-    explicit ``-f`` is required because the ``.tmp`` extension strips the
-    container hint ffmpeg would otherwise infer from the real extension, so it
-    cannot pick a muxer on its own. ``output_format`` names that muxer; when it
-    is ``None`` the historical default ``matroska`` is used, so all existing
-    video call sites are unaffected. Audio call sites pass e.g. ``"flac"`` or
-    ``"ipod"``.
-
-    Args:
-        cmd:           Original ffmpeg command.
-        output_file:   Intended output path(s). Pass the same objects as in cmd.
-        output_format: The ffmpeg ``-f`` muxer token for the ``.tmp`` output(s),
-                       or ``None`` to use the ``matroska`` default.
-
-    Returns:
-        Tuple of ``(modified_cmd, tmp_to_final)`` where ``tmp_to_final`` maps
-        each temp path back to its intended final path.
-
-    Raises:
-        ValueError: If any output path is not found in ``cmd``.
-    """
-    muxer = output_format if output_format is not None else FFMPEG_MUXER_MATROSKA
-    paths: list[Path] = [output_file] if isinstance(output_file, Path) else list(output_file)
-
-    # Ensure that all given paths are present in the cmd. Just a safety check of dev intent.
-    missing = set(paths) - set(cmd)
-    if missing:
-        raise ValueError(
-            f"output_file path(s) {missing!r} not found in ffmpeg cmd. "
-            "Ensure the exact Path object (or its str) is present in cmd."
-        )
-
-    # Build final→tmp mapping for substitution, then invert to tmp→final for the return value
-    final_to_tmp: dict[Path, Path] = {p: p.parent / f"{p.stem}{TEMP_SUFFIX}" for p in paths}
-    tmp_to_final: dict[Path, Path] = {tmp: Path(final) for final, tmp in final_to_tmp.items()}
-
-    # Replace cmd args with temp files, injecting the explicit output muxer.
-    modified_cmd: list[str | os.PathLike] = []
-    for arg in cmd:
-        if arg in final_to_tmp:
-            modified_cmd += [FFMPEG_ARG_FORMAT, muxer, final_to_tmp[arg]]
-        else:
-            modified_cmd.append(arg)
-
-    return modified_cmd, tmp_to_final
-
-
-def _finalize_outputs(tmp_to_final: dict[Path, Path], success: bool) -> None:
-    """Rename temp files to final names on success, or delete them on failure.
-
-    Args:
-        tmp_to_final: Mapping of temp path → final path.
-        success:      Whether ffmpeg exited successfully with non-empty outputs.
-    """
-    if success:
-        for tmp_path, final_path in tmp_to_final.items():
-            try:
-                tmp_path.replace(final_path)
-                logger.debug("Renamed %s → %s", tmp_path.name, final_path.name)
-            except OSError:
-                # Cross-device move — fall back to copy-then-delete
-                logger.warning(
-                    "Cross-device rename for %s → %s; falling back to copy+delete",
-                    tmp_path.name, final_path.name,
-                )
-                shutil.copy2(tmp_path, final_path)
-                tmp_path.unlink(missing_ok=True)
-    else:
-        for tmp_path in tmp_to_final:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError as exc:
-                logger.debug("Could not delete temp file %s: %s", tmp_path, exc)
-
-
 async def run_ffmpeg_async(
-    cmd:               list[str | os.PathLike],
-    output_file:       Path | list[Path] | None,
+    request:           FFmpegRequest,
     progress_callback: ProgressCallback | None = None,
-    video_meta:        VideoMetadata | None    = None,
     cwd:               Path | None             = None,
-    output_format:     str | None              = None,
 ) -> FFmpegRunResult:
-    """Run an ffmpeg command asynchronously with correct pipe handling.
+    """Run an ffmpeg request asynchronously with correct pipe handling.
 
-    Injects ``-hide_banner -nostats -progress pipe:1`` into ``cmd``, launches
-    the subprocess, reads stdout and stderr concurrently, and returns an
-    ``FFmpegRunResult``.
+    Composes the launch argv (progress flags, ``-y``, per-input windows and
+    maps, ``-map_chapters -1``), launches the subprocess, reads stdout and
+    stderr concurrently, and returns an :class:`FFmpegRunResult`.
 
-    When ``output_file`` is a ``Path`` or ``list[Path]``, the runner enforces
-    the ``.tmp``-then-rename protocol: each output path is substituted with a
-    ``<stem>.tmp`` sibling before launching ffmpeg, then renamed to the final
-    name on success or deleted on failure. Because the ``.tmp`` extension hides
-    the real container, the runner injects an explicit ``-f <muxer>`` for each
-    substituted output: ``output_format`` names that muxer, defaulting to
-    ``matroska`` (unchanged behaviour for every video call site). Audio call
-    sites pass the correct muxer (``"flac"`` / ``"ipod"``).
+    When ``request.output`` is set, the ``.tmp``-then-rename protocol applies:
+    the output is substituted with a ``<stem>.tmp`` sibling plus an explicit
+    ``-f <muxer>`` (``request.output_format``, default Matroska) before launch,
+    then renamed to the final name on success or deleted on failure — a file
+    at its final name is always the product of a complete, successful write.
 
     Args:
-        cmd:               Full ffmpeg command including the executable.
-        output_file:       Intended output path(s), or ``None`` for commands
-                           that produce no file output (null-encode, probing).
+        request:           The structured ffmpeg invocation.
         progress_callback: Optional ``(frame, out_time_seconds)`` callable
                            invoked once per completed progress block.
-        video_meta:        Optional ``VideoMetadata`` instance populated
-                           in-place from stderr (and stdout frame count).
         cwd:               Optional working directory for the subprocess.
-        output_format:     ffmpeg ``-f`` muxer token for the ``.tmp`` output(s),
-                           or ``None`` for the ``matroska`` default. Ignored when
-                           ``output_file`` is ``None``.
 
     Returns:
         ``FFmpegRunResult`` with ``returncode``, ``success``, ``stderr_lines``,
         and ``frame_count``.
-
-    Raises:
-        ValueError: If any path in ``output_file`` is not found in ``cmd``.
     """
-    # Resolve .tmp substitutions before injecting progress flags
-    tmp_to_final: dict[Path, Path] = {}
-    if output_file is not None:
-        cmd, tmp_to_final = _resolve_tmp_paths(list(cmd), output_file, output_format)
-
-    modified_cmd = _inject_flags(list(cmd))
-    logger.debug("run_ffmpeg_async: %s", " ".join(str(a) for a in modified_cmd))
+    argv, tmp_to_final = _launch_argv(request)
+    logger.debug("run_ffmpeg_async: %s", " ".join(str(a) for a in argv))
 
     proc = await asyncio.create_subprocess_exec(
-        *modified_cmd,
+        *argv,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=str(cwd) if cwd is not None else None,
+        cwd=cwd,
     )
     with _procs_lock:
         _live_procs.add(proc)
@@ -399,15 +438,14 @@ async def run_ffmpeg_async(
         with _procs_lock:
             _live_procs.discard(proc)
 
-    # Determine success: exit code 0 AND all temp files non-empty
-    all_outputs_ok = all(
-        tmp_path.exists() and tmp_path.stat().st_size > 0
-        for tmp_path in tmp_to_final
-    ) if tmp_to_final else True
+    # Determine success: exit code 0 AND a non-empty temp output (if any)
+    output_ok = (
+        tmp_to_final[0].exists() and tmp_to_final[0].stat().st_size > 0
+    ) if tmp_to_final is not None else True
 
     result = FFmpegRunResult(
         returncode   = proc.returncode,  # type: ignore[arg-type]
-        success      = proc.returncode == 0 and all_outputs_ok,
+        success      = proc.returncode == 0 and output_ok,
         stderr_lines = stderr_lines,
         frame_count  = frame_count,
     )
@@ -417,24 +455,15 @@ async def run_ffmpeg_async(
         for line in result.stderr_lines[-STDERR_TAIL_LINES:]:
             logger.error("ffmpeg stderr: %s", line)
 
-    _finalize_outputs(tmp_to_final, result.success)
-
-    if video_meta is not None:
-        video_meta.populate_from_ffmpeg_output(stderr_lines)
-        if frame_count is not None:
-            # stdout progress=end value is authoritative over stderr-parsed value
-            video_meta._frame_count = frame_count  # type: ignore[attr-defined]
+    _finalize_output(tmp_to_final, result.success)
 
     return result
 
 
 def run_ffmpeg(
-    cmd:               list[str | os.PathLike],
-    output_file:       Path | list[Path] | None,
+    request:           FFmpegRequest,
     progress_callback: ProgressCallback | None = None,
-    video_meta:        VideoMetadata | None    = None,
     cwd:               Path | None             = None,
-    output_format:     str | None              = None,
 ) -> FFmpegRunResult:
     """Synchronous wrapper around ``run_ffmpeg_async``.
 
@@ -443,21 +472,15 @@ def run_ffmpeg(
     ``run_ffmpeg_async`` instead in that case.
 
     Args:
-        cmd:               Full ffmpeg command including the executable.
-        output_file:       Intended output path(s), or ``None`` for commands
-                           that produce no file output (null-encode, probing).
+        request:           The structured ffmpeg invocation.
         progress_callback: Optional ``(frame, out_time_seconds)`` callable.
-        video_meta:        Optional ``VideoMetadata`` instance to populate.
         cwd:               Optional working directory for the subprocess.
-        output_format:     ffmpeg ``-f`` muxer token for the ``.tmp`` output(s),
-                           or ``None`` for the ``matroska`` default.
 
     Returns:
         ``FFmpegRunResult``.
 
     Raises:
         RuntimeError: If called from within a running event loop.
-        ValueError:   If any path in ``output_file`` is not found in ``cmd``.
     """
     try:
         asyncio.get_running_loop()
@@ -470,7 +493,7 @@ def run_ffmpeg(
         )
 
     return asyncio.run(
-        run_ffmpeg_async(cmd, output_file, progress_callback, video_meta, cwd, output_format)
+        run_ffmpeg_async(request, progress_callback, cwd)
     )
 
 
@@ -485,9 +508,9 @@ class FrameCountError(Exception):
 def get_frame_count(video_file: Path) -> int:
     """Return the total frame count of ``video_file`` via an ffmpeg null-copy pass.
 
-    Uses ``ffmpeg -i <file> -map 0:v:0 -c copy -f null -`` with
-    ``-progress pipe:1`` so the exact output frame count is read from the
-    final ``progress=end`` block on stdout.
+    Runs a null-output stream-copy pass with ``-progress pipe:1`` so the exact
+    output frame count is read for free from the final ``progress=end`` block
+    on stdout.
 
     Args:
         video_file: Path to the video file to count frames in.
@@ -498,15 +521,11 @@ def get_frame_count(video_file: Path) -> int:
     Raises:
         FrameCountError: If the frame count cannot be determined.
     """
-    cmd: list[str | os.PathLike] = [
-        "ffmpeg",
-        "-i",    video_file,
-        "-map",  "0:v:0",
-        "-c",    "copy",
-        "-f",    "null",
-        "-",
-    ]
-    result = run_ffmpeg(cmd, output_file=None)
+    request = FFmpegRequest(
+        inputs      = [FFmpegInput(path=video_file, selector=FFMPEG_MAP_FIRST_VIDEO)],
+        output_args = ("-c", FFMPEG_CODEC_COPY),
+    )
+    result = run_ffmpeg(request)
     if result.frame_count is None:
         raise FrameCountError(
             f"Could not determine frame count for {video_file}. "

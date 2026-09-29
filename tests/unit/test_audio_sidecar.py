@@ -67,8 +67,8 @@ class TestRoundTrip:
         restored = AudioSidecar.load(path)
         assert restored is not None
         assert restored == original
-        assert restored.signatures == original.signatures
-        assert set(restored.signatures) == {"night", "normal"}
+        assert restored.chains == original.chains
+        assert set(restored.chains) == {"night", "normal"}
 
     def test_round_trip_flac_default_chain(self, tmp_path: Path) -> None:
         """A norm-only chain's signature is stable across save/load.
@@ -84,7 +84,7 @@ class TestRoundTrip:
         restored = AudioSidecar.load(path)
         assert restored is not None
         # The signature is a stable string; FLAC (no encode) is baked into it.
-        assert "flac" in restored.signatures["normal"]
+        assert "flac" in restored.chains["normal"]
         assert restored == original
 
 
@@ -112,7 +112,7 @@ class TestInvalidationSignatures:
             changed_palette,
         ))
 
-        assert current_sig != persisted.signatures["night"]
+        assert current_sig != persisted.chains["night"]
 
     def test_removed_chain_drops_from_signature_map(self, tmp_path: Path) -> None:
         """Removing a chain drops its entry from the persisted signature map.
@@ -132,9 +132,9 @@ class TestInvalidationSignatures:
 
         current = _sidecar(("normal", ["dyn"]))
 
-        assert current.signatures != persisted.signatures
-        assert "night" in persisted.signatures
-        assert "night" not in current.signatures
+        assert current.chains != persisted.chains
+        assert "night" in persisted.chains
+        assert "night" not in current.chains
 
     def test_unchanged_chain_keeps_identical_signature(self, tmp_path: Path) -> None:
         """An identically-resolved chain keeps the same signature so it is reused.
@@ -152,7 +152,7 @@ class TestInvalidationSignatures:
             ChainSpec(name="night", filters=["peak", "down", "aac"]),
             _palette(),
         ))
-        assert current_sig == persisted.signatures["night"]
+        assert current_sig == persisted.chains["night"]
 
 
 class TestAtomicWriteAndRecovery:

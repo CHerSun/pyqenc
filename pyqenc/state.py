@@ -4,9 +4,9 @@ This module provides:
 
 - ``ArtifactState`` — three-value enum classifying each artifact's
   completeness (``ABSENT`` / ``PARTIAL`` / ``COMPLETE``).
-- Data models: ``JobState``, ``ChunkingParams``,
+- Data models:
   ``OptimizationParams``, ``EncodingParams``, ``MetricsSidecar``,
-  ``EncodingResultSidecar``, ``MeasureSidecar``, ``ChunkSidecar``.
+  ``ProbeState``, ``EncodingResultSidecar``, ``MeasureSidecar``.
 
 Each model is self-sufficient: call ``Model.load(path)`` to load from a YAML
 file and ``instance.save(path)`` to persist atomically.
@@ -16,22 +16,18 @@ file and ``instance.save(path)`` to persist atomically.
 from __future__ import annotations
 
 import logging
-from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 from typing import Self
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 from pyqenc.audio.chain import ResolvedChain, chain_signature
 from pyqenc.models import (
-    ChunkMetadata,
     CropParams,
-    SceneBoundary,
-    VideoMetadata,
 )
-from pyqenc.utils.long_path import LongPath
+from pyqenc.stream_model import DecimalYaml, LongPathYaml
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 logger = logging.getLogger(__name__)
@@ -79,44 +75,32 @@ class ArtifactState(Enum):
 # ---------------------------------------------------------------------------
 
 class ProbeState(BaseModel):
-    """Sidecar model for ``probe.yaml``.
+    """Sidecar model for ``probe.yaml`` (the slow facet).
 
     Written by ``ProbePhase`` after resolving frame count and crop.  Contains
-    only the delta over ``job.yaml``: ``frame_count`` and ``crop``.  Fast-probe
-    fields (duration, fps, resolution, etc.) are NOT duplicated here.
+    only the delta over the extraction inventory: ``frame_count`` and ``crop``.
 
     ``frame_count=0`` is the sentinel for "could not be determined" — no valid
-    video has zero frames.  ``crop=None`` means no cropping.
+    video has zero frames.  ``crop`` is non-optional: an empty
+    :class:`CropParams` means "no crop" and the key is omitted from the file
+    when empty (serialization compactness only); loading always materializes
+    a concrete crop — ``None`` ("auto") never appears past config.
     """
 
     frame_count: int
-    crop:        CropParams | None = None
+    crop:        CropParams = CropParams()
 
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict."""
-        result: dict = {"frame_count": self.frame_count}
-        if self.crop is not None:
-            result["crop"] = {
-                "top":    self.crop.top,
-                "bottom": self.crop.bottom,
-                "left":   self.crop.left,
-                "right":  self.crop.right,
-            }
-        return result
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict) -> ProbeState:
-        """Restore from a dict loaded from ``probe.yaml``."""
-        raw_crop = data.get("crop")
-        crop = CropParams(**raw_crop) if isinstance(raw_crop, dict) else None
-        return cls(
-            frame_count = int(data["frame_count"]),
-            crop        = crop,
-        )
+    @model_serializer
+    def _serialize(self) -> dict:
+        """Dump with the crop key omitted when empty (compactness only)."""
+        data: dict = {"frame_count": self.frame_count}
+        if not self.crop.is_empty():
+            data["crop"] = self.crop.model_dump()
+        return data
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
-        """Load ``ProbeState`` from *path*.
+        """Load ``ProbeState`` from *path* (an absent crop materializes empty).
 
         Returns:
             ``ProbeState`` if the file exists and is valid, ``None`` otherwise.
@@ -126,7 +110,7 @@ class ProbeState(BaseModel):
         try:
             with path.open("r", encoding="utf-8") as fh:
                 data = yaml.safe_load(fh)
-            return cls.from_yaml_dict(data or {})
+            return cls.model_validate(data or {})
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not load %s: %s", path, exc)
             return None
@@ -134,135 +118,11 @@ class ProbeState(BaseModel):
     def save(self, path: Path) -> None:
         """Write this ``ProbeState`` to *path* atomically.
 
-        Creates parent directories as needed.
-
         Args:
             path: Destination YAML file path.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
-        write_yaml_atomic(path, self.to_yaml_dict())
-        logger.debug("Saved %s", path.name)
-
-
-class JobState(BaseModel):
-    """Stable source video parameters stored in ``job.yaml``.
-
-    Contains only run-invariant metadata — no phase status, no chunk tracking.
-    Crop and frame count are owned by ProbePhase and stored in ``probe.yaml``.
-    """
-
-    source: VideoMetadata
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict using ``model_dump_full``."""
-        data = self.source.model_dump_full()
-        # Convert Path to str for YAML serialisation
-        data["path"] = str(data["path"])
-        return {"source": data}
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict) -> JobState:
-        """Restore from a dict loaded from ``job.yaml``.
-
-        Any ``crop`` field present in old files is silently ignored — crop
-        is now owned by ``ProbePhase`` and stored in ``probe.yaml``.
-        """
-        source_data = data["source"]
-        source_data = {**source_data, "path": Path(source_data["path"])}
-        source = VideoMetadata.model_validate_full(source_data)
-        return cls(source=source)
-
-    @classmethod
-    def load(cls, path: Path) -> Self | None:
-        """Load ``JobState`` from *path*.
-
-        Returns:
-            ``JobState`` if the file exists and is valid, ``None`` otherwise.
-        """
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return cls.from_yaml_dict(data)
-        except Exception as exc:
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
-
-    def save(self, path: Path) -> None:
-        """Write this ``JobState`` to *path* atomically.
-
-        Creates parent directories as needed.
-
-        Args:
-            path: Destination YAML file path.
-        """
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_yaml_atomic(path, self.to_yaml_dict())
-        logger.debug("Saved %s", path.name)
-
-
-class ChunkingParams(BaseModel):
-    """Phase parameter file model for chunking (``chunking.yaml``).
-
-    Stores the chunking mode and detected scene boundaries.  ``chunking_mode``
-    is written first so a mode change is immediately visible in the file.
-    Crop params are NOT stored here since chunking does not apply or depend on
-    cropping.
-
-    Attributes:
-        chunking_mode: The chunking mode used when chunks were produced.
-                       ``None`` for files written before this field was added
-                       (treated as unknown — no mismatch triggered).
-        scenes:        Detected scene boundaries.
-    """
-
-    chunking_mode: str | None              = None
-    scenes:        list[SceneBoundary]     = Field(default_factory=list)
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict (``chunking_mode`` comes first)."""
-        return {
-            "chunking_mode": self.chunking_mode,
-            "scenes": [
-                {"frame": s.frame, "timestamp_seconds": s.timestamp_seconds}
-                for s in self.scenes
-            ],
-        }
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict) -> ChunkingParams:
-        """Restore from a dict loaded from ``chunking.yaml``."""
-        scenes = [SceneBoundary(**s) for s in data.get("scenes", [])]
-        return cls(
-            chunking_mode = data.get("chunking_mode"),
-            scenes        = scenes,
-        )
-
-    @classmethod
-    def load(cls, path: Path) -> Self | None:
-        """Load ``ChunkingParams`` from *path*.
-
-        Returns:
-            ``ChunkingParams`` if the file exists and is valid, ``None`` otherwise.
-        """
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return cls.from_yaml_dict(data or {})
-        except Exception as exc:
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
-
-    def save(self, path: Path) -> None:
-        """Write this ``ChunkingParams`` to *path* atomically.
-
-        Args:
-            path: Destination YAML file path.
-        """
-        write_yaml_atomic(path, self.to_yaml_dict())
+        write_yaml_atomic(path, self.model_dump(exclude_none=True))
         logger.debug("Saved %s", path.name)
 
 
@@ -270,27 +130,12 @@ class StrategyTestResult(BaseModel):
     """Per-strategy test result stored in ``optimization.yaml``.
 
     Attributes:
-        strategy_name: Display name of the strategy that was tested (e.g. ``'slow+h265-aq'``).
-        total_size:    Total encoded size across all test chunks in bytes.
+        strategy:    Display name of the strategy that was tested (e.g. ``'slow+h265-aq'``).
+        total_size:  Total encoded size across all test chunks in bytes.
     """
 
-    strategy_name: str
-    total_size:    int
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict."""
-        return {
-            "strategy":   self.strategy_name,
-            "total_size": self.total_size,
-        }
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict) -> StrategyTestResult:
-        """Restore from a dict loaded from ``optimization.yaml``."""
-        return cls(
-            strategy_name = str(data["strategy"]),
-            total_size    = int(data["total_size"]),
-        )
+    strategy:   str
+    total_size: int
 
 
 class OptimizationParams(BaseModel):
@@ -312,54 +157,18 @@ class OptimizationParams(BaseModel):
                           Written in both optimization mode and all-strategies mode so
                           ``OptimizationPhase`` can detect target changes on the next run
                           regardless of mode.
-        metrics_sampling: Frame subsampling factor used when test encodes ran.
+        sampling:          Frame subsampling factor used when test encodes ran.
                           ``None`` for files written before this field was added
                           (treated as unknown — no mismatch triggered).
     """
 
-    model_config = {}
-
-    probe:            ProbeState | None      = None
+    probe:            ProbeState | None       = None
     test_chunks:      list[str]                = Field(default_factory=list)
     strategy_results: list[StrategyTestResult] = Field(default_factory=list)
     tolerance_pct:    float                    = 0.0
     selected:         list[str]                = Field(default_factory=list)
     quality_targets:  list[str]                = Field(default_factory=list)
-    metrics_sampling: int | None               = None
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict."""
-        d: dict = {
-            "test_chunks":      self.test_chunks,
-            "tolerance_pct":    self.tolerance_pct,
-            "strategy_results": [r.to_yaml_dict() for r in self.strategy_results],
-            "selected":         self.selected,
-            "quality_targets":  self.quality_targets,
-            "sampling":         self.metrics_sampling,
-        }
-        if self.probe is not None:
-            d["probe"] = self.probe.to_yaml_dict()
-        return d
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict) -> OptimizationParams:
-        """Restore from a dict loaded from ``optimization.yaml``."""
-        probe_data = data.get("probe")
-        probe = ProbeState.from_yaml_dict(probe_data) if probe_data else None
-        strategy_results = [
-            StrategyTestResult.from_yaml_dict(r)
-            for r in data.get("strategy_results", [])
-        ]
-        raw_sampling = data.get("sampling")
-        return cls(
-            probe            = probe,
-            test_chunks      = data.get("test_chunks", []),
-            strategy_results = strategy_results,
-            tolerance_pct    = float(data.get("tolerance_pct", 0.0)),
-            selected         = [str(n) for n in data.get("selected", [])],
-            quality_targets  = data.get("quality_targets", []),
-            metrics_sampling = int(raw_sampling) if raw_sampling is not None else None,
-        )
+    sampling:         int | None               = None
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
@@ -373,7 +182,7 @@ class OptimizationParams(BaseModel):
         try:
             with path.open("r", encoding="utf-8") as fh:
                 data = yaml.safe_load(fh)
-            return cls.from_yaml_dict(data or {})
+            return cls.model_validate(data or {})
         except Exception as exc:
             logger.warning("Could not load %s: %s", path, exc)
             return None
@@ -384,7 +193,7 @@ class OptimizationParams(BaseModel):
         Args:
             path: Destination YAML file path.
         """
-        write_yaml_atomic(path, self.to_yaml_dict())
+        write_yaml_atomic(path, self.model_dump(exclude_none=True))
         logger.debug("Saved %s", path.name)
 
 
@@ -395,20 +204,6 @@ class EncodingParams(BaseModel):
     """
 
     probe: ProbeState | None = None
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict."""
-        d: dict = {}
-        if self.probe is not None:
-            d["probe"] = self.probe.to_yaml_dict()
-        return d
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict) -> EncodingParams:
-        """Restore from a dict loaded from ``encoding.yaml``."""
-        probe_data = data.get("probe")
-        probe = ProbeState.from_yaml_dict(probe_data) if probe_data else None
-        return cls(probe=probe)
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
@@ -422,7 +217,7 @@ class EncodingParams(BaseModel):
         try:
             with path.open("r", encoding="utf-8") as fh:
                 data = yaml.safe_load(fh)
-            return cls.from_yaml_dict(data or {})
+            return cls.model_validate(data or {})
         except Exception as exc:
             logger.warning("Could not load %s: %s", path, exc)
             return None
@@ -433,7 +228,7 @@ class EncodingParams(BaseModel):
         Args:
             path: Destination YAML file path.
         """
-        write_yaml_atomic(path, self.to_yaml_dict())
+        write_yaml_atomic(path, self.model_dump(exclude_none=True))
         logger.debug("Saved %s", path.name)
 
 
@@ -444,41 +239,21 @@ class MetricsSidecar(BaseModel):
     ``targets_met`` is for human inspection only; the algorithm always
     re-evaluates pass/fail from ``metrics`` against current quality targets.
 
-    ``metrics_sampling`` records the frame subsampling factor used when the
-    metrics were measured.  On recovery, if this differs from the current
-    config the sidecar is treated as stale and the attempt is re-measured
-    (without re-encoding).  ``None`` for legacy sidecars written before this
-    field was added — treated as unknown, no staleness check triggered.
+    ``sampling`` records the frame subsampling factor used when the metrics
+    were measured.  On recovery, if this differs from the current config the
+    sidecar is treated as stale and the attempt is re-measured (without
+    re-encoding).  ``None`` for sidecars written before this field was added
+    — treated as unknown, no staleness check triggered.
 
     The ``metrics`` field uses the flat ``{metric_stat: value}`` format
     (e.g. ``vmaf_min``, ``ssim_median``) consistent with ``ChunkQualityStats``
-    serialisation.  The YAML key for the sampling factor is ``sampling``.
+    serialisation.
     """
 
-    crf:              Decimal
-    targets_met:      bool                # for human inspection only
-    metrics_sampling: int | None = None   # subsampling factor used when metrics were measured
-    metrics:          dict[str, float]    # all measured values, e.g. vmaf_min, ssim_median
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict."""
-        return {
-            "crf":        str(self.crf),
-            "targets_met": self.targets_met,
-            "sampling":   self.metrics_sampling,
-            "metrics":    self.metrics,
-        }
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict) -> MetricsSidecar:
-        """Restore from a dict loaded from an attempt sidecar YAML."""
-        raw_sampling = data.get("sampling")
-        return cls(
-            crf              = Decimal(str(data["crf"])),
-            targets_met      = bool(data["targets_met"]),
-            metrics_sampling = int(raw_sampling) if raw_sampling is not None else None,
-            metrics          = {k: float(v) for k, v in data.get("metrics", {}).items()},
-        )
+    crf:         DecimalYaml         # exact string round-trip (no float drift)
+    targets_met: bool                # for human inspection only
+    sampling:    int | None = None   # subsampling factor used when metrics were measured
+    metrics:     dict[str, float]    # all measured values, e.g. vmaf_min, ssim_median
 
 
 class EncodingResultSidecar(BaseModel):
@@ -494,29 +269,10 @@ class EncodingResultSidecar(BaseModel):
     ``PARTIAL`` pairs naturally when targets change.
     """
 
-    winning_attempt: str              # filename of the winning attempt .mkv
-    crf:             Decimal
-    metrics:         dict[str, float] # only the targeted metric values
-    targets_met:     bool = True      # False when search exhausted without a passing attempt
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict."""
-        return {
-            "winning_attempt": self.winning_attempt,
-            "crf":             str(self.crf),
-            "metrics":         self.metrics,
-            "targets_met":     self.targets_met,
-        }
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict) -> EncodingResultSidecar:
-        """Restore from a dict loaded from an encoding result sidecar YAML."""
-        return cls(
-            winning_attempt = data["winning_attempt"],
-            crf             = Decimal(str(data["crf"])),
-            metrics         = {k: float(v) for k, v in data.get("metrics", {}).items()},
-            targets_met     = bool(data.get("targets_met", True)),
-        )
+    winning_attempt: str                # filename of the winning attempt .mkv
+    crf:             DecimalYaml        # exact string round-trip (no float drift)
+    metrics:         dict[str, float]   # only the targeted metric values
+    targets_met:     bool = True        # False when search exhausted without a passing attempt
 
 
 class MeasureSidecar(BaseModel):
@@ -532,41 +288,14 @@ class MeasureSidecar(BaseModel):
     The YAML key for the sampling factor is ``sampling``.
     """
 
-    source_video:               Path
-    target_video:               Path
-    source_duration_seconds:    float | None
-    target_duration_seconds:    float | None
-    effective_duration_seconds: float | None
+    source_video:               LongPathYaml
+    target_video:               LongPathYaml
+    source_duration_seconds:    float | None          = None
+    target_duration_seconds:    float | None          = None
+    effective_duration_seconds: float | None          = None
     sampling:                   int
-    crop_params:                dict[str, int] | None
-    metrics:                    dict[str, float]  # flat: vmaf_min, ssim_median, …
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict."""
-        return {
-            "source_video":               str(self.source_video),
-            "target_video":               str(self.target_video),
-            "source_duration_seconds":    self.source_duration_seconds,
-            "target_duration_seconds":    self.target_duration_seconds,
-            "effective_duration_seconds": self.effective_duration_seconds,
-            "sampling":                   self.sampling,
-            "crop_params":                self.crop_params,
-            "metrics":                    self.metrics,
-        }
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict) -> MeasureSidecar:
-        """Restore from a dict loaded from a measure sidecar YAML."""
-        return cls(
-            source_video               = Path(data["source_video"]),
-            target_video               = Path(data["target_video"]),
-            source_duration_seconds    = data.get("source_duration_seconds"),
-            target_duration_seconds    = data.get("target_duration_seconds"),
-            effective_duration_seconds = data.get("effective_duration_seconds"),
-            sampling                   = int(data["sampling"]),
-            crop_params                = data.get("crop_params"),
-            metrics                    = {k: float(v) for k, v in data.get("metrics", {}).items()},
-        )
+    crop_params:                dict[str, int] | None = None
+    metrics:                    dict[str, float]      = Field(default_factory=dict)
 
 
 class AudioSidecar(BaseModel):
@@ -600,10 +329,10 @@ class AudioSidecar(BaseModel):
           night:  '{"name":"night","filters":[...],"encode":{...}}'
 
     Attributes:
-        signatures: Map of chain name → its canonical signature string.
+        chains: Map of chain name → its canonical signature string.
     """
 
-    signatures: dict[str, str]
+    chains: dict[str, str]
 
     @staticmethod
     def signature_of(chain: ResolvedChain) -> str:
@@ -630,25 +359,14 @@ class AudioSidecar(BaseModel):
         Returns:
             The sidecar holding one signature string per chain.
         """
-        return cls(signatures={name: cls.signature_of(chain) for name, chain in resolved.items()})
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict: ``{"chains": {name: signature}}``."""
-        return {"chains": dict(self.signatures)}
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict) -> AudioSidecar:
-        """Restore from a dict loaded from ``audio.yaml``.
-
-        Signatures are read back as-is (they stay strings — never reconstructed
-        into :class:`ResolvedChain` objects).
-        """
-        raw = data.get("chains") or {}
-        return cls(signatures={str(name): str(sig) for name, sig in raw.items()})
+        return cls(chains={name: cls.signature_of(chain) for name, chain in resolved.items()})
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
         """Load ``AudioSidecar`` from *path*.
+
+        Signatures are read back as-is (they stay strings — never reconstructed
+        into :class:`ResolvedChain` objects).
 
         Returns:
             ``AudioSidecar`` if the file exists and is valid, ``None`` otherwise.
@@ -658,7 +376,7 @@ class AudioSidecar(BaseModel):
         try:
             with path.open("r", encoding="utf-8") as fh:
                 data = yaml.safe_load(fh)
-            return cls.from_yaml_dict(data or {})
+            return cls.model_validate(data or {})
         except Exception as exc:
             logger.warning("Could not load %s: %s", path, exc)
             return None
@@ -673,7 +391,7 @@ class AudioSidecar(BaseModel):
             path: Destination YAML file path.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
-        write_yaml_atomic(path, self.to_yaml_dict())
+        write_yaml_atomic(path, self.model_dump(exclude_none=True))
         logger.debug("Saved %s", path.name)
 
 
@@ -692,31 +410,10 @@ class MergeStrategySummary(BaseModel):
     """
 
     strategy_name:   str
-    output_path:     Path
-    file_size_bytes: int
+    output_path:     LongPathYaml
+    file_size_bytes: int              = 0
     metrics:         dict[str, float] = Field(default_factory=dict)
     targets_met:     bool             = False
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict."""
-        return {
-            "strategy_name":   self.strategy_name,
-            "output_path":     str(self.output_path),
-            "file_size_bytes": self.file_size_bytes,
-            "metrics":         self.metrics,
-            "targets_met":     self.targets_met,
-        }
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict) -> MergeStrategySummary:
-        """Restore from a dict loaded from ``merge.yaml``."""
-        return cls(
-            strategy_name   = data["strategy_name"],
-            output_path     = LongPath(data["output_path"]),
-            file_size_bytes = int(data.get("file_size_bytes", 0)),
-            metrics         = {k: float(v) for k, v in data.get("metrics", {}).items()},
-            targets_met     = bool(data.get("targets_met", False)),
-        )
 
 
 class MergeParams(BaseModel):
@@ -733,7 +430,7 @@ class MergeParams(BaseModel):
     Attributes:
         quality_targets:    Quality targets serialised as ``"metric-statistic:value"``
                             strings.  ``None`` / empty means no targets were configured.
-        metrics_sampling:   Frame subsampling factor used during quality measurement.
+        sampling:           Frame subsampling factor used during quality measurement.
                             ``None`` for files written before this field was added
                             (treated as unknown — no mismatch triggered).
         probe:              Probe state (crop + frame count) active when merge ran.
@@ -744,44 +441,12 @@ class MergeParams(BaseModel):
         strategy_summaries: Per-strategy summary rows for summary replay on rerun.
     """
 
-    quality_targets:    list[str]                = Field(default_factory=list)
-    metrics_sampling:   int | None               = None
-    probe:              ProbeState | None       = None
-    source_stem:        str                      = ""
-    source_size_bytes:  int                      = 0
+    quality_targets:    list[str]                  = Field(default_factory=list)
+    sampling:           int | None                 = None
+    probe:              ProbeState | None          = None
+    source_stem:        str                        = ""
+    source_size_bytes:  int                        = 0
     strategy_summaries: list[MergeStrategySummary] = Field(default_factory=list)
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict."""
-        d: dict = {
-            "quality_targets":    self.quality_targets,
-            "sampling":           self.metrics_sampling,
-            "source_stem":        self.source_stem,
-            "source_size_bytes":  self.source_size_bytes,
-            "strategy_summaries": [s.to_yaml_dict() for s in self.strategy_summaries],
-        }
-        if self.probe is not None:
-            d["probe"] = self.probe.to_yaml_dict()
-        return d
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict) -> MergeParams:
-        """Restore from a dict loaded from ``merge.yaml``."""
-        raw_sampling = data.get("sampling")
-        probe_data = data.get("probe")
-        probe = ProbeState.from_yaml_dict(probe_data) if probe_data else None
-        summaries = [
-            MergeStrategySummary.from_yaml_dict(s)
-            for s in data.get("strategy_summaries", [])
-        ]
-        return cls(
-            quality_targets    = data.get("quality_targets", []),
-            metrics_sampling   = int(raw_sampling) if raw_sampling is not None else None,
-            probe              = probe,
-            source_stem        = data.get("source_stem", ""),
-            source_size_bytes  = int(data.get("source_size_bytes", 0)),
-            strategy_summaries = summaries,
-        )
 
     @classmethod
     def load(cls, path: Path) -> MergeParams | None:
@@ -795,7 +460,7 @@ class MergeParams(BaseModel):
         try:
             with path.open("r", encoding="utf-8") as fh:
                 data = yaml.safe_load(fh)
-            return cls.from_yaml_dict(data or {})
+            return cls.model_validate(data or {})
         except Exception as exc:
             logger.warning("Could not load %s: %s", path, exc)
             return None
@@ -806,47 +471,7 @@ class MergeParams(BaseModel):
         Args:
             path: Destination YAML file path.
         """
-        write_yaml_atomic(path, self.to_yaml_dict())
+        write_yaml_atomic(path, self.model_dump(exclude_none=True))
         logger.debug("Saved %s", path.name)
-
-
-class ChunkSidecar(BaseModel):
-    """Chunk sidecar (``<chunk_stem>.yaml``).
-
-    Written atomically alongside each chunk ``.mkv`` file.  Its presence
-    (combined with the ``.tmp`` protocol) means the chunk was written
-    successfully and its metadata is known without re-probing.
-
-    ``chunk_id`` is NOT stored — it is derived from the filename stem.
-    """
-
-    chunk: ChunkMetadata
-
-    def to_yaml_dict(self) -> dict:
-        """Serialise to a YAML-friendly dict (excludes chunk_id and path)."""
-        data = self.chunk.model_dump_full()
-        # chunk_id and path are derived from the filename — omit from sidecar
-        data.pop("chunk_id", None)
-        data.pop("path", None)
-        data.pop("crop_params", None)
-        data.pop("pix_fmt", None)
-        data.pop("file_size_bytes", None)
-        return data
-
-    @classmethod
-    def from_yaml_dict(cls, data: dict, chunk_id: str, path: Path) -> ChunkSidecar:
-        """Restore from a dict loaded from a chunk sidecar YAML.
-
-        Args:
-            data:     Dict loaded from the sidecar YAML file.
-            chunk_id: Chunk identifier derived from the filename stem.
-            path:     Path to the chunk ``.mkv`` file.
-        """
-        chunk = ChunkMetadata.model_validate_full({
-            **data,
-            "chunk_id": chunk_id,
-            "path":     path,
-        })
-        return cls(chunk=chunk)
 
 

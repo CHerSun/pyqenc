@@ -912,7 +912,6 @@ class TestAppConfigRoundTrip:
         assert round_tripped.encoding.visual_hash       == config.encoding.visual_hash
         assert round_tripped.extraction.include         == config.extraction.include
         assert round_tripped.extraction.exclude         == config.extraction.exclude
-        assert round_tripped.chunking.mode              == config.chunking.mode
         assert round_tripped.chunking.scene_threshold   == config.chunking.scene_threshold
         assert round_tripped.chunking.min_scene_length  == config.chunking.min_scene_length
         assert set(round_tripped.audio.filters.keys())  == set(config.audio.filters.keys())
@@ -1847,3 +1846,52 @@ class TestAudioConfigInvalidRaisesValidationError:
         audio_dict["chains"].append({"name": bad_name, "filters": ["peaknorm"]})
         with pytest.raises(ValidationError):
             AudioConfig.model_validate(audio_dict)
+
+
+# ---------------------------------------------------------------------------
+# Strategy-name safety by construction (Req 15.6, file-stream-model spec)
+# ---------------------------------------------------------------------------
+
+class TestStrategyNamesSafeByConstruction:
+    def test_bundled_profile_and_preset_names_are_safe(self) -> None:
+        """Every bundled default_config.yaml profile/preset name is
+        filesystem-safe — strategy names are embedded verbatim in strategy
+        directory and merge output names, so the bundled defaults must always
+        pass the config-load check."""
+        from pyqenc.app_config import load_app_config
+        from pyqenc.utils.naming import is_filesystem_safe_name
+
+        cfg = load_app_config(default_only=True)
+        for profile_name in cfg.profiles:
+            assert is_filesystem_safe_name(profile_name), profile_name
+        for codec in cfg.codecs.values():
+            for preset in codec.presets:
+                assert is_filesystem_safe_name(preset), preset
+
+    def _bundled_config_dict(self) -> dict:
+        from pyqenc.app_config import load_app_config
+        return load_app_config(default_only=True).model_dump(mode="json")
+
+    def test_unsafe_profile_name_rejected_naming_offender(self) -> None:
+        """Bug prevented: an unsafe profile name reaching the filesystem as a
+        strategy directory name (the error must name the offender)."""
+        from pydantic import ValidationError
+
+        from pyqenc.app_config import AppConfig
+
+        data = self._bundled_config_dict()
+        first = next(iter(data["profiles"]))
+        data["profiles"] = {"bad/name": data["profiles"][first]}
+        with pytest.raises(ValidationError, match="bad/name"):
+            AppConfig.model_validate(data)
+
+    def test_unsafe_preset_name_rejected_naming_offender(self) -> None:
+        from pydantic import ValidationError
+
+        from pyqenc.app_config import AppConfig
+
+        data = self._bundled_config_dict()
+        first_codec = next(iter(data["codecs"]))
+        data["codecs"][first_codec]["presets"] = ["slow:ok?"]
+        with pytest.raises(ValidationError, match=r"slow:ok\?"):
+            AppConfig.model_validate(data)

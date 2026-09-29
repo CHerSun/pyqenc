@@ -18,8 +18,7 @@ pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
 
 from pathlib import Path  # noqa: E402  (after platform guard for clarity)
 
-from pyqenc.utils.long_path import LongPath, _EXT_PREFIX  # noqa: E402
-
+from pyqenc.utils.long_path import _EXT_PREFIX, LongPath  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers

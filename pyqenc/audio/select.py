@@ -3,7 +3,7 @@
 :func:`resolve_selection` turns the extracted audio tracks plus the ordered
 ``audio.select`` config into the *working track set* — the tracks that chains
 will then process. It is a **pure** function: it matches user regexes against
-each track's conventional string (:meth:`AudioMetadata.selector_string`) and
+each track's conventional string (:meth:`AudioStream.selector_string`) and
 returns a subset of the given tracks. It performs no I/O and never re-probes
 (Requirement 7.6).
 
@@ -25,26 +25,27 @@ Selection model (Requirement 5):
   (Req 5.9). Order follows the original track order for determinism.
 
 Dedup key: the track's ``path``. Each extracted audio track is written to its
-own file, so ``AudioMetadata.path`` is unique per track and is the robust,
+combination, so ``(file path, track_id)`` is the robust,
 stable identity for de-duplicating overlapping entry picks.
 """
 # CHerSun 2026
 
 import re
+from pathlib import Path
 
 from pyqenc.app_config import SelectEntry
-from pyqenc.models import AudioMetadata
+from pyqenc.stream_model import AudioStream
 
 
 def resolve_selection(
-    tracks: list[AudioMetadata],
+    tracks: list[AudioStream],
     select: list[SelectEntry],
-) -> list[AudioMetadata]:
+) -> list[AudioStream]:
     """Resolve the working track set from extracted tracks and the select config.
 
     Pure function over the already-extracted audio metadata — no I/O, no
     re-probe. Regexes are matched case-insensitively against each track's
-    :meth:`~pyqenc.models.AudioMetadata.selector_string`.
+    :meth:`~pyqenc.stream_model.AudioStream.selector_string`.
 
     Args:
         tracks: Extracted audio tracks, in extraction order.
@@ -57,16 +58,16 @@ def resolve_selection(
     if not select:
         return list(tracks)
 
-    picked_paths: set = set()
+    picked_ids: set[tuple[Path, int]] = set()
     for entry in select:
-        for track in _pick_entry(tracks, entry):
-            picked_paths.add(track.path)
+        for stream in _pick_entry(tracks, entry):
+            picked_ids.add((stream.file.path, stream.info.track_id))
 
     # Preserve original track order for deterministic output.
-    return [track for track in tracks if track.path in picked_paths]
+    return [stream for stream in tracks if (stream.file.path, stream.info.track_id) in picked_ids]
 
 
-def _pick_entry(tracks: list[AudioMetadata], entry: SelectEntry) -> list[AudioMetadata]:
+def _pick_entry(tracks: list[AudioStream], entry: SelectEntry) -> list[AudioStream]:
     """Return the tracks a single select entry contributes (Req 5.5–5.8).
 
     Args:

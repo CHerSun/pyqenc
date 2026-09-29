@@ -34,3 +34,6 @@ uv.lock
 
 # Local modified config for debug runs
 pyqenc.yaml
+
+# Local zcode config setup
+.zcode/config.json

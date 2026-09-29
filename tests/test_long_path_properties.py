@@ -10,12 +10,11 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from hypothesis import HealthCheck, given, settings
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import pyqenc.utils.long_path as _lp_module
-from pyqenc.utils.long_path import LongPath, _EXT_PREFIX, _MAX_PATH
-
+from pyqenc.utils.long_path import _EXT_PREFIX, _MAX_PATH, LongPath
 
 # ---------------------------------------------------------------------------
 # Shared strategies

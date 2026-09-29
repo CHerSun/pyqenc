@@ -34,14 +34,15 @@ from pyqenc.constants import (
     CONFIG_DIR_HOME,
     CONFIG_FILENAME_CWD,
     CONFIG_FILENAME_HOME,
+    FILENAME_CONTROL_CHARS,
     FILENAME_FORBIDDEN_CHARS,
 )
 from pyqenc.models import (
-    ChunkingMode,
     CodecConfig,
     QualityTarget,
     Strategy,
 )
+from pyqenc.utils.naming import is_filesystem_safe_name
 
 _logger = logging.getLogger(__name__)
 
@@ -50,6 +51,9 @@ def _deep_merge(base: dict, override: dict) -> dict:
     """Recursively merge *override* on top of *base* and return a new dict.
 
     Merge rules:
+    - **``None`` override values are dropped**: a section present in the YAML
+      but empty (only comments) parses as ``None`` and must not clobber the
+      bundled default — the intent is "nothing overridden", never "delete".
     - **Scalar values** (anything that is not a ``dict`` or ``list``):
       the override value wins unconditionally.
     - **Dict values**: the two sub-dicts are merged recursively using the
@@ -71,6 +75,8 @@ def _deep_merge(base: dict, override: dict) -> dict:
     result: dict = dict(base)
 
     for key, override_value in override.items():
+        if override_value is None:
+            continue  # empty YAML section — "nothing overridden", never a clobber
         base_value = result.get(key)
 
         if isinstance(base_value, dict) and isinstance(override_value, dict):
@@ -167,7 +173,6 @@ class ChunkingConfig(BaseModel):
                            is eligible to be split off as a separate chunk.
     """
 
-    mode:             ChunkingMode
     scene_threshold:  float
     min_scene_length: int
 
@@ -470,10 +475,10 @@ class AudioConfig(BaseModel):
 def _validate_chain_name_filesystem_safe(name: str) -> None:
     """Raise ``ValueError`` if *name* is unsafe for use in an output filename.
 
-    Rejects empty/whitespace-only names, any character in
-    :data:`~pyqenc.constants.FILENAME_FORBIDDEN_CHARS` (``< > : " / \\ | ? *``),
-    and control characters (U+0000–U+001F). Chain names form the
-    ``chain=<name>`` filename suffix, so they must be filesystem-safe (Req 8.4).
+    Rejects empty/whitespace-only names and any filesystem-unsafe character
+    (via :func:`pyqenc.utils.naming.is_filesystem_safe_name`). Chain names
+    form the ``chain=<name>`` filename suffix, so they must be
+    filesystem-safe (Req 8.4).
 
     Args:
         name: The chain name to validate.
@@ -483,11 +488,11 @@ def _validate_chain_name_filesystem_safe(name: str) -> None:
     """
     if not name or not name.strip():
         raise ValueError("Chain name must be a non-empty, non-blank string.")
-    bad = {ch for ch in name if ch in FILENAME_FORBIDDEN_CHARS or ord(ch) < 0x20}
-    if bad:
+    if not is_filesystem_safe_name(name):
+        bad = sorted(set(name) & (FILENAME_FORBIDDEN_CHARS | FILENAME_CONTROL_CHARS))
         raise ValueError(
             f"Chain name {name!r} contains filesystem-unsafe character(s): "
-            f"{sorted(bad)}. Avoid {sorted(FILENAME_FORBIDDEN_CHARS)} and control characters."
+            f"{bad}. Avoid {sorted(FILENAME_FORBIDDEN_CHARS)} and control characters."
         )
 
 
@@ -561,6 +566,12 @@ class AppConfig(BaseModel):
         since ``'+'`` is the delimiter in strategy pattern syntax and its presence
         in a name would make pattern parsing ambiguous.
 
+        Additionally rejects profile and preset names containing filesystem-unsafe
+        characters (Req 15.6): a strategy name (``profile[preset]``) is embedded
+        verbatim in strategy directory and merge output names, so its parts are
+        safe by construction — validated at the definition point, never
+        sanitized at a use point.
+
         Args:
             data: Raw input data (typically a ``dict``).
 
@@ -570,7 +581,8 @@ class AppConfig(BaseModel):
             the type error downstream).
 
         Raises:
-            ValueError: If any codec or profile name contains ``'+'``.
+            ValueError: If any codec or profile name contains ``'+'``, or any
+                        profile/preset name is filesystem-unsafe.
         """
         if isinstance(data, dict):
             codecs = data.get("codecs")
@@ -582,6 +594,16 @@ class AppConfig(BaseModel):
                             f"as the delimiter in strategy pattern syntax. "
                             f"Rename the codec to remove '+'."
                         )
+                for codec_name, codec_data in codecs.items():
+                    if isinstance(codec_data, dict):
+                        for preset in codec_data.get("presets", []):
+                            if not is_filesystem_safe_name(str(preset)):
+                                raise ValueError(
+                                    f"Preset name '{preset}' of codec '{codec_name}' "
+                                    f"contains filesystem-unsafe characters — strategy "
+                                    f"names are embedded verbatim in filesystem paths. "
+                                    f"Rename the preset."
+                                )
                 patched: dict[str, object] = {}
                 for codec_name, codec_data in codecs.items():
                     if isinstance(codec_data, dict) and "name" not in codec_data:
@@ -597,6 +619,12 @@ class AppConfig(BaseModel):
                             f"Profile name '{profile_name}' contains '+', which is reserved "
                             f"as the delimiter in strategy pattern syntax. "
                             f"Rename the profile to remove '+'."
+                        )
+                    if not is_filesystem_safe_name(profile_name):
+                        raise ValueError(
+                            f"Profile name '{profile_name}' contains filesystem-unsafe "
+                            f"characters — strategy names are embedded verbatim in "
+                            f"filesystem paths. Rename the profile."
                         )
         return data
 

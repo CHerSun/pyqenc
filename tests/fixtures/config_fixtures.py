@@ -1,7 +1,6 @@
 """Configuration file fixtures for testing."""
 
 from pathlib import Path
-from typing import Any
 
 # Sample configuration YAML content
 SAMPLE_CONFIG_YAML = """

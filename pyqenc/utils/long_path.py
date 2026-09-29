@@ -3,10 +3,20 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pydantic import GetCoreSchemaHandler
+    from pydantic_core import CoreSchema
 
 _WINDOWS:    bool = sys.platform == "win32"
 _EXT_PREFIX: str  = chr(92) * 2 + "?" + chr(92)   # \\?\  (4 chars)
 _MAX_PATH:   int  = 260                             # Windows MAX_PATH limit
+
+
+def _coerce_long_path(value: Path) -> LongPath:
+    """Return ``value`` as a :class:`LongPath` (pydantic after-validator)."""
+    return value if isinstance(value, LongPath) else LongPath(os.fspath(value))
 
 
 class LongPath(type(Path())): # Platform-specific path type
@@ -21,10 +31,11 @@ class LongPath(type(Path())): # Platform-specific path type
 
     - ``os.fspath(long_path)`` / ``long_path.__fspath__()``:
       returns the ``\\?\\``-prefixed absolute string on Windows for long paths.
-      Used by Python's file I/O and ``shutil.*``.
+      Used by Python's file I/O, ``shutil.*``, and subprocess argv resolution.
     - ``str(long_path)``:
-      returns the plain path string *without* any ``\\?\\`` prefix on all platforms.
-      Use this when building ffmpeg subprocess command lists.
+      returns the plain path string *without* any ``\\?\\`` prefix on all
+      platforms. Use this for logging and printing only — never for command
+      building or file operations.
 
     Path composition (``/`` operator) is preserved: ``LongPath(base) / child``
     always returns a ``LongPath`` instance, not a plain ``Path``.
@@ -34,7 +45,11 @@ class LongPath(type(Path())): # Platform-specific path type
         work_dir = LongPath(args.work_dir)
         artifact = work_dir / "chunks" / "chunk_01.mkv"   # still LongPath
         artifact.mkdir(parents=True, exist_ok=True)        # uses __fspath__() — long-path safe
-        cmd = ["ffmpeg", "-i", str(artifact), ...]         # uses __str__()   — no \\?\\ prefix
+        cmd: list[str | os.PathLike] = ["ffmpeg", "-i", artifact, ...]
+                                                            # pass path-like directly — subprocess
+                                                            # resolves via __fspath__()
+        cmd = ["mkvmerge", "@" + os.fspath(options_file)]  # forced single-string argument: concat
+                                                            # with os.fspath, never str()
     """
 
     def __fspath__(self) -> str:
@@ -63,13 +78,35 @@ class LongPath(type(Path())): # Platform-specific path type
         """Return the plain path string without any ``\\?\\`` prefix.
 
         Always returns the plain path regardless of length or platform.
-        Use this when passing paths to ffmpeg or any other subprocess that
-        does not understand the Windows extended-length prefix.
+        Use this for logging/printing only — commands take the path-like
+        directly (subprocess resolves it via ``__fspath__()``), and forced
+        single-string arguments concatenate with ``os.fspath``.
 
         Returns:
             Plain path string, never prefixed with ``\\?\\``.
         """
         return super().__str__()
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source_type: object,
+        handler: GetCoreSchemaHandler,
+    ) -> CoreSchema:
+        """Pydantic schema: validate like :class:`pathlib.Path`, coerce to ``LongPath``.
+
+        Declared once on the type so pydantic models can annotate fields as
+        ``LongPath`` directly — plain ``Path``/``str`` inputs validate through
+        the standard Path schema and come back as ``LongPath`` instances.
+        YAML string serialization is layered on top via a ``PlainSerializer``
+        in the annotating module, not here.
+        """
+        from pydantic_core import (
+            core_schema,  # local — keeps the module stdlib-only at import time
+        )
+
+        path_schema = handler(Path)
+        return core_schema.no_info_after_validator_function(_coerce_long_path, path_schema)
 
     def __truediv__(self, key: str | Path) -> LongPath:
         """Extend path with ``/`` operator, preserving ``LongPath`` type.

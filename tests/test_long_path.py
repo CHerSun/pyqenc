@@ -6,15 +6,13 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 import pyqenc.utils.long_path as _lp_module
-from pyqenc.utils.long_path import LongPath, _EXT_PREFIX, _MAX_PATH
-
+from pyqenc.utils.long_path import _EXT_PREFIX, _MAX_PATH, LongPath
 
 # ---------------------------------------------------------------------------
 # 1. LongPath is a subtype of Path (isinstance check)

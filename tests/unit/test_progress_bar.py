@@ -3,7 +3,6 @@ import pytest
 
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -25,9 +24,10 @@ def _collect(total: float, calls: list[tuple[float, AdvanceState]], show_counter
     fake = _FakeBar()
 
     # Patch alive_bar so we don't need a real terminal.
-    import pyqenc.utils.alive as alive_mod
-    from contextlib import contextmanager
     from collections.abc import Generator
+    from contextlib import contextmanager
+
+    import pyqenc.utils.alive as alive_mod
 
     @contextmanager
     def _mock_alive_bar(**kwargs: object) -> Generator[_FakeBar, None, None]:

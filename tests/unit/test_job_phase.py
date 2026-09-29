@@ -1,9 +1,10 @@
-"""Unit tests for JobPhase source mismatch detection and force_wipe propagation.
+"""Unit tests for JobPhase source identity, mismatch detection and force_wipe.
 
 Covers:
 - run() dry-run: returns PENDING when job.yaml absent, REUSED when present
 - run() execute: creates job.yaml on first run (COMPLETED)
-- Source mismatch without --force: returns FAILED, force_wipe=False
+- job.yaml persists only the File dump (path + size) and the result carries File
+- Source mismatch (path/size) without --force: returns FAILED, force_wipe=False
 - Source mismatch with --force: returns COMPLETED, force_wipe=True, job.yaml overwritten
 - No mismatch: returns COMPLETED/REUSED, force_wipe=False
 """
@@ -15,16 +16,17 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
 from pyqenc.app_config import load_app_config
 from pyqenc.models import (
     CleanupLevel,
     PhaseOutcome,
     QualityTarget,
-    VideoMetadata,
 )
 from pyqenc.phases.job import JobPhase
-from pyqenc.state import JobState
+from pyqenc.stream_model import File, JobSidecar
+from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -59,15 +61,11 @@ def _make_phase(
 
 
 def _persist_job(work_dir: Path, source: Path, file_size: int | None = None) -> None:
-    """Write a job.yaml with given source metadata (valid fps — current state)."""
+    """Write a job.yaml carrying the source identity (path + size)."""
     work_dir.mkdir(parents=True, exist_ok=True)
-    vm = VideoMetadata(path=source)
-    if file_size is not None:
-        vm._file_size_bytes = file_size
-    else:
-        vm._file_size_bytes = source.stat().st_size
-    vm._fps = 24.0
-    JobState(source=vm).save(work_dir / "job.yaml")
+    size = file_size if file_size is not None else source.stat().st_size
+    sidecar = JobSidecar(source=File(path=source, file_size_bytes=size))
+    write_yaml_atomic(work_dir / "job.yaml", sidecar.model_dump(exclude_none=True))
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +74,7 @@ def _persist_job(work_dir: Path, source: Path, file_size: int | None = None) -> 
 
 class TestJobPhaseRunDryRun:
     def test_dry_run_absent_probes_but_writes_no_file(self, tmp_path: Path) -> None:
-        """Dry-run on a fresh work-dir builds the JobState (read-only) without writing job.yaml.
+        """Dry-run on a fresh work-dir establishes the File (read-only) without writing job.yaml.
 
         Bug guarded: if JobPhase returned PENDING (or otherwise not-complete) in
         dry-run, the whole dry-run pipeline would cascade to "pending at: Job"
@@ -89,7 +87,7 @@ class TestJobPhaseRunDryRun:
         phase = _make_phase(tmp_path, src)
         result = phase.run(dry_run=True)
         assert result.is_complete is True
-        assert result.job is not None
+        assert result.file is not None
         assert not (work_dir / "job.yaml").exists()
 
     def test_dry_run_existing_returns_reused(self, tmp_path: Path) -> None:
@@ -138,6 +136,38 @@ class TestJobPhaseRunExecuteNoMismatch:
         assert result.is_complete is True
         assert (tmp_path / "work" / "job.yaml").exists()
 
+    def test_job_yaml_persists_only_the_file_dump(self, tmp_path: Path) -> None:
+        """Bug prevented: job.yaml regrowing cached fast metadata — the
+        sidecar is the File dump (path + size) and nothing else."""
+        src = _make_source(tmp_path)
+        phase = _make_phase(tmp_path, src)
+        phase.run(dry_run=False)
+
+        data = yaml.safe_load((tmp_path / "work" / "job.yaml").read_text(encoding="utf-8"))
+        assert set(data) == {"source"}
+        assert set(data["source"]) == {"path", "file_size_bytes"}
+        assert data["source"]["file_size_bytes"] == src.stat().st_size
+
+    def test_result_carries_eager_file(self, tmp_path: Path) -> None:
+        """JobPhaseResult exposes the run's single File — path + size from
+        the filesystem, established eagerly."""
+        src = _make_source(tmp_path)
+        phase = _make_phase(tmp_path, src)
+        result = phase.run(dry_run=False)
+        assert result.file is not None
+        assert result.file.path == src
+        assert result.file.file_size_bytes == src.stat().st_size
+
+    def test_reused_result_carries_file_too(self, tmp_path: Path) -> None:
+        src = _make_source(tmp_path)
+        work_dir = tmp_path / "work"
+        _persist_job(work_dir, src)
+        phase = _make_phase(tmp_path, src)
+        result = phase.run(dry_run=False)
+        assert result.outcome == PhaseOutcome.REUSED
+        assert result.file is not None
+        assert result.file.path == src
+
     def test_first_run_force_wipe_false(self, tmp_path: Path) -> None:
         src = _make_source(tmp_path)
         phase = _make_phase(tmp_path, src)
@@ -154,6 +184,22 @@ class TestJobPhaseRunExecuteNoMismatch:
         result = phase.run(dry_run=False)
         assert result.is_complete is True
         assert result.force_wipe is False
+
+
+class TestJobPhasePathMismatch:
+    def test_path_mismatch_without_force_fails(self, tmp_path: Path) -> None:
+        """A sidecar recorded for a different source path is a fatal
+        mismatch (the identity check compares persisted path vs live path)."""
+        src = _make_source(tmp_path)
+        other = tmp_path / "other.mkv"
+        other.write_bytes(b"\x00" * 1024)
+        work_dir = tmp_path / "work"
+        _persist_job(work_dir, other)  # recorded for a different file
+        phase = _make_phase(tmp_path, src, force=False)
+
+        result = phase.run(dry_run=False)
+        assert result.outcome == PhaseOutcome.FAILED
+        assert "path" in result.error
 
 
 # ---------------------------------------------------------------------------
@@ -224,8 +270,8 @@ class TestJobPhaseSourceMismatchWithForce:
 
         # job.yaml must exist and carry the real current file size
         assert (work_dir / "job.yaml").exists()
-        assert result.job is not None
-        assert result.job.source._file_size_bytes == src.stat().st_size
+        assert result.file is not None
+        assert result.file.file_size_bytes == src.stat().st_size
 
     def test_mismatch_with_force_logs_warning(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

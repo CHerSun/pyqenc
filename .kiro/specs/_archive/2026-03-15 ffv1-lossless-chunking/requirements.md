@@ -5,6 +5,10 @@
 - Created: 2026-03-15
 - Completed: 2026-03-15
 
+## Cross-Spec Notes
+
+- **Superseded by `2026-09-25 file-stream-model`.** Chunk files no longer exist in any mode: encoding and quality measurement read the original source directly through `-ss/-t` timestamp windows with accurate seek (decode-after-seek), which is frame-perfect without all-intra intermediates. `ChunkingMode`, the FFV1 split path, `--chunking-mode` and the remux fallback are all deleted. Frame-exactness survives as the preservation invariant `source.frame_count == Σ chunk.frame_count == Σ attempt.frame_count == final.frame_count`. This spec is archived.
+
 ## Introduction
 
 The chunking phase currently splits the source video using `ffmpeg -c copy` with input-side `-ss`. Because stream-copy can only cut at existing I-frames, each chunk boundary snaps to the nearest I-frame *before* the requested scene timestamp. This means chunk boundaries are not frame-perfect.

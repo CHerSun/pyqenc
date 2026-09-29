@@ -20,7 +20,6 @@ from pyqenc.constants import (
     SUCCESS_SYMBOL_MAJOR,
 )
 from pyqenc.models import (
-    ChunkingMode,
     CleanupLevel,
     CropParams,
 )
@@ -186,17 +185,6 @@ def _add_crop_arguments(parser: argparse.ArgumentParser) -> None:
 def _add_chunking_arguments(parser: argparse.ArgumentParser) -> None:
     """Add chunking arguments (used by subcommands that depend on ChunkingPhase)."""
     parser.add_argument(
-        "--chunking-mode",
-        choices=["lossless", "remux"],
-        default=None,
-        dest="chunking_mode",
-        metavar="CHUNKING_MODE",
-        help=(
-            "Chunking method: 'lossless' (default) re-encodes chunks to FFV1 for frame-perfect boundaries; "
-            "'remux' uses stream-copy for faster chunking and smaller intermediate files but boundaries snap to the nearest I-frame."
-        ),
-    )
-    parser.add_argument(
         "--scene-threshold",
         type=float,
         default=None,
@@ -302,12 +290,6 @@ def _build_config(args: argparse.Namespace) -> "AppConfig":
         config.extraction.exclude = args.exclude
 
     # --- chunking ---
-    chunking_val = getattr(args, "chunking_mode", None)
-    if chunking_val is not None:
-        config.chunking.mode = (
-            ChunkingMode.REMUX if chunking_val == ChunkingMode.REMUX.value
-            else ChunkingMode.LOSSLESS
-        )
     if getattr(args, "scene_threshold", None) is not None:
         config.chunking.scene_threshold = args.scene_threshold
     if getattr(args, "min_scene_length", None) is not None:
@@ -352,7 +334,7 @@ def _create_auto_subcommand(subparsers: argparse._SubParsersAction) -> None:
         "auto",
         help="Execute complete pipeline from extraction to final merge",
     )
-    p.add_argument("source", type=Path, help="Source MKV video file")
+    p.add_argument("source", type=LongPath, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
     _add_filter_arguments(p)
@@ -368,7 +350,7 @@ def _create_extract_subcommand(subparsers: argparse._SubParsersAction) -> None:
         "extract",
         help="Extract video and audio streams from source MKV",
     )
-    p.add_argument("source", type=Path, help="Source MKV video file")
+    p.add_argument("source", type=LongPath, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
     _add_filter_arguments(p)
@@ -382,7 +364,7 @@ def _create_chunk_subcommand(subparsers: argparse._SubParsersAction) -> None:
         "chunk",
         help="Split extracted video into scene-based chunks",
     )
-    p.add_argument("source", type=Path, help="Source MKV video file")
+    p.add_argument("source", type=LongPath, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
     _add_filter_arguments(p)
@@ -397,7 +379,7 @@ def _create_encode_subcommand(subparsers: argparse._SubParsersAction) -> None:
         "encode",
         help="Encode chunks to meet quality targets",
     )
-    p.add_argument("source", type=Path, help="Source MKV video file")
+    p.add_argument("source", type=LongPath, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
     _add_filter_arguments(p)
@@ -413,7 +395,7 @@ def _create_audio_subcommand(subparsers: argparse._SubParsersAction) -> None:
         "audio",
         help="Process audio streams with normalization",
     )
-    p.add_argument("source", type=Path, help="Source MKV video file")
+    p.add_argument("source", type=LongPath, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
     _add_filter_arguments(p)
@@ -426,7 +408,7 @@ def _create_merge_subcommand(subparsers: argparse._SubParsersAction) -> None:
         "merge",
         help="Merge encoded chunks and audio into final MKV files",
     )
-    p.add_argument("source", type=Path, help="Source MKV video file")
+    p.add_argument("source", type=LongPath, help="Source MKV video file")
     _add_base_arguments(p)
     _add_pipeline_arguments(p)
     _add_filter_arguments(p)
@@ -462,7 +444,7 @@ def _cmd_auto(args: argparse.Namespace) -> int:
     resolved_strats = config.encoding.resolved_strategies
     strategy_display = (
         "using defaults from config file" if strategies is None
-        else ", ".join(s.name for s in resolved_strats)
+        else ", ".join(s.display_name() for s in resolved_strats)
     )
     kv_to_show = {
         "Source:":         args.source,
@@ -883,7 +865,7 @@ def _cmd_measure(args: argparse.Namespace) -> int:
             work_dir                 = args.work_dir,
             target_videos            = args.targets,
             crop_params              = crop_params,
-            metrics_sampling         = metrics_sampling,
+            sampling                 = metrics_sampling,
             screenshot_count         = args.screenshots,
             screenshot_interval      = args.every,
             screenshot_include_edges = args.screenshot_include_edges,

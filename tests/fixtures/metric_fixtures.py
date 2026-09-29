@@ -1,7 +1,7 @@
 """Mock metric results for testing."""
 
-from pathlib import Path
 import json
+from pathlib import Path
 
 # Sample VMAF JSON output
 SAMPLE_VMAF_JSON = {

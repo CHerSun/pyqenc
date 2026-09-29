@@ -3,6 +3,21 @@
 - Created: 2026-03-17
 - Completed: 2026-03-17
 
+## Cross-Spec Notes
+
+**Amended by `2026-09-25 file-stream-model` (2026-09-27).** The runner core this
+spec defined — progress injection/parsing (``FFmpegRunResult.frame_count``),
+``.tmp``-then-rename with explicit muxer, stderr collection, kill registry,
+sync wrapper's running-loop guard — is retained unchanged. The call API became
+a structured ``FFmpegRequest`` (inputs with ``-map`` selectors and ``-ss``/``-t``
+windows, output stage, optional ``filter_complex``): command composition is
+owned by the runner, which also always injects ``-y`` (stale ``.tmp`` must
+never hang a prompt) and ``-map_chapters -1`` (no ffmpeg output carries
+chapters; ``mkvmerge --timestamps`` is the carrier). The ``video_meta=``
+in-place population parameter is removed — call sites read
+``result.frame_count`` explicitly. Golden command tests pin every call site's
+composed argv.
+
 ## Introduction
 
 The pyqenc pipeline makes ffmpeg calls from at least seven different modules

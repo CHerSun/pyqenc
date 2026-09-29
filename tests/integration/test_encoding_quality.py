@@ -12,7 +12,7 @@ from tests.fixtures.metric_fixtures import (
     create_mock_vmaf_file,
     get_expected_vmaf_stats,
 )
-from tests.fixtures.video_fixtures import get_sample_video_path, sample_video_exists
+from tests.fixtures.video_fixtures import sample_video_exists
 
 
 class TestEncodingQualityIntegration:
@@ -133,8 +133,8 @@ class TestEncodeChunkQualitySearchV2Integration:
 
     def _make_strategy(self) -> object:
         """Build a minimal Strategy-like mock for testing."""
-        from unittest.mock import MagicMock
         from decimal import Decimal
+        from unittest.mock import MagicMock
 
         codec = MagicMock()
         codec.quality_better      = Decimal("0")
@@ -145,8 +145,8 @@ class TestEncodeChunkQualitySearchV2Integration:
         codec.quality_log_padding = 4
 
         strategy = MagicMock()
-        strategy.name       = "test-strategy"
-        strategy.safe_name  = "test_strategy"
+        strategy.display_name.return_value = "test-strategy"
+        strategy.safe_name.return_value    = "test_strategy"
         strategy.codec      = codec
         strategy.to_ffmpeg_args.return_value = ["-i", "{input}", "-crf", "18"]
         return strategy
@@ -154,13 +154,12 @@ class TestEncodeChunkQualitySearchV2Integration:
     def _make_chunk(self, tmp_path: Path) -> object:
         """Build a minimal ChunkMetadata-like mock."""
         from unittest.mock import MagicMock
-        from pathlib import Path
 
         chunk_file = tmp_path / "chunk_001.mkv"
         chunk_file.write_bytes(b"fake")
 
         chunk = MagicMock()
-        chunk.chunk_id        = "chunk_001"
+        chunk.safe_name.return_value = "chunk_001"
         chunk.path            = chunk_file
         chunk._resolution     = "1920x1080"
         chunk.resolution      = "1920x1080"
@@ -171,6 +170,7 @@ class TestEncodeChunkQualitySearchV2Integration:
     def test_encode_chunk_uses_qualitysearchv2(self, tmp_path: Path) -> None:
         """encode_chunk instantiates QualitySearchV3 (verified via source inspection)."""
         import inspect
+
         from pyqenc.phases.encoding import ChunkEncoder
 
         src = inspect.getsource(ChunkEncoder.encode_chunk)
@@ -180,10 +180,11 @@ class TestEncodeChunkQualitySearchV2Integration:
     @pytest.mark.skip(reason="ChunkEncoder constructor signature changed (collector arg added); needs update")
     def test_fully_cached_chunk_returns_reused_true(self, tmp_path: Path) -> None:
         """A chunk where all attempts are cache hits returns reused=True."""
-        from unittest.mock import MagicMock, patch
         from decimal import Decimal
+        from unittest.mock import MagicMock, patch
+
+        from pyqenc.models import AttemptMetadata, QualityTarget
         from pyqenc.phases.encoding import ChunkEncoder, ChunkEncodingResult
-        from pyqenc.models import QualityTarget, AttemptMetadata
         from pyqenc.utils.visualization import QualityEvaluator
 
         strategy = self._make_strategy()
@@ -218,7 +219,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         encoder = ChunkEncoder(
             quality_evaluator = evaluator,
             work_dir          = tmp_path,
-            metrics_sampling  = 10,
+            sampling = 10,
         )
 
         reference = MagicMock()
@@ -246,12 +247,13 @@ class TestEncodeChunkQualitySearchV2Integration:
     @pytest.mark.skip(reason="ChunkEncoder constructor signature changed (collector arg added); needs update")
     def test_encode_chunk_calls_finalize_on_convergence(self, tmp_path: Path) -> None:
         """encode_chunk calls _finalize_winning_attempt when search converges with a pass."""
-        from unittest.mock import MagicMock, patch
         from decimal import Decimal
-        from pyqenc.phases.encoding import ChunkEncoder
+        from unittest.mock import MagicMock, patch
+
         from pyqenc.models import QualityTarget
+        from pyqenc.phases.encoding import ChunkEncoder
+        from pyqenc.quality import MetricType, QualityArtifacts, QualityEvaluation
         from pyqenc.utils.visualization import QualityEvaluator
-        from pyqenc.quality import QualityEvaluation, QualityArtifacts, MetricType
 
         strategy = self._make_strategy()
         chunk    = self._make_chunk(tmp_path)
