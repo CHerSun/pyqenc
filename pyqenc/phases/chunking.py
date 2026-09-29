@@ -291,7 +291,7 @@ class ChunkingPhase(Phase):
         if stream is None:
             err = "No extended video stream available for chunking"
             logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+            return self._make_result(PhaseOutcome.FAILED, [], err)
 
         boundaries = self._recovered_scenes
         if boundaries:
@@ -309,13 +309,13 @@ class ChunkingPhase(Phase):
                     )
             except Exception as exc:
                 logger.exception("Scene detection failed")
-                return self._make_result(PhaseOutcome.FAILED, [], str(exc), error=str(exc))
+                return self._make_result(PhaseOutcome.FAILED, [], str(exc))
             self._persist_scenes(work_dir / _CHUNKING_YAML, boundaries)
 
         try:
             chunks = build_chunks(boundaries, stream)
         except RecoveryError as exc:
-            return self._make_result(PhaseOutcome.FAILED, [], str(exc), error=str(exc))
+            return self._make_result(PhaseOutcome.FAILED, [], str(exc))
 
         logger.info("%d chunk window(s) — no files produced (direct-from-source)", len(chunks))
         return self._make_result(
@@ -331,11 +331,11 @@ class ChunkingPhase(Phase):
         if stream is None:
             err = "No extended video stream available for chunking"
             logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+            return self._make_result(PhaseOutcome.FAILED, [], err)
         try:
             chunks = build_chunks(self._recovered_scenes, stream)
         except RecoveryError as exc:
-            return self._make_result(PhaseOutcome.FAILED, [], str(exc), error=str(exc))
+            return self._make_result(PhaseOutcome.FAILED, [], str(exc))
         return self._make_result(
             PhaseOutcome.REUSED, [],
             "chunking.yaml reused",
@@ -347,7 +347,6 @@ class ChunkingPhase(Phase):
         outcome:   PhaseOutcome,
         artifacts: list,
         message:   str,
-        error:     str | None = None,
         chunks:    list[VideoStreamChunk] | None = None,
     ) -> ChunkingPhaseResult:
         """Assemble a ``ChunkingPhaseResult``.
@@ -355,8 +354,8 @@ class ChunkingPhase(Phase):
         Args:
             outcome:   The phase outcome.
             artifacts: Always empty (chunking.yaml is state, not an artifact).
-            message:   Human-readable summary.
-            error:     Error description when ``outcome`` is ``FAILED``.
+            message:   Human-readable summary — on ``FAILED``, the error
+                       description.
             chunks:    The chunk windows (empty on failure paths).
 
         Returns:
@@ -366,7 +365,6 @@ class ChunkingPhase(Phase):
             outcome   = outcome,
             artifacts = artifacts,
             message   = message,
-            error     = error,
             chunks    = chunks or [],
         )
 

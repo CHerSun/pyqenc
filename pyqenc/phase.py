@@ -3,7 +3,8 @@
 This module defines the structural backbone of the phase object model:
 
 - ``ArtifactState``   — re-exported from ``state`` for convenience.
-- ``Artifact``        — base dataclass for all phase output artifacts.
+- ``Artifact``        — the generic artifact wrapper: a typed payload plus
+                        its recovery/selection facts (the only artifact class).
 - ``PhaseOutcome``    — re-exported from ``models`` for convenience.
 - ``PhaseResult``     — result returned by every phase's ``run()``.
 - ``FinalizeContext`` — pre-resolved end-of-run decisions passed to ``finalize``.
@@ -75,36 +76,46 @@ TPhase = TypeVar("TPhase", bound="Phase")
 
 
 # ---------------------------------------------------------------------------
-# Artifact base
+# Artifact — the generic wrapper (the only artifact class)
 # ---------------------------------------------------------------------------
 
 @dataclass
-class Artifact:
-    """Base class for all phase output artifacts.
+class Artifact[PayloadT]:
+    """One investable entity (the payload) plus its recovery/selection facts.
 
-    Each phase defines a concrete subclass that adds fully typed metadata
-    fields (e.g. ``ChunkArtifact`` adds ``metadata: ChunkMetadata | None``).
+    An artifact is the thing we act on and invest in — the unit of recovery
+    (presence-based, resumable), of selection, and of inter-phase transfer.
+    Identity and metadata live on the typed payload (a stream-model entity);
+    the wrapper adds only the two recovery axes. No subclass of this class
+    exists; every ledger row and result field is a direct ``Artifact[...]``
+    instantiation with a concrete payload type.
+
+    There is no ``path`` field: file-backed locations derive from the payload;
+    virtual payloads have none. The wrapper is mutable and never persisted —
+    the owning phase flips ``state`` to ``COMPLETE`` as ``_execute()``
+    verifies each production; sidecars persist payload info slices only.
+
+    Type parameter:
+        PayloadT: The stream-model entity this artifact wraps.
 
     Attributes:
-        path:   Path to the primary artifact file on disk.
-        state:  Completeness of this artifact.
-        wanted: Whether this artifact is selected by the current run. This is a
-                DERIVED value: it comes from external input — the user's stream
-                filter plus the pipeline mode (e.g. ``video_required``) for
-                extraction, and scene detection for chunking — and is never
-                chosen or mutated by a phase on its own during recovery.
-                Orthogonal to completeness. ``True`` = must be produced if not
-                already ``COMPLETE``. ``False`` = present or expected on disk
-                but not needed this run; it is retained in place unchanged and
-                is not a deletion candidate — deletion only ever happens when
-                the user explicitly sets a cleanup level, applied uniformly.
-                The default ``True`` ensures all existing construction sites
-                are unaffected.
+        payload: The typed entity this row is about.
+        state:   Completeness of this artifact (presence-based).
+        wanted:  Whether this artifact is selected by the current run. This is a
+                 DERIVED value: it comes from external input — the user's stream
+                 filter plus the pipeline mode (e.g. ``video_required``) for
+                 extraction, and scene detection for chunking — and is never
+                 chosen or mutated by a phase on its own during recovery.
+                 Orthogonal to completeness. ``True`` = must be produced if not
+                 already ``COMPLETE``. ``False`` = present or expected on disk
+                 but not needed this run; it is retained in place unchanged and
+                 is not a deletion candidate — deletion only ever happens when
+                 the user explicitly sets a cleanup level, applied uniformly.
     """
 
-    path:   Path
-    state:  ArtifactState
-    wanted: bool = True
+    payload: PayloadT
+    state:   ArtifactState
+    wanted:  bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -118,20 +129,19 @@ class PhaseResult:
     Attributes:
         outcome:   High-level outcome of the phase execution.
         artifacts: Wanted artifacts only (``wanted=True``). Phases build a full
-                   internal artifact list in ``_recover()`` covering both
+                   internal recovery ledger in ``_recover()`` covering both
                    wanted and unwanted entries, then filter to ``wanted=True``
                    before constructing ``PhaseResult``. ``pending`` and
                    ``complete`` derive from this list directly, so callers
                    never need to filter by ``wanted`` themselves.
-        message:   Human-readable summary of the phase outcome.
-        error:     Error description when ``outcome`` is ``FAILED``; ``None``
-                   otherwise.
+        message:   The single human-readable string. On ``FAILED`` this IS the
+                   failure description; partial-failure detail (count plus
+                   identifiers) folds into it.
     """
 
     outcome:   PhaseOutcome
     artifacts: list[Artifact]
     message:   str
-    error:     str | None = None
 
     # ------------------------------------------------------------------
     # Derived helpers
@@ -443,9 +453,7 @@ class Phase:
             # Fatal recover-time invalidation — a hard stop (same severity the
             # phases already used for mode/probe/source mismatches).
             self._logger.critical(exc.message)
-            self.result = self._make_result(
-                PhaseOutcome.FAILED, [], exc.message, error=exc.message,
-            )
+            self.result = self._make_result(PhaseOutcome.FAILED, [], exc.message)
             return self.result
 
         # 7. Recovery summary over the unfiltered internal list; wanted
@@ -539,7 +547,7 @@ class Phase:
             names = ", ".join(n.capitalize() for n in failed)
             err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
             self._logger.error(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+            return self._make_result(PhaseOutcome.FAILED, [], err)
         if pending:
             names = ", ".join(n.capitalize() for n in pending)
             msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
@@ -647,15 +655,14 @@ class Phase:
         outcome:   PhaseOutcome,
         artifacts: list[Artifact],
         message:   str,
-        error:     str | None = None,
     ) -> PhaseResult:
         """Assemble the phase's typed result (payload defaults for the phase).
 
         Args:
             outcome:   The phase outcome.
             artifacts: The wanted artifact list (``PhaseResult.artifacts``).
-            message:   Human-readable summary.
-            error:     Error description when ``outcome`` is ``FAILED``.
+            message:   Human-readable summary — on ``FAILED``, the error
+                       description.
 
         Returns:
             The populated typed result.

@@ -61,7 +61,7 @@ from pyqenc.phase import (
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.state import ArtifactState, AudioSidecar
-from pyqenc.stream_model import AudioStream
+from pyqenc.stream_model import AudioOutput, AudioStream
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.long_path import LongPath
 
@@ -82,6 +82,10 @@ class AudioArtifact(Artifact):
     on-disk presence (COMPLETE when the file exists, ABSENT when it must be
     produced); ``wanted`` marks whether the current config still expects it.
 
+    Transitional (deleted in task 7 with the generic-row migration): the base
+    wrapper carries no ``path``; the extra fields are redeclared so
+    construction sites keep working.
+
     Attributes:
         source_stream: The source audio stream this output is produced from.
         chain_name:    The producing chain's configured name.
@@ -89,7 +93,10 @@ class AudioArtifact(Artifact):
         codec:         The effective output codec (e.g. ``flac``, ``aac``).
     """
 
-    source_stream: AudioStream | None = None
+    payload:       AudioOutput | None  = None
+    state:         ArtifactState       = ArtifactState.ABSENT
+    path:          Path | None         = None
+    source_stream: AudioStream | None  = None
     chain_name:   str | None           = None
     out_layout:   ChannelLayout | None = None
     codec:        str | None           = None
@@ -473,7 +480,7 @@ class AudioPhase(Phase):
 
         if produced == 0 and failed > 0:
             err = f"all {failed} audio chain output(s) failed"
-            return self._make_result(PhaseOutcome.FAILED, artifacts, err, error=err)
+            return self._make_result(PhaseOutcome.FAILED, artifacts, err)
 
         outcome = PhaseOutcome.COMPLETED
         return self._make_result(
@@ -506,15 +513,14 @@ class AudioPhase(Phase):
         outcome:   PhaseOutcome,
         artifacts: list[AudioArtifact],
         message:   str,
-        error:     str | None = None,
     ) -> AudioPhaseResult:
         """Assemble an ``AudioPhaseResult`` from the wanted artifacts.
 
         Args:
             outcome:   The phase outcome.
             artifacts: The wanted artifact list.
-            message:   Human-readable summary.
-            error:     Error description when ``outcome`` is ``FAILED``.
+            message:   Human-readable summary — on ``FAILED``, the error
+                       description.
 
         Returns:
             The populated result (``artifacts`` drive dependency resolution;
@@ -525,7 +531,6 @@ class AudioPhase(Phase):
             outcome     = outcome,
             artifacts   = artifacts,
             message     = message,
-            error       = error,
             outputs     = artifacts,
             audio_files = [a.path for a in complete],
         )

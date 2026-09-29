@@ -410,6 +410,9 @@ def _extract_timestamps(
 # ---------------------------------------------------------------------------
 # Artifacts and result
 # ---------------------------------------------------------------------------
+# Transitional (deleted in task 3 with the generic-row migration): the base
+# wrapper carries no ``path``; each subclass redeclares its extra fields so
+# construction sites keep working.
 
 @dataclass
 class SubtitleArtifact(Artifact):
@@ -419,7 +422,10 @@ class SubtitleArtifact(Artifact):
         stream: The subtitle stream owning the artifact's name and selector.
     """
 
-    stream: SubtitleStream | None = None
+    payload: SubtitleStream | None      = None
+    state:   ArtifactState              = ArtifactState.ABSENT
+    path:    Path | None                = None
+    stream:  SubtitleStream | None      = None
 
 
 @dataclass
@@ -430,12 +436,19 @@ class AttachmentArtifact(Artifact):
         stream: The attachment stream owning the artifact's name.
     """
 
-    stream: AttachmentStream | None = None
+    payload: AttachmentStream | None = None
+    state:   ArtifactState           = ArtifactState.ABSENT
+    path:    Path | None             = None
+    stream:  AttachmentStream | None = None
 
 
 @dataclass
 class ChaptersArtifact(Artifact):
     """Extraction artifact for the container's chapter edition (chapters.xml)."""
+
+    payload: File | None = None
+    state:   ArtifactState = ArtifactState.ABSENT
+    path:    Path | None   = None
 
 
 @dataclass
@@ -450,7 +463,10 @@ class TimestampArtifact(Artifact):
         stream: The video stream whose PTS values are extracted.
     """
 
-    stream: VideoStream | None = None
+    payload: VideoStream | None = None
+    state:   ArtifactState      = ArtifactState.ABSENT
+    path:    Path | None        = None
+    stream:  VideoStream | None = None
 
 
 @dataclass
@@ -467,7 +483,10 @@ class VideoStreamArtifact(Artifact):
         stream: The enumerated video stream.
     """
 
-    stream: VideoStream | None = None
+    payload: VideoStream | None = None
+    state:   ArtifactState      = ArtifactState.ABSENT
+    path:    Path | None        = None
+    stream:  VideoStream | None = None
 
 
 @dataclass
@@ -478,7 +497,10 @@ class AudioStreamArtifact(Artifact):
         stream: The enumerated audio stream.
     """
 
-    stream: AudioStream | None = None
+    payload: AudioStream | None = None
+    state:   ArtifactState      = ArtifactState.ABSENT
+    path:    Path | None        = None
+    stream:  AudioStream | None = None
 
 
 # Type alias for all extraction artifacts — use this in annotations throughout
@@ -783,15 +805,14 @@ class ExtractionPhase(Phase):
         outcome:   PhaseOutcome,
         artifacts: list[ExtractionArtifact],
         message:   str,
-        error:     str | None = None,
     ) -> ExtractionPhaseResult:
         """Assemble an ``ExtractionPhaseResult`` deriving payloads from artifacts.
 
         Args:
             outcome:   The phase outcome.
             artifacts: The wanted artifact list.
-            message:   Human-readable summary.
-            error:     Error description when ``outcome`` is ``FAILED``.
+            message:   Human-readable summary — on ``FAILED``, the error
+                       description.
 
         Returns:
             The populated result.
@@ -821,7 +842,6 @@ class ExtractionPhase(Phase):
             outcome           = outcome,
             artifacts         = artifacts,
             message           = message,
-            error             = error,
             video_stream      = self._video,
             audio_streams     = list(self._audio),
             subtitle_streams  = subtitles,
@@ -874,7 +894,7 @@ class ExtractionPhase(Phase):
         if not source.exists():
             err = f"Source video not found: {source}"
             logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, artifacts, err, error=err)
+            return self._make_result(PhaseOutcome.FAILED, artifacts, err)
 
         errors: list[str] = []
 
@@ -895,10 +915,7 @@ class ExtractionPhase(Phase):
             err_summary  = f"{len(errors)} extraction error(s): {'; '.join(errors)}"
             logger.error(err_summary)
             outcome = PhaseOutcome.FAILED if failed_count > 0 else PhaseOutcome.COMPLETED
-            return self._make_result(
-                outcome, artifacts, err_summary,
-                error=err_summary if outcome == PhaseOutcome.FAILED else None,
-            )
+            return self._make_result(outcome, artifacts, err_summary)
 
         complete_count = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE)
         logger.info(

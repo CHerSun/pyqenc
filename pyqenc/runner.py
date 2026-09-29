@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 from pyqenc.constants import THICK_LINE
 from pyqenc.metrics import METRICS_YAML_FILENAME, MetricsCollector
@@ -35,6 +36,7 @@ from pyqenc.phase import (
     PhaseRegistry,
     PhaseResult,
 )
+from pyqenc.phases.merge import MergeArtifact
 from pyqenc.utils.long_path import LongPath
 
 logger = logging.getLogger(__name__)
@@ -66,10 +68,10 @@ class RunResult:
                              would need to do work).
         phases_failed:       Names of phases whose outcome is ``FAILED``.
         output_files:        Final output file paths, taken from the *target*
-                             phase's result only (artifacts under a ``final/``
-                             directory).
-        error:               Failure description when ``success`` is ``False``;
-                             ``None`` otherwise.
+                             phase's result only (complete merged outputs).
+        error:               Failure description when ``success`` is ``False``
+                             (the target result's ``message`` — on ``FAILED``
+                             it IS the error description); ``None`` otherwise.
     """
 
     success:             bool
@@ -236,8 +238,9 @@ class Runner:
 
         Args:
             run_ok:        Whether the target phase completed successfully.
-            target_result: The target phase's result (its ``error``/``message``
-                           populates ``RunResult.error`` on failure).
+            target_result: The target phase's result (its ``message``
+                           populates ``RunResult.error`` on failure — on
+                           ``FAILED`` the message IS the error description).
 
         Returns:
             The assembled ``RunResult``.
@@ -268,11 +271,7 @@ class Runner:
 
         error: str | None = None
         if not run_ok:
-            error = (
-                target_result.error
-                or target_result.message
-                or "run did not complete successfully"
-            )
+            error = target_result.message or "run did not complete successfully"
 
         return RunResult(
             success             = run_ok,
@@ -336,6 +335,13 @@ def _collect_output_files(result: PhaseResult) -> list[Path]:
     Returns:
         The list of final output file paths (empty when none qualify).
     """
-    return [artifact.path for artifact in result.complete if "final" in artifact.path.parts]
+    # Transitional (dies in task 8, Req 9.3): the rows are still MergeArtifact
+    # subclasses carrying a path; the runner then reads Artifact[MergedVideo]
+    # payloads instead of sniffing the final/ directory.
+    return [
+        cast(MergeArtifact, artifact).path
+        for artifact in result.complete
+        if cast(MergeArtifact, artifact).path is not None
+    ]
 
 

@@ -209,7 +209,7 @@ def _make_merge_phase(
     )
     job.result = JobPhaseResult(
         outcome    = PhaseOutcome.COMPLETED,
-        artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
+        artifacts  = [Artifact(payload=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message    = "job complete",
         force_wipe = False,
         config     = config,
@@ -221,7 +221,7 @@ def _make_merge_phase(
 
     extraction = ExtractionPhase(config, registry, video_required=True, collector=collector)
     ts_artifacts = (
-        [Artifact(path=timestamps_path, state=ArtifactState.COMPLETE)]
+        [Artifact(payload=timestamps_path, state=ArtifactState.COMPLETE)]
         if timestamps_path is not None
         else []
     )
@@ -236,7 +236,7 @@ def _make_merge_phase(
     probe = ProbePhase(config, registry, collector=collector, crop_params=None)
     probe.result = ProbePhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
-        artifacts = [Artifact(path=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
+        artifacts = [Artifact(payload=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
         message   = "probe complete",
         stream    = _extended_stream(source, frame_count),
     )
@@ -522,7 +522,7 @@ class TestMkvmergeOptionsFileLifecycle:
                 result = merge.run(dry_run=False)
 
             assert result.outcome == PhaseOutcome.COMPLETED, (
-                f"Expected COMPLETED, got {result.outcome} (error={result.error!r})"
+                f"Expected COMPLETED, got {result.outcome} (message={result.message!r})"
             )
             assert not options_file.exists(), (
                 "Options file must be deleted after a successful merge"
@@ -703,7 +703,7 @@ class TestMergeFailsWithoutTimestamps:
             with patch("pyqenc.phases.merge.subprocess.run"):
                 result = merge.run(dry_run=False)
 
-            combined = f"{result.message} {result.error or ''}"
+            combined = result.message
             assert "fail" in combined.lower() or "timestamps" in combined.lower(), (
                 f"Expected failure message to mention 'fail' or 'timestamps', got: {combined!r}"
             )

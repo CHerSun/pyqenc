@@ -56,7 +56,7 @@ from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import MergeParams, MergeStrategySummary, ProbeState
-from pyqenc.stream_model import EncodedChunk, ExtendedVideoStream
+from pyqenc.stream_model import EncodedChunk, ExtendedVideoStream, MergedVideo
 from pyqenc.utils.ffmpeg_runner import get_frame_count
 from pyqenc.utils.log_format import (
     fmt_key_value_table,
@@ -95,6 +95,10 @@ def _targets_as_strings(targets: list[QualityTarget]) -> list[str]:
 class MergeArtifact(Artifact):
     """Artifact for a single merged output file.
 
+    Transitional (deleted in task 8 with the generic-row migration): the base
+    wrapper carries no ``path``; the extra fields are redeclared so
+    construction sites keep working.
+
     Attributes:
         strategy_name: Display name of the encoding strategy (e.g. ``slow+h265-aq``).
         frame_count:   Frame count of the merged output; ``None`` until measured.
@@ -103,11 +107,14 @@ class MergeArtifact(Artifact):
         plot_path:     Path to the quality plot PNG; ``None`` if not produced.
     """
 
-    strategy_name: str        = ""
-    frame_count:   int | None = None
-    metrics:       dict[str, float] = field(default_factory=dict)
-    targets_met:   bool             = False
-    plot_path:     Path | None      = None
+    payload:       MergedVideo | None    = None
+    state:         ArtifactState         = ArtifactState.ABSENT
+    path:          Path | None           = None
+    strategy_name: str                   = ""
+    frame_count:   int | None            = None
+    metrics:       dict[str, float]      = field(default_factory=dict)
+    targets_met:   bool                  = False
+    plot_path:     Path | None           = None
 
 
 # ---------------------------------------------------------------------------
@@ -650,7 +657,7 @@ class MergePhase(Phase):
         if incomplete:
             err = f"EncodingPhase has {len(incomplete)} incomplete artifact(s) — cannot merge"
             logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+            return self._make_result(PhaseOutcome.FAILED, [], err)
 
         return None
 
@@ -824,15 +831,14 @@ class MergePhase(Phase):
         outcome:   PhaseOutcome,
         artifacts: list[MergeArtifact],
         message:   str,
-        error:     str | None = None,
     ) -> MergePhaseResult:
         """Assemble a ``MergePhaseResult`` from the final-output artifacts.
 
         Args:
             outcome:   The phase outcome.
             artifacts: The wanted artifact list.
-            message:   Human-readable summary.
-            error:     Error description when ``outcome`` is ``FAILED``.
+            message:   Human-readable summary — on ``FAILED``, the error
+                       description (count plus identifiers).
 
         Returns:
             The populated result (``merged`` mirrors ``artifacts``).
@@ -841,7 +847,6 @@ class MergePhase(Phase):
             outcome   = outcome,
             artifacts = artifacts,
             message   = message,
-            error     = error,
             merged    = artifacts,
         )
 
@@ -1122,7 +1127,7 @@ class MergePhase(Phase):
             metrics_sampling   = self._dep(JobPhase).result.config.measurement.sampling,  # type: ignore[union-attr]
         )
         if failed_strategies and not final_artifacts:
-            return self._make_result(PhaseOutcome.FAILED, [], "All strategy merges failed", error="All strategy merges failed")
+            return self._make_result(PhaseOutcome.FAILED, [], "All strategy merges failed")
 
         # Persist merge params (with summary) so quality-target / sampling changes are
         # detected next run and the summary table can be replayed on rerun.
@@ -1143,8 +1148,7 @@ class MergePhase(Phase):
         if failed_strategies:
             return self._make_result(
                 PhaseOutcome.FAILED, final_artifacts,
-                f"{len(failed_strategies)} strategy(ies) failed",
-                error=f"Failed: {', '.join(failed_strategies[:5])}",
+                f"{len(failed_strategies)} strategy(ies) failed: {', '.join(failed_strategies[:5])}",
             )
 
         did_work = any(a.state == ArtifactState.COMPLETE for a in final_artifacts)

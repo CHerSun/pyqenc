@@ -162,7 +162,7 @@ class OptimizationPhase(Phase):
         if not strategies:
             err = "No strategies configured"
             logger.error(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+            return self._make_result(PhaseOutcome.FAILED, [], err)
 
         # All-strategies mode: triggered by the optimize flag being off or a
         # single strategy given (nothing to optimize against).
@@ -370,7 +370,7 @@ class OptimizationPhase(Phase):
         if strategies_to_test and not chunks:
             err = "No chunks available from ChunkingPhase"
             logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+            return self._make_result(PhaseOutcome.FAILED, [], err)
 
         test_chunk_ids = persisted.test_chunks if persisted and persisted.test_chunks else []
         if test_chunk_ids:
@@ -492,15 +492,14 @@ class OptimizationPhase(Phase):
         outcome:   PhaseOutcome,
         artifacts: list[Artifact],
         message:   str,
-        error:     str | None = None,
     ) -> OptimizationPhaseResult:
         """Assemble an ``OptimizationPhaseResult`` from the payload stashes.
 
         Args:
             outcome:   The phase outcome.
             artifacts: Artifact list (empty on non-execute paths).
-            message:   Human-readable summary.
-            error:     Error description when ``outcome`` is ``FAILED``.
+            message:   Human-readable summary — on ``FAILED``, the error
+                       description.
 
         Returns:
             The populated result (``selected_strategies`` resolved from the
@@ -511,7 +510,6 @@ class OptimizationPhase(Phase):
             outcome             = outcome,
             artifacts           = artifacts,
             message             = message,
-            error               = error,
             selected_strategies = self._resolve_selected(self._selected_names),
             strategy_results    = list(self._strategy_results),
         )
@@ -706,12 +704,15 @@ def _strategy_artifacts(
     Returns:
         Combined artifact list, complete entries first then absent entries.
     """
+    # Transitional fake rows (deleted in task 5 with the per-pair ledger):
+    # the payload carries the strategy name — log_recovery_line reads only
+    # wanted/state.
     artifacts:  list[Artifact] = [
-        Artifact(path=Path(name), state=ArtifactState.COMPLETE, wanted=True)
+        Artifact(payload=name, state=ArtifactState.COMPLETE, wanted=True)
         for name in complete_names
     ]
     artifacts += [
-        Artifact(path=Path(name), state=ArtifactState.ABSENT, wanted=True)
+        Artifact(payload=name, state=ArtifactState.ABSENT, wanted=True)
         for name in (absent_names or [])
     ]
     return artifacts

@@ -51,7 +51,7 @@ def _make_job_result(work_dir: Path, source: Path) -> JobPhaseResult:
     """Return a COMPLETED JobPhaseResult carrying the source and work_dir."""
     return JobPhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
-        artifacts = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
+        artifacts = [Artifact(payload=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message   = "job complete",
         work_dir  = work_dir,
         source    = source,
@@ -149,7 +149,7 @@ class TestProbePhaseFailedNoVideo:
 
         assert result.outcome == PhaseOutcome.FAILED
         assert result.stream is None
-        assert result.error is not None
+        assert result.message
         assert not (work_dir / "probe.yaml").exists()
 
 

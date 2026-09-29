@@ -1571,15 +1571,22 @@ def encode_all_chunks(
 class EncodedArtifact(Artifact):
     """Encoding artifact for a single ``(chunk_id, strategy)`` pair.
 
+    Transitional (deleted in task 6 with the generic-row migration): the base
+    wrapper carries no ``path``; the extra fields are redeclared so
+    construction sites keep working.
+
     Attributes:
         chunk_id: Chunk identifier.
         strategy: Strategy used to produce this artifact.
         crf:      Winning CRF value; ``None`` when state is not ``COMPLETE``.
     """
 
-    chunk_id: str = ""
-    strategy: str = ""
-    crf:      Decimal | None = None
+    payload:  EncodedChunk | None = None
+    state:    ArtifactState       = ArtifactState.ABSENT
+    path:     Path | None         = None
+    chunk_id: str                 = ""
+    strategy: str                 = ""
+    crf:      Decimal | None      = None
 
 
 @_dataclass
@@ -1851,7 +1858,6 @@ class EncodingPhase(Phase):
         outcome:   PhaseOutcome,
         artifacts: list[EncodedArtifact],
         message:   str,
-        error:     str | None = None,
         encoded_chunks: dict[str, dict[str, EncodedChunk]] | None = None,
     ) -> "EncodingPhaseResult":
         """Assemble an ``EncodingPhaseResult`` from the pair artifacts.
@@ -1859,8 +1865,8 @@ class EncodingPhase(Phase):
         Args:
             outcome:        The phase outcome.
             artifacts:      The wanted artifact list.
-            message:        Human-readable summary.
-            error:          Error description when ``outcome`` is ``FAILED``.
+            message:        Human-readable summary — on ``FAILED``, the error
+                            description (count plus identifiers).
             encoded_chunks: The winning ``EncodedChunk`` objects (defaults to
                             the stash from the last ``encode_all_chunks`` run).
 
@@ -1871,7 +1877,6 @@ class EncodingPhase(Phase):
             outcome        = outcome,
             artifacts      = artifacts,
             message        = message,
-            error          = error,
             encoded        = artifacts,
             encoded_chunks = encoded_chunks if encoded_chunks is not None else self._encoded_chunks,
         )
@@ -1910,12 +1915,12 @@ class EncodingPhase(Phase):
         if not chunks:
             err = "No chunks available from ChunkingPhase"
             logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+            return self._make_result(PhaseOutcome.FAILED, [], err)
 
         if not strategies:
             err = "No strategies available from OptimizationPhase"
             logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+            return self._make_result(PhaseOutcome.FAILED, [], err)
 
         strategy_names = [s.display_name() for s in strategies]
 
@@ -1953,7 +1958,7 @@ class EncodingPhase(Phase):
         if enc_result.outcome == PhaseOutcome.FAILED:
             err = enc_result.error or "Encoding failed"
             logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+            return self._make_result(PhaseOutcome.FAILED, [], err)
 
         self._encoded_chunks = enc_result.encoded_chunks
 
@@ -1988,7 +1993,7 @@ class EncodingPhase(Phase):
                         f"({attempt_total}) != source ({source_total}). Per-chunk: {detail}"
                     )
                     logger.critical(err)
-                    return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+                    return self._make_result(PhaseOutcome.FAILED, [], err)
                 logger.debug(
                     "Frame preservation verified: Σ winning attempts == source == %d",
                     source_total,
@@ -2041,8 +2046,7 @@ class EncodingPhase(Phase):
         if failed_pairs:
             return self._make_result(
                 PhaseOutcome.FAILED, final_artifacts,
-                f"{len(failed_pairs)} pair(s) failed",
-                error=f"Failed pairs: {', '.join(failed_pairs[:5])}",
+                f"{len(failed_pairs)} pair(s) failed: {', '.join(failed_pairs[:5])}",
             )
 
         outcome = PhaseOutcome.COMPLETED if enc_result.encoded_count > 0 else PhaseOutcome.REUSED

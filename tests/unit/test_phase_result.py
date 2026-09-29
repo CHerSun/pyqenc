@@ -26,7 +26,7 @@ from pyqenc.state import ArtifactState
 # ---------------------------------------------------------------------------
 
 def _artifact(state: ArtifactState, wanted: bool = True) -> Artifact:
-    return Artifact(path=Path("/fake/path"), state=state, wanted=wanted)
+    return Artifact(payload=Path("/fake/path"), state=state, wanted=wanted)
 
 
 def _result(outcome: PhaseOutcome, states: list[ArtifactState] = ()) -> PhaseResult:

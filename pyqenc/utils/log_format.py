@@ -113,15 +113,15 @@ def log_recovery_line(
 ) -> str:
     """Log the recovery summary and return the same human-readable message.
 
-    Takes the phase's INTERNAL artifact list (pre-filter, including
-    ``wanted=False`` entries) — NOT ``PhaseResult.artifacts`` — because it needs
-    the unwanted count, which is only visible before wanted-filtering.  Derives
-    all five counts itself; callers never compute recovery counts locally.
+    Takes the phase's INTERNAL artifact ledger (pre-filter, including
+    ``wanted=False`` entries) — NOT ``PhaseResult.artifacts``.  Derives all
+    counts itself; callers never compute recovery counts locally.
 
-    The five counts are: ``total`` (all internal artifacts), ``unwanted``
-    (``wanted=False`` over the full list), and ``complete``/``partial``/
-    ``absent`` (counted over the wanted artifacts only).  All five are always
-    shown, even when zero.
+    The counts are: ``total`` (every internal row — internal artifacts and
+    ``wanted=False`` rows included), ``wanted`` (the selected rows), and
+    ``complete``/``partial``/``absent`` (counted over the wanted rows only).
+    The identity ``wanted == complete + partial + absent`` always holds. All
+    counts are always shown, even when zero.
 
     The returned string is the single source of truth for the recovery message:
     callers assign it directly to ``PhaseResult.message`` rather than building a
@@ -132,7 +132,7 @@ def log_recovery_line(
         artifacts: The phase's internal artifact list (including ``wanted=False``
                    entries).
         unit:      Singular noun for the artifact type (e.g. ``"chunk"``,
-                   ``"pair"``, ``"strategy result"``).  Reserved for callers that
+                   ``"pair"``, ``"attempt"``). Reserved for callers that
                    want a noun other than the default; it does not affect the
                    counts.
 
@@ -140,15 +140,15 @@ def log_recovery_line(
         The emitted recovery message, identical to the logged line.
     """
     total    = len(artifacts)
-    unwanted = sum(1 for a in artifacts if not a.wanted)
+    wanted   = sum(1 for a in artifacts if a.wanted)
     complete = sum(1 for a in artifacts if a.wanted and a.state == ArtifactState.COMPLETE)
     partial  = sum(1 for a in artifacts if a.wanted and a.state == ArtifactState.PARTIAL)
     absent   = sum(1 for a in artifacts if a.wanted and a.state == ArtifactState.ABSENT)
 
     suffix  = "resuming" if complete else "full run needed"
     message = (
-        f"Recovery: {total} total, {unwanted} unwanted"
-        f" — {complete} complete, {partial} partial, {absent} absent"
+        f"Recovery: {total} total, {wanted} wanted"
+        f" ({complete} complete, {partial} partial, {absent} absent)"
         f" — {suffix}"
     )
     log.info(message)

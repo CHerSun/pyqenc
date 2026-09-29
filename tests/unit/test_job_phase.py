@@ -118,9 +118,9 @@ class TestJobPhaseRunDryRun:
             result = phase.run(dry_run=True)
 
         assert result.outcome == PhaseOutcome.FAILED
-        assert result.error is not None
-        assert "mismatch" in result.error.lower()
-        assert "--force" in result.error
+        assert result.message
+        assert "mismatch" in result.message.lower()
+        assert "--force" in result.message
         assert any(r.levelno == logging.CRITICAL and "mismatch" in r.message.lower() for r in caplog.records)
 
 
@@ -199,7 +199,7 @@ class TestJobPhasePathMismatch:
 
         result = phase.run(dry_run=False)
         assert result.outcome == PhaseOutcome.FAILED
-        assert "path" in result.error
+        assert "path" in result.message
 
 
 # ---------------------------------------------------------------------------

@@ -267,15 +267,14 @@ class ProbePhase(Phase):
         outcome:   PhaseOutcome,
         artifacts: list[Artifact],
         message:   str,
-        error:     str | None = None,
     ) -> ProbePhaseResult:
         """Assemble a ``ProbePhaseResult`` from the resolved payload stash.
 
         Args:
             outcome:   The phase outcome.
             artifacts: Always empty (probe.yaml is state, not an artifact).
-            message:   Human-readable summary.
-            error:     Error description when ``outcome`` is ``FAILED``.
+            message:   Human-readable summary — on ``FAILED``, the error
+                       description.
 
         Returns:
             The populated result (``stream`` defaults to ``None`` on
@@ -285,7 +284,6 @@ class ProbePhase(Phase):
             outcome   = outcome,
             artifacts = artifacts,
             message   = message,
-            error     = error,
             stream    = self._resolved,
             crop      = self._resolved.crop if self._resolved is not None else CropParams(),
         )

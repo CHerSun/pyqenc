@@ -138,7 +138,7 @@ def _make_extraction_phase(
     job_result = JobPhaseResult(
         file       = File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64),
         outcome    = PhaseOutcome.COMPLETED,
-        artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
+        artifacts  = [Artifact(payload=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message    = "job complete",
         force_wipe = False,
         config     = config,
@@ -430,7 +430,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
         )
         job.result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
-            artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
+            artifacts  = [Artifact(payload=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
             message    = "job complete",
             force_wipe = False,
             config     = config,
@@ -443,7 +443,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
         extraction = ExtractionPhase(config, registry, video_required=True, collector=collector)
         extraction.result = ExtractionPhaseResult(
             outcome         = PhaseOutcome.COMPLETED,
-            artifacts       = [Artifact(path=ts_file, state=ArtifactState.COMPLETE)],
+            artifacts       = [Artifact(payload=ts_file, state=ArtifactState.COMPLETE)],
             message         = "extraction complete",
             timestamps_path = ts_file,
         )
@@ -452,7 +452,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
         probe = ProbePhase(config, registry, collector=collector, crop_params=None)
         probe.result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [Artifact(path=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
+            artifacts = [Artifact(payload=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
             message   = "probe complete",
             stream    = _extended_stream(source, frame_count),
         )

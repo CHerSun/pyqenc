@@ -257,15 +257,14 @@ class JobPhase(Phase):
         outcome:   PhaseOutcome,
         artifacts: list[Artifact],
         message:   str,
-        error:     str | None = None,
     ) -> JobPhaseResult:
         """Assemble a ``JobPhaseResult`` from constructor + recovery state.
 
         Args:
             outcome:   The phase outcome.
             artifacts: Always empty (job.yaml is state, not an artifact).
-            message:   Human-readable summary.
-            error:     Error description when ``outcome`` is ``FAILED``.
+            message:   Human-readable summary — on ``FAILED``, the error
+                       description.
 
         Returns:
             The populated result.
@@ -274,7 +273,6 @@ class JobPhase(Phase):
             outcome     = outcome,
             artifacts   = artifacts,
             message     = message,
-            error       = error,
             file        = self._file,
             force_wipe  = self._force_wipe,
             config      = self._config,

@@ -84,10 +84,9 @@ class _StubPhase(Phase):
         outcome: PhaseOutcome,
         artifacts: list[Artifact],
         message: str,
-        error: str | None = None,
     ) -> PhaseResult:
         return PhaseResult(
-            outcome=PhaseOutcome(outcome), artifacts=artifacts, message=message, error=error
+            outcome=PhaseOutcome(outcome), artifacts=artifacts, message=message
         )
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> PhaseResult:
@@ -146,7 +145,7 @@ def _spy_collector() -> MagicMock:
 
 
 def _art(state: ArtifactState, *, wanted: bool = True) -> Artifact:
-    return Artifact(path=Path(f"{state.value}_{wanted}.mkv"), state=state, wanted=wanted)
+    return Artifact(payload=Path(f"{state.value}_{wanted}.mkv"), state=state, wanted=wanted)
 
 
 # ---------------------------------------------------------------------------
@@ -194,20 +193,31 @@ class TestBanner:
 
 
 class TestRecovery:
-    def test_recovery_timed_and_line_logged_with_unwanted_count(
+    def test_recovery_timed_and_line_counts_wanted_states(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        artifacts = [_art(ArtifactState.COMPLETE), _art(ArtifactState.COMPLETE, wanted=False)]
+        """Bug guarded: the recovery line dropping the internal/unwanted split
+        or breaking the identity wanted == complete + partial + absent — the
+        line is the user's only honest view of what remains."""
+        artifacts = [
+            _art(ArtifactState.COMPLETE),
+            _art(ArtifactState.ABSENT),
+            _art(ArtifactState.PARTIAL),
+            _art(ArtifactState.COMPLETE, wanted=False),
+        ]
         phase = _StubPhase(_spy_collector(), Recovery.from_artifacts(artifacts))
         with caplog.at_level(logging.INFO):
             result = phase.run()
 
-        assert [call.args[0] for call in _collector_of(phase).time.call_args_list] == [
+        assert [call.args[0] for call in _collector_of(phase).time.call_args_list][:1] == [
             MetricKey.RECOVERY
         ]
-        assert any("2 total, 1 unwanted" in r.message for r in caplog.records)
+        assert any(
+            "Recovery: 4 total, 3 wanted (1 complete, 1 partial, 1 absent)" in r.message
+            for r in caplog.records
+        )
         # Wanted-only exposure; the unwanted artifact stays internal.
-        assert len(result.artifacts) == 1
+        assert len(result.artifacts) == 3
         assert result.artifacts[0].wanted
 
     def test_recovery_error_becomes_failed_result(self) -> None:
@@ -218,7 +228,7 @@ class TestRecovery:
         )
         result = phase.run()
         assert result.outcome is PhaseOutcome.FAILED
-        assert result.error == "fatal mismatch"
+        assert result.message == "fatal mismatch"
         assert phase.execute_calls == 0
 
 
