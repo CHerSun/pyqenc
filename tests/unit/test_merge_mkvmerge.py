@@ -94,7 +94,7 @@ _SAFE_NAME = _STRATEGY.replace(":", "_")
 
 def _by_strategy_name(encoded) -> dict:
     """Key an EncodedChunk by its own strategy name (as encoding.py does)."""
-    return {encoded.strategy.name: encoded}
+    return {encoded.strategy.display_name(): encoded}
 
 
 def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):

@@ -779,11 +779,11 @@ class TestOptimizationPhaseTiming:
             probe            = ProbeState(frame_count=0, crop=CropParams()),
             test_chunks      = ["chunk_0"],
             strategy_results = [
-                StrategyTestResult(strategy=strategy.name, total_size=1024),
+                StrategyTestResult(strategy=strategy.display_name(), total_size=1024),
                 StrategyTestResult(strategy=_STRATEGY_H265_AQ.name, total_size=512),
             ],
             tolerance_pct    = 5.0,   # matches AppConfig.encoding.strategy_selection_tolerance default
-            selected         = [strategy.name],
+            selected         = [strategy.display_name()],
             quality_targets  = [],
             sampling = 1,     # matches AppConfig.encoding.sampling default
         )
@@ -822,7 +822,7 @@ class TestOptimizationPhaseTiming:
 
         successful_result = ChunkEncodingResult(
             chunk_id     = "chunk_0",
-            strategy     = strategy.name,
+            strategy     = strategy.display_name(),
             success      = True,
             final_crf    = 28.0,
             attempts     = 2,
@@ -885,7 +885,7 @@ class TestOptimizationPhaseTiming:
 
         successful_result = ChunkEncodingResult(
             chunk_id     = "chunk_0",
-            strategy     = strategy.name,
+            strategy     = strategy.display_name(),
             success      = True,
             final_crf    = 28.0,
             attempts     = 3,
@@ -918,7 +918,7 @@ class TestOptimizationPhaseTiming:
         call_update = step_calls[0].kwargs.get("convergence_update")
         assert call_key == MetricKey.ENCODING, f"Wrong key: {call_key}"
         assert isinstance(call_update, ConvergenceUpdate), f"Expected ConvergenceUpdate, got: {call_update}"
-        assert call_update.strategy      == strategy.name, f"Wrong strategy: {call_update.strategy}"
+        assert call_update.strategy      == strategy.display_name(), f"Wrong strategy: {call_update.strategy}"
         assert call_update.attempt_count == 3,             f"Wrong attempt_count: {call_update.attempt_count}"
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
@@ -937,11 +937,11 @@ class TestOptimizationPhaseTiming:
             probe            = ProbeState(frame_count=0, crop=CropParams()),
             test_chunks      = ["chunk_0"],
             strategy_results = [
-                StrategyTestResult(strategy=strategy.name, total_size=1024),
+                StrategyTestResult(strategy=strategy.display_name(), total_size=1024),
                 StrategyTestResult(strategy=_STRATEGY_H265_AQ.name, total_size=512),
             ],
             tolerance_pct    = 0.0,
-            selected         = [strategy.name],
+            selected         = [strategy.display_name()],
             quality_targets  = [],
             sampling = 1,
         )
@@ -1006,7 +1006,7 @@ class TestEncodingPhaseTiming:
             artifacts         = [],
             message           = "ok",
             selected_strategies = [strategy],
-            strategy_results  = [StrategyTestResult(strategy=strategy.name, total_size=1024)],
+            strategy_results  = [StrategyTestResult(strategy=strategy.display_name(), total_size=1024)],
         )
 
     def _make_phase(
@@ -1686,8 +1686,8 @@ class TestMetricKeySmoke:
             presets=["slow"],
         )
         strategy = Strategy(preset="h265.fast", profile="slow.2", codec=codec, profile_args=[])
-        assert "." not in strategy.name, (
-            f"Expected no ASCII dot in strategy.name, got: {strategy.name!r}"
+        assert "." not in strategy.display_name(), (
+            f"Expected no ASCII dot in strategy.display_name(), got: {strategy.display_name()!r}"
         )
 
     # ------------------------------------------------------------------

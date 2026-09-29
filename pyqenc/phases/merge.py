@@ -567,7 +567,7 @@ class MergePhase(Phase):
 
     In pipeline mode encoded chunks are read directly from
     ``EncodingPhase.result`` without rescanning the filesystem.  In standalone
-    mode the phase scans ``encoded/<strategy.safe_name>/`` for each strategy.
+    mode the phase scans ``encoded/<strategy.safe_name()>/`` for each strategy.
 
     Args:
         config: Full pipeline configuration.
@@ -871,7 +871,7 @@ class MergePhase(Phase):
             for encoded in by_strategy.values():
                 # Filesystem form throughout — merge outputs and the concat
                 # options file embed this name (Req 15.10).
-                seen[encoded.strategy.safe_name] = encoded.strategy.safe_name
+                seen[encoded.strategy.safe_name()] = encoded.strategy.safe_name()
         return list(seen.items())
 
     def _execute(

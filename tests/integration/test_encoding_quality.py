@@ -145,8 +145,8 @@ class TestEncodeChunkQualitySearchV2Integration:
         codec.quality_log_padding = 4
 
         strategy = MagicMock()
-        strategy.name       = "test-strategy"
-        strategy.safe_name  = "test_strategy"
+        strategy.display_name.return_value = "test-strategy"
+        strategy.safe_name.return_value    = "test_strategy"
         strategy.codec      = codec
         strategy.to_ffmpeg_args.return_value = ["-i", "{input}", "-crf", "18"]
         return strategy
@@ -159,7 +159,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         chunk_file.write_bytes(b"fake")
 
         chunk = MagicMock()
-        chunk.chunk_id        = "chunk_001"
+        chunk.safe_name.return_value = "chunk_001"
         chunk.path            = chunk_file
         chunk._resolution     = "1920x1080"
         chunk.resolution      = "1920x1080"

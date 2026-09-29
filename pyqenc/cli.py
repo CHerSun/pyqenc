@@ -444,7 +444,7 @@ def _cmd_auto(args: argparse.Namespace) -> int:
     resolved_strats = config.encoding.resolved_strategies
     strategy_display = (
         "using defaults from config file" if strategies is None
-        else ", ".join(s.name for s in resolved_strats)
+        else ", ".join(s.display_name() for s in resolved_strats)
     )
     kv_to_show = {
         "Source:":         args.source,

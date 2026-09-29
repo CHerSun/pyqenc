@@ -706,14 +706,14 @@ def test_strategy_dot_sanitization_produces_valid_metric_keys(
         profile_args = [],
     )
 
-    # strategy.name must contain no ASCII dot
-    assert _ASCII_DOT not in strategy.name, (
-        f"strategy.name={strategy.name!r} still contains ASCII dot "
+    # strategy.display_name() must contain no ASCII dot
+    assert _ASCII_DOT not in strategy.display_name(), (
+        f"strategy.display_name()={strategy.display_name()!r} still contains ASCII dot "
         f"(preset={preset!r}, profile={profile!r})"
     )
 
-    # Using strategy.name as a suffix must produce a key that groups under MetricKey.ENCODING
-    dotted = _build_key(MetricKey.ENCODING, strategy.name)
+    # Using strategy.display_name() as a suffix must produce a key that groups under MetricKey.ENCODING
+    dotted = _build_key(MetricKey.ENCODING, strategy.display_name())
     prefix = _last_dot_prefix(dotted)
     assert prefix == MetricKey.ENCODING, (
         f"prefix={prefix!r} != {MetricKey.ENCODING!r} for dotted key {dotted!r}"

@@ -35,7 +35,7 @@ _APP_CONFIG = load_app_config(default_only=True)
 
 # Resolve a few specific strategies for use in tests.
 _ALL_STRATEGIES = _APP_CONFIG.encoding.resolved_strategies
-_STRATEGY_MAP = {s.name: s for s in _ALL_STRATEGIES}
+_STRATEGY_MAP = {s.display_name(): s for s in _ALL_STRATEGIES}
 
 # Pick 3 well-known strategies that exist in the default config.
 _S1 = next(s for s in _ALL_STRATEGIES if s.preset == "slow" and s.profile == "h265-aq")
@@ -158,7 +158,7 @@ def _make_results(sizes: list[int]) -> list[StrategyTestResult]:
     """Create StrategyTestResult list for S1, S2, S3 with given sizes."""
     strategies = [_S1, _S2, _S3]
     return [
-        StrategyTestResult(strategy=s.name, total_size=sz)
+        StrategyTestResult(strategy=s.display_name(), total_size=sz)
         for s, sz in zip(strategies, sizes)
     ]
 
@@ -174,14 +174,14 @@ class TestApplyTolerance:
         results = _make_results([100, 110, 120])
         selected = OptimizationPhase._apply_tolerance(results, 0.0)
         assert len(selected) == 1
-        assert selected[0] == _S1.name
+        assert selected[0] == _S1.display_name()
 
     def test_tolerance_includes_within_threshold(self) -> None:
         results = _make_results([100, 104, 120])
         selected = OptimizationPhase._apply_tolerance(results, 5.0)
-        assert _S1.name in selected
-        assert _S2.name in selected
-        assert _S3.name not in selected
+        assert _S1.display_name() in selected
+        assert _S2.display_name() in selected
+        assert _S3.display_name() not in selected
 
     def test_tolerance_100_selects_all(self) -> None:
         results = _make_results([100, 150, 200])
@@ -194,19 +194,19 @@ class TestApplyTolerance:
     def test_zero_size_results_excluded(self) -> None:
         """Strategies with total_size=0 (failed) are excluded."""
         results = [
-            StrategyTestResult(strategy=_S1.name, total_size=0,   avg_crf=0.0),
-            StrategyTestResult(strategy=_S2.name, total_size=100),
+            StrategyTestResult(strategy=_S1.display_name(), total_size=0,   avg_crf=0.0),
+            StrategyTestResult(strategy=_S2.display_name(), total_size=100),
         ]
         selected = OptimizationPhase._apply_tolerance(results, 5.0)
-        assert _S1.name not in selected
-        assert _S2.name in selected
+        assert _S1.display_name() not in selected
+        assert _S2.display_name() in selected
 
     def test_exact_threshold_boundary_included(self) -> None:
         """A strategy exactly at the threshold (100% * (1 + tol/100)) is included."""
         results = _make_results([100, 105, 200])
         selected = OptimizationPhase._apply_tolerance(results, 5.0)
-        assert _S1.name in selected
-        assert _S2.name in selected
+        assert _S1.display_name() in selected
+        assert _S2.display_name() in selected
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +228,7 @@ class TestToleranceReapplication:
             source    = source,
             strategy_results = results,
             tolerance_pct    = 5.0,
-            selected         = [_S1.name, _S2.name],
+            selected         = [_S1.display_name(), _S2.display_name()],
         )
 
         result = phase.run(dry_run=False)
@@ -250,7 +250,7 @@ class TestToleranceReapplication:
             source           = source,
             strategy_results = results,
             tolerance_pct    = 5.0,
-            selected         = [_S1.name, _S2.name],
+            selected         = [_S1.display_name(), _S2.display_name()],
         )
 
         result = phase.run(dry_run=False)
@@ -270,7 +270,7 @@ class TestToleranceReapplication:
             source           = source,
             strategy_results = results,
             tolerance_pct    = 5.0,
-            selected         = [_S1.name, _S2.name],
+            selected         = [_S1.display_name(), _S2.display_name()],
         )
 
         phase.run(dry_run=False)
@@ -291,7 +291,7 @@ class TestToleranceReapplication:
             source           = source,
             strategy_results = results,
             tolerance_pct    = 5.0,
-            selected         = [_S1.name, _S2.name],
+            selected         = [_S1.display_name(), _S2.display_name()],
         )
 
         result = phase.run(dry_run=False)
@@ -312,7 +312,7 @@ class TestToleranceReapplication:
             source           = source,
             strategy_results = results,
             tolerance_pct    = 5.0,
-            selected         = [_S1.name, _S2.name],
+            selected         = [_S1.display_name(), _S2.display_name()],
         )
 
         result = phase.run(dry_run=False)
@@ -327,15 +327,15 @@ class TestToleranceReapplication:
 
         # Only 2 of 3 strategies have results
         partial_results = [
-            StrategyTestResult(strategy=_S1.name, total_size=100),
-            StrategyTestResult(strategy=_S2.name, total_size=104),
+            StrategyTestResult(strategy=_S1.display_name(), total_size=100),
+            StrategyTestResult(strategy=_S2.display_name(), total_size=104),
         ]
         _persist_optimization(
             work_dir         = work_dir,
             source           = source,
             strategy_results = partial_results,
             tolerance_pct    = 5.0,
-            selected         = [_S1.name, _S2.name],
+            selected         = [_S1.display_name(), _S2.display_name()],
         )
 
         result = phase.run(dry_run=False)
@@ -355,7 +355,7 @@ class TestAllStrategiesMode:
         result = phase.run(dry_run=False)
 
         assert result.is_complete is True
-        assert sorted(s.name for s in result.selected_strategies) == sorted(s.name for s in strategies)
+        assert sorted(s.display_name() for s in result.selected_strategies) == sorted(s.display_name() for s in strategies)
 
     def test_no_strategy_results_in_all_strategies_mode(self, tmp_path: Path) -> None:
         phase, _ = _make_phase(tmp_path, [_S1, _S2], optimize=False)

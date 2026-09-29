@@ -176,7 +176,7 @@ class OptimizationPhase(Phase):
 
     def _log_key_params(self) -> None:
         """Log the strategy list and tolerance (key parameters)."""
-        logger.info("Strategies:  %s", ", ".join(s.name for s in self._config.encoding.resolved_strategies))
+        logger.info("Strategies:  %s", ", ".join(s.display_name() for s in self._config.encoding.resolved_strategies))
         logger.info("Tolerance:   %.1f%%", self._config.encoding.optimize_tolerance)
 
     def _recovery_unit(self) -> str:
@@ -278,7 +278,7 @@ class OptimizationPhase(Phase):
                 cached_results[r.strategy] = r
         self._cached_results = cached_results
 
-        self._strategies_to_test = [s for s in strategies if s.name not in cached_results]
+        self._strategies_to_test = [s for s in strategies if s.display_name() not in cached_results]
         if (
             not self._strategies_to_test
             and cached_results
@@ -301,7 +301,7 @@ class OptimizationPhase(Phase):
         # Step 5 — one artifact per strategy result.
         artifacts = _strategy_artifacts(
             complete_names = list(cached_results.keys()),
-            absent_names   = [s.name for s in self._strategies_to_test],
+            absent_names   = [s.display_name() for s in self._strategies_to_test],
         )
         return Recovery.from_artifacts(artifacts)
 
@@ -409,7 +409,7 @@ class OptimizationPhase(Phase):
         total_count        = len(test_chunks) * len(strategies_to_test)
 
         test_chunk_ids = [c.chunk_id for c in test_chunks]
-        strategy_names = [s.name for s in strategies_to_test]
+        strategy_names = [s.display_name() for s in strategies_to_test]
         from pyqenc.phases.encoding import (
             _encode_chunks_parallel,
             _recover_encoding_attempts,
@@ -445,11 +445,11 @@ class OptimizationPhase(Phase):
         for strategy in strategies_to_test:
             file_sizes: list[float] = []
             for chunk in test_chunks:
-                encoded = enc_result.encoded_chunks.get(chunk.chunk_id, {}).get(strategy.name)
+                encoded = enc_result.encoded_chunks.get(chunk.safe_name(), {}).get(strategy.display_name())
                 if encoded is not None and encoded.stream.stream.file.path.exists():
                     file_sizes.append(encoded.stream.stream.file.file_size_bytes or 0)
             new_results.append(StrategyTestResult(
-                strategy     = strategy.name,
+                strategy     = strategy.display_name(),
                 total_size    = int(sum(file_sizes)),
             ))
 
@@ -530,7 +530,7 @@ class OptimizationPhase(Phase):
             Matching ``Strategy`` objects from the resolved strategies,
             preserving the order of *selected_names*.
         """
-        by_name = {s.name: s for s in self._config.encoding.resolved_strategies}
+        by_name = {s.display_name(): s for s in self._config.encoding.resolved_strategies}
         return [by_name[n] for n in selected_names if n in by_name]
 
     def _all_strategies(self, dry_run: bool) -> OptimizationPhaseResult:
@@ -583,7 +583,7 @@ class OptimizationPhase(Phase):
                 test_chunks      = [],
                 strategy_results = [],
                 tolerance_pct    = 0.0,
-                selected         = [s.name for s in self._config.encoding.resolved_strategies],
+                selected         = [s.display_name() for s in self._config.encoding.resolved_strategies],
                 quality_targets  = current_targets,
                 sampling = current_sampling,
             ).save(opt_yaml)
@@ -753,7 +753,7 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
 
     # Collect all existing strategy subdirs
     existing_dirs = [d for d in encoded_base.iterdir() if d.is_dir()]
-    expected_names = {s.name for s in strategies}
+    expected_names = {s.display_name() for s in strategies}
     unexpected = [d for d in existing_dirs if d.name not in expected_names]
 
     if unexpected:
@@ -770,7 +770,7 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
         return
 
     for strategy in strategies:
-        strategy_dir = encoded_base / strategy.name
+        strategy_dir = encoded_base / strategy.safe_name()
         if not strategy_dir.exists():
             continue
         try:

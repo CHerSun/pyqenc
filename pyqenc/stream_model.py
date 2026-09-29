@@ -443,7 +443,7 @@ class VideoStreamChunk(BaseModel):
     def _format_window(start_ts: float, end_ts: float) -> str:
         """The window in natural separators — the single name generator (Req 15.10).
 
-        ``HH:MM:SS.mmm-HH:MM:SS.mmm``; the chunk id (:meth:`chunk_id`) is this
+        ``HH:MM:SS.mmm-HH:MM:SS.mmm``; the chunk id (:meth:`safe_name`) is this
         display form with the time separators substituted, never a second
         assembly.
         """
@@ -456,24 +456,17 @@ class VideoStreamChunk(BaseModel):
         return f"{_bound(start_ts)}{RANGE_SEPARATOR}{_bound(end_ts)}"
 
     @property
-    def chunk_id(self) -> str:
-        """The chunk id derived from the window — never stored separately."""
-        return self.format_chunk_id(self.start_timestamp, self.end_timestamp)
-
-    @property
-    def display_name(self) -> str:
-        """Display name — the window in natural separators (Req 15.10)."""
-        return self._format_window(self.start_timestamp, self.end_timestamp)
-
-    @property
-    def safe_name(self) -> str:
-        """Filesystem-safe name — the chunk id (separator-substituted display)."""
-        return self.chunk_id
-
-    @property
     def duration_seconds(self) -> float:
         """The window's duration in seconds."""
         return self.end_timestamp - self.start_timestamp
+
+    def display_name(self) -> str:
+        """Display name — the window in natural separators (single generator)."""
+        return self._format_window(self.start_timestamp, self.end_timestamp)
+
+    def safe_name(self) -> str:
+        """Filesystem-safe name — the chunk id (separator-substituted display)."""
+        return self.format_chunk_id(self.start_timestamp, self.end_timestamp)
 
     @classmethod
     def parse_chunk_id(
@@ -587,7 +580,7 @@ class EncodedChunk(BaseModel):
     def file_name(self) -> str:
         """The attempt's file name, derived from the composition — never stored."""
         return self.format_file_name(
-            self.chunk.chunk_id,
+            self.chunk.safe_name(),
             self.stream.stream.info.resolution or "",
             self.crf,
         )

@@ -464,7 +464,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
             outcome        = PhaseOutcome.COMPLETED,
             artifacts      = [],
             message        = "encoding complete",
-            encoded_chunks = {"chunk1": {encoded_chunk.strategy.name: encoded_chunk}},
+            encoded_chunks = {"chunk1": {encoded_chunk.strategy.display_name(): encoded_chunk}},
         )
         registry[EncodingPhase] = encoding
 
@@ -480,7 +480,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
         merge = MergePhase(config, registry, collector=collector)
 
         source_stem = source.stem
-        output_file = work_dir / FINAL_OUTPUT_DIR / f"{source_stem} {encoded_chunk.strategy.name}.mkv"
+        output_file = work_dir / FINAL_OUTPUT_DIR / f"{source_stem} {encoded_chunk.strategy.display_name()}.mkv"
 
         def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
             output_file.parent.mkdir(parents=True, exist_ok=True)

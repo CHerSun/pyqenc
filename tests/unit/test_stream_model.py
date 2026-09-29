@@ -219,7 +219,7 @@ class TestChunkIdRoundTrips:
         byte-for-byte."""
         name = VideoStreamChunk.format_chunk_id(start, end)
         chunk = VideoStreamChunk.parse_chunk_id(name, _extended())
-        assert chunk.chunk_id == name
+        assert chunk.safe_name() == name
 
     def test_parse_rejects_non_chunk_names(self) -> None:
         with pytest.raises(ValueError, match="Not a chunk id"):
@@ -449,16 +449,16 @@ class TestChunkTwoNames:
     def test_display_name_uses_natural_separators(self) -> None:
         """Display form carries the natural ``:``/``.`` separators — the single
         generated form everything else derives from."""
-        assert self._chunk().display_name == "00:00:00.000-00:00:01.043"
+        assert self._chunk().display_name() == "00:00:00.000-00:00:01.043"
 
-    def test_safe_name_is_chunk_id(self) -> None:
+    def test_safe_name_is_the_chunk_id_form(self) -> None:
         """The safe form (display with separators substituted) is the chunk id —
         the on-disk naming is unchanged, and parse() still round-trips it."""
         from pyqenc.stream_model import VideoStreamChunk
 
         chunk = self._chunk()
-        assert chunk.safe_name == chunk.chunk_id == "00꞉00꞉00․000-00꞉00꞉01․043"
-        parsed = VideoStreamChunk.parse_chunk_id(chunk.safe_name, chunk.stream)
+        assert chunk.safe_name() == "00꞉00꞉00․000-00꞉00꞉01․043"
+        parsed = VideoStreamChunk.parse_chunk_id(chunk.safe_name(), chunk.stream)
         assert (parsed.start_timestamp, parsed.end_timestamp) == \
             (chunk.start_timestamp, chunk.end_timestamp)
 
@@ -483,4 +483,5 @@ class TestStrategyTwoNames:
             ),
             profile_args=[],
         )
-        assert strategy.display_name == strategy.safe_name == strategy.name == "slow+h265-aq"
+        assert strategy.display_name() == strategy.safe_name() == "slow+h265-aq"
+        assert not hasattr(strategy, "name"), "no third accessor — exactly the pair"

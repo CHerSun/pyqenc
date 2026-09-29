@@ -87,10 +87,11 @@ class PhaseOutcome(Enum):
 class Strategy(BaseModel):
     """Resolved encoding strategy — single owner of identity, codec, and ffmpeg args.
 
-    Carries everything needed to identify the strategy (``name`` for logs,
-    YAML keys, and filesystem paths — safe by construction via config-load
-    validation of profile/preset names) and to encode with it: the codec's
-    two argument stages and the ffmpeg arg generation.
+    Carries everything needed to identify the strategy — the uniform name pair
+    (:meth:`display_name` for logs/sidecars, :meth:`safe_name` for filesystem
+    paths; both passthroughs since profile/preset names are validated safe at
+    config load) — and to encode with it: the codec's two argument stages and
+    the ffmpeg arg generation.
 
     Attributes:
         preset:       FFmpeg preset (e.g. ``'slow'``, ``'veryslow'``).
@@ -109,28 +110,24 @@ class Strategy(BaseModel):
     @field_validator("preset", "profile", mode="before")
     @classmethod
     def _sanitize_dots(cls, v: str) -> str:
-        """Replace ASCII dots with ``TIME_SEPARATOR_MS`` so ``strategy.name`` is dot-free."""
+        """Replace ASCII dots with ``TIME_SEPARATOR_MS`` so the strategy name is dot-free."""
         return v.replace(".", TIME_SEPARATOR_MS)
 
-    @property
-    def name(self) -> str:
-        """Canonical identity (e.g. ``'slow+h265-aq'``) — display and safe in one.
+    def display_name(self) -> str:
+        """Display name — the composed identity, verbatim (``'slow+h265-aq'``).
 
-        Safe by construction (config-load validation of profile/preset names),
-        so the uniform pair (:meth:`display_name` / :meth:`safe_name`) are both
-        passthroughs; consumers pick by purpose without per-type thinking.
+        The single generator (Req 15.10); the safe form is :meth:`safe_name`.
         """
         return f"{self.preset}+{self.profile}"
 
-    @property
-    def display_name(self) -> str:
-        """Display name for logs and sidecars (Req 15.10 uniform footprint)."""
-        return self.name
-
-    @property
     def safe_name(self) -> str:
-        """Filesystem-safe name — passthrough sanitize (validated safe at load)."""
-        return sanitize_filesystem_text(self.name)
+        """Filesystem-safe name — passthrough sanitize (validated safe at load).
+
+        Uniform pair with :meth:`display_name` (methods, like every named
+        element): consumers touching the filesystem always take the safe
+        name, no per-type thinking.
+        """
+        return sanitize_filesystem_text(self.display_name())
 
     @property
     def pre_input_args(self) -> tuple[str, ...]:

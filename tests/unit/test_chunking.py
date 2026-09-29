@@ -181,7 +181,7 @@ class TestBuildChunks:
     def test_chunk_ids_derive_from_windows(self):
         """The chunk id is a pure function of the window — never stored."""
         chunks = build_chunks(_boundaries(), _stream())
-        assert chunks[0].chunk_id == VideoStreamChunk.format_chunk_id(0.0, 13.33)
+        assert chunks[0].safe_name() == VideoStreamChunk.format_chunk_id(0.0, 13.33)
 
     def test_as_input_carries_the_window(self):
         """The chunk input is the source + selector + input-side window."""
