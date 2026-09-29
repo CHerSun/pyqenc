@@ -374,7 +374,8 @@ class AudioPhase(Phase):
         expected_names: set[str]       = set()
 
         for stream in tracks:
-            layout = stream.layout()
+            assert stream.info.layout is not None, "layout guaranteed by ExtractionPhase"
+            layout = stream.info.layout
             for name, chain in resolved.items():
                 out = chain_output_path(stream, name, chain.encode.extension, audio_dir)
                 expected_names.add(out.name)

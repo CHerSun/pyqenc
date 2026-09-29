@@ -378,7 +378,8 @@ async def execute_chain(
 
     af_parts:      list[str]              = []            # frozen fragments (invariant)
     output_format: EncodeParams           = resolved.encode  # authoritative effective target
-    layout:        ChannelLayout          = stream.layout()
+    assert stream.info.layout is not None, "layout guaranteed by ExtractionPhase"
+    layout: ChannelLayout = stream.info.layout
     last_output:   FFmpegRunResult | None = None         # only the CURRENT filter's latest pass
 
     while runnable:

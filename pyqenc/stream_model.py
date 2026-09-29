@@ -277,24 +277,6 @@ class VideoStream(Stream[VideoStreamInfo]):
 class AudioStream(Stream[AudioStreamInfo]):
     """An audio stream — ``info`` is statically :class:`AudioStreamInfo`."""
 
-    def layout(self) -> ChannelLayout:
-        """The stream's channel layout — guaranteed by ExtractionPhase.
-
-        ``_audio_info`` materializes a layout for every audio stream
-        (``channel_layout`` when named, else derived from the always-present
-        ``channels`` count), so the assert can only fire on a programming bug
-        — a stream that bypassed extraction. Bitrate scaling and downmix
-        selection consume the count through here.
-
-        Returns:
-            The stream's own :class:`ChannelLayout`.
-        """
-        assert self.info.layout is not None, (
-            "audio stream layout is guaranteed by ExtractionPhase "
-            "(_audio_info derives it from the channels count when unnamed)"
-        )
-        return self.info.layout
-
     def display_name(self) -> str:
         """Display name for logs and include/exclude filtering (never on disk)."""
         tags = _display_tags(self.info)
