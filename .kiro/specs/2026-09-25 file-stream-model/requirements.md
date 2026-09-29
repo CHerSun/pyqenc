@@ -4,7 +4,7 @@
 
 - Spec: File → Stream Object Model & Direct-From-Source Processing
 - Created: 2026-09-25
-- Completed: 2026-09-27
+- Completed: 2026-09-29
 
 ## Cross-Spec Notes
 
