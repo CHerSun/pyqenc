@@ -137,7 +137,9 @@ CONFIG_DIR_HOME      = ".config/pyqenc"
 
 # Extraction artifact filenames
 TIMESTAMPS_FILENAME = "timestamps.txt"
-"""Filename for the per-frame PTS timestamp file produced by ExtractionPhase."""
+"""Filename for the per-frame PTS timestamp index produced by ExtractionPhase."""
+CHAPTERS_FILENAME = "chapters.xml"
+"""Filename for the extracted chapter edition produced by ExtractionPhase."""
 
 # Artifact discovery patterns
 CHUNK_NAME_PATTERN = re.compile(

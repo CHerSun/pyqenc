@@ -264,7 +264,7 @@ def _extraction_sidecar() -> ExtractionSidecar:
                 extracted_path=LongPath("extracted/#4 (attachment-ttf) filename=font.ttf"),
             )],
         },
-        chapters = {"extracted_path": LongPath("extracted/chapters.xml")},
+        chapters = True,
         timestamps_path = LongPath("extracted/timestamps.txt"),
     )
 
@@ -485,3 +485,120 @@ class TestStrategyTwoNames:
         )
         assert strategy.display_name() == strategy.safe_name() == "slow+h265-aq"
         assert not hasattr(strategy, "name"), "no third accessor — exactly the pair"
+
+
+# ---------------------------------------------------------------------------
+# Artifact payload entities (spec 2026-09-28 artifact-model, Req 2)
+# ---------------------------------------------------------------------------
+
+def _strategy() -> Strategy:
+    return Strategy(
+        preset="slow", profile="h265-aq",
+        codec=CodecConfig(
+            name="h265-10bit", default_quality=Decimal(20),
+            default_preset="slow",
+            quality_range=(Decimal(0), Decimal(51)), presets=["slow"],
+        ),
+        profile_args=[],
+    )
+
+
+def _audio_stream() -> AudioStream:
+    return AudioStream(
+        file = _file(),
+        info = AudioStreamInfo(
+            track_id        = 2,
+            codec_name      = "flac",
+            language        = "eng",
+            start_timestamp = 0.0,
+            duration_seconds = 5964.48,
+            layout          = ChannelLayout.parse("5.1(side)"),
+        ),
+    )
+
+
+class TestChaptersPayload:
+    def test_composes_the_source_file_and_round_trips(self) -> None:
+        """Bug guarded: the chapters edition is a container-level payload
+        anchored on the source File — not a path record, not a stream."""
+        from pyqenc.stream_model import Chapters
+
+        chapters = Chapters(file=_file())
+        assert Chapters.model_validate(chapters.model_dump(exclude_none=True)) == chapters
+
+    def test_no_generated_name_pair(self) -> None:
+        """Bug guarded: a fixed-constant name must not grow a generated-name
+        pair — Chapters exposes neither ``display_name`` nor ``safe_name``."""
+        from pyqenc.stream_model import Chapters
+
+        assert not hasattr(Chapters(file=_file()), "display_name")
+
+
+class TestAudioOutputPayload:
+    def test_composition_round_trip(self) -> None:
+        """Bug guarded: the (stream, chain) output is an eager frozen model
+        whose dump re-validates (the payload-family serialization contract)."""
+        from pyqenc.stream_model import AudioOutput
+
+        out = AudioOutput(
+            stream=_audio_stream(), chain_name="nightlong",
+            output_path=LongPath("D:/w/audio/#2 (audio-flac) lang=eng chain=nightlong.flac"),
+        )
+        assert AudioOutput.model_validate(out.model_dump(exclude_none=True)) == out
+
+    def test_safe_name_matches_the_chain_output_site(self) -> None:
+        """Bug guarded: AudioOutput's safe name drifting from the chain-output
+        materialization site (stream safe name + ``chain=<name>``) — recovery
+        would classify existing outputs as absent forever."""
+        from pyqenc.audio.chain import chain_output_path
+        from pyqenc.constants import CHAIN_FILENAME_SUFFIX
+        from pyqenc.stream_model import AudioOutput
+
+        stream = _audio_stream()
+        out = AudioOutput(stream=stream, chain_name="night", output_path=LongPath("D:/w/x.flac"))
+        assert out.display_name() == f"{stream.display_name()}{CHAIN_FILENAME_SUFFIX}night"
+        assert out.safe_name() == f"{stream.safe_name()}{CHAIN_FILENAME_SUFFIX}night"
+        site = chain_output_path(stream, "night", "flac", LongPath("D:/w/audio"))
+        assert site.stem == out.safe_name(), "materialization site must derive the same stem"
+
+
+class TestMergedVideoPayload:
+    def test_composition_round_trip_with_measured_facts(self) -> None:
+        """Bug guarded: the merged output carries its measured facts (frame
+        count, metrics, targets-met, plot) — a dump must not lose them."""
+        from pyqenc.stream_model import MergedVideo
+
+        mv = MergedVideo(
+            source_stem="source", strategy=_strategy(),
+            output_path=LongPath("D:/w/merged/source slow+h265-aq.mkv"),
+            frame_count=142_932,
+            metrics={"vmaf_min": 95.9},
+            targets_met=True,
+            plot_path=LongPath("D:/w/merged/source slow+h265-aq.png"),
+        )
+        assert MergedVideo.model_validate(mv.model_dump(exclude_none=True)) == mv
+
+    def test_two_names_derive_from_stem_and_strategy(self) -> None:
+        """Bug guarded: the merged output's name pair must stay the single
+        derivation (``<file stem> <strategy>``) — display verbatim, safe the
+        sanitized form, extension appended at the materialization site."""
+        from pyqenc.stream_model import MergedVideo
+
+        mv = MergedVideo(
+            source_stem="source", strategy=_strategy(),
+            output_path=LongPath("D:/w/merged/source slow+h265-aq.mkv"),
+        )
+        assert mv.display_name() == "source slow+h265-aq"
+        assert mv.safe_name() == "source slow+h265-aq"
+        assert mv.output_path.stem == mv.safe_name()
+
+
+class TestFixedConstantNames:
+    def test_extraction_fixed_constants_pinned(self) -> None:
+        """Bug guarded: the fixed-constant artifact filenames are load-bearing
+        recovery conventions — an accidental rename would orphan every
+        existing workdir's extracted components."""
+        from pyqenc.constants import CHAPTERS_FILENAME, TIMESTAMPS_FILENAME
+
+        assert TIMESTAMPS_FILENAME == "timestamps.txt"
+        assert CHAPTERS_FILENAME == "chapters.xml"

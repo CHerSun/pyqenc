@@ -477,8 +477,9 @@ class TestExtractionSidecarLifecycle:
             tmp_path, _ffprobe_json(_video_json(), _audio_json(), _subtitle_json()),
         )
         data = yaml.safe_load((work_dir / "extraction.yaml").read_text(encoding="utf-8"))
-        assert set(data) == {"source", "streams", "timestamps_path"}
+        assert set(data) == {"source", "streams", "chapters", "timestamps_path"}
         assert data["source"]["path"] == str(source)
+        assert data["chapters"] is False
         assert data["streams"]["video"]["fps_fraction"] == [24000, 1001]
         assert len(data["streams"]["audio"]) == 1
         assert data["streams"]["subtitles"][0]["track_id"] == 3

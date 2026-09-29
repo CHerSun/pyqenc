@@ -17,6 +17,10 @@ and passed by reference through phase results:
   ``[start, end)`` timestamp window. No file on disk.
 - :class:`EncodedChunk` — EncodingPhase; an attempt as a stream (the attempt
   file's own video) composed with its source chunk, strategy and CRF.
+- :class:`Chapters` / :class:`AudioOutput` / :class:`MergedVideo` — artifact
+  payloads (spec ``2026-09-28 artifact-model``): the container's chapter
+  edition, one processed (track, chain) audio output, and one merged output
+  per strategy with its measured facts.
 
 All fields are eager — no property access triggers a probe. Producer
 guarantees are guarded by plain asserts at consumers (a violated guarantee is
@@ -42,6 +46,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer
 
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import (
+    CHAIN_FILENAME_SUFFIX,
     CHUNK_NAME_PATTERN,
     ENCODED_ATTEMPT_NAME_PATTERN,
     FFMPEG_SELECTOR_PREFIX,
@@ -609,6 +614,96 @@ class EncodedChunk(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Artifact payload entities (spec ``2026-09-28 artifact-model``)
+# ---------------------------------------------------------------------------
+
+class Chapters(BaseModel):
+    """The container's chapter edition — an extraction payload, not a stream.
+
+    Container-level (no ``track_id``, no ``-map`` selector; file-stream-model
+    Req 2.5). Its file name is the fixed constant ``chapters.xml`` — not a
+    generated name, nothing to pair (Req 15.10); the extracted location
+    derives at the extraction phase's single owning site.
+
+    Attributes:
+        file: The source file the edition belongs to (identity anchor).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    file: File
+
+
+class AudioOutput(BaseModel):
+    """One processed (track, chain) output — the audio phase's payload.
+
+    Composes the source audio stream with the producing chain's identity; the
+    resolved output facts are reachable through the composition (layout via
+    ``stream.info.layout``, codec via the chain resolvable from
+    ``chain_name`` + config). Disk name follows the existing derivation: the
+    stream's safe name plus ``" chain=<name>"``, the extension appended at the
+    materialization site (file-stream-model Req 15.7).
+
+    Attributes:
+        stream:     The source audio stream the output was produced from.
+        chain_name: The producing chain's configured name.
+        output_path: The output's materialized location (the chain-output
+                     name at the audio dir — a pure function of identity).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    stream:      AudioStream
+    chain_name:  str
+    output_path: LongPathYaml
+
+    def display_name(self) -> str:
+        """Display name — the stream's display name plus the chain token."""
+        return f"{self.stream.display_name()}{CHAIN_FILENAME_SUFFIX}{self.chain_name}"
+
+    def safe_name(self) -> str:
+        """Filesystem-safe name — the sanitized display form (no extension)."""
+        return sanitize_filesystem_text(self.display_name())
+
+
+class MergedVideo(BaseModel):
+    """One merged output per strategy — the merge phase's payload.
+
+    Composes the strategy with the source identity needed for naming plus the
+    measured facts consumers need. The output name materializes from
+    ``<file stem> <strategy>.mkv`` at the merge phase's single derivation site
+    (file-stream-model Req 15.8).
+
+    Attributes:
+        source_stem:  The source file's name stem (naming identity).
+        strategy:     The strategy the output was merged from.
+        output_path:  The output's materialized location.
+        frame_count:  Measured frame count; ``None`` until measured.
+        metrics:      Measured quality metrics keyed by ``"{metric}_{stat}"``.
+        targets_met:  Whether quality targets were met.
+        plot_path:    The quality plot PNG, when produced.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source_stem:  str
+    strategy:     Strategy
+    output_path:  LongPathYaml
+    frame_count:  int | None = None
+    metrics:      dict[str, float] = {}
+    targets_met:  bool             = False
+    plot_path:    LongPathYaml | None = None
+
+    def display_name(self) -> str:
+        """Display name — the source stem plus the strategy, verbatim."""
+        return f"{self.source_stem} {self.strategy.display_name()}"
+
+    def safe_name(self) -> str:
+        """Filesystem-safe name — the sanitized display form (no extension)."""
+        return sanitize_filesystem_text(self.display_name())
+
+
+# ---------------------------------------------------------------------------
 # Req 5 — sidecar slices (unique-property persistence)
 # ---------------------------------------------------------------------------
 
@@ -670,22 +765,8 @@ class StreamsInventory(BaseModel):
     attachments: list[AttachmentStreamInfo] = []
 
 
-class ContainerArtifact(BaseModel):
-    """A container-level artifact's extracted path (chapters, timestamps).
-
-    Chapters and timestamps are not streams — no ``track_id``, no ``-map``
-    selector — so they persist as plain extracted paths.
-
-    Attributes:
-        extracted_path: Path of the extracted artifact (relative to the work
-                        dir on disk).
-    """
-
-    extracted_path: LongPathYaml
-
-
 class ExtractionSidecar(_SourceSidecarBase):
-    """The ``extraction.yaml`` slice: stream inventory, extracted paths,
+    """The ``extraction.yaml`` slice: stream inventory, chapters presence,
     source identity.
 
     Owned by ExtractionPhase; a reuse run loads it instead of re-probing, with
@@ -694,13 +775,15 @@ class ExtractionSidecar(_SourceSidecarBase):
     Attributes:
         source:          The source identity for invalidation.
         streams:         The per-type stream inventory (info slices).
-        chapters:        The extracted chapters artifact, or ``None``.
+        chapters:        Whether the source carries a chapter edition (the
+                         extracted location is the fixed ``chapters.xml``
+                         convention — nothing per-run to record).
         timestamps_path: Path of the extracted per-frame PTS file, or ``None``.
     """
 
     streams:          StreamsInventory
-    chapters:         ContainerArtifact | None = None
-    timestamps_path:  LongPathYaml | None       = None
+    chapters:         bool                  = False
+    timestamps_path:  LongPathYaml | None   = None
 
 
 class SceneRecord(BaseModel):

@@ -268,7 +268,7 @@ def _measure_quality(
         for stat_name, stat_value in metric_stats.items():
             metrics_dict[f"{metric_name.value}_{stat_name}"] = stat_value
 
-    plot_path = evaluation.artifacts.plot if evaluation.artifacts.plot else None
+    plot_path = evaluation.logs.plot if evaluation.logs.plot else None
     return metrics_dict, evaluation.targets_met, plot_path
 
 

@@ -30,6 +30,7 @@ import yaml
 
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import (
+    CHAPTERS_FILENAME,
     EXTRACTED_DIR,
     FAILURE_SYMBOL_MINOR,
     FFMPEG_CODEC_COPY,
@@ -56,7 +57,6 @@ from pyqenc.stream_model import (
     AttachmentStreamInfo,
     AudioStream,
     AudioStreamInfo,
-    ContainerArtifact,
     ExtractionSidecar,
     File,
     SourceMismatchError,
@@ -86,9 +86,6 @@ _SUBTITLE_FFMPEG_FORMAT: dict[str, str] = {
 """Text subtitle codecs that require an explicit ``-f`` muxer for their ``.tmp``
 output. Bitmap subtitle codecs (pgs, sub) are self-describing and stay on the
 runner's Matroska default."""
-
-_CHAPTERS_DISPLAY_NAME = "chapters.xml"
-"""Filter/display string for the chapters container artifact."""
 
 
 # ---------------------------------------------------------------------------
@@ -682,7 +679,7 @@ class ExtractionPhase(Phase):
             ))
 
         if self._has_chapters:
-            path = extracted_dir / _CHAPTERS_DISPLAY_NAME
+            path = extracted_dir / CHAPTERS_FILENAME
             artifacts.append(ChaptersArtifact(
                 path   = path,
                 state  = ArtifactState.COMPLETE if path.name in on_disk_names else ArtifactState.ABSENT,
@@ -727,7 +724,7 @@ class ExtractionPhase(Phase):
                 self._audio       = [AudioStream(file=source_file, info=i) for i in inv.audio]
                 self._subtitles   = [SubtitleStream(file=source_file, info=i) for i in inv.subtitles]
                 self._attachments = [AttachmentStream(file=source_file, info=i) for i in inv.attachments]
-                self._has_chapters = sidecar.chapters is not None
+                self._has_chapters = sidecar.chapters
                 return
 
         try:
@@ -762,8 +759,7 @@ class ExtractionPhase(Phase):
                 subtitles   = [s.info for s in self._subtitles],
                 attachments = [s.info for s in self._attachments],
             ),
-            chapters = (ContainerArtifact(extracted_path=self._stream_artifact_path(_CHAPTERS_DISPLAY_NAME))
-                        if self._has_chapters else None),
+            chapters = self._has_chapters,
             timestamps_path = (self._stream_artifact_path(TIMESTAMPS_FILENAME)
                                if self._video is not None else None),
         )
@@ -1104,7 +1100,7 @@ class _ChaptersProxy:
     """Filter stand-in exposing the chapters artifact's display name."""
 
     def display_name(self) -> str:
-        return _CHAPTERS_DISPLAY_NAME
+        return CHAPTERS_FILENAME
 
 
 def _log_stream_table(
