@@ -1780,7 +1780,12 @@ class EncodingPhase(Phase):
             strategies = strategy_names,
         )
 
-        # Convert to EncodedArtifact list
+        # Convert to EncodedArtifact list; COMPLETE pairs also rebuild the
+        # composed EncodedChunk objects so a REUSED run's result carries them
+        # (merge derives its expected strategies from encoded_chunks — without
+        # this, a reuse run with deleted finals finds nothing to re-merge).
+        chunk_by_id   = {c.chunk_id: c for c in chunks}
+        strategy_by_name = {st.name: st for st in strategies}
         artifacts: list[EncodedArtifact] = []
         for chunk_id in chunk_ids:
             for strategy_name in strategy_names:
@@ -1793,6 +1798,22 @@ class EncodingPhase(Phase):
                         strategy = strategy_name,
                     ))
                     continue
+
+                if (
+                    pair_rec.state == ArtifactState.COMPLETE
+                    and pair_rec.winning_file is not None
+                    and chunk_id in chunk_by_id
+                    and strategy_name in strategy_by_name
+                ):
+                    name_record = EncodedChunk.parse_file_name(pair_rec.winning_file.name)
+                    self._encoded_chunks.setdefault(chunk_id, {})[strategy_name] = build_encoded_chunk(
+                        chunk        = chunk_by_id[chunk_id],
+                        strategy     = strategy_by_name[strategy_name],
+                        crf          = name_record.crf,
+                        path         = pair_rec.winning_file,
+                        resolution   = name_record.resolution,
+                        frame_count  = 0,  # unknown on recovery (Req 14.2)
+                    )
 
                 artifacts.append(EncodedArtifact(
                     path     = pair_rec.winning_file or (
