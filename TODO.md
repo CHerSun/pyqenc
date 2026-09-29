@@ -127,48 +127,19 @@ re-verify (chain signature embedded in output names?) or force re-run?
 
 ---
 
-## 🤔 10. Chapters are filterable and never consumed downstream
-
-**Status:** needs thinking (design gap)
-
-- Chapters are a normal filterable stream ("as a stream for uniform
-  filtering", `pyqenc/phases/extraction.py:276-297`; include/exclude applies
-  to all types, `pyqenc/cli.py:162-169`), unlike timestamps which are
-  extracted unconditionally (`extraction.py:550-621, 1066-1069`).
-- Chunking has zero chapter handling (split cmd is `-ss/-t ... -an`,
-  `pyqenc/phases/chunking.py:256-263`); merge concat uses mkvmerge append +
-  `--timestamps` with no `--chapters` (`pyqenc/phases/merge.py:1215-1222`).
-  The extracted chapters.xml artifact is read by no downstream phase.
-
-**Questions to think about:** original idea — make chapters a mandatory
-artifact (not filterable, like timestamps) and use the *original* chapters at
-mkvmerge concat. Worth doing before someone hits per-chunk chapter explosion?
-
----
-
-## 🤔 11. Invalidation on config edits is partial; invalidation-matrix doc is stale
+## 🤔 11. Per-phase invalidation is unvalidated
 
 **Status:** needs thinking (review)
 
-- Real param-keyed invalidation exists per phase: audio chain signatures
-  (`audio.py:417-443`), chunking mode mismatch (`chunking.py:645-670`),
-  optimization targets/sampling (`optimization.py:196-246`), encoding
-  probe/crop mismatch (`encoding.py:1730-1770`), merge
-  (`merge.py:786-817`).
-- But editing codec/profile `encoder_args`/`extra_args` invalidates nothing
-  (`EncodingParams` persists only `probe`, `encoding.py:1740`).
-  (2026-09-22, phase-run-template: strategy-list changes no longer leave
-  *invisible* orphans — encoding recovery surfaces `encoded/<strategy>/`
-  dirs outside the current selection as `wanted=False` artifacts; actual
-  deletion remains gated by explicit cleanup levels.)
-- `parameters-phases-invalidation.md` is itself partly stale: row 16 claims
-  chunking_mode is untracked (now tracked at `chunking.py:645-670`), rows
-  23–25 reference audio params removed by the audio-chains rework.
-- The crop dich survives, now documented (`check_resolution = None if crop`,
-  `encoding.py:780-783`).
+- Each phase hand-lists its invalidation criteria, effects and sidecar
+  fields. Review them from a logical perspective — per phase: which criteria
+  and effects invalidation SHOULD have, and which sidecar fields that really
+  requires — versus what the code does today. Refresh
+  `parameters-phases-invalidation.md` from the result (it is stale).
 
-**Questions to think about:** config-fingerprint-based invalidation instead
-of hand-listed fields? Refresh/regenerate the matrix doc?
+**Questions to think about:** rebuild the matrix from first principles;
+drop stale rows and fields; is config-fingerprint-based invalidation
+warranted anywhere?
 
 ---
 
@@ -324,23 +295,36 @@ exclusions) under an `optimization:` subconfig?
   bundles anywhere in config.
 
 **Questions to think about:** `--target <preset>` alongside `--targets
-<raw list>`; presets defined in config (metrics per preset)?
+<raw list>`; presets defined in config (metrics per preset)? What would be a good UX for the end user? Easy to understand, difficult to make mistake. Maybe make `--targets` naming more verbose intentionally?
+
+Something like:
+- ultra - should match approximately CRF 12-14 quality (say, 0.25 bits per pixel expected bitrate)
+- high - should match CRF 16-18 approximately (~0.17 - those are just examples)
+- medium - should match CRF 20-22 approximately (~0.1 - for the free space estimation)
+- low - should match CRF 25+ approximately (~0.08 - if we don't have other means to estimate)
+
+With some default profile being default (similarly to codec's default preset in config) - used if user told nothing. Probably `high`
+
+CRF above is when using H.265-anime at slow preset. One problem is how to estimate that. Pipeline runs on chunks - more granular quality assesment. 
+But we can use built-in profile quality range limiting for running fixed-CRF encodes on chunks to get the quality measures.
+
+Another question is I want targets to favor retaining natural film grain, not favoring blurred results. h.265-anime is particularly tuned for this, so 
+probably we should run 2 encodes at fixed CRFs - with plain h.265 and with h.265-anime variant at same CRF. And compare measured metrics to better understand 
+the difference - where we could give more slack, where we should make things tighter (in favor of retention of original looks, but at sane quality levels).
 
 ---
 
-## 🤔 22. No filename template system ({fps}, {title}, …)
+## 🤔 22. End-user output-name template system ({fps}, {title}, …)
 
-**Status:** needs thinking (feature)
+**Status:** needs thinking (feature, low priority)
 
-- Final output name is a hardcoded f-string
-  `f"{source_stem} {safe_name}.mkv"` (`pyqenc/phases/merge.py:838,941`);
-  no template dict / `format_map` mechanism exists (only the unrelated codec
-  `encoder_args` templating, `pyqenc/models.py:174-180`). `{fps}` does not
-  exist.
+- Not a naming-ownership concern — the merge-output name family has a single
+  owner (`MergedVideo`, `2026-09-28 artifact-model` spec). This item is the
+  end-user feature: config-defined templates for final output file names
+  that the owner consumes.
 
-**Questions to think about:** output-name templates as a config dict
-(name → format string, case-insensitive keys)? Which parameters: title, fps,
-year, strategy?
+**Questions to think about:** template syntax and config shape; which
+parameters to expose (title, fps, year, strategy, …)?
 
 ---
 
@@ -358,22 +342,6 @@ year, strategy?
 
 **Questions to think about:** auto-populate the registry from terminal-phase
 dependencies (that's what the dependency declarations are for)?
-
----
-
-## 🤔 27. Artifact subclass zoo vs. generic `Artifact[T]`
-
-**Status:** needs thinking (API design)
-
-- Base dataclass `Artifact(path, state, wanted)` (`pyqenc/phase.py:61-87`)
-  plus per-phase subclasses adding typed fields: extraction tracks
-  (`extraction.py:649-697`), `AudioArtifact` (`audio.py:74`), `ChunkArtifact`
-  (`chunking.py:353`), `EncodedArtifact` (`encoding.py:1478-1490`),
-  `MergeArtifact` (`merge.py:93`). No generic `Artifact[VideoMetadata]` /
-  `Artifact[AudioMetadata]` payload typing.
-
-**Questions to think about:** generic `Artifact[T]` with typed payload — what
-breaks (per-type fields like crf/strategy)? Worth it?
 
 ---
 
@@ -605,12 +573,113 @@ behavior change that landed without them — decide whether the astats/downmix
 behavior itself is approved as-is (then update the canned data/assertions) or
 needs revisiting. Should the audio-chains spec get a difference note?
 
-## 44. Considering we move to stream objects rather then materialized files - we probably no longer need a video_required flag
-
-Stream objectification takes 0 effort. So we can create all streams. Consumers will take what they need. Audio Phase won't pick up video stream.
-A side effect is also an extraction summary table - it should now have only 1 column - wanted flag.
-
 ## 45. Summary table for audio
 
-Like for extraction phase - I want similar table for audio phase - a summary on which stream were picked up (wanted flag). Maybe with a column with counter - by how many chains.
-Maybe should also add after table - selector - selected tracks (as a clear reason for choice).
+Like for extraction phase - I want a similar table for audio phase - a summary on which streams were picked up (wanted flag), maybe with a chain counter per stream. Maybe also add after the table - the selector - selected tracks (as a clear reason for the choice).
+
+With the `2026-09-28 artifact-model` spec the data lives in one place: the audio ledger rows (`Artifact[AudioOutput]` = source stream + chain, with `wanted`) — pure UX on top.
+
+## 46. Scene detection threshold propagation from config
+
+One more consideration here - it is possible that some code default is taken instead of config value.
+See also #47, #38
+
+
+## 47. Scene detection threshold search
+
+Default doesn't always produce wanted results.
+Add a searching mechanic, similar to quality search? With something like 0.15 - 0.5 range and a starting point of say 0.27?
+Target is to get small chunks - not over a minute probably (it is a rare thing for movies to have such a long scene).
+But not to split on every min frames (too low value).
+With all params being configurable in the config, including ability to disable the search.
+
+Why? I'm often seeing a movie being split like - titles, full movie as SINGLE HUGE chunk, finals as separate chunks.
+
+## 48. Remove include/exclude filters?
+
+Previously include/exclude filters were made specifically for extraction phase - it was costly to extract everything. Also, this was the only mean to
+actually control which audio gets processed.
+
+Now, we have video/audio streams passthrough mechanics.
+Now, we have audio selectors, which give a more controllable choice with sub-preferences.
+
+It looks like we should consider:
+- completely removing the include/exclude filters (materialize all non video/audio things; video and audio has separate processing)
+- or maybe keep filters but re-add the ability to materialize audio/video (not for processing, but for the end-user) via some special option? Maybe even with video/audio stream retartgetting to extracted files, if actually materialized.
+
+## 50. Better space estimations
+
+In general I like how space estimation looks. Maybe we don't need required/recommended if we already have a min-max values.
+The numbers on space estimations look to be quite off the actual. We need some way to better estimate space knowing the config (cleanup levels, bitrates, etc; what to do with targets?) and streams available (number of audio streams; video stream presence, etc).
+
+> 2026-09-28 12:13 [[96mINFO[0m] Source video size            0.35 GB
+> 2026-09-28 12:13 [[96mINFO[0m] Estimated required space     1.49 ... 4.48 GB
+> 2026-09-28 12:13 [[96mINFO[0m] Estimated recommended space  1.79 ... 5.38 GB
+> 2026-09-28 12:13 [[96mINFO[0m] Available space              198.82 GB
+
+Just a few thoughts:
+- maybe the phase itself should give estimation? Like finalize, but the first call instead to ask for space estimation. Not sure, looks difficult
+- maybe for targets we should add profiles. Something like targets profile "high", "medium", "low", with their own sets of targets each. But also a hint on approximate bits per pixel? like 0.1 for medium, 0.15 for high, 0.08 for low?
+- need a research there
+
+## 51. QualitySearchV3 is outright broken.
+
+One of examples - it gets the same values on CRF 12.0 and 11.5 and starts treading back upwards.
+
+```
+2026-09-28 17:40 [[96mINFO[0m] 👊 ｟ultrafast+h265-anime ｠ 00꞉05꞉49․140-00꞉06꞉32․601 attempt #1: ✘ miss with CRF 18.0 (psnr_min=16.6  psnr_median=44.4  ssim_min=60.2  ssim_median=98.4  vmaf_min=0.0✘ vmaf_median=93.6  vif_min=4.9  vif_median=92.2)
+2026-09-28 17:42 [[96mINFO[0m] 👊 ｟ultrafast+h265-anime ｠ 00꞉05꞉49․140-00꞉06꞉32․601 attempt #2: ✘ miss with CRF 12.0 (psnr_min=16.6  psnr_median=48.8  ssim_min=59.9  ssim_median=99.2  vmaf_min=0.0✘ vmaf_median=96.1  vif_min=4.9  vif_median=96.2)
+2026-09-28 17:44 [[96mINFO[0m] 👊 ｟ultrafast+h265-anime ｠ 00꞉05꞉49․140-00꞉06꞉32․601 attempt #3: ✘ miss with CRF 11.5 (psnr_min=16.6  psnr_median=48.8  ssim_min=59.9  ssim_median=99.2  vmaf_min=0.0✘ vmaf_median=96.1  vif_min=4.9  vif_median=96.2)
+2026-09-28 17:46 [[96mINFO[0m] 👊 ｟ultrafast+h265-anime ｠ 00꞉05꞉49․140-00꞉06꞉32․601 attempt #4: ✘ miss with CRF 15.0 (psnr_min=16.6  psnr_median=46.7  ssim_min=60.0  ssim_median=98.9  vmaf_min=0.0✘ vmaf_median=95.2  vif_min=4.9  vif_median=94.5)
+2026-09-28 17:49 [[96mINFO[0m] 👊 ｟ultrafast+h265-anime ｠ 00꞉05꞉49․140-00꞉06꞉32․601 attempt #5: ✘ miss with CRF 13.5 (psnr_min=16.6  psnr_median=47.2  ssim_min=60.0  ssim_median=99.0  vmaf_min=0.0✘ vmaf_median=95.4  vif_min=4.9  vif_median=94.9)
+2026-09-28 17:51 [[96mINFO[0m] 👊 ｟ultrafast+h265-anime ｠ 00꞉05꞉49․140-00꞉06꞉32․601 attempt #6: ✘ miss with CRF 13.0 (psnr_min=16.6  psnr_median=48.1  ssim_min=60.0  ssim_median=99.1  vmaf_min=0.0✘ vmaf_median=95.8  vif_min=4.9  vif_median=95.6)
+2026-09-28 17:54 [[96mINFO[0m] 👊 ｟ultrafast+h265-anime ｠ 00꞉05꞉49․140-00꞉06꞉32․601 attempt #7: ✘ miss with CRF 12.5 (psnr_min=16.6  psnr_median=48.1  ssim_min=60.0  ssim_median=99.1  vmaf_min=0.0✘ vmaf_median=95.8  vif_min=4.9  vif_median=95.6)
+```
+
+We need to rework this again and make a v4:
+- We need to merge V2 and V3 ideas
+- Basic idea is the same as it was in V2 - by default we work in 2-point mode, reducing either left or right side. And at some point we go for 3-way attempt to find sweet spot.
+- Idea from V3 with allowing extrapolation outside the range - holds
+- Idea from V3 that if we reached boundary without success and need to do 1 binary step back - holds
+- Criterias for 3-way sweet spot change:
+    - When go towards lower quality (i.e. we do have a success already) - continue as 2-point up to any point until we reach boundary or get a miss.
+    - 3 way activates only when we do NOT have a success (not once) + reached the highest quality boundary + made a step back. This is the only way to activate 3-way. But needs 1 extra condition - best matching point (a failure still) is in the middle, i.e. we have 2 other points with worse score.
+
+Scoring, points selection, extrapolation - all look working in v3. Just conditions are wrong. And the code is too complex, I believe it could be simplified.
+
+One note worth attention in example above are points CRF 12.0 and CRF 11.5 - they get absolutely the same score. This ruins the line slope and can't really use 3-way algorithm there. Need to think how to work with that. Maybe dedup such points during 3-point selection? Not sure, but this happens quite often (often binary-identical files).
+
+## 52. h264 codec private data differs between winning encoding attempts
+
+h264 uses a single instance of codec private data. If it differs between chunks' winning attempts - h264 video cannot be merged and played later, unlike h265 or av1, which have local copies in blocks.
+Need to investigate why this is happening and if we can fix this without ruining processing for other codecs.
+
+## 53. Ensure mkvextract with fallback
+
+We are targetting MKV source and output as the key targets. Other outputs are not supported. Other inputs - well, we should try to use them.
+So the policy is - we should use mkvextract first where possible. But have a fallback in-place if that fails. Prefer try-except flow semantics (i.e. if we failed to get fps - that's a failure -> try next variant).
+
+Other acceptable tools: ffprobe, ffmpeg. Maybe something else.
+
+This is not applicable to actual encoding/processing - both audio and video processing we aim to do with ffmpeg only.
+
+For the outputs - we support only mkv and we prefer mkvmerge.
+
+Need to check code. Especially metadata extraction, files materialization (extraction phase), screenshotting.
+
+## 54. Validate Phase's DEPENDS_ON by actual usage
+
+Validate Phase's class field DEPENDS_ON vs actual inputs used from those phases via `_deps` or similar mechanics. We need a clean concise dependencies graph.
+Also need to build a table or a graph with actual dependencies - inputs, internals, results - both artifacts and settings. between phases and phase's internals.
+
+## 55. Fixed-crf encoding
+
+Current UX for fixed CRF encoding is rather complicated for end-user, involving config editing (duplicate profile and fix there; or do profile override for quality range).
+There should be some easier way. Problem is how to fluently do that without affecting multi-strategy settings. Maybe enforce single strategy if fixed crf key is used?
+Needs thinking.
+
+## 56. Merge output is not written atomically
+
+mkvmerge writes the final MKV directly at its destination name (`-o final/xxx.mkv`), violating the `.tmp`-then-rename phase contract: a crash mid-concat leaves a truncated `.mkv` at the final path. It self-recovers today only because the sidecar (written atomically after success) is the completeness marker — a sidecar-less output classifies as PARTIAL and is re-merged (overwritten). The mkvpropedit header patch added 2026-09-29 also runs on the pre-rename file path in spirit, but the file is already at its final name by then.
+Options to think about: mkvmerge to `xxx.mkv.tmp` + rename after propedit; or declare the sidecar the atomicity boundary and document the deviation.
+

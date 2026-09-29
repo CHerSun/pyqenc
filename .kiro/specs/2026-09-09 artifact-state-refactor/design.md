@@ -12,6 +12,7 @@ This design partially supersedes every earlier spec that described the four-valu
 
 | Spec | Created | Relationship |
 |------|---------|--------------|
+| `2026-09-28 artifact-model` | 2026-09-28 | **Supersedes in part (successor).** The per-phase `Artifact` subclass architecture, `Artifact.path` as a defining field, and `PhaseResult.artifacts` as a wanted-only list assigned wholesale are replaced by one generic `Artifact[PayloadT]` (payload + state + wanted) with typed result fields and a derived `artifacts` property. Retained here: the completeness enum semantics, completeness × selection orthogonality, `wanted` as derived external input, and the unified `log_recovery_line()` over the internal list. |
 | `phase-recovery-refactor` | 2026-03-17 | **Superseded in part.** Established `ArtifactState` (`ABSENT`/`ARTIFACT_ONLY`/`COMPLETE`). `ARTIFACT_ONLY` is renamed `PARTIAL` and the enum is re-scoped to completeness only. |
 | `phase-object-model` | 2026-03-20 | **Superseded in part.** Defined the four-value enum with `STALE`; `pending` included `STALE`. `STALE` is removed — selection moves to `Artifact.wanted`. |
 | `pts-preservation` | 2026-04-29 | **Superseded in part.** Four-value enum references and `TimestampArtifact` states are updated; `TimestampArtifact` stays `COMPLETE`/`ABSENT` and now also carries `wanted`. |
