@@ -31,10 +31,11 @@ class LongPath(type(Path())): # Platform-specific path type
 
     - ``os.fspath(long_path)`` / ``long_path.__fspath__()``:
       returns the ``\\?\\``-prefixed absolute string on Windows for long paths.
-      Used by Python's file I/O and ``shutil.*``.
+      Used by Python's file I/O, ``shutil.*``, and subprocess argv resolution.
     - ``str(long_path)``:
-      returns the plain path string *without* any ``\\?\\`` prefix on all platforms.
-      Use this when building ffmpeg subprocess command lists.
+      returns the plain path string *without* any ``\\?\\`` prefix on all
+      platforms. Use this for logging and printing only — never for command
+      building or file operations.
 
     Path composition (``/`` operator) is preserved: ``LongPath(base) / child``
     always returns a ``LongPath`` instance, not a plain ``Path``.
@@ -44,7 +45,11 @@ class LongPath(type(Path())): # Platform-specific path type
         work_dir = LongPath(args.work_dir)
         artifact = work_dir / "chunks" / "chunk_01.mkv"   # still LongPath
         artifact.mkdir(parents=True, exist_ok=True)        # uses __fspath__() — long-path safe
-        cmd = ["ffmpeg", "-i", str(artifact), ...]         # uses __str__()   — no \\?\\ prefix
+        cmd: list[str | os.PathLike] = ["ffmpeg", "-i", artifact, ...]
+                                                            # pass path-like directly — subprocess
+                                                            # resolves via __fspath__()
+        cmd = ["mkvmerge", "@" + os.fspath(options_file)]  # forced single-string argument: concat
+                                                            # with os.fspath, never str()
     """
 
     def __fspath__(self) -> str:
@@ -73,8 +78,9 @@ class LongPath(type(Path())): # Platform-specific path type
         """Return the plain path string without any ``\\?\\`` prefix.
 
         Always returns the plain path regardless of length or platform.
-        Use this when passing paths to ffmpeg or any other subprocess that
-        does not understand the Windows extended-length prefix.
+        Use this for logging/printing only — commands take the path-like
+        directly (subprocess resolves it via ``__fspath__()``), and forced
+        single-string arguments concatenate with ``os.fspath``.
 
         Returns:
             Plain path string, never prefixed with ``\\?\\``.

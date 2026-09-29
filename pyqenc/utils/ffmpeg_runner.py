@@ -424,7 +424,7 @@ async def run_ffmpeg_async(
         *argv,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=str(cwd) if cwd is not None else None,
+        cwd=cwd,
     )
     with _procs_lock:
         _live_procs.add(proc)

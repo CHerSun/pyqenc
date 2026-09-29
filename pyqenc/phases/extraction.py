@@ -349,7 +349,7 @@ def _extract_timestamps(
     # --- Attempt 1: mkvextract timecodes_v2 ---
     mkvextract_cmd: list[str | os.PathLike] = [
         "mkvextract", source,
-        "timecodes_v2", f"0:{tmp}",
+        "timecodes_v2", f"0:{os.fspath(tmp)}",
     ]
     logger.debug("Extracting timestamps via mkvextract: %s", source.name)
     try:

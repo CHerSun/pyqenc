@@ -8,6 +8,7 @@ quality targets, including parallel execution and artifact-based resumption.
 
 import asyncio
 import logging
+import os
 import shutil as _shutil
 import subprocess
 from collections.abc import Callable
@@ -96,7 +97,7 @@ logger = logging.getLogger(__name__)
 def _probe_resolution(path: Path) -> str | None:
     """Return the video resolution of *path* as ``'WxH'``, or ``None`` on failure."""
     import json as _json
-    cmd = [
+    cmd: list[str | os.PathLike] = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
         "-show_entries", "stream=width,height",

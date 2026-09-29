@@ -935,7 +935,7 @@ class MergePhase(Phase):
                 _write_mkvmerge_options_file(options_file, args)
 
                 # Run mkvmerge via options file (avoids OS command-line length limits)
-                cmd_mkvmerge: list[str | os.PathLike] = ["mkvmerge", f"@{options_file}"]
+                cmd_mkvmerge: list[str | os.PathLike] = ["mkvmerge", f"@{os.fspath(options_file)}"]
                 logger.debug("mkvmerge command: %s", " ".join(str(a) for a in cmd_mkvmerge))
 
                 with self._collector.time(MetricKey.MERGE, "concat"):
@@ -961,7 +961,7 @@ class MergePhase(Phase):
 
                 # Restore the true frame rate in the track header —
                 # see _build_mkvpropedit_args for why mkvmerge cannot do it.
-                propedit_cmd: list[str] = _build_mkvpropedit_args(
+                propedit_cmd: list[str | os.PathLike] = _build_mkvpropedit_args(
                     output_file, source_stream.stream.info.fps_fraction,
                 )
                 propedit_result = subprocess.run(propedit_cmd, capture_output=True, text=True, check=False)
@@ -1149,6 +1149,10 @@ def _build_mkvmerge_options(
     from the ms-rounded restored timestamps, and ``--default-duration`` cannot
     override that — it only reinterprets *input* tracks that lack timing.
 
+    Paths are converted with ``os.fspath`` — the same string a subprocess
+    would resolve for a path-like — so extended-length prefixes survive the
+    JSON options-file serialization.
+
     Args:
         chunks:          Ordered list of encoded chunk paths.
         output:          Destination output MKV path.
@@ -1158,12 +1162,12 @@ def _build_mkvmerge_options(
         List of strings suitable for writing to a JSON options file.
     """
     args: list[str] = [
-        "-o",          str(output),
-        "--timestamps", f"0:{timestamps_path}",
-        str(chunks[0]),
+        "-o",              os.fspath(output),
+        "--timestamps", f"0:{os.fspath(timestamps_path)}",
+        os.fspath(chunks[0]),
     ]
     for chunk in chunks[1:]:
-        args.append(f"+{chunk}")
+        args.append(f"+{os.fspath(chunk)}")
     return args
 
 
@@ -1176,7 +1180,7 @@ def _default_duration_ns(fps: Fraction) -> int:
     return round(_NS_PER_SECOND / fps)
 
 
-def _build_mkvpropedit_args(output: Path, fps: Fraction) -> list[str]:
+def _build_mkvpropedit_args(output: Path, fps: Fraction) -> list[str | os.PathLike]:
     """Build the mkvpropedit argument list restoring the video track's frame-rate header.
 
     mkvmerge derives ``DefaultDuration`` from the ms-rounded timestamps that
@@ -1190,10 +1194,12 @@ def _build_mkvpropedit_args(output: Path, fps: Fraction) -> list[str]:
         fps:    The source stream's true frame rate.
 
     Returns:
-        The mkvpropedit command as a list of strings.
+        The mkvpropedit command; *output* is passed as a path-like so the
+        extended-length ``\\?`` prefix is injected only when the runner
+        resolves it.
     """
     return [
-        "mkvpropedit", str(output),
+        "mkvpropedit", output,
         "--edit", _MKVPROPEDIT_VIDEO_TRACK,
         "--set", f"default-duration={_default_duration_ns(fps)}",
     ]

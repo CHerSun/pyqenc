@@ -33,7 +33,7 @@
 - `LongPath` from `pyqenc.utils.long_path` is mandatory for all project file I/O — it subclasses `Path` and transparently handles Windows extended-length paths (>260 chars). NO `str` for paths.
 - Use `LongPath` everywhere a path is constructed, stored, or passed to Python file I/O (`open`, `mkdir`, `exists`, `replace`, `shutil.*`, etc.). This does NOT apply to libraries that handle their own file I/O (JSON, PNG, etc.).
 - For any on-disk results use `.tmp`-then-rename protocol for atomicity and consistency enforcement.
-- For subprocess cmd building use type hint `list[str|os.PathLike]` and supply `LongPath` variables directly (without converting to `str`). The runner calls `os.fspath()` which injects the `\\?\` prefix when needed. Exception: when ffmpeg or another tool does not understand the `\\?\` prefix, pass `str(long_path)` explicitly — `LongPath.__str__()` always returns the plain path.
+- For subprocess cmd building use type hint `list[str|os.PathLike]` and supply `LongPath`/`Path` variables directly (without converting to `str`). The subprocess layer calls `os.fspath()` which injects the `\\?\` prefix when needed. When a path must be embedded in a single forced-string argument (e.g. mkvmerge `@options.json`, mkvextract `0:timestamps.txt`), concatenate with `os.fspath(path)` — never `str(path)`. `str(path)` is allowed for printing/logging only, never for command building or file operations.
 
 ## Constants & Magic Values
 

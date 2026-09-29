@@ -24,6 +24,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from fractions import Fraction
 from pathlib import Path
@@ -302,7 +303,7 @@ class TestBuildMkvmergeOptions:
         args = _build_mkvmerge_options(chunks, output, ts_path)
 
         for chunk in chunks[1:]:
-            assert f"+{chunk}" in args, (
+            assert f"+{os.fspath(chunk)}" in args, (
                 f"Expected '+{chunk}' in args, got: {args}"
             )
 
@@ -316,7 +317,7 @@ class TestBuildMkvmergeOptions:
 
         assert "-o" in args
         o_index = args.index("-o")
-        assert args[o_index + 1] == str(output)
+        assert args[o_index + 1] == os.fspath(output)
 
     def test_timestamps_placement_before_first_chunk(self, tmp_path: Path) -> None:
         """'--timestamps 0:<path>' must appear before the first chunk."""
@@ -329,10 +330,10 @@ class TestBuildMkvmergeOptions:
         assert "--timestamps" in args
         ts_index    = args.index("--timestamps")
         ts_value    = args[ts_index + 1]
-        chunk0_index = args.index(str(chunks[0]))
+        chunk0_index = args.index(os.fspath(chunks[0]))
 
-        assert ts_value == f"0:{ts_path}", (
-            f"Expected '0:{ts_path}', got {ts_value!r}"
+        assert ts_value == f"0:{os.fspath(ts_path)}", (
+            f"Expected '0:{os.fspath(ts_path)}', got {ts_value!r}"
         )
         assert ts_index < chunk0_index, (
             "--timestamps must appear before the first chunk"
@@ -407,16 +408,19 @@ class TestBuildMkvpropeditArgs:
     def test_full_command_pinned(self, tmp_path: Path) -> None:
         """Bug guarded: mkvpropedit rejects suffixed values ('41708333ns' is
         not an unsigned integer) — the value must be a bare integer, applied
-        to the first video track of the merged file."""
+        to the first video track of the merged file. The output is passed as
+        a path-like (str(Path) in command building is forbidden — it can drop
+        the extended-length prefix)."""
         output = tmp_path / "output.mkv"
 
         args = _build_mkvpropedit_args(output, Fraction(24000, 1001))
 
         assert args == [
-            "mkvpropedit", str(output),
+            "mkvpropedit", output,
             "--edit", "track:v1",
             "--set", "default-duration=41708333",
         ]
+        assert all(isinstance(a, (str, Path)) for a in args)
 
 
 # ---------------------------------------------------------------------------
