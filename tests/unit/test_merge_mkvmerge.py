@@ -271,7 +271,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options([chunk], output, ts_path)
+        args = _build_mkvmerge_options([chunk], output, ts_path, fps=24000/1001)
 
         # The chunk path must appear without a '+' prefix
         assert str(chunk) in args
@@ -283,7 +283,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options(chunks, output, ts_path)
+        args = _build_mkvmerge_options(chunks, output, ts_path, fps=24000/1001)
 
         assert str(chunks[0]) in args
         assert f"+{chunks[0]}" not in args
@@ -294,7 +294,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options(chunks, output, ts_path)
+        args = _build_mkvmerge_options(chunks, output, ts_path, fps=24000/1001)
 
         for chunk in chunks[1:]:
             assert f"+{chunk}" in args, (
@@ -307,7 +307,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options([chunk], output, ts_path)
+        args = _build_mkvmerge_options([chunk], output, ts_path, fps=24000/1001)
 
         assert "-o" in args
         o_index = args.index("-o")
@@ -319,7 +319,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options(chunks, output, ts_path)
+        args = _build_mkvmerge_options(chunks, output, ts_path, fps=24000/1001)
 
         assert "--timestamps" in args
         ts_index    = args.index("--timestamps")
@@ -339,11 +339,25 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options(chunks, output, ts_path)
+        args = _build_mkvmerge_options(chunks, output, ts_path, fps=24000/1001)
 
         assert args.count("--timestamps") == 1, (
             f"Expected exactly 1 '--timestamps', got {args.count('--timestamps')}"
         )
+
+    def test_default_duration_declares_true_fps(self, tmp_path: Path) -> None:
+        """Bug guarded: mkvmerge guesses the track fps from ms-rounded restored
+        timestamps (observed 500/21 for a 24000/1001 stream) — any consumer
+        trusting container metadata mispairs frames. --default-duration must
+        declare the true rate."""
+        chunk   = tmp_path / "chunk1.mkv"
+        output  = tmp_path / "output.mkv"
+        ts_path = tmp_path / "timestamps.txt"
+
+        args = _build_mkvmerge_options([chunk], output, ts_path, fps=24000/1001)
+
+        assert "--default-duration" in args
+        assert args[args.index("--default-duration") + 1] == "0:23.976023976023978fps"
 
     def test_returns_list_of_strings(self, tmp_path: Path) -> None:
         """Return type must be list[str]."""
@@ -351,7 +365,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options([chunk], output, ts_path)
+        args = _build_mkvmerge_options([chunk], output, ts_path, fps=24000/1001)
 
         assert isinstance(args, list)
         assert all(isinstance(a, str) for a in args)

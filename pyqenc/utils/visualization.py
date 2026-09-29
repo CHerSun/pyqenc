@@ -1274,6 +1274,7 @@ class QualityEvaluator:
         duration_seconds: float                          = 0.0,
         width:            int                            = 0,
         cwd:              Path | None                    = None,
+        fps_value:        Fraction | None                = None,
     ) -> QualityArtifacts:
         """Generate metric log files for quality comparison.
 
@@ -1308,7 +1309,7 @@ class QualityEvaluator:
 
         logger.debug(
             "Generating metrics for %s vs %s (tmp prefix: %s)",
-            encoded.name, reference.path.name, uuid_hex,
+            encoded.name, Path(str(reference.path)).name, uuid_hex,
         )
 
         # Single ffmpeg pass — progress is linear: total = duration_seconds, weight = 1.0.
@@ -1340,6 +1341,7 @@ class QualityEvaluator:
             cwd              = output_dir,
             progress_callback = _progress_callback if bar_advance is not None else None,
             output_extension = ".tmp",
+            fps              = float(fps_value) if fps_value is not None else None,
         )
         if not result.success:
             logger.warning("Metrics run had non-zero exit code: %d", result.returncode)
@@ -1421,6 +1423,7 @@ class QualityEvaluator:
                     duration_seconds = duration_seconds or 0.0,
                     width            = width,
                     cwd              = cwd,
+                    fps_value        = fps_value,
                 )
                 advance(0, AdvanceState.COMPLETE)
         else:
@@ -1432,6 +1435,7 @@ class QualityEvaluator:
                 duration_seconds = duration_seconds or 0.0,
                 width            = width,
                 cwd              = cwd,
+                fps_value        = fps_value,
             )
 
         return self._finish_evaluation(
@@ -1503,6 +1507,7 @@ class QualityEvaluator:
                         duration_seconds = duration_seconds or 0.0,
                         width            = width,
                         cwd              = cwd,
+                        fps_value        = fps_value,
                     )
                 )
                 advance(0, AdvanceState.COMPLETE)

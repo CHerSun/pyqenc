@@ -1447,3 +1447,56 @@ class TestRunMetricsCommandGolden:
             "-map_chapters", "-1",
             "-f", "null", "-",
         ]
+
+    def test_golden_argv_with_fps(self, tmp_path) -> None:
+        """Bug guarded: the re-timing must substitute the caller-known fps
+        numerically — per-input FRAME_RATE trusts container declarations, and
+        mkvmerge-written finals declare guessed rates (500/21 for 24000/1001),
+        mispairing frames at file scale."""
+        import asyncio
+        from unittest.mock import patch
+
+        from pyqenc.models import CropParams
+        from pyqenc.quality import MetricType, run_metrics
+        from pyqenc.utils.ffmpeg_runner import (
+            _PROGRESS_FLAGS,
+            FFmpegInput,
+            FFmpegRunResult,
+            compose_command,
+        )
+
+        distorted = tmp_path / "enc" / "dist.mkv"
+        reference = tmp_path / "chunks" / "ref.mkv"
+
+        captured: list = []
+
+        async def fake_async(request, **_kwargs):
+            captured.append(request)
+            return FFmpegRunResult(returncode=0, success=True)
+
+        with patch("pyqenc.quality.run_ffmpeg_async", side_effect=fake_async):
+            asyncio.run(
+                run_metrics(
+                    metrics         = {MetricType.PSNR},
+                    distorted       = FFmpegInput(path=distorted),
+                    reference       = FFmpegInput(path=reference),
+                    crop_distorted  = CropParams(),
+                    crop_reference  = CropParams(),
+                    width           = 0,
+                    use_gpu         = False,
+                    subsample       = 1,
+                    output_prefix   = "uuid",
+                    fps             = 24000 / 1001,
+                )
+            )
+
+        graph = "[0:v]crop=iw-0:ih-0:0:0,setpts=N/(23.976023976023978*TB)[main];[1:v]crop=iw-0:ih-0:0:0,setpts=N/(23.976023976023978*TB)[ref];[main][ref]psnr=stats_file=uuidpsnr.log"
+        argv = [str(a) for a in compose_command(captured[0])]
+        assert argv == [
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-i", str(distorted),
+            "-i", str(reference),
+            "-filter_complex", graph,
+            "-map_chapters", "-1",
+            "-f", "null", "-",
+        ]

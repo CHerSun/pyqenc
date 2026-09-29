@@ -252,7 +252,7 @@ def _measure_quality(
         targets            = quality_targets,
         output_dir         = output_dir,
         duration_seconds   = source_stream.stream.info.duration_seconds or 0.0,
-        fps_value          = None,
+        fps_value          = source_stream.stream.info.fps_fraction,
         metrics_output_dir = output_dir,
         subsample_factor   = metrics_sampling,
         show_progress      = True,
@@ -927,7 +927,10 @@ class MergePhase(Phase):
 
                 # Write mkvmerge options file
                 options_file = final_dir / f"concat_{strategy_name}.json"
-                args = _build_mkvmerge_options(strategy_chunks, output_file, timestamps_path)
+                args = _build_mkvmerge_options(
+                    strategy_chunks, output_file, timestamps_path,
+                    fps=float(source_stream.stream.info.fps_fraction),
+                )
                 _write_mkvmerge_options_file(options_file, args)
 
                 # Run mkvmerge via options file (avoids OS command-line length limits)
@@ -1118,17 +1121,24 @@ def _build_mkvmerge_options(
     chunks:          list[Path],
     output:          Path,
     timestamps_path: Path,
+    fps:             float,
 ) -> list[str]:
     """Build the mkvmerge argument list for chunk concatenation with PTS restoration.
 
     The first chunk is listed without a prefix; each subsequent chunk is
     preceded by ``"+"`` as a separate element (mkvmerge append syntax).
     ``--timestamps`` is applied to track 0 of the first chunk only.
+    ``--default-duration`` declares the track's true frame rate: without it
+    mkvmerge guesses from the ms-rounded restored timestamps (observed
+    500/21 instead of 24000/1001), and any consumer trusting the container
+    metadata — including our own index-based metric re-timing — mispairs
+    frames at file scale.
 
     Args:
         chunks:          Ordered list of encoded chunk paths.
         output:          Destination output MKV path.
         timestamps_path: Path to the timestamps.txt file.
+        fps:             The source stream's true average frame rate.
 
     Returns:
         List of strings suitable for writing to a JSON options file.
@@ -1136,6 +1146,7 @@ def _build_mkvmerge_options(
     args: list[str] = [
         "-o",          str(output),
         "--timestamps", f"0:{timestamps_path}",
+        "--default-duration", f"0:{fps}fps",
         str(chunks[0]),
     ]
     for chunk in chunks[1:]:

@@ -312,6 +312,7 @@ async def run_metrics(
     cwd:               Path | None             = None,
     progress_callback: ProgressCallback | None = None,
     output_extension:  str | None              = None,
+    fps:               float | None            = None,
 ) -> FFmpegRunResult:
     """Build and run a single ffmpeg pass computing all requested metrics simultaneously.
 
@@ -347,7 +348,14 @@ async def run_metrics(
         progress_callback: Optional ``(frame, out_time_seconds)`` callable
                            invoked once per completed progress block.
         output_extension:  Override the default file extension for metric output
-                           files (e.g. ``".tmp"``).  When ``None``, defaults are
+                           files (e.g. ``".tmp"``).
+        fps:               The true average frame rate of BOTH inputs, when
+                           known. The index-based re-timing substitutes it
+                           numerically so both grids are identical regardless
+                           of what the containers declare (mkvmerge-written
+                           finals have been observed declaring 500/21 for a
+                           24000/1001 stream). ``None`` falls back to each
+                           input's self-declared ``FRAME_RATE``.  When ``None``, defaults are
                            used (``.log`` for PSNR/SSIM, ``.json`` for VMAF).
 
     Returns:
@@ -374,6 +382,10 @@ async def run_metrics(
     crop_d    = crop_distorted.to_ffmpeg_filter()
     crop_r    = crop_reference.to_ffmpeg_filter()
 
+    # The re-timing rate: the caller-known truth when available (both inputs
+    # are the same content), else each input's self-declared rate.
+    retime_rate = repr(fps) if fps is not None else "FRAME_RATE"
+
     # Re-time both inputs to exact index-based CFR before the metric filters.
     # framesync (the dualinput core of psnr/ssim/libvmaf) pairs frames by PTS:
     # the attempt's and the source window's ms-rounded timestamp grids carry
@@ -385,9 +397,9 @@ async def run_metrics(
     # the origin and preserves the grid mismatch (empirically a no-op here).
     if n_branches == 1:
         # No split needed — single branch uses [main]/[ref] directly
-        sel = f",select='not(mod(n,{subsample}))',setpts=N/(FRAME_RATE*TB)" if (
+        sel = f",select='not(mod(n,{subsample}))',setpts=N/({retime_rate}*TB)" if (
             subsample > 1 and branches[0].info.subsample_via_filter
-        ) else ",setpts=N/(FRAME_RATE*TB)"
+        ) else f",setpts=N/({retime_rate}*TB)"
         f_dist = f"[0:v]{crop_d}{width_str}{sel}[main]"
         f_ref  = f"[1:v]{crop_r}{width_str}{sel}[ref]"
         branch_labels_d = ["main"]
@@ -408,12 +420,12 @@ async def run_metrics(
             label_d = f"main{i}"
             label_r = f"ref{i}"
             if subsample > 1 and branch.info.subsample_via_filter:
-                sel = f"select='not(mod(n,{subsample}))',setpts=N/(FRAME_RATE*TB)"
+                sel = f"select='not(mod(n,{subsample}))',setpts=N/({retime_rate}*TB)"
                 branch_parts_d.append(f"[d{i}]{sel}[{label_d}]")
                 branch_parts_r.append(f"[r{i}]{sel}[{label_r}]")
             else:
-                branch_parts_d.append(f"[d{i}]setpts=N/(FRAME_RATE*TB)[{label_d}]")
-                branch_parts_r.append(f"[r{i}]setpts=N/(FRAME_RATE*TB)[{label_r}]")
+                branch_parts_d.append(f"[d{i}]setpts=N/({retime_rate}*TB)[{label_d}]")
+                branch_parts_r.append(f"[r{i}]setpts=N/({retime_rate}*TB)[{label_r}]")
             branch_labels_d.append(label_d)
             branch_labels_r.append(label_r)
 

@@ -212,6 +212,19 @@ Frame-exactness stops being a positioning concern and becomes a verification inv
 > only inside the metric process; attempts on disk and the final merge keep
 > original timestamps (AC 2). This resolves the AC 3 experiment: the flag was
 > not redundant — it was the wrong formula.
+>
+> **Second e2e finding (same day):** the re-timing must not trust the
+> containers' *declared* frame rates either. mkvmerge-written finals declared
+> 500/21 for a 24000/1001 stream (mkvmerge guesses from the ms-rounded
+> restored timestamps), and per-input `FRAME_RATE` re-timing mispaired every
+> frame at file scale (merge-quality vmaf-median 3.9). Fixes: (a) property —
+> merge passes `--default-duration 0:<fps>fps` so the final declares its
+> true rate; (b) robustness — `run_metrics(fps=...)` substitutes the
+> caller-known true rate numerically into the re-timing expression for both
+> inputs (`FRAME_RATE` remains the fallback when the caller has no rate);
+> measurement call sites (encode per-chunk, merge final, measure standalone)
+> all pass the stream's `fps_fraction`. Verified on the produced final:
+> psnr-median 24.7 → 48.8, vmaf-median 4.0 → 96.6.
 
 #### Acceptance Criteria
 
