@@ -465,7 +465,7 @@ class ChunkEncoder:
         Returns:
             Path to ``<work_dir>/encoding/<safe_strategy>/``.
         """
-        return self.work_dir / ENCODING_WORKSPACE_DIR / strategy.name
+        return self.work_dir / ENCODING_WORKSPACE_DIR / strategy.safe_name
 
     def _get_encoded_dir(self, strategy: Strategy) -> Path:
         """Get the finalized output directory for *strategy*.
@@ -480,7 +480,7 @@ class ChunkEncoder:
         Returns:
             Path to ``<work_dir>/encoded/<safe_strategy>/``.
         """
-        return self.work_dir / ENCODED_OUTPUT_DIR / strategy.name
+        return self.work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name
 
     def _get_attempt_path(
         self,

@@ -393,12 +393,13 @@ class TestStreamTwoNames:
         assert self._audio().safe_name() == \
             "#1 (audio-ac3) lang=rus title=Дубляж_ _часть 1_2__ ch=stereo"
 
-    def test_subtitle_disk_name_derives_from_display(self) -> None:
+    def test_subtitle_disk_form_is_safe_name_plus_extension(self) -> None:
         """Bug guarded: the subtitle disk name was a SECOND generator with its
         own token rules (``#3 (ass)`` on disk vs ``#3 (subtitle-ass)`` in the
-        table) — the disk form must be the sanitized display name plus the
-        extension, nothing else changed (type token included, so include/
-        exclude patterns match one family)."""
+        table). The stream exposes only the pair — the disk form is composed
+        at the materialization site as safe name + codec extension, nothing
+        else changed (type token included, so include/exclude patterns match
+        one family)."""
         from pyqenc.stream_model import SubtitleStream, SubtitleStreamInfo
 
         sub = SubtitleStream(
@@ -407,12 +408,14 @@ class TestStreamTwoNames:
                                       title='Часть "1"?'),
         )
         assert sub.display_name() == '#3 (subtitle-ass) lang=rus title=Часть "1"?'
-        assert sub.extracted_file_name() == "#3 (subtitle-ass) lang=rus title=Часть _1__.ass"
+        assert sub.safe_name() == "#3 (subtitle-ass) lang=rus title=Часть _1__"
+        assert f"{sub.safe_name()}.{sub.file_extension}" == \
+            "#3 (subtitle-ass) lang=rus title=Часть _1__.ass"
 
-    def test_attachment_disk_name_derives_from_display(self) -> None:
-        """Bug guarded: same second-generator defect — the attachment disk
-        name must be the sanitized display name (which already carries the
-        attachment's own filename), with no independent assembly."""
+    def test_attachment_disk_form_is_safe_name_verbatim(self) -> None:
+        """Bug guarded: same second-generator defect — the attachment stream
+        exposes only the pair; its safe name (display already carries the
+        attachment's own filename) IS the disk form, no extension appended."""
         from pyqenc.stream_model import AttachmentStream, AttachmentStreamInfo
 
         att = AttachmentStream(
@@ -420,4 +423,64 @@ class TestStreamTwoNames:
             info = AttachmentStreamInfo(track_id=4, codec_name="ttf", filename="font.ttf"),
         )
         assert att.display_name() == "#4 (attachment-ttf) filename=font.ttf"
-        assert att.extracted_file_name() == att.safe_name()
+        assert att.safe_name() == "#4 (attachment-ttf) filename=font.ttf"
+
+
+class TestChunkTwoNames:
+    """The display/safe pair on chunks (Req 15.10) — one generator, one transform."""
+
+    def _chunk(self):
+        from pyqenc.models import CropParams
+        from pyqenc.stream_model import (
+            ExtendedVideoStream,
+            VideoStream,
+            VideoStreamChunk,
+            VideoStreamInfo,
+        )
+
+        stream = ExtendedVideoStream(
+            stream = VideoStream(file=_file(), info=VideoStreamInfo(track_id=0)),
+            frame_count = 25,
+            crop = CropParams(),
+        )
+        return VideoStreamChunk(stream=stream, start_timestamp=0.0,
+                                end_timestamp=1.043, frame_count=25)
+
+    def test_display_name_uses_natural_separators(self) -> None:
+        """Display form carries the natural ``:``/``.`` separators — the single
+        generated form everything else derives from."""
+        assert self._chunk().display_name == "00:00:00.000-00:00:01.043"
+
+    def test_safe_name_is_chunk_id(self) -> None:
+        """The safe form (display with separators substituted) is the chunk id —
+        the on-disk naming is unchanged, and parse() still round-trips it."""
+        from pyqenc.stream_model import VideoStreamChunk
+
+        chunk = self._chunk()
+        assert chunk.safe_name == chunk.chunk_id == "00꞉00꞉00․000-00꞉00꞉01․043"
+        parsed = VideoStreamChunk.parse_chunk_id(chunk.safe_name, chunk.stream)
+        assert (parsed.start_timestamp, parsed.end_timestamp) == \
+            (chunk.start_timestamp, chunk.end_timestamp)
+
+
+class TestStrategyTwoNames:
+    """The uniform pair on Strategy — passthroughs (safe by construction)."""
+
+    def test_pair_passes_through_unchanged(self) -> None:
+        """Bug guarded: per-type decisions about which name form to use — a
+        safe-by-construction name still exposes the pair so consumers call
+        ``safe_name()``/``display_name()`` uniformly."""
+        from decimal import Decimal
+
+        from pyqenc.models import CodecConfig, Strategy
+
+        strategy = Strategy(
+            preset="slow", profile="h265-aq",
+            codec=CodecConfig(
+                name="h265-10bit", default_quality=Decimal(20),
+                default_preset="slow",
+                quality_range=(Decimal(0), Decimal(51)), presets=["slow"],
+            ),
+            profile_args=[],
+        )
+        assert strategy.display_name == strategy.safe_name == strategy.name == "slow+h265-aq"

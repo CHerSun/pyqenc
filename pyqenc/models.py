@@ -27,6 +27,7 @@ from pyqenc.constants import (
     TIME_SEPARATOR_MS,
     UP_ARROW,
 )
+from pyqenc.utils.naming import sanitize_filesystem_text
 
 logger = logging.getLogger(__name__)
 
@@ -113,8 +114,23 @@ class Strategy(BaseModel):
 
     @property
     def name(self) -> str:
-        """Display name used in logs, YAML and filesystem paths (e.g. ``'slow+h265-aq'``)."""
+        """Canonical identity (e.g. ``'slow+h265-aq'``) — display and safe in one.
+
+        Safe by construction (config-load validation of profile/preset names),
+        so the uniform pair (:meth:`display_name` / :meth:`safe_name`) are both
+        passthroughs; consumers pick by purpose without per-type thinking.
+        """
         return f"{self.preset}+{self.profile}"
+
+    @property
+    def display_name(self) -> str:
+        """Display name for logs and sidecars (Req 15.10 uniform footprint)."""
+        return self.name
+
+    @property
+    def safe_name(self) -> str:
+        """Filesystem-safe name — passthrough sanitize (validated safe at load)."""
+        return sanitize_filesystem_text(self.name)
 
     @property
     def pre_input_args(self) -> tuple[str, ...]:

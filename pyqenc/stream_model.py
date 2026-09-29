@@ -49,6 +49,7 @@ from pyqenc.constants import (
     SELECTOR_KEY_CH,
     SELECTOR_KEY_LANG,
     SELECTOR_KEY_TITLE,
+    TIME_SEPARATOR,
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
@@ -328,16 +329,6 @@ class SubtitleStream(Stream[SubtitleStreamInfo]):
         if "ssa"         in codec or "substation" in codec: return "ssa"
         raise ValueError(f"Unknown subtitle codec: {self.info.codec_name}")
 
-    def extracted_file_name(self) -> str:
-        """The extracted subtitle file name — the safe name plus its extension (Req 15.2/15.7).
-
-        Derived, never re-generated: :meth:`display_name` is this stream's
-        single name generator; the disk form is its sanitized counterpart with
-        the codec-derived extension appended. No parser exists:
-        ``extraction.yaml`` carries the resulting paths.
-        """
-        return f"{self.safe_name()}.{self.file_extension}"
-
 
 class AttachmentStream(Stream[AttachmentStreamInfo]):
     """An attachment stream — ``info`` is statically :class:`AttachmentStreamInfo`."""
@@ -348,15 +339,6 @@ class AttachmentStream(Stream[AttachmentStreamInfo]):
         if self.info.filename:
             tags.append(f"filename={self.info.filename}")
         return _format_display_name("attachment", self.info, tags)
-
-    def extracted_file_name(self) -> str:
-        """The dumped attachment file name — the safe name as-is (Req 15.2/15.7).
-
-        Derived, never re-generated: :meth:`display_name` is this stream's
-        single name generator and already carries the attachment's own
-        filename; attachments add no extension of their own.
-        """
-        return self.safe_name()
 
 
 def _display_tags(info: StreamInfo) -> list[str]:
@@ -451,22 +433,42 @@ class VideoStreamChunk(BaseModel):
         Returns:
             The chunk id ``HH꞉MM꞉SS․mmm-HH꞉MM꞉SS․mmm``.
         """
-        start_str = TIME_SEPARATOR_SAFE.join([
-            f"{int(start_ts // 3600):02d}",
-            f"{int((start_ts % 3600) // 60):02d}",
-            f"{start_ts % 60:06.3f}".replace(".", TIME_SEPARATOR_MS),
-        ])
-        end_str = TIME_SEPARATOR_SAFE.join([
-            f"{int(end_ts // 3600):02d}",
-            f"{int((end_ts % 3600) // 60):02d}",
-            f"{end_ts % 60:06.3f}".replace(".", TIME_SEPARATOR_MS),
-        ])
-        return f"{start_str}{RANGE_SEPARATOR}{end_str}"
+        return VideoStreamChunk._format_window(start_ts, end_ts).replace(
+            ":", TIME_SEPARATOR_SAFE,
+        ).replace(
+            ".", TIME_SEPARATOR_MS,
+        )
+
+    @staticmethod
+    def _format_window(start_ts: float, end_ts: float) -> str:
+        """The window in natural separators — the single name generator (Req 15.10).
+
+        ``HH:MM:SS.mmm-HH:MM:SS.mmm``; the chunk id (:meth:`chunk_id`) is this
+        display form with the time separators substituted, never a second
+        assembly.
+        """
+        def _bound(ts: float) -> str:
+            return TIME_SEPARATOR.join([
+                f"{int(ts // 3600):02d}",
+                f"{int((ts % 3600) // 60):02d}",
+                f"{ts % 60:06.3f}",
+            ])
+        return f"{_bound(start_ts)}{RANGE_SEPARATOR}{_bound(end_ts)}"
 
     @property
     def chunk_id(self) -> str:
         """The chunk id derived from the window — never stored separately."""
         return self.format_chunk_id(self.start_timestamp, self.end_timestamp)
+
+    @property
+    def display_name(self) -> str:
+        """Display name — the window in natural separators (Req 15.10)."""
+        return self._format_window(self.start_timestamp, self.end_timestamp)
+
+    @property
+    def safe_name(self) -> str:
+        """Filesystem-safe name — the chunk id (separator-substituted display)."""
+        return self.chunk_id
 
     @property
     def duration_seconds(self) -> float:

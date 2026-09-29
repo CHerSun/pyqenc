@@ -869,7 +869,9 @@ class MergePhase(Phase):
         seen: dict[str, str] = {}
         for by_strategy in encoded_chunks.values():
             for encoded in by_strategy.values():
-                seen[encoded.strategy.name] = encoded.strategy.name
+                # Filesystem form throughout — merge outputs and the concat
+                # options file embed this name (Req 15.10).
+                seen[encoded.strategy.safe_name] = encoded.strategy.safe_name
         return list(seen.items())
 
     def _execute(

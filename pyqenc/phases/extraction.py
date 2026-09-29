@@ -668,13 +668,16 @@ class ExtractionPhase(Phase):
             ))
 
         for stream in self._subtitles:
+            # Disk name = safe name + codec-derived extension (Req 15.10).
             artifacts.append(self._make_stream_artifact(
-                SubtitleArtifact, stream, stream.extracted_file_name(),
+                SubtitleArtifact, stream, f"{stream.safe_name()}.{stream.file_extension}",
                 on_disk_names, selected,
             ))
         for stream in self._attachments:
+            # Attachments carry their own filename inside the display name —
+            # safe name as-is, no extension appended.
             artifacts.append(self._make_stream_artifact(
-                AttachmentArtifact, stream, stream.extracted_file_name(),
+                AttachmentArtifact, stream, stream.safe_name(),
                 on_disk_names, selected,
             ))
 
