@@ -31,7 +31,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from pyqenc.app_config import load_app_config
-from pyqenc.constants import EXTRACTED_DIR, FINAL_OUTPUT_DIR, TIMESTAMPS_FILENAME
+from pyqenc.constants import EXTRACTED_DIR, MERGED_OUTPUT_DIR, TIMESTAMPS_FILENAME
 from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import (
     CleanupLevel,
@@ -508,9 +508,9 @@ class TestMkvmergeOptionsFileLifecycle:
 
             merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=ts_file)
 
-            final_dir    = work_dir / FINAL_OUTPUT_DIR
-            output_file  = final_dir / f"{source.stem} {_SAFE_NAME}.mkv"
-            options_file = final_dir / f"concat_{_SAFE_NAME}.json"
+            merged_dir   = work_dir / MERGED_OUTPUT_DIR
+            output_file  = merged_dir / f"{source.stem} {_SAFE_NAME}.mkv"
+            options_file = merged_dir / f"concat_{_SAFE_NAME}.json"
 
             def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
                 if cmd[0] == "mkvpropedit":
@@ -562,8 +562,8 @@ class TestMkvmergeOptionsFileLifecycle:
 
             merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=ts_file)
 
-            final_dir    = work_dir / FINAL_OUTPUT_DIR
-            options_file = final_dir / f"concat_{_SAFE_NAME}.json"
+            merged_dir   = work_dir / MERGED_OUTPUT_DIR
+            options_file = merged_dir / f"concat_{_SAFE_NAME}.json"
 
             def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
                 result = MagicMock()
@@ -604,8 +604,8 @@ class TestMkvmergeOptionsFileLifecycle:
 
             merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=ts_file)
 
-            final_dir   = work_dir / FINAL_OUTPUT_DIR
-            output_file = final_dir / f"{source.stem} {_SAFE_NAME}.mkv"
+            merged_dir  = work_dir / MERGED_OUTPUT_DIR
+            output_file = merged_dir / f"{source.stem} {_SAFE_NAME}.mkv"
 
             def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
                 result = MagicMock()

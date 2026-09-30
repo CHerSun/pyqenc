@@ -388,7 +388,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
 
     **Validates: Requirement 6.1**
     """
-    from pyqenc.constants import FINAL_OUTPUT_DIR
+    from pyqenc.constants import MERGED_OUTPUT_DIR
     from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
     from pyqenc.phases.encoding import (
         EncodingPhase,
@@ -491,7 +491,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
         merge = MergePhase(config, registry, collector=collector)
 
         source_stem = source.stem
-        output_file = work_dir / FINAL_OUTPUT_DIR / f"{source_stem} {encoded_chunk.strategy.display_name()}.mkv"
+        output_file = work_dir / MERGED_OUTPUT_DIR / f"{source_stem} {encoded_chunk.strategy.display_name()}.mkv"
 
         def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
             output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -512,10 +512,10 @@ def test_frame_count_preservation(frame_count: int) -> None:
         f"(message={merge_result.message!r})"
     )
 
-    complete_artifacts = [a for a in merge_result.merged if a.state == ArtifactState.COMPLETE]
-    assert len(complete_artifacts) == 1
-    assert complete_artifacts[0].frame_count == frame_count, (
-        f"Expected frame_count={frame_count}, got {complete_artifacts[0].frame_count}"
+    complete_rows = [a for a in merge_result.merged if a.state == ArtifactState.COMPLETE]
+    assert len(complete_rows) == 1
+    assert complete_rows[0].payload.frame_count == frame_count, (
+        f"Expected frame_count={frame_count}, got {complete_rows[0].payload.frame_count}"
     )
 
 

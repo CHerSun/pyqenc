@@ -24,7 +24,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
 
 from pyqenc.constants import THICK_LINE
 from pyqenc.metrics import METRICS_YAML_FILENAME, MetricsCollector
@@ -36,7 +35,8 @@ from pyqenc.phase import (
     PhaseRegistry,
     PhaseResult,
 )
-from pyqenc.phases.merge import MergeArtifact
+from pyqenc.phases.merge import MergePhaseResult
+from pyqenc.state import ArtifactState
 from pyqenc.utils.long_path import LongPath
 
 logger = logging.getLogger(__name__)
@@ -323,25 +323,25 @@ class Runner:
 # ---------------------------------------------------------------------------
 
 def _collect_output_files(result: PhaseResult) -> list[Path]:
-    """Return the final output paths from a single phase result.
+    """Return the deliverable paths from the target (merge) phase's result.
 
-    A phase (``MergePhase``) stores its artifacts in ``result.artifacts``; each
-    ``COMPLETE`` artifact whose path lives inside a ``final/`` directory is a
-    pipeline output file. Reads the given (target) phase's result only (Req 4.5).
+    The merge result's ``Artifact[MergedVideo]`` rows carry their materialized
+    locations; every ``COMPLETE`` row's payload path is a pipeline output file
+    (Req 9.3 — no directory sniffing). Reads the given (target) phase's result
+    only (Req 4.5).
 
     Args:
         result: The target phase's result.
 
     Returns:
-        The list of final output file paths (empty when none qualify).
+        The list of merged output file paths (empty when none qualify).
     """
-    # Transitional (dies in task 8, Req 9.3): the rows are still MergeArtifact
-    # subclasses carrying a path; the runner then reads Artifact[MergedVideo]
-    # payloads instead of sniffing the final/ directory.
+    if not isinstance(result, MergePhaseResult):
+        return []
     return [
-        cast(MergeArtifact, artifact).path
-        for artifact in result.complete
-        if cast(MergeArtifact, artifact).path is not None
+        row.payload.output_path
+        for row in result.merged
+        if row.state == ArtifactState.COMPLETE
     ]
 
 

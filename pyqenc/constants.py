@@ -102,8 +102,10 @@ ENCODED_OUTPUT_DIR     = "encoded"
 """Output directory for finalized encoded artifacts (hard-linked winning attempts)."""
 AUDIO_OUTPUT_DIR       = "audio"
 """Output directory for processed audio files (AudioPhase)."""
-FINAL_OUTPUT_DIR       = "final"
-"""Output directory for merged final outputs (MergePhase)."""
+MERGED_OUTPUT_DIR      = "merged"
+"""Output directory for merged outputs (MergePhase) — completing the
+past-participle family (``extracted/``, ``encoded/``, ``merged/``): the merged
+output is the merge phase's product, not a fully finalized container."""
 MEASURE_DIR            = "measure"
 """Output subdirectory name for standalone measure artifacts."""
 

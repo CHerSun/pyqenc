@@ -89,6 +89,20 @@ def _audio_output(out_path: Path):
     )
 
 
+def _merged_row(out_path: Path, state) -> Artifact:
+    """A merged-output row over a minimal MergedVideo payload."""
+    from pyqenc.stream_model import MergedVideo
+
+    return Artifact(
+        payload=MergedVideo(
+            source_stem="source",
+            strategy=_make_strategy_by_name("slow+h265"),
+            output_path=out_path,
+        ),
+        state=state,
+    )
+
+
 def _make_strategy_by_name(name: str) -> Strategy:
     """A minimal Strategy for a ``preset+profile`` display name."""
     from decimal import Decimal
@@ -1463,21 +1477,17 @@ class TestMergePhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.phases.merge import MergeArtifact, MergePhase
+        from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        output_file = tmp_path / "work" / "final" / "source slow+h265.mkv"
+        output_file = tmp_path / "work" / "merged" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
         output_file.write_bytes(b"\x00" * 64)
 
-        stub_artifact = MergeArtifact(
-            path          = output_file,
-            state         = ArtifactState.COMPLETE,
-            strategy_name = "slow+h265",
-        )
+        stub_artifact = _merged_row(output_file, ArtifactState.COMPLETE)
 
         with patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             phase.run()
@@ -1492,21 +1502,17 @@ class TestMergePhaseTiming:
 
         Validates: Requirements 6.5
         """
-        from pyqenc.phases.merge import MergeArtifact, MergePhase
+        from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
         from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        output_file = tmp_path / "work" / "final" / "source slow+h265.mkv"
+        output_file = tmp_path / "work" / "merged" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        stub_artifact = MergeArtifact(
-            path          = output_file,
-            state         = ArtifactState.ABSENT,
-            strategy_name = "slow+h265",
-        )
+        stub_artifact = _merged_row(output_file, ArtifactState.ABSENT)
 
         encoded_path = tmp_path / "work" / "encoded" / "slow+h265" / "chunk_0.mkv"
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1538,7 +1544,7 @@ class TestMergePhaseTiming:
         Validates: Requirements 6.5
         """
         from pyqenc.models import PhaseOutcome
-        from pyqenc.phases.merge import MergeArtifact, MergePhase
+        from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
 
         collector = _spy_collector()
@@ -1614,14 +1620,10 @@ class TestMergePhaseTiming:
         registry[EncodingPhase]   = encoding_mock    # type: ignore[index]
         registry[AudioPhase]      = audio_mock       # type: ignore[index]
 
-        output_file = tmp_path / "work" / "final" / "source slow+h265.mkv"
+        output_file = tmp_path / "work" / "merged" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        stub_artifact = MergeArtifact(
-            path          = output_file,
-            state         = ArtifactState.ABSENT,
-            strategy_name = "slow+h265",
-        )
+        stub_artifact = _merged_row(output_file, ArtifactState.ABSENT)
 
         encoded_path = tmp_path / "work" / "encoded" / "slow+h265" / "chunk_0.mkv"
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1650,21 +1652,17 @@ class TestMergePhaseTiming:
 
         Validates: Requirements 6.4, 6.5
         """
-        from pyqenc.phases.merge import MergeArtifact, MergePhase
+        from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
 
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
 
-        output_file = tmp_path / "work" / "final" / "source slow+h265.mkv"
+        output_file = tmp_path / "work" / "merged" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
         output_file.write_bytes(b"\x00" * 64)
 
-        stub_artifact = MergeArtifact(
-            path          = output_file,
-            state         = ArtifactState.COMPLETE,
-            strategy_name = "slow+h265",
-        )
+        stub_artifact = _merged_row(output_file, ArtifactState.COMPLETE)
 
         with patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             result = phase.run()
