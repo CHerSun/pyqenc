@@ -10,11 +10,10 @@ import asyncio
 import json
 import logging
 import os
-import shutil as _shutil
+import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from dataclasses import dataclass as _dataclass
 from dataclasses import replace as _dc_replace
 from decimal import Decimal
 from pathlib import Path
@@ -188,7 +187,7 @@ def _hardlink_or_copy(src: Path, dst: Path) -> None:
         logger.debug("Hard-linked %s → %s", src.name, dst)
     except OSError:
         # Cross-device link or other OS restriction — fall back to copy
-        _shutil.copy2(src, dst)
+        shutil.copy2(src, dst)
         logger.debug("Copied (cross-device fallback) %s → %s", src.name, dst)
 
 
@@ -753,7 +752,7 @@ class ChunkEncoder:
                         metrics_dir = encoding_dir / attempt_file.stem
                         if metrics_dir.is_dir():
                             try:
-                                _shutil.rmtree(metrics_dir)
+                                shutil.rmtree(metrics_dir)
                                 logger.debug(
                                     "Intermediate cleanup: deleted metrics dir %s", metrics_dir.name
                                 )
@@ -1638,7 +1637,7 @@ def encode_all_chunks(
 # EncodingPhase — Phase object
 # ---------------------------------------------------------------------------
 
-@_dataclass
+@dataclass
 class EncodingPhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying encoding-specific payload.
 
@@ -1742,7 +1741,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         for target in (work_dir / ENCODING_WORKSPACE_DIR, work_dir / ENCODED_OUTPUT_DIR):
             if target.exists():
                 try:
-                    _shutil.rmtree(target)
+                    shutil.rmtree(target)
                     logger.debug("deep cleanup: deleted %s", target)
                 except OSError as exc:
                     logger.warning("deep cleanup: could not delete %s: %s", target, exc)
@@ -1783,7 +1782,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         if force_wipe:
             for d in (enc_dir, out_dir):
                 if d.exists():
-                    _shutil.rmtree(d)
+                    shutil.rmtree(d)
                     logger.debug("force_wipe: deleted %s", d)
             if yaml_path.exists():
                 yaml_path.unlink()

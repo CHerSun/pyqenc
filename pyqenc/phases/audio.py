@@ -24,8 +24,7 @@ logger = logging.getLogger(__name__)
 # AudioPhase — Phase object
 # ---------------------------------------------------------------------------
 
-from dataclasses import dataclass as _dataclass
-from dataclasses import field as _field
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
@@ -72,7 +71,7 @@ _AUDIO_YAML = "audio.yaml"
 _FALLBACK_LAYOUT_TOKEN = "stereo"
 
 
-@_dataclass
+@dataclass
 class AudioPhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying the audio phase's typed outputs.
 
@@ -86,7 +85,7 @@ class AudioPhaseResult(PhaseResult):
         outputs: Typed chain-output rows (all wanted outputs).
     """
 
-    outputs: list[Artifact[AudioOutput]] = _field(default_factory=list)
+    outputs: list[Artifact[AudioOutput]] = field(default_factory=list)
 
 
 class AudioPhase(Phase[AudioPhaseResult]):
