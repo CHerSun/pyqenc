@@ -157,11 +157,6 @@ _PROGRESS_FLAGS: list[str] = ["-hide_banner", "-nostats", "-progress", "pipe:1"]
 """Flags injected after the ffmpeg executable in every composed command."""
 
 
-def _format_seconds(value: float) -> str:
-    """Format a window bound for ``-ss``/``-t`` as plain ``str(float)``."""
-    return str(value)
-
-
 def compose_command(
     request: FFmpegRequest,
 ) -> tuple[list[str | os.PathLike], tuple[Path, Path] | None]:
@@ -190,9 +185,10 @@ def compose_command(
     for inp in request.inputs:
         argv.extend(inp.pre_input_args)
         if inp.start_seconds is not None:
-            argv.extend([FFMPEG_ARG_SEEK, _format_seconds(inp.start_seconds)])
+            # Window bounds go to ffmpeg as plain str(float) — no fixed-precision formatting.
+            argv.extend([FFMPEG_ARG_SEEK, str(inp.start_seconds)])
         if inp.duration_seconds is not None:
-            argv.extend([FFMPEG_ARG_DURATION, _format_seconds(inp.duration_seconds)])
+            argv.extend([FFMPEG_ARG_DURATION, str(inp.duration_seconds)])
         argv.extend([FFMPEG_ARG_INPUT, inp.path])
 
     for inp in request.inputs:
