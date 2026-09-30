@@ -27,7 +27,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pyqenc.app_config import load_app_config
-from pyqenc.metrics import MetricKey, NoOpMetricsCollector
+from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import (
     CleanupLevel,
     CropParams,
@@ -39,6 +39,12 @@ from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import ArtifactState, ProbeState
 from pyqenc.stream_model import File, VideoStream, VideoStreamInfo
+from tests.test_metrics_integration import (
+    _dotted_groups,
+    _dotted_keys,
+    _recorded_metrics,
+    _top_level_keys,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers — build REAL typed results and a REAL registry
@@ -211,7 +217,7 @@ class TestProbePhaseReused:
         override_crop     = CropParams(top=0, bottom=0)
 
         with (
-            patch("pyqenc.utils.crop.detect_crop_parameters", return_value=override_crop),
+            patch("pyqenc.phases.probe.detect_crop_parameters", return_value=override_crop),
             patch("pyqenc.phases.probe.get_frame_count", return_value=1440),
         ):
             phase  = _make_probe_phase(job_result, extraction_result, crop_params=override_crop)
@@ -250,7 +256,7 @@ class TestProbePhaseCompleted:
         body = "".join(f"{i * 42}\n" for i in range(self._DETECTED_FRAME_COUNT))
         timestamps.write_text("# timestamp format v2\n" + body, encoding="utf-8")
 
-        with patch("pyqenc.utils.crop.detect_crop_parameters", return_value=self._DETECTED_CROP):
+        with patch("pyqenc.phases.probe.detect_crop_parameters", return_value=self._DETECTED_CROP):
             result = phase.run()
 
         return result, work_dir
@@ -288,66 +294,69 @@ class TestProbePhaseCompleted:
 
 
 class TestProbeTiming:
-    """The collector now times the probe phase (closes the TODO-7 gap)."""
+    """The probe phase's work is visible in metrics.yaml (closes the TODO-7 gap)."""
 
     _DETECTED_CROP = CropParams(top=8, bottom=8, left=0, right=0)
     _DETECTED_FRAME_COUNT = 1234
 
-    def test_all_probe_spans_recorded_on_fresh_run(self, tmp_path: Path) -> None:
-        """Fresh probe records top-level `probe` plus both dotted sub-action keys."""
-        from unittest.mock import MagicMock
+    def test_fresh_run_records_probe_and_sub_actions(self, tmp_path: Path) -> None:
+        """A fresh probe run reports the top-level ``probe`` row plus both
+        dotted sub-action rows (crop_detect, frame_count) in metrics.yaml.
 
-        from pyqenc.metrics import MetricsCollector
-
-        collector = MagicMock(spec=MetricsCollector)
-        collector.time.return_value = __import__("contextlib").nullcontext()
-
+        Bug guarded: the probe phase's work (crop detection, frame counting —
+        both external ffmpeg/ffprobe passes) finishing without its cost being
+        attributable in the run's report.
+        """
         source = tmp_path / "source.mkv"
         source.write_bytes(bytes(64))
         job_result = _make_job_result(tmp_path, source)
         extraction_result = _make_extraction_result(tmp_path, _make_video_stream(source))
 
-        phase = _make_probe_phase(
-            job_result, extraction_result, collector=collector
-        )
+        def run(collector) -> None:
+            phase = _make_probe_phase(
+                job_result, extraction_result, collector=collector
+            )
+            # Frame count via the null-count fallback (no timestamps file).
+            with (
+                patch("pyqenc.phases.probe.detect_crop_parameters", return_value=self._DETECTED_CROP),
+                patch("pyqenc.phases.probe.get_frame_count", return_value=self._DETECTED_FRAME_COUNT),
+            ):
+                result = phase.run()
+            assert result.outcome is PhaseOutcome.COMPLETED
 
-        # Frame count via the null-count fallback (no timestamps file).
-        with (
-            patch("pyqenc.utils.crop.detect_crop_parameters", return_value=self._DETECTED_CROP),
-            patch("pyqenc.phases.probe.get_frame_count", return_value=self._DETECTED_FRAME_COUNT),
-        ):
-            result = phase.run()
+        metrics   = _recorded_metrics(tmp_path, run)
+        top_level = _top_level_keys(metrics)
+        assert "probe" in top_level, f"probe row missing: {sorted(top_level)}"
+        dotted = _dotted_keys(metrics)
+        assert "probe.crop_detect" in dotted, f"crop_detect missing: {sorted(dotted)}"
+        assert "probe.frame_count" in dotted, f"frame_count missing: {sorted(dotted)}"
 
-        assert result.outcome is PhaseOutcome.COMPLETED
+    def test_cached_run_records_no_probe_work_rows(self, tmp_path: Path) -> None:
+        """A fully cached probe run reports only recovery — no probe work rows.
 
-        calls = [call.args for call in collector.time.call_args_list]
-        assert (MetricKey.RECOVERY,) in calls, f"recovery span missing: {calls}"
-        assert (MetricKey.PROBE, "crop_detect") in calls, f"crop_detect span missing: {calls}"
-        assert (MetricKey.PROBE, "frame_count") in calls, f"frame_count span missing: {calls}"
-
-    def test_cached_run_records_no_probe_work_spans(self, tmp_path: Path) -> None:
-        """Fully cached probe.yaml records only recovery — no probe spans."""
-        from unittest.mock import MagicMock
-
-        from pyqenc.metrics import MetricsCollector
-
-        collector = MagicMock(spec=MetricsCollector)
-        collector.time.return_value = __import__("contextlib").nullcontext()
-
+        Bug guarded: a cached probe.yaml re-running (and re-timing) crop
+        detection or frame counting over values it already has.
+        """
         source = tmp_path / "source.mkv"
         source.write_bytes(bytes(64))
         job_result = _make_job_result(tmp_path, source)
         extraction_result = _make_extraction_result(tmp_path, _make_video_stream(source))
-
-        phase = _make_probe_phase(
-            job_result, extraction_result, collector=collector
-        )
         _write_probe_yaml(
             tmp_path, frame_count=42, crop=CropParams(top=1, bottom=1, left=0, right=0)
         )
 
-        result = phase.run()
+        def run(collector) -> None:
+            phase = _make_probe_phase(
+                job_result, extraction_result, collector=collector
+            )
+            result = phase.run()
+            assert result.outcome is PhaseOutcome.REUSED
 
-        assert result.outcome is PhaseOutcome.REUSED
-        calls = [call.args for call in collector.time.call_args_list]
-        assert calls == [(MetricKey.RECOVERY,)], f"unexpected spans: {calls}"
+        metrics = _recorded_metrics(tmp_path, run)
+        top_level = _top_level_keys(metrics)
+        assert top_level == {"recovery"}, (
+            f"a cached probe must report only its recovery scan, got: {sorted(top_level)}"
+        )
+        assert not _dotted_groups(metrics), (
+            f"a cached probe must report no sub-action rows, got: {_dotted_groups(metrics)}"
+        )

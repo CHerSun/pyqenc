@@ -104,7 +104,7 @@ def _captured_request(encoder: ChunkEncoder, crop: CropParams | None) -> FFmpegR
 
 def _captured_cmd(encoder: ChunkEncoder, crop: CropParams | None) -> list[str]:
     """Composed launch argv of the request captured by ``_captured_request``."""
-    return [str(a) for a in compose_command(_captured_request(encoder, crop))]
+    return [str(a) for a in compose_command(_captured_request(encoder, crop))[0]]
 
 
 # ---------------------------------------------------------------------------

@@ -517,9 +517,8 @@ class PassthroughFilter(FilterType):
     executing it is **not yet implemented**. Its :meth:`resolve` fails loudly so
     a passthrough chain can never silently produce an incorrect file.
 
-    Future behaviour (planned in the in-memory-stream spec): a passthrough chain
-    produces no file at all — the source stream object is surfaced directly into
-    the phase result for the muxer to consume, avoiding on-disk extraction.
+    Planned (in-memory-stream spec): a passthrough chain surfaces the source
+    stream object directly into the phase result — no file produced.
     """
 
     type_id      = "passthrough"
@@ -532,8 +531,6 @@ class PassthroughFilter(FilterType):
     ) -> FilterStep:
         """Raise — passthrough execution is not implemented yet (fail loud)."""
         raise NotImplementedError(
-            "passthrough is not implemented yet. It is reserved for the future "
-            "in-memory-stream spec, where a passthrough chain will surface the "
-            "source stream object directly into the phase result and produce no "
-            "file. It must never silently emit an incorrect file until then."
+            "passthrough is not implemented yet. "
+            "It must never silently emit an incorrect file."
         )

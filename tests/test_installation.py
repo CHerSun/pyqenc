@@ -18,7 +18,8 @@ def test_console_script_available():
     result = subprocess.run(
         [sys.executable, "-m", "pyqenc.cli", "--help"],
         capture_output=True,
-        text=True
+        text=True,
+        check=False,
     )
 
     assert result.returncode == 0
@@ -36,7 +37,8 @@ def test_auto_subcommand_help():
     result = subprocess.run(
         [sys.executable, "-m", "pyqenc.cli", "auto", "--help"],
         capture_output=True,
-        text=True
+        text=True,
+        check=False,
     )
 
     assert result.returncode == 0
@@ -143,6 +145,6 @@ if __name__ == "__main__":
     except AssertionError as e:
         print(f"\n✗ Test failed: {e}")
         sys.exit(1)
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError) as e:
         print(f"\n✗ Unexpected error: {e}")
         sys.exit(1)

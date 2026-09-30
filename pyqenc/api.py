@@ -22,6 +22,7 @@ it to the runner.
 """
 # CHerSun 2026
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -30,6 +31,11 @@ from pyqenc.constants import DEFAULT_SCREENSHOT_COUNT
 from pyqenc.metrics import NoOpMetricsCollector, YamlMetricsCollector
 from pyqenc.models import CleanupLevel, CropParams
 from pyqenc.phase import Phase, _build_registry
+from pyqenc.phases.audio import AudioPhase
+from pyqenc.phases.chunking import ChunkingPhase
+from pyqenc.phases.encoding import EncodingPhase
+from pyqenc.phases.extraction import ExtractionPhase
+from pyqenc.phases.measure import _parse_duration, run_measure
 from pyqenc.phases.merge import MergePhase
 from pyqenc.runner import Runner, RunResult
 from pyqenc.utils.long_path import LongPath
@@ -207,7 +213,6 @@ def extract_streams(
     Raises:
         FileNotFoundError: If source video does not exist.
     """
-    from pyqenc.phases.extraction import ExtractionPhase
 
     return _drive(
         config,
@@ -257,7 +262,6 @@ def chunk_video(
         FileNotFoundError: If source video does not exist.
         ValueError:        If scene threshold or min scene length is invalid.
     """
-    from pyqenc.phases.chunking import ChunkingPhase
 
     return _drive(
         config,
@@ -305,7 +309,6 @@ def process_audio(
     Raises:
         FileNotFoundError: If source video does not exist.
     """
-    from pyqenc.phases.audio import AudioPhase
 
     return _drive(
         config,
@@ -354,7 +357,6 @@ def encode_chunks(
         FileNotFoundError: If source video does not exist.
         ValueError:        If strategies or quality targets are invalid.
     """
-    from pyqenc.phases.encoding import EncodingPhase
 
     return _drive(
         config,
@@ -421,9 +423,9 @@ def merge_final(
 def measure_quality(
     source_video:             Path,
     work_dir:                 Path,
+    metrics_sampling:         int,
     target_videos:            list[Path]        | None = None,
     crop_params:              CropParams | None = None,
-    metrics_sampling:         int               = 3,
     screenshot_count:         int | None        = DEFAULT_SCREENSHOT_COUNT,
     screenshot_interval:      str | None        = None,
     width:                    int | None        = None,
@@ -449,7 +451,7 @@ def measure_quality(
                                   computation. Pass ``None`` to auto-load from
                                   ``job.yaml`` in ``work_dir`` if present; pass an
                                   empty ``CropParams`` to explicitly disable cropping.
-        metrics_sampling:         Frame subsampling factor (≥1, default 3).
+        metrics_sampling:         Frame subsampling factor (≥1).
         screenshot_count:         Screenshots to capture from each video (≥1, default 20).
                                   In interval mode, acts as a cap on the total count.
         screenshot_interval:      Interval string between screenshots in interval mode
@@ -467,9 +469,6 @@ def measure_quality(
         FileNotFoundError: If ``source_video`` or any path in ``target_videos`` does not exist.
         ValueError:        If ``metrics_sampling`` < 1 or ``screenshot_count`` < 1.
     """
-    import asyncio
-
-    from pyqenc.phases.measure import _parse_duration, run_measure
 
     if not source_video.exists():
         raise FileNotFoundError(f"Source video not found: {source_video}")
@@ -486,7 +485,7 @@ def measure_quality(
         target_videos            = target_videos or [],
         work_dir                 = work_dir,
         crop_params              = crop_params,
-        metrics_sampling         = metrics_sampling,
+        sampling                  = metrics_sampling,
         width                    = width,
         screenshot_count         = screenshot_count,
         screenshot_interval      = parsed_interval,

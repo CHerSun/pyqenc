@@ -150,7 +150,7 @@ pyqenc config .     # preview: would show which config is active and where it wi
 pyqenc config . -y  # execute the copy
 ```
 
-Config search order (first found wins): `./pyqenc.yaml` → `~/.config/pyqenc/config.yaml` → built-in defaults.
+Config build order: built-in defaults → `~/.config/pyqenc/config.yaml` → `./pyqenc.yaml` . Later config override prior ones. Lists and values get fully replaced, dicts are merged.
 
 ---
 

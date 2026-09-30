@@ -67,7 +67,7 @@ class TestComposeCommand:
             filter_complex = "[0:v][1:v]psnr",
             output         = Path("/out/x.mkv"),
         )
-        assert _flat(compose_command(request)) == [
+        assert _flat(compose_command(request)[0]) == [
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
             "-hwaccel", "cuda", "-ss", "1.5", "-t", "2.25", "-i", str(Path("/src/a.mkv")),
             "-i", str(Path("/src/b.mkv")),
@@ -84,7 +84,7 @@ class TestComposeCommand:
             inputs      = [FFmpegInput(path=Path("/v.mkv"), selector="0:v:0")],
             output_args = ("-c", "copy"),
         )
-        assert _flat(compose_command(request))[-5:] == [
+        assert _flat(compose_command(request)[0])[-5:] == [
             "-c", "copy", "-map_chapters", "-1", "-f", "null", "-",
         ][-5:]
 
@@ -93,7 +93,7 @@ class TestComposeCommand:
             inputs      = [FFmpegInput(path=Path("/v.mkv"), selector="0:v:0")],
             output_args = ("-c", "copy"),
         )
-        assert _flat(compose_command(request)) == [
+        assert _flat(compose_command(request)[0]) == [
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
             "-i", str(Path("/v.mkv")),
             "-map", "0:v:0",
@@ -110,7 +110,7 @@ class TestComposeCommand:
             output       = Path("/out/a.flac"),
             output_format = "flac",
         )
-        argv = _flat(compose_command(request))
+        argv = _flat(compose_command(request)[0])
         assert argv[-3:] == ["-f", "flac", str(Path("/out/a.tmp"))]
 
     def test_tmp_output_is_stem_tmp_sibling(self) -> None:
@@ -121,7 +121,7 @@ class TestComposeCommand:
             output_args = ("-c", "copy"),
             output      = Path("/out/chunk.1920x800.q22.mkv"),
         )
-        argv = _flat(compose_command(request))
+        argv = _flat(compose_command(request)[0])
         assert argv[-1] == str(Path("/out/chunk.1920x800.q22.tmp"))
 
     def test_zero_start_is_emitted_not_skipped(self) -> None:
@@ -131,7 +131,7 @@ class TestComposeCommand:
             inputs      = [FFmpegInput(path=Path("/v.mkv"), start_seconds=0.0, duration_seconds=1.0)],
             output_args = (),
         )
-        argv = _flat(compose_command(request))
+        argv = _flat(compose_command(request)[0])
         assert argv[6:10] == ["-ss", "0.0", "-t", "1.0"]
 
     def test_selector_only_inputs_get_maps_in_order(self) -> None:
@@ -145,7 +145,7 @@ class TestComposeCommand:
             ],
             output_args = (),
         )
-        argv = _flat(compose_command(request))
+        argv = _flat(compose_command(request)[0])
         maps = [argv[i + 1] for i, a in enumerate(argv) if a == "-map"]
         assert maps == ["1:2", "2:0"]
 
@@ -153,7 +153,7 @@ class TestComposeCommand:
         """Every request carries ``-y`` (stale .tmp must never hang ffmpeg)
         and ``-map_chapters -1`` (no output ever inherits input chapters)."""
         request = FFmpegRequest(inputs=[FFmpegInput(path=Path("/v.mkv"))], output_args=())
-        argv = _flat(compose_command(request))
+        argv = _flat(compose_command(request)[0])
         assert argv[1:6] == [*_PROGRESS_FLAGS, "-y"]
         assert "-map_chapters" in argv
         assert argv[argv.index("-map_chapters") + 1] == "-1"
@@ -169,7 +169,7 @@ class TestGetFrameCount:
         with patch("pyqenc.utils.ffmpeg_runner.run_ffmpeg", return_value=result) as mock_run:
             assert get_frame_count(Path("/v.mkv")) == 42
         request = mock_run.call_args[0][0]
-        assert _flat(compose_command(request)) == [
+        assert _flat(compose_command(request)[0]) == [
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
             "-i", str(Path("/v.mkv")),
             "-map", "0:v:0",

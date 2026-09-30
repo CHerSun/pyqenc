@@ -41,6 +41,7 @@ from pyqenc.models import (
     CodecConfig,
     QualityTarget,
     Strategy,
+    _coerce_decimal_pair,
 )
 from pyqenc.utils.naming import is_filesystem_safe_name
 
@@ -136,8 +137,7 @@ class ProfileConfig(BaseModel):
         """Coerce ``quality_range`` elements to ``Decimal``, preserving config order."""
         if v is None:
             return None
-        a, b = Decimal(str(v[0])), Decimal(str(v[1]))
-        return a, b
+        return _coerce_decimal_pair(v)
 
 
 class ExtractionConfig(BaseModel):
@@ -159,13 +159,9 @@ class ExtractionConfig(BaseModel):
 
 
 class ChunkingConfig(BaseModel):
-    """Chunking phase configuration controlling split strategy and scene detection.
+    """Chunking phase configuration controlling scene detection.
 
     Attributes:
-        mode:              Chunking strategy — ``LOSSLESS`` re-encodes each chunk
-                           to FFV1 all-intra for frame-perfect boundaries;
-                           ``REMUX`` stream-copies for speed at the cost of snapping
-                           to the nearest I-frame.
         scene_threshold:   Minimum content-change score (0.0–1.0) for the scene
                            detector to declare a scene boundary. Lower values make
                            the detector more sensitive.
@@ -208,7 +204,7 @@ class EncodingConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
     @model_validator(mode="after")
-    def _invalidate_resolved_cache_on_mutation(self) -> "EncodingConfig":
+    def _invalidate_resolved_cache_on_mutation(self) -> EncodingConfig:
         """Invalidate the resolved caches whenever a field is assigned.
 
         ``AppConfig`` resolves eagerly at validation time and ``resolve()`` is
@@ -273,13 +269,12 @@ class EncodingConfig(BaseModel):
         """Resolved ``QualityTarget`` objects; populated after :meth:`resolve` is called.
 
         Raises:
-            RuntimeError: If :meth:`resolve` has not been called yet.
+            AssertionError: If :meth:`resolve` has not been called yet.
         """
-        if self._resolved_targets is None:
-            raise RuntimeError(
-                "EncodingConfig.resolve() has not been called — "
-                "resolved_targets is not available."
-            )
+        assert self._resolved_targets is not None, (
+            "EncodingConfig.resolve() must be called before accessing "
+            "resolved_targets"
+        )
         return self._resolved_targets
 
     @property
@@ -287,13 +282,12 @@ class EncodingConfig(BaseModel):
         """Resolved ``Strategy`` objects; populated after :meth:`resolve` is called.
 
         Raises:
-            RuntimeError: If :meth:`resolve` has not been called yet.
+            AssertionError: If :meth:`resolve` has not been called yet.
         """
-        if self._resolved_strategies is None:
-            raise RuntimeError(
-                "EncodingConfig.resolve() has not been called — "
-                "resolved_strategies is not available."
-            )
+        assert self._resolved_strategies is not None, (
+            "EncodingConfig.resolve() must be called before accessing "
+            "resolved_strategies"
+        )
         return self._resolved_strategies
 
 
@@ -304,10 +298,10 @@ class FilterInstance(BaseModel):
     ``type`` against the filter-type **registry** (``pyqenc.audio.filters``) — the
     single authority on which types exist — and validates the remaining fields
     against that type's ``params_model`` (whose ``extra="forbid"`` rejects unknown
-    params). No filter-type ids are enumerated here (Req 2.5); adding a filter
+    params). No filter-type ids are enumerated here; adding a filter
     type never touches this model.
 
-    Task 6 constructs the runnable filter from an instance via
+    The runnable filter is constructed from an instance via
     ``get_filter_class(inst.type)(inst.params)``.
 
     Attributes:
@@ -318,12 +312,9 @@ class FilterInstance(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     type:   str
-    # ``SerializeAsAny`` makes ``params`` serialise by its RUNTIME concrete type
-    # (the per-filter param model) rather than the declared ``BaseModel``. Without
-    # it, ``model_dump``/``model_dump_json`` would emit ``{}`` (the base model has
-    # no fields), which would silently drop every filter param — breaking the
-    # sidecar signature so a changed param could never be detected for
-    # invalidation.
+    # ``SerializeAsAny``: ``params`` must serialise by its runtime concrete
+    # type — the declared ``BaseModel`` would dump ``{}`` and silently drop
+    # every filter param.
     params: SerializeAsAny[BaseModel]
 
     @model_validator(mode="before")
@@ -407,20 +398,20 @@ class SelectEntry(BaseModel):
 class AudioConfig(BaseModel):
     """Audio processing configuration: filter palette, chains, and track select.
 
-    Replaces the former flat model. The three pieces are:
+    The three pieces are:
 
     - ``filters`` — a **palette** of named, reusable filter definitions, each
       validated through the filter-type registry (:class:`FilterInstance`).
       Uses **dict-merge** across config layers, so a later layer may add or tune
-      a named filter without redefining the whole palette (Req 1.3).
+      a named filter without redefining the whole palette.
     - ``chains`` — ordered recipes referencing filter names. Uses **list-replace**
-      across layers (Req 4.2).
+      across layers.
     - ``select`` — an ordered track-selection tree; empty means "all extracted
-      tracks" (Req 5.3). Uses **list-replace** across layers (Req 5.2).
+      tracks". Uses **list-replace** across layers.
 
     Cross-field integrity (chain→filter references, name uniqueness, passthrough
     alone, filename-safe names) is enforced by :meth:`_validate_chains` and
-    surfaces as a ``ValidationError`` at config load (Req 12.1).
+    surfaces as a ``ValidationError`` at config load.
 
     Attributes:
         filters: Palette: filter name → validated :class:`FilterInstance`.
@@ -478,7 +469,7 @@ def _validate_chain_name_filesystem_safe(name: str) -> None:
     Rejects empty/whitespace-only names and any filesystem-unsafe character
     (via :func:`pyqenc.utils.naming.is_filesystem_safe_name`). Chain names
     form the ``chain=<name>`` filename suffix, so they must be
-    filesystem-safe (Req 8.4).
+    filesystem-safe.
 
     Args:
         name: The chain name to validate.
@@ -567,7 +558,7 @@ class AppConfig(BaseModel):
         in a name would make pattern parsing ambiguous.
 
         Additionally rejects profile and preset names containing filesystem-unsafe
-        characters (Req 15.6): a strategy name (``profile[preset]``) is embedded
+        characters: a strategy name (``profile[preset]``) is embedded
         verbatim in strategy directory and merge output names, so its parts are
         safe by construction — validated at the definition point, never
         sanitized at a use point.
@@ -791,7 +782,7 @@ def _validate_profile_quality_range(
     p_better, p_worse = profile_range
     c_better, c_worse = codec.quality_better, codec.quality_worse
 
-    if codec.quality_higher_is_better:
+    if codec.quality_range[0] > codec.quality_range[1]:
         # VBR: better > worse (e.g. [99.5, 0.5] Mbit/s).
         # Profile better must not exceed codec better; profile worse must not go below codec worse.
         out_of_range = p_better > c_better or p_worse < c_worse

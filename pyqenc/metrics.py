@@ -7,49 +7,42 @@ Metrics are accumulated throughout a pipeline run and persisted incrementally to
 ``metrics.yaml`` in the work directory root using the `.tmp`-then-rename atomic
 write protocol.  The report survives interruptions and resumes across runs.
 
-Usage (orchestrator)::
+Usage::
 
     collector = YamlMetricsCollector(work_dir=config.work_dir)
-    registry  = _build_registry(config, collector)
     # ... run phases ...
-    collector.flush(partial=False)
-
-Usage (standalone / tests)::
-
-    collector = NoOpMetricsCollector()
-    registry  = _build_registry(config, collector)
+    collector.flush()
 """
 
 from __future__ import annotations
 
 __all__ = [
-    # Enums
-    "MetricKey",
-    # Type aliases
-    "MetricsStore",
-    # Dataclasses
-    "ConvergenceUpdate",
     # Pydantic models
     "AttemptStats",
     "ConvergenceStats",
-    "TopLevelEntry",
+    # Dataclasses
+    "ConvergenceUpdate",
     "DottedEntry",
     "DottedGroup",
-    "TimeDistribution",
-    "PipelineMetrics",
+    # Enums
+    "MetricKey",
     # Protocol + implementations
     "MetricsCollector",
+    # Type aliases
+    "MetricsStore",
     "NoOpMetricsCollector",
-    # Interrupt-flush registry
-    "flush_all_metrics",
+    "PipelineMetrics",
+    "TimeDistribution",
+    "TopLevelEntry",
+    "YamlMetricsCollector",
     # Internal helpers exposed for testing
     "_ConvergenceAccumulator",
-    "_update_accumulator",
     "_compute_convergence",
-    "_compute_top_level_entries",
     "_compute_dotted_groups",
-    # Added in task 7:
-    "YamlMetricsCollector",
+    "_compute_top_level_entries",
+    "_update_accumulator",
+    # Interrupt-flush registry
+    "flush_all_metrics",
 ]
 
 import contextlib
@@ -57,11 +50,11 @@ import logging
 import math
 import threading
 import time as _time
-from dataclasses import (  # noqa: F401  (field used in ConvergenceAccumulator — task 5)
+from dataclasses import (  # noqa: F401
     dataclass,
     field,
 )
-from datetime import datetime  # noqa: F401  (used in flush — task 7)
+from datetime import datetime  # noqa: F401
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -147,15 +140,6 @@ def _last_dot_prefix(key: str) -> str:
     For ``"a.b.c"`` returns ``"a.b"``.
     """
     return key.rsplit(DOTTED_KEY_SEPARATOR, 1)[0]
-
-
-def _build_key(key: MetricKey, *parts: str) -> str:
-    """Join *key* and zero or more *parts* with the metric key separator.
-
-    With no parts returns the top-level key string (e.g. ``"encoding"``).
-    With one or more parts returns a dotted key (e.g. ``"encoding.h265"``).
-    """
-    return DOTTED_KEY_SEPARATOR.join((key, *parts))
 
 
 # ---------------------------------------------------------------------------
@@ -265,13 +249,9 @@ class PipelineMetrics(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Interrupt-flush registry
+# Interrupt-flush registry — reached directly by the CLI SIGINT handler
+# (never through the runner) to flush partial timing before ``os._exit``.
 # ---------------------------------------------------------------------------
-#
-# Symmetric with ffmpeg's ``_live_procs`` / ``kill_all_ffmpeg`` in
-# ``ffmpeg_runner``: the collectors own their own registry, and the CLI SIGINT
-# handler reaches this registry (never through the runner) to flush partial
-# timing before ``os._exit``.
 
 _live_collectors_lock: threading.Lock = threading.Lock()
 _live_collectors: set[YamlMetricsCollector] = set()
@@ -466,10 +446,10 @@ def _compute_top_level_entries(store: MetricsStore) -> tuple[int, list[TopLevelE
         is the integer-rounded sum of all top-level values.
     """
     top_level_raw = {k: v for k, v in store.items() if _is_top_level(k)}
-    grand_total   = int(round(sum(top_level_raw.values()))) if top_level_raw else 0
+    grand_total   = round(sum(top_level_raw.values())) if top_level_raw else 0
     entries: list[TopLevelEntry] = []
     for key, val in top_level_raw.items():
-        secs = int(round(val))
+        secs = round(val)
         if secs == 0:
             continue
         percent = f"{secs / grand_total * 100:.1f}%" if grand_total > 0 else "0.0%"
@@ -503,12 +483,12 @@ def _compute_dotted_groups(store: MetricsStore) -> dict[str, DottedGroup]:
 
     result: dict[str, DottedGroup] = {}
     for prefix, siblings in prefix_groups.items():
-        prefix_total = int(round(sum(siblings.values())))
+        prefix_total = round(sum(siblings.values()))
         if prefix_total == 0:
             continue  # omit prefix groups where all values are zero
         breakdown: list[DottedEntry] = []
         for key, val in siblings.items():
-            secs = int(round(val))
+            secs = round(val)
             if secs == 0:
                 continue
             percent = f"{secs / prefix_total * 100:.1f}%" if prefix_total > 0 else "0.0%"
@@ -600,7 +580,7 @@ class YamlMetricsCollector(MetricsCollector):
                 logger.debug("Metrics: unknown key %r in persisted file, skipping", entry.key)
 
         # Restore dotted time accumulators
-        for _prefix, group in pm.time_distribution.dotted.items():
+        for group in pm.time_distribution.dotted.values():
             for entry in group.breakdown:
                 try:
                     self._store[entry.key] = float(entry.seconds)
@@ -636,7 +616,7 @@ class YamlMetricsCollector(MetricsCollector):
         incremental flush if needed.  Exceptions are re-raised after recording
         elapsed time so timing is never lost.
         """
-        return self._TimingContext(self, _build_key(key, *parts))
+        return self._TimingContext(self, DOTTED_KEY_SEPARATOR.join((key, *parts)))
 
     class _TimingContext:
         """Inner context manager used by :meth:`YamlMetricsCollector.time`."""

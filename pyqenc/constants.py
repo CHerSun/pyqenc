@@ -3,13 +3,6 @@
 
 import re
 
-TIMEOUT_SECONDS_SHORT = 10
-"""Short timeout for quick operations"""
-TIMEOUT_SECONDS_LONG = 300
-"""Longer timeout for potentially slow operations"""
-TIMEOUT_SECONDS_MAX = 3600
-"""Maximum timeout for very long operations. To have at least some form of fallback."""
-
 THRESHOLD_ATTEMPTS_WARNING = 10
 """Threshold for warning about excessive encoding attempts."""
 
@@ -37,14 +30,8 @@ Used only when pixel-based estimation is not possible (no VideoStreamInfo availa
 # Vertical delimiters
 LINE_WIDTH  = 72
 """Horizontal line width for log blocks."""
-THIN_LINE   = "─" * LINE_WIDTH
-"""Think horizontal line to separate large blocks (phases) in logs."""
 THICK_LINE  = "═" * LINE_WIDTH
 """Thick horizontal line to separate large blocks (phases) in logs."""
-
-# Padding control
-PADDING_FRAME_NUMBER = 6
-"""Padding for frame numbers in chunk filenames for consistent sorting and readability. For example, with a padding of 6, frame 42 would be represented as '000042' in filenames."""
 
 METRIC_LOG_DECIMAL_PLACES = 1
 """Decimal places used when formatting metric values in log messages. Values are always truncated (floored), never rounded, to prevent a miss from displaying as a pass due to rounding."""
@@ -84,9 +71,7 @@ within a phase.  Combined with a ``MetricKey`` prefix it forms keys such as
 ``"encoding.quality_measure"`` and ``"merge.quality_measure"``.  Using a shared
 constant ensures the suffix is identical across all phases that measure quality."""
 BRACKET_LEFT = "｟"
-"""Left bracket symbol for visually distinct log formatting."""
 BRACKET_RIGHT = " ｠"
-"""Right bracket symbol for visually distinct log formatting."""
 UP_ARROW="↑"
 DOWN_ARROW="↓"
 LEFT_ARROW="←"
@@ -95,7 +80,6 @@ RIGHT_ARROW="→"
 # Directory names for phase output
 EXTRACTED_DIR          = "extracted"
 """Output directory for extracted streams (ExtractionPhase)."""
-"""Output directory for video chunks (ChunkingPhase)."""
 ENCODING_WORKSPACE_DIR = "encoding"
 """Working directory for CRF search attempt files (intermediate, per-strategy)."""
 ENCODED_OUTPUT_DIR     = "encoded"
@@ -109,25 +93,9 @@ output is the merge phase's product, not a fully finalized container."""
 MEASURE_DIR            = "measure"
 """Output subdirectory name for standalone measure artifacts."""
 
-METRICS_SUBDIR_SUFFIX    = ".metrics"
-"""Suffix appended to target stem to form the raw metric logs subdirectory."""
-SCREENSHOT_TIMESTAMP_FMT = "{h:02d}{sep}{m:02d}{sep}{s:02d}{ms_sep}{ms:03d}"
-"""Zero-padded timestamp format for screenshot filenames.
-
-Uses TIME_SEPARATOR_SAFE and TIME_SEPARATOR_MS from constants — the same
-separators used in chunk filenames — producing e.g. ``01꞉02꞉03․456``.
-"""
-
 # Measure defaults
 DEFAULT_SCREENSHOT_COUNT  = 20
 """Default number of screenshots captured from each video."""
-KEEP_RAW_METRICS_FILES    = False
-"""When ``False`` (default), raw metric log files (``.psnr.log``, ``.ssim.log``,
-``.vmaf.json``), their ``.stats`` sidecars, and the containing metrics subdirectory
-are deleted after the graph PNG is generated.  Set to ``True`` to retain them for
-debugging.  This is an internal mechanics flag — separate from user-facing cleanup
-settings — because artifact recovery is based on the sidecar YAML (which stores the
-full ``MetricStats`` snapshot) rather than the raw logs."""
 
 # Config file locations (used by load_app_config and the `config` subcommand)
 CONFIG_FILENAME_CWD  = "pyqenc.yaml"
@@ -151,9 +119,6 @@ CHUNK_NAME_PATTERN = re.compile(
 ``_chunk_name_duration``.  A stem has the form
 ``HH꞉MM꞉SS․mmm-HH꞉MM꞉SS․mmm`` where ``꞉`` is ``TIME_SEPARATOR_SAFE`` and
 ``․`` is ``TIME_SEPARATOR_MS``."""
-
-ENCODED_ATTEMPT_GLOB_PATTERN = "*.q*.mkv"
-"""Glob mask used to discover encoded attempt files in a strategy output directory."""
 
 ENCODED_ATTEMPT_NAME_PATTERN = re.compile(
     r"^(?P<chunk_id>.+)\.(?P<resolution>\d+x\d+)\.q(?P<quality>[\d.]+)\.mkv$"
@@ -202,9 +167,6 @@ FFMPEG_ARG_BITRATE_A = "-b:a"
 FFMPEG_ARG_FORMAT   = "-f"
 """ffmpeg output-format (muxer) flag."""
 
-FFMPEG_MAP_FIRST_AUDIO = "0:a:0"
-"""Maps the first audio stream of the (single) input — chain sources are single-stream extracts."""
-
 FFMPEG_MAP_FIRST_VIDEO = "0:v:0"
 """Maps the first video stream of the (single) input — null-count passes."""
 
@@ -216,16 +178,6 @@ model's ``as_input()`` adapter."""
 FFMPEG_CODEC_COPY = "copy"
 """Stream-copy codec token — remux-style extraction and null-count passes."""
 
-FFMPEG_ARG_NO_AUDIO = "-an"
-"""ffmpeg flag dropping all audio streams — keeps chain outputs video-only."""
-FFMPEG_ARG_NO_VIDEO = "-vn"
-"""ffmpeg flag dropping all video streams — keeps chain outputs audio-only."""
-FFMPEG_ARG_NO_SUBS  = "-sn"
-"""ffmpeg flag dropping all subtitle streams — keeps chain outputs audio-only."""
-FFMPEG_ARG_NO_DATA  = "-dn"
-"""ffmpeg flag dropping all data streams (e.g. a stray ``bin_data`` stream the
-muxer would otherwise carry through) — keeps chain outputs audio-only."""
-
 FFMPEG_NULL_MUXER = "null"
 """The ``null`` muxer, used with a ``-`` sink for measurement passes that write no file."""
 FFMPEG_NULL_SINK  = "-"
@@ -234,21 +186,16 @@ FFMPEG_NULL_SINK  = "-"
 # ---------------------------------------------------------------------------
 # Output-container muxers
 # ---------------------------------------------------------------------------
-# The shared ffmpeg runner writes every file output to a ``.tmp`` sibling first
-# (atomicity). The ``.tmp`` extension carries no container hint, so ffmpeg cannot
-# infer the muxer from the extension and needs an explicit ``-f <muxer>``. Each
-# call site supplies the correct muxer for its target container (per the project
-# ffmpeg philosophy: be explicit about the container). When a caller supplies no
-# muxer, the runner defaults to ``matroska`` (the historical behaviour for all
-# video outputs).
+# The runner writes every file output to a ``.tmp`` sibling (atomicity), and the
+# ``.tmp`` extension carries no container hint — so each call site supplies an
+# explicit ``-f <muxer>``; the runner default is ``matroska``.
 
 FFMPEG_MUXER_MATROSKA = "matroska"
 """Default ``-f`` muxer for ``.tmp`` outputs — Matroska (all video call sites)."""
 FFMPEG_MUXER_FLAC     = "flac"
-"""``-f`` muxer for raw FLAC audio outputs (``.flac``)."""
 FFMPEG_MUXER_IPOD     = "ipod"
-"""``-f`` muxer for MP4/M4A audio outputs (``.m4a``) — the conventional ffmpeg
-muxer for an ``.m4a`` audio-only container."""
+"""``-f`` muxer for ``.m4a`` audio-only containers — ffmpeg's conventional
+choice (not derivable from the extension)."""
 FFMPEG_MUXER_IMAGE2   = "image2"
 """``-f`` muxer for single-frame PNG screenshot outputs written through the
 ``.tmp`` protocol (the ``.tmp`` extension hides the image container hint)."""
@@ -276,7 +223,7 @@ extension falls back to the runner default (Matroska)."""
 FILENAME_FORBIDDEN_CHARS: frozenset[str] = frozenset('<>:"/\\|?*')
 """Characters forbidden in a chain name because they are unsafe in filenames on
 common filesystems (Windows especially). A chain name containing any of these —
-or any control character (U+0000–U+001F) — is rejected at config load (Req 8.4)."""
+or any control character (U+0000–U+001F) — is rejected at config load."""
 
 FILENAME_CONTROL_CHARS: frozenset[str] = frozenset(chr(code) for code in range(0x20))
 """Control characters (U+0000–U+001F) — unsafe in filenames alongside
@@ -284,7 +231,7 @@ FILENAME_CONTROL_CHARS: frozenset[str] = frozenset(chr(code) for code in range(0
 
 FILENAME_SANITIZATION_REPLACEMENT = "_"
 """Replacement character for :func:`pyqenc.utils.naming.sanitize_filesystem_text`
-— media-sourced free text is sanitized by replacement, never rejected (Req 15.2)."""
+— media-sourced free text is sanitized by replacement, never rejected."""
 
 SELECTOR_KEY_LANG  = "lang"
 """Conventional-string token key for an audio track's language (e.g. ``lang=eng``)."""
@@ -299,13 +246,9 @@ STDERR_TAIL_LINES = 20
 ``_drain_stderr``.  These lines are available for error logging after the
 subprocess exits."""
 
-# Visual hash emoji pools
-# Classification: East Asian Width property of the base codepoint.
-#   WIDE   — eaw == "W": renders as 2 terminal columns in monospace fonts.
-#             No variation-selector suffix (U+FE0F) — those render inconsistently.
-#   NARROW — eaw == "N": single terminal column.
-# Use VISUAL_HASH_EMOJIS_WIDE for chunk log prefixes (consistent alignment).
-# Use VISUAL_HASH_EMOJIS_NARROW only where single-column alignment is needed.
+# Visual hash emoji pool — East-Asian-Width "W" codepoints only (2 terminal
+# columns each in monospace fonts); no variation-selector suffixes (U+FE0F),
+# which render inconsistently.
 
 VISUAL_HASH_EMOJIS_WIDE: list[str] = [
     # Animals
@@ -377,11 +320,3 @@ VISUAL_HASH_EMOJIS_WIDE: list[str] = [
 ]
 """290 full-width emojis (East Asian Width = W) for visual hash prefixes in chunk log lines.
 Each occupies exactly 2 terminal columns in a monospace font, ensuring consistent alignment."""
-
-VISUAL_HASH_EMOJIS_NARROW: list[str] = [
-    "\U0001F3CE","\U0001F3CD","\U0001F5DD","\U0001F579","\U0001F56F",
-    "\U0001F5A5","\U0001F5A8","\U0001F5B1","\U0001F4FD","\U0001F39E",
-    "\U0001F576","\U0001F590","\U0001F43F","\U0001F577",
-]
-"""14 narrow emojis (East Asian Width = N) — single terminal column.
-Reserved for contexts where 1-column alignment is needed."""

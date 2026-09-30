@@ -21,13 +21,15 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from pyqenc.models import QualityTarget
-from pyqenc.quality import MetricInfo, MetricType
 
 # Module-level imports avoid first-example import overhead (pandas/matplotlib
 # take ~2-3 s on first import on Windows, which would exceed the deadline).
+from pyqenc.quality import MetricInfo, MetricType, QualityLogs
 from pyqenc.utils.visualization import (
     QualityEvaluator,
-    analyze_chunk_quality,
+    compute_metric_stats,
+    normalize_metrics,
+    parse_metrics,
     parse_vif_file,
 )
 
@@ -209,23 +211,23 @@ def test_parse_vif_file_combined_score(s0: float, s1: float, s2: float, s3: floa
 
 
 # ---------------------------------------------------------------------------
-# Property 10: analyze_chunk_quality VIF integration and normalization
+# Property 10: metric pipeline VIF normalization
 # ---------------------------------------------------------------------------
 
 
 @settings(max_examples=50)
 @given(frame_values=st.lists(_st_unit, min_size=2, max_size=30))
-def test_analyze_chunk_quality_vif_normalized(frame_values: list[float]) -> None:
-    """Property 10: ChunkQualityStats contains VIF; all stats in [0, 100].
+def test_metric_pipeline_vif_normalized(frame_values: list[float]) -> None:
+    """Property 10: the parse→normalize→stats pipeline maps VIF into [0, 100].
+
+    Bug guarded: raw VIF scale is ~[0, 1.5]; a stats row leaking the raw
+    scale would show min/median values far below the other metrics.
 
     Validates: Requirements 5.2, 5.3
-    # Feature: vif-metric-support, Property 10: analyze_chunk_quality VIF normalization
+    # Feature: vif-metric-support, Property 10: pipeline VIF normalization
     """
-    result = analyze_chunk_quality(
-        vif_log=_write_vif(frame_values),
-        generate_plot=False,
-        delete_after_parse=False,
-    )
+    artifacts = QualityLogs(vif_log=_write_vif(frame_values))
+    result    = compute_metric_stats(normalize_metrics(parse_metrics(artifacts, 1)))
     assert MetricType.VIF in result
     for stat_key in ("min", "p05", "p25", "median", "p75", "p95", "max"):
         val = result[MetricType.VIF][stat_key]  # type: ignore[literal-required]
@@ -233,24 +235,20 @@ def test_analyze_chunk_quality_vif_normalized(frame_values: list[float]) -> None
 
 
 # ---------------------------------------------------------------------------
-# Property 11: analyze_chunk_quality backward compatibility
+# Property 11: no VIF input → no VIF stats row
 # ---------------------------------------------------------------------------
 
 
 @settings(max_examples=50)
 @given(frame_values=st.lists(_st_unit, min_size=2, max_size=30))
-def test_analyze_chunk_quality_no_vif_unchanged(frame_values: list[float]) -> None:
-    """Property 11: vif_log=None → MetricType.VIF absent from ChunkQualityStats.
+def test_metric_pipeline_no_vif_input_no_vif_row(frame_values: list[float]) -> None:
+    """Property 11: a PSNR-only run never produces a VIF stats row.
 
     Validates: Requirements 5.5
-    # Feature: vif-metric-support, Property 11: analyze_chunk_quality backward compatibility
+    # Feature: vif-metric-support, Property 11: no VIF input, no VIF row
     """
-    result = analyze_chunk_quality(
-        psnr_log=_write_psnr(frame_values),
-        vif_log=None,
-        generate_plot=False,
-        delete_after_parse=False,
-    )
+    artifacts = QualityLogs(psnr_log=_write_psnr(frame_values))
+    result    = compute_metric_stats(normalize_metrics(parse_metrics(artifacts, 1)))
     assert MetricType.VIF  not in result
     assert MetricType.PSNR in result
 
@@ -332,7 +330,6 @@ def test_normalize_formula_correctness(
     """
     test_info = MetricInfo(
         name              = "TEST",
-        id                = "test",
         higher_is_better  = True,
         _offset           = offset,
         _scale_factor     = scale,

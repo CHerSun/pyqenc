@@ -15,7 +15,6 @@ from enum import Enum
 from pathlib import Path
 from typing import (
     TypedDict,
-    TypeVar,
 )
 
 import pandas as pd
@@ -42,13 +41,6 @@ class MetricInfo:
 
     Single source of truth for normalization, display, and CRF search behaviour.
     Accessed via ``MetricType.PSNR.info``, etc.
-
-    Public fields: ``name``, ``id``, ``higher_is_better``, ``lossless_value``,
-    ``lossless_raw_repr``, ``display_unit``, ``plot_y_min``, ``plot_y_max``,
-    ``comparison_range``, ``acceptance_delta``.
-
-    Internal fields (not part of public API — used only by ``normalize()``):
-    ``_offset``, ``_scale_factor``, ``_clip_lower``, ``_clip_upper``.
 
     Attributes:
         name:              Human-readable display name (e.g. ``"PSNR"``).
@@ -97,7 +89,6 @@ class MetricInfo:
     """
 
     name:                 str
-    id:                   str
     higher_is_better:     bool
     _offset:              float
     _scale_factor:        float
@@ -193,7 +184,6 @@ class MetricType(Enum):
 _METRIC_INFO: dict[MetricType, MetricInfo] = {
     MetricType.VMAF: MetricInfo(
         name              = "VMAF",
-        id                = "vmaf",
         higher_is_better  = True,
         _offset           = 0.0,
         _scale_factor     = 1.0,
@@ -210,7 +200,6 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
     ),
     MetricType.SSIM: MetricInfo(
         name              = "SSIM",
-        id                = "ssim",
         higher_is_better  = True,
         _offset           = 0.0,
         _scale_factor     = 100.0,
@@ -227,7 +216,6 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
     ),
     MetricType.PSNR: MetricInfo(
         name              = "PSNR",
-        id                = "psnr",
         higher_is_better  = True,
         _offset           = 0.0,
         _scale_factor     = 1.0,
@@ -242,10 +230,8 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         acceptance_delta  = 0.3,   # 0.3 dB surplus should be negligible
         subsample_via_filter = True,   # uses select='not(mod(n,factor))' on its branch
     ),
-    # VIF
     MetricType.VIF: MetricInfo(
         name              = "VIF",
-        id                = "vif",
         higher_is_better  = True,
         _offset           = 0.0,
         _scale_factor     = 100.0,
@@ -266,7 +252,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
 class MetricStats(TypedDict):
     """Key statistics for a single metric.
 
-    Subset of ``_MetricStatistics`` stored in sidecars and used for targeting.
+    Subset of :class:`FullMetricStatistics` stored in sidecars and used for targeting.
     Includes the same percentile selection used by the visualization plots:
     min, p05, p25, median (p50), p75, p95, max, std.
     """
@@ -284,8 +270,8 @@ ChunkQualityStats = dict[MetricType, MetricStats]
 """Quality statistics for a video chunk across all metrics."""
 
 
-class _MetricStatistics(TypedDict):
-    """Full percentile statistics used internally."""
+class FullMetricStatistics(TypedDict):
+    """Full percentile statistics (computed by the visualization layer)."""
 
     min: float
     p5:  float
@@ -387,14 +373,11 @@ async def run_metrics(
     retime_rate = repr(fps) if fps is not None else "FRAME_RATE"
 
     # Re-time both inputs to exact index-based CFR before the metric filters.
-    # framesync (the dualinput core of psnr/ssim/libvmaf) pairs frames by PTS:
-    # the attempt's and the source window's ms-rounded timestamp grids carry
-    # different rounding phases, and where they diverge framesync duplicates/
-    # skips a frame — intermittent single-frame mispairings (~14 dB PSNR drops
-    # every few frames, vmaf_min=0). setpts=N/(FRAME_RATE*TB) rewrites PTS to
-    # the frame index on both sides, so pairing is index-perfect — verified
-    # against per-frame PNG comparison on real media. PTS-STARTPTS only rebases
-    # the origin and preserves the grid mismatch (empirically a no-op here).
+    # framesync (the dualinput core of psnr/ssim/libvmaf) pairs frames by PTS,
+    # and the two inputs' ms-rounded timestamp grids can carry different
+    # rounding phases, making framesync duplicate/skip a frame where they
+    # diverge.  setpts=N/(FRAME_RATE*TB) rewrites PTS to the frame index on
+    # both sides, so pairing is index-perfect.
     if n_branches == 1:
         # No split needed — single branch uses [main]/[ref] directly
         sel = f",select='not(mod(n,{subsample}))',setpts=N/({retime_rate}*TB)" if (
@@ -432,7 +415,6 @@ async def run_metrics(
         f_dist = f_dist_base + ";" + ";".join(branch_parts_d)
         f_ref  = f_ref_base  + ";" + ";".join(branch_parts_r)
 
-    # Build per-branch metric filters
     metric_filters: list[str] = []
     for i, branch in enumerate(branches):
         ld = branch_labels_d[i]
@@ -474,7 +456,7 @@ class QualityLogs:
 
     All log paths point to ``.tmp``-suffixed files during their lifetime —
     they are never renamed to canonical names.  Each file is deleted
-    immediately after successful parsing by ``analyze_chunk_quality``.
+    immediately after successful parsing by the quality evaluator.
 
     Attributes:
         psnr_log:  Path to PSNR ``.tmp`` log file, or ``None`` if not generated.
@@ -509,7 +491,7 @@ class QualityEvaluation:
 
 
 # ---------------------------------------------------------------------------
-# Scoring helpers (module-level, kept for backward compatibility with tests)
+# Scoring helpers
 # ---------------------------------------------------------------------------
 
 def _score_attempt(
@@ -628,16 +610,6 @@ class QualityPoint:
         return self.score == 0 and not self.is_sentinel
 
 
-T_numeric = TypeVar("T_numeric", int, float, Decimal)
-
-
-def _in_range(value: T_numeric, start: T_numeric, end: T_numeric) -> bool:
-    """Check if a value belongs to a given range, handling inverted ranges too."""
-    low  = min(start, end)
-    high = max(start, end)
-    return low <= value <= high
-
-
 def _clamp_to_range(
     q:            Decimal,
     granularity:  Decimal,
@@ -749,7 +721,7 @@ class QualitySearchBase(ABC):
         self._exhausted:        bool                = False
 
     # ------------------------------------------------------------------
-    # Abstract contract (same as the former QualitySearchProtocol)
+    # Abstract contract
     # ------------------------------------------------------------------
 
     @property
@@ -996,15 +968,17 @@ class QualitySearchBase(ABC):
 
 
 # ---------------------------------------------------------------------------
-# QualitySearch — legacy proportional interpolation algorithm
+# QualitySearch — proportional interpolation algorithm (V1)
+#
+# V1/V2 are unused by the pipeline (V3 is the active search); kept as
+# reference for the planned V4 rework (TODO §51).
 # ---------------------------------------------------------------------------
 
 class QualitySearch(QualitySearchBase):
-    """Quality search using proportional interpolation (legacy algorithm).
+    """Quality search using proportional interpolation.
 
-    Encapsulates the binary-bracket search previously split across
-    ``CRFHistory`` and ``adjust_crf()``.  Direction-agnostic: uses
-    ``quality_better``/``quality_worse`` instead of assuming lower=better.
+    Direction-agnostic: uses ``quality_better``/``quality_worse`` instead of
+    assuming lower=better.
 
     When ``quality_better == quality_worse``, the first ``record()`` call
     records the result and returns ``None`` (single fixed quality value).
@@ -1080,9 +1054,6 @@ class QualitySearch(QualitySearchBase):
     def record(self, quality: Decimal, quality_results: dict[str, float]) -> Decimal | None:
         """Record one attempt and return the next quality value to try.
 
-        Mirrors the logic of the former ``adjust_crf()`` function using
-        instance state instead of a ``CRFHistory`` object.
-
         Args:
             quality:         Quality value used for this attempt.
             quality_results: Measured quality metrics keyed as ``"<metric>_<stat>"``.
@@ -1098,7 +1069,7 @@ class QualitySearch(QualitySearchBase):
         try:
             new_point = QualityPoint(quality, self._score(quality_results), quality_results)
         except ValueError:
-            raise ValueError("QualitySearch: missing metric key for quality=%s" % quality)
+            raise ValueError(f"QualitySearch: missing metric key for quality={quality}")
 
         # Early acceptance: score == 0 means targets met within acceptance_delta.
         if new_point.is_winner:
@@ -1260,7 +1231,7 @@ class QualitySearchV2(QualitySearchBase):
         try:
             new_point = QualityPoint(quality, self._score(quality_results), quality_results)
         except ValueError:
-            raise ValueError("QualitySearchV2: missing metric key for quality=%s" % quality)
+            raise ValueError(f"QualitySearchV2: missing metric key for quality={quality}")
 
         if self._exhausted:
             return None
@@ -1299,7 +1270,7 @@ class QualitySearchV2(QualitySearchBase):
                 self._attempted_points,
             )
 
-        #! NO `NEW_POINT` BELOW THIS POINT — only the best point and its adjacent points
+        # NO `NEW_POINT` BELOW THIS POINT — only the best point and its adjacent points
 
         # Sort quality values so that higher quality comes first.
         sorted_q = sorted(
@@ -1322,9 +1293,8 @@ class QualitySearchV2(QualitySearchBase):
         best_p       = self._best_score_point
         best_q_index = sorted_q.index(best_p.q)  # type: ignore[union-attr]
 
-        # Still doing outward search — go in binary steps between bounds and last attempt.
-        # ATTENTION: Proportional search could work here, but it often loses sweet-point
-        # curve shape, thus never reaching 3-point mode. Keep it at binary.
+        # Still doing outward search — binary only: proportional steps often
+        # lose the sweet-point curve shape and never reach 3-point mode.
         if best_p.is_fail and best_q_index == 0:
             return self._next_or_exhaust(
                 self._compute_next_quality(
@@ -1395,21 +1365,12 @@ class QualitySearchV2(QualitySearchBase):
 # ---------------------------------------------------------------------------
 
 class QualitySearchV3(QualitySearchBase):
-    """Quality search using linear extrapolation and a midpoint-probe safety net.
+    """Quality search using linear extrapolation with a midpoint-probe safety net.
 
-    Replaces V2's binary half-steps toward the codec boundary (when both known
-    points are on the same side) with **linear extrapolation**: given two
-    same-side points, it projects where the quality curve would cross zero and
-    jumps directly there.  On a monotonic linear curve this finds the crossing
-    in O(1) steps instead of O(log N).
-
-    A **midpoint-probe safety net** is added for the edge case where the outward
-    direction is exhausted (the boundary has actually been tested and both points
-    are still on the same side): one midpoint probe is inserted before declaring
-    full exhaustion, catching non-monotonic curves that V2 would miss.
-
-    V3 is a drop-in replacement for V2 — same ``QualitySearchBase`` interface,
-    same constructor signature.
+    Given two same-side points, projects where the quality curve crosses zero
+    and jumps directly there — O(1) steps on a monotonic linear curve.  When
+    the outward direction is exhausted (boundary tested, both points still on
+    the same side), one midpoint probe runs before declaring full exhaustion.
 
     When ``quality_better == quality_worse``, the first ``record()`` call
     records the result and returns ``None`` (single fixed quality value).
@@ -1491,7 +1452,7 @@ class QualitySearchV3(QualitySearchBase):
         try:
             new_point = QualityPoint(quality, self._score(quality_results), quality_results)
         except ValueError:
-            raise ValueError("QualitySearchV3: missing metric key for quality=%s" % quality)
+            raise ValueError(f"QualitySearchV3: missing metric key for quality={quality}")
 
         # Record the attempt
         self._attempted_points[quality] = new_point
@@ -1727,21 +1688,12 @@ class QualitySearchV3(QualitySearchBase):
         else:
             closer_p, further_p = p2, p1
 
-        # For proportional extrapolation we need both points to have real metrics.
-        # Pass the two tested points as better_point/worse_point so that
-        # _compute_proportional_candidate can compute t from their metric values.
-        # The outward clamp (sentinel or best opposite-side tested point) is used
-        # only in _finalize_q to enforce the hard boundary.
-        #
-        # For two fails: closer_p is the fail nearest the target (smallest deficit).
-        #   better_point = closer_p, worse_point = further_p
-        #   t > 1 extrapolates past further_p toward quality_better (outward) ✓
-        #   t = 0.5 binary midpoint lands between the two fails (inward) — but
-        #   _finalize_q clamps to [outward_clamp, closer_p) so it still moves outward ✓
-        #
-        # For two passes: closer_p is the pass nearest the target (smallest surplus).
-        #   better_point = closer_p, worse_point = further_p
-        #   t > 1 extrapolates past further_p toward quality_worse (outward) ✓
+        # Order the points as better_point=closer_p, worse_point=further_p so
+        # that t > 1 extrapolates outward, past further_p toward the relevant
+        # boundary (quality_better for two fails, quality_worse for two
+        # passes).  The t = 0.5 binary fallback would land inward, between the
+        # two points, but _finalize_q clamps against outward_clamp so the step
+        # still moves outward.
         if p1.is_pass:
             fail_points   = [pt for pt in self._attempted_points.values() if pt.is_fail]
             outward_clamp = min(fail_points, key=lambda pt: abs(pt.score)) if fail_points else QualityPoint(self._quality_worse, 0, None)

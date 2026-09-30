@@ -15,12 +15,10 @@ file and ``instance.save(path)`` to persist atomically.
 
 from __future__ import annotations
 
-import logging
 from enum import Enum
 from pathlib import Path
-from typing import Self
+from typing import TYPE_CHECKING, Self
 
-import yaml
 from pydantic import BaseModel, Field, model_serializer
 
 from pyqenc.audio.chain import ResolvedChain, chain_signature
@@ -28,9 +26,10 @@ from pyqenc.models import (
     CropParams,
 )
 from pyqenc.stream_model import DecimalYaml, LongPathYaml
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.utils.yaml_utils import load_model, save_model
 
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from pyqenc.phases.probe import ProbePhaseResult
 
 
 # ---------------------------------------------------------------------------
@@ -99,21 +98,36 @@ class ProbeState(BaseModel):
         return data
 
     @classmethod
+    def from_probe(cls, probe_result: ProbePhaseResult) -> Self:
+        """Snapshot a probe phase result as the comparable ``ProbeState``.
+
+        The single composition site for parameter-invalidations: phases that
+        persist the active probe facet (``encoding.yaml``, ``optimization.yaml``,
+        ``merge.yaml``) build their ``ProbeState`` from the live
+        ``ProbePhaseResult`` here.  An unknown facet maps to the sentinels —
+        frame count 0, empty crop.
+
+        Args:
+            probe_result: The probe phase's result (guaranteed present —
+                          callers reach this only after the dependency walk).
+
+        Returns:
+            The snapshot.
+        """
+        frame_count = (
+            probe_result.stream.payload.frame_count
+            if probe_result.stream is not None else 0
+        )
+        return cls(frame_count=frame_count, crop=probe_result.crop)
+
+    @classmethod
     def load(cls, path: Path) -> Self | None:
         """Load ``ProbeState`` from *path* (an absent crop materializes empty).
 
         Returns:
             ``ProbeState`` if the file exists and is valid, ``None`` otherwise.
         """
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return cls.model_validate(data or {})
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
+        return load_model(path, cls)
 
     def save(self, path: Path) -> None:
         """Write this ``ProbeState`` to *path* atomically.
@@ -121,9 +135,7 @@ class ProbeState(BaseModel):
         Args:
             path: Destination YAML file path.
         """
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_yaml_atomic(path, self.model_dump(exclude_none=True))
-        logger.debug("Saved %s", path.name)
+        save_model(path, self)
 
 
 class StrategyTestResult(BaseModel):
@@ -177,15 +189,7 @@ class OptimizationParams(BaseModel):
         Returns:
             ``OptimizationParams`` if the file exists and is valid, ``None`` otherwise.
         """
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return cls.model_validate(data or {})
-        except Exception as exc:
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
+        return load_model(path, cls)
 
     def save(self, path: Path) -> None:
         """Write this ``OptimizationParams`` to *path* atomically.
@@ -193,8 +197,7 @@ class OptimizationParams(BaseModel):
         Args:
             path: Destination YAML file path.
         """
-        write_yaml_atomic(path, self.model_dump(exclude_none=True))
-        logger.debug("Saved %s", path.name)
+        save_model(path, self)
 
 
 class EncodingParams(BaseModel):
@@ -212,15 +215,7 @@ class EncodingParams(BaseModel):
         Returns:
             ``EncodingParams`` if the file exists and is valid, ``None`` otherwise.
         """
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return cls.model_validate(data or {})
-        except Exception as exc:
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
+        return load_model(path, cls)
 
     def save(self, path: Path) -> None:
         """Write this ``EncodingParams`` to *path* atomically.
@@ -228,8 +223,7 @@ class EncodingParams(BaseModel):
         Args:
             path: Destination YAML file path.
         """
-        write_yaml_atomic(path, self.model_dump(exclude_none=True))
-        logger.debug("Saved %s", path.name)
+        save_model(path, self)
 
 
 class MetricsSidecar(BaseModel):
@@ -302,7 +296,7 @@ class AudioSidecar(BaseModel):
     """Sidecar model for the audio phase (``audio.yaml``).
 
     Records ONLY a compact, per-chain **signature** for each chain this work-dir
-    is committed to, keyed by chain name (Req 9.1). ``select`` is deliberately
+    is committed to, keyed by chain name. ``select`` is deliberately
     NOT persisted: selection is a pure function of the current extracted tracks
     plus the current ``select`` config, recomputed for free every run, so there
     is nothing to track across runs.
@@ -318,9 +312,9 @@ class AudioSidecar(BaseModel):
 
     The sidecar records committed **intent**, decoupled from completion —
     completion is always read from the presence of output files on disk, never
-    inferred from this sidecar (Req 9.6). A differing or removed chain (detected
+    inferred from this sidecar. A differing or removed chain (detected
     by signature comparison) triggers invalidation of that chain's on-disk
-    outputs (Req 9.2, 9.3, 9.4).
+    outputs.
 
     On-disk shape (``audio.yaml``)::
 
@@ -334,24 +328,12 @@ class AudioSidecar(BaseModel):
 
     chains: dict[str, str]
 
-    @staticmethod
-    def signature_of(chain: ResolvedChain) -> str:
-        """Return the canonical signature string for a resolved chain.
-
-        Delegates to :func:`~pyqenc.audio.chain.chain_signature` so the sidecar
-        and the audio phase use the SAME canonical function (DRY).
-
-        Args:
-            chain: The resolved chain to sign.
-
-        Returns:
-            The canonical signature string.
-        """
-        return chain_signature(chain)
-
     @classmethod
     def from_resolved(cls, resolved: dict[str, ResolvedChain]) -> AudioSidecar:
         """Build an ``AudioSidecar`` from resolved chains, computing each signature.
+
+        Each signature is the canonical :func:`~pyqenc.audio.chain.chain_signature`
+        — the SAME canonical function the audio phase uses (DRY).
 
         Args:
             resolved: Map of chain name → :class:`ResolvedChain`.
@@ -359,7 +341,7 @@ class AudioSidecar(BaseModel):
         Returns:
             The sidecar holding one signature string per chain.
         """
-        return cls(chains={name: cls.signature_of(chain) for name, chain in resolved.items()})
+        return cls(chains={name: chain_signature(chain) for name, chain in resolved.items()})
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
@@ -371,28 +353,18 @@ class AudioSidecar(BaseModel):
         Returns:
             ``AudioSidecar`` if the file exists and is valid, ``None`` otherwise.
         """
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return cls.model_validate(data or {})
-        except Exception as exc:
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
+        return load_model(path, cls)
 
     def save(self, path: Path) -> None:
         """Write this ``AudioSidecar`` to *path* atomically.
 
-        Uses the ``.tmp``-then-rename protocol (Req 9.7). Creates parent
+        Uses the ``.tmp``-then-rename protocol. Creates parent
         directories as needed.
 
         Args:
             path: Destination YAML file path.
         """
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_yaml_atomic(path, self.model_dump(exclude_none=True))
-        logger.debug("Saved %s", path.name)
+        save_model(path, self)
 
 
 class MergeStrategySummary(BaseModel):
@@ -455,15 +427,7 @@ class MergeParams(BaseModel):
         Returns:
             ``MergeParams`` if the file exists and is valid, ``None`` otherwise.
         """
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return cls.model_validate(data or {})
-        except Exception as exc:
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
+        return load_model(path, cls)
 
     def save(self, path: Path) -> None:
         """Write this ``MergeParams`` to *path* atomically.
@@ -471,7 +435,6 @@ class MergeParams(BaseModel):
         Args:
             path: Destination YAML file path.
         """
-        write_yaml_atomic(path, self.model_dump(exclude_none=True))
-        logger.debug("Saved %s", path.name)
+        save_model(path, self)
 
 

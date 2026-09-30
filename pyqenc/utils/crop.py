@@ -25,7 +25,7 @@ def detect_crop_parameters(
     remove all black borders while preserving maximum content area.
 
     Always returns a ``CropParams`` instance — all-zero if no borders are found
-    or if detection fails for any reason (Req 3.2: auto-detect failure falls
+    or if detection fails for any reason (auto-detect failure falls
     back to an empty crop with the warning logged here).
 
     Args:
@@ -98,6 +98,6 @@ def detect_crop_parameters(
         logger.info(f"Cropping: {crop.display()} (detected)")
         return crop
 
-    except Exception as e:
+    except (OSError, ValueError) as e:
         logger.error("Failed to detect crop parameters: %s", e)
         return CropParams()

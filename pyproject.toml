@@ -37,6 +37,7 @@ version = {attr = "pyqenc.__version__"}
 [dependency-groups]
 dev = [
     "debugpy>=1.8.20",
+    "ruff>=0.16.0",
     "ty>=0.0.31",
     "types-psutil>=7.2.2.20260130",
     "uv>=0.11.7",
@@ -45,4 +46,23 @@ test = [
     "hypothesis>=6.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+]
+
+[tool.ruff]
+target-version = "py313"
+# House style uses long vertically-aligned signatures (up to ~205 chars);
+# E501 stays unselected — this value only feeds future formatter decisions.
+line-length = 120
+# Archived spec material under .kiro/specs is kept verbatim, not linted.
+extend-exclude = [".kiro"]
+
+[tool.ruff.lint]
+ignore = [
+    # String-form Decimal literals are the house convention (uniform with
+    # Decimal("0.5"), where the string form is required for exactness).
+    "FURB157",
+    # int|float unions in progress footprints are deliberate: audio advances
+    # per result (int) against an int total, video advances seconds (float);
+    # ProgressBarState renders the two differently (isinstance check).
+    "PYI041",
 ]

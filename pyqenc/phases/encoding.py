@@ -7,18 +7,19 @@ quality targets, including parallel execution and artifact-based resumption.
 # CHerSun 2026
 
 import asyncio
+import json
 import logging
 import os
-import shutil as _shutil
+import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from dataclasses import dataclass as _dataclass
 from dataclasses import replace as _dc_replace
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
+import yaml
 from alive_progress import config_handler
 
 from pyqenc.constants import (
@@ -28,7 +29,6 @@ from pyqenc.constants import (
     FAILURE_SYMBOL_MINOR,
     METRIC_KEY_QUALITY_MEASURE,
     SUCCESS_SYMBOL_MINOR,
-    TEMP_SUFFIX,
     THRESHOLD_ATTEMPTS_WARNING,
     WARNING_SYMBOL,
 )
@@ -74,6 +74,7 @@ from pyqenc.stream_model import (
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.ffmpeg_runner import FFmpegRequest, FFmpegRunResult, run_ffmpeg
+from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
 from pyqenc.utils.log_format import (
     fmt_chunk,
     fmt_chunk_attempt_result,
@@ -89,7 +90,6 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
 
-_ENCODING_YAML = "encoding.yaml"
 
 config_handler.set_global(enrich_print=False) # type: ignore
 logger = logging.getLogger(__name__)
@@ -97,7 +97,6 @@ logger = logging.getLogger(__name__)
 
 def _probe_resolution(path: Path) -> str | None:
     """Return the video resolution of *path* as ``'WxH'``, or ``None`` on failure."""
-    import json as _json
     cmd: list[str | os.PathLike] = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
@@ -107,14 +106,14 @@ def _probe_resolution(path: Path) -> str | None:
     ]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
-        data = _json.loads(result.stdout)
+        data = json.loads(result.stdout)
         streams = data.get("streams", [])
         if streams:
             w, h = streams[0].get("width"), streams[0].get("height")
             if w and h:
                 return f"{w}x{h}"
-    except Exception:
-        pass
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        logger.debug("Failed to probe resolution of %s: %s", path.name, e)
     return None
 
 
@@ -128,15 +127,13 @@ def _read_metrics_sidecar(attempt_path: Path) -> dict | None:
         Parsed sidecar dict (keys: ``targets_met``, ``crf``, ``metrics``,
         ``sampling``), or ``None`` if no sidecar exists or it cannot be parsed.
     """
-    import yaml as _yaml
-
     yaml_sidecar = attempt_path.with_suffix(".yaml")
     if yaml_sidecar.exists():
         try:
             with yaml_sidecar.open("r", encoding="utf-8") as fh:
-                return _yaml.safe_load(fh)
-        except Exception:
-            pass
+                return yaml.safe_load(fh)
+        except (OSError, yaml.YAMLError) as e:
+            logger.debug("Failed to read metrics sidecar %s: %s", yaml_sidecar.name, e)
 
     return None
 
@@ -152,7 +149,7 @@ def _write_metrics_sidecar(
 
     Uses ``write_yaml_atomic`` so a crash during writing never leaves a partial
     sidecar.  Stores ALL measured metric values (not filtered to current targets)
-    so the CRF history is reusable when quality targets change (Req 6a.1).
+    so the CRF history is reusable when quality targets change.
 
     Args:
         attempt_path:     Path to the encoded attempt ``.mkv`` file.
@@ -170,7 +167,7 @@ def _write_metrics_sidecar(
     )
     try:
         write_yaml_atomic(sidecar, data.model_dump(exclude_none=True))
-    except Exception as e:
+    except (OSError, ValueError, yaml.YAMLError) as e:
         logger.warning("Failed to write metrics sidecar for %s: %s", attempt_path.name, e)
 
 
@@ -183,9 +180,6 @@ def _hardlink_or_copy(src: Path, dst: Path) -> None:
         src: Source file path (the winning attempt ``.mkv``).
         dst: Destination path in ``encoded/<strategy>/``.
     """
-    import os
-    import shutil
-
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.link(src, dst)
@@ -208,8 +202,7 @@ def _write_encoding_result_sidecar(
     """Atomically write an encoding result sidecar when CRF search converges.
 
     Written as ``<chunk_id>.<res>.yaml`` in the strategy output directory.
-    Its presence marks the ``(chunk_id, strategy)`` pair as ``COMPLETE``
-    (Req 6b.1, 6b.2).
+    Its presence marks the ``(chunk_id, strategy)`` pair as ``COMPLETE``.
 
     Args:
         output_dir:      Strategy output directory.
@@ -234,7 +227,7 @@ def _write_encoding_result_sidecar(
             "Wrote encoding result sidecar: %s (crf=%s, targets_met=%s)",
             sidecar_path.name, crf, targets_met,
         )
-    except Exception as e:
+    except (OSError, ValueError, yaml.YAMLError) as e:
         logger.warning(
             "Failed to write encoding result sidecar for %s/%s: %s",
             chunk_id, resolution, e,
@@ -301,12 +294,9 @@ def _pair_rows(
     rows: list[Artifact[EncodedChunk]] = []
     for chunk_id in chunk_ids:
         for name in strategy_names:
-            pair = pair_recovery.pairs.get((chunk_id, name))
-            if (
-                pair is not None
-                and pair.state == ArtifactState.COMPLETE
-                and pair.winning_file is not None
-            ):
+            # Every (chunk_id, name) combination has a row — direct index.
+            pair = pair_recovery.pairs[(chunk_id, name)]
+            if pair.state == ArtifactState.COMPLETE and pair.winning_file is not None:
                 record = EncodedChunk.parse_file_name(pair.winning_file.name)
                 rows.append(Artifact(
                     payload = build_encoded_chunk(
@@ -315,14 +305,14 @@ def _pair_rows(
                         crf        = record.crf,
                         path       = pair.winning_file,
                         resolution = record.resolution,
-                        frame_count= 0,  # unknown on recovery (Req 14.2)
+                        frame_count= 0,  # unknown on recovery
                     ),
                     state   = ArtifactState.COMPLETE,
                 ))
             else:
                 rows.append(Artifact(
                     payload = _pair_placeholder(work_dir, chunk_by_id[chunk_id], strategy_by_name[name]),
-                    state   = pair.state if pair is not None else ArtifactState.ABSENT,
+                    state   = pair.state,
                 ))
     return rows
 
@@ -330,8 +320,8 @@ def _pair_rows(
 def _orphan_strategy_rows(work_dir: Path, strategies: list[Strategy]) -> list[Artifact[StreamFile]]:
     """Rows for orphaned ``encoded/<strategy>/`` directories.
 
-    A strategy directory no longer selected by the current configuration has
-    no reconstructible entity (its Strategy object is gone) — the on-disk
+    A strategy directory absent from the current selection has no
+    reconstructible entity (its Strategy object is gone) — the on-disk
     product itself is the only identity left. Ledger-only rows (``wanted=
     False``): retained in place, never pending; deletion only via explicit
     cleanup.
@@ -355,7 +345,7 @@ def _orphan_strategy_rows(work_dir: Path, strategies: list[Strategy]) -> list[Ar
 
 
 # ---------------------------------------------------------------------------
-# Encoding recovery helpers (moved from recovery.py — Req 4.3)
+# Encoding recovery helpers
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -374,12 +364,6 @@ class _PhaseRecovery:
 
     pairs:   dict[tuple[str, str], _EncodingRecovery] = field(default_factory=dict)
     pending: list[tuple[str, str]]                    = field(default_factory=list)
-
-
-def _enc_encoded_strategy_dir(work_dir: Path, strategy: str) -> Path:
-    """Return the finalized output directory for *strategy* under ``encoded/``."""
-    safe = strategy.replace(":", "_")
-    return work_dir / ENCODED_OUTPUT_DIR / safe
 
 
 def _recover_encoding_attempts(
@@ -411,7 +395,8 @@ def _recover_encoding_attempts(
     complete_count = absent_count = 0
 
     for strategy in strategies:
-        encoded_dir = _enc_encoded_strategy_dir(work_dir, strategy)
+        # The finalized output directory for this strategy under encoded/ (':' sanitized).
+        encoded_dir = work_dir / ENCODED_OUTPUT_DIR / strategy.replace(":", "_")
 
         # Build index: chunk_id -> winning .mkv path, from a single directory listing.
         # Layout in encoded/<strategy>/:
@@ -547,7 +532,7 @@ class ChunkEncoder:
             collector:         Metrics collector for per-attempt timing.
             crop_params:       Optional crop parameters to apply to every chunk attempt.
             cleanup_level:     Controls deletion of intermediate attempt files after
-                               a pair converges (Req 12.3).
+                               a pair converges.
             visual_hash:       When ``True``, prepend a deterministic emoji to every
                                chunk log line for visual distinction in parallel output.
             metrics_sampling:  Frame subsampling factor for quality metric generation.
@@ -716,19 +701,16 @@ class ChunkEncoder:
         encoded_dir = self._get_encoded_dir(strategy)
         encoded_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. Hard-link the winning .mkv
         dst_mkv = encoded_dir / winning_attempt.name
         if not dst_mkv.exists():
             _hardlink_or_copy(winning_attempt, dst_mkv)
 
-        # 2. Hard-link the winning quality graph (.png) if it exists
         src_graph = winning_attempt.with_suffix(".png")
         if src_graph.exists():
             dst_graph = encoded_dir / src_graph.name
             if not dst_graph.exists():
                 _hardlink_or_copy(src_graph, dst_graph)
 
-        # 3. Write the encoding result sidecar into encoded/
         _write_encoding_result_sidecar(
             output_dir  = encoded_dir,
             chunk_id    = chunk_id,
@@ -739,8 +721,8 @@ class ChunkEncoder:
             targets_met = targets_met,
         )
 
-        # 4. Intermediate cleanup: delete all attempt files for this pair from encoding/
-        #    (Req 6.6, 12.3) — only after the hard-link and sidecar are safely written.
+        # Intermediate cleanup: delete all attempt files for this pair from
+        # encoding/ — only after the hard-link and sidecar are safely written.
         if self._cleanup_level >= CleanupLevel.INTERMEDIATE:
             encoding_dir = self._get_output_dir(strategy)
             if encoding_dir.exists():
@@ -765,9 +747,8 @@ class ChunkEncoder:
                         # Also remove the per-attempt metrics subfolder if present
                         metrics_dir = encoding_dir / attempt_file.stem
                         if metrics_dir.is_dir():
-                            import shutil as _shutil
                             try:
-                                _shutil.rmtree(metrics_dir)
+                                shutil.rmtree(metrics_dir)
                                 logger.debug(
                                     "Intermediate cleanup: deleted metrics dir %s", metrics_dir.name
                                 )
@@ -814,7 +795,7 @@ class ChunkEncoder:
             inputs      = [
                 _dc_replace(
                     chunk.as_input(),
-                    pre_input_args = strategy.pre_input_args,
+                    pre_input_args = tuple(strategy.codec.pre_input_args),
                 ),
             ],
             output_args = tuple(strategy.to_output_args(crf, vf_filter=vf_filter)),
@@ -833,7 +814,7 @@ class ChunkEncoder:
 
             return result
 
-        except Exception as e:
+        except (OSError, RuntimeError) as e:
             logger.error("Exception during encoding: %s", e)
             return None
 
@@ -1011,7 +992,7 @@ class ChunkEncoder:
                         error       = error_msg,
                     )
 
-                # Preservation invariant (Req 9.6): attempts of the same chunk
+                # Preservation invariant: attempts of the same chunk
                 # must encode the same frames — a differing count is an error.
                 attempt_frame_count = run_result.frame_count or 0
                 if attempt_frame_count > 0:
@@ -1030,8 +1011,8 @@ class ChunkEncoder:
                             error       = f"Attempt frame count mismatch for {chunk.safe_name()}",
                         )
                     last_frame_count = attempt_frame_count
-                    # Vocal cross-check vs the detector-derived chunk count
-                    # (Req 9.5): ±1 boundary disagreement is an expected
+                    # Vocal cross-check vs the detector-derived chunk count:
+                    # ±1 boundary disagreement is an expected
                     # artifact of seek-target rounding, not a lost frame.
                     if chunk.frame_count > 0 and attempt_frame_count != chunk.frame_count:
                         logger.warning(
@@ -1174,6 +1155,8 @@ class ChunkEncoder:
         # Progress bar advance — after the loop so ETA reflects actual encode time.
         if not _any_real_work:
             # All cache hits — chunk was fully recovered from existing artifacts.
+            # Same winner rule as the fresh path: a passing attempt when one exists,
+            # otherwise the best failing attempt (still the best recovered state).
             return ChunkEncodingResult(
                 chunk_id     = chunk.safe_name(),
                 strategy     = strategy.display_name(),
@@ -1181,7 +1164,7 @@ class ChunkEncoder:
                 targets_met  = search.best_targets_met,
                 final_crf    = search.best_quality,
                 attempts     = attempt_number,
-                encoded_file = final_attempt,
+                encoded_file = final_attempt if final_attempt is not None else best_fail_attempt,
                 reused       = True,
             )
 
@@ -1219,7 +1202,7 @@ def build_encoded_chunk(
     resolution:   str,
     frame_count:  int,
 ) -> EncodedChunk:
-    """Compose the winning attempt as an :class:`EncodedChunk` (Req 14).
+    """Compose the winning attempt as an :class:`EncodedChunk`.
 
     The attempt's own video stream: crop empty by construction (applied
     during the encode), frame count from the encode run, info from the
@@ -1237,10 +1220,7 @@ def build_encoded_chunk(
     Returns:
         The composed :class:`~pyqenc.stream_model.EncodedChunk`.
     """
-    try:
-        file_size_bytes: int | None = path.stat().st_size
-    except OSError:
-        file_size_bytes = None
+    file_size_bytes = safe_stat_size(path)
     source_info = chunk.stream.stream.info
     attempt_info = VideoStreamInfo(
         track_id     = 0,
@@ -1280,7 +1260,6 @@ class ChunkQueue:
         self.strategies = strategies
         self._pending:     list[tuple[VideoStreamChunk, Strategy]] = []
         self._in_progress: set[tuple[str, str]]                 = set()
-        self._completed:   set[tuple[str, str]]                 = set()
 
         # Build initial queue (all chunk+strategy combinations)
         for chunk in chunks:
@@ -1319,7 +1298,6 @@ class ChunkQueue:
             strategy: Encoding strategy.
         """
         self._in_progress.discard((chunk_id, strategy.display_name()))
-        self._completed.add((chunk_id, strategy.display_name()))
 
     def mark_failed(self, chunk_id: str, strategy: Strategy) -> None:
         """Mark chunk+strategy as failed.
@@ -1337,16 +1315,6 @@ class ChunkQueue:
             True if no more work to do.
         """
         return len(self._pending) == 0 and len(self._in_progress) == 0
-
-    def get_progress(self) -> tuple[int, int]:
-        """Get current progress.
-
-        Returns:
-            Tuple of (completed, total).
-        """
-        total     = len(self.chunks) * len(self.strategies)
-        completed = len(self._completed)
-        return (completed, total)
 
 
 async def _encode_chunk_async(
@@ -1421,21 +1389,23 @@ async def _encode_chunks_parallel(
     """
     result    = EncodingResult()
     semaphore = asyncio.Semaphore(max_parallel)
-    counter_failed = 0
 
     # Pre-populate result with COMPLETE pairs from recovery (skip them in the queue)
     complete_pairs: set[tuple[str, str]] = set()
     if phase_recovery is not None:
         for chunk in chunks:
             for strategy in strategies:
-                pair_recovery = phase_recovery.pairs.get((chunk.safe_name(), strategy.display_name()))
-                if pair_recovery is not None and pair_recovery.state == ArtifactState.COMPLETE:
+                pair_recovery = phase_recovery.pairs[(chunk.safe_name(), strategy.display_name())]
+                if pair_recovery.state == ArtifactState.COMPLETE:
                     logger.debug(
                         "Skipping COMPLETE pair %s/%s (encoding result sidecar valid)",
                         chunk.safe_name(), strategy.display_name(),
                     )
-                    if pair_recovery.winning_file is None:
-                        raise ValueError(f"Winning file not found for {chunk.safe_name()}/{strategy.display_name()}")
+                    # COMPLETE recovery rows always carry their winning file.
+                    assert pair_recovery.winning_file is not None, (
+                        f"winning file guaranteed for COMPLETE pair "
+                        f"{chunk.safe_name()}/{strategy.display_name()}"
+                    )
                     if chunk.safe_name() not in result.encoded_chunks:
                         result.encoded_chunks[chunk.safe_name()] = {}
                     name_record = EncodedChunk.parse_file_name(pair_recovery.winning_file.name)
@@ -1445,7 +1415,7 @@ async def _encode_chunks_parallel(
                         crf          = name_record.crf,
                         path         = pair_recovery.winning_file,
                         resolution   = name_record.resolution,
-                        frame_count  = 0,  # unknown on recovery (Req 14.2)
+                        frame_count  = 0,  # unknown on recovery
                     )
                     result.reused_count += 1
                     complete_pairs.add((chunk.safe_name(), strategy.display_name()))
@@ -1456,11 +1426,9 @@ async def _encode_chunks_parallel(
         (c, s) for (c, s) in queue._pending
         if (c.safe_name(), s.display_name()) not in complete_pairs
     ]
-    queue._completed = complete_pairs.copy()
 
     async def encode_worker() -> None:
         """Worker coroutine for encoding chunks."""
-        nonlocal counter_failed
         while not queue.is_empty():
             next_item = queue.get_next()
             if next_item is None:
@@ -1488,17 +1456,18 @@ async def _encode_chunks_parallel(
 
                 # Update result
                 if chunk_result.success:
+                    # Success implies a built winner (encode_chunk's contract).
+                    assert chunk_result.encoded_file is not None and chunk_result.final_crf is not None
                     if chunk.safe_name() not in result.encoded_chunks:
                         result.encoded_chunks[chunk.safe_name()] = {}
-                    if chunk_result.encoded_file is not None and chunk_result.final_crf is not None:
-                        result.encoded_chunks[chunk.safe_name()][strategy.display_name()] = build_encoded_chunk(
-                            chunk        = chunk,
-                            strategy     = strategy,
-                            crf          = chunk_result.final_crf,
-                            path         = chunk_result.encoded_file.path,
-                            resolution   = chunk_result.encoded_file.resolution,
-                            frame_count  = chunk_result.frame_count,
-                        )
+                    result.encoded_chunks[chunk.safe_name()][strategy.display_name()] = build_encoded_chunk(
+                        chunk        = chunk,
+                        strategy     = strategy,
+                        crf          = chunk_result.final_crf,
+                        path         = chunk_result.encoded_file.path,
+                        resolution   = chunk_result.encoded_file.resolution,
+                        frame_count  = chunk_result.frame_count,
+                    )
 
                     if chunk_result.reused:
                         result.reused_count += 1
@@ -1521,7 +1490,6 @@ async def _encode_chunks_parallel(
                 else:
                     queue.mark_failed(chunk.safe_name(), strategy)
                     result.failed_chunks.append(chunk.safe_name())
-                    counter_failed += 1
                     if advance is not None:
                         advance(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.FAILED)
 
@@ -1555,11 +1523,13 @@ def encode_all_chunks(
     """Encode all chunks with quality-targeted CRF adjustment.
 
     This is the main entry point for the encoding phase. It handles:
-    - Pre-validating crop params against ``encoding.yaml`` (Req 3.5)
-    - Writing ``encoding.yaml`` with current crop params (Req 2.4)
-    - Calling ``recover_attempts`` to classify all ``(chunk, strategy)`` pairs
-    - Skipping ``COMPLETE`` pairs and resuming ``PARTIAL`` pairs
+    - Classifying all ``(chunk, strategy)`` pairs via
+      ``_recover_encoding_attempts``
+    - Skipping ``COMPLETE`` pairs and resuming pending pairs
     - Parallel encoding of chunks that need work
+
+    ``encoding.yaml`` persistence and probe-mismatch validation are owned by
+    ``EncodingPhase``.
 
     Args:
         chunks:            List of chunk windows to encode.
@@ -1570,15 +1540,12 @@ def encode_all_chunks(
         max_parallel:      Maximum concurrent encoding processes
         force:             If False, reuse existing encodings that meet current targets
         dry_run:           If True, only report what would be done without encoding
-        crop_params:       Crop parameters to apply uniformly to every chunk attempt.                           When ``None``, no cropping is applied.
+        crop_params:       Crop parameters to apply uniformly to every chunk attempt.
                            When ``None``, no cropping is applied.
-        encoding_yaml:     Optional path to ``encoding.yaml`` for crop pre-validation
-                           and persistence.  When provided, crop pre-validation
-                           and ``encoding.yaml`` persistence are enabled.
+        encoding_yaml:     Unused — ``encoding.yaml`` persistence is owned by
+                           ``EncodingPhase``.
         cleanup_level:     Controls deletion of intermediate attempt files after each
-                           pair converges (Req 6.6, 12.3).
-        collector:         Metrics collector; passed through to
-                           ``_encode_chunks_parallel`` for timing and convergence tracking.
+                           pair converges.
         metrics_sampling:  Frame subsampling factor for quality metric generation.
                            Passed through to ``ChunkEncoder`` and then to
                            ``QualityEvaluator.evaluate_chunk``.
@@ -1591,22 +1558,13 @@ def encode_all_chunks(
         len(chunks), len(strategies), len(quality_targets),
     )
 
-    # --- Stale .tmp cleanup (Req 7.7) ---
-    encoding_base = work_dir / ENCODING_WORKSPACE_DIR
-    if encoding_base.exists():
-        for tmp_file in encoding_base.rglob(f"*{TEMP_SUFFIX}"):
-            logger.warning("Removing stale temp file from previous run: %s", tmp_file.name)
-            try:
-                tmp_file.unlink()
-            except OSError as e:
-                logger.warning("Could not remove stale temp file %s: %s", tmp_file, e)
+    # No stale-.tmp scan here: the sole caller (``EncodingPhase._execute``)
+    # always follows ``EncodingPhase._recover()`` — which already cleaned the
+    # identical ``encoding/`` tree — and nothing writes ``.tmp`` under it
+    # between the two (the only intervening write is ``encoding.yaml`` at the
+    # work-dir root, outside this tree).
 
-    # --- Step 2: Write encoding.yaml (Req 2.4) — handled by EncodingPhase ---
-    # encoding.yaml persistence and probe mismatch validation are owned by
-    # EncodingPhase._recover() and _execute(). encoding_yaml is
-    # always None when called from the Phase path.
-
-    # --- Step 3: Artifact recovery via _recover_encoding_attempts (Req 3.6) ---
+    # Artifact recovery: classify every (chunk, strategy) pair.
     chunk_ids      = [c.safe_name() for c in chunks]
     strategy_names = [s.display_name() for s in strategies]
     phase_recovery = _recover_encoding_attempts(work_dir, chunk_ids, strategy_names)
@@ -1678,10 +1636,10 @@ def encode_all_chunks(
     return result
 
 # ---------------------------------------------------------------------------
-# EncodingPhase — Phase object (task 9)
+# EncodingPhase — Phase object
 # ---------------------------------------------------------------------------
 
-@_dataclass
+@dataclass
 class EncodingPhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying encoding-specific payload.
 
@@ -1712,8 +1670,8 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
     """Phase object for CRF-search chunk encoding.
 
     Owns artifact enumeration, recovery, invalidation, execution, and logging
-    for the encoding phase.  Wraps the existing ``encode_all_chunks`` helper.
-    The uniform run footprint is inherited from :class:`Phase`.
+    for the encoding phase.  Execution delegates to the ``encode_all_chunks``
+    helper. The uniform run footprint is inherited from :class:`Phase`.
 
     Args:
         config: Full pipeline configuration.
@@ -1721,6 +1679,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
     """
 
     name:        str       = "encoding"
+    SIDECAR_NAME = "encoding.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (
         JobPhase, ProbePhase, ChunkingPhase, OptimizationPhase,
     )
@@ -1754,7 +1713,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         logger.info("Scanning for existing artifacts...")
 
         probe_result = self._dep_result(ProbePhase)
-        crop         = probe_result.crop if probe_result is not None else None
+        crop         = probe_result.crop
 
         strategies = self._dep_result(OptimizationPhase).selected_strategies
         chunks     = self._dep_result(ChunkingPhase).chunks
@@ -1785,7 +1744,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         for target in (work_dir / ENCODING_WORKSPACE_DIR, work_dir / ENCODED_OUTPUT_DIR):
             if target.exists():
                 try:
-                    _shutil.rmtree(target)
+                    shutil.rmtree(target)
                     logger.debug("deep cleanup: deleted %s", target)
                 except OSError as exc:
                     logger.warning("deep cleanup: could not delete %s: %s", target, exc)
@@ -1819,14 +1778,14 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         work_dir   = job_result.work_dir
         enc_dir    = work_dir / ENCODING_WORKSPACE_DIR
         out_dir    = work_dir / ENCODED_OUTPUT_DIR
-        yaml_path  = work_dir / _ENCODING_YAML
+        yaml_path  = work_dir / EncodingPhase.SIDECAR_NAME
         force_wipe = job_result.force_wipe
 
         # Step 1: force-wipe
         if force_wipe:
             for d in (enc_dir, out_dir):
                 if d.exists():
-                    _shutil.rmtree(d)
+                    shutil.rmtree(d)
                     logger.debug("force_wipe: deleted %s", d)
             if yaml_path.exists():
                 yaml_path.unlink()
@@ -1836,30 +1795,18 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # removed encoding.yaml, so a mismatch can only be seen without it).
         if not force_wipe:
             persisted_enc = EncodingParams.load(yaml_path)
-            probe_result  = self._dep_result(ProbePhase)
-            crop          = probe_result.crop if probe_result is not None else None
-            current_probe = ProbeState(
-                frame_count = probe_result.stream.payload.frame_count if (probe_result is not None and probe_result.stream is not None) else 0,
-                crop        = crop if crop is not None else CropParams(),
-            ) if probe_result is not None else None
+            current_probe = ProbeState.from_probe(self._dep_result(ProbePhase))
             self.params   = EncodingParams(probe=current_probe)
 
-            if persisted_enc is not None and current_probe is not None:
-                if persisted_enc.probe != current_probe:
-                    raise RecoveryError(
-                        "Probe params changed since last encoding run "
-                        f"(persisted={persisted_enc.probe}, current={current_probe}). "
-                        "Re-run with --force to delete stale encoding artifacts and continue."
-                    )
+            if persisted_enc is not None and persisted_enc.probe != current_probe:
+                raise RecoveryError(
+                    "Probe params changed since last encoding run "
+                    f"(persisted={persisted_enc.probe}, current={current_probe}). "
+                    "Re-run with --force to delete stale encoding artifacts and continue."
+                )
 
         # Step 3: clean up .tmp files
-        if enc_dir.exists():
-            for tmp in enc_dir.rglob(f"*{TEMP_SUFFIX}"):
-                try:
-                    tmp.unlink()
-                    logger.warning("Removed leftover temp file: %s", tmp)
-                except OSError as exc:
-                    logger.warning("Could not remove temp file %s: %s", tmp, exc)
+        remove_stale_tmp_files(enc_dir)
 
         # Step 4: get chunks and strategies from dependencies
         chunking_result     = self._dep_result(ChunkingPhase)
@@ -1932,7 +1879,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         """
         work_dir = self._dep_result(JobPhase).work_dir
         probe_result = self._dep_result(ProbePhase)
-        crop         = probe_result.crop if probe_result is not None else None
+        crop         = probe_result.crop
 
         # Resolve chunks and strategies from dependencies
         chunking_result     = self._dep_result(ChunkingPhase)
@@ -1955,13 +1902,9 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         self.quality_labels = {s.display_name(): s.codec.quality_label for s in strategies}
 
         # Persist encoding.yaml with current probe state
-        encoding_yaml = work_dir / _ENCODING_YAML
+        encoding_yaml = work_dir / EncodingPhase.SIDECAR_NAME
         if self.params is None:
-            current_probe = ProbeState(
-                frame_count = probe_result.stream.payload.frame_count if (probe_result is not None and probe_result.stream is not None) else 0,
-                crop        = crop if crop is not None else CropParams(),
-            ) if probe_result is not None else None
-            self.params = EncodingParams(probe=current_probe)
+            self.params = EncodingParams(probe=ProbeState.from_probe(probe_result))
         self.params.save(encoding_yaml)
         logger.debug("Wrote encoding.yaml (crop=%s)", crop)
 
@@ -1987,14 +1930,13 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             logger.critical(err)
             return self._make_result(PhaseOutcome.FAILED, [], err)
 
-        # Preservation invariant (Req 9.1/9.7): Σ winning-attempt frame counts
+        # Preservation invariant: Σ winning-attempt frame counts
         # must equal the source count. Recovered winners without a known count
         # (0 sentinel) skip the check with a warning — the final-merge
         # verification remains the hard backstop.
-        source_total = (
-            probe_result.stream.payload.frame_count
-            if probe_result is not None and probe_result.stream is not None else 0
-        )
+        # The dependency walk guarantees a completed probe with a resolved stream.
+        assert probe_result.stream is not None, "probe guaranteed complete by the dependency walk"
+        source_total = probe_result.stream.payload.frame_count
         winners = [
             (chunk_id, strategy_name, encoded)
             for chunk_id, by_strategy in enc_result.encoded_chunks.items()

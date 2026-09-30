@@ -68,15 +68,15 @@ class TestMatrixLookup:
         assert spec == "pan=stereo|c0=c0+0.707*c2+0.707*c4|c1=c1+0.707*c2+0.707*c5"
         assert "c3" not in spec  # LFE dropped
 
-    def test_51_to_20_lfe_preserved_verbatim(self) -> None:
-        # Bug: "improving" the historical night fold (e.g. bumping FC to 0.707 or
-        # changing LFE gain) silently changes user-heard output. It is verbatim.
+    def test_51_to_20_lfe_is_dolby_power_balanced_fold(self) -> None:
+        # Bug: silently changing the LFE fold coefficients changes user-heard
+        # output; the Dolby power-balanced values are the approved mix.
         spec = DOWNMIX_MATRICES[
             (Layout.SURROUND_51.value, Layout.STEREO.value, MatrixName.LFE.value)
         ]
         assert spec == (
-            "pan=stereo|c0=0.5*c2+0.707*c0+0.707*c4+0.5*c3"
-            "|c1=0.5*c2+0.707*c1+0.707*c5+0.5*c3"
+            "pan=stereo|c0=0.3431*c0+0.2426*c2+0.2426*c4+0.1716*c3"
+            "|c1=0.3431*c1+0.2426*c2+0.2426*c5+0.1716*c3"
         )
 
     def test_51_to_20_boosted_preserved_verbatim(self) -> None:
@@ -95,7 +95,7 @@ class TestMatrixLookup:
         spec = DOWNMIX_MATRICES[
             (Layout.SURROUND_71.value, Layout.SURROUND_51.value, None)
         ]
-        assert spec == "pan=5.1|c0=c0|c1=c1|c2=c2|c3=c3|c4=c4+c6|c5=c5+c7"
+        assert spec == "pan=5.1|c0=c0|c1=c1|c2=c2|c3=c3|c4=0.5*c6+0.5*c4|c5=0.5*c7+0.5*c5"
 
     def test_71_to_20_folds_side_pair_into_back_terms(self) -> None:
         # Bug: dropping the side channels (c6/c7) when going 7.1→2.0 loses the

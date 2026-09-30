@@ -33,11 +33,6 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Internal probe helpers (module-level, not part of public API)
-
-
-
-# ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
 
@@ -116,7 +111,7 @@ class Strategy(BaseModel):
     def display_name(self) -> str:
         """Display name — the composed identity, verbatim (``'slow+h265-aq'``).
 
-        The single generator (Req 15.10); the safe form is :meth:`safe_name`.
+        The single generator; the safe form is :meth:`safe_name`.
         """
         return f"{self.preset}+{self.profile}"
 
@@ -128,15 +123,6 @@ class Strategy(BaseModel):
         name, no per-type thinking.
         """
         return sanitize_filesystem_text(self.display_name())
-
-    @property
-    def pre_input_args(self) -> tuple[str, ...]:
-        """The codec's pre-input stage (``-hwaccel`` / ``-init_hw_device`` / vulkan setup).
-
-        The encoder merges these into the encode request's input; the runner
-        emits them before the input's window flags and ``-i``.
-        """
-        return tuple(self.codec.pre_input_args)
 
     def to_output_args(self, quality: Decimal, vf_filter: str | None = None) -> list[str]:
         """Expand the codec's ``encoder_args`` template into the output-stage args.
@@ -283,6 +269,40 @@ class QualityTarget(BaseModel):
     def __str__(self) -> str:
         return f"{self.metric}-{self.statistic}≥{self.value}"
 
+
+def targets_as_strings(targets: list[QualityTarget]) -> list[str]:
+    """Serialise quality targets to ``"metric-statistic:value"`` strings.
+
+    The canonical persisted form of a target set (``optimization.yaml``,
+    ``merge.yaml``): sorted so the list is order-independent — two runs with
+    the same targets in different config order serialise identically.
+
+    Args:
+        targets: Quality targets from :class:`~pyqenc.app_config.AppConfig`.
+
+    Returns:
+        Sorted list of strings like ``["vmaf-min:93.0"]``.
+    """
+    return sorted(f"{t.metric}-{t.statistic}:{t.value}" for t in targets)
+
+
+def _coerce_decimal_pair(v: tuple | list) -> tuple[Decimal, Decimal]:
+    """Coerce a two-element quality range to ``(Decimal, Decimal)``.
+
+    The shared ``quality_range`` before-validator body: each element passes
+    through ``str`` first so floats and YAML strings both land on the exact
+    same ``Decimal`` value.  Config order is preserved — the caller's
+    convention (first = better end) decides meaning, not the helper.
+
+    Args:
+        v: The two-element range (ints, floats, or strings).
+
+    Returns:
+        The pair as ``Decimal`` values.
+    """
+    return Decimal(str(v[0])), Decimal(str(v[1]))
+
+
 class CodecConfig(BaseModel):
     """Configuration for a video codec.
 
@@ -358,17 +378,6 @@ class CodecConfig(BaseModel):
         """The quality value representing the *worse* end of the range (``quality_range[1]``)."""
         return self.quality_range[1]
 
-    @property
-    def quality_higher_is_better(self) -> bool:
-        """``True`` when a higher quality value means better quality (e.g. VBR bitrate).
-
-        Derived from ``quality_range``: when ``quality_range[0] > quality_range[1]``,
-        higher values are better (e.g. ``[99, 0]`` for Mbit/s).
-        When ``quality_range[0] < quality_range[1]``, lower values are better
-        (e.g. ``[0, 51]`` for CRF/CQ/QP).
-        """
-        return self.quality_range[0] > self.quality_range[1]
-
     @field_validator("quality_range", mode="before")
     @classmethod
     def _normalise_quality_range(
@@ -378,8 +387,7 @@ class CodecConfig(BaseModel):
 
         ``quality_range[0]`` is always the *better* end as specified in config.
         """
-        a, b = Decimal(str(v[0])), Decimal(str(v[1]))
-        return a, b
+        return _coerce_decimal_pair(v)
 
     @property
     def quality_log_padding(self) -> int:

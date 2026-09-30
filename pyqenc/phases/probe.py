@@ -43,7 +43,9 @@ from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.state import ProbeState
 from pyqenc.stream_model import ExtendedVideoStream, VideoStream
+from pyqenc.utils.crop import detect_crop_parameters
 from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
+from pyqenc.utils.fs import remove_stale_tmp_file
 from pyqenc.utils.timestamps import count_frames
 
 if TYPE_CHECKING:
@@ -52,7 +54,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_PROBE_YAML_NAME = "probe.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +113,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
     """
 
     name:        str       = "probe"
+    SIDECAR_NAME = "probe.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase)
     BANNER:      bool      = False
     _METRIC_KEY: MetricKey = MetricKey.PROBE
@@ -163,7 +165,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         """
         job_result        = self._dep_result(JobPhase)
         extraction_result = self._dep_result(ExtractionPhase)
-        probe_yaml        = job_result.work_dir / _PROBE_YAML_NAME
+        probe_yaml        = job_result.work_dir / ProbePhase.SIDECAR_NAME
 
         # Step 1 — no video stream: fatal for all downstream video phases.
         video_artifact = extraction_result.video_stream
@@ -174,13 +176,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         self._video_stream = video_artifact.payload
 
         # Step 2 — .tmp pre-clean (probe.yaml is written via .tmp-then-rename).
-        tmp = probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX)
-        if tmp.exists():
-            try:
-                tmp.unlink()
-                logger.warning("Removed leftover temp file: %s", tmp.name)
-            except OSError as exc:
-                logger.warning("Could not remove temp file %s: %s", tmp, exc)
+        remove_stale_tmp_file(probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX))
 
         # Step 3 — load + currency.
         self._probe_state = ProbeState.load(probe_yaml)
@@ -223,9 +219,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         Returns:
             ``ProbePhaseResult`` with outcome ``COMPLETED``.
         """
-        from pyqenc.utils.crop import detect_crop_parameters
-
-        probe_yaml = self._dep_result(JobPhase).work_dir / _PROBE_YAML_NAME
+        probe_yaml = self._dep_result(JobPhase).work_dir / ProbePhase.SIDECAR_NAME
         probe_state = self._probe_state
         video       = self._video_stream
         assert video is not None  # recovery guarantees a video stream

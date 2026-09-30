@@ -1,4 +1,4 @@
-"""Shared filesystem-name primitives for the naming-ownership rules (Req 15).
+"""Shared filesystem-name primitives for the naming-ownership rules.
 
 Exactly two kinds of names exist in the pipeline. **Display names** carry any
 symbols and never touch the filesystem. **Filesystem names** are constrained,
@@ -30,7 +30,7 @@ def is_filesystem_safe_name(name: str) -> bool:
 
     Used at config load for names that are embedded verbatim in filesystem
     paths (profiles, presets, chains): an unsafe name is rejected there, so no
-    sanitization ever executes in a naming path (Req 15.6).
+    sanitization ever executes in a naming path.
 
     Args:
         name: The candidate name.
@@ -47,8 +47,7 @@ def sanitize_filesystem_text(text: str) -> str:
     The sanitize primitive for **media-sourced free text only** (stream titles
     above all): Windows-forbidden characters and control chars are replaced
     with :data:`FILENAME_SANITIZATION_REPLACEMENT` — replacement, never
-    rejection, so the pipeline never fails a stream because of its title
-    (Req 15.2).
+    rejection, so the pipeline never fails a stream because of its title.
 
     Args:
         text: Free text destined for a filesystem name.

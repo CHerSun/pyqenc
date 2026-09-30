@@ -9,10 +9,6 @@ plus the stream duration at load time, and each chunk's frame count derives
 from the detector-reported boundary frames (the last chunk closes against
 the source total) — Σ chunk counts telescope to the source count by
 construction.
-
-The FFV1/remux split machinery, ``ChunkingMode`` and the ``chunks/``
-directory are gone: positioning is timestamp-based and frame-exactness is a
-verified invariant, not positional machinery.
 """
 # CHerSun 2026
 
@@ -23,7 +19,6 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar
 
-import yaml
 from scenedetect import ContentDetector, detect
 
 from pyqenc.metrics import MetricKey
@@ -48,7 +43,7 @@ from pyqenc.stream_model import (
     VideoStreamChunk,
 )
 from pyqenc.utils.alive import alive_bar
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -56,7 +51,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CHUNKING_YAML = "chunking.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +129,7 @@ def build_chunks(
     Every boundary opens a ``[start, end)`` window; each window's frame count
     is the difference of consecutive detector-reported boundary frames, the
     last closing against the source total. The counts telescope, so
-    ``Σ chunk.frame_count == stream.frame_count`` by construction (Req 9.4).
+    ``Σ chunk.frame_count == stream.frame_count`` by construction.
 
     Args:
         boundaries: Scene boundaries in order (the first at the stream start).
@@ -212,6 +206,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
     """
 
     name:        str       = "chunking"
+    SIDECAR_NAME = "chunking.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase, ProbePhase)
     _METRIC_KEY: MetricKey = MetricKey.CHUNKING
 
@@ -240,8 +235,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         """Determine ``chunking.yaml`` currency: absent boundaries or current.
 
         Steps:
-        1. If ``force_wipe``: delete ``chunking.yaml`` and any legacy
-           ``chunks/`` directory from the pre-spec pipeline.
+        1. If ``force_wipe``: delete ``chunking.yaml``.
         2. Load scene boundaries from ``chunking.yaml``; pending when absent
            or empty (detection must run), current otherwise.
 
@@ -255,7 +249,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         """
         job_result = self._dep_result(JobPhase)
         work_dir   = job_result.work_dir
-        yaml_path  = work_dir / _CHUNKING_YAML
+        yaml_path  = work_dir / ChunkingPhase.SIDECAR_NAME
         force_wipe = job_result.force_wipe
 
         # Step 1: force-wipe.
@@ -300,10 +294,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         """
         work_dir = self._dep_result(JobPhase).work_dir
         stream   = self._dep_result(ProbePhase).stream
-        if stream is None:
-            err = "No extended video stream available for chunking"
-            logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err)
+        assert stream is not None, "probe guaranteed complete by the dependency walk"
         extended = stream.payload
 
         boundaries = self._recovered_scenes
@@ -323,7 +314,13 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
             except Exception as exc:
                 logger.exception("Scene detection failed")
                 return self._make_result(PhaseOutcome.FAILED, [], str(exc))
-            self._persist_scenes(work_dir / _CHUNKING_YAML, boundaries)
+            sidecar_path = work_dir / ChunkingPhase.SIDECAR_NAME
+            sidecar = ChunkingSidecar(scenes=[
+                SceneRecord(timestamp_seconds=b.timestamp_seconds, frame=b.frame)
+                for b in boundaries
+            ])
+            write_yaml_atomic(sidecar_path, sidecar.model_dump(exclude_none=True))
+            logger.debug("Wrote scene boundaries: %s", sidecar_path.name)
 
         try:
             chunks = build_chunks(boundaries, extended)
@@ -341,10 +338,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
     def _reused_result(self, wanted: list, message: str) -> ChunkingPhaseResult:
         """Build the reused result from the cached boundaries."""
         stream = self._dep_result(ProbePhase).stream
-        if stream is None:
-            err = "No extended video stream available for chunking"
-            logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err)
+        assert stream is not None, "probe guaranteed complete by the dependency walk"
         try:
             chunks = build_chunks(self._recovered_scenes, stream.payload)
         except RecoveryError as exc:
@@ -398,22 +392,4 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
     @staticmethod
     def _load_sidecar(path) -> ChunkingSidecar | None:
         """Load ``chunking.yaml``; ``None`` when absent or unparseable."""
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return ChunkingSidecar.model_validate(data)
-        except Exception as exc:  # noqa: BLE001 — any parse failure means "detect"
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
-
-    @staticmethod
-    def _persist_scenes(path, boundaries: list[SceneBoundary]) -> None:
-        """Persist the boundaries (the detector's own frame values included)."""
-        sidecar = ChunkingSidecar(scenes=[
-            SceneRecord(timestamp_seconds=b.timestamp_seconds, frame=b.frame)
-            for b in boundaries
-        ])
-        write_yaml_atomic(path, sidecar.model_dump(exclude_none=True))
-        logger.debug("Wrote scene boundaries: %s", path.name)
+        return load_model(path, ChunkingSidecar)

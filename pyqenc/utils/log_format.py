@@ -24,7 +24,6 @@ from pyqenc.constants import (
     METRIC_LOG_DECIMAL_PLACES,
     NEUTRAL_INDICATOR_SYMBOL,
     SUCCESS_SYMBOL_MAJOR,
-    SUCCESS_SYMBOL_MINOR,
     THICK_LINE,
     VISUAL_HASH_EMOJIS_WIDE,
 )
@@ -33,7 +32,6 @@ from pyqenc.state import ArtifactState
 if TYPE_CHECKING:
     from decimal import Decimal
 
-    from pyqenc.models import QualityTarget
     from pyqenc.phase import Artifact
 
 logger = logging.getLogger(__name__)
@@ -185,12 +183,9 @@ def visual_hash(strategy: str, chunk_id: str) -> str:
     return VISUAL_HASH_EMOJIS_WIDE[h % len(VISUAL_HASH_EMOJIS_WIDE)]
 
 
-def _fmt_chunk_prefix(strategy: str, chunk_id: str, use_visual_hash: bool = True) -> str:
-    prefix = f"{visual_hash(strategy, chunk_id)} " if use_visual_hash else ""
-    return f"{prefix}{BRACKET_LEFT}{strategy}{BRACKET_RIGHT} {chunk_id}"
-
 def fmt_chunk(strategy: str, chunk_id: str, msg: str, use_visual_hash: bool = True) -> str:
-    return _fmt_chunk_prefix(strategy, chunk_id, use_visual_hash) + f" {msg}"
+    prefix = f"{visual_hash(strategy, chunk_id)} " if use_visual_hash else ""
+    return f"{prefix}{BRACKET_LEFT}{strategy}{BRACKET_RIGHT} {chunk_id} {msg}"
 
 def fmt_chunk_start(strategy: str, chunk_id: str, use_visual_hash: bool = True) -> str:
     return fmt_chunk(strategy, chunk_id, "starting ...", use_visual_hash)
@@ -241,40 +236,17 @@ def fmt_key_value_table(kv_to_show: dict[str, str | list | object]) -> None:
 # Merge summary helpers
 # ---------------------------------------------------------------------------
 
-def _fmt_size_mb(size_bytes: int) -> str:
+def fmt_size_mb(size_bytes: int) -> str:
     """Format *size_bytes* as MB with a narrow-space thousands separator.
 
-    Example: 4_231_400_000 → ``"4 031.4"``
+    One decimal place below 1000 MB, none at or above (column width stays
+    stable for large outputs).
+
+    Example: 4_231_400_000 → ``"4 031"``
     """
     mb = size_bytes / (1024 * 1024)
     # Format with comma thousands separator then swap to narrow no-break space (U+202F). Use single decimal place for <1000 MB values.
     return f"{mb:,.1f}".replace(",", "\u202f") if mb < 1000 else f"{mb:,.0f}".replace(",", "\u202f")
-
-
-def _fmt_savings(size_bytes: int, reference_size_bytes: int) -> str:
-    """Return savings percentage string, e.g. ``"77.0%"``."""
-    if reference_size_bytes <= 0:
-        return "N/A"
-    saved = (1 - size_bytes / reference_size_bytes) * 100
-    return f"{saved:.1f}%"
-
-
-def _fmt_target_value(
-    target:      QualityTarget,
-    metrics:     dict[str, float],
-    targets_met: bool | None,
-) -> str:
-    """Return a formatted metric value with pass/fail symbol for *target*.
-
-    Returns ``"N/A"`` when the metric key is absent from *metrics*.
-    """
-    key   = f"{target.metric}_{target.statistic}"
-    value = metrics.get(key)
-    if value is None:
-        return "N/A"
-    symbol = SUCCESS_SYMBOL_MINOR if value >= target.value else FAILURE_SYMBOL_MINOR
-    return f"{fmt_metric_value(value)} {symbol}"
-
 
 
 

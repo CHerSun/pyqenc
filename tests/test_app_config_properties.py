@@ -267,7 +267,7 @@ class TestDeepMergeRecursivelyMergesNestedDicts:
         )
 
         # Every key exclusive to the base sub-dict must be present.
-        for key in base_sub:
+        for key, base_value in base_sub.items():
             if key not in override_sub:
                 assert key in result_sub, (
                     f"_deep_merge dropped base-only key {key!r} from nested "
@@ -276,10 +276,10 @@ class TestDeepMergeRecursivelyMergesNestedDicts:
                     f"  override sub-dict : {override_sub!r}\n"
                     f"  result sub-dict   : {result_sub!r}"
                 )
-                assert result_sub[key] == base_sub[key], (
+                assert result_sub[key] == base_value, (
                     f"_deep_merge changed the value for base-only key "
                     f"{key!r} in nested dict.\n"
-                    f"  expected : {base_sub[key]!r}\n"
+                    f"  expected : {base_value!r}\n"
                     f"  got      : {result_sub[key]!r}"
                 )
 
@@ -858,8 +858,8 @@ class TestAppConfigRoundTrip:
         config.encoding.strategies      = strategies
 
         # Force re-resolution to populate the private caches.
-        config.encoding._resolved_targets    = None  # noqa: SLF001
-        config.encoding._resolved_strategies = None  # noqa: SLF001
+        config.encoding._resolved_targets    = None
+        config.encoding._resolved_strategies = None
         config.encoding.resolve(config.codecs, config.profiles)
 
         dumped        = config.model_dump()
@@ -996,8 +996,8 @@ class TestStrategyResolutionDeterministicAndIdempotent:
         config.encoding.strategies = strategy_patterns
 
         # Force re-resolution with the new strategy list.
-        config.encoding._resolved_targets    = None  # noqa: SLF001
-        config.encoding._resolved_strategies = None  # noqa: SLF001
+        config.encoding._resolved_targets    = None
+        config.encoding._resolved_strategies = None
         config.encoding.resolve(config.codecs, config.profiles)
 
         first_read:  list[Strategy] = config.encoding.resolved_strategies
@@ -1050,8 +1050,8 @@ class TestStrategyResolutionDeterministicAndIdempotent:
         config.encoding.strategies = strategy_patterns
 
         # First resolution (fresh cache).
-        config.encoding._resolved_targets    = None  # noqa: SLF001
-        config.encoding._resolved_strategies = None  # noqa: SLF001
+        config.encoding._resolved_targets    = None
+        config.encoding._resolved_strategies = None
         config.encoding.resolve(config.codecs, config.profiles)
 
         after_first_resolve: list[Strategy] = config.encoding.resolved_strategies
@@ -1103,8 +1103,8 @@ class TestStrategyResolutionDeterministicAndIdempotent:
         config.encoding.strategies = strategy_patterns
 
         # Clear the cache so we resolve fresh for this specific pattern list.
-        config.encoding._resolved_targets    = None  # noqa: SLF001
-        config.encoding._resolved_strategies = None  # noqa: SLF001
+        config.encoding._resolved_targets    = None
+        config.encoding._resolved_strategies = None
         config.encoding.resolve(config.codecs, config.profiles)
 
         resolved: list[Strategy] = config.encoding.resolved_strategies
@@ -1212,8 +1212,8 @@ class TestStrategyDeduplicationByPresetProfile:
         config.encoding.strategies = patterns
 
         # Force fresh resolution with the (possibly duplicate) pattern list.
-        config.encoding._resolved_targets    = None  # noqa: SLF001
-        config.encoding._resolved_strategies = None  # noqa: SLF001
+        config.encoding._resolved_targets    = None
+        config.encoding._resolved_strategies = None
         config.encoding.resolve(config.codecs, config.profiles)
 
         resolved: list[Strategy] = config.encoding.resolved_strategies
@@ -1262,8 +1262,8 @@ class TestStrategyDeduplicationByPresetProfile:
         config.encoding.strategies = patterns
 
         # Force fresh resolution.
-        config.encoding._resolved_targets    = None  # noqa: SLF001
-        config.encoding._resolved_strategies = None  # noqa: SLF001
+        config.encoding._resolved_targets    = None
+        config.encoding._resolved_strategies = None
         config.encoding.resolve(config.codecs, config.profiles)
 
         resolved: list[Strategy] = config.encoding.resolved_strategies
@@ -1322,8 +1322,8 @@ class TestStrategyDeduplicationByPresetProfile:
         # Any profile that matches both patterns would be a duplicate.
         config.encoding.strategies = ["h265*+slow", "h265+slow", "h265-aq+slow"]
 
-        config.encoding._resolved_targets    = None  # noqa: SLF001
-        config.encoding._resolved_strategies = None  # noqa: SLF001
+        config.encoding._resolved_targets    = None
+        config.encoding._resolved_strategies = None
         config.encoding.resolve(config.codecs, config.profiles)
 
         resolved: list[Strategy] = config.encoding.resolved_strategies
@@ -1367,7 +1367,7 @@ class TestStrategyDeduplicationByPresetProfile:
 # **Validates: Requirements 3.2, 3.5, 3.6**
 # ---------------------------------------------------------------------------
 
-from pydantic import ValidationError  # noqa: E402
+from pydantic import ValidationError
 
 
 class TestValidationErrorOnInvalidStrings:

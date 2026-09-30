@@ -1,9 +1,4 @@
-"""
-Unified visualization and quality metrics analysis for video encoding pipeline.
-
-Consolidates metric parsing, statistics computation, and plot generation
-from the legacy metrics_visualization module.
-"""
+"""Unified visualization and quality metrics analysis for video encoding pipeline."""
 # CHerSun 2026
 
 import asyncio
@@ -27,11 +22,11 @@ from pyqenc.constants import (
 from pyqenc.models import CropParams, QualityTarget
 from pyqenc.quality import (
     ChunkQualityStats,
+    FullMetricStatistics,
     MetricStats,
     MetricType,
-    QualityLogs,
     QualityEvaluation,
-    _MetricStatistics,
+    QualityLogs,
     run_metrics,
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
@@ -251,6 +246,8 @@ def parse_vmaf_file(file_path: Path, factor: int = 1) -> pd.DataFrame:
 
     Raises:
         ValueError: If the file is not a valid VMAF JSON.
+        TypeError: If the VMAF JSON structure has wrong types (``frames`` is
+                   not an array, or a frame entry is not an object).
     """
     try:
         with file_path.open("r") as fh:
@@ -260,14 +257,14 @@ def parse_vmaf_file(file_path: Path, factor: int = 1) -> pd.DataFrame:
 
     frames = vmaf_data.get("frames")
     if not isinstance(frames, list):
-        raise ValueError(f"VMAF 'frames' is not an array: {file_path}")
+        raise TypeError(f"VMAF 'frames' is not an array: {file_path}")
     if not frames:
         raise ValueError(f"VMAF 'frames' array is empty: {file_path}")
 
     data: list[dict[str, float | int]] = []
     for frame in frames:
         if not isinstance(frame, dict):
-            raise ValueError(f"VMAF frame is not a dictionary: {file_path}")
+            raise TypeError(f"VMAF frame is not a dictionary: {file_path}")
         n    = frame.get("frameNum")
         vmaf = frame.get("metrics", {}).get("vmaf")
         if n is not None and vmaf is not None:
@@ -347,7 +344,7 @@ def compute_statistics(
     values:          pd.Series,
     std_cutoff_max:  float | None = None,
     std_cutoff_min:  float | None = None,
-) -> _MetricStatistics:
+) -> FullMetricStatistics:
     """Compute quantile-based statistics for any numeric metric series.
 
     Values are expected to already be on the display scale (normalized).
@@ -451,7 +448,7 @@ def create_unified_plot(
     styles:              dict[MetricType, MetricVisualStyle] | None = None,
     fps:                 float | None                         = None,
     chunk_start_seconds: float                               = 0.0,
-) -> dict[MetricType, _MetricStatistics]:
+) -> dict[MetricType, FullMetricStatistics]:
     """Create a unified quality-metrics plot and save it to disk.
 
     Generates a figure with:
@@ -478,14 +475,14 @@ def create_unified_plot(
                              from 0.
 
     Returns:
-        Mapping of ``MetricType`` to full ``_MetricStatistics``.
+        Mapping of ``MetricType`` to full ``FullMetricStatistics``.
 
     Raises:
         ValueError: If ``df_norm`` contains no recognized metric columns.
     """
-    # Callers pass the exact rational ``fps_fraction`` (Req 9.9) — coerce to
-    # float here so every x-axis arithmetic stays float (Fraction + float
-    # index would produce object-dtype arrays matplotlib cannot plot).
+    # Callers pass the exact rational ``fps_fraction`` — coerce to float here
+    # so every x-axis arithmetic stays float (Fraction + float index would
+    # produce object-dtype arrays matplotlib cannot plot).
     if fps is not None:
         fps = float(fps)
 
@@ -624,7 +621,7 @@ def create_unified_plot(
     lines:  list[plt.Line2D] = []
     labels: list[str]        = []
 
-    for metric_type in scaled_values:
+    for metric_type, plot_values in scaled_values.items():
         style  = effective_styles[metric_type]
 
         if style.y_axis == "left" and ax_left is not None:
@@ -634,7 +631,6 @@ def create_unified_plot(
         else:
             ax = ax_main
 
-        plot_values = scaled_values[metric_type]
         plot_index  = frame_index[metric_type] + frame_offset
 
         n_points = len(plot_values)
@@ -661,7 +657,7 @@ def create_unified_plot(
         labels.append(style.label)
 
     # Compute full statistics from scaled values
-    stats: dict[MetricType, _MetricStatistics] = {
+    stats: dict[MetricType, FullMetricStatistics] = {
         mt: compute_statistics(scaled_values[mt])
         for mt in scaled_values
     }
@@ -677,7 +673,7 @@ def create_unified_plot(
     _summary_boxes.append((
         current_x, _SUMMARY_BOX_Y_POS,
         f"Frames:\n  Total: {total_frames}\n  Checked: {frames_checked}\n  Factor: 1:{factor}",
-        dict(facecolor="wheat", alpha=_SUMMARY_BOX_ALPHA),
+        {"facecolor": "wheat", "alpha": _SUMMARY_BOX_ALPHA},
     ))
     current_x += _SUMMARY_BOX_WIDTH + _SUMMARY_BOX_SPACING
 
@@ -711,7 +707,7 @@ def create_unified_plot(
         )
         _summary_boxes.append((
             current_x, _SUMMARY_BOX_Y_POS, summary_text,
-            dict(facecolor=style.color, alpha=_SUMMARY_BOX_METRIC_ALPHA),
+            {"facecolor": style.color, "alpha": _SUMMARY_BOX_METRIC_ALPHA},
         ))
         current_x += _SUMMARY_BOX_WIDTH + _SUMMARY_BOX_SPACING
 
@@ -763,32 +759,9 @@ def create_unified_plot(
                                 message="This figure includes Axes that are not compatible with tight_layout")
         plt.tight_layout(pad=_TIGHT_LAYOUT_PAD)
 
-    # -----------------------------------------------------------------------
-    # Summary boxes — why fig.text() and NOT ax.text()
-    # -----------------------------------------------------------------------
-    # When a twinx() axes is present it sits in a separate axes layer that is
-    # rendered on top of ax_main in the figure's stacking order.  Any text
-    # added via ax_main.text(..., transform=ax_main.transAxes) lives in
-    # ax_main's layer and is therefore drawn *under* the twinx axes — meaning
-    # the twinx grid lines and background patch overdraw it regardless of the
-    # zorder value set on the Text artist (zorder only sorts within one axes).
-    #
-    # The fix: use fig.text() with figure-level coordinates so the text is
-    # composited in the figure layer, which is always above all axes layers.
-    #
-    # The coordinate conversion (axes → figure) must happen AFTER tight_layout()
-    # because tight_layout repositions the axes; computing the transform before
-    # that call would produce stale coordinates and misplace the boxes.
-    #
-    # What NOT to do:
-    #   - ax.text(..., zorder=<large number>) — zorder is intra-axes only.
-    #   - iterating gridlines and setting their zorder — seaborn styles render
-    #     the grid as part of the axes background, not as Line2D artists, so
-    #     get_xgridlines() / get_ygridlines() may return nothing useful.
-    #   - switching to a "darkgrid" or "whitegrid" seaborn style and hoping
-    #     rcParams["axes.grid"] = False suppresses it — it does not fully
-    #     suppress the background patch that carries the grid texture.
-    # -----------------------------------------------------------------------
+    # Summary boxes use fig.text() (figure-layer coordinates): ax.text would be
+    # drawn under the twinx axes — zorder only sorts within one axes. The
+    # axes→figure transform must run after tight_layout, which repositions axes.
     axes_to_fig = ax_main.transAxes + fig.transFigure.inverted()
     for ax_x, ax_y, text, bbox_kw in _summary_boxes:
         fx, fy = axes_to_fig.transform((ax_x, ax_y))
@@ -824,7 +797,7 @@ def _is_known_metric(col: str) -> bool:
         return False
 
 
-def extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -> MetricStats:
+def _extract_key_stats(full_stats: FullMetricStatistics, metric_type: MetricType) -> MetricStats:
     """Extract the key statistics subset from a full statistics dict.
 
     For PSNR, substitutes the highest non-inf percentile for ``max`` when the
@@ -902,7 +875,7 @@ def parse_metrics(artifacts: QualityLogs, factor: int = 1) -> pd.DataFrame:
             df = parser(path, factor)  # type: ignore[operator]
             frames.append(df)
             logger.debug("parse_metrics: parsed %s (%d frames)", metric_type.value, len(df))
-        except Exception as exc:
+        except (OSError, ValueError, TypeError) as exc:
             logger.warning("parse_metrics: failed to parse %s from %s: %s", metric_type.value, path, exc)
 
     if not frames:
@@ -942,7 +915,7 @@ def compute_metric_stats(df_norm: pd.DataFrame) -> ChunkQualityStats:
     """Compute key statistics for each metric column in a normalized DataFrame.
 
     For each column whose name matches a ``MetricType.value``, calls
-    ``compute_statistics`` then ``extract_key_stats`` and stores the result.
+    ``compute_statistics`` then ``_extract_key_stats`` and stores the result.
     Columns not matching any ``MetricType.value`` are silently skipped.
 
     Args:
@@ -960,122 +933,11 @@ def compute_metric_stats(df_norm: pd.DataFrame) -> ChunkQualityStats:
             continue
         std_cutoff = 100.0 if mt == MetricType.PSNR else None
         full = compute_statistics(df_norm[col], std_cutoff_max=std_cutoff)
-        result[mt] = extract_key_stats(full, mt)
+        result[mt] = _extract_key_stats(full, mt)
         logger.debug(
             "compute_metric_stats: %s min=%.2f med=%.2f max=%.2f",
             mt.value, result[mt]["min"], result[mt]["median"], result[mt]["max"],
         )
-    return result
-
-
-def _auto_output_path(artifacts: "QualityLogs") -> Path:
-    """Derive an output plot path from the first available metric file in *artifacts*."""
-    first = artifacts.psnr_log or artifacts.ssim_log or artifacts.vmaf_json or artifacts.vif_log
-    if not first:
-        raise ValueError("At least one metric file must be provided")
-    stem   = first.stem
-    prefix = stem.split(".")[0] if "." in stem else stem
-    return first.parent / f"{prefix}_metrics.png"
-
-
-def analyze_chunk_quality(
-    psnr_log:            Path | None  = None,
-    ssim_log:            Path | None  = None,
-    vmaf_json:           Path | None  = None,
-    vif_log:             Path | None  = None,
-    factor:              int          = 1,
-    output_path:         Path | None  = None,
-    title:               str | None   = None,
-    generate_plot:       bool         = True,
-    fps:                 float | None = None,
-    chunk_start_seconds: float        = 0.0,
-    delete_after_parse:  bool         = True,
-) -> ChunkQualityStats:
-    """Analyze video chunk quality from metric log files.
-
-    Parses the provided metric files, computes statistics, and optionally
-    generates a unified visualization plot.  Each raw ``.tmp`` log file is
-    deleted immediately after successful parsing when ``delete_after_parse``
-    is ``True`` (best-effort; a warning is logged on failure).
-
-    Internally uses the composable pipeline:
-    ``parse_metrics`` → ``normalize_metrics`` → ``compute_metric_stats``
-    → ``create_unified_plot``.
-
-    Args:
-        psnr_log:            Path to PSNR log file (optional).
-        ssim_log:            Path to SSIM log file (optional).
-        vmaf_json:           Path to VMAF JSON file (optional).
-        vif_log:             Path to VIF log file (optional).
-        factor:              Frame sampling factor used during metric generation.
-        output_path:         Destination for the plot PNG.  Auto-derived when ``None``.
-        title:               Plot title.  Auto-generated when ``None``.
-        generate_plot:       Whether to create and save the visualization.
-        fps:                 Frames per second of the encoded video.
-        chunk_start_seconds: Start timestamp of the chunk in seconds.
-        delete_after_parse:  When ``True`` (default), each raw metric file is
-                             deleted immediately after successful parsing.
-
-    Returns:
-        ``ChunkQualityStats`` with statistics for each available metric.
-
-    Raises:
-        ValueError: If no valid metric file could be parsed.
-    """
-    from pyqenc.quality import QualityLogs
-
-    artifacts = QualityLogs(
-        psnr_log  = psnr_log,
-        ssim_log  = ssim_log,
-        vmaf_json = vmaf_json,
-        vif_log   = vif_log,
-    )
-
-    # parse_metrics handles per-metric failures internally (logs warning, skips).
-    df_raw  = parse_metrics(artifacts, factor)
-    df_norm = normalize_metrics(df_raw)
-    result  = compute_metric_stats(df_norm)
-
-    # Deferred deletion — all parsers have finished, safe to remove files now.
-    # vif_log and vmaf_json may point to the same file; use a set to delete once.
-    if delete_after_parse:
-        to_delete: set[Path] = set()
-        for path in (psnr_log, ssim_log, vmaf_json, vif_log):
-            if path is not None and path.exists():
-                to_delete.add(path)
-        for path in to_delete:
-            try:
-                path.unlink(missing_ok=True)
-                logger.debug("Deleted raw metric tmp file: %s", path.name)
-            except Exception as exc:
-                logger.warning("Could not delete metric tmp file %s: %s", path.name, exc)
-
-    # Single concise info summary
-    parts = [
-        f"{mt.value.upper()} min={result[mt]['min']:.1f} med={result[mt]['median']:.1f}"
-        for mt in [MetricType.VMAF, MetricType.PSNR, MetricType.SSIM, MetricType.VIF]
-        if mt in result
-    ]
-    if parts:
-        logger.debug("Metrics (normalized): %s", " | ".join(parts))
-
-    if generate_plot:
-        if output_path is None:
-            output_path = _auto_output_path(artifacts)
-        if title is None:
-            names = [col.upper() for col in df_norm.columns if _is_known_metric(col)]
-            title = f"Video Quality Metrics Analysis ({', '.join(names)})"
-        logger.debug("Generating unified plot: %s", output_path)
-        create_unified_plot(
-            df_norm             = df_norm,
-            factor              = factor,
-            output_path         = output_path,
-            title               = title,
-            fps                 = fps,
-            chunk_start_seconds = chunk_start_seconds,
-        )
-        logger.debug("Plot saved to %s", output_path)
-
     return result
 
 
@@ -1091,10 +953,7 @@ def create_crf_plot(
 ) -> None:
     """Create a quality-parameter-over-time plot and save it to disk.
 
-    Layout mirrors ``create_unified_plot`` exactly for side-by-side comparison:
-    same figure size, same gridspec (main + stats row), dual Y-axes both
-    labeled with *quality_label*, same x-axis formatter (``HH:MM:SS`` / seconds,
-    two lines), same summary box, same DPI.
+    Layout mirrors ``create_unified_plot`` for side-by-side comparison.
 
     Args:
         chunks:        List of ``(start_seconds, end_seconds, quality_value)`` tuples,
@@ -1117,8 +976,8 @@ def create_crf_plot(
     plt.style.use("seaborn-v0_8")
     plt.rcParams["axes.grid"] = False
 
-    # Mirror create_unified_plot: 2 rows × 3 columns (same ratios/spacing as 3-metric plot)
-    # The stats subplot spans all 3 columns so the main plot width matches exactly.
+    # 2 rows × 3 columns; the stats subplot spans all 3 columns so the main
+    # plot width matches the 3-metric metrics plot.
     _N_STAT_COLS: int = 3
     fig = plt.figure(figsize=(_FIG_WIDTH, _FIG_HEIGHT))
     gs  = fig.add_gridspec(
@@ -1149,7 +1008,7 @@ def create_crf_plot(
     ax_left.set_title(title, fontsize=_FONT_TITLE, fontweight="bold", pad=20)
     ax_left.tick_params(axis="x", labelsize=_FONT_AXIS_TICKS_X)
 
-    # X-axis: seconds, formatted as HH:MM:SS / s (two lines to match metrics plot height)
+    # X-axis: seconds, formatted as HH:MM:SS / s (two lines like the metrics plot)
     x_min = float(starts.min())
     x_max = float(ends.max())
     x_pad = (x_max - x_min) * _X_PADDING_RATIO
@@ -1184,7 +1043,7 @@ def create_crf_plot(
     )
     ax_left.legend([line], [quality_label], loc="lower right", fontsize=_FONT_LEGEND, framealpha=_LEGEND_ALPHA)
 
-    # Stats subplot — same structure as metric subplots in create_unified_plot
+    # Stats subplot
     crf_series  = pd.Series(crfs)
     crf_stats   = compute_statistics(crf_series, std_cutoff_max=_CRF_Y_MAX)
 
@@ -1216,7 +1075,7 @@ def create_crf_plot(
     ax_stats.grid(True, axis="x", alpha=_GRID_ALPHA_MAJOR, zorder=0)
     ax_stats.set_axisbelow(True)
 
-    # Summary box — same pattern as create_unified_plot (fig.text after tight_layout)
+    # Summary box — fig.text after tight_layout
     summary_text = (
         f"{quality_label}:\n"
         f"  Chunks: {len(chunks)}\n"
@@ -1238,7 +1097,7 @@ def create_crf_plot(
         transform         = fig.transFigure,
         fontsize          = _FONT_SUMMARY_BOX,
         verticalalignment = "bottom",
-        bbox              = dict(boxstyle="round", facecolor=_CRF_COLOR, alpha=_SUMMARY_BOX_METRIC_ALPHA),
+        bbox              = {"boxstyle": "round", "facecolor": _CRF_COLOR, "alpha": _SUMMARY_BOX_METRIC_ALPHA},
         family            = "monospace",
     )
 
@@ -1346,20 +1205,19 @@ class QualityEvaluator:
         if not result.success:
             logger.warning("Metrics run had non-zero exit code: %d", result.returncode)
 
-        # Build artifact paths — .tmp files stay as-is, no rename.
-        # VIF data is embedded in the VMAF JSON (via feature=name=vif), so
-        # vif_log points to the same file as vmaf_json — explicit for clarity.
+        # Build artifact paths — .tmp files stay as-is, no rename. VIF is
+        # embedded in the VMAF JSON (feature=name=vif), so vif_log shares the
+        # vmaf_json path.
         vmaf_tmp = output_dir / f"{tmp_prefix}{MetricType.VMAF.value}.tmp"
         artifacts = QualityLogs(
             psnr_log  = output_dir / f"{tmp_prefix}{MetricType.PSNR.value}.tmp",
             ssim_log  = output_dir / f"{tmp_prefix}{MetricType.SSIM.value}.tmp",
             vmaf_json = vmaf_tmp,
-            vif_log   = vmaf_tmp,   # VIF is parsed from the same VMAF JSON
+            vif_log   = vmaf_tmp,
             plot      = None,
         )
 
-        # Warn for any missing tmp file (ffmpeg failure).
-        # vif_log intentionally shares the vmaf_json path — only check distinct paths.
+        # Warn for any missing tmp file (ffmpeg failure); distinct paths only.
         checked: set[Path] = set()
         for attr, path in [
             ("psnr_log",  artifacts.psnr_log),
@@ -1467,6 +1325,11 @@ class QualityEvaluator:
     ) -> QualityEvaluation:
         """Evaluate encoded chunk against reference and quality targets.
 
+        Thin sync wrapper over :meth:`evaluate_chunk_async` (the single
+        implementation): runs the coroutine on a fresh event loop.  Use only
+        from sync code with no running loop — callers already inside an
+        ``async`` context must ``await`` the async twin instead.
+
         Args:
             encoded:             Path to encoded video file (read whole).
             reference:           The reference as a runner input — a chunk
@@ -1479,7 +1342,7 @@ class QualityEvaluator:
             fps_value:           Average fps for plot x-axis conversion
                                  (``fps_fraction`` of the source stream).
             subsample_factor:    Frame subsampling factor for metrics.
-            show_progress:       If True, display a live progress bar.
+            show_progress:      If True, display a live progress bar.
             plot_path:           Explicit path for the PNG plot.  When ``None``,
                                  written as ``<encoded.stem>.png`` inside ``output_dir``.
             chunk_start_seconds: Start timestamp of the chunk in seconds.
@@ -1490,49 +1353,22 @@ class QualityEvaluator:
         Returns:
             QualityEvaluation with metrics and target evaluation results.
         """
-        output_dir.mkdir(parents=True, exist_ok=True)
-        cwd = metrics_output_dir if metrics_output_dir is not None else output_dir
-
-        bar_title         = encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
-        _total_complexity = duration_seconds or 0.0  # single ffmpeg run, linear time
-
-        if show_progress:
-            with ProgressBar(_total_complexity, title=f"Metrics: {bar_title}", show_counters=False) as advance:
-                artifacts = asyncio.run(
-                    self._generate_metrics(
-                        encoded, reference, ref_crop,
-                        output_prefix    = str(cwd / f"{encoded.stem}."),
-                        metrics_sampling = subsample_factor,
-                        bar_advance      = advance,
-                        duration_seconds = duration_seconds or 0.0,
-                        width            = width,
-                        cwd              = cwd,
-                        fps_value        = fps_value,
-                    )
-                )
-                advance(0, AdvanceState.COMPLETE)
-        else:
-            artifacts = asyncio.run(
-                self._generate_metrics(
-                    encoded, reference, ref_crop,
-                    output_prefix    = str(cwd / f"{encoded.stem}."),
-                    metrics_sampling = subsample_factor,
-                    bar_advance      = None,
-                    duration_seconds = duration_seconds or 0.0,
-                    width            = width,
-                    cwd              = cwd,
-                )
+        return asyncio.run(
+            self.evaluate_chunk_async(
+                encoded             = encoded,
+                reference           = reference,
+                ref_crop            = ref_crop,
+                targets             = targets,
+                output_dir          = output_dir,
+                duration_seconds    = duration_seconds,
+                fps_value           = fps_value,
+                subsample_factor    = subsample_factor,
+                show_progress       = show_progress,
+                plot_path           = plot_path,
+                chunk_start_seconds = chunk_start_seconds,
+                width               = width,
+                metrics_output_dir  = metrics_output_dir,
             )
-
-        return self._finish_evaluation(
-            encoded             = encoded,
-            artifacts           = artifacts,
-            output_dir          = output_dir,
-            targets             = targets,
-            subsample_factor    = subsample_factor,
-            plot_path           = plot_path,
-            fps_value           = fps_value,
-            chunk_start_seconds = chunk_start_seconds,
         )
 
     def _finish_evaluation(
@@ -1591,8 +1427,8 @@ class QualityEvaluator:
             chunk_start_seconds = chunk_start_seconds,
         )
 
-        # Delete tmp files after both parse_metrics and create_unified_plot have consumed them.
-        # vif_log and vmaf_json may share the same path — use a set.
+        # Delete tmp files after both parse_metrics and create_unified_plot have
+        # consumed them; the set dedups the shared VIF/VMAF path.
         to_delete: set[Path] = set()
         for path in (
             artifacts_for_parse.psnr_log,
@@ -1606,7 +1442,7 @@ class QualityEvaluator:
             try:
                 path.unlink(missing_ok=True)
                 logger.debug("Deleted raw metric tmp file: %s", path.name)
-            except Exception as exc:
+            except OSError as exc:
                 logger.warning("Could not delete metric tmp file %s: %s", path.name, exc)
 
         artifacts.plot = resolved_plot_path

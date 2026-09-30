@@ -34,6 +34,7 @@ pre-resolved ``FinalizeContext.deep_cleanup`` flag is set.
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
@@ -67,7 +68,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Strategy is now defined in models.py and re-exported here for convenience.
+# Strategy — re-exported from models.py for convenience.
 # ---------------------------------------------------------------------------
 
 
@@ -144,7 +145,7 @@ class PhaseResult:
 
         Dataclass-fields introspection over the concrete result class,
         ``Artifact``-typed fields only, in declaration order — the declared
-        fields are the contract (Req 6.2). Plain settings/run-parameter
+        fields are the contract. Plain settings/run-parameter
         fields never contribute. Field names come from the dataclass field
         list itself, so this is the one sanctioned dynamic access in the
         codebase.
@@ -171,34 +172,6 @@ class PhaseResult:
         Downstream phases check this to decide whether to proceed.
         """
         return self.outcome in (PhaseOutcome.COMPLETED, PhaseOutcome.REUSED)
-
-    @property
-    def complete(self) -> list[Artifact[object]]:
-        """Artifacts whose state is ``COMPLETE``."""
-        return [a for a in self.artifacts if a.state == ArtifactState.COMPLETE]
-
-    @property
-    def pending(self) -> list[Artifact[object]]:
-        """Artifacts that require active work this run.
-
-        Includes only ``ABSENT`` (must produce) and ``PARTIAL`` (protected
-        investment needing the missing component). Since the derived
-        ``artifacts`` lists only the declared (wanted) fields' rows, no
-        additional ``wanted`` filtering is needed here. Unwanted artifacts
-        stay internal and never reach this property.
-        """
-        return [
-            a for a in self.artifacts
-            if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)
-        ]
-
-    @property
-    def did_work(self) -> bool:
-        """``True`` when the phase performed real work this run.
-
-        Distinguishes ``COMPLETED`` (work done) from ``REUSED`` (all cached).
-        """
-        return self.outcome == PhaseOutcome.COMPLETED
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +276,7 @@ class PhaseContractError(RuntimeError):
 # Phase — template-method base implementing the uniform run()
 # ---------------------------------------------------------------------------
 
-class Phase[ResultT: PhaseResult]:
+class Phase[ResultT: PhaseResult](ABC):
     """Template-method base class implementing the uniform phase ``run()``.
 
     Type parameter:
@@ -313,35 +286,16 @@ class Phase[ResultT: PhaseResult]:
                  and ``.result`` then carry the concrete type with no casts,
                  overloads, or base-module imports (no circular dependencies).
 
-    The single concrete ``run()`` below owns the run footprint shared by every
-    phase, in this exact order:
-
-    1. In-run memoization guard — a cached ``self.result`` is returned
-       verbatim: no re-resolution, no banner, no re-classification.
-    2. ``_skip_check()`` — phase-specific skip (e.g. optimization disabled);
-       reads constructor state (config) only, never dependency results.
-    3. ``_ensure_dependencies()`` — shared dependency walk; a ``FAILED``
-       dependency chains a typed ``FAILED`` result with one ERROR line, a
-       ``PENDING`` one (dry-run only) chains a typed ``PENDING`` with one
-       INFO line. No banner is emitted on either short-circuit.
-    4. Banner — iff the ``BANNER`` class flag; exactly once, after deps.
-    5. ``_log_key_params()`` — key-parameter logging.
-    6. Timed ``_recover()`` under the top-level ``recovery`` metric key;
-       returns the :class:`Recovery` single source of truth. A
-       :class:`RecoveryError` converts to a typed ``FAILED`` result.
-    7. ``log_recovery_line`` over the unfiltered internal artifact list
-       (skipped when the phase has no artifacts).
-    8. Dry-run branch — unless ``_DRY_RUN_READONLY``: ``PENDING`` when work
-       remains, otherwise the reused result. No writes happen.
-    9. No pending work — the phase-built reused result (``REUSED``).
-    10. Timed ``_execute(wanted, dry_run)`` under the phase's top-level
-        metric key. The concrete phase alone decides ``COMPLETED`` /
-        ``FAILED``; returning ``PENDING`` from ``_execute`` violates the
-        contract and the runner fails loudly on it.
-
-    The template never decides ``COMPLETED`` / ``FAILED`` and never computes
-    per-phase payloads — those live in the phase hooks. Timing, banner, guards
-    and the wanted-filter exist exactly once, here.
+    The single concrete ``run()`` owns the run footprint shared by every
+    phase, in exact order: memoization guard → ``_skip_check()`` → dependency
+    resolution → banner → timed ``_recover()`` → dry-run / no-pending
+    branches → timed ``_execute(wanted, dry_run)``. The template never
+    decides ``COMPLETED`` / ``FAILED`` and never computes per-phase payloads —
+    those live in the mandatory abstract methods (``_recover``, ``_execute``,
+    ``_make_result`` — every concrete phase implements all three) and the
+    optional hooks (``_skip_check``, ``_reused_result``, ``_log_key_params``,
+    ``_recovery_unit`` — base defaults); timing, banner, guards, and the
+    wanted-filter exist exactly once, here.
 
     Class attributes:
         name:              Human-readable phase name (logs, banners, summary).
@@ -385,8 +339,8 @@ class Phase[ResultT: PhaseResult]:
             config:    Full validated application configuration.
             phases:    Phase registry link. Must contain an instance of every
                        type in ``DEPENDS_ON`` by the time ``run()`` is called;
-                       a declared dependency still missing then raises
-                       ``TypeError`` (mis-wired registry — a programming
+                       a declared dependency still missing then trips an
+                       ``assert`` (mis-wired registry — a programming
                        error, never silently dropped). ``None`` is legal only
                        for phases with no dependencies.
             collector: Metrics collector; the template owns all timing calls.
@@ -421,18 +375,17 @@ class Phase[ResultT: PhaseResult]:
             The dependency's typed result.
 
         Raises:
-            TypeError: When the declared dependency is missing from the
+            AssertionError: When the declared dependency is missing from the
                 registry (mis-wired registry — a programming error).
             AssertionError: When the dependency has no cached result — a
                 phase hook ran before the dependency walk (a programming
                 error, never a runtime condition to handle).
         """
         instance = self._phases.get(dep_cls)
-        if instance is None:
-            raise TypeError(
-                f"{type(self).__name__} requires {dep_cls.__name__} "
-                "in the phase registry (declared in DEPENDS_ON)"
-            )
+        assert instance is not None, (
+            f"{type(self).__name__} requires {dep_cls.__name__} "
+            "in the phase registry (declared in DEPENDS_ON)"
+        )
         result = instance.result
         assert result is not None, (
             f"{dep_cls.__name__}.result guaranteed by the dependency walk"
@@ -544,7 +497,7 @@ class Phase[ResultT: PhaseResult]:
 
         First fetches every type declared in ``DEPENDS_ON`` from the registry
         link — a declared dependency missing from the registry raises
-        ``TypeError`` (mis-wired registry, a programming error; the dependency
+        An ``AssertionError`` (mis-wired registry, a programming error; the dependency
         is never silently dropped). A ``FAILED``
         dependency chains a typed ``FAILED`` result, a ``PENDING`` one
         (dry-run only) chains a typed ``PENDING`` result.
@@ -558,24 +511,25 @@ class Phase[ResultT: PhaseResult]:
             (dry-run only), or ``None`` when the phase may proceed.
 
         Raises:
-            TypeError: When a dependency declared in ``DEPENDS_ON`` is absent
-                from the registry.
+            AssertionError: When a dependency declared in ``DEPENDS_ON`` is
+                absent from the registry (mis-wired registry — a programming
+                error).
         """
         missing = [
             cls.__name__ for cls in self.DEPENDS_ON if cls not in self._phases
         ]
-        if missing:
-            raise TypeError(
-                f"{type(self).__name__} requires {', '.join(missing)} "
-                "in the phase registry (declared in DEPENDS_ON)"
-            )
+        assert not missing, (
+            f"{type(self).__name__} requires {', '.join(missing)} "
+            "in the phase registry (declared in DEPENDS_ON)"
+        )
         failed:  list[str] = []
         pending: list[str] = []
         for dep_cls in self.DEPENDS_ON:
             dep = self._phases[dep_cls]
             if dep.result is None:
                 dep.run(dry_run=dry_run)
-            if dep.result is None or dep.result.outcome is PhaseOutcome.FAILED:
+            assert dep.result is not None, "run() assigns a result on every return path"
+            if dep.result.outcome is PhaseOutcome.FAILED:
                 failed.append(dep.name)
             elif dep.result.outcome is PhaseOutcome.PENDING:
                 pending.append(dep.name)
@@ -654,6 +608,7 @@ class Phase[ResultT: PhaseResult]:
             message or f"all {self._recovery_unit()}s reused",
         )
 
+    @abstractmethod
     def _recover(self) -> Recovery:
         """Scan disk and build the single source of truth for this run.
 
@@ -667,8 +622,9 @@ class Phase[ResultT: PhaseResult]:
         Returns:
             The :class:`Recovery` single source of truth.
         """
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def _execute(self, wanted: list[Artifact], dry_run: bool) -> PhaseResult:
         """Produce every wanted artifact; the phase alone decides the outcome.
 
@@ -685,8 +641,9 @@ class Phase[ResultT: PhaseResult]:
         Returns:
             The typed phase result with the outcome the phase chooses.
         """
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def _make_result(
         self,
         outcome:   PhaseOutcome,
@@ -704,7 +661,7 @@ class Phase[ResultT: PhaseResult]:
         Returns:
             The populated typed result.
         """
-        raise NotImplementedError
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -740,9 +697,9 @@ def _build_registry(
     ``JobPhase`` receives all volatile per-run parameters (``source``,
     ``work_dir``, ``force``, ``cleanup``, ``no_metrics``) as plain kwargs and
     stores them on ``JobPhaseResult`` so all downstream phases can read them
-    via ``self._job.result.*``.  All other phases are constructed with only
-    ``(config, registry, collector=collector)`` — they never receive volatile
-    args directly.
+    via ``self._dep_result(JobPhase)``.  All other phases are constructed with
+    only ``(config, registry, collector=collector)`` — they never receive
+    volatile args directly.
 
     The registry is a plain ``dict`` keyed by phase *class* (not instance),
     preserving insertion order (Python 3.7+).
@@ -794,7 +751,7 @@ def _build_registry(
     registry: PhaseRegistry = {}
 
     # JobPhase receives all volatile kwargs — it stores them on JobPhaseResult
-    # so downstream phases can access them via self._job.result.*.
+    # so downstream phases can access them via _dep_result(JobPhase).
     registry[JobPhase] = JobPhase(
         config, registry,
         source     = source,
@@ -807,7 +764,7 @@ def _build_registry(
 
     # ExtractionPhase follows Job unconditionally.
     # video_required is forwarded so ExtractionPhase can skip video/timestamp
-    # extraction when running in audio-only mode (Task 9).
+    # extraction when running in audio-only mode.
     registry[ExtractionPhase] = ExtractionPhase(
         config, registry,
         video_required = video_required,
@@ -818,7 +775,7 @@ def _build_registry(
         # ProbePhase sits between Extraction and the remaining video phases.
         # crop_params is forwarded here (not to JobPhase) so ProbePhase owns
         # crop detection and manual overrides.
-        from pyqenc.phases.chunking import ChunkingPhase
+        from pyqenc.phases.chunking import ChunkingPhase  # deferred: phases import phase (registry cycle)
         from pyqenc.phases.encoding import EncodingPhase
         from pyqenc.phases.merge import MergePhase
         from pyqenc.phases.optimization import OptimizationPhase

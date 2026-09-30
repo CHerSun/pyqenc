@@ -37,10 +37,11 @@ are declared once on the annotated types below.
 
 from __future__ import annotations
 
+from abc import abstractmethod
 from dataclasses import replace
 from decimal import Decimal
 from fractions import Fraction
-from typing import Annotated
+from typing import Annotated, Self
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer
 
@@ -144,7 +145,9 @@ class StreamInfo(BaseModel):
         codec_name:        ffprobe codec name (e.g. ``hevc``, ``flac``).
         language:          ISO language tag, when the stream declares one.
         title:             The stream's title tag (free media-sourced text).
-        start_timestamp:   The stream's start offset on the container timeline.
+        start_timestamp:   The stream's start offset on the container timeline
+                           (ffprobe ``start_time``) — critical for aligning
+                           streams against each other if they are ever merged.
         duration_seconds:  The stream's own duration.
     """
 
@@ -157,6 +160,67 @@ class StreamInfo(BaseModel):
     start_timestamp:  float | None = None
     duration_seconds: float | None = None
 
+    @staticmethod
+    def _tags_of(raw: dict) -> dict:
+        """The stream's tags dict (possibly nested under the container's tag list)."""
+        return raw.get("tags") or {}
+
+    @staticmethod
+    def _float_or_none(value: object) -> float | None:
+        """Parse an ffprobe scalar into a float, tolerating missing/bad values."""
+        if value is None:
+            return None
+        try:
+            return float(str(value))  # type: ignore[arg-type]
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _duration_from_tags(tags: dict) -> float | None:
+        """Parse a Matroska ``DURATION`` tag (``HH:MM:SS.nnnnnnnnn``) to seconds.
+
+        MKV streams carry no ffprobe-level ``duration`` float — the stream
+        duration lives only in the per-track ``DURATION`` tag.
+        """
+        raw = tags.get("DURATION")
+        if not isinstance(raw, str):
+            return None
+        parts = raw.split(":")
+        if len(parts) != 3:
+            return None
+        try:
+            hours, minutes, seconds = (float(part) for part in parts)
+        except ValueError:
+            return None
+        return hours * 3600 + minutes * 60 + seconds
+
+    @classmethod
+    def _base_ffprobe_fields(cls, raw: dict) -> dict:
+        """The container-level fields every stream carries, from one ffprobe dict."""
+        tags = cls._tags_of(raw)
+        return {
+            "track_id":         int(raw.get("index", -1)),
+            "codec_name":       raw.get("codec_name"),
+            "language":         tags.get("language"),
+            "title":            tags.get("title") or tags.get("TITLE"),
+            "start_timestamp":  cls._float_or_none(raw.get("start_time")),
+            "duration_seconds": (
+                cls._float_or_none(raw.get("duration"))
+                if raw.get("duration") is not None
+                else cls._duration_from_tags(tags)
+            ),
+        }
+
+    @classmethod
+    def from_ffprobe(cls, raw: dict) -> Self:
+        """Build the info slice from one ffprobe stream dict.
+
+        The info classes own their external-data mapping: ffprobe dicts become
+        typed fields exactly once, here. Subclasses extend with their own
+        fields.
+        """
+        return cls(**cls._base_ffprobe_fields(raw))
+
 
 class VideoStreamInfo(StreamInfo):
     """Video-specific fast-facet properties.
@@ -166,13 +230,62 @@ class VideoStreamInfo(StreamInfo):
         fps_fraction:  Exact average fps as a rational (e.g. ``24000/1001``)
                        — the value timestamp conversions compute with.
         resolution:    ``"<width>x<height>"`` (e.g. ``"1920x1080"``).
-        pix_fmt:       Pixel format name (e.g. ``yuv420p10le``).
+        pix_fmt:       Pixel format name (e.g. ``yuv420p10le``) — a source
+                       property worth preserving.
     """
 
     fps:          float | None       = None
     fps_fraction: FractionYaml | None = None
     resolution:   str | None         = None
     pix_fmt:      str | None         = None
+
+    @staticmethod
+    def _parse_resolution(resolution: str) -> tuple[int, int] | None:
+        """Parse a ``'WxH'`` resolution string into ``(width, height)``;
+        ``None`` if parsing fails.
+        """
+        try:
+            w, h = resolution.split("x")
+            return int(w), int(h)
+        except (ValueError, AttributeError):
+            return None
+
+    @property
+    def total_pixels(self) -> int | None:
+        """Total pixel count over the stream's duration, from the fast facets.
+
+        Resolution area × ``fps * duration_seconds``; ``None`` when any input
+        facet is missing or invalid. Feeds the disk-space estimate.
+        """
+        if not self.resolution:
+            return None
+        res = self._parse_resolution(self.resolution)
+        if res is None or self.fps is None or self.duration_seconds is None or self.fps <= 0:
+            return None
+        return res[0] * res[1] * int(self.fps * self.duration_seconds)
+
+    @classmethod
+    def from_ffprobe(cls, raw: dict) -> Self:
+        """Build from one ffprobe video stream dict (fps as an exact rational)."""
+        fps_fraction: Fraction | None = None
+        frame_rate = raw.get("r_frame_rate")
+        if isinstance(frame_rate, str) and "/" in frame_rate:
+            num_s, den_s = frame_rate.split("/", 1)
+            try:
+                den = int(den_s)
+                if den != 0:
+                    fps_fraction = Fraction(int(num_s), den)
+            except ValueError:
+                pass
+
+        width, height = raw.get("width"), raw.get("height")
+        return cls(
+            **StreamInfo._base_ffprobe_fields(raw),
+            fps          = float(fps_fraction) if fps_fraction is not None else None,
+            fps_fraction = fps_fraction,
+            resolution   = f"{width}x{height}" if width and height else None,
+            pix_fmt      = raw.get("pix_fmt"),
+        )
 
 
 class AudioStreamInfo(StreamInfo):
@@ -184,6 +297,20 @@ class AudioStreamInfo(StreamInfo):
     """
 
     layout: ChannelLayout | None = None
+
+    @classmethod
+    def from_ffprobe(cls, raw: dict) -> Self:
+        """Build from one ffprobe audio stream dict, resolving the channel layout.
+
+        Layout fallback: the declared ``channel_layout``, else ``<channels>.0``
+        derived from the raw channel count.
+        """
+        layout: ChannelLayout | None = None
+        if channel_layout := raw.get("channel_layout"):
+            layout = ChannelLayout.parse(channel_layout)
+        elif channels := raw.get("channels"):
+            layout = ChannelLayout.parse(f"{channels}.0")
+        return cls(**StreamInfo._base_ffprobe_fields(raw), layout=layout)
 
 
 class SubtitleStreamInfo(StreamInfo):
@@ -198,6 +325,14 @@ class SubtitleStreamInfo(StreamInfo):
     is_forced:      bool               = False
     extracted_path: LongPathYaml | None = None
 
+    @classmethod
+    def from_ffprobe(cls, raw: dict) -> Self:
+        """Build from one ffprobe subtitle stream dict (forced flag from disposition)."""
+        return cls(
+            **StreamInfo._base_ffprobe_fields(raw),
+            is_forced=(raw.get("disposition") or {}).get("forced") == 1,
+        )
+
 
 class AttachmentStreamInfo(StreamInfo):
     """Attachment-specific properties plus the extracted-file path.
@@ -210,6 +345,14 @@ class AttachmentStreamInfo(StreamInfo):
 
     filename:       str | None         = None
     extracted_path: LongPathYaml | None = None
+
+    @classmethod
+    def from_ffprobe(cls, raw: dict) -> Self:
+        """Build from one ffprobe attachment dict (filename from its tags)."""
+        return cls(
+            **StreamInfo._base_ffprobe_fields(raw),
+            filename=StreamInfo._tags_of(raw).get("filename"),
+        )
 
 
 class Stream[InfoT: StreamInfo](BaseModel):
@@ -251,15 +394,15 @@ class Stream[InfoT: StreamInfo](BaseModel):
             selector = f"{FFMPEG_SELECTOR_PREFIX}{self.info.track_id}",
         )
 
+    @abstractmethod
     def display_name(self) -> str:
-        """Display name — identity fields verbatim, any symbols, never on disk (Req 15.2).
+        """Display name — identity fields verbatim, any symbols, never on disk.
 
-        Contract method: every concrete stream class overrides it.
+        Contract method: every concrete stream class must implement it.
         """
-        raise NotImplementedError
 
     def safe_name(self) -> str:
-        """The display name made filesystem-safe (Req 15.2 two-name pattern).
+        """The display name made filesystem-safe (the two-name pattern).
 
         The same name with every filesystem-unsafe character replaced through
         the shared sanitize primitive — the form used wherever a stream's
@@ -297,7 +440,7 @@ class AudioStream(Stream[AudioStreamInfo]):
         the layout's faithful source token (``ChannelLayout.original``) so a
         user's select regex matches the source layout exactly (e.g.
         ``ch=5.1(side)``). Derived purely from the enumerated info fields —
-        a display string (Req 15.2), never used on disk.
+        a display string, never used on disk.
 
         Returns:
             The conventional string (e.g. ``"lang=eng ch=5.1(side) title=Surround"``).
@@ -349,7 +492,7 @@ class AttachmentStream(Stream[AttachmentStreamInfo]):
 def _display_tags(info: StreamInfo) -> list[str]:
     """Shared identity tags for display names: language and the title verbatim.
 
-    Display names carry identity fields as-is (Req 15.2); the filesystem-safe
+    Display names carry identity fields as-is; the filesystem-safe
     form is :meth:`Stream.safe_name`, never a pre-sanitized display name.
     """
     tags: list[str] = []
@@ -446,7 +589,7 @@ class VideoStreamChunk(BaseModel):
 
     @staticmethod
     def _format_window(start_ts: float, end_ts: float) -> str:
-        """The window in natural separators — the single name generator (Req 15.10).
+        """The window in natural separators — the single name generator.
 
         ``HH:MM:SS.mmm-HH:MM:SS.mmm``; the chunk id (:meth:`safe_name`) is this
         display form with the time separators substituted, never a second
@@ -535,7 +678,7 @@ class VideoStreamChunk(BaseModel):
 # ---------------------------------------------------------------------------
 
 class EncodedAttemptName(BaseModel):
-    """The typed record parsed from an encoded attempt's file name (Req 15.5).
+    """The typed record parsed from an encoded attempt's file name.
 
     The name carries only part of a composed identity — recovery joins this
     record against phase results rather than pretending the name reconstructs
@@ -557,7 +700,7 @@ class EncodedChunk(BaseModel):
     construction (applied during the encode); the attempt's
     :class:`VideoStreamInfo` is populated eagerly, once, after the encode.
 
-    This class owns the attempt-file name family (Req 15.5): the name is a
+    This class owns the attempt-file name family: the name is a
     pure function of the composed identity, generation and parsing living
     here as a strict inverse pair — presence-based recovery is trustworthy
     only because ``parse(format(x)) == x`` is pinned by tests.
@@ -580,15 +723,6 @@ class EncodedChunk(BaseModel):
     def format_file_name(chunk_id: str, resolution: str, crf: Decimal) -> str:
         """The attempt file name for an identity: ``<chunk_id>.<res>.q<crf>.mkv``."""
         return f"{chunk_id}.{resolution}.q{crf}.mkv"
-
-    @property
-    def file_name(self) -> str:
-        """The attempt's file name, derived from the composition — never stored."""
-        return self.format_file_name(
-            self.chunk.safe_name(),
-            self.stream.stream.info.resolution or "",
-            self.crf,
-        )
 
     @classmethod
     def parse_file_name(cls, name: str) -> EncodedAttemptName:
@@ -620,10 +754,10 @@ class EncodedChunk(BaseModel):
 class Chapters(BaseModel):
     """The container's chapter edition — an extraction payload, not a stream.
 
-    Container-level (no ``track_id``, no ``-map`` selector; file-stream-model
-    Req 2.5). Its file name is the fixed constant ``chapters.xml`` — not a
-    generated name, nothing to pair (Req 15.10); the extracted location
-    derives at the extraction phase's single owning site.
+    Container-level (no ``track_id``, no ``-map`` selector). Its file name is
+    the fixed constant ``chapters.xml`` — not a generated name, nothing to
+    pair; the extracted location derives at the extraction phase's single
+    owning site.
 
     Attributes:
         file: The source file the edition belongs to (identity anchor).
@@ -642,7 +776,7 @@ class AudioOutput(BaseModel):
     ``stream.info.layout``, codec via the chain resolvable from
     ``chain_name`` + config). Disk name follows the existing derivation: the
     stream's safe name plus ``" chain=<name>"``, the extension appended at the
-    materialization site (file-stream-model Req 15.7).
+    materialization site.
 
     Attributes:
         stream:     The source audio stream the output was produced from.
@@ -671,8 +805,7 @@ class MergedVideo(BaseModel):
 
     Composes the strategy with the source identity needed for naming plus the
     measured facts consumers need. The output name materializes from
-    ``<file stem> <strategy>.mkv`` at the merge phase's single derivation site
-    (file-stream-model Req 15.8).
+    ``<file stem> <strategy>.mkv`` at the merge phase's single derivation site.
 
     Attributes:
         source_stem:  The source file's name stem (naming identity).
@@ -741,8 +874,7 @@ class _SourceSidecarBase(BaseModel):
 class JobSidecar(_SourceSidecarBase):
     """The ``job.yaml`` slice: the :class:`File` dump under the ``source`` key.
 
-    The shrunk schema — job-level cached heuristics are gone; the persisted
-    path + size are the source-mismatch comparison basis.
+    The persisted path + size are the source-mismatch comparison basis.
     """
 
 

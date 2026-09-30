@@ -22,13 +22,9 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
-import yaml
-
-from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import (
     CHAPTERS_FILENAME,
     EXTRACTED_DIR,
@@ -61,6 +57,7 @@ from pyqenc.stream_model import (
     ExtractionSidecar,
     File,
     SourceMismatchError,
+    StreamInfo,
     StreamsInventory,
     SubtitleStream,
     SubtitleStreamInfo,
@@ -69,7 +66,8 @@ from pyqenc.stream_model import (
 )
 from pyqenc.utils.disk_space import log_disk_space_info
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.utils.fs import remove_stale_tmp_files
+from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -77,7 +75,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_EXTRACTION_YAML_FILENAME = "extraction.yaml"
 
 _SUBTITLE_FFMPEG_FORMAT: dict[str, str] = {
     "srt": "srt",
@@ -122,113 +119,6 @@ def _probe_streams_json(source: Path) -> dict:
         raise RuntimeError(f"Failed to parse FFprobe output: {exc}") from exc
 
 
-def _tags_of(raw: dict) -> dict:
-    """The stream's tags dict (possibly nested under the container's tag list)."""
-    return raw.get("tags") or {}
-
-
-def _float_or_none(value: object) -> float | None:
-    """Parse an ffprobe scalar into a float, tolerating missing/bad values."""
-    if value is None:
-        return None
-    try:
-        return float(str(value))  # type: ignore[arg-type]
-    except (ValueError, TypeError):
-        return None
-
-
-def _duration_from_tags(tags: dict) -> float | None:
-    """Parse a Matroska ``DURATION`` tag (``HH:MM:SS.nnnnnnnnn``) to seconds.
-
-    MKV streams carry no ffprobe-level ``duration`` float — the stream duration
-    lives only in the per-track ``DURATION`` tag.
-    """
-    raw = tags.get("DURATION")
-    if not isinstance(raw, str):
-        return None
-    parts = raw.split(":")
-    if len(parts) != 3:
-        return None
-    try:
-        hours, minutes, seconds = (float(part) for part in parts)
-    except ValueError:
-        return None
-    return hours * 3600 + minutes * 60 + seconds
-
-
-def _base_info_fields(raw: dict) -> dict:
-    """The container-level ``StreamInfo`` fields from one ffprobe stream dict."""
-    tags = _tags_of(raw)
-    return {
-        "track_id":         int(raw.get("index", -1)),
-        "codec_name":       raw.get("codec_name"),
-        "language":         tags.get("language"),
-        "title":            tags.get("title") or tags.get("TITLE"),
-        "start_timestamp":  _float_or_none(raw.get("start_time")),
-        "duration_seconds": (
-            _float_or_none(raw.get("duration"))
-            if raw.get("duration") is not None
-            else _duration_from_tags(tags)
-        ),
-    }
-
-
-def _video_info(raw: dict) -> VideoStreamInfo:
-    """Build a :class:`VideoStreamInfo` from one ffprobe video stream dict."""
-    fps_fraction: Fraction | None = None
-    frame_rate = raw.get("r_frame_rate")
-    if isinstance(frame_rate, str) and "/" in frame_rate:
-        num_s, den_s = frame_rate.split("/", 1)
-        try:
-            den = int(den_s)
-            if den != 0:
-                fps_fraction = Fraction(int(num_s), den)
-        except ValueError:
-            pass
-
-    width, height = raw.get("width"), raw.get("height")
-    return VideoStreamInfo(
-        **_base_info_fields(raw),
-        fps          = float(fps_fraction) if fps_fraction is not None else None,
-        fps_fraction = fps_fraction,
-        resolution   = f"{width}x{height}" if width and height else None,
-        pix_fmt      = raw.get("pix_fmt"),
-    )
-
-
-def _audio_info(raw: dict) -> AudioStreamInfo:
-    """Build an :class:`AudioStreamInfo` from one ffprobe audio stream dict."""
-    layout: ChannelLayout | None = None
-    if channel_layout := raw.get("channel_layout"):
-        layout = ChannelLayout.parse(channel_layout)
-    elif channels := raw.get("channels"):
-        layout = ChannelLayout.parse(f"{channels}.0")
-    return AudioStreamInfo(**_base_info_fields(raw), layout=layout)
-
-
-def _subtitle_info(raw: dict) -> SubtitleStreamInfo:
-    """Build a :class:`SubtitleStreamInfo` from one ffprobe subtitle stream dict."""
-    return SubtitleStreamInfo(
-        **_base_info_fields(raw),
-        is_forced=(raw.get("disposition") or {}).get("forced") == 1,
-    )
-
-
-def _attachment_info(raw: dict) -> AttachmentStreamInfo:
-    """Build an :class:`AttachmentStreamInfo` from one ffprobe attachment dict."""
-    return AttachmentStreamInfo(
-        **_base_info_fields(raw),
-        filename=_tags_of(raw).get("filename"),
-    )
-
-
-def _is_attachment(raw: dict) -> bool:
-    """Whether an ffprobe stream is an attachment (attached picture/font)."""
-    if (raw.get("disposition") or {}).get("attached_pic", 0) == 1:
-        return True
-    return str(_tags_of(raw).get("mimetype", "")).startswith("image/")
-
-
 def _enumerate_streams(
     data:    dict,
     source_file: File,
@@ -253,14 +143,16 @@ def _enumerate_streams(
 
     for raw in data.get("streams", []):
         codec_type = raw.get("codec_type", "")
-        if _is_attachment(raw):
-            attachments.append(AttachmentStream(file=source_file, info=_attachment_info(raw)))
+        # Attachment (attached picture/font): the disposition flag, or an image/* mimetype.
+        if (raw.get("disposition") or {}).get("attached_pic", 0) == 1 \
+                or str(StreamInfo._tags_of(raw).get("mimetype", "")).startswith("image/"):
+            attachments.append(AttachmentStream(file=source_file, info=AttachmentStreamInfo.from_ffprobe(raw)))
         elif codec_type == "video":
-            video.append(VideoStream(file=source_file, info=_video_info(raw)))
+            video.append(VideoStream(file=source_file, info=VideoStreamInfo.from_ffprobe(raw)))
         elif codec_type == "audio":
-            audio.append(AudioStream(file=source_file, info=_audio_info(raw)))
+            audio.append(AudioStream(file=source_file, info=AudioStreamInfo.from_ffprobe(raw)))
         elif codec_type == "subtitle":
-            subtitles.append(SubtitleStream(file=source_file, info=_subtitle_info(raw)))
+            subtitles.append(SubtitleStream(file=source_file, info=SubtitleStreamInfo.from_ffprobe(raw)))
         # Data and unknown streams are not consumable payload — skipped.
 
     if len(video) > 1:
@@ -312,12 +204,12 @@ def streams_filter_plain_regex(
 # ---------------------------------------------------------------------------
 
 def _expected_index_path(work_dir: Path) -> Path:
-    """The per-frame PTS index location — the single owning site (Req 3.4)."""
+    """The per-frame PTS index location — the single owning site."""
     return work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
 
 
 def _expected_chapters_path(work_dir: Path) -> Path:
-    """The extracted chapter edition location (fixed-constant name, Req 2.2)."""
+    """The extracted chapter edition location (fixed-constant name)."""
     return work_dir / EXTRACTED_DIR / CHAPTERS_FILENAME
 
 
@@ -422,7 +314,7 @@ def _extract_timestamps(
 type _ExtractionRow = Artifact[
     VideoStream | AudioStream | SubtitleStream | AttachmentStream | Chapters
 ]
-"""One ledger row of the extraction phase (Req 7)."""
+"""One ledger row of the extraction phase."""
 
 
 @dataclass
@@ -451,30 +343,14 @@ class ExtractionPhaseResult(PhaseResult):
     chapters:           Artifact[Chapters] | None         = None
     work_dir:           Path | None                       = None
 
-    # Transitional population (deleted in task 9 when the base field becomes
-    # the derived concatenation): the base ``artifacts`` field is populated
-    # from these fields by ``_make_result`` so generic consumers stay fed.
-
     @property
     def timestamps_path(self) -> Path | None:
-        """The per-frame PTS index path — derived; ``None`` when absent (Req 3.5)."""
+        """The per-frame PTS index path — derived; ``None`` when absent."""
         if self.video_stream is None or self.video_stream.state != ArtifactState.COMPLETE:
             return None
         assert self.work_dir is not None, "work_dir set on every phase-built result"
         return _expected_index_path(self.work_dir)
 
-    @property
-    def chapters_path(self) -> Path | None:
-        """The extracted chapters.xml path — derived; ``None`` when absent."""
-        if self.chapters is None or self.chapters.state != ArtifactState.COMPLETE:
-            return None
-        assert self.work_dir is not None, "work_dir set on every phase-built result"
-        return _expected_chapters_path(self.work_dir)
-
-
-# ---------------------------------------------------------------------------
-# Interim legacy adapters (deleted with the last legacy consumer)
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # ExtractionPhase
@@ -497,6 +373,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
     """
 
     name:        str       = "extraction"
+    SIDECAR_NAME = "extraction.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase,)
     _METRIC_KEY: MetricKey = MetricKey.EXTRACTION
 
@@ -563,7 +440,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         job_result = self._dep_result(JobPhase)
         work_dir      = job_result.work_dir
         extracted_dir = work_dir / EXTRACTED_DIR
-        sidecar_path  = work_dir / _EXTRACTION_YAML_FILENAME
+        sidecar_path  = work_dir / ExtractionPhase.SIDECAR_NAME
         force_wipe    = job_result.force_wipe
 
         # Step 1: force-wipe.
@@ -574,13 +451,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             sidecar_path.unlink(missing_ok=True)
 
         # Step 2: clean up .tmp files.
-        if extracted_dir.exists():
-            for tmp in extracted_dir.glob(f"*{TEMP_SUFFIX}"):
-                try:
-                    tmp.unlink()
-                    logger.warning("Removed leftover temp file: %s", tmp)
-                except OSError as exc:
-                    logger.warning("Could not remove temp file %s: %s", tmp, exc)
+        remove_stale_tmp_files(extracted_dir)
 
         # Step 3: resolve the stream inventory (sidecar first, no re-probe).
         assert job_result.file is not None, "File guaranteed by JobPhase"
@@ -589,7 +460,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         self._normalize_extracted_paths(work_dir)
 
         # The filter selects extractable streams only — the video row's wanted
-        # is the pipeline mode, never the filter (Req 3.3).
+        # is the pipeline mode, never the filter.
         selected = streams_filter_plain_regex(
             [
                 *self._audio,
@@ -613,7 +484,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
         if self._video is not None:
             # The video artifact: a virtual stream whose single expected
-            # material component is the per-frame PTS index (Req 3.1/3.2) —
+            # material component is the per-frame PTS index —
             # COMPLETE iff the index is present; no PARTIAL (both producer
             # paths write through .tmp-then-rename, so presence implies a
             # complete write). The stream's existence in the source is a
@@ -736,20 +607,16 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
     @staticmethod
     def _load_sidecar(path: Path) -> ExtractionSidecar | None:
         """Load ``extraction.yaml``; ``None`` when absent or unparseable."""
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return ExtractionSidecar.model_validate(data)
-        except Exception as exc:  # noqa: BLE001 — any parse failure means "re-enumerate"
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
+        return load_model(path, ExtractionSidecar)
 
     def _persist_sidecar(self, sidecar_path: Path) -> None:
         """Write the inventory to ``extraction.yaml`` (the unique info slices)."""
+        # The inventory's source identity — the first enumerated stream's File.
+        stream = self._video or next(iter(self._audio), None) \
+            or next(iter(self._subtitles), None) or next(iter(self._attachments), None)
+        assert stream is not None, "inventory has at least one stream (video required for timestamps)"
         sidecar = ExtractionSidecar(
-            source          = self._sidecar_source(),
+            source          = stream.file,
             streams         = StreamsInventory(
                 video       = self._video.info if self._video is not None else None,
                 audio       = [s.info for s in self._audio],
@@ -761,13 +628,6 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         write_yaml_atomic(sidecar_path, sidecar.model_dump(exclude_none=True))
         self._sidecar_dirty = False
         logger.debug("Wrote stream inventory: %s", sidecar_path.name)
-
-    def _sidecar_source(self) -> File:
-        """The inventory's source identity — the first enumerated stream's File."""
-        stream = self._video or next(iter(self._audio), None) \
-            or next(iter(self._subtitles), None) or next(iter(self._attachments), None)
-        assert stream is not None, "inventory has at least one stream (video required for timestamps)"
-        return stream.file
 
     # ------------------------------------------------------------------
     # Result / finalize
@@ -819,8 +679,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         freshly enumerated inventory), runs the disk-space estimate on the
         real video stream data, then produces each ``ABSENT`` row's component
         by payload type — the video row's extractor path IS the per-frame PTS
-        index path (the TimestampArtifact fold, Req 3.1). ``dry_run`` is never
-        ``True`` here (extraction is not a readonly-execute phase; the
+        index path. ``dry_run`` is never ``True`` here (extraction is not a readonly-execute phase; the
         template previews instead).
 
         Args:
@@ -837,7 +696,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         extracted_dir.mkdir(parents=True, exist_ok=True)
 
         if self._sidecar_dirty:
-            self._persist_sidecar(work_dir / _EXTRACTION_YAML_FILENAME)
+            self._persist_sidecar(work_dir / ExtractionPhase.SIDECAR_NAME)
 
         # Disk-space estimate on the enumerated stream data (log-only).
         if self._video is not None:
@@ -913,7 +772,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
                 _expected_index_path(work_dir),
             )
             artifact.state = ArtifactState.COMPLETE
-        except Exception as exc:
+        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
             err = f"Failed to extract timestamps: {exc}"
             logger.critical(err)
             errors.append(err)
@@ -950,7 +809,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         source:    Path,
         errors:    list[str],
     ) -> None:
-        """Dump one attachment through the file-trust rule (Req 7.7).
+        """Dump one attachment through the file-trust rule.
 
         ``-dump_attachment`` writes directly (not a muxer output), so the
         phase wraps it: the dump targets a ``.tmp`` sibling, renamed to the
@@ -1036,10 +895,9 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
     def finalize(self, ctx: FinalizeContext) -> None:
         """Perform end-of-run housekeeping for the extraction phase.
 
-        ``extracted/`` keeps its surviving small content (timestamps,
-        chapters, subtitles, attachments) — deep cleanup no longer deletes it
-        (Req 11.4); reproducibility is guaranteed by the atomic write
-        protocol, and the artifacts are cheap to keep.
+        No-op: ``extracted/`` content (timestamps, chapters, subtitles,
+        attachments) survives deep cleanup — the atomic write protocol
+        guarantees reproducibility, and the artifacts are cheap to keep.
 
         Args:
             ctx: Pre-resolved end-of-run decisions from the runner.
@@ -1068,8 +926,8 @@ def _log_stream_table(
     - Present: ``✔`` if ``row.state`` is ``COMPLETE`` else ``✘``
                (completeness only; ``ABSENT`` and ``PARTIAL`` both show ``✘``).
     - Name:    The payload's ``display_name()`` — no per-artifact-type
-               dispatch (Req 9.4); the chapters row shows its fixed-constant
-               file name (nothing generated to pair, Req 2.5).
+               dispatch; the chapters row shows its fixed-constant
+               file name (nothing generated to pair).
 
     Stream-table asymmetry is honest: the video row's "Present" means
     "index extracted" (real work); audio rows are pure virtual.

@@ -14,7 +14,7 @@ no private-attr poking.
 
 Covers:
 - _build_mkvmerge_options: single chunk, multiple chunks, timestamps placement
-- _default_duration_ns / _build_mkvpropedit_args: exact ns conversion, argv pin
+- _build_mkvpropedit_args: exact default-duration ns conversion, argv pin
 - _write_mkvmerge_options_file: JSON written atomically
 - Options file deleted on success, retained on failure (via run())
 - mkvpropedit failure fails the strategy without writing a sidecar (via run())
@@ -23,6 +23,7 @@ Covers:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -45,30 +46,19 @@ from pyqenc.phases.encoding import (
 )
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
-from pyqenc.phases.merge import (
-    MergePhase,
-    _build_mkvmerge_options,
-    _build_mkvpropedit_args,
-    _default_duration_ns,
-    _log_missed_targets_warning,
-    _write_mkvmerge_options_file,
-)
+from pyqenc.phases.merge import MergePhase
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import ArtifactState
-from pyqenc.stream_model import File, VideoStream, VideoStreamInfo
+from pyqenc.stream_model import (
+    ExtendedVideoStream,
+    File,
+    VideoStream,
+    VideoStreamInfo,
+)
 
 
-def _extended_stream(path: Path, frame_count: int) -> "ExtendedVideoStream":
+def _extended_stream(path: Path, frame_count: int) -> ExtendedVideoStream:
     """An ExtendedVideoStream for the source (fast facet + frame count)."""
-    from fractions import Fraction
-
-    from pyqenc.stream_model import (
-        ExtendedVideoStream,
-        File,
-        VideoStream,
-        VideoStreamInfo,
-    )
-
     return ExtendedVideoStream(
         stream=VideoStream(
             file=File(path=path, file_size_bytes=64),
@@ -145,15 +135,13 @@ def _make_chunk_window(source, chunk_id):
 
     start, end = 0.0, 1.0
     if "-" in chunk_id:
-        try:
+        with contextlib.suppress(ValueError):
             from pyqenc.stream_model import VideoStreamChunk as _VSC
             bounds = _VSC.parse_chunk_id(chunk_id, ExtendedVideoStream(
                 stream=VideoStream(file=File(path=source), info=VideoStreamInfo(track_id=0)),
                 frame_count=24, crop=CropParams(),
             ))
             start, end = bounds.start_timestamp, bounds.end_timestamp
-        except Exception:
-            pass
     return VideoStreamChunk(
         stream = ExtendedVideoStream(
             stream = VideoStream(
@@ -286,7 +274,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options([chunk], output, ts_path)
+        args = MergePhase._build_mkvmerge_options([chunk], output, ts_path)
 
         # The chunk path must appear without a '+' prefix
         assert str(chunk) in args
@@ -298,7 +286,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options(chunks, output, ts_path)
+        args = MergePhase._build_mkvmerge_options(chunks, output, ts_path)
 
         assert str(chunks[0]) in args
         assert f"+{chunks[0]}" not in args
@@ -309,7 +297,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options(chunks, output, ts_path)
+        args = MergePhase._build_mkvmerge_options(chunks, output, ts_path)
 
         for chunk in chunks[1:]:
             assert f"+{os.fspath(chunk)}" in args, (
@@ -322,7 +310,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options([chunk], output, ts_path)
+        args = MergePhase._build_mkvmerge_options([chunk], output, ts_path)
 
         assert "-o" in args
         o_index = args.index("-o")
@@ -334,7 +322,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options(chunks, output, ts_path)
+        args = MergePhase._build_mkvmerge_options(chunks, output, ts_path)
 
         assert "--timestamps" in args
         ts_index    = args.index("--timestamps")
@@ -354,7 +342,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options(chunks, output, ts_path)
+        args = MergePhase._build_mkvmerge_options(chunks, output, ts_path)
 
         assert args.count("--timestamps") == 1, (
             f"Expected exactly 1 '--timestamps', got {args.count('--timestamps')}"
@@ -370,7 +358,7 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options([chunk], output, ts_path)
+        args = MergePhase._build_mkvmerge_options([chunk], output, ts_path)
 
         assert "--default-duration" not in args
 
@@ -380,14 +368,14 @@ class TestBuildMkvmergeOptions:
         output  = tmp_path / "output.mkv"
         ts_path = tmp_path / "timestamps.txt"
 
-        args = _build_mkvmerge_options([chunk], output, ts_path)
+        args = MergePhase._build_mkvmerge_options([chunk], output, ts_path)
 
         assert isinstance(args, list)
         assert all(isinstance(a, str) for a in args)
 
 
 # ---------------------------------------------------------------------------
-# _default_duration_ns / _build_mkvpropedit_args
+# _build_mkvpropedit_args — default-duration ns conversion
 # ---------------------------------------------------------------------------
 
 class TestDefaultDurationNs:
@@ -397,18 +385,21 @@ class TestDefaultDurationNs:
         """Bug guarded: float math drifts at NTSC rates — the exact rational
         path must produce the canonical 24000/1001 duration of 41 708 333 ns
         (the value the source container itself carries)."""
-        assert _default_duration_ns(Fraction(24000, 1001)) == 41_708_333
+        args = MergePhase._build_mkvpropedit_args(Path("output.mkv"), Fraction(24000, 1001))
+        assert "default-duration=41708333" in args
 
     def test_integer_rate(self) -> None:
         """24 fps → 1e9/24 ns rounded to the nearest integer."""
-        assert _default_duration_ns(Fraction(24, 1)) == 41_666_667
+        args = MergePhase._build_mkvpropedit_args(Path("output.mkv"), Fraction(24, 1))
+        assert "default-duration=41666667" in args
 
     def test_common_rates_stay_exact(self) -> None:
         """25/50/60 fps divide 1e9 exactly — no rounding may occur."""
         for fps, expected in ((Fraction(25), 40_000_000),
                               (Fraction(50), 20_000_000),
                               (Fraction(60), 16_666_667)):
-            assert _default_duration_ns(fps) == expected
+            args = MergePhase._build_mkvpropedit_args(Path("output.mkv"), fps)
+            assert f"default-duration={expected}" in args
 
 
 class TestBuildMkvpropeditArgs:
@@ -422,7 +413,7 @@ class TestBuildMkvpropeditArgs:
         the extended-length prefix)."""
         output = tmp_path / "output.mkv"
 
-        args = _build_mkvpropedit_args(output, Fraction(24000, 1001))
+        args = MergePhase._build_mkvpropedit_args(output, Fraction(24000, 1001))
 
         assert args == [
             "mkvpropedit", output,
@@ -441,20 +432,20 @@ class TestWriteMkvmergeOptionsFile:
 
     def test_file_is_created(self, tmp_path: Path) -> None:
         path = tmp_path / "options.json"
-        _write_mkvmerge_options_file(path, ["-o", "out.mkv", "chunk.mkv"])
+        MergePhase._write_mkvmerge_options_file(path, ["-o", "out.mkv", "chunk.mkv"])
         assert path.exists()
 
     def test_content_is_valid_json_array(self, tmp_path: Path) -> None:
         args = ["-o", "out.mkv", "--timestamps", "0:/ts.txt", "chunk.mkv"]
         path = tmp_path / "options.json"
-        _write_mkvmerge_options_file(path, args)
+        MergePhase._write_mkvmerge_options_file(path, args)
 
         loaded = json.loads(path.read_text(encoding="utf-8"))
         assert loaded == args
 
     def test_tmp_file_not_left_behind(self, tmp_path: Path) -> None:
         path = tmp_path / "options.json"
-        _write_mkvmerge_options_file(path, ["-o", "out.mkv"])
+        MergePhase._write_mkvmerge_options_file(path, ["-o", "out.mkv"])
 
         tmp_file = tmp_path / "options.tmp"
         assert not tmp_file.exists()
@@ -464,7 +455,7 @@ class TestWriteMkvmergeOptionsFile:
         unicode_path = "/path/to/movie.mkv"
         args = ["-o", unicode_path]
         path = tmp_path / "options.json"
-        _write_mkvmerge_options_file(path, args)
+        MergePhase._write_mkvmerge_options_file(path, args)
 
         loaded = json.loads(path.read_text(encoding="utf-8"))
         assert loaded[1] == unicode_path
@@ -721,6 +712,19 @@ class TestMergeFailsWithoutTimestamps:
 # Missed-targets warning (completion-line escalation)
 # ---------------------------------------------------------------------------
 
+def _make_phase(targets: list) -> MergePhase:
+    """A minimal MergePhase whose config carries exactly *targets*."""
+    from types import SimpleNamespace
+
+    from pyqenc.metrics import NoOpMetricsCollector
+
+    config = SimpleNamespace(
+        encoding  = SimpleNamespace(resolved_targets=targets),
+        measurement = SimpleNamespace(sampling=3),
+    )
+    return MergePhase(config, {}, collector=NoOpMetricsCollector())  # type: ignore[arg-type]
+
+
 class TestMissedTargetsWarning:
     """A missed quality target escalates to a WARNING naming every miss.
 
@@ -743,7 +747,7 @@ class TestMissedTargetsWarning:
         metrics = {"vmaf_min": 88.3, "psnr_min": 43.5}   # vmaf missed, psnr met
 
         with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
-            _log_missed_targets_warning("ultrafast+h265", metrics, targets)
+            _make_phase(targets)._log_missed_targets_warning("ultrafast+h265", metrics)
 
         warnings = [r for r in caplog.records if r.levelno == _logging.WARNING]
         assert len(warnings) == 1, "exactly one warning expected"
@@ -761,6 +765,6 @@ class TestMissedTargetsWarning:
         metrics = {"vmaf_min": 96.5}
 
         with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
-            _log_missed_targets_warning("ultrafast+h265", metrics, targets)
+            _make_phase(targets)._log_missed_targets_warning("ultrafast+h265", metrics)
 
         assert not [r for r in caplog.records if r.levelno == _logging.WARNING]

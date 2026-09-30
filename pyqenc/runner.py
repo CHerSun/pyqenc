@@ -1,23 +1,23 @@
 """Slim, phase-agnostic runner that drives a single target phase.
 
-The ``Runner`` replaces the registry-iterating ``PipelineOrchestrator``. Its
-responsibilities are deliberately narrow and phase-agnostic:
+Responsibilities:
 
-1. Run exactly one *target* phase via ``target.run(dry_run=...)``. Dependency
+1. Run exactly one *target* phase via ``target.run(dry_run=...)``; dependency
    resolution lives inside the phases, so the runner never iterates the
-   registry to *drive* execution (Req 3.1, 3.2, 3.3).
-2. Own the run-scoped metrics collector's final flush lifecycle (Req 7.4).
+   registry to *drive* execution.
+2. Own the run-scoped metrics collector's final flush lifecycle.
 3. Build a uniform run summary from each phase's cached ``PhaseResult.outcome``,
-   using only the common ``PhaseResult`` surface (Req 4).
+   using only the common ``PhaseResult`` surface.
 4. Compute the single ``deep_cleanup`` decision once and broadcast
-   ``finalize(ctx)`` to every phase on a successful, non-dry-run execution
-   (Req 5, 6).
+   ``finalize(ctx)`` to every phase on a successful, non-dry-run execution.
 
 The runner knows only the ``Phase`` / ``PhaseResult`` protocol surface,
 ``CleanupLevel``, ``PhaseOutcome``, and the registry ``dict`` — plus the one
 sanctioned exception: reading the merge target's deliverable contract
-(``Artifact[MergedVideo]`` payloads, Req 9.3) to collect the run's output
-files. It never names any other phase's internals.
+(``Artifact[MergedVideo]`` payloads) to collect the run's output files. It
+never names any other phase's internals.
+
+Spec: .kiro/specs/2026-09-09 phase-terminal-runner/
 """
 # CHerSun 2026
 
@@ -38,7 +38,6 @@ from pyqenc.phase import (
     PhaseResult,
 )
 from pyqenc.phases.merge import MergePhaseResult
-from pyqenc.state import ArtifactState
 from pyqenc.utils.long_path import LongPath
 
 logger = logging.getLogger(__name__)
@@ -50,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RunResult:
-    """Uniform result of a single ``Runner`` invocation (replaces ``PipelineResult``).
+    """Uniform result of a single ``Runner`` invocation.
 
     Built solely from the common ``PhaseResult`` surface of every phase in the
     registry, so it is identical in shape for every command (``auto`` and the
@@ -183,14 +182,14 @@ class Runner:
 
         summary = self._build_summary(run_ok=run_ok, target_result=result)
 
-        # Final metrics flush on an execute run (Req 7.4); never on dry-run (Req 7.6).
+        # Final metrics flush on an execute run; never on dry-run.
         if not dry_run and not self._no_metrics:
             self._collector.flush()
             logger.info("Metrics written to: %s", self._work_dir / METRICS_YAML_FILENAME)
 
         # Always unregister the collector from the interrupt-flush registry — on
         # every path (success, failure, dry-run, contract violation) — now that
-        # this run is done (Req 7.7). close() only unregisters; it never writes.
+        # this run is done. close() only unregisters; it never writes.
         self._collector.close()
 
         if contract_violation:
@@ -200,7 +199,7 @@ class Runner:
                 "(phase contract violation — _execute must return COMPLETED or FAILED)"
             )
 
-        # Downgrade-and-warn for ALL on a non-terminal command (Req 6.3, 6.4).
+        # Downgrade-and-warn for ALL on a non-terminal command.
         if self._cleanup >= CleanupLevel.ALL and not self._is_terminal_most:
             logger.warning(
                 "Full cleanup (--cleanup all) requested but '%s' is not the terminal "
@@ -208,7 +207,7 @@ class Runner:
                 target.name,
             )
 
-        # Single deep_cleanup decision, computed once (Req 6.1).
+        # Single deep_cleanup decision, computed once.
         deep = (
             run_ok
             and not dry_run
@@ -216,7 +215,7 @@ class Runner:
             and self._cleanup >= CleanupLevel.ALL
         )
 
-        # Broadcast finalize only on a successful execute run (Req 5, 6.5, 6.6).
+        # Broadcast finalize only on a successful execute run.
         if run_ok and not dry_run:
             ctx = FinalizeContext(deep_cleanup=deep)
             for phase in self._registry.values():
@@ -234,9 +233,8 @@ class Runner:
 
         Reads only ``phase.name`` and ``phase.result.outcome`` for every phase
         that has a cached result — the common ``PhaseResult`` surface, never a
-        phase-specific internal (Req 4.1, 4.3). Each outcome is bucketed across
-        all four ``PhaseOutcome`` values with none silently dropped (Req 4.2).
-        Phases with no cached result (e.g. never reached because an earlier
+        phase-specific internal. Each outcome is bucketed across all four
+        ``PhaseOutcome`` values with none silently dropped. Phases with no cached result (e.g. never reached because an earlier
         dependency failed) are simply absent from ``outcomes``.
 
         Args:
@@ -269,11 +267,10 @@ class Runner:
                 case PhaseOutcome.FAILED:
                     phases_failed.append(phase.name)
 
-        # Final output paths come from the TARGET phase's result only (Req 4.5);
-        # a merge target carries the deliverable contract, every other target
-        # has none.
+        # Final output paths come from the TARGET phase's result only; a merge
+        # target carries the deliverable contract, every other target has none.
         output_files: list[Path] = (
-            _collect_output_files(target_result)
+            target_result.output_paths
             if isinstance(target_result, MergePhaseResult) else []
         )
 
@@ -297,7 +294,7 @@ class Runner:
 
         Reports counts only (executed / reused / needing-work / failed); the
         reporting of specific final output *paths* stays the responsibility of
-        the producing phase, not this uniform summary (Req 4.5).
+        the producing phase, not this uniform summary.
 
         Args:
             summary: The assembled run summary.
@@ -329,24 +326,3 @@ class Runner:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
-
-def _collect_output_files(result: MergePhaseResult) -> list[Path]:
-    """Return the deliverable paths from the merge target's result.
-
-    The merge result's ``Artifact[MergedVideo]`` rows carry their materialized
-    locations; every ``COMPLETE`` row's payload path is a pipeline output file
-    (Req 9.3 — no directory sniffing).
-
-    Args:
-        result: The merge target's result.
-
-    Returns:
-        The list of merged output file paths.
-    """
-    return [
-        row.payload.output_path
-        for row in result.merged
-        if row.state == ArtifactState.COMPLETE
-    ]
-
-

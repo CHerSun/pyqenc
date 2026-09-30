@@ -4,6 +4,8 @@
 import argparse
 import logging
 import os
+import shutil
+import signal
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,15 +16,30 @@ if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
 
 import pyqenc
+from pyqenc.api import (
+    chunk_video,
+    encode_chunks,
+    extract_streams,
+    measure_quality,
+    merge_final,
+    process_audio,
+    run_pipeline,
+)
+from pyqenc.app_config import load_app_config
 from pyqenc.constants import (
+    CONFIG_DIR_HOME,
+    CONFIG_FILENAME_CWD,
+    CONFIG_FILENAME_HOME,
     DEFAULT_SCREENSHOT_COUNT,
     FAILURE_SYMBOL_MAJOR,
     SUCCESS_SYMBOL_MAJOR,
 )
+from pyqenc.metrics import flush_all_metrics
 from pyqenc.models import (
     CleanupLevel,
     CropParams,
 )
+from pyqenc.utils.ffmpeg_runner import kill_all_ffmpeg
 from pyqenc.utils.log_format import fmt_key_value_table
 from pyqenc.utils.logging import setup_logging
 from pyqenc.utils.long_path import LongPath
@@ -37,11 +54,6 @@ def _set_process_priority() -> None:
         logger.debug("Process priority set to below normal")
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Failed to set process priority: {e}")
-
-
-def _parse_quality_targets(targets_str: str) -> list[str]:
-    """Parse comma-separated quality targets, i.e. "vmaf-min:95,ssim-med:98" into a list of strings."""
-    return [t.strip() for t in targets_str.split(",") if t.strip()]
 
 
 def _parse_strategies(strategies_str: str | None) -> list[str] | None:
@@ -279,8 +291,6 @@ def _build_config(args: argparse.Namespace) -> "AppConfig":
         Fully assembled ``AppConfig`` with CLI overrides applied and strategies
         resolved.
     """
-    from pyqenc.app_config import load_app_config
-
     config = load_app_config()
 
     # --- extraction ---
@@ -298,7 +308,7 @@ def _build_config(args: argparse.Namespace) -> "AppConfig":
     # --- encoding / quality ---
     quality_target_str = getattr(args, "targets", None)
     if quality_target_str is not None:
-        config.encoding.targets = _parse_quality_targets(quality_target_str)
+        config.encoding.targets = [t.strip() for t in quality_target_str.split(",") if t.strip()]
 
     strategies = _parse_strategies(getattr(args, "strategies", None))
     if strategies is not None:
@@ -424,7 +434,6 @@ def _create_merge_subcommand(subparsers: argparse._SubParsersAction) -> None:
 
 def _cmd_auto(args: argparse.Namespace) -> int:
     """Execute the 'auto' subcommand."""
-    from pyqenc.api import run_pipeline
 
     logger.info("Starting automatic pipeline execution...")
     logger.info("")
@@ -480,7 +489,6 @@ def _cmd_auto(args: argparse.Namespace) -> int:
 
 def _cmd_extract(args: argparse.Namespace) -> int:
     """Execute the 'extract' subcommand."""
-    from pyqenc.api import extract_streams
 
     logger.info("Starting stream extraction")
     logger.info(f"Source: {args.source}")
@@ -517,7 +525,6 @@ def _cmd_extract(args: argparse.Namespace) -> int:
 
 def _cmd_chunk(args: argparse.Namespace) -> int:
     """Execute the 'chunk' subcommand."""
-    from pyqenc.api import chunk_video
 
     logger.info("Starting video chunking")
     logger.info(f"Source: {args.source}")
@@ -554,7 +561,6 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
 
 def _cmd_encode(args: argparse.Namespace) -> int:
     """Execute the 'encode' subcommand."""
-    from pyqenc.api import encode_chunks
 
     logger.info("Starting chunk encoding")
     logger.info(f"Source: {args.source}")
@@ -591,7 +597,6 @@ def _cmd_encode(args: argparse.Namespace) -> int:
 
 def _cmd_audio(args: argparse.Namespace) -> int:
     """Execute the 'audio' subcommand."""
-    from pyqenc.api import process_audio
 
     logger.info("Starting audio processing")
     logger.info(f"Source: {args.source}")
@@ -621,7 +626,6 @@ def _cmd_audio(args: argparse.Namespace) -> int:
 
 def _cmd_merge(args: argparse.Namespace) -> int:
     """Execute the 'merge' subcommand."""
-    from pyqenc.api import merge_final
 
     logger.info("Starting final merge")
     logger.info(f"Source: {args.source}")
@@ -711,14 +715,6 @@ def _create_config_subcommand(subparsers: argparse._SubParsersAction) -> None:
 
 def _cmd_config(args: argparse.Namespace) -> int:
     """Execute the 'config' subcommand."""
-    import shutil
-
-    from pyqenc.app_config import load_app_config
-    from pyqenc.constants import (
-        CONFIG_DIR_HOME,
-        CONFIG_FILENAME_CWD,
-        CONFIG_FILENAME_HOME,
-    )
 
     if args.target_dir is None:
         target = Path.home() / CONFIG_DIR_HOME / CONFIG_FILENAME_HOME
@@ -844,8 +840,6 @@ def _create_measure_subcommand(subparsers: argparse._SubParsersAction) -> None:
 
 def _cmd_measure(args: argparse.Namespace) -> int:
     """Execute the 'measure' subcommand."""
-    from pyqenc.api import measure_quality
-    from pyqenc.app_config import load_app_config
 
     try:
         crop_params = _resolve_crop_params(args)
@@ -865,7 +859,7 @@ def _cmd_measure(args: argparse.Namespace) -> int:
             work_dir                 = args.work_dir,
             target_videos            = args.targets,
             crop_params              = crop_params,
-            sampling                 = metrics_sampling,
+            metrics_sampling         = metrics_sampling,
             screenshot_count         = args.screenshots,
             screenshot_interval      = args.every,
             screenshot_include_edges = args.screenshot_include_edges,
@@ -966,12 +960,8 @@ Examples:
 
     _set_process_priority()
 
-    import signal
 
-    from pyqenc.metrics import flush_all_metrics
-    from pyqenc.utils.ffmpeg_runner import kill_all_ffmpeg
-
-    def _sigint_handler(signum: int, frame: object) -> None:
+    def _sigint_handler(_signum: int, _frame: object) -> None:
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         kill_all_ffmpeg()
         flush_all_metrics()

@@ -57,7 +57,7 @@ _51     = ChannelLayout.parse("5.1")
 
 # Canned stderr that the built-in two-pass filters can scrape, so a chain that
 # includes real peaknorm/loudnorm resolves to its final fragment on pass 2.
-_VOLUMEDETECT_STDERR = ["[Parsed_volumedetect] max_volume: -6.0 dB"]
+_ASTATS_STDERR = ["[Parsed_astats_0 @ 0x55e] Peak level dB: -6.0"]
 _LOUDNORM_STDERR = [
     '[Parsed_loudnorm] {',
     '  "input_i" : "-18.0",',
@@ -91,7 +91,7 @@ class _SpyRunner:
 
     def argv_of(self, call_index: int) -> list[str]:
         """The composed launch argv of the recorded call, as plain strings."""
-        return [str(a) for a in compose_command(self.calls[call_index])]
+        return [str(a) for a in compose_command(self.calls[call_index])[0]]
 
     def af_of(self, call_index: int) -> str | None:
         """Return the ``-af`` value of the recorded call, or ``None`` if absent."""
@@ -182,7 +182,7 @@ class TestInvocationCount:
         """One two-pass filter ⇒ 1 measurement + 1 application (bug: wrong count)."""
         palette = {"peak": _fi("peaknorm", target_dbfs=-1.0)}
         resolved = _resolved("peak", palette, ["peak"])
-        spy = _SpyRunner(stderr_per_call=[_VOLUMEDETECT_STDERR])
+        spy = _SpyRunner(stderr_per_call=[_ASTATS_STDERR])
 
         await execute_chain(resolved, source, out_dir, runner=spy)
 
@@ -199,7 +199,7 @@ class TestInvocationCount:
             "loud": _fi("loudnorm", i=-16.0, tp=-1.5, lra=11.0),
         }
         resolved = _resolved("both", palette, ["peak", "loud"])
-        spy = _SpyRunner(stderr_per_call=[_VOLUMEDETECT_STDERR, _LOUDNORM_STDERR])
+        spy = _SpyRunner(stderr_per_call=[_ASTATS_STDERR, _LOUDNORM_STDERR])
 
         await execute_chain(resolved, source, out_dir, runner=spy)
 
@@ -222,12 +222,12 @@ class TestMeasurementAfIncludesFrozenFragments:
             "loud": _fi("loudnorm", i=-16.0, tp=-1.5, lra=11.0),
         }
         resolved = _resolved("both", palette, ["peak", "loud"])
-        spy = _SpyRunner(stderr_per_call=[_VOLUMEDETECT_STDERR, _LOUDNORM_STDERR])
+        spy = _SpyRunner(stderr_per_call=[_ASTATS_STDERR, _LOUDNORM_STDERR])
 
         await execute_chain(resolved, source, out_dir, runner=spy)
 
-        # Call 0: peaknorm measurement — just "volumedetect".
-        assert spy.af_of(0) == "volumedetect"
+        # Call 0: peaknorm measurement — just "astats".
+        assert spy.af_of(0) == "astats"
         # Call 1: loudnorm measurement — the FROZEN peaknorm fragment, then loudnorm.
         loud_measure_af = spy.af_of(1)
         assert loud_measure_af is not None
@@ -253,7 +253,7 @@ class TestMeasurementAfIncludesFrozenFragments:
             "loud": _fi("loudnorm", i=-16.0, tp=-1.5, lra=11.0),
         }
         resolved = _resolved("both", palette, ["peak", "loud"])
-        spy = _SpyRunner(stderr_per_call=[_VOLUMEDETECT_STDERR, _LOUDNORM_STDERR])
+        spy = _SpyRunner(stderr_per_call=[_ASTATS_STDERR, _LOUDNORM_STDERR])
 
         await execute_chain(resolved, source, out_dir, runner=spy)
 
@@ -380,7 +380,7 @@ class TestAfJoining:
         await execute_chain(resolved, source_51, out_dir, runner=spy)
 
         af = spy.af_of(0) or ""
-        assert af.startswith("pan=stereo|")
+        assert af.startswith("aformat=sample_fmts=flt,pan=stereo|")
         assert af.count(",dynaudnorm=") == 1
         assert ",," not in af
 

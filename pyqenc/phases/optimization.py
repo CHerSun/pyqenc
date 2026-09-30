@@ -38,8 +38,8 @@ from pyqenc.models import (
     CleanupLevel,
     CropParams,
     PhaseOutcome,
-    QualityTarget,
     Strategy,
+    targets_as_strings,
 )
 from pyqenc.phase import (
     Artifact,
@@ -60,6 +60,7 @@ from pyqenc.state import (
 )
 from pyqenc.stream_model import EncodedChunk, VideoStreamChunk
 from pyqenc.utils.alive import AdvanceState, ProgressBar
+from pyqenc.utils.log_format import fmt_size_mb
 from pyqenc.utils.visualization import QualityEvaluator
 
 if TYPE_CHECKING:
@@ -70,7 +71,6 @@ if TYPE_CHECKING:
 config_handler.set_global(enrich_print=False)  # type: ignore
 logger = logging.getLogger(__name__)
 
-_OPTIMIZATION_YAML    = "optimization.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@ class OptimizationPhaseResult(PhaseResult):
     Attributes:
         winners: The winning test attempts — one ``Artifact[EncodedChunk]``
                  per (test chunk, strategy) pair. The single sanctioned
-                 exception to the consumption-graph rule (Req 5.2): nothing
+                 exception to the consumption-graph rule: nothing
                  downstream consumes them, but carrying the winners keeps
                  this phase structurally identical to EncodingPhase (same
                  result shape, same sort-into-fields step) so the base run
@@ -126,6 +126,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
     """
 
     name:        str       = "optimization"
+    SIDECAR_NAME = "optimization.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ProbePhase, ChunkingPhase)
     _METRIC_KEY: MetricKey = MetricKey.OPTIMIZATION
 
@@ -220,16 +221,12 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         job_result   = self._dep_result(JobPhase)
         probe_result = self._dep_result(ProbePhase)
         work_dir     = job_result.work_dir
-        opt_yaml     = work_dir / _OPTIMIZATION_YAML
+        opt_yaml     = work_dir / OptimizationPhase.SIDECAR_NAME
         tolerance    = self._config.encoding.optimize_tolerance
         strategies   = self._config.encoding.resolved_strategies
         force_wipe   = job_result.force_wipe
 
-        crop           = probe_result.crop
-        current_probe  = ProbeState(
-            frame_count = probe_result.stream.payload.frame_count if probe_result.stream is not None else 0,
-            crop        = crop if crop else None,
-        )
+        current_probe      = ProbeState.from_probe(probe_result)
         self._current_probe = current_probe
 
         # Step 1 — force wipe (before any currency decision, so --force
@@ -240,16 +237,15 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             persisted = None
 
         # Step 2 — probe mismatch invalidation.
-        if persisted is not None and persisted.strategy_results:
-            if persisted.probe != current_probe:
-                raise RecoveryError(
-                    "Probe params changed since last optimization run "
-                    f"(persisted={persisted.probe}, current={current_probe}). "
-                    "Re-run with --force to delete stale optimization artifacts and continue."
-                )
+        if persisted is not None and persisted.strategy_results and persisted.probe != current_probe:
+            raise RecoveryError(
+                "Probe params changed since last optimization run "
+                f"(persisted={persisted.probe}, current={current_probe}). "
+                "Re-run with --force to delete stale optimization artifacts and continue."
+            )
 
         # Step 3 — quality-target / sampling change detection.
-        current_targets  = _targets_as_strings(self._config.encoding.resolved_targets)
+        current_targets  = targets_as_strings(self._config.encoding.resolved_targets)
         current_sampling = self._config.measurement.sampling
         targets_changed = (
             persisted is not None
@@ -307,7 +303,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         # Step 5 — the per-pair ledger: one Artifact[EncodedChunk] row per
         # (test chunk, strategy) winning attempt, presence-based via the
-        # shared attempt-recovery machinery (Req 8).
+        # shared attempt-recovery machinery.
         self._test_chunks = self._resolve_test_chunks(persisted)
         if self._strategies_to_test and not self._test_chunks:
             raise RecoveryError("No chunks available from ChunkingPhase")
@@ -339,7 +335,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         return _select_test_chunks(chunks)
 
     def _pair_ledger(self, work_dir: Path, strategies: list[Strategy]) -> list[Artifact]:
-        """The per-pair ledger plus orphaned-strategy rows (Req 8.1/8.2)."""
+        """The per-pair ledger plus orphaned-strategy rows."""
         from pyqenc.phases.encoding import _orphan_strategy_rows, _pair_rows
 
         rows: list[Artifact] = _pair_rows(work_dir, self._test_chunks, strategies)
@@ -369,12 +365,12 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         """
         job_result = self._dep_result(JobPhase)
         work_dir   = job_result.work_dir
-        opt_yaml   = work_dir / _OPTIMIZATION_YAML
+        opt_yaml   = work_dir / OptimizationPhase.SIDECAR_NAME
         tolerance  = self._config.encoding.optimize_tolerance
         persisted  = self._persisted
-        crop       = self._current_probe.crop if self._current_probe else None
+        crop       = self._current_probe.crop
 
-        current_targets  = _targets_as_strings(self._config.encoding.resolved_targets)
+        current_targets  = targets_as_strings(self._config.encoding.resolved_targets)
         current_sampling = self._config.measurement.sampling
 
         # Cheap path: all results cached, only the tolerance changed —
@@ -446,7 +442,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         from pyqenc.phases.encoding import (
             _encode_chunks_parallel,
             _recover_encoding_attempts,
-        )
+        )  # deferred: circular import (encoding <-> optimization)
 
         phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, strategy_names)
 
@@ -541,6 +537,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             live config; ``None``-safe on dep-failure paths where no stash
             exists).
         """
+        # Resolve strategy name strings to Strategy objects from the live config.
+        by_name = {s.display_name(): s for s in self._config.encoding.resolved_strategies}
         return OptimizationPhaseResult(
             outcome             = outcome,
             message             = message,
@@ -548,25 +546,12 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 r for r in artifacts
                 if isinstance(r.payload, EncodedChunk) and r.state == ArtifactState.COMPLETE
             ],
-            selected_strategies = self._resolve_selected(self._selected_names),
+            selected_strategies = [by_name[n] for n in self._selected_names if n in by_name],
         )
 
     # ------------------------------------------------------------------
     # Public Phase interface
     # ------------------------------------------------------------------
-
-    def _resolve_selected(self, selected_names: list[str]) -> list[Strategy]:
-        """Resolve strategy name strings to ``Strategy`` objects from the live config.
-
-        Args:
-            selected_names: Strategy display names from ``_apply_tolerance``.
-
-        Returns:
-            Matching ``Strategy`` objects from the resolved strategies,
-            preserving the order of *selected_names*.
-        """
-        by_name = {s.display_name(): s for s in self._config.encoding.resolved_strategies}
-        return [by_name[n] for n in selected_names if n in by_name]
 
     def _all_strategies(self, dry_run: bool) -> OptimizationPhaseResult:
         """All-strategies mode: bookkeeping + the skip result (no banner).
@@ -585,8 +570,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             ``OptimizationPhaseResult`` with all configured strategies selected.
         """
         work_dir         = self._dep_result(JobPhase).work_dir
-        opt_yaml         = work_dir / _OPTIMIZATION_YAML
-        current_targets  = _targets_as_strings(self._config.encoding.resolved_targets)
+        opt_yaml         = work_dir / OptimizationPhase.SIDECAR_NAME
+        current_targets  = targets_as_strings(self._config.encoding.resolved_targets)
         current_sampling = self._config.measurement.sampling
 
         if not dry_run:
@@ -637,7 +622,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         Args:
             work_dir: Pipeline working directory.
         """
-        opt_yaml = work_dir / _OPTIMIZATION_YAML
+        opt_yaml = work_dir / OptimizationPhase.SIDECAR_NAME
         if opt_yaml.exists():
             opt_yaml.unlink()
             logger.debug("force_wipe: deleted %s", opt_yaml)
@@ -697,8 +682,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         )
 
         for res in results:
-            size_mb  = res.total_size / (1024 * 1024) if res.total_size > 0 else 0.0
-            size_str = f"{size_mb:,.1f}".replace(",", "\u202f")
+            size_str = fmt_size_mb(res.total_size)
             marker   = " ◀ selected" if res.strategy in selected_names else ""
             status   = "passed" if res.total_size > 0 else "failed"
             logger.info(
@@ -718,18 +702,6 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
-def _targets_as_strings(quality_targets: list[QualityTarget]) -> list[str]:
-    """Serialise *quality_targets* to ``"metric-statistic:value"`` strings.
-
-    Args:
-        quality_targets: Quality targets from :class:`~pyqenc.app_config.AppConfig`.
-
-    Returns:
-        Sorted list of strings like ``["vmaf-min:93.0"]``.
-    """
-    return sorted(f"{t.metric}-{t.statistic}:{t.value}" for t in quality_targets)
-
-
 def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
     """Delete the entire ``encoded/<strategy>/`` directory for each strategy.
 
@@ -738,7 +710,7 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
     attempts from ``encoding/`` and re-evaluate them from scratch.
 
     Called when quality targets or ``metrics_sampling`` change, since both
-    invalidate the previously selected winners and their recorded metrics.
+    invalidate the selected winners and their recorded metrics.
 
     If the strategy list does not cover all subdirs present (e.g. strategies
     were renamed), wipes the entire ``encoded/`` base directory as a fallback

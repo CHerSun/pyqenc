@@ -25,15 +25,13 @@ Design decisions (see ``.kiro/specs/2026-09-11 audio-chains/design.md``):
 Matrix flavours for the 5.1→2.0 (and derived 7.1→2.0) fold:
 
 - ``std``     — canonical ITU-R BS.775 / ATSC Lo/Ro fold, LFE (c3) dropped.
-- ``lfe``     — the historical "night" community fold: mixes FC, surrounds, and a
-                share of the LFE into both channels. Preserved verbatim.
-- ``boosted`` — the historical "nboost" community fold: dialog-forward (full FC,
-                reduced surrounds, LFE dropped). Preserved verbatim.
+- ``lfe``     — community "night" fold: FC, surrounds, and an LFE share in both
+                channels.
+- ``boosted`` — community "nboost" fold: dialog-forward (full FC, reduced
+                surrounds, LFE dropped).
 
-``lfe`` and ``boosted`` are community-sourced formulas kept verbatim as distinct
-named matrices; they differ in FC weight, surround weight, and LFE handling — not
-merely in an LFE gain — which is why they are separate entries rather than one
-parameterized fold.
+``lfe`` and ``boosted`` differ in FC weight, surround weight, and LFE handling —
+not merely in an LFE gain — hence two separate entries.
 """
 # CHerSun 2026
 
@@ -45,9 +43,10 @@ class Layout(StrEnum):
 
     These are the *normalized* forms only (``stereo`` normalizes to ``STEREO``'s
     value ``2.0`` upstream in the :class:`~pyqenc.audio.layout.ChannelLayout`
-    parser — Task 4). Matrix keys and the channel-count map use these values.
+    parser). Matrix keys and the channel-count map use these values.
     """
 
+    MONO = "1.0"
     STEREO = "2.0"
     SURROUND_51 = "5.1"
     SURROUND_71 = "7.1"
@@ -62,6 +61,7 @@ class MatrixName(StrEnum):
 
 
 _LAYOUT_CHANNELS: dict[str, int] = {
+    Layout.MONO.value: 1,
     Layout.STEREO.value: 2,
     Layout.SURROUND_51.value: 6,
     Layout.SURROUND_71.value: 8,
@@ -87,16 +87,16 @@ def layout_channels(normalized_layout: str) -> int:
 
 
 DOWNMIX_FORMAT: str ="aformat=sample_fmts=flt"
-"""ffmpeg filter fragment to convert the input to float samples for downmixing. This is needed because the built-in downmix matrices
-can produce positive gain, which cannot be represented in 16-bit/32-bit integer samples. The `flt` (and `dbl`) format is used to avoid clipping
-and preserve audio fidelity during the downmixing process."""
+"""ffmpeg filter fragment converting the input to float samples before downmixing:
+the built-in matrices can produce positive gain, which integer sample formats
+(16/32-bit) cannot represent — ``flt`` avoids clipping."""
 
 DOWNMIX_MATRICES: dict[tuple[str, str, str | None], str] = {
-    #@ ___ 7.1 → 5.1 ___
+    # 7.1 → 5.1
     # Plain index fold of the side pair into the back pair, no matrix.
     (Layout.SURROUND_71.value, Layout.SURROUND_51.value, None):
         "pan=5.1|c0=c0|c1=c1|c2=c2|c3=c3|c4=0.5*c6+0.5*c4|c5=0.5*c7+0.5*c5",       # Direct folding of channels.
-    #@ ___ 5.1 → 2.0 ___
+    # 5.1 → 2.0
     (Layout.SURROUND_51.value, Layout.STEREO.value, MatrixName.STD.value):
         "pan=stereo|c0=c0+0.707*c2+0.707*c4|c1=c1+0.707*c2+0.707*c5",                                         # std: ITU-R BS.775 / ATSC Lo/Ro fold, LFE (c3) dropped.
     (Layout.SURROUND_51.value, Layout.STEREO.value, MatrixName.LFE.value):
@@ -104,7 +104,7 @@ DOWNMIX_MATRICES: dict[tuple[str, str, str | None], str] = {
         #"pan=stereo|c0=0.5*c2+0.707*c0+0.707*c4+0.5*c3|c1=0.5*c2+0.707*c1+0.707*c5+0.5*c3",                  # David's LFE downmix from doom9 forum
     (Layout.SURROUND_51.value, Layout.STEREO.value, MatrixName.BOOSTED.value):
         "pan=stereo|c0=c2+0.30*c0+0.30*c4|c1=c2+0.30*c1+0.30*c5",                                             # Boosted dialogs from doom9 forum.
-    #@ ___ 7.1 → 2.0 ___
+    # 7.1 → 2.0
     (Layout.SURROUND_71.value, Layout.STEREO.value, MatrixName.STD.value):
         "pan=stereo|c0=c0+0.707*c2+0.707*c4+0.707*c6|c1=c1+0.707*c2+0.707*c5+0.707*c7",        # std: ITU-R BS.775 / ATSC Lo/Ro fold, LFE (c3) dropped.
     (Layout.SURROUND_71.value, Layout.STEREO.value, MatrixName.LFE.value):

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from pyqenc.metrics import MetricsCollector
 from pyqenc.models import QualityTarget
 from pyqenc.utils.visualization import QualityEvaluator
 from tests.fixtures.metric_fixtures import (
@@ -24,9 +25,9 @@ class TestEncodingQualityIntegration:
         metrics_dir = tmp_path / "metrics"
         metrics_dir.mkdir()
 
-        vmaf_file = create_mock_vmaf_file(metrics_dir / "test.vmaf.json")
-        ssim_file = create_mock_ssim_file(metrics_dir / "test.ssim.log")
-        psnr_file = create_mock_psnr_file(metrics_dir / "test.psnr.log")
+        create_mock_vmaf_file(metrics_dir / "test.vmaf.json")
+        create_mock_ssim_file(metrics_dir / "test.ssim.log")
+        create_mock_psnr_file(metrics_dir / "test.psnr.log")
 
         # Define quality targets
         targets = [
@@ -219,7 +220,8 @@ class TestEncodeChunkQualitySearchV2Integration:
         encoder = ChunkEncoder(
             quality_evaluator = evaluator,
             work_dir          = tmp_path,
-            sampling = 10,
+            collector         = MagicMock(spec=MetricsCollector),
+            metrics_sampling  = 10,
         )
 
         reference = MagicMock()
@@ -252,7 +254,7 @@ class TestEncodeChunkQualitySearchV2Integration:
 
         from pyqenc.models import QualityTarget
         from pyqenc.phases.encoding import ChunkEncoder
-        from pyqenc.quality import MetricType, QualityLogs, QualityEvaluation
+        from pyqenc.quality import MetricType, QualityEvaluation, QualityLogs
         from pyqenc.utils.visualization import QualityEvaluator
 
         strategy = self._make_strategy()

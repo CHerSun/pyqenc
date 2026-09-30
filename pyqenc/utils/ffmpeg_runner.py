@@ -68,8 +68,8 @@ def kill_all_ffmpeg() -> None:
     for proc in procs:
         try:
             proc.kill()
-        except Exception:
-            pass
+        except OSError as exc:
+            logger.debug("kill_all_ffmpeg: could not kill process: %s", exc)
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -157,20 +157,14 @@ _PROGRESS_FLAGS: list[str] = ["-hide_banner", "-nostats", "-progress", "pipe:1"]
 """Flags injected after the ffmpeg executable in every composed command."""
 
 
-def _format_seconds(value: float) -> str:
-    """Format a window bound for ``-ss``/``-t``.
-
-    Plain ``str(float)`` reproduces the pre-request formatting at every
-    converted call site (seek-target flooring to microseconds is a
-    direct-from-source wiring decision and lands with that spec task).
-    """
-    return str(value)
-
-
-def _launch_argv(
+def compose_command(
     request: FFmpegRequest,
 ) -> tuple[list[str | os.PathLike], tuple[Path, Path] | None]:
-    """Compose the exact argv ffmpeg is launched with.
+    """Compose the exact launch plan ffmpeg is executed with.
+
+    The single authority: the runner launches this composition and the golden
+    command tests pin it, so a request's meaning is inspectable without
+    running ffmpeg.
 
     Layout, in order: progress flags and ``-y``; per input
     ``pre_input_args [-ss start] [-t duration] -i path``; ``-map <selector>``
@@ -191,9 +185,10 @@ def _launch_argv(
     for inp in request.inputs:
         argv.extend(inp.pre_input_args)
         if inp.start_seconds is not None:
-            argv.extend([FFMPEG_ARG_SEEK, _format_seconds(inp.start_seconds)])
+            # Window bounds go to ffmpeg as plain str(float) — no fixed-precision formatting.
+            argv.extend([FFMPEG_ARG_SEEK, str(inp.start_seconds)])
         if inp.duration_seconds is not None:
-            argv.extend([FFMPEG_ARG_DURATION, _format_seconds(inp.duration_seconds)])
+            argv.extend([FFMPEG_ARG_DURATION, str(inp.duration_seconds)])
         argv.extend([FFMPEG_ARG_INPUT, inp.path])
 
     for inp in request.inputs:
@@ -215,17 +210,6 @@ def _launch_argv(
     muxer  = request.output_format if request.output_format is not None else FFMPEG_MUXER_MATROSKA
     argv.extend([FFMPEG_ARG_FORMAT, muxer, tmp])
     return argv, (tmp, output)
-
-
-def compose_command(request: FFmpegRequest) -> list[str | os.PathLike]:
-    """Return the exact argv ffmpeg is launched with for ``request``.
-
-    The single argv authority: the runner launches this composition and the
-    golden command tests pin it, so a request's meaning is inspectable without
-    running ffmpeg.
-    """
-    argv, _tmp_to_final = _launch_argv(request)
-    return argv
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +401,7 @@ async def run_ffmpeg_async(
         ``FFmpegRunResult`` with ``returncode``, ``success``, ``stderr_lines``,
         and ``frame_count``.
     """
-    argv, tmp_to_final = _launch_argv(request)
+    argv, tmp_to_final = compose_command(request)
     logger.debug("run_ffmpeg_async: %s", " ".join(str(a) for a in argv))
 
     proc = await asyncio.create_subprocess_exec(

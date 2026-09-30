@@ -1,7 +1,13 @@
 """Phase integration tests for MetricsCollector timing instrumentation.
 
-Verifies that phases call ``time()`` and ``step()`` with the expected ``MetricKey``
-values when their core work methods run.  External I/O (ffprobe, ffmpeg, crop
+Verifies the OBSERVABLE metrics contract of each phase: after a phase runs
+against a real ``YamlMetricsCollector``, the flushed ``metrics.yaml`` records
+the expected timing rows (top-level phase keys, dotted sub-action keys) and
+convergence statistics — and records nothing for work that did not happen
+(reused paths, reused pairs).  The collector runs under a deterministic
+stepping clock so every completed span accrues at least one second and
+survives the report's integer-second rounding; assertions parse the YAML,
+never the collector's internals.  External I/O (ffprobe, ffmpeg, crop
 detect) is mocked out so tests run without real media files.
 
 Tests live here per the spec: tests/test_metrics_integration.py
@@ -11,19 +17,34 @@ Tests live here per the spec: tests/test_metrics_integration.py
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import yaml
+
 from pyqenc.app_config import AppConfig, load_app_config
-from pyqenc.metrics import MetricKey, MetricsCollector, NoOpMetricsCollector
+from pyqenc.metrics import (
+    MetricKey,
+    MetricsCollector,
+    NoOpMetricsCollector,
+    YamlMetricsCollector,
+)
 from pyqenc.models import (
     CleanupLevel,
     PhaseOutcome,
     Strategy,
 )
 from pyqenc.phase import Artifact, Recovery
+from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
+from pyqenc.phases.chunking import ChunkingPhase, ChunkingPhaseResult
+from pyqenc.phases.encoding import EncodingPhase, EncodingPhaseResult
+from pyqenc.phases.extraction import ExtractionPhase
+from pyqenc.phases.job import JobPhaseResult
+from pyqenc.phases.merge import MergePhase
+from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.state import ArtifactState
-from pyqenc.stream_model import File
+from pyqenc.stream_model import ExtendedVideoStream, File, VideoStreamChunk
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 _SHARED_APP_CONFIG: AppConfig = load_app_config(default_only=True)
@@ -46,7 +67,7 @@ def _make_config(tmp_path: Path) -> AppConfig:
     """
     return load_app_config(default_only=True)
 
-def _make_chunk_window(source: Path, start: float, end: float) -> "VideoStreamChunk":
+def _make_chunk_window(source: Path, start: float, end: float) -> VideoStreamChunk:
     """A VideoStreamChunk fixture over the source window."""
     from pyqenc.stream_model import VideoStreamChunk
 
@@ -150,7 +171,7 @@ def _make_volatile(tmp_path: Path) -> dict:
         "no_metrics": False,
     }
 
-def _make_extended_stream(path: Path, frame_count: int, duration: float) -> "ExtendedVideoStream":
+def _make_extended_stream(path: Path, frame_count: int, duration: float) -> ExtendedVideoStream:
     """An ExtendedVideoStream fixture (fast facet + frame count)."""
     from fractions import Fraction
 
@@ -179,13 +200,79 @@ def _make_extended_stream(path: Path, frame_count: int, duration: float) -> "Ext
 def _spy_collector() -> MagicMock:
     """Return a ``MagicMock`` that satisfies the ``MetricsCollector`` Protocol.
 
-    ``time()`` returns a real no-op context manager so ``with collector.time(key):``
-    works correctly in phase code.  ``step`` is a plain mock so calls
-    can be inspected via ``assert_called_with`` / ``call_args_list``.
+    Used only where a test needs SOME collector to satisfy a constructor and
+    never asserts on it — never to inspect ``time()``/``step()`` call args
+    (that pins internal instrumentation, not behavior).
     """
     collector = MagicMock(spec=MetricsCollector)
     collector.time.return_value = contextlib.nullcontext()
     return collector
+
+
+class _SteppingClock:
+    """Deterministic ``monotonic()`` source: every call advances one step.
+
+    Used via ``patch("time.monotonic", ...)`` so each completed ``time()``
+    span accrues at least one step (>= 1 s) and survives the integer-second
+    rounding in the metrics report.  Real sub-millisecond test spans would
+    round to 0 and be omitted from ``metrics.yaml`` entirely.
+    """
+
+    def __init__(self, step: float = 1.0) -> None:
+        self._now  = 1_000.0
+        self._step = step
+
+    def __call__(self) -> float:
+        self._now += self._step
+        return self._now
+
+
+def _recorded_metrics(
+    tmp_path: Path,
+    run: Callable[[MetricsCollector], None],
+) -> dict:
+    """Run *run* against a real collector and return the parsed metrics.yaml.
+
+    Creates a ``YamlMetricsCollector`` writing ``metrics.yaml`` below
+    ``tmp_path/work``, patches ``time.monotonic`` to a stepping clock for the
+    duration of *run*, flushes, closes, and returns ``yaml.safe_load`` of the
+    written report.  Asserting on this dict is asserting on the run's
+    external record — not on collector internals.
+    """
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    collector = YamlMetricsCollector(work_dir=work_dir, force_wipe=True)
+    try:
+        with patch("time.monotonic", _SteppingClock()):
+            run(collector)
+        collector.flush()
+    finally:
+        collector.close()
+    metrics_path = work_dir / "metrics.yaml"
+    assert metrics_path.exists(), "metrics.yaml was not written"
+    return yaml.safe_load(metrics_path.read_text(encoding="utf-8"))
+
+
+def _top_level_keys(metrics: dict) -> set[str]:
+    """Top-level timing keys with recorded (non-zero) seconds in metrics.yaml."""
+    return {
+        entry["key"]
+        for entry in metrics["pipeline_metrics"]["time_distribution"]["top_level"]
+    }
+
+
+def _dotted_groups(metrics: dict) -> dict[str, dict]:
+    """Dotted sub-action groups in metrics.yaml, keyed by prefix string."""
+    return metrics["pipeline_metrics"]["time_distribution"].get("dotted", {})
+
+
+def _dotted_keys(metrics: dict) -> set[str]:
+    """Dotted sub-action keys with recorded (non-zero) seconds in metrics.yaml."""
+    return {
+        entry["key"]
+        for group in _dotted_groups(metrics).values()
+        for entry in group["breakdown"]
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +283,11 @@ class TestJobPhaseTiming:
     """Integration tests for ``JobPhase`` timing instrumentation (Req 6.5)."""
 
     def test_job_probe_recorded_on_run(self, tmp_path: Path) -> None:
-        """``time(MetricKey.JOB)`` must be called when ``run()`` executes.
+        """A completed job run must leave its probe time in ``metrics.yaml``.
+
+        Bug guarded: the run's report losing the job timing row — the
+        pipeline's first phase silently missing from ``time_distribution``,
+        leaving the report an incomplete record of what ran.
 
         Validates: Requirements 6.5
         """
@@ -204,15 +295,14 @@ class TestJobPhaseTiming:
 
         config   = _make_config(tmp_path)
         volatile = _make_volatile(tmp_path)
-        collector = _spy_collector()
-        phase    = JobPhase(config, collector=collector, **volatile)
 
-        phase.run()
+        def run(collector: MetricsCollector) -> None:
+            JobPhase(config, collector=collector, **volatile).run()
 
-        # Verify the execute span was recorded under the job metric key
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.JOB in time_keys_called, (
-            f"Expected MetricKey.JOB in time() calls, got: {time_keys_called}"
+        metrics    = _recorded_metrics(tmp_path, run)
+        top_level  = _top_level_keys(metrics)
+        assert "job" in top_level, (
+            f"job timing missing from metrics.yaml, got: {sorted(top_level)}"
         )
 
     def test_job_probe_not_recorded_when_reused(self, tmp_path: Path) -> None:
@@ -309,7 +399,7 @@ class TestExtractionPhaseTiming:
     def _make_phase(
         self,
         tmp_path: Path,
-        collector: MagicMock,
+        collector: MetricsCollector,
     ) -> ExtractionPhase:
         """Return an ``ExtractionPhase`` with a pre-wired job dependency."""
         from pyqenc.phases.extraction import ExtractionPhase
@@ -324,8 +414,12 @@ class TestExtractionPhaseTiming:
         registry[JobPhase] = job_mock  # type: ignore[index]
         return phase
 
-    def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
-        """``time(MetricKey.RECOVERY)`` must be called even when all artifacts are reused.
+    def test_reused_run_reports_recovery_without_extraction(self, tmp_path: Path) -> None:
+        """An all-reused extraction run reports recovery time and no extraction time.
+
+        Bug guarded: a resumed run either losing its recovery-scan seconds or
+        claiming extraction execution seconds it never spent — the report
+        must distinguish "we only looked" from "we did work".
 
         Validates: Requirements 6.5, 2.7
         """
@@ -337,9 +431,6 @@ class TestExtractionPhaseTiming:
             SubtitleStream,
             SubtitleStreamInfo,
         )
-
-        collector = _spy_collector()
-        phase     = self._make_phase(tmp_path, collector)
 
         # A complete subtitle row so _recover returns all-complete → REUSED path
         stub_artifact = Artifact(
@@ -354,24 +445,29 @@ class TestExtractionPhaseTiming:
             wanted  = True,
         )
 
-        with patch.object(
-            ExtractionPhase, "_recover",
-            return_value=Recovery.from_artifacts([stub_artifact]),
-        ):
-            phase.run()
+        def run(collector: MetricsCollector) -> None:
+            phase = self._make_phase(tmp_path, collector)
+            with patch.object(
+                ExtractionPhase, "_recover",
+                return_value=Recovery.from_artifacts([stub_artifact]),
+            ):
+                phase.run()
 
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.RECOVERY in time_keys_called, (
-            f"Expected MetricKey.RECOVERY in time() calls, got: {time_keys_called}"
+        metrics   = _recorded_metrics(tmp_path, run)
+        top_level = _top_level_keys(metrics)
+        assert "recovery" in top_level, (
+            f"recovery timing missing from metrics.yaml, got: {sorted(top_level)}"
         )
-        assert MetricKey.EXTRACTION not in time_keys_called, (
-            "EXTRACTION must not be timed when all artifacts are reused, "
-            f"got: {time_keys_called}"
+        assert "extraction" not in top_level, (
+            "a fully-reused run must not report extraction execution time, "
+            f"got: {sorted(top_level)}"
         )
 
     def test_extraction_recorded_for_mkvextract_tracks(self, tmp_path: Path) -> None:
-        """Both ``time(MetricKey.RECOVERY)`` and ``time(MetricKey.EXTRACTION)``
-        are called when extraction produces pending artifacts.
+        """A run that extracts tracks reports both recovery and extraction time.
+
+        Bug guarded: pending extraction work finishing without leaving its
+        execution seconds in the report — the run's cost would be invisible.
 
         Validates: Requirements 6.5, 2.5
         """
@@ -383,9 +479,6 @@ class TestExtractionPhaseTiming:
             SubtitleStream,
             SubtitleStreamInfo,
         )
-
-        collector = _spy_collector()
-        phase     = self._make_phase(tmp_path, collector)
 
         extracted_dir = tmp_path / "work" / "extracted"
         extracted_dir.mkdir(parents=True, exist_ok=True)
@@ -404,25 +497,28 @@ class TestExtractionPhaseTiming:
             wanted  = True,
         )
 
-        with (
-            patch.object(
-                ExtractionPhase, "_recover",
-                return_value=Recovery.from_artifacts([stub_artifact]),
-            ),
-            patch("pyqenc.phases.extraction._probe_streams_json",
-                  return_value={"streams": [], "chapters": []}),
-            patch("pyqenc.phases.extraction._extract_timestamps"),
-            patch("pyqenc.phases.extraction.run_ffmpeg") as mock_ffmpeg,
-        ):
-            mock_ffmpeg.return_value = MagicMock(success=True)
-            phase.run()
+        def run(collector: MetricsCollector) -> None:
+            phase = self._make_phase(tmp_path, collector)
+            with (
+                patch.object(
+                    ExtractionPhase, "_recover",
+                    return_value=Recovery.from_artifacts([stub_artifact]),
+                ),
+                patch("pyqenc.phases.extraction._probe_streams_json",
+                      return_value={"streams": [], "chapters": []}),
+                patch("pyqenc.phases.extraction._extract_timestamps"),
+                patch("pyqenc.phases.extraction.run_ffmpeg") as mock_ffmpeg,
+            ):
+                mock_ffmpeg.return_value = MagicMock(success=True)
+                phase.run()
 
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.RECOVERY in time_keys_called, (
-            f"Expected MetricKey.RECOVERY in time() calls, got: {time_keys_called}"
+        metrics   = _recorded_metrics(tmp_path, run)
+        top_level = _top_level_keys(metrics)
+        assert "recovery" in top_level, (
+            f"recovery timing missing from metrics.yaml, got: {sorted(top_level)}"
         )
-        assert MetricKey.EXTRACTION in time_keys_called, (
-            f"Expected MetricKey.EXTRACTION in time() calls, got: {time_keys_called}"
+        assert "extraction" in top_level, (
+            f"extraction timing missing from metrics.yaml, got: {sorted(top_level)}"
         )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
@@ -492,7 +588,7 @@ class TestChunkingPhaseTiming:
     def _make_phase(
         self,
         tmp_path:  Path,
-        collector: MagicMock,
+        collector: MetricsCollector,
     ) -> ChunkingPhase:
         """Return a ``ChunkingPhase`` with pre-wired job/extraction/probe deps."""
         from pyqenc.models import PhaseOutcome
@@ -530,20 +626,18 @@ class TestChunkingPhaseTiming:
         registry[ProbePhase]      = probe_mock       # type: ignore[index]
         return phase
 
-    def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
-        """``time(MetricKey.RECOVERY)`` must be called when boundaries are cached.
+    def test_reused_run_reports_recovery_without_chunking(self, tmp_path: Path) -> None:
+        """A run with cached boundaries reports recovery time and no chunking time.
+
+        Bug guarded: a resumed chunking run losing its recovery-scan seconds
+        or claiming chunking execution (scene-detect) seconds it never spent.
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.phases.chunking import (
-            ChunkingSidecar,  # noqa: F401 — via stream_model
-        )
         from pyqenc.stream_model import ChunkingSidecar as _CS
         from pyqenc.stream_model import SceneRecord
 
-        collector = _spy_collector()
-        phase     = self._make_phase(tmp_path, collector)
-
+        outcome: dict[str, str] = {}
         work_dir = tmp_path / "work"
         work_dir.mkdir(parents=True, exist_ok=True)
         write_yaml_atomic(
@@ -551,36 +645,64 @@ class TestChunkingPhaseTiming:
             _CS(scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)]).model_dump(),
         )
 
-        result = phase.run()
+        def run(collector: MetricsCollector) -> None:
+            phase = self._make_phase(tmp_path, collector)
+            outcome["value"] = phase.run().outcome.value
 
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.RECOVERY in time_keys_called, (
-            f"Expected MetricKey.RECOVERY in time() calls, got: {time_keys_called}"
+        metrics   = _recorded_metrics(tmp_path, run)
+        top_level = _top_level_keys(metrics)
+        assert "recovery" in top_level, (
+            f"recovery timing missing from metrics.yaml, got: {sorted(top_level)}"
         )
-        assert result.outcome.value == "reused"
+        assert "chunking" not in top_level, (
+            "a fully-reused chunking run must not report chunking execution "
+            f"time, got: {sorted(top_level)}"
+        )
+        assert outcome["value"] == "reused"
 
     def test_scene_detect_recorded_when_no_cached_boundaries(self, tmp_path: Path) -> None:
-        """``time(MetricKey.CHUNKING, "scene_detect")`` runs when detection runs."""
+        """A fresh chunking run reports chunking time including the scene-detect
+        sub-action as a dotted key.
+
+        Bug guarded: scene detection running without its cost being attributable
+        in the report — the ``chunking.scene_detect`` dotted row is the only
+        place the detection sub-action's share of chunking time is visible.
+
+        Validates: Requirements 6.5
+        """
         from pyqenc.models import SceneBoundary
 
-        collector = _spy_collector()
-        phase     = self._make_phase(tmp_path, collector)
+        outcome: dict[str, str] = {}
 
-        with patch("pyqenc.phases.chunking.detect_scenes",
-                   return_value=[SceneBoundary(frame=0, timestamp_seconds=0.0)]):
-            result = phase.run()
+        def run(collector: MetricsCollector) -> None:
+            phase = self._make_phase(tmp_path, collector)
+            with patch("pyqenc.phases.chunking.detect_scenes",
+                       return_value=[SceneBoundary(frame=0, timestamp_seconds=0.0)]):
+                outcome["value"] = phase.run().outcome.value
 
-        calls = [call.args for call in collector.time.call_args_list]
-        assert (MetricKey.CHUNKING, "scene_detect") in calls, f"scene_detect span missing: {calls}"
-        assert result.outcome.value == "completed"
+        metrics   = _recorded_metrics(tmp_path, run)
+        top_level = _top_level_keys(metrics)
+        assert "chunking" in top_level, (
+            f"chunking timing missing from metrics.yaml, got: {sorted(top_level)}"
+        )
+        assert "chunking.scene_detect" in _dotted_keys(metrics), (
+            f"scene_detect sub-action missing from metrics.yaml, "
+            f"got: {sorted(_dotted_keys(metrics))}"
+        )
+        assert outcome["value"] == "completed"
 
     def test_scene_detect_not_recorded_when_boundaries_cached(self, tmp_path: Path) -> None:
-        """Cached boundaries skip detection entirely — no scene_detect span."""
+        """Cached boundaries skip detection entirely — no scene-detect cost
+        and no detection subprocess in the report.
+
+        Bug guarded: a resumed run re-running (and re-timing) scene detection
+        over boundaries it already has — the expensive ffmpeg scan must not
+        run, and the report must not claim it did.
+
+        Validates: Requirements 6.5, 2.7
+        """
         from pyqenc.stream_model import ChunkingSidecar as _CS
         from pyqenc.stream_model import SceneRecord
-
-        collector = _spy_collector()
-        phase     = self._make_phase(tmp_path, collector)
 
         work_dir = tmp_path / "work"
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -589,12 +711,18 @@ class TestChunkingPhaseTiming:
             _CS(scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)]).model_dump(),
         )
 
-        with patch("pyqenc.phases.chunking.detect_scenes") as detect_mock:
-            phase.run()
+        def run(collector: MetricsCollector) -> None:
+            phase = self._make_phase(tmp_path, collector)
+            with patch("pyqenc.phases.chunking.detect_scenes") as detect_mock:
+                phase.run()
+                detect_mock.assert_not_called()
 
-        detect_mock.assert_not_called()
-        calls = [call.args for call in collector.time.call_args_list]
-        assert (MetricKey.CHUNKING, "scene_detect") not in calls
+        metrics = _recorded_metrics(tmp_path, run)
+        assert "chunking" not in _top_level_keys(metrics)
+        assert "chunking" not in _dotted_groups(metrics), (
+            f"no chunking sub-action may be reported on a cached run, "
+            f"got: {sorted(_dotted_groups(metrics))}"
+        )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
         """``ChunkingPhase`` must run without error when given a ``NoOpMetricsCollector``.
@@ -623,7 +751,7 @@ class TestAudioPhaseTiming:
     def _make_phase(
         self,
         tmp_path: Path,
-        collector: MagicMock,
+        collector: MetricsCollector,
     ) -> AudioPhase:
         """Return an ``AudioPhase`` with pre-wired job and extraction dependencies."""
         from pyqenc.models import PhaseOutcome
@@ -665,39 +793,49 @@ class TestAudioPhaseTiming:
         registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
         return phase
 
-    def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
-        """``time(MetricKey.RECOVERY)`` must be called even when all artifacts are reused.
+    def test_reused_run_reports_recovery_without_audio(self, tmp_path: Path) -> None:
+        """An all-reused audio run reports recovery time and no audio time.
+
+        Bug guarded: a resumed run losing its recovery-scan seconds or
+        claiming audio processing seconds it never spent — the report must
+        distinguish "we only looked" from "we did work".  (Merges the former
+        spy pair recovery-recorded / audio-not-recorded into one report
+        assertion.)
 
         Validates: Requirements 6.5, 2.7
         """
         from pyqenc.phases.audio import AudioPhase
-
-        collector = _spy_collector()
-        phase     = self._make_phase(tmp_path, collector)
 
         stub_row = Artifact(
             payload=_audio_output(tmp_path / "work" / "audio" / "track.aac"),
             state=ArtifactState.COMPLETE,
         )
 
-        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
-            phase.run()
+        def run(collector: MetricsCollector) -> None:
+            phase = self._make_phase(tmp_path, collector)
+            with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
+                phase.run()
 
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.RECOVERY in time_keys_called, (
-            f"Expected MetricKey.RECOVERY in time() calls, got: {time_keys_called}"
+        metrics   = _recorded_metrics(tmp_path, run)
+        top_level = _top_level_keys(metrics)
+        assert "recovery" in top_level, (
+            f"recovery timing missing from metrics.yaml, got: {sorted(top_level)}"
+        )
+        assert "audio" not in top_level, (
+            "a fully-reused audio run must not report audio execution time, "
+            f"got: {sorted(top_level)}"
         )
 
     def test_audio_recorded_when_processing_runs(self, tmp_path: Path) -> None:
-        """``time(MetricKey.AUDIO)`` must be called when audio processing executes.
+        """A run that processes audio reports audio execution time.
+
+        Bug guarded: pending audio work finishing without leaving its
+        execution seconds in the report — the run's cost would be invisible.
 
         Validates: Requirements 6.5
         """
         from pyqenc.models import PhaseOutcome
         from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
-
-        collector = _spy_collector()
-        phase     = self._make_phase(tmp_path, collector)
 
         stub_artifact = Artifact(
             payload=_audio_output(tmp_path / "work" / "audio" / "track.aac"),
@@ -709,38 +847,18 @@ class TestAudioPhaseTiming:
             message   = "ok",
         )
 
-        with (
-            patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
-            patch.object(AudioPhase, "_execute", return_value=stub_result),
-        ):
-            phase.run()
+        def run(collector: MetricsCollector) -> None:
+            phase = self._make_phase(tmp_path, collector)
+            with (
+                patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
+                patch.object(AudioPhase, "_execute", return_value=stub_result),
+            ):
+                phase.run()
 
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.AUDIO in time_keys_called, (
-            f"Expected MetricKey.AUDIO in time() calls, got: {time_keys_called}"
-        )
-
-    def test_audio_not_recorded_when_all_reused(self, tmp_path: Path) -> None:
-        """``time(MetricKey.AUDIO)`` must NOT be called when all artifacts are already complete.
-
-        Validates: Requirements 6.5
-        """
-        from pyqenc.phases.audio import AudioPhase
-
-        collector = _spy_collector()
-        phase     = self._make_phase(tmp_path, collector)
-
-        stub_row = Artifact(
-            payload=_audio_output(tmp_path / "work" / "audio" / "track.aac"),
-            state=ArtifactState.COMPLETE,
-        )
-
-        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
-            phase.run()
-
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.AUDIO not in time_keys_called, (
-            f"Expected MetricKey.AUDIO NOT called on reuse, got: {time_keys_called}"
+        metrics   = _recorded_metrics(tmp_path, run)
+        top_level = _top_level_keys(metrics)
+        assert "audio" in top_level, (
+            f"audio timing missing from metrics.yaml, got: {sorted(top_level)}"
         )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
@@ -807,7 +925,7 @@ class TestOptimizationPhaseTiming:
     def _make_phase(
         self,
         tmp_path:  Path,
-        collector: MagicMock,
+        collector: MetricsCollector,
         *,
         optimize:  bool = True,
     ) -> OptimizationPhase:
@@ -856,20 +974,26 @@ class TestOptimizationPhaseTiming:
         registry[ChunkingPhase] = chunking_mock  # type: ignore[index]
         return phase
 
-    def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
-        """``time(MetricKey.RECOVERY)`` must be called when all results are already cached.
+    def test_recovery_recorded_with_cached_optimization_params(self, tmp_path: Path) -> None:
+        """An optimization run with cached results must report its recovery scan.
+
+        Bug guarded: the recovery scan's seconds being lost from the report —
+        the scan (loading and validating persisted optimization params) runs
+        before any decision and its cost must be visible.
+
+        Note: with this fixture the persisted test-chunk IDs do not match the
+        chunking result, so the phase legitimately re-selects and executes
+        (outcome COMPLETED) — the guaranteed observable is the recovery row,
+        not a reuse outcome.
 
         Validates: Requirements 6.5, 2.7
         """
         from pyqenc.models import CropParams
         from pyqenc.state import OptimizationParams, ProbeState, StrategyTestResult
 
-        collector = _spy_collector()
-        phase     = self._make_phase(tmp_path, collector, optimize=True)
-
         strategy = _STRATEGY_SLOW_H265
         # tolerance_pct and metrics_sampling must match config defaults so the
-        # full-reuse path (step 4) is taken rather than falling through to encodes.
+        # full-reuse path (step 4) is attempted rather than falling through.
         persisted = OptimizationParams(
             probe            = ProbeState(frame_count=0, crop=CropParams()),
             test_chunks      = ["chunk_0"],
@@ -883,23 +1007,32 @@ class TestOptimizationPhaseTiming:
             sampling = 1,     # matches AppConfig.encoding.sampling default
         )
 
-        # All results cached with matching tolerance → reuse path (step 4 in run())
-        with patch.object(OptimizationParams, "load", return_value=persisted):
-            phase.run()
+        def run(collector: MetricsCollector) -> None:
+            phase = self._make_phase(tmp_path, collector, optimize=True)
+            with patch.object(OptimizationParams, "load", return_value=persisted):
+                phase.run()
 
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.RECOVERY in time_keys_called, (
-            f"Expected MetricKey.RECOVERY in time() calls on reuse path, got: {time_keys_called}"
+        metrics   = _recorded_metrics(tmp_path, run)
+        top_level = _top_level_keys(metrics)
+        assert "recovery" in top_level, (
+            f"recovery timing missing from metrics.yaml, got: {sorted(top_level)}"
         )
 
-    def test_optimization_prefix_threads_through_shared_encoder(self, tmp_path: Path) -> None:
-        """Test encodes are attributed to the optimization phase, not encoding.
+    def test_shared_executor_records_no_top_level_span(self, tmp_path: Path) -> None:
+        """``_encode_chunks_parallel`` must not open a timing span of its own.
 
-        ``_encode_chunks_parallel`` records NO top-level span any more (the
-        owning phase's template owns it); with ``metric_prefix=OPTIMIZATION``
-        its convergence ``step`` lands under the optimization key (Req: TODO-1
-        fix — optimization follows the encoding contract via the shared
-        encoder, no code duplication).
+        Bug guarded: the shared executor (driven by both the encoding and the
+        optimization phase) recording a top-level span would double-count
+        every encode — the owning phase's ``run()`` already wraps execution
+        under its own key.  Externally: a direct executor run leaves
+        ``time_distribution`` empty while its convergence data still reaches
+        the report.
+
+        (The former spy form also pinned the OPTIMIZATION vs ENCODING prefix
+        passed to ``step()``; the YAML report does not distinguish prefixes,
+        so that internal-instrumentation assertion was dropped — the run
+        below still passes ``metric_prefix=OPTIMIZATION`` to exercise the
+        shared-encoder path.)
 
         Validates: Requirements 6.5, 2.2a
         """
@@ -907,8 +1040,7 @@ class TestOptimizationPhaseTiming:
 
         from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
 
-        collector = _spy_collector()
-        strategy  = _STRATEGY_SLOW_H265
+        strategy = _STRATEGY_SLOW_H265
 
         chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
 
@@ -928,93 +1060,32 @@ class TestOptimizationPhaseTiming:
         stub_recovery = MagicMock()
         stub_recovery.pairs = {}
 
-        with (
-            patch("pyqenc.phases.encoding._recover_encoding_attempts", return_value=stub_recovery),
-            patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result),
-        ):
-            asyncio.run(
-                _encode_chunks_parallel(
-                    encoder          = MagicMock(),
-                    chunks           = [chunk],
-                    strategies       = [strategy],
-                    quality_targets  = [],
-                    max_parallel     = 1,
-                    force            = False,
-                    collector        = collector,
-                    metric_prefix    = MetricKey.OPTIMIZATION,
+        def run(collector: MetricsCollector) -> None:
+            with (
+                patch("pyqenc.phases.encoding._recover_encoding_attempts", return_value=stub_recovery),
+                patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result),
+            ):
+                asyncio.run(
+                    _encode_chunks_parallel(
+                        encoder          = MagicMock(),
+                        chunks           = [chunk],
+                        strategies       = [strategy],
+                        quality_targets  = [],
+                        max_parallel     = 1,
+                        force            = False,
+                        collector        = collector,
+                        metric_prefix    = MetricKey.OPTIMIZATION,
+                    )
                 )
-            )
 
-        # No top-level span is recorded by the executor itself...
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.ENCODING not in time_keys_called, (
-            f"Executor must not record a top-level span (phase template owns it), got: {time_keys_called}"
+        metrics = _recorded_metrics(tmp_path, run)
+        assert _top_level_keys(metrics) == set(), (
+            "executor must not record a top-level span (the owning phase owns it), "
+            f"got: {sorted(_top_level_keys(metrics))}"
         )
-        # ...and convergence steps land under the owning phase's prefix.
-        step_keys = [call.args[0] for call in collector.step.call_args_list]
-        assert MetricKey.OPTIMIZATION in step_keys, (
-            f"Expected step(OPTIMIZATION) for the optimization-owned encode, got: {step_keys}"
+        assert metrics["pipeline_metrics"]["convergence"], (
+            "convergence data from the executor's encodes must still reach the report"
         )
-
-    def test_step_called_with_convergence_update_per_chunk(self, tmp_path: Path) -> None:
-        """``step(MetricKey.ENCODING, convergence_update=...)`` must be called
-        once per successfully converged test chunk inside _encode_chunks_parallel.
-
-        Validates: Requirements 6.5, 4.1a
-        """
-        import asyncio
-
-        from pyqenc.metrics import ConvergenceUpdate
-        from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
-
-        collector = _spy_collector()
-        strategy  = _STRATEGY_SLOW_H265
-
-        chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
-
-        # Reference file must exist so the encode path is reached (not skipped)
-        (tmp_path / "chunk_0.mkv").write_bytes(b"\x00" * 64)
-
-        encoded_path = tmp_path / "chunk_0_enc.mkv"
-        encoded_path.write_bytes(b"\x00" * 128)
-
-        successful_result = ChunkEncodingResult(
-            chunk_id     = "chunk_0",
-            strategy     = strategy.display_name(),
-            success      = True,
-            final_crf    = 28.0,
-            attempts     = 3,
-            encoded_file = MagicMock(path=encoded_path, resolution="1920x1080"),
-            reused       = False,
-        )
-
-        stub_recovery = MagicMock()
-        stub_recovery.pairs = {}
-
-        with (
-            patch("pyqenc.phases.encoding._recover_encoding_attempts", return_value=stub_recovery),
-            patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result),
-        ):
-            asyncio.run(
-                _encode_chunks_parallel(
-                    encoder          = MagicMock(),
-                    chunks           = [chunk],
-                    strategies       = [strategy],
-                    quality_targets  = [],
-                    max_parallel     = 1,
-                    force            = False,
-                    collector        = collector,
-                )
-            )
-
-        step_calls = collector.step.call_args_list
-        assert len(step_calls) == 1, f"Expected 1 step() call, got {len(step_calls)}"
-        call_key    = step_calls[0].args[0]
-        call_update = step_calls[0].kwargs.get("convergence_update")
-        assert call_key == MetricKey.ENCODING, f"Wrong key: {call_key}"
-        assert isinstance(call_update, ConvergenceUpdate), f"Expected ConvergenceUpdate, got: {call_update}"
-        assert call_update.strategy      == strategy.display_name(), f"Wrong strategy: {call_update.strategy}"
-        assert call_update.attempt_count == 3,             f"Wrong attempt_count: {call_update.attempt_count}"
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
         """``OptimizationPhase`` must run without error when given a ``NoOpMetricsCollector``.
@@ -1100,7 +1171,7 @@ class TestEncodingPhaseTiming:
     def _make_phase(
         self,
         tmp_path:  Path,
-        collector: MagicMock,
+        collector: MetricsCollector,
     ) -> EncodingPhase:
         """Return an ``EncodingPhase`` with pre-wired job, probe, chunking, and optimization deps."""
         from pyqenc.models import PhaseOutcome
@@ -1139,31 +1210,38 @@ class TestEncodingPhaseTiming:
         registry[OptimizationPhase] = optimization_mock  # type: ignore[index]
         return phase
 
-    def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
-        """``time(MetricKey.RECOVERY)`` must be called even when all pairs are already complete.
+    def test_reused_run_reports_recovery_without_encoding(self, tmp_path: Path) -> None:
+        """An all-complete encoding run reports recovery time and no encoding time.
+
+        Bug guarded: a resumed encoding run losing its recovery-scan seconds
+        or claiming encode seconds it never spent.
 
         Validates: Requirements 6.5, 2.7
         """
         from pyqenc.phases.encoding import EncodingPhase
-
-        collector = _spy_collector()
-        phase     = self._make_phase(tmp_path, collector)
 
         stub_row = Artifact(
             payload=_encoded_chunk(tmp_path / "chunk_0.mkv", "chunk_0", "slow+h265"),
             state=ArtifactState.COMPLETE,
         )
 
-        with patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
-            phase.run()
+        def run(collector: MetricsCollector) -> None:
+            phase = self._make_phase(tmp_path, collector)
+            with patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
+                phase.run()
 
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.RECOVERY in time_keys_called, (
-            f"Expected MetricKey.RECOVERY in time() calls, got: {time_keys_called}"
+        metrics   = _recorded_metrics(tmp_path, run)
+        top_level = _top_level_keys(metrics)
+        assert "recovery" in top_level, (
+            f"recovery timing missing from metrics.yaml, got: {sorted(top_level)}"
+        )
+        assert "encoding" not in top_level, (
+            "a fully-reused encoding run must not report encoding execution "
+            f"time, got: {sorted(top_level)}"
         )
 
     def test_encoding_main_recorded_when_encodes_run(self, tmp_path: Path) -> None:
-        """``time(MetricKey.ENCODING)`` must be called when encoding executes.
+        """A run that encodes reports encoding execution time in metrics.yaml.
 
         The top-level span is owned by the phase template's ``run()`` (it wraps
         ``_execute``), so drive the phase with one pending artifact and a
@@ -1177,9 +1255,6 @@ class TestEncodingPhaseTiming:
             EncodingPhaseResult,
         )
 
-        collector = _spy_collector()
-        phase     = self._make_phase(tmp_path, collector)
-
         stub_artifact = Artifact(
             payload=_encoded_chunk(tmp_path / "chunk_0.mkv", "chunk_0", "slow+h265"),
             state=ArtifactState.ABSENT,
@@ -1190,29 +1265,33 @@ class TestEncodingPhaseTiming:
             message   = "ok",
         )
 
-        with (
-            patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
-            patch.object(EncodingPhase, "_execute", return_value=stub_result),
-        ):
-            phase.run()
+        def run(collector: MetricsCollector) -> None:
+            phase = self._make_phase(tmp_path, collector)
+            with (
+                patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
+                patch.object(EncodingPhase, "_execute", return_value=stub_result),
+            ):
+                phase.run()
 
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.ENCODING in time_keys_called, (
-            f"Expected MetricKey.ENCODING in time() calls, got: {time_keys_called}"
+        metrics   = _recorded_metrics(tmp_path, run)
+        top_level = _top_level_keys(metrics)
+        assert "encoding" in top_level, (
+            f"encoding timing missing from metrics.yaml, got: {sorted(top_level)}"
         )
 
-    def test_step_called_with_convergence_update_per_chunk(self, tmp_path: Path) -> None:
-        """``step(MetricKey.ENCODING, convergence_update=...)`` must be called
-        once per successfully converged (non-reused) chunk/strategy pair.
+    def test_converged_chunk_reaches_report_convergence_section(self, tmp_path: Path) -> None:
+        """Each converged (non-reused) chunk/strategy pair must land in the
+        report's ``convergence`` section with its strategy and attempt count.
+
+        Bug guarded: convergence data collected in memory but lost on the way
+        to ``metrics.yaml`` — the per-strategy attempt statistics are the
+        report's record of how hard the CRF search worked.
 
         Validates: Requirements 6.5, 4.1a
         """
         import asyncio
 
-        from pyqenc.metrics import ConvergenceUpdate
         from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
-
-        collector = _spy_collector()
 
         chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
 
@@ -1232,41 +1311,46 @@ class TestEncodingPhaseTiming:
             reused       = False,
         )
 
-        with patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result):
-            asyncio.run(
-                _encode_chunks_parallel(
-                    encoder          = MagicMock(),
-                    chunks           = [chunk],
-                    strategies       = [_STRATEGY_SLOW_H265],
-                    quality_targets  = [],
-                    max_parallel     = 1,
-                    force            = False,
-                    collector        = collector,
+        def run(collector: MetricsCollector) -> None:
+            with patch("pyqenc.phases.encoding._encode_chunk_async", return_value=successful_result):
+                asyncio.run(
+                    _encode_chunks_parallel(
+                        encoder          = MagicMock(),
+                        chunks           = [chunk],
+                        strategies       = [_STRATEGY_SLOW_H265],
+                        quality_targets  = [],
+                        max_parallel     = 1,
+                        force            = False,
+                        collector        = collector,
+                    )
                 )
-            )
 
-        step_calls = collector.step.call_args_list
-        assert len(step_calls) == 1, f"Expected 1 step() call, got {len(step_calls)}"
-        call_key    = step_calls[0].args[0]
-        call_update = step_calls[0].kwargs.get("convergence_update")
-        assert call_key == MetricKey.ENCODING, f"Wrong key: {call_key}"
-        assert isinstance(call_update, ConvergenceUpdate), f"Expected ConvergenceUpdate, got: {call_update}"
-        assert call_update.strategy      == _STRATEGY_SLOW_H265.display_name(), f"Wrong strategy: {call_update.strategy}"
-        assert call_update.attempt_count == 3,                         f"Wrong attempt_count: {call_update.attempt_count}"
+        metrics     = _recorded_metrics(tmp_path, run)
+        convergence = metrics["pipeline_metrics"]["convergence"]
+        assert convergence, f"convergence section missing from metrics.yaml: {metrics}"
+        by_strategy = {stats["strategy"]: stats for stats in convergence}
+        assert _STRATEGY_SLOW_H265.display_name() in by_strategy, (
+            f"strategy missing from convergence section, got: {sorted(by_strategy)}"
+        )
+        stats = by_strategy[_STRATEGY_SLOW_H265.display_name()]
+        assert stats["chunks"] == 1, f"expected 1 converged chunk, got: {stats['chunks']}"
+        assert stats["attempts"]["total"] == 3, (
+            f"expected 3 total attempts, got: {stats['attempts']['total']}"
+        )
+        assert stats["attempts"]["max"] == 3
 
-    def test_step_not_called_for_reused_pairs(self, tmp_path: Path) -> None:
-        """``step(MetricKey.ENCODING)`` must NOT be called for reused pairs.
+    def test_reused_pairs_report_no_convergence_data(self, tmp_path: Path) -> None:
+        """Reused pairs must contribute no convergence data to the report.
 
-        Reused pairs have already been counted in a prior run — no new convergence
-        data to record.
+        Bug guarded: a resumed run re-counting already-reported pairs — the
+        convergence statistics would inflate with each resume, double-crediting
+        work done in earlier runs.
 
         Validates: Requirements 6.5, 4.1a
         """
         import asyncio
 
         from pyqenc.phases.encoding import ChunkEncodingResult, _encode_chunks_parallel
-
-        collector = _spy_collector()
 
         chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
 
@@ -1283,22 +1367,24 @@ class TestEncodingPhaseTiming:
             reused       = True,
         )
 
-        with patch("pyqenc.phases.encoding._encode_chunk_async", return_value=reused_result):
-            asyncio.run(
-                _encode_chunks_parallel(
-                    encoder          = MagicMock(),
-                    chunks           = [chunk],
-                    strategies       = [_STRATEGY_SLOW_H265],
-                    quality_targets  = [],
-                    max_parallel     = 1,
-                    force            = False,
-                    collector        = collector,
+        def run(collector: MetricsCollector) -> None:
+            with patch("pyqenc.phases.encoding._encode_chunk_async", return_value=reused_result):
+                asyncio.run(
+                    _encode_chunks_parallel(
+                        encoder          = MagicMock(),
+                        chunks           = [chunk],
+                        strategies       = [_STRATEGY_SLOW_H265],
+                        quality_targets  = [],
+                        max_parallel     = 1,
+                        force            = False,
+                        collector        = collector,
+                    )
                 )
-            )
 
-        step_calls = collector.step.call_args_list
-        assert len(step_calls) == 0, (
-            f"Expected no step() calls for reused pair, got: {step_calls}"
+        metrics = _recorded_metrics(tmp_path, run)
+        assert metrics["pipeline_metrics"]["convergence"] is None, (
+            "reused pairs must not produce convergence data, got: "
+            f"{metrics['pipeline_metrics']['convergence']}"
         )
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
@@ -1381,9 +1467,17 @@ class TestMergePhaseTiming:
     def _make_phase(
         self,
         tmp_path:  Path,
-        collector: MagicMock,
+        collector: MetricsCollector,
+        *,
+        probe_stream: ExtendedVideoStream | None = None,
     ) -> MergePhase:
-        """Return a ``MergePhase`` with pre-wired job, extraction, encoding, and audio deps."""
+        """Return a ``MergePhase`` with pre-wired job, extraction, encoding, and audio deps.
+
+        ``probe_stream`` overrides the default real ``ExtendedVideoStream``
+        probe payload (e.g. with specific fps for merge quality measurement).
+        The dependency walk guarantees a resolved stream — the fixture always
+        provides one.
+        """
         from pyqenc.models import PhaseOutcome
         from pyqenc.phases.audio import AudioPhase
         from pyqenc.phases.encoding import EncodingPhase
@@ -1439,10 +1533,14 @@ class TestMergePhaseTiming:
 
         from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
         probe_mock = MagicMock(spec=ProbePhase)
+        if probe_stream is None:
+            probe_stream = _make_extended_stream(
+                tmp_path / "source.mkv", frame_count=640, duration=26.67,
+            )
         probe_mock.result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
             message   = "probe complete",
-            stream    = None,
+            stream    = Artifact(payload=probe_stream, state=ArtifactState.COMPLETE),
         )
 
         registry: dict[type, object] = {}
@@ -1454,16 +1552,16 @@ class TestMergePhaseTiming:
         registry[AudioPhase]      = audio_mock       # type: ignore[index]
         return phase
 
-    def test_recovery_recorded_on_reused_path(self, tmp_path: Path) -> None:
-        """``time(MetricKey.RECOVERY)`` must be called even when all artifacts are already complete.
+    def test_reused_run_reports_recovery_without_merge(self, tmp_path: Path) -> None:
+        """An all-complete merge run reports recovery time and no merge time.
+
+        Bug guarded: a resumed merge run losing its recovery-scan seconds or
+        claiming merge execution seconds it never spent.
 
         Validates: Requirements 6.5, 2.7
         """
         from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
-
-        collector = _spy_collector()
-        phase     = self._make_phase(tmp_path, collector)
 
         output_file = tmp_path / "work" / "merged" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1471,25 +1569,33 @@ class TestMergePhaseTiming:
 
         stub_artifact = _merged_row(output_file, ArtifactState.COMPLETE)
 
-        with patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
-            phase.run()
+        def run(collector: MetricsCollector) -> None:
+            phase = self._make_phase(tmp_path, collector)
+            with patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
+                phase.run()
 
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.RECOVERY in time_keys_called, (
-            f"Expected MetricKey.RECOVERY in time() calls, got: {time_keys_called}"
+        metrics   = _recorded_metrics(tmp_path, run)
+        top_level = _top_level_keys(metrics)
+        assert "recovery" in top_level, (
+            f"recovery timing missing from metrics.yaml, got: {sorted(top_level)}"
+        )
+        assert "merge" not in top_level, (
+            "a fully-reused merge run must not report merge execution time, "
+            f"got: {sorted(top_level)}"
         )
 
     def test_merge_concat_recorded_when_merge_runs(self, tmp_path: Path) -> None:
-        """``time(MetricKey.MERGE)`` must be called when a pending strategy is merged.
+        """A run that merges reports merge time, with the concatenation
+        sub-action visible as a dotted key.
+
+        Bug guarded: the mkvmerge concatenation finishing without its cost
+        being attributable in the report — the ``merge.concat`` dotted row is
+        the only place the concat sub-action's share of merge time shows.
 
         Validates: Requirements 6.5
         """
         from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
-        from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
-
-        collector = _spy_collector()
-        phase     = self._make_phase(tmp_path, collector)
 
         output_file = tmp_path / "work" / "merged" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1500,105 +1606,43 @@ class TestMergePhaseTiming:
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
         encoded_path.write_bytes(b"\x00" * 128)
 
-        success_result = FFmpegRunResult(success=True, returncode=0)
+        def run(collector: MetricsCollector) -> None:
+            phase = self._make_phase(tmp_path, collector)
+            with (
+                patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
+                patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
+                patch("pyqenc.phases.merge.get_frame_count", return_value=100),
+                patch.object(MergePhase, "_collect_encoded_chunks", return_value={
+                    "chunk_0": {"slow+h265": _encoded_chunk(encoded_path, "chunk_0", "slow+h265")},
+                }),
+            ):
+                mock_subprocess.return_value = MagicMock(returncode=0, stderr="")
+                # Create the output file so the merge "succeeds"
+                output_file.write_bytes(b"\x00" * 128)
+                phase.run()
 
-        with (
-            patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
-            patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
-            patch("pyqenc.phases.merge.get_frame_count", return_value=100),
-            patch.object(MergePhase, "_collect_encoded_chunks", return_value={
-                "chunk_0": {"slow+h265": encoded_path},
-            }),
-        ):
-            mock_subprocess.return_value = MagicMock(returncode=0, stderr="")
-            # Create the output file so the merge "succeeds"
-            output_file.write_bytes(b"\x00" * 128)
-            phase.run()
-
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.MERGE in time_keys_called, (
-            f"Expected MetricKey.MERGE in time() calls, got: {time_keys_called}"
+        metrics   = _recorded_metrics(tmp_path, run)
+        top_level = _top_level_keys(metrics)
+        assert "merge" in top_level, (
+            f"merge timing missing from metrics.yaml, got: {sorted(top_level)}"
+        )
+        assert "merge.concat" in _dotted_keys(metrics), (
+            f"concat sub-action missing from metrics.yaml, got: {sorted(_dotted_keys(metrics))}"
         )
 
     def test_merge_quality_measure_recorded_when_targets_set(self, tmp_path: Path) -> None:
-        """``time(MetricKey.MERGE)`` must be called when quality targets are configured.
+        """A merge run with quality targets reports the quality-measure
+        sub-action as a dotted key in metrics.yaml.
+
+        Bug guarded: quality measurement (a costly VMAF pass over the merged
+        output) finishing without its cost being attributable in the report —
+        the ``merge.quality_measure`` dotted row is the only place that
+        sub-action's share of merge time shows.
 
         Validates: Requirements 6.5
         """
-        from pyqenc.models import PhaseOutcome
         from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
-
-        collector = _spy_collector()
-
-        # Build config with a quality target so _measure_quality branch is entered
-        source = tmp_path / "source.mkv"
-        source.write_bytes(b"\x00" * 64)
-        config = _make_config(tmp_path)
-        work_dir = tmp_path / "work"
-        work_dir.mkdir(parents=True, exist_ok=True)
-
-        from pyqenc.phases.audio import AudioPhase
-        from pyqenc.phases.encoding import EncodingPhase
-        from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
-        from pyqenc.phases.job import JobPhase
-
-        ts_file = work_dir / "extracted" / "timestamps.txt"
-        ts_file.parent.mkdir(parents=True, exist_ok=True)
-        ts_file.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
-
-        job_mock = MagicMock(spec=JobPhase)
-        job_mock.result = self._make_job_result(tmp_path)
-
-        from pyqenc.phase import Artifact as _Artifact
-        from pyqenc.state import ArtifactState as _ArtifactState
-        from pyqenc.stream_model import (
-            File as _File,
-        )
-        from pyqenc.stream_model import (
-            VideoStream as _VideoStream,
-        )
-        from pyqenc.stream_model import (
-            VideoStreamInfo as _VideoStreamInfo,
-        )
-
-        video_row = _Artifact(
-            payload = _VideoStream(
-                file = _File(path=work_dir / "source.mkv"),
-                info = _VideoStreamInfo(track_id=0),
-            ),
-            state   = _ArtifactState.COMPLETE,
-        )
-        extraction_result = ExtractionPhaseResult(
-            outcome      = PhaseOutcome.COMPLETED,
-            message      = "ok",
-            video_stream = video_row,
-            work_dir     = work_dir,
-        )
-        extraction_mock = MagicMock(spec=ExtractionPhase)
-        extraction_mock.result = extraction_result
-
-        encoding_mock = MagicMock(spec=EncodingPhase)
-        encoding_mock.result = self._make_encoding_result(tmp_path)
-
-        audio_mock = MagicMock(spec=AudioPhase)
-        audio_mock.result = self._make_audio_result()
-
-        from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
-        probe_mock = MagicMock(spec=ProbePhase)
-        probe_mock.result = ProbePhaseResult(
-            outcome   = PhaseOutcome.COMPLETED,
-            message   = "probe complete",
-            stream    = None,
-        )
-
-        registry: dict[type, object] = {}
-        phase = MergePhase(config, registry, collector=collector)  # type: ignore[arg-type]
-        registry[JobPhase]        = job_mock         # type: ignore[index]
-        registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
-        registry[ProbePhase]      = probe_mock       # type: ignore[index]
-        registry[EncodingPhase]   = encoding_mock    # type: ignore[index]
-        registry[AudioPhase]      = audio_mock       # type: ignore[index]
 
         output_file = tmp_path / "work" / "merged" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1609,23 +1653,34 @@ class TestMergePhaseTiming:
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
         encoded_path.write_bytes(b"\x00" * 128)
 
-        with (
-            patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
-            patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
-            patch("pyqenc.phases.merge.get_frame_count", return_value=100),
-            patch.object(MergePhase, "_collect_encoded_chunks", return_value={
-                "chunk_0": {"slow+h265": encoded_path},
-            }),
-            patch("pyqenc.phases.merge._measure_quality", return_value=({}, False, None)),
-        ):
-            mock_subprocess.return_value = MagicMock(returncode=0, stderr="")
-            output_file.write_bytes(b"\x00" * 128)
-            phase.run()
+        def run(collector: MetricsCollector) -> None:
+            phase = self._make_phase(
+                tmp_path, collector,
+                # Quality measurement needs a real source stream on the probe
+                # result; without it the phase skips the whole sub-action.
+                probe_stream=_make_extended_stream(
+                    tmp_path / "source.mkv", frame_count=100, duration=4.0,
+                ),
+            )
+            with (
+                patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),
+                patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
+                patch("pyqenc.phases.merge.get_frame_count", return_value=100),
+                patch.object(MergePhase, "_collect_encoded_chunks", return_value={
+                    "chunk_0": {"slow+h265": _encoded_chunk(encoded_path, "chunk_0", "slow+h265")},
+                }),
+                patch("pyqenc.phases.merge.MergePhase._measure_quality", return_value=({}, False, None)),
+            ):
+                mock_subprocess.return_value = MagicMock(returncode=0, stderr="")
+                output_file.write_bytes(b"\x00" * 128)
+                phase.run()
 
-        time_keys_called = [call.args[0] for call in collector.time.call_args_list]
-        assert MetricKey.MERGE in time_keys_called, (
-            f"Expected MetricKey.MERGE in time() calls, got: {time_keys_called}"
+        metrics   = _recorded_metrics(tmp_path, run)
+        dotted    = _dotted_keys(metrics)
+        assert "merge.quality_measure" in dotted, (
+            f"quality_measure sub-action missing from metrics.yaml, got: {sorted(dotted)}"
         )
+        assert "merge" in _top_level_keys(metrics)
 
     def test_noop_collector_works_as_drop_in(self, tmp_path: Path) -> None:
         """``MergePhase`` must run without error when given a ``NoOpMetricsCollector``.
@@ -1787,30 +1842,33 @@ class TestMetricKeySmoke:
     def test_top_level_and_dotted_keys_coexist(self, tmp_path: Path) -> None:
         """YamlMetricsCollector must store both top-level and dotted keys independently.
 
-        Call time(MetricKey.ENCODING) and time(MetricKey.ENCODING, "h265"), flush,
-        parse YAML, assert both top_level has an "encoding" entry and dotted has
-        an "encoding" group.
+        Bug guarded: recording a dotted sub-action overwriting (or being
+        merged into) its same-named top-level row — the report must carry the
+        phase total and the sub-action breakdown side by side.
 
         Validates: Requirements 1.3, 6.1, 6.2
         """
-        import yaml as _yaml
-
         from pyqenc.metrics import YamlMetricsCollector
 
         work_dir = tmp_path / "work"
         work_dir.mkdir()
         collector = YamlMetricsCollector(work_dir=work_dir, force_wipe=True)
-
-        # Inject non-zero values directly into _store to avoid real timing
-        collector._store["encoding"]      = 10.0
-        collector._store["encoding.h265"] = 8.0
-
-        collector.flush()
+        try:
+            # Record through the public API under the stepping clock so each
+            # span accrues >= 1 s and survives the report's integer rounding.
+            with patch("time.monotonic", _SteppingClock()):
+                with collector.time(MetricKey.ENCODING):
+                    pass
+                with collector.time(MetricKey.ENCODING, "h265"):
+                    pass
+            collector.flush()
+        finally:
+            collector.close()
 
         metrics_path = work_dir / "metrics.yaml"
         assert metrics_path.exists(), "metrics.yaml was not written"
 
-        raw = _yaml.safe_load(metrics_path.read_text(encoding="utf-8"))
+        raw = yaml.safe_load(metrics_path.read_text(encoding="utf-8"))
         pm  = raw["pipeline_metrics"]
         td  = pm["time_distribution"]
 
@@ -1837,25 +1895,28 @@ class TestMetricKeySmoke:
 
         Validates: Requirements 5.4
         """
-        import yaml as _yaml
-
         from pyqenc.metrics import YamlMetricsCollector
 
         work_dir = tmp_path / "work"
         work_dir.mkdir()
         collector = YamlMetricsCollector(work_dir=work_dir, force_wipe=True)
-
-        # Only top-level keys — no dotted keys
-        collector._store["encoding"]   = 10.0
-        collector._store["merge"]      = 5.0
-        collector._store["extraction"] = 3.0
-
-        collector.flush()
+        try:
+            # Only top-level keys — no dotted keys (public API, stepping clock).
+            with patch("time.monotonic", _SteppingClock()):
+                with collector.time(MetricKey.ENCODING):
+                    pass
+                with collector.time(MetricKey.MERGE):
+                    pass
+                with collector.time(MetricKey.EXTRACTION):
+                    pass
+            collector.flush()
+        finally:
+            collector.close()
 
         metrics_path = work_dir / "metrics.yaml"
         assert metrics_path.exists(), "metrics.yaml was not written"
 
-        raw = _yaml.safe_load(metrics_path.read_text(encoding="utf-8"))
+        raw = yaml.safe_load(metrics_path.read_text(encoding="utf-8"))
         pm  = raw["pipeline_metrics"]
         td  = pm["time_distribution"]
 

@@ -37,6 +37,8 @@ For audio it can be higher. Probably 2 or 4 by default.
 
 Worth noting too. With parallelism==1 we could stick to sync mode. While parallelism >1 requires async.
 
+parallelism could also be named concurrency.
+
 ---
 
 ## 🤔 3. Sub-second metric keys are lossy across runs
@@ -53,31 +55,6 @@ Worth noting too. With parallelism==1 we could stick to sync mode. While paralle
 
 **Questions to think about:** persist floats and round only at display time?
 Make zero-row omission display-only rather than load-bearing for resume?
-
----
-
-## 🤔 4. There are man ruff violations
-
-We need to revise ruff violations.
-
----
-
-## 🤔 5. Metrics integration tests assert on internal implementation
-
-**Status:** needs thinking (test-quality concern)
-
-- The metrics integration tests spy on `collector.time()` call args with
-  `MagicMock` and assert on the key list
-  (`tests/test_metrics_integration.py`, extraction cases around lines 226–320 —
-  including the assertions added in the 0.14.2 fix, which follow the file's
-  established pattern).
-- `coding-standards.md`: "Tests should never check internal state, only
-  observable behavior"; `steering/agent-commands.md`: public/external behavior
-  must be tested, not internal implementation.
-
-**Questions to think about:** restructure toward running a phase with a real
-`YamlMetricsCollector` into a temp dir and asserting on the written
-`metrics.yaml`? Keep spy tests as fast unit-level complements?
 
 ---
 
@@ -357,22 +334,6 @@ attempts as "measurement") worth anything for video?
 
 ---
 
-## 🤔 32. `dict[type[Phase], Phase]` pattern ×13; quoted `cast()` ×8 remain
-
-**Status:** needs thinking (typing polish)
-
-- `dict[type[Phase], Phase]` (and quoted variants) at `phase.py:330,378,387`,
-  `runner.py:106,115`, `job.py:99`, and each phase `__init__`
-  (`extraction.py:742`, `probe.py:96`, `audio.py:132`, `chunking.py:419`,
-  `optimization.py:118`, `encoding.py:1523`, `merge.py:546`).
-- Quoted forward-ref casts remain at `probe.py:107-108`, `extraction.py:752`,
-  `encoding.py:1534-1537`, `merge.py:560` (others already de-quoted).
-
-**Questions to think about:** is the type-keyed dict load-bearing (registry
-lookup) or replaceable? De-quote remaining casts where imports allow.
-
----
-
 ## 🤔 33. Disk-space estimation is JobPhase-only, log-only
 
 **Status:** needs thinking (partially implemented)
@@ -463,19 +424,6 @@ Or... should we remove it completely?
 
 ---
 
-## 41. Assertions and exhaustiveness checks are rarely used.
-
-A lot of things, like None guards or PENDING phase result state on run - are NOT user validations. Those are programmatic errors. They should use assertions 
-(assertions help with static checks, help avoid part of unnecessary tests, and could be disabled when running in production for better perf).
-User validations should be on things that users or inputs could affect (like, a broken input file with wrong streams metadata - it is a bad input).
-
-Exhaustiveness checks like for enums if we later add a new value - we might not update all places. So often thing like `else assert_never...` are added to ensure
-we don't forget to update.
-
-Those probably should be added to steering docs and memory as key principles. And checked against current codebase.
-
----
-
 ## 42. Adding ability to fix quality range has broken optimization phase
 
 Previously we were selecting the best strategy via optimization phase - encoding a small subset of chunks using all strategies. Our principle was - we reach targets.
@@ -488,28 +436,6 @@ for selection:
 - Should the score include the size? Size is basically a price for the score, where the score is the profit. Must reach some balance - smaller size is prefered, 
   while too high score doesn't outweight the size (so that we don't blindly always pick largest size - quite the contrary, target is to reach smaller size while 
   keeping good enough quality).
-
----
-
-## 🤔 43. Audio filter tests are stale vs the astats switch (11 pre-existing failures)
-
-**Status:** needs thinking (pre-existing on `file-stream-model` base `ffbf953`, verified in a clean HEAD worktree)
-
-- `PeakNormFilter` pass 1 measures via `astats` and scrapes `Peak level dB:`
-  (`pyqenc/audio/filters.py:286`), but `tests/unit/test_audio_chain.py` still
-  feeds canned `[Parsed_volumedetect] max_volume: ...` stderr and asserts
-  `af == "volumedetect"` → 5 failures (`TestInvocationCount` ×2,
-  `TestMeasurementAfIncludesFrozenFragments` ×2, `TestAfJoining` ×1).
-- `tests/unit/test_audio_filters.py` (3 failures around `TestTwoPassPeakNorm` /
-  `TestDownmixNoOp`) — same root cause: `assert 'astats' == 'volumedetect'`.
-- `tests/unit/test_audio_matrices.py` (2 `TestMatrixLookup` failures) — separate
-  root cause: pan coefficients changed (e.g. LFE fold `0.1716*c5` vs the tested
-  `0.707*c5`) without the test expectations following.
-
-**Questions to think about:** these are behavior-pinning tests drifting from a
-behavior change that landed without them — decide whether the astats/downmix
-behavior itself is approved as-is (then update the canned data/assertions) or
-needs revisiting. Should the audio-chains spec get a difference note?
 
 ---
 
@@ -653,34 +579,6 @@ Human input: all materialized artifacts must follow .tmp then rename protocol. I
 
 ---
 
-## 57. Check standalone functions
-
-Are they really meant to be on module level? Is there really no class that should own them?
-Need a review. Disowned functions are strongly discouraged, at least without clear reason for it to be disowned.
-
----
-
-## 58. Code and comments sprawl.
-
-This is a pet project. Expected to be rather small. Key metadata classes (streams, chapters, file, etc), key results classes, direct carryover (single instanciation)
-and ffmpeg calling / progress reporting.
-
-It feels like project size is stupidly bloated.
-
-We need to review the code to reduce the footprint. A few notes I see directly (but there could be more):
-
-- microscopic functions (often pure accessors) with only 1 consumer - why not inline? (there could be legitimate use cases)
-- bloated tests for None in functions for programmatic errors - should be plain assertions or changed footprint. Like, if we don't accept None - mark it in footprint.
-- importing the same thing like a dozen times at different places in the same module - imports should be at the top. Mid-way imports allowed only to break circular dependencies - clearly marked for that. Also, we should record such cases for later review. Circular dependencies is generally a bad smell.
-- dead code leftovers
-- long comments - sometimes up to a few screens of text, including historical drama, etc. We don't need to be too agressive here,
-  but comments should be concise, they are about the CURRENT state/usage.
-- many tests don't add value. They check implementation details instead of external behavior properties. Like, checking string format instead of checking that unique strings are produced, or that escaped display_name == safe_name
-
-What can we do? ruff? codebase-memory-mcp?
-
----
-
 ## 59. Parallel metrics
 
 Currently, if we run 2 jobs onto the same folder (say, separate video and audio passes) - metrics will get garbled.
@@ -708,6 +606,8 @@ What should be:
   Could be flag-walled, or debug level printed (reusing our printing level flag).
 - For exceptions there must be clear concise proper-level messages logged, which include - what happened, how that will affect end-user (pipeline broken, exitting, can't continue, quality can't be reached; something end-user can understand).
 
+Ideally, internal things shouldn't log anything but debug messages and propagate their problems via exceptions higher, where proper logging should take place. But if they already log - need to review if it should really log there or if it should be moved.
+
 ---
 
 ## 61. Quality graph - adjust placement of metrics boxes
@@ -726,3 +626,68 @@ Probably worth moving to the phase.
 
 ---
 
+## 63. CLI reference doc is outdated
+
+Needs updating to current state. cli-reference.md .
+README.md too. In particular - wrong chunking modes info, space requirements, quality targets.
+audio-processing.md - at minimum we switched to long arguments names. Matrixes explanations were reworded, and no need for historical mentions.
+  Multiple chains can independently target the same or different tracks; each produces its own output. - plain wrong about targetting - chains have no targetting, they consume what select filters selected.
+  Worked example (a): all Russian dubs - but the example has no prefer. needs rewording
+  naming is depicted incorrectly - audio stream name, not source stem name
+---
+
+## 64. Audio chain as flt
+
+Need to check if full audio chain is converted to flt or only on downmix filter. Probably always using flt is better for precise. But only downmix using custom weights should be capable of producing clipping?
+
+---
+
+## 65. Cleanup 2026-09-30 — deferred findings (from cleanup-report.md)
+
+Covered by the cleanup branch and closed: old §4 (ruff gate), §5 (metrics spy
+tests → metrics.yaml behavior tests), §43 (stale audio tests), §58 (comment/
+dead-code sprawl). Audit: `cleanup-report.md`.
+
+Deferred as costly/structural:
+
+- encoding⇄optimization import cycle (marked `# deferred: circular import` at
+  3 sites) — worth breaking properly.
+- CLI `_cmd_*` bodies ×6 near-identical (crop-parse → build config → api → log).
+- Test fixture factories duplicated across files (Strategy/CodecConfig,
+  extended-stream, encoded-chunk builders) → conftest consolidation.
+- `EncodedChunk` composition duplicated (`_pair_placeholder` vs
+  `build_encoded_chunk` shapes).
+- ASCII summary-table scaffold duplicated (optimization vs merge).
+- `runner._collect_output_files` belongs on `MergePhaseResult`.
+- measure→extraction private imports (`_probe_streams_json`, `_video_info`)
+  and api→measure `_parse_duration` — re-homing per §57.
+- Broader test-surface rework beyond metrics (string-format pinning etc.);
+  skipped integration tests need a real run on a media sample.
+- ty: 83 diagnostics remain (type-modeling noise on pydantic patterns; one
+  false positive on `MetricsCollector.step(*parts)` with zero parts).
+
+---
+
+## 66. CLI subcommands review
+
+Do we really need all current subcommands? From UX point of view for end-user. 
+Current setup was mirroring the initial phases structure and allowed better testing for devs.
+But ordinary user likely doesn't need that.
+
+What would ordinary user need? I'd guess it should be intent based. Something like:
+- auto - kept for full default pipeline
+- video - for video only processing
+- audio - for audio only processing
+- measure - for measuring, including EXTERNAL videos (i.e. things produced not by pyqenc).
+
+anything else?
+
+I was thinking about a way to give user mechanics to extract (materialize) anything from source really. 
+Maybe this should be the function of `extract` subcommand (a bit different from extract mechanics in auto/video/audio), if we moved to virtual streams in main phases.
+This is also a question specifically for audio - user might want source audio available as standalone files to use in external audio editors. 
+I was thinking of maybe introducing a dump filter (like passthrough, but to a file). But direct extract command might be a better way.
+As another point for extract subcommand working like this - it was always a problem to just extract everything from mkv. Most CLI tools require explicit
+streams listing, which is quite painful when making commands manually. with `extract` subcommand it could be something like `pyqenc extract source.mkv --exclude "video-" -y` to dump everything.
+Ideally reusing the current extract phase mechanics.
+
+other considerations?

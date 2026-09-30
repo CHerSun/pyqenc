@@ -48,7 +48,7 @@ class TestCropDetectCommand:
             detect_crop_parameters(_video(), sample_count=50)
 
         assert len(captured) == 1
-        argv = [str(a) for a in compose_command(captured[0])]
+        argv = [str(a) for a in compose_command(captured[0])[0]]
         assert argv == [
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
             "-ss", "10.0",
