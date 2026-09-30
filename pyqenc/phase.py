@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from pyqenc.metrics import MetricKey
 from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, Strategy
@@ -65,10 +65,6 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
-
-TPhase = TypeVar("TPhase", bound="Phase")
-"""A Phase subclass; the return type of ``Phase._dep()``."""
-
 
 # ---------------------------------------------------------------------------
 # Strategy is now defined in models.py and re-exported here for convenience.
@@ -405,39 +401,18 @@ class Phase[ResultT: PhaseResult]:
     # link is the source of truth, fetched fresh at run time.
     # ------------------------------------------------------------------
 
-    def _dep(self, dep_cls: type[TPhase]) -> TPhase:
-        """Return the dependency instance of ``dep_cls`` from the registry.
-
-        Fetches fresh on every call — the registry is the single source of
-        truth, and it may have been populated after this phase's construction.
-
-        Args:
-            dep_cls: The dependency's phase class.
-
-        Returns:
-            The concrete instance from the registry.
-
-        Raises:
-            TypeError: When the declared dependency is missing from the
-                registry (mis-wired registry — a programming error).
-        """
-        instance = self._phases.get(dep_cls)
-        if instance is None:
-            raise TypeError(
-                f"{type(self).__name__} requires {dep_cls.__name__} "
-                "in the phase registry (declared in DEPENDS_ON)"
-            )
-        return cast(TPhase, instance)
-
     def _dep_result[R: PhaseResult](self, dep_cls: type[Phase[R]]) -> R:
-        """Return the dependency's cached typed result.
+        """Return the dependency's cached typed result — the dependency accessor.
 
-        The shared dependency walk guarantees every declared dependency has
-        run (and cached its result) before this phase's hooks execute, so
-        consumers read dependency facts through this typed getter instead of
-        re-narrowing ``Phase.result`` at every call site. The declared
-        ``Phase[R]`` parametrization is what recovers the concrete result
-        type from the phase class at each call site.
+        Fetches the ``dep_cls`` instance from the registry fresh on every call
+        (the registry is the single source of truth, and it may have been
+        populated after this phase's construction). The shared dependency walk
+        guarantees every declared dependency has run (and cached its result)
+        before this phase's hooks execute, so consumers read dependency facts
+        through this typed getter instead of re-narrowing ``Phase.result`` at
+        every call site. The declared ``Phase[R]`` parametrization is what
+        recovers the concrete result type from the phase class at each call
+        site.
 
         Args:
             dep_cls: The dependency's phase class.
@@ -452,7 +427,13 @@ class Phase[ResultT: PhaseResult]:
                 phase hook ran before the dependency walk (a programming
                 error, never a runtime condition to handle).
         """
-        result = self._dep(dep_cls).result
+        instance = self._phases.get(dep_cls)
+        if instance is None:
+            raise TypeError(
+                f"{type(self).__name__} requires {dep_cls.__name__} "
+                "in the phase registry (declared in DEPENDS_ON)"
+            )
+        result = instance.result
         assert result is not None, (
             f"{dep_cls.__name__}.result guaranteed by the dependency walk"
         )

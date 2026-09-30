@@ -53,7 +53,6 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
-    from pyqenc.phases.job import JobPhaseResult
 
 logger = logging.getLogger(__name__)
 
@@ -254,7 +253,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         Returns:
             The :class:`Recovery` single source of truth.
         """
-        job_result: JobPhaseResult = self._dep(JobPhase).result  # type: ignore[assignment]
+        job_result = self._dep_result(JobPhase)
         work_dir   = job_result.work_dir
         yaml_path  = work_dir / _CHUNKING_YAML
         force_wipe = job_result.force_wipe

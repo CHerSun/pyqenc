@@ -1753,7 +1753,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         """Log chunks, strategies, crop, and targets (key parameters)."""
         logger.info("Scanning for existing artifacts...")
 
-        probe_result = self._dep(ProbePhase).result
+        probe_result = self._dep_result(ProbePhase)
         crop         = probe_result.crop if probe_result is not None else None
 
         strategies = self._dep_result(OptimizationPhase).selected_strategies
@@ -1781,10 +1781,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         """
         if not ctx.deep_cleanup:
             return
-        job = self._dep(JobPhase)
-        if job.result is None:
-            return
-        work_dir = job.result.work_dir
+        work_dir = self._dep_result(JobPhase).work_dir
         for target in (work_dir / ENCODING_WORKSPACE_DIR, work_dir / ENCODED_OUTPUT_DIR):
             if target.exists():
                 try:
@@ -1934,7 +1931,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             ``EncodingPhaseResult`` after encoding.
         """
         work_dir = self._dep_result(JobPhase).work_dir
-        probe_result = self._dep(ProbePhase).result
+        probe_result = self._dep_result(ProbePhase)
         crop         = probe_result.crop if probe_result is not None else None
 
         # Resolve chunks and strategies from dependencies

@@ -541,7 +541,7 @@ class MergePhase(Phase[MergePhaseResult]):
     def params(self) -> MergeParams:
         """Current merge params derived from the job result config and probe result.
 
-        Built at runtime from ``self._dep(JobPhase).result`` and ``self._dep(ProbePhase).result``
+        Built at runtime from ``self._dep_result(JobPhase)`` and ``self._dep_result(ProbePhase)``
         so the values are always current (e.g. after CLI overrides) rather than
         snapshotted at construction time.
         """
@@ -897,7 +897,7 @@ class MergePhase(Phase[MergePhaseResult]):
 
                 # Resolve timestamps path from ExtractionPhase result
                 timestamps_path: Path | None = (
-                    self._dep(ExtractionPhase).result.timestamps_path
+                    self._dep_result(ExtractionPhase).timestamps_path
                 )
 
                 if timestamps_path is None or not timestamps_path.exists():
@@ -1000,7 +1000,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 if crf_data:
                     crf_plot_path = merged_dir / f"{output_file.stem}.crf.png"
                     try:
-                        qlabel = self._dep(EncodingPhase).quality_labels.get(strategy_name, "CRF")
+                        qlabel = self._dep_result(EncodingPhase).quality_labels.get(strategy_name, "CRF")
                         create_crf_plot(
                             chunks        = crf_data,
                             output_path   = crf_plot_path,

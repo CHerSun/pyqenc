@@ -24,7 +24,7 @@ import subprocess
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import yaml
 
@@ -50,7 +50,7 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
-from pyqenc.phases.job import JobPhase, JobPhaseResult
+from pyqenc.phases.job import JobPhase
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
     AttachmentStream,
@@ -804,8 +804,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             attachment_streams = [r for r in artifacts if isinstance(r.payload, AttachmentStream)],
             chapters           = next(
                 (r for r in artifacts if isinstance(r.payload, Chapters)), None),
-            work_dir           = cast(
-                JobPhaseResult, self._dep(JobPhase).result).work_dir,
+            work_dir           = self._dep_result(JobPhase).work_dir,
         )
 
     def _execute(
