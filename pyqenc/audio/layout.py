@@ -33,7 +33,7 @@ from pyqenc.audio.matrices import Layout, layout_channels
 # Raw ffmpeg tokens that are aliases for a dotted normalized layout.
 _ALIAS_NORMALIZED: dict[str, str] = {
     "stereo": Layout.STEREO.value,   # "2.0"
-    "mono":   "1.0",
+    "mono":   Layout.MONO.value,     # "1.0"
 }
 
 

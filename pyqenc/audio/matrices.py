@@ -46,6 +46,7 @@ class Layout(StrEnum):
     parser). Matrix keys and the channel-count map use these values.
     """
 
+    MONO = "1.0"
     STEREO = "2.0"
     SURROUND_51 = "5.1"
     SURROUND_71 = "7.1"
@@ -60,6 +61,7 @@ class MatrixName(StrEnum):
 
 
 _LAYOUT_CHANNELS: dict[str, int] = {
+    Layout.MONO.value: 1,
     Layout.STEREO.value: 2,
     Layout.SURROUND_51.value: 6,
     Layout.SURROUND_71.value: 8,
