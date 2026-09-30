@@ -162,7 +162,7 @@ class TestDownmixNoOp:
         # where stereo was requested.
         f = DownmixFilter(DownmixParams(to="2.0", matrix="std"))
         step = f.resolve(_51, None)
-        assert step.af == "pan=stereo|c0=c0+0.707*c2+0.707*c4|c1=c1+0.707*c2+0.707*c5"
+        assert step.af == "aformat=sample_fmts=flt,pan=stereo|c0=c0+0.707*c2+0.707*c4|c1=c1+0.707*c2+0.707*c5"
         assert step.out_layout.normalized == "2.0"
 
 
@@ -198,13 +198,13 @@ class TestTwoPassPeakNorm:
         f = PeakNormFilter(PeakNormParams(target_dbfs=-1.0))
         step = f.resolve(_STEREO, None)
         assert step.needs_pass is True
-        assert step.af == "volumedetect"
+        assert step.af == "astats"
 
     def test_second_call_applies_measured_gain(self) -> None:
         # Bug: mis-scraping max_volume (or ignoring it) would apply the wrong
         # gain, over/under-shooting the target peak.
         f = PeakNormFilter(PeakNormParams(target_dbfs=-1.0))
-        result = _measurement(["[Parsed_volumedetect_0 @ 0x0] max_volume: -6.5 dB"])
+        result = _measurement(["[Parsed_astats_1 @ 0x0] Peak level dB: -6.5"])
         step = f.resolve(_STEREO, result)
         assert step.needs_pass is False
         # gain = target(-1.0) - measured(-6.5) = 5.5 dB
@@ -214,7 +214,7 @@ class TestTwoPassPeakNorm:
         # Bug: proceeding without a parseable measurement would silently produce
         # an unnormalised file.
         f = PeakNormFilter(PeakNormParams(target_dbfs=-1.0))
-        with pytest.raises(RuntimeError, match="max_volume"):
+        with pytest.raises(RuntimeError, match="parseable peak volume"):
             f.resolve(_STEREO, _measurement(["no measurement here"], returncode=1))
 
 
