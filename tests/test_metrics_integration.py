@@ -1669,7 +1669,7 @@ class TestMergePhaseTiming:
                 patch.object(MergePhase, "_collect_encoded_chunks", return_value={
                     "chunk_0": {"slow+h265": _encoded_chunk(encoded_path, "chunk_0", "slow+h265")},
                 }),
-                patch("pyqenc.phases.merge._measure_quality", return_value=({}, False, None)),
+                patch("pyqenc.phases.merge.MergePhase._measure_quality", return_value=({}, False, None)),
             ):
                 mock_subprocess.return_value = MagicMock(returncode=0, stderr="")
                 output_file.write_bytes(b"\x00" * 128)

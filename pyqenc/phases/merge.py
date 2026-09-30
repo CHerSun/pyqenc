@@ -83,382 +83,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-_NS_PER_SECOND = 1_000_000_000
-_MKVPROPEDIT_VIDEO_TRACK = "track:v1"
-
-
-def _expected_output_path(merged_dir: Path, source_stem: str, strategy: Strategy) -> Path:
-    """The merged output location — the single derivation site.
-
-    ``<file stem> <strategy.safe_name()>.mkv`` below ``merged/``; names are
-    safe by construction.
-    """
-    return merged_dir / f"{source_stem} {strategy.safe_name()}.mkv"
 
 
 # ---------------------------------------------------------------------------
 # Sidecar model
 # ---------------------------------------------------------------------------
 
-def _sidecar_path(output_file: Path) -> Path:
-    """Return the sidecar YAML path for a merged output file."""
-    return output_file.with_suffix(".yaml")
-
-
-def _load_merge_sidecar(output_file: Path) -> dict | None:
-    """Load the merge sidecar for *output_file*, or ``None`` if absent/invalid."""
-    path = _sidecar_path(output_file)
-    if not path.exists():
-        return None
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            return yaml.safe_load(fh)
-    except (OSError, yaml.YAMLError) as exc:
-        logger.debug("Could not load merge sidecar %s: %s", path.name, exc)
-        return None
-
-
-def _build_strategy_summaries(
-    rows:              list[Artifact[MergedVideo]],
-    source_video_path: Path | None,
-) -> tuple[int, list[MergeStrategySummary]]:
-    """Build per-strategy summary rows and source size from complete rows.
-
-    Args:
-        rows:              The merged-output rows (complete ones are summarized).
-        source_video_path: Path to the source video for size capture; ``None`` if unavailable.
-
-    Returns:
-        Tuple of ``(source_size_bytes, strategy_summaries)``.
-    """
-    source_size = (
-        (safe_stat_size(source_video_path) or 0)
-        if source_video_path is not None else 0
-    )
-
-    summaries: list[MergeStrategySummary] = []
-    for row in rows:
-        if row.state != ArtifactState.COMPLETE:
-            continue
-        payload = row.payload
-        summaries.append(MergeStrategySummary(
-            strategy_name   = payload.strategy.display_name(),
-            output_path     = payload.output_path,
-            file_size_bytes = safe_stat_size(payload.output_path) or 0,
-            metrics         = payload.metrics,
-            targets_met     = payload.targets_met,
-        ))
-    return source_size, summaries
-
-
-def _write_merge_sidecar(
-    output_file:     Path,
-    frame_count:     int | None,
-    all_metrics:     dict[str, float],
-    quality_targets: list[QualityTarget],
-    targets_met:     bool,
-    plot_path:       Path | None,
-) -> None:
-    """Atomically write a merge sidecar alongside *output_file*.
-
-    Only metrics for user-requested quality targets are persisted.
-    Quality target values are written before measured metrics so the user
-    can directly compare target vs. actual in the YAML.
-    Keys use ``{metric}-{statistic}`` form (e.g. ``vmaf-min``) matching the CLI convention.
-    """
-    targets_section = {f"{t.metric}-{t.statistic}": t.value for t in quality_targets}
-    # Only the user-requested targets' metrics; values coerced to plain Python
-    # ``float`` to avoid numpy scalar serialisation artefacts.
-    metrics_section = {
-        f"{t.metric}-{t.statistic}": float(all_metrics[f"{t.metric}_{t.statistic}"])
-        for t in quality_targets
-        if f"{t.metric}_{t.statistic}" in all_metrics
-    }
-
-    data: dict = {
-        "frame_count":   frame_count,
-        "targets_met":   targets_met,
-        "targets":       targets_section,
-        "metrics":       metrics_section,
-    }
-    if plot_path is not None:
-        data["plot"] = str(plot_path)
-    try:
-        write_yaml_atomic(_sidecar_path(output_file), data)
-    except (OSError, yaml.YAMLError) as exc:
-        logger.warning("Could not write merge sidecar for %s: %s", output_file.name, exc)
-
-
-
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-def _measure_quality(
-    final_result:     Path,
-    source_stream:    ExtendedVideoStream,
-    ref_crop:         CropParams | None,
-    quality_targets:  list[QualityTarget],
-    output_dir:       Path,
-    metrics_sampling: int,
-) -> tuple[dict[str, float], bool, Path | None]:
-    """Measure final quality metrics for *final_result* against *source_stream*.
-
-    Raw metric ``.tmp`` files are written directly to ``output_dir`` and deleted
-    immediately after parsing.  The quality plot PNG is written to
-    ``output_dir / f"{final_result.stem}.png"`` and kept.
-
-    Returns:
-        Tuple of ``(metrics_dict, targets_met, plot_path)``.
-    """
-    evaluator = QualityEvaluator(output_dir)
-    plot_path = output_dir / f"{final_result.stem}.png"
-
-    evaluation = evaluator.evaluate_chunk(
-        encoded            = final_result,
-        reference          = source_stream.stream.as_input(),
-        ref_crop           = ref_crop,
-        targets            = quality_targets,
-        output_dir         = output_dir,
-        duration_seconds   = source_stream.stream.info.duration_seconds or 0.0,
-        fps_value          = source_stream.stream.info.fps_fraction,
-        metrics_output_dir = output_dir,
-        subsample_factor   = metrics_sampling,
-        show_progress      = True,
-        plot_path          = plot_path,
-    )
-
-    metrics_dict: dict[str, float] = {}
-    for metric_name, metric_stats in evaluation.metrics.items():
-        for stat_name, stat_value in metric_stats.items():
-            metrics_dict[f"{metric_name.value}_{stat_name}"] = stat_value
-
-    plot_path = evaluation.logs.plot if evaluation.logs.plot else None
-    return metrics_dict, evaluation.targets_met, plot_path
-
-
-def _fmt_inline_metrics(
-    metrics_dict:    dict[str, float],
-    quality_targets: list[QualityTarget],
-) -> str:
-    """Return a compact single-line metrics string for the completion log line.
-
-    Example: ``"vmaf-min=94.1 ✔  vmaf-median=97.4 ✔  psnr-min=41.5 ✘  ssim-min=95.7 ✔"``
-
-    Args:
-        metrics_dict:    Measured metric values keyed by ``"{metric}_{statistic}"``.
-        quality_targets: Targets used to determine pass/fail symbols.
-
-    Returns:
-        Space-separated metric readings, or empty string if no targets.
-    """
-    parts: list[str] = []
-    for target in quality_targets:
-        key   = f"{target.metric}_{target.statistic}"
-        value = metrics_dict.get(key)
-        if value is None:
-            continue
-        symbol = SUCCESS_SYMBOL_MINOR if value >= target.value else FAILURE_SYMBOL_MINOR
-        parts.append(f"{target.metric}-{target.statistic}={fmt_metric_value(value)} {symbol}")
-    return "  ".join(parts)
-
-
-def _log_missed_targets_warning(
-    strategy_name:  str,
-    metrics_dict:   dict[str, float],
-    quality_targets: list[QualityTarget],
-) -> None:
-    """Log a WARNING naming every target this strategy missed, with wanted vs actual.
-
-    The completion line and the summary table stay neutral; this is the single
-    place a missed target is escalated to warning level so the reason is
-    immediately visible where the merge happened.
-
-    Args:
-        strategy_name:   The merged strategy.
-        metrics_dict:    Measured metrics keyed by ``"{metric}_{statistic}"``.
-        quality_targets: The targets that were checked.
-    """
-    missed: list[str] = []
-    for target in quality_targets:
-        value = metrics_dict.get(f"{target.metric}_{target.statistic}")
-        if value is not None and value < target.value:
-            missed.append(
-                f"{target.metric}-{target.statistic} = {fmt_metric_value(value)} "
-                f"(target ≥ {fmt_metric_value(target.value)})"
-            )
-    if missed:
-        logger.warning(
-            "%s %s missed quality targets: %s",
-            WARNING_SYMBOL, strategy_name, ";  ".join(missed),
-        )
-
-
-def _log_merge_summary(
-    summaries:         list[MergeStrategySummary],
-    source_stem:       str,
-    source_size_bytes: int,
-    quality_targets:   list[QualityTarget],
-    metrics_sampling:  int,
-) -> None:
-    """Log the merge summary: source row + strategy table with sizes, % of source,
-    and quality pass/miss marks; followed by a targets reminder and per-miss details.
-
-    Args:
-        summaries:         Per-strategy summary rows, sorted by file size ascending.
-        source_stem:       Source video stem (filename without extension).
-        source_size_bytes: Size of the source video in bytes; ``0`` if unavailable.
-        quality_targets:   Quality targets that were checked.
-        metrics_sampling:  Frame subsampling factor used during measurement.
-    """
-    if not summaries:
-        logger.info("  No output files produced.")
-        return
-
-    source_size = source_size_bytes
-    has_targets = bool(quality_targets)
-
-    sorted_summaries = sorted(summaries, key=lambda r: safe_stat_size(r.output_path) or 0)
-
-    def _pct_str(size: int) -> str:
-        if source_size <= 0:
-            return "  N/A"
-        return f"{size / source_size * 100:5.1f}%"
-
-    # --- Table header ---
-    if has_targets:
-        logger.info("  %-25s  %12s  %7s  %s", "Strategy", "Size (MB)", "vs src", "Quality")
-        logger.info("  %-25s  %12s  %7s  %s", "-" * 25, "-" * 12, "-" * 7, "-" * 7)
-    else:
-        logger.info("  %-25s  %12s  %7s", "Strategy", "Size (MB)", "vs src")
-        logger.info("  %-25s  %12s  %7s", "-" * 25, "-" * 12, "-" * 7)
-
-    # --- Source row ---
-    if source_size > 0:
-        src_str = fmt_size_mb(source_size)
-        if has_targets:
-            logger.info("  %-25s  %12s  %7s  %s", source_stem[:25], src_str, "100.0%", "")
-        else:
-            logger.info("  %-25s  %12s  %7s", source_stem[:25], src_str, "100.0%")
-
-    # --- Strategy rows ---
-    any_miss = False
-    for summary in sorted_summaries:
-        size_bytes = safe_stat_size(summary.output_path) or 0
-        size_str   = fmt_size_mb(size_bytes)
-        pct        = _pct_str(size_bytes)
-
-        if has_targets:
-            if summary.metrics:
-                mark = SUCCESS_SYMBOL_MINOR if summary.targets_met else FAILURE_SYMBOL_MINOR
-                if not summary.targets_met:
-                    any_miss = True
-            else:
-                mark = "-"
-            logger.info("  %-25s  %12s  %7s  %s", summary.strategy_name[:25], size_str, pct, mark)
-        else:
-            logger.info("  %-25s  %12s  %7s", summary.strategy_name[:25], size_str, pct)
-
-    # --- Output location note ---
-    output_dir = sorted_summaries[0].output_path.parent
-    logger.info("")
-    logger.info("  Files named: %s *.mkv  (where * is the strategy)", source_stem)
-    logger.info("  Location: %s", output_dir)
-
-    if not has_targets:
-        return
-
-    # --- Targets reminder ---
-    targets_str = "  Targets: " + ",  ".join(
-        f"{t.metric}-{t.statistic} ≥ {t.value:.2f}"
-        for t in quality_targets
-    )
-    logger.info("")
-    logger.info(targets_str)
-
-    if not any_miss:
-        logger.info("  %s All quality targets met.", SUCCESS_SYMBOL_MINOR)
-        return
-
-    # --- Per-miss details as key-value table ---
-    miss_table: dict[str, str | list] = {}
-
-    for summary in sorted_summaries:
-        if summary.targets_met or not summary.metrics:
-            continue
-        missed_lines = []
-        for target in quality_targets:
-            key   = f"{target.metric}_{target.statistic}"
-            value = summary.metrics.get(key)
-            if value is None:
-                missed_lines.append(f"{target.metric}-{target.statistic}: not measured (target: {target.value:.2f})")
-            elif value < target.value:
-                missed_lines.append(f"{target.metric}-{target.statistic}: {value:.2f} (target: {target.value:.2f})")
-        if missed_lines:
-            miss_table[f"{WARNING_SYMBOL} {summary.strategy_name}"] = missed_lines if len(missed_lines) > 1 else missed_lines[0]
-
-    fmt_key_value_table(miss_table)
-
-    if miss_table and metrics_sampling > 1:
-        logger.info("  (Subsampling 1:%d — with fewer frames measured, there's a higher chance to miss outliers, making quality targeting less reliable)", metrics_sampling)
-
-
-
-def _log_merge_summary_from_params(
-    params:          MergeParams,
-    quality_targets: list[QualityTarget],
-) -> None:
-    """Replay the merge summary table from persisted ``MergeParams``.
-
-    Delegates to ``_log_merge_summary`` over the persisted summary rows.
-    Called on the REUSED path so the user sees the same table as on the
-    original run.
-
-    Args:
-        params:          Loaded ``MergeParams`` from ``merge.yaml``.
-        quality_targets: Current quality targets (for miss-detail rendering).
-    """
-    if not params.strategy_summaries:
-        logger.info("  No summary data saved — re-run to generate.")
-        return
-
-    _log_merge_summary(
-        summaries         = params.strategy_summaries,
-        source_stem       = params.source_stem,
-        source_size_bytes = params.source_size_bytes,
-        quality_targets   = quality_targets,
-        metrics_sampling  = params.sampling or 1,
-    )
-
-
-def _collect_crf_data(
-    winners:  list[Artifact[EncodedChunk]],
-    strategy: str,
-) -> list[tuple[float, float, Decimal]]:
-    """Extract ``(start_seconds, end_seconds, crf)`` tuples for a strategy's winners.
-
-    Reads the winning attempts via their payloads — ``payload.crf`` and the
-    window through ``payload.chunk`` (chunk-id parsing belongs to
-    :meth:`VideoStreamChunk.parse_chunk_id`).
-
-    Args:
-        winners:  The encoding phase's winner rows.
-        strategy: Strategy display name to filter by.
-
-    Returns:
-        List of ``(start_s, end_s, crf)`` sorted by start time.
-    """
-    result: list[tuple[float, float, Decimal]] = [
-        (payload.chunk.start_timestamp, payload.chunk.end_timestamp, payload.crf)
-        for payload in (row.payload for row in winners)
-        if payload.strategy.display_name() == strategy
-    ]
-    result.sort(key=lambda t: t[0])
-    return result
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +145,8 @@ class MergePhase(Phase[MergePhaseResult]):
 
     name:        str       = "merge"
     SIDECAR_NAME = "merge.yaml"
+    _NS_PER_SECOND       = 1_000_000_000
+    _MKVPROPEDIT_VIDEO_TRACK = "track:v1"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (
         JobPhase, ExtractionPhase, ProbePhase, EncodingPhase, AudioPhase,
     )
@@ -671,9 +307,9 @@ class MergePhase(Phase[MergePhaseResult]):
         rows: list[Artifact] = []
         expected_names: set[str] = set()
         for strategy in strategies:
-            output_file = _expected_output_path(merged_dir, source_stem, strategy)
+            output_file = MergePhase._expected_output_path(merged_dir, source_stem, strategy)
             expected_names.add(output_file.name)
-            sidecar = _load_merge_sidecar(output_file)
+            sidecar = MergePhase._load_merge_sidecar(output_file)
 
             if output_file.exists() and sidecar is not None:
                 # COMPLETE — output and sidecar both present
@@ -730,7 +366,7 @@ class MergePhase(Phase[MergePhaseResult]):
                     continue
                 state = (
                     ArtifactState.COMPLETE
-                    if _load_merge_sidecar(output_file) is not None
+                    if MergePhase._load_merge_sidecar(output_file) is not None
                     else ArtifactState.PARTIAL
                 )
                 rows.append(Artifact(
@@ -750,7 +386,7 @@ class MergePhase(Phase[MergePhaseResult]):
             logger.info(THICK_LINE)
             logger.info("MERGE SUMMARY")
             logger.info(THICK_LINE)
-            _log_merge_summary_from_params(persisted, self._config.encoding.resolved_targets)
+            MergePhase._log_merge_summary_from_params(persisted, self._config.encoding.resolved_targets)
         return self._make_result(PhaseOutcome.REUSED, wanted, message)
 
     def _make_result(
@@ -831,7 +467,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 continue
 
             # The merge output name derives at the single site.
-            output_file = _expected_output_path(merged_dir, source_stem, strategy)
+            output_file = MergePhase._expected_output_path(merged_dir, source_stem, strategy)
             assert output_file == payload.output_path, "recovery derived the same location"
             logger.info("Merging: %s", strategy_name)
 
@@ -868,8 +504,8 @@ class MergePhase(Phase[MergePhaseResult]):
 
                 # Write mkvmerge options file
                 options_file = merged_dir / f"concat_{strategy_name}.json"
-                args = _build_mkvmerge_options(strategy_chunks, output_file, timestamps_path)
-                _write_mkvmerge_options_file(options_file, args)
+                args = MergePhase._build_mkvmerge_options(strategy_chunks, output_file, timestamps_path)
+                MergePhase._write_mkvmerge_options_file(options_file, args)
 
                 # Run mkvmerge via options file (avoids OS command-line length limits).
                 # The "@<file>" option embeds the path in a sub-string mkvmerge
@@ -900,7 +536,7 @@ class MergePhase(Phase[MergePhaseResult]):
 
                 # Restore the true frame rate in the track header —
                 # see _build_mkvpropedit_args for why mkvmerge cannot do it.
-                propedit_cmd: list[str | os.PathLike] = _build_mkvpropedit_args(
+                propedit_cmd: list[str | os.PathLike] = MergePhase._build_mkvpropedit_args(
                     output_file, source_stream.stream.info.fps_fraction,
                 )
                 propedit_result = subprocess.run(propedit_cmd, capture_output=True, text=True, check=False)
@@ -939,7 +575,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 if job_result.config.encoding.resolved_targets:
                     try:
                         with self._collector.time(MetricKey.MERGE, METRIC_KEY_QUALITY_MEASURE):
-                            metrics_dict, targets_met, plot_path = _measure_quality(
+                            metrics_dict, targets_met, plot_path = MergePhase._measure_quality(
                                 final_result     = output_file,
                                 source_stream    = source_stream,
                                 ref_crop         = crop,
@@ -951,7 +587,7 @@ class MergePhase(Phase[MergePhaseResult]):
                         logger.warning("  Could not measure quality: %s", exc)
 
                 # CRF distribution plot — reads the typed winners field
-                crf_data = _collect_crf_data(
+                crf_data = MergePhase._collect_crf_data(
                     self._dep_result(EncodingPhase).winners,
                     strategy_name,
                 )
@@ -972,7 +608,7 @@ class MergePhase(Phase[MergePhaseResult]):
                     logger.warning("No CRF data available for strategy %s — skipping CRF plot", strategy_name)
 
                 # Write sidecar (marks this output as COMPLETE)
-                _write_merge_sidecar(
+                MergePhase._write_merge_sidecar(
                     output_file     = output_file,
                     frame_count     = frame_count,
                     all_metrics     = metrics_dict,
@@ -983,14 +619,14 @@ class MergePhase(Phase[MergePhaseResult]):
 
                 frames_sym  = SUCCESS_SYMBOL_MINOR if frame_count_ok else FAILURE_SYMBOL_MINOR
                 frames_str  = str(frame_count) if frame_count is not None else "unknown"
-                metrics_str = _fmt_inline_metrics(metrics_dict, self._dep_result(JobPhase).config.encoding.resolved_targets)
+                metrics_str = MergePhase._fmt_inline_metrics(metrics_dict, self._dep_result(JobPhase).config.encoding.resolved_targets)
                 logger.info(
                     "%s Merged %s:  frames=%s %s%s",
                     SUCCESS_SYMBOL_MAJOR, strategy_name, frames_str, frames_sym,
                     f"  {metrics_str}" if metrics_str else "",
                 )
                 if metrics_dict and not targets_met:
-                    _log_missed_targets_warning(
+                    MergePhase._log_missed_targets_warning(
                         strategy_name, metrics_dict,
                         self._dep_result(JobPhase).config.encoding.resolved_targets,
                     )
@@ -1019,11 +655,11 @@ class MergePhase(Phase[MergePhaseResult]):
         logger.info(THICK_LINE)
         if failed_strategies:
             logger.error("  Failed strategies: %s", ", ".join(failed_strategies))
-        _, strategy_summaries = _build_strategy_summaries(
+        _, strategy_summaries = MergePhase._build_strategy_summaries(
             final_rows,
             source_stream.stream.file.path,
         )
-        _log_merge_summary(
+        MergePhase._log_merge_summary(
             summaries          = strategy_summaries,
             source_stem        = source_stem,
             source_size_bytes  = safe_stat_size(source_stream.stream.file.path) or 0,
@@ -1036,7 +672,7 @@ class MergePhase(Phase[MergePhaseResult]):
         # Persist merge params (with summary) so quality-target / sampling changes are
         # detected next run and the summary table can be replayed on rerun.
         if complete_count > 0:
-            source_size_bytes, strategy_summaries = _build_strategy_summaries(
+            source_size_bytes, strategy_summaries = MergePhase._build_strategy_summaries(
                 final_rows,
                 source_stream.stream.file.path,
             )
@@ -1078,82 +714,444 @@ class MergePhase(Phase[MergePhaseResult]):
 # MergePhase module-level helpers
 # ---------------------------------------------------------------------------
 
-def _build_mkvmerge_options(
-    chunks:          list[Path],
-    output:          Path,
-    timestamps_path: Path,
-) -> list[str]:
-    """Build the mkvmerge argument list for chunk concatenation with PTS restoration.
 
-    The first chunk is listed without a prefix; each subsequent chunk is
-    preceded by ``"+"`` as a separate element (mkvmerge append syntax).
-    ``--timestamps`` is applied to track 0 of the first chunk only.  The
-    output's track-header ``DefaultDuration`` is restored afterwards by
-    ``mkvpropedit`` (see :func:`_build_mkvpropedit_args`): mkvmerge derives it
-    from the ms-rounded restored timestamps, and ``--default-duration`` cannot
-    override that — it only reinterprets *input* tracks that lack timing.
+    @staticmethod
+    def _expected_output_path(merged_dir: Path, source_stem: str, strategy: Strategy) -> Path:
+        """The merged output location — the single derivation site.
 
-    Paths converted for the JSON file are standalone argv elements there, so
-    they use ``os.fspath`` — the same string a subprocess would resolve for a
-    path-like. The ``--timestamps`` value is a sub-string argument (track
-    spec) and keeps the plain form: mkvmerge parses it itself and may not
-    accept an extended-length prefix inside it.
+        ``<file stem> <strategy.safe_name()>.mkv`` below ``merged/``; names are
+        safe by construction.
+        """
+        return merged_dir / f"{source_stem} {strategy.safe_name()}.mkv"
 
-    Args:
-        chunks:          Ordered list of encoded chunk paths.
-        output:          Destination output MKV path.
-        timestamps_path: Path to the timestamps.txt file.
+    @staticmethod
+    def _sidecar_path(output_file: Path) -> Path:
+        """Return the sidecar YAML path for a merged output file."""
+        return output_file.with_suffix(".yaml")
 
-    Returns:
-        List of strings suitable for writing to a JSON options file.
-    """
-    args: list[str] = [
-        "-o",              os.fspath(output),
-        "--timestamps", f"0:{timestamps_path}",
-        os.fspath(chunks[0]),
-    ]
-    for chunk in chunks[1:]:
-        args.append(f"+{os.fspath(chunk)}")
-    return args
+    @staticmethod
+    def _load_merge_sidecar(output_file: Path) -> dict | None:
+        """Load the merge sidecar for *output_file*, or ``None`` if absent/invalid."""
+        path = MergePhase._sidecar_path(output_file)
+        if not path.exists():
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                return yaml.safe_load(fh)
+        except (OSError, yaml.YAMLError) as exc:
+            logger.debug("Could not load merge sidecar %s: %s", path.name, exc)
+            return None
 
+    @staticmethod
+    def _build_strategy_summaries(
+        rows:              list[Artifact[MergedVideo]],
+        source_video_path: Path | None,
+    ) -> tuple[int, list[MergeStrategySummary]]:
+        """Build per-strategy summary rows and source size from complete rows.
 
-def _build_mkvpropedit_args(output: Path, fps: Fraction) -> list[str | os.PathLike]:
-    """Build the mkvpropedit argument list restoring the video track's frame-rate header.
+        Args:
+            rows:              The merged-output rows (complete ones are summarized).
+            source_video_path: Path to the source video for size capture; ``None`` if unavailable.
 
-    mkvmerge derives ``DefaultDuration`` from the ms-rounded timestamps that
-    ``--timestamps`` restores (observed 42 ms → 500/21 for a 24000/1001
-    stream).  Header-only consumers then misdeclare the frame rate and flag
-    the output VFR (MediaInfo: "Frame rate mode: Variable").  The edit is
-    instant, does not touch block data, and takes an integer ns value.
+        Returns:
+            Tuple of ``(source_size_bytes, strategy_summaries)``.
+        """
+        source_size = (
+            (safe_stat_size(source_video_path) or 0)
+            if source_video_path is not None else 0
+        )
 
-    The ns value uses exact rational arithmetic: the float path drifts at
-    NTSC rates (24000/1001 → 41 708 333.33 ns).
+        summaries: list[MergeStrategySummary] = []
+        for row in rows:
+            if row.state != ArtifactState.COMPLETE:
+                continue
+            payload = row.payload
+            summaries.append(MergeStrategySummary(
+                strategy_name   = payload.strategy.display_name(),
+                output_path     = payload.output_path,
+                file_size_bytes = safe_stat_size(payload.output_path) or 0,
+                metrics         = payload.metrics,
+                targets_met     = payload.targets_met,
+            ))
+        return source_size, summaries
 
-    Args:
-        output: The merged MKV whose track header is patched in place.
-        fps:    The source stream's true frame rate.
+    @staticmethod
+    def _write_merge_sidecar(
+        output_file:     Path,
+        frame_count:     int | None,
+        all_metrics:     dict[str, float],
+        quality_targets: list[QualityTarget],
+        targets_met:     bool,
+        plot_path:       Path | None,
+    ) -> None:
+        """Atomically write a merge sidecar alongside *output_file*.
 
-    Returns:
-        The mkvpropedit command; *output* is passed as a path-like so the
-        extended-length ``\\?`` prefix is injected only when the runner
-        resolves it.
-    """
-    return [
-        "mkvpropedit", output,
-        "--edit", _MKVPROPEDIT_VIDEO_TRACK,
-        "--set", f"default-duration={round(_NS_PER_SECOND / fps)}",
-    ]
+        Only metrics for user-requested quality targets are persisted.
+        Quality target values are written before measured metrics so the user
+        can directly compare target vs. actual in the YAML.
+        Keys use ``{metric}-{statistic}`` form (e.g. ``vmaf-min``) matching the CLI convention.
+        """
+        targets_section = {f"{t.metric}-{t.statistic}": t.value for t in quality_targets}
+        # Only the user-requested targets' metrics; values coerced to plain Python
+        # ``float`` to avoid numpy scalar serialisation artefacts.
+        metrics_section = {
+            f"{t.metric}-{t.statistic}": float(all_metrics[f"{t.metric}_{t.statistic}"])
+            for t in quality_targets
+            if f"{t.metric}_{t.statistic}" in all_metrics
+        }
 
+        data: dict = {
+            "frame_count":   frame_count,
+            "targets_met":   targets_met,
+            "targets":       targets_section,
+            "metrics":       metrics_section,
+        }
+        if plot_path is not None:
+            data["plot"] = str(plot_path)
+        try:
+            write_yaml_atomic(MergePhase._sidecar_path(output_file), data)
+        except (OSError, yaml.YAMLError) as exc:
+            logger.warning("Could not write merge sidecar for %s: %s", output_file.name, exc)
 
-def _write_mkvmerge_options_file(path: Path, args: list[str]) -> None:
-    """Write mkvmerge arguments to a JSON options file atomically.
+    @staticmethod
+    def _measure_quality(
+        final_result:     Path,
+        source_stream:    ExtendedVideoStream,
+        ref_crop:         CropParams | None,
+        quality_targets:  list[QualityTarget],
+        output_dir:       Path,
+        metrics_sampling: int,
+    ) -> tuple[dict[str, float], bool, Path | None]:
+        """Measure final quality metrics for *final_result* against *source_stream*.
 
-    Uses the ``.tmp``-then-rename protocol for consistency.
+        Raw metric ``.tmp`` files are written directly to ``output_dir`` and deleted
+        immediately after parsing.  The quality plot PNG is written to
+        ``output_dir / f"{final_result.stem}.png"`` and kept.
 
-    Args:
-        path: Destination path for the options file.
-        args: List of mkvmerge argument strings.
-    """
-    tmp = path.parent / f"{path.stem}{TEMP_SUFFIX}"
-    tmp.write_text(json.dumps(args, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+        Returns:
+            Tuple of ``(metrics_dict, targets_met, plot_path)``.
+        """
+        evaluator = QualityEvaluator(output_dir)
+        plot_path = output_dir / f"{final_result.stem}.png"
+
+        evaluation = evaluator.evaluate_chunk(
+            encoded            = final_result,
+            reference          = source_stream.stream.as_input(),
+            ref_crop           = ref_crop,
+            targets            = quality_targets,
+            output_dir         = output_dir,
+            duration_seconds   = source_stream.stream.info.duration_seconds or 0.0,
+            fps_value          = source_stream.stream.info.fps_fraction,
+            metrics_output_dir = output_dir,
+            subsample_factor   = metrics_sampling,
+            show_progress      = True,
+            plot_path          = plot_path,
+        )
+
+        metrics_dict: dict[str, float] = {}
+        for metric_name, metric_stats in evaluation.metrics.items():
+            for stat_name, stat_value in metric_stats.items():
+                metrics_dict[f"{metric_name.value}_{stat_name}"] = stat_value
+
+        plot_path = evaluation.logs.plot if evaluation.logs.plot else None
+        return metrics_dict, evaluation.targets_met, plot_path
+
+    @staticmethod
+    def _fmt_inline_metrics(
+        metrics_dict:    dict[str, float],
+        quality_targets: list[QualityTarget],
+    ) -> str:
+        """Return a compact single-line metrics string for the completion log line.
+
+        Example: ``"vmaf-min=94.1 ✔  vmaf-median=97.4 ✔  psnr-min=41.5 ✘  ssim-min=95.7 ✔"``
+
+        Args:
+            metrics_dict:    Measured metric values keyed by ``"{metric}_{statistic}"``.
+            quality_targets: Targets used to determine pass/fail symbols.
+
+        Returns:
+            Space-separated metric readings, or empty string if no targets.
+        """
+        parts: list[str] = []
+        for target in quality_targets:
+            key   = f"{target.metric}_{target.statistic}"
+            value = metrics_dict.get(key)
+            if value is None:
+                continue
+            symbol = SUCCESS_SYMBOL_MINOR if value >= target.value else FAILURE_SYMBOL_MINOR
+            parts.append(f"{target.metric}-{target.statistic}={fmt_metric_value(value)} {symbol}")
+        return "  ".join(parts)
+
+    @staticmethod
+    def _log_missed_targets_warning(
+        strategy_name:  str,
+        metrics_dict:   dict[str, float],
+        quality_targets: list[QualityTarget],
+    ) -> None:
+        """Log a WARNING naming every target this strategy missed, with wanted vs actual.
+
+        The completion line and the summary table stay neutral; this is the single
+        place a missed target is escalated to warning level so the reason is
+        immediately visible where the merge happened.
+
+        Args:
+            strategy_name:   The merged strategy.
+            metrics_dict:    Measured metrics keyed by ``"{metric}_{statistic}"``.
+            quality_targets: The targets that were checked.
+        """
+        missed: list[str] = []
+        for target in quality_targets:
+            value = metrics_dict.get(f"{target.metric}_{target.statistic}")
+            if value is not None and value < target.value:
+                missed.append(
+                    f"{target.metric}-{target.statistic} = {fmt_metric_value(value)} "
+                    f"(target ≥ {fmt_metric_value(target.value)})"
+                )
+        if missed:
+            logger.warning(
+                "%s %s missed quality targets: %s",
+                WARNING_SYMBOL, strategy_name, ";  ".join(missed),
+            )
+
+    @staticmethod
+    def _log_merge_summary(
+        summaries:         list[MergeStrategySummary],
+        source_stem:       str,
+        source_size_bytes: int,
+        quality_targets:   list[QualityTarget],
+        metrics_sampling:  int,
+    ) -> None:
+        """Log the merge summary: source row + strategy table with sizes, % of source,
+        and quality pass/miss marks; followed by a targets reminder and per-miss details.
+
+        Args:
+            summaries:         Per-strategy summary rows, sorted by file size ascending.
+            source_stem:       Source video stem (filename without extension).
+            source_size_bytes: Size of the source video in bytes; ``0`` if unavailable.
+            quality_targets:   Quality targets that were checked.
+            metrics_sampling:  Frame subsampling factor used during measurement.
+        """
+        if not summaries:
+            logger.info("  No output files produced.")
+            return
+
+        source_size = source_size_bytes
+        has_targets = bool(quality_targets)
+
+        sorted_summaries = sorted(summaries, key=lambda r: safe_stat_size(r.output_path) or 0)
+
+        def _pct_str(size: int) -> str:
+            if source_size <= 0:
+                return "  N/A"
+            return f"{size / source_size * 100:5.1f}%"
+
+        # --- Table header ---
+        if has_targets:
+            logger.info("  %-25s  %12s  %7s  %s", "Strategy", "Size (MB)", "vs src", "Quality")
+            logger.info("  %-25s  %12s  %7s  %s", "-" * 25, "-" * 12, "-" * 7, "-" * 7)
+        else:
+            logger.info("  %-25s  %12s  %7s", "Strategy", "Size (MB)", "vs src")
+            logger.info("  %-25s  %12s  %7s", "-" * 25, "-" * 12, "-" * 7)
+
+        # --- Source row ---
+        if source_size > 0:
+            src_str = fmt_size_mb(source_size)
+            if has_targets:
+                logger.info("  %-25s  %12s  %7s  %s", source_stem[:25], src_str, "100.0%", "")
+            else:
+                logger.info("  %-25s  %12s  %7s", source_stem[:25], src_str, "100.0%")
+
+        # --- Strategy rows ---
+        any_miss = False
+        for summary in sorted_summaries:
+            size_bytes = safe_stat_size(summary.output_path) or 0
+            size_str   = fmt_size_mb(size_bytes)
+            pct        = _pct_str(size_bytes)
+
+            if has_targets:
+                if summary.metrics:
+                    mark = SUCCESS_SYMBOL_MINOR if summary.targets_met else FAILURE_SYMBOL_MINOR
+                    if not summary.targets_met:
+                        any_miss = True
+                else:
+                    mark = "-"
+                logger.info("  %-25s  %12s  %7s  %s", summary.strategy_name[:25], size_str, pct, mark)
+            else:
+                logger.info("  %-25s  %12s  %7s", summary.strategy_name[:25], size_str, pct)
+
+        # --- Output location note ---
+        output_dir = sorted_summaries[0].output_path.parent
+        logger.info("")
+        logger.info("  Files named: %s *.mkv  (where * is the strategy)", source_stem)
+        logger.info("  Location: %s", output_dir)
+
+        if not has_targets:
+            return
+
+        # --- Targets reminder ---
+        targets_str = "  Targets: " + ",  ".join(
+            f"{t.metric}-{t.statistic} ≥ {t.value:.2f}"
+            for t in quality_targets
+        )
+        logger.info("")
+        logger.info(targets_str)
+
+        if not any_miss:
+            logger.info("  %s All quality targets met.", SUCCESS_SYMBOL_MINOR)
+            return
+
+        # --- Per-miss details as key-value table ---
+        miss_table: dict[str, str | list] = {}
+
+        for summary in sorted_summaries:
+            if summary.targets_met or not summary.metrics:
+                continue
+            missed_lines = []
+            for target in quality_targets:
+                key   = f"{target.metric}_{target.statistic}"
+                value = summary.metrics.get(key)
+                if value is None:
+                    missed_lines.append(f"{target.metric}-{target.statistic}: not measured (target: {target.value:.2f})")
+                elif value < target.value:
+                    missed_lines.append(f"{target.metric}-{target.statistic}: {value:.2f} (target: {target.value:.2f})")
+            if missed_lines:
+                miss_table[f"{WARNING_SYMBOL} {summary.strategy_name}"] = missed_lines if len(missed_lines) > 1 else missed_lines[0]
+
+        fmt_key_value_table(miss_table)
+
+        if miss_table and metrics_sampling > 1:
+            logger.info("  (Subsampling 1:%d — with fewer frames measured, there's a higher chance to miss outliers, making quality targeting less reliable)", metrics_sampling)
+
+    @staticmethod
+    def _log_merge_summary_from_params(
+        params:          MergeParams,
+        quality_targets: list[QualityTarget],
+    ) -> None:
+        """Replay the merge summary table from persisted ``MergeParams``.
+
+        Delegates to ``_log_merge_summary`` over the persisted summary rows.
+        Called on the REUSED path so the user sees the same table as on the
+        original run.
+
+        Args:
+            params:          Loaded ``MergeParams`` from ``merge.yaml``.
+            quality_targets: Current quality targets (for miss-detail rendering).
+        """
+        if not params.strategy_summaries:
+            logger.info("  No summary data saved — re-run to generate.")
+            return
+
+        MergePhase._log_merge_summary(
+            summaries         = params.strategy_summaries,
+            source_stem       = params.source_stem,
+            source_size_bytes = params.source_size_bytes,
+            quality_targets   = quality_targets,
+            metrics_sampling  = params.sampling or 1,
+        )
+
+    @staticmethod
+    def _collect_crf_data(
+        winners:  list[Artifact[EncodedChunk]],
+        strategy: str,
+    ) -> list[tuple[float, float, Decimal]]:
+        """Extract ``(start_seconds, end_seconds, crf)`` tuples for a strategy's winners.
+
+        Reads the winning attempts via their payloads — ``payload.crf`` and the
+        window through ``payload.chunk`` (chunk-id parsing belongs to
+        :meth:`VideoStreamChunk.parse_chunk_id`).
+
+        Args:
+            winners:  The encoding phase's winner rows.
+            strategy: Strategy display name to filter by.
+
+        Returns:
+            List of ``(start_s, end_s, crf)`` sorted by start time.
+        """
+        result: list[tuple[float, float, Decimal]] = [
+            (payload.chunk.start_timestamp, payload.chunk.end_timestamp, payload.crf)
+            for payload in (row.payload for row in winners)
+            if payload.strategy.display_name() == strategy
+        ]
+        result.sort(key=lambda t: t[0])
+        return result
+
+    @staticmethod
+    def _build_mkvmerge_options(
+        chunks:          list[Path],
+        output:          Path,
+        timestamps_path: Path,
+    ) -> list[str]:
+        """Build the mkvmerge argument list for chunk concatenation with PTS restoration.
+
+        The first chunk is listed without a prefix; each subsequent chunk is
+        preceded by ``"+"`` as a separate element (mkvmerge append syntax).
+        ``--timestamps`` is applied to track 0 of the first chunk only.  The
+        output's track-header ``DefaultDuration`` is restored afterwards by
+        ``mkvpropedit`` (see :func:`_build_mkvpropedit_args`): mkvmerge derives it
+        from the ms-rounded restored timestamps, and ``--default-duration`` cannot
+        override that — it only reinterprets *input* tracks that lack timing.
+
+        Paths converted for the JSON file are standalone argv elements there, so
+        they use ``os.fspath`` — the same string a subprocess would resolve for a
+        path-like. The ``--timestamps`` value is a sub-string argument (track
+        spec) and keeps the plain form: mkvmerge parses it itself and may not
+        accept an extended-length prefix inside it.
+
+        Args:
+            chunks:          Ordered list of encoded chunk paths.
+            output:          Destination output MKV path.
+            timestamps_path: Path to the timestamps.txt file.
+
+        Returns:
+            List of strings suitable for writing to a JSON options file.
+        """
+        args: list[str] = [
+            "-o",              os.fspath(output),
+            "--timestamps", f"0:{timestamps_path}",
+            os.fspath(chunks[0]),
+        ]
+        for chunk in chunks[1:]:
+            args.append(f"+{os.fspath(chunk)}")
+        return args
+
+    @staticmethod
+    def _build_mkvpropedit_args(output: Path, fps: Fraction) -> list[str | os.PathLike]:
+        """Build the mkvpropedit argument list restoring the video track's frame-rate header.
+
+        mkvmerge derives ``DefaultDuration`` from the ms-rounded timestamps that
+        ``--timestamps`` restores (observed 42 ms → 500/21 for a 24000/1001
+        stream).  Header-only consumers then misdeclare the frame rate and flag
+        the output VFR (MediaInfo: "Frame rate mode: Variable").  The edit is
+        instant, does not touch block data, and takes an integer ns value.
+
+        The ns value uses exact rational arithmetic: the float path drifts at
+        NTSC rates (24000/1001 → 41 708 333.33 ns).
+
+        Args:
+            output: The merged MKV whose track header is patched in place.
+            fps:    The source stream's true frame rate.
+
+        Returns:
+            The mkvpropedit command; *output* is passed as a path-like so the
+            extended-length ``\\?`` prefix is injected only when the runner
+            resolves it.
+        """
+        return [
+            "mkvpropedit", output,
+            "--edit", MergePhase._MKVPROPEDIT_VIDEO_TRACK,
+            "--set", f"default-duration={round(MergePhase._NS_PER_SECOND / fps)}",
+        ]
+
+    @staticmethod
+    def _write_mkvmerge_options_file(path: Path, args: list[str]) -> None:
+        """Write mkvmerge arguments to a JSON options file atomically.
+
+        Uses the ``.tmp``-then-rename protocol for consistency.
+
+        Args:
+            path: Destination path for the options file.
+            args: List of mkvmerge argument strings.
+        """
+        tmp = path.parent / f"{path.stem}{TEMP_SUFFIX}"
+        tmp.write_text(json.dumps(args, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
