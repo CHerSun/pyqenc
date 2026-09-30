@@ -45,6 +45,7 @@ from pyqenc.state import ProbeState
 from pyqenc.stream_model import ExtendedVideoStream, VideoStream
 from pyqenc.utils.crop import detect_crop_parameters
 from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
+from pyqenc.utils.fs import remove_stale_tmp_file
 from pyqenc.utils.timestamps import count_frames
 
 if TYPE_CHECKING:
@@ -175,13 +176,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         self._video_stream = video_artifact.payload
 
         # Step 2 — .tmp pre-clean (probe.yaml is written via .tmp-then-rename).
-        tmp = probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX)
-        if tmp.exists():
-            try:
-                tmp.unlink()
-                logger.warning("Removed leftover temp file: %s", tmp.name)
-            except OSError as exc:
-                logger.warning("Could not remove temp file %s: %s", tmp, exc)
+        remove_stale_tmp_file(probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX))
 
         # Step 3 — load + currency.
         self._probe_state = ProbeState.load(probe_yaml)

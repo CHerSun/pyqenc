@@ -41,6 +41,7 @@ from pyqenc.models import (
     CodecConfig,
     QualityTarget,
     Strategy,
+    _coerce_decimal_pair,
 )
 from pyqenc.utils.naming import is_filesystem_safe_name
 
@@ -136,8 +137,7 @@ class ProfileConfig(BaseModel):
         """Coerce ``quality_range`` elements to ``Decimal``, preserving config order."""
         if v is None:
             return None
-        a, b = Decimal(str(v[0])), Decimal(str(v[1]))
-        return a, b
+        return _coerce_decimal_pair(v)
 
 
 class ExtractionConfig(BaseModel):

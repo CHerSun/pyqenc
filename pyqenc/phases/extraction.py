@@ -26,8 +26,6 @@ from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
-import yaml
-
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import (
     CHAPTERS_FILENAME,
@@ -69,7 +67,8 @@ from pyqenc.stream_model import (
 )
 from pyqenc.utils.disk_space import log_disk_space_info
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.utils.fs import remove_stale_tmp_files
+from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -551,13 +550,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             sidecar_path.unlink(missing_ok=True)
 
         # Step 2: clean up .tmp files.
-        if extracted_dir.exists():
-            for tmp in extracted_dir.glob(f"*{TEMP_SUFFIX}"):
-                try:
-                    tmp.unlink()
-                    logger.warning("Removed leftover temp file: %s", tmp)
-                except OSError as exc:
-                    logger.warning("Could not remove temp file %s: %s", tmp, exc)
+        remove_stale_tmp_files(extracted_dir)
 
         # Step 3: resolve the stream inventory (sidecar first, no re-probe).
         assert job_result.file is not None, "File guaranteed by JobPhase"
@@ -713,15 +706,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
     @staticmethod
     def _load_sidecar(path: Path) -> ExtractionSidecar | None:
         """Load ``extraction.yaml``; ``None`` when absent or unparseable."""
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return ExtractionSidecar.model_validate(data)
-        except Exception as exc:  # noqa: BLE001 — any parse failure means "re-enumerate"
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
+        return load_model(path, ExtractionSidecar)
 
     def _persist_sidecar(self, sidecar_path: Path) -> None:
         """Write the inventory to ``extraction.yaml`` (the unique info slices)."""

@@ -236,10 +236,13 @@ def fmt_key_value_table(kv_to_show: dict[str, str | list | object]) -> None:
 # Merge summary helpers
 # ---------------------------------------------------------------------------
 
-def _fmt_size_mb(size_bytes: int) -> str:
+def fmt_size_mb(size_bytes: int) -> str:
     """Format *size_bytes* as MB with a narrow-space thousands separator.
 
-    Example: 4_231_400_000 → ``"4 031.4"``
+    One decimal place below 1000 MB, none at or above (column width stays
+    stable for large outputs).
+
+    Example: 4_231_400_000 → ``"4 031"``
     """
     mb = size_bytes / (1024 * 1024)
     # Format with comma thousands separator then swap to narrow no-break space (U+202F). Use single decimal place for <1000 MB values.

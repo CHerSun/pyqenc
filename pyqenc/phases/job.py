@@ -23,8 +23,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
-import yaml
-
 from pyqenc.constants import TEMP_SUFFIX
 from pyqenc.metrics import MetricKey, MetricsCollector
 from pyqenc.models import (
@@ -42,8 +40,9 @@ from pyqenc.phase import (
     RecoveryError,
 )
 from pyqenc.stream_model import File, JobSidecar
+from pyqenc.utils.fs import remove_stale_tmp_file, safe_stat_size
 from pyqenc.utils.long_path import LongPath
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -178,13 +177,7 @@ class JobPhase(Phase[JobPhaseResult]):
         job_yaml = self._work_dir / _JOB_YAML_FILENAME
 
         # Step 1 — .tmp pre-clean (job.yaml is written via .tmp-then-rename).
-        tmp = job_yaml.with_name(job_yaml.name + TEMP_SUFFIX)
-        if tmp.exists():
-            try:
-                tmp.unlink()
-                logger.warning("Removed leftover temp file: %s", tmp.name)
-            except OSError as exc:
-                logger.warning("Could not remove temp file %s: %s", tmp, exc)
+        remove_stale_tmp_file(job_yaml.with_name(job_yaml.name + TEMP_SUFFIX))
 
         # Step 2 — load the File dump; absent/unparseable → must create.
         existing = self._load_job_sidecar(job_yaml)
@@ -334,15 +327,7 @@ class JobPhase(Phase[JobPhaseResult]):
         Returns:
             The loaded sidecar, or ``None`` when absent or unparseable.
         """
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return JobSidecar.model_validate(data)
-        except Exception as exc:  # noqa: BLE001 — any parse/validation failure means "rebuild"
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
+        return load_model(path, JobSidecar)
 
     def _probe_file(self) -> File:
         """Construct the run's single :class:`File`, eagerly from the filesystem.
@@ -351,11 +336,9 @@ class JobPhase(Phase[JobPhaseResult]):
             The source ``File`` (path + size; size is ``None`` when the stat
             fails).
         """
-        try:
-            file_size_bytes: int | None = self._source.stat().st_size
-        except OSError as exc:
-            file_size_bytes = None
-            logger.warning("Could not stat source file %s: %s", self._source, exc)
+        file_size_bytes = safe_stat_size(self._source)
+        if file_size_bytes is None:
+            logger.warning("Could not stat source file: %s", self._source)
         return File(path=self._source, file_size_bytes=file_size_bytes)
 
     def _find_source_mismatches(

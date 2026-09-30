@@ -38,8 +38,8 @@ from pyqenc.models import (
     CleanupLevel,
     CropParams,
     PhaseOutcome,
-    QualityTarget,
     Strategy,
+    targets_as_strings,
 )
 from pyqenc.phase import (
     Artifact,
@@ -60,6 +60,7 @@ from pyqenc.state import (
 )
 from pyqenc.stream_model import EncodedChunk, VideoStreamChunk
 from pyqenc.utils.alive import AdvanceState, ProgressBar
+from pyqenc.utils.log_format import fmt_size_mb
 from pyqenc.utils.visualization import QualityEvaluator
 
 if TYPE_CHECKING:
@@ -225,11 +226,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         strategies   = self._config.encoding.resolved_strategies
         force_wipe   = job_result.force_wipe
 
-        crop           = probe_result.crop
-        current_probe  = ProbeState(
-            frame_count = probe_result.stream.payload.frame_count if probe_result.stream is not None else 0,
-            crop        = crop if crop else None,
-        )
+        current_probe      = ProbeState.from_probe(probe_result)
         self._current_probe = current_probe
 
         # Step 1 — force wipe (before any currency decision, so --force
@@ -248,7 +245,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             )
 
         # Step 3 — quality-target / sampling change detection.
-        current_targets  = _targets_as_strings(self._config.encoding.resolved_targets)
+        current_targets  = targets_as_strings(self._config.encoding.resolved_targets)
         current_sampling = self._config.measurement.sampling
         targets_changed = (
             persisted is not None
@@ -373,7 +370,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         persisted  = self._persisted
         crop       = self._current_probe.crop if self._current_probe else None
 
-        current_targets  = _targets_as_strings(self._config.encoding.resolved_targets)
+        current_targets  = targets_as_strings(self._config.encoding.resolved_targets)
         current_sampling = self._config.measurement.sampling
 
         # Cheap path: all results cached, only the tolerance changed —
@@ -574,7 +571,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         """
         work_dir         = self._dep_result(JobPhase).work_dir
         opt_yaml         = work_dir / _OPTIMIZATION_YAML
-        current_targets  = _targets_as_strings(self._config.encoding.resolved_targets)
+        current_targets  = targets_as_strings(self._config.encoding.resolved_targets)
         current_sampling = self._config.measurement.sampling
 
         if not dry_run:
@@ -685,8 +682,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         )
 
         for res in results:
-            size_mb  = res.total_size / (1024 * 1024) if res.total_size > 0 else 0.0
-            size_str = f"{size_mb:,.1f}".replace(",", "\u202f")
+            size_str = fmt_size_mb(res.total_size)
             marker   = " ◀ selected" if res.strategy in selected_names else ""
             status   = "passed" if res.total_size > 0 else "failed"
             logger.info(
@@ -705,18 +701,6 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
-
-def _targets_as_strings(quality_targets: list[QualityTarget]) -> list[str]:
-    """Serialise *quality_targets* to ``"metric-statistic:value"`` strings.
-
-    Args:
-        quality_targets: Quality targets from :class:`~pyqenc.app_config.AppConfig`.
-
-    Returns:
-        Sorted list of strings like ``["vmaf-min:93.0"]``.
-    """
-    return sorted(f"{t.metric}-{t.statistic}:{t.value}" for t in quality_targets)
-
 
 def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
     """Delete the entire ``encoded/<strategy>/`` directory for each strategy.

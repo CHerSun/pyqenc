@@ -269,6 +269,40 @@ class QualityTarget(BaseModel):
     def __str__(self) -> str:
         return f"{self.metric}-{self.statistic}≥{self.value}"
 
+
+def targets_as_strings(targets: list[QualityTarget]) -> list[str]:
+    """Serialise quality targets to ``"metric-statistic:value"`` strings.
+
+    The canonical persisted form of a target set (``optimization.yaml``,
+    ``merge.yaml``): sorted so the list is order-independent — two runs with
+    the same targets in different config order serialise identically.
+
+    Args:
+        targets: Quality targets from :class:`~pyqenc.app_config.AppConfig`.
+
+    Returns:
+        Sorted list of strings like ``["vmaf-min:93.0"]``.
+    """
+    return sorted(f"{t.metric}-{t.statistic}:{t.value}" for t in targets)
+
+
+def _coerce_decimal_pair(v: tuple | list) -> tuple[Decimal, Decimal]:
+    """Coerce a two-element quality range to ``(Decimal, Decimal)``.
+
+    The shared ``quality_range`` before-validator body: each element passes
+    through ``str`` first so floats and YAML strings both land on the exact
+    same ``Decimal`` value.  Config order is preserved — the caller's
+    convention (first = better end) decides meaning, not the helper.
+
+    Args:
+        v: The two-element range (ints, floats, or strings).
+
+    Returns:
+        The pair as ``Decimal`` values.
+    """
+    return Decimal(str(v[0])), Decimal(str(v[1]))
+
+
 class CodecConfig(BaseModel):
     """Configuration for a video codec.
 
@@ -353,8 +387,7 @@ class CodecConfig(BaseModel):
 
         ``quality_range[0]`` is always the *better* end as specified in config.
         """
-        a, b = Decimal(str(v[0])), Decimal(str(v[1]))
-        return a, b
+        return _coerce_decimal_pair(v)
 
     @property
     def quality_log_padding(self) -> int:

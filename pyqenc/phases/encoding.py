@@ -30,7 +30,6 @@ from pyqenc.constants import (
     FAILURE_SYMBOL_MINOR,
     METRIC_KEY_QUALITY_MEASURE,
     SUCCESS_SYMBOL_MINOR,
-    TEMP_SUFFIX,
     THRESHOLD_ATTEMPTS_WARNING,
     WARNING_SYMBOL,
 )
@@ -76,6 +75,7 @@ from pyqenc.stream_model import (
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.ffmpeg_runner import FFmpegRequest, FFmpegRunResult, run_ffmpeg
+from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
 from pyqenc.utils.log_format import (
     fmt_chunk,
     fmt_chunk_attempt_result,
@@ -1223,10 +1223,7 @@ def build_encoded_chunk(
     Returns:
         The composed :class:`~pyqenc.stream_model.EncodedChunk`.
     """
-    try:
-        file_size_bytes: int | None = path.stat().st_size
-    except OSError:
-        file_size_bytes = None
+    file_size_bytes = safe_stat_size(path)
     source_info = chunk.stream.stream.info
     attempt_info = VideoStreamInfo(
         track_id     = 0,
@@ -1560,15 +1557,11 @@ def encode_all_chunks(
         len(chunks), len(strategies), len(quality_targets),
     )
 
-    # Stale .tmp cleanup
-    encoding_base = work_dir / ENCODING_WORKSPACE_DIR
-    if encoding_base.exists():
-        for tmp_file in encoding_base.rglob(f"*{TEMP_SUFFIX}"):
-            logger.warning("Removing stale temp file from previous run: %s", tmp_file.name)
-            try:
-                tmp_file.unlink()
-            except OSError as e:
-                logger.warning("Could not remove stale temp file %s: %s", tmp_file, e)
+    # No stale-.tmp scan here: the sole caller (``EncodingPhase._execute``)
+    # always follows ``EncodingPhase._recover()`` — which already cleaned the
+    # identical ``encoding/`` tree — and nothing writes ``.tmp`` under it
+    # between the two (the only intervening write is ``encoding.yaml`` at the
+    # work-dir root, outside this tree).
 
     # Artifact recovery: classify every (chunk, strategy) pair.
     chunk_ids      = [c.safe_name() for c in chunks]
@@ -1800,12 +1793,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # removed encoding.yaml, so a mismatch can only be seen without it).
         if not force_wipe:
             persisted_enc = EncodingParams.load(yaml_path)
-            probe_result  = self._dep_result(ProbePhase)
-            crop          = probe_result.crop if probe_result is not None else None
-            current_probe = ProbeState(
-                frame_count = probe_result.stream.payload.frame_count if (probe_result is not None and probe_result.stream is not None) else 0,
-                crop        = crop if crop is not None else CropParams(),
-            ) if probe_result is not None else None
+            current_probe = ProbeState.from_probe(self._dep_result(ProbePhase))
             self.params   = EncodingParams(probe=current_probe)
 
             if (
@@ -1820,13 +1808,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
                 )
 
         # Step 3: clean up .tmp files
-        if enc_dir.exists():
-            for tmp in enc_dir.rglob(f"*{TEMP_SUFFIX}"):
-                try:
-                    tmp.unlink()
-                    logger.warning("Removed leftover temp file: %s", tmp)
-                except OSError as exc:
-                    logger.warning("Could not remove temp file %s: %s", tmp, exc)
+        remove_stale_tmp_files(enc_dir)
 
         # Step 4: get chunks and strategies from dependencies
         chunking_result     = self._dep_result(ChunkingPhase)
@@ -1924,11 +1906,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # Persist encoding.yaml with current probe state
         encoding_yaml = work_dir / _ENCODING_YAML
         if self.params is None:
-            current_probe = ProbeState(
-                frame_count = probe_result.stream.payload.frame_count if (probe_result is not None and probe_result.stream is not None) else 0,
-                crop        = crop if crop is not None else CropParams(),
-            ) if probe_result is not None else None
-            self.params = EncodingParams(probe=current_probe)
+            self.params = EncodingParams(probe=ProbeState.from_probe(probe_result))
         self.params.save(encoding_yaml)
         logger.debug("Wrote encoding.yaml (crop=%s)", crop)
 

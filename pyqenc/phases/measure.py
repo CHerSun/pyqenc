@@ -32,10 +32,11 @@ from pyqenc.quality import ChunkQualityStats, MetricType
 from pyqenc.state import MeasureSidecar, ProbeState
 from pyqenc.stream_model import File, JobSidecar, VideoStream, VideoStreamInfo
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg_async
-from pyqenc.utils.log_format import _fmt_size_mb, fmt_key_value_table, fmt_metric_value
+from pyqenc.utils.fs import remove_stale_tmp_files
+from pyqenc.utils.log_format import fmt_key_value_table, fmt_metric_value, fmt_size_mb
 from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.visualization import QualityEvaluator
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -297,16 +298,8 @@ def _load_job_source_path(job_yaml: Path) -> LongPath | None:
     Returns:
         The recorded source path, or ``None`` when absent/unparseable.
     """
-    if not job_yaml.exists():
-        return None
-    try:
-        with job_yaml.open("r", encoding="utf-8") as fh:
-            data = yaml.safe_load(fh)
-        sidecar = JobSidecar.model_validate(data)
-    except Exception as exc:  # noqa: BLE001 — any parse failure means "no crop"
-        logger.warning("Could not load %s: %s", job_yaml, exc)
-        return None
-    return sidecar.source.path
+    sidecar = load_model(job_yaml, JobSidecar)
+    return sidecar.source.path if sidecar is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -874,7 +867,7 @@ def _log_measure_summary(targets: list[TargetMeasureResult]) -> None:
 
     for t in targets:
         stem      = t.target_video.stem[:STEM_WIDTH]
-        size_str  = _fmt_size_mb(t.target_video.stat().st_size) if t.target_video.exists() else "N/A"
+        size_str  = fmt_size_mb(t.target_video.stat().st_size) if t.target_video.exists() else "N/A"
         row_parts = [f"{stem:<{STEM_WIDTH}}", f"{size_str:>{SIZE_WIDTH}}"]
         for mt in all_metric_types:
             stats  = t.metrics.get(mt, {})
@@ -1012,12 +1005,7 @@ async def run_measure(
     measure_dir.mkdir(parents=True, exist_ok=True)
 
     # Startup cleanup: remove any stale .tmp metric files from interrupted runs
-    for tmp_file in measure_dir.glob("*.tmp"):
-        try:
-            tmp_file.unlink()
-            logger.debug("Cleaned up stale tmp file: %s", tmp_file.name)
-        except OSError as exc:
-            logger.warning("Could not delete stale tmp file %s: %s", tmp_file.name, exc)
+    remove_stale_tmp_files(measure_dir)
 
     # ------------------------------------------------------------------
     # Duration probing (needed for sidecar and duration-mismatch warnings)

@@ -19,7 +19,6 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar
 
-import yaml
 from scenedetect import ContentDetector, detect
 
 from pyqenc.metrics import MetricKey
@@ -44,7 +43,7 @@ from pyqenc.stream_model import (
     VideoStreamChunk,
 )
 from pyqenc.utils.alive import alive_bar
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -399,12 +398,4 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
     @staticmethod
     def _load_sidecar(path) -> ChunkingSidecar | None:
         """Load ``chunking.yaml``; ``None`` when absent or unparseable."""
-        if not path.exists():
-            return None
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh)
-            return ChunkingSidecar.model_validate(data)
-        except Exception as exc:  # noqa: BLE001 — any parse failure means "detect"
-            logger.warning("Could not load %s: %s", path, exc)
-            return None
+        return load_model(path, ChunkingSidecar)

@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 from dataclasses import dataclass as _dataclass
 from dataclasses import field as _field
-from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
@@ -62,6 +61,7 @@ from pyqenc.phases.job import JobPhase
 from pyqenc.state import ArtifactState, AudioSidecar
 from pyqenc.stream_model import AudioOutput, AudioStream, File
 from pyqenc.utils.alive import AdvanceState, ProgressBar
+from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
 from pyqenc.utils.long_path import LongPath
 
 _AUDIO_YAML = "audio.yaml"
@@ -175,7 +175,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
             self._force_wipe(audio_dir, sidecar_path, resolved)
 
         # Step 3 — clear leftover .tmp files.
-        self._clean_tmp(audio_dir)
+        remove_stale_tmp_files(audio_dir)
 
         # Step 4 + 5 — invalidate differing/removed chains and rewrite the sidecar
         #              BEFORE producing anything.
@@ -225,17 +225,6 @@ class AudioPhase(Phase[AudioPhaseResult]):
         if sidecar_path.exists():
             sidecar_path.unlink(missing_ok=True)
             logger.debug("force_wipe: deleted %s", sidecar_path.name)
-
-    def _clean_tmp(self, audio_dir: LongPath) -> None:
-        """Remove leftover ``.tmp`` files from a previous interrupted run."""
-        if not audio_dir.exists():
-            return
-        for tmp in audio_dir.glob(f"*{TEMP_SUFFIX}"):
-            try:
-                tmp.unlink()
-                logger.warning("Removed leftover temp file: %s", tmp.name)
-            except OSError as exc:
-                logger.warning("Could not remove temp file %s: %s", tmp, exc)
 
     def _selected_tracks(self) -> list[AudioStream]:
         """Resolve the working track set from extraction + ``audio.select``."""
@@ -368,7 +357,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
                     and path.name not in expected_names
                 ):
                     rows.append(Artifact(
-                        payload = File(path=LongPath(path), file_size_bytes=_safe_size(path)),
+                        payload = File(path=LongPath(path), file_size_bytes=safe_stat_size(path)),
                         state   = ArtifactState.COMPLETE,
                         wanted  = False,
                     ))
@@ -499,14 +488,6 @@ class AudioPhase(Phase[AudioPhaseResult]):
 # ---------------------------------------------------------------------------
 # AudioPhase module-level helpers
 # ---------------------------------------------------------------------------
-
-def _safe_size(path: Path) -> int | None:
-    """The file's size in bytes, or ``None`` when the stat fails."""
-    try:
-        return path.stat().st_size
-    except OSError:
-        return None
-
 
 def _parse_chain_name(filename: str) -> str | None:
     """Return the exact chain name from a ``<stream safe name> chain=<name>.<ext>`` filename.

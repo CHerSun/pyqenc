@@ -1325,6 +1325,11 @@ class QualityEvaluator:
     ) -> QualityEvaluation:
         """Evaluate encoded chunk against reference and quality targets.
 
+        Thin sync wrapper over :meth:`evaluate_chunk_async` (the single
+        implementation): runs the coroutine on a fresh event loop.  Use only
+        from sync code with no running loop — callers already inside an
+        ``async`` context must ``await`` the async twin instead.
+
         Args:
             encoded:             Path to encoded video file (read whole).
             reference:           The reference as a runner input — a chunk
@@ -1337,7 +1342,7 @@ class QualityEvaluator:
             fps_value:           Average fps for plot x-axis conversion
                                  (``fps_fraction`` of the source stream).
             subsample_factor:    Frame subsampling factor for metrics.
-            show_progress:       If True, display a live progress bar.
+            show_progress:      If True, display a live progress bar.
             plot_path:           Explicit path for the PNG plot.  When ``None``,
                                  written as ``<encoded.stem>.png`` inside ``output_dir``.
             chunk_start_seconds: Start timestamp of the chunk in seconds.
@@ -1348,49 +1353,22 @@ class QualityEvaluator:
         Returns:
             QualityEvaluation with metrics and target evaluation results.
         """
-        output_dir.mkdir(parents=True, exist_ok=True)
-        cwd = metrics_output_dir if metrics_output_dir is not None else output_dir
-
-        bar_title         = encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
-        _total_complexity = duration_seconds or 0.0  # single ffmpeg run, linear time
-
-        if show_progress:
-            with ProgressBar(_total_complexity, title=f"Metrics: {bar_title}", show_counters=False) as advance:
-                artifacts = asyncio.run(
-                    self._generate_metrics(
-                        encoded, reference, ref_crop,
-                        output_prefix    = str(cwd / f"{encoded.stem}."),
-                        metrics_sampling = subsample_factor,
-                        bar_advance      = advance,
-                        duration_seconds = duration_seconds or 0.0,
-                        width            = width,
-                        cwd              = cwd,
-                        fps_value        = fps_value,
-                    )
-                )
-                advance(0, AdvanceState.COMPLETE)
-        else:
-            artifacts = asyncio.run(
-                self._generate_metrics(
-                    encoded, reference, ref_crop,
-                    output_prefix    = str(cwd / f"{encoded.stem}."),
-                    metrics_sampling = subsample_factor,
-                    bar_advance      = None,
-                    duration_seconds = duration_seconds or 0.0,
-                    width            = width,
-                    cwd              = cwd,
-                )
+        return asyncio.run(
+            self.evaluate_chunk_async(
+                encoded             = encoded,
+                reference           = reference,
+                ref_crop            = ref_crop,
+                targets             = targets,
+                output_dir          = output_dir,
+                duration_seconds    = duration_seconds,
+                fps_value           = fps_value,
+                subsample_factor    = subsample_factor,
+                show_progress       = show_progress,
+                plot_path           = plot_path,
+                chunk_start_seconds = chunk_start_seconds,
+                width               = width,
+                metrics_output_dir  = metrics_output_dir,
             )
-
-        return self._finish_evaluation(
-            encoded             = encoded,
-            artifacts           = artifacts,
-            output_dir          = output_dir,
-            targets             = targets,
-            subsample_factor    = subsample_factor,
-            plot_path           = plot_path,
-            fps_value           = fps_value,
-            chunk_start_seconds = chunk_start_seconds,
         )
 
     def _finish_evaluation(

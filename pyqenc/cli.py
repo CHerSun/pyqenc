@@ -961,7 +961,7 @@ Examples:
     _set_process_priority()
 
 
-    def _sigint_handler(signum: int, frame: object) -> None:
+    def _sigint_handler(_signum: int, _frame: object) -> None:
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         kill_all_ffmpeg()
         flush_all_metrics()

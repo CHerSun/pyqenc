@@ -39,7 +39,13 @@ from pyqenc.constants import (
     WARNING_SYMBOL,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import CropParams, PhaseOutcome, QualityTarget, Strategy
+from pyqenc.models import (
+    CropParams,
+    PhaseOutcome,
+    QualityTarget,
+    Strategy,
+    targets_as_strings,
+)
 from pyqenc.phase import (
     Artifact,
     ArtifactState,
@@ -56,9 +62,11 @@ from pyqenc.phases.probe import ProbePhase
 from pyqenc.state import MergeParams, MergeStrategySummary, ProbeState
 from pyqenc.stream_model import EncodedChunk, ExtendedVideoStream, File, MergedVideo
 from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
+from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
 from pyqenc.utils.log_format import (
     fmt_key_value_table,
     fmt_metric_value,
+    fmt_size_mb,
 )
 from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.visualization import QualityEvaluator, create_crf_plot
@@ -78,11 +86,6 @@ _MERGE_YAML = "merge.yaml"
 
 _NS_PER_SECOND = 1_000_000_000
 _MKVPROPEDIT_VIDEO_TRACK = "track:v1"
-
-
-def _targets_as_strings(targets: list[QualityTarget]) -> list[str]:
-    """Serialise quality targets to ``"metric-statistic:value"`` strings."""
-    return [f"{t.metric}-{t.statistic}:{t.value}" for t in targets]
 
 
 def _expected_output_path(merged_dir: Path, source_stem: str, strategy: Strategy) -> Path:
@@ -116,14 +119,6 @@ def _load_merge_sidecar(output_file: Path) -> dict | None:
         return None
 
 
-def _safe_file_size(path: Path) -> int:
-    """Return the file size of *path* in bytes, or ``0`` on any OS error."""
-    try:
-        return path.stat().st_size
-    except OSError:
-        return 0
-
-
 def _build_strategy_summaries(
     rows:              list[Artifact[MergedVideo]],
     source_video_path: Path | None,
@@ -137,12 +132,10 @@ def _build_strategy_summaries(
     Returns:
         Tuple of ``(source_size_bytes, strategy_summaries)``.
     """
-    source_size = 0
-    if source_video_path is not None:
-        try:
-            source_size = source_video_path.stat().st_size
-        except OSError:
-            pass
+    source_size = (
+        (safe_stat_size(source_video_path) or 0)
+        if source_video_path is not None else 0
+    )
 
     summaries: list[MergeStrategySummary] = []
     for row in rows:
@@ -152,7 +145,7 @@ def _build_strategy_summaries(
         summaries.append(MergeStrategySummary(
             strategy_name   = payload.strategy.display_name(),
             output_path     = payload.output_path,
-            file_size_bytes = _safe_file_size(payload.output_path),
+            file_size_bytes = safe_stat_size(payload.output_path) or 0,
             metrics         = payload.metrics,
             targets_met     = payload.targets_met,
         ))
@@ -327,7 +320,7 @@ def _log_merge_summary(
     source_size = source_size_bytes
     has_targets = bool(quality_targets)
 
-    sorted_summaries = sorted(summaries, key=lambda r: _safe_file_size(r.output_path))
+    sorted_summaries = sorted(summaries, key=lambda r: safe_stat_size(r.output_path) or 0)
 
     def _pct_str(size: int) -> str:
         if source_size <= 0:
@@ -344,8 +337,7 @@ def _log_merge_summary(
 
     # --- Source row ---
     if source_size > 0:
-        src_mb  = source_size / (1024 * 1024)
-        src_str = f"{src_mb:,.1f}".replace(",", "\u202f")
+        src_str = fmt_size_mb(source_size)
         if has_targets:
             logger.info("  %-25s  %12s  %7s  %s", source_stem[:25], src_str, "100.0%", "")
         else:
@@ -354,9 +346,8 @@ def _log_merge_summary(
     # --- Strategy rows ---
     any_miss = False
     for summary in sorted_summaries:
-        size_bytes = _safe_file_size(summary.output_path)
-        size_mb    = size_bytes / (1024 * 1024)
-        size_str   = f"{size_mb:,.1f}".replace(",", "\u202f")
+        size_bytes = safe_stat_size(summary.output_path) or 0
+        size_str   = fmt_size_mb(size_bytes)
         pct        = _pct_str(size_bytes)
 
         if has_targets:
@@ -536,15 +527,12 @@ class MergePhase(Phase[MergePhaseResult]):
         probe: ProbeState | None = None
         probe_result = self._dep_result(ProbePhase)
         if probe_result is not None:
-            probe = ProbeState(
-                frame_count = probe_result.stream.payload.frame_count if probe_result.stream is not None else 0,
-                crop        = probe_result.crop,
-            )
+            probe = ProbeState.from_probe(probe_result)
 
         job_result = self._dep_result(JobPhase)
         if job_result is not None:
             return MergeParams(
-                quality_targets  = _targets_as_strings(job_result.config.encoding.resolved_targets),
+                quality_targets  = targets_as_strings(job_result.config.encoding.resolved_targets),
                 sampling = job_result.config.measurement.sampling,
                 probe            = probe,
             )
@@ -658,13 +646,7 @@ class MergePhase(Phase[MergePhaseResult]):
                     merge_yaml.unlink(missing_ok=True)
 
         # Step 3: clean up .tmp files
-        if merged_dir.exists():
-            for tmp in merged_dir.glob(f"*{TEMP_SUFFIX}"):
-                try:
-                    tmp.unlink()
-                    logger.warning("Removed leftover temp file: %s", tmp)
-                except OSError as exc:
-                    logger.warning("Could not remove temp file %s: %s", tmp, exc)
+        remove_stale_tmp_files(merged_dir)
 
         # Step 4: determine expected strategies from the typed winners field —
         # the already-cached EncodingPhase winners, distinct by safe name, in
@@ -747,7 +729,7 @@ class MergePhase(Phase[MergePhaseResult]):
                     else ArtifactState.PARTIAL
                 )
                 rows.append(Artifact(
-                    payload = File(path=LongPath(output_file), file_size_bytes=_safe_file_size(output_file)),
+                    payload = File(path=LongPath(output_file), file_size_bytes=safe_stat_size(output_file)),
                     state   = state,
                     wanted  = False,
                 ))
@@ -1043,7 +1025,8 @@ class MergePhase(Phase[MergePhaseResult]):
             summaries          = strategy_summaries,
             source_stem        = source_stem,
             source_size_bytes  = (
-                _safe_file_size(source_stream.stream.file.path) if source_stream is not None else 0
+                (safe_stat_size(source_stream.stream.file.path) or 0)
+                if source_stream is not None else 0
             ),
             quality_targets    = self._dep_result(JobPhase).config.encoding.resolved_targets,
             metrics_sampling   = self._dep_result(JobPhase).config.measurement.sampling,
