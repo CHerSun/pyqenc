@@ -368,7 +368,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         opt_yaml   = work_dir / _OPTIMIZATION_YAML
         tolerance  = self._config.encoding.optimize_tolerance
         persisted  = self._persisted
-        crop       = self._current_probe.crop if self._current_probe else None
+        crop       = self._current_probe.crop
 
         current_targets  = targets_as_strings(self._config.encoding.resolved_targets)
         current_sampling = self._config.measurement.sampling

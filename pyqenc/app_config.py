@@ -269,13 +269,12 @@ class EncodingConfig(BaseModel):
         """Resolved ``QualityTarget`` objects; populated after :meth:`resolve` is called.
 
         Raises:
-            RuntimeError: If :meth:`resolve` has not been called yet.
+            AssertionError: If :meth:`resolve` has not been called yet.
         """
-        if self._resolved_targets is None:
-            raise RuntimeError(
-                "EncodingConfig.resolve() has not been called — "
-                "resolved_targets is not available."
-            )
+        assert self._resolved_targets is not None, (
+            "EncodingConfig.resolve() must be called before accessing "
+            "resolved_targets"
+        )
         return self._resolved_targets
 
     @property
@@ -283,13 +282,12 @@ class EncodingConfig(BaseModel):
         """Resolved ``Strategy`` objects; populated after :meth:`resolve` is called.
 
         Raises:
-            RuntimeError: If :meth:`resolve` has not been called yet.
+            AssertionError: If :meth:`resolve` has not been called yet.
         """
-        if self._resolved_strategies is None:
-            raise RuntimeError(
-                "EncodingConfig.resolve() has not been called — "
-                "resolved_strategies is not available."
-            )
+        assert self._resolved_strategies is not None, (
+            "EncodingConfig.resolve() must be called before accessing "
+            "resolved_strategies"
+        )
         return self._resolved_strategies
 
 

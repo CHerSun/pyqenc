@@ -524,20 +524,13 @@ class MergePhase(Phase[MergePhaseResult]):
         so the values are always current (e.g. after CLI overrides) rather than
         snapshotted at construction time.
         """
-        probe: ProbeState | None = None
-        probe_result = self._dep_result(ProbePhase)
-        if probe_result is not None:
-            probe = ProbeState.from_probe(probe_result)
-
+        probe = ProbeState.from_probe(self._dep_result(ProbePhase))
         job_result = self._dep_result(JobPhase)
-        if job_result is not None:
-            return MergeParams(
-                quality_targets  = targets_as_strings(job_result.config.encoding.resolved_targets),
-                sampling = job_result.config.measurement.sampling,
-                probe            = probe,
-            )
-        # Fallback: empty params before job result is available
-        return MergeParams(quality_targets=[], sampling=1)
+        return MergeParams(
+            quality_targets  = targets_as_strings(job_result.config.encoding.resolved_targets),
+            sampling = job_result.config.measurement.sampling,
+            probe            = probe,
+        )
 
     # ------------------------------------------------------------------
     # Phase hooks
@@ -619,7 +612,6 @@ class MergePhase(Phase[MergePhaseResult]):
                 sampling_changed = persisted.sampling is not None and persisted.sampling != self.params.sampling
                 probe_changed    = (
                     persisted.probe is not None
-                    and self.params.probe is not None
                     and persisted.probe != self.params.probe
                 )
                 if targets_changed or sampling_changed:
@@ -803,14 +795,11 @@ class MergePhase(Phase[MergePhaseResult]):
 
         job_result = self._dep_result(JobPhase)
         probe_result = self._dep_result(ProbePhase)
-        crop: CropParams | None = probe_result.crop if probe_result is not None else None
-        source_stream: ExtendedVideoStream | None = (
-            probe_result.stream.payload if (probe_result is not None and probe_result.stream is not None) else None
-        )
-        source_frame_count: int = (
-            probe_result.stream.payload.frame_count
-            if (probe_result is not None and probe_result.stream is not None) else 0
-        )
+        crop: CropParams | None = probe_result.crop
+        # The dependency walk guarantees a completed probe with a resolved stream.
+        assert probe_result.stream is not None, "probe guaranteed complete by the dependency walk"
+        source_stream: ExtendedVideoStream = probe_result.stream.payload
+        source_frame_count: int            = probe_result.stream.payload.frame_count
         source_stem = job_result.source.stem
 
         # Build encoded_chunks dict from EncodingPhase result
@@ -934,7 +923,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 targets_met:  bool             = False
                 plot_path:    Path | None       = None
 
-                if source_stream is not None and job_result.config.encoding.resolved_targets:
+                if job_result.config.encoding.resolved_targets:
                     try:
                         with self._collector.time(MetricKey.MERGE, METRIC_KEY_QUALITY_MEASURE):
                             metrics_dict, targets_met, plot_path = _measure_quality(
@@ -1019,15 +1008,12 @@ class MergePhase(Phase[MergePhaseResult]):
             logger.error("  Failed strategies: %s", ", ".join(failed_strategies))
         _, strategy_summaries = _build_strategy_summaries(
             final_rows,
-            source_stream.stream.file.path if source_stream is not None else None,
+            source_stream.stream.file.path,
         )
         _log_merge_summary(
             summaries          = strategy_summaries,
             source_stem        = source_stem,
-            source_size_bytes  = (
-                (safe_stat_size(source_stream.stream.file.path) or 0)
-                if source_stream is not None else 0
-            ),
+            source_size_bytes  = safe_stat_size(source_stream.stream.file.path) or 0,
             quality_targets    = self._dep_result(JobPhase).config.encoding.resolved_targets,
             metrics_sampling   = self._dep_result(JobPhase).config.measurement.sampling,
         )
@@ -1039,7 +1025,7 @@ class MergePhase(Phase[MergePhaseResult]):
         if complete_count > 0:
             source_size_bytes, strategy_summaries = _build_strategy_summaries(
                 final_rows,
-                source_stream.stream.file.path if source_stream is not None else None,
+                source_stream.stream.file.path,
             )
             MergeParams(
                 quality_targets    = self.params.quality_targets,

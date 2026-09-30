@@ -65,11 +65,6 @@ from pyqenc.utils.long_path import LongPath
 
 _AUDIO_YAML = "audio.yaml"
 
-# Default channel layout when a selected track carries no extraction layout.
-# Preferred source is always the track's own ``AudioMetadata.layout``; this is a
-# graceful fallback so a missing layout never crashes chain execution.
-_FALLBACK_LAYOUT_TOKEN = "stereo"
-
 
 @dataclass
 class AudioPhaseResult(PhaseResult):

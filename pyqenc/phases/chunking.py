@@ -294,10 +294,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         """
         work_dir = self._dep_result(JobPhase).work_dir
         stream   = self._dep_result(ProbePhase).stream
-        if stream is None:
-            err = "No extended video stream available for chunking"
-            logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err)
+        assert stream is not None, "probe guaranteed complete by the dependency walk"
         extended = stream.payload
 
         boundaries = self._recovered_scenes
@@ -341,10 +338,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
     def _reused_result(self, wanted: list, message: str) -> ChunkingPhaseResult:
         """Build the reused result from the cached boundaries."""
         stream = self._dep_result(ProbePhase).stream
-        if stream is None:
-            err = "No extended video stream available for chunking"
-            logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err)
+        assert stream is not None, "probe guaranteed complete by the dependency walk"
         try:
             chunks = build_chunks(self._recovered_scenes, stream.payload)
         except RecoveryError as exc:

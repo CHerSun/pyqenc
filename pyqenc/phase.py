@@ -335,8 +335,8 @@ class Phase[ResultT: PhaseResult]:
             config:    Full validated application configuration.
             phases:    Phase registry link. Must contain an instance of every
                        type in ``DEPENDS_ON`` by the time ``run()`` is called;
-                       a declared dependency still missing then raises
-                       ``TypeError`` (mis-wired registry — a programming
+                       a declared dependency still missing then trips an
+                       ``assert`` (mis-wired registry — a programming
                        error, never silently dropped). ``None`` is legal only
                        for phases with no dependencies.
             collector: Metrics collector; the template owns all timing calls.
@@ -371,18 +371,17 @@ class Phase[ResultT: PhaseResult]:
             The dependency's typed result.
 
         Raises:
-            TypeError: When the declared dependency is missing from the
+            AssertionError: When the declared dependency is missing from the
                 registry (mis-wired registry — a programming error).
             AssertionError: When the dependency has no cached result — a
                 phase hook ran before the dependency walk (a programming
                 error, never a runtime condition to handle).
         """
         instance = self._phases.get(dep_cls)
-        if instance is None:
-            raise TypeError(
-                f"{type(self).__name__} requires {dep_cls.__name__} "
-                "in the phase registry (declared in DEPENDS_ON)"
-            )
+        assert instance is not None, (
+            f"{type(self).__name__} requires {dep_cls.__name__} "
+            "in the phase registry (declared in DEPENDS_ON)"
+        )
         result = instance.result
         assert result is not None, (
             f"{dep_cls.__name__}.result guaranteed by the dependency walk"
@@ -494,7 +493,7 @@ class Phase[ResultT: PhaseResult]:
 
         First fetches every type declared in ``DEPENDS_ON`` from the registry
         link — a declared dependency missing from the registry raises
-        ``TypeError`` (mis-wired registry, a programming error; the dependency
+        An ``AssertionError`` (mis-wired registry, a programming error; the dependency
         is never silently dropped). A ``FAILED``
         dependency chains a typed ``FAILED`` result, a ``PENDING`` one
         (dry-run only) chains a typed ``PENDING`` result.
@@ -508,24 +507,25 @@ class Phase[ResultT: PhaseResult]:
             (dry-run only), or ``None`` when the phase may proceed.
 
         Raises:
-            TypeError: When a dependency declared in ``DEPENDS_ON`` is absent
-                from the registry.
+            AssertionError: When a dependency declared in ``DEPENDS_ON`` is
+                absent from the registry (mis-wired registry — a programming
+                error).
         """
         missing = [
             cls.__name__ for cls in self.DEPENDS_ON if cls not in self._phases
         ]
-        if missing:
-            raise TypeError(
-                f"{type(self).__name__} requires {', '.join(missing)} "
-                "in the phase registry (declared in DEPENDS_ON)"
-            )
+        assert not missing, (
+            f"{type(self).__name__} requires {', '.join(missing)} "
+            "in the phase registry (declared in DEPENDS_ON)"
+        )
         failed:  list[str] = []
         pending: list[str] = []
         for dep_cls in self.DEPENDS_ON:
             dep = self._phases[dep_cls]
             if dep.result is None:
                 dep.run(dry_run=dry_run)
-            if dep.result is None or dep.result.outcome is PhaseOutcome.FAILED:
+            assert dep.result is not None, "run() assigns a result on every return path"
+            if dep.result.outcome is PhaseOutcome.FAILED:
                 failed.append(dep.name)
             elif dep.result.outcome is PhaseOutcome.PENDING:
                 pending.append(dep.name)

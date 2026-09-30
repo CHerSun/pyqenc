@@ -235,8 +235,7 @@ class JobPhase(Phase[JobPhaseResult]):
 
         # Fresh identity (job.yaml absent, or force_wipe after a source
         # mismatch) — recovery already probed it eagerly for the ledger row.
-        if self._file is None:
-            self._file = self._probe_file()
+        assert self._file is not None, "file guaranteed by the _recover pending branches"
         if not dry_run:
             write_yaml_atomic(
                 job_yaml,
@@ -285,14 +284,11 @@ class JobPhase(Phase[JobPhaseResult]):
         Returns:
             The populated result.
         """
-        file_row = (
-            Artifact(payload=self._file, state=file_state)
-            if self._file is not None else None
-        )
+        assert self._file is not None, "file set on every phase-built result"
         return JobPhaseResult(
             outcome     = outcome,
             message     = message,
-            file        = file_row,
+            file        = Artifact(payload=self._file, state=file_state),
             force_wipe  = self._force_wipe,
             config      = self._config,
             work_dir    = self._work_dir,

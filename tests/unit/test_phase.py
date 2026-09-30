@@ -147,7 +147,7 @@ class TestDeclaredDependencies:
         target = _DepStubPhase(NoOpMetricsCollector(), Recovery(pending=False), registry=registry)  # type: ignore[call-arg]
         # registry stays empty — the declared dep is absent
 
-        with pytest.raises(TypeError, match="requires _StubPhase"):
+        with pytest.raises(AssertionError, match="requires _StubPhase"):
             target.run()
 
 

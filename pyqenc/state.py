@@ -98,7 +98,7 @@ class ProbeState(BaseModel):
         return data
 
     @classmethod
-    def from_probe(cls, probe_result: ProbePhaseResult | None) -> Self | None:
+    def from_probe(cls, probe_result: ProbePhaseResult) -> Self:
         """Snapshot a probe phase result as the comparable ``ProbeState``.
 
         The single composition site for parameter-invalidations: phases that
@@ -108,14 +108,12 @@ class ProbeState(BaseModel):
         frame count 0, empty crop.
 
         Args:
-            probe_result: The probe phase's result, or ``None`` when the
-                          dependency short-circuited.
+            probe_result: The probe phase's result (guaranteed present —
+                          callers reach this only after the dependency walk).
 
         Returns:
-            The snapshot, or ``None`` when *probe_result* is ``None``.
+            The snapshot.
         """
-        if probe_result is None:
-            return None
         frame_count = (
             probe_result.stream.payload.frame_count
             if probe_result.stream is not None else 0

@@ -295,12 +295,9 @@ def _pair_rows(
     rows: list[Artifact[EncodedChunk]] = []
     for chunk_id in chunk_ids:
         for name in strategy_names:
-            pair = pair_recovery.pairs.get((chunk_id, name))
-            if (
-                pair is not None
-                and pair.state == ArtifactState.COMPLETE
-                and pair.winning_file is not None
-            ):
+            # Every (chunk_id, name) combination has a row — direct index.
+            pair = pair_recovery.pairs[(chunk_id, name)]
+            if pair.state == ArtifactState.COMPLETE and pair.winning_file is not None:
                 record = EncodedChunk.parse_file_name(pair.winning_file.name)
                 rows.append(Artifact(
                     payload = build_encoded_chunk(
@@ -316,7 +313,7 @@ def _pair_rows(
             else:
                 rows.append(Artifact(
                     payload = _pair_placeholder(work_dir, chunk_by_id[chunk_id], strategy_by_name[name]),
-                    state   = pair.state if pair is not None else ArtifactState.ABSENT,
+                    state   = pair.state,
                 ))
     return rows
 
@@ -1159,6 +1156,8 @@ class ChunkEncoder:
         # Progress bar advance — after the loop so ETA reflects actual encode time.
         if not _any_real_work:
             # All cache hits — chunk was fully recovered from existing artifacts.
+            # Same winner rule as the fresh path: a passing attempt when one exists,
+            # otherwise the best failing attempt (still the best recovered state).
             return ChunkEncodingResult(
                 chunk_id     = chunk.safe_name(),
                 strategy     = strategy.display_name(),
@@ -1166,7 +1165,7 @@ class ChunkEncoder:
                 targets_met  = search.best_targets_met,
                 final_crf    = search.best_quality,
                 attempts     = attempt_number,
-                encoded_file = final_attempt,
+                encoded_file = final_attempt if final_attempt is not None else best_fail_attempt,
                 reused       = True,
             )
 
@@ -1397,14 +1396,17 @@ async def _encode_chunks_parallel(
     if phase_recovery is not None:
         for chunk in chunks:
             for strategy in strategies:
-                pair_recovery = phase_recovery.pairs.get((chunk.safe_name(), strategy.display_name()))
-                if pair_recovery is not None and pair_recovery.state == ArtifactState.COMPLETE:
+                pair_recovery = phase_recovery.pairs[(chunk.safe_name(), strategy.display_name())]
+                if pair_recovery.state == ArtifactState.COMPLETE:
                     logger.debug(
                         "Skipping COMPLETE pair %s/%s (encoding result sidecar valid)",
                         chunk.safe_name(), strategy.display_name(),
                     )
-                    if pair_recovery.winning_file is None:
-                        raise ValueError(f"Winning file not found for {chunk.safe_name()}/{strategy.display_name()}")
+                    # COMPLETE recovery rows always carry their winning file.
+                    assert pair_recovery.winning_file is not None, (
+                        f"winning file guaranteed for COMPLETE pair "
+                        f"{chunk.safe_name()}/{strategy.display_name()}"
+                    )
                     if chunk.safe_name() not in result.encoded_chunks:
                         result.encoded_chunks[chunk.safe_name()] = {}
                     name_record = EncodedChunk.parse_file_name(pair_recovery.winning_file.name)
@@ -1455,17 +1457,18 @@ async def _encode_chunks_parallel(
 
                 # Update result
                 if chunk_result.success:
+                    # Success implies a built winner (encode_chunk's contract).
+                    assert chunk_result.encoded_file is not None and chunk_result.final_crf is not None
                     if chunk.safe_name() not in result.encoded_chunks:
                         result.encoded_chunks[chunk.safe_name()] = {}
-                    if chunk_result.encoded_file is not None and chunk_result.final_crf is not None:
-                        result.encoded_chunks[chunk.safe_name()][strategy.display_name()] = build_encoded_chunk(
-                            chunk        = chunk,
-                            strategy     = strategy,
-                            crf          = chunk_result.final_crf,
-                            path         = chunk_result.encoded_file.path,
-                            resolution   = chunk_result.encoded_file.resolution,
-                            frame_count  = chunk_result.frame_count,
-                        )
+                    result.encoded_chunks[chunk.safe_name()][strategy.display_name()] = build_encoded_chunk(
+                        chunk        = chunk,
+                        strategy     = strategy,
+                        crf          = chunk_result.final_crf,
+                        path         = chunk_result.encoded_file.path,
+                        resolution   = chunk_result.encoded_file.resolution,
+                        frame_count  = chunk_result.frame_count,
+                    )
 
                     if chunk_result.reused:
                         result.reused_count += 1
@@ -1710,7 +1713,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         logger.info("Scanning for existing artifacts...")
 
         probe_result = self._dep_result(ProbePhase)
-        crop         = probe_result.crop if probe_result is not None else None
+        crop         = probe_result.crop
 
         strategies = self._dep_result(OptimizationPhase).selected_strategies
         chunks     = self._dep_result(ChunkingPhase).chunks
@@ -1795,11 +1798,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             current_probe = ProbeState.from_probe(self._dep_result(ProbePhase))
             self.params   = EncodingParams(probe=current_probe)
 
-            if (
-                persisted_enc is not None
-                and current_probe is not None
-                and persisted_enc.probe != current_probe
-            ):
+            if persisted_enc is not None and persisted_enc.probe != current_probe:
                 raise RecoveryError(
                     "Probe params changed since last encoding run "
                     f"(persisted={persisted_enc.probe}, current={current_probe}). "
@@ -1880,7 +1879,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         """
         work_dir = self._dep_result(JobPhase).work_dir
         probe_result = self._dep_result(ProbePhase)
-        crop         = probe_result.crop if probe_result is not None else None
+        crop         = probe_result.crop
 
         # Resolve chunks and strategies from dependencies
         chunking_result     = self._dep_result(ChunkingPhase)
@@ -1935,10 +1934,9 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # must equal the source count. Recovered winners without a known count
         # (0 sentinel) skip the check with a warning — the final-merge
         # verification remains the hard backstop.
-        source_total = (
-            probe_result.stream.payload.frame_count
-            if probe_result is not None and probe_result.stream is not None else 0
-        )
+        # The dependency walk guarantees a completed probe with a resolved stream.
+        assert probe_result.stream is not None, "probe guaranteed complete by the dependency walk"
+        source_total = probe_result.stream.payload.frame_count
         winners = [
             (chunk_id, strategy_name, encoded)
             for chunk_id, by_strategy in enc_result.encoded_chunks.items()

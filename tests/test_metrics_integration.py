@@ -1473,9 +1473,10 @@ class TestMergePhaseTiming:
     ) -> MergePhase:
         """Return a ``MergePhase`` with pre-wired job, extraction, encoding, and audio deps.
 
-        ``probe_stream`` optionally supplies a real ``ExtendedVideoStream`` as
-        the probe result payload — needed for paths that require a source
-        stream (e.g. merge quality measurement).
+        ``probe_stream`` overrides the default real ``ExtendedVideoStream``
+        probe payload (e.g. with specific fps for merge quality measurement).
+        The dependency walk guarantees a resolved stream — the fixture always
+        provides one.
         """
         from pyqenc.models import PhaseOutcome
         from pyqenc.phases.audio import AudioPhase
@@ -1532,13 +1533,14 @@ class TestMergePhaseTiming:
 
         from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
         probe_mock = MagicMock(spec=ProbePhase)
+        if probe_stream is None:
+            probe_stream = _make_extended_stream(
+                tmp_path / "source.mkv", frame_count=640, duration=26.67,
+            )
         probe_mock.result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
             message   = "probe complete",
-            stream    = (
-                Artifact(payload=probe_stream, state=ArtifactState.COMPLETE)
-                if probe_stream is not None else None
-            ),
+            stream    = Artifact(payload=probe_stream, state=ArtifactState.COMPLETE),
         )
 
         registry: dict[type, object] = {}

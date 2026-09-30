@@ -183,3 +183,40 @@ ultrafast+h265 / -anime / -aq) — everything else had to rebuild:
   both targets PSNR-med 48.7 / SSIM-med 99.0 / VMAF-med 96.5 / VIF-med 94.9 —
   matching the merge-phase measurements. Graphs + sidecars written; 0 stale
   .tmp files remain.
+
+## Contract-enforcement audit (2026-09-30, user-requested doctrine pass)
+
+Doctrine: `isinstance`/`is None` checks are for EXTERNAL optionality (CLI, config,
+sidecar, media/ffprobe data, real API Optionals); PROGRAMMATIC contracts (values our
+own construction guarantees) get `assert` or a tightened footprint.
+
+**isinstance (39 sites): all compliant.** External parsing/validation (VMAF JSON,
+ffprobe dicts, config YAML, deep-merge), assert-form param narrowing (audio filters),
+and heterogeneous artifact-row dispatch (`isinstance(r.payload, X)` filters over
+genuinely mixed lists). No changes needed.
+
+**is None / is not None (274 code hits):** 157 external-OK, 70 dispatch-OK, 22 already
+assert-form, 1 doubtful, **24 contract violations fixed**:
+
+| Family | Sites | Fix |
+|---|---|---|
+| A — `_dep_result` values treated as Optional (can never be None; walk guarantees COMPLETED/REUSED deps) | encoding ×4, merge ×9 | Dead conjuncts/wrappers dropped; probe-stream reads now `assert probe_result.stream is not None, "probe guaranteed complete by the dependency walk"` |
+| B — `ProbeState.from_probe` Optional footprint dead at all 4 call sites | state.py, merge.py | Footprint tightened: `from_probe(probe_result: ProbePhaseResult) -> Self` |
+| C — chunking `_execute`/`_reused_result` silently FAILED on impossible None stream (its own `_recover` already asserts) | chunking ×2 | Mirrored the assert |
+| D — `.get()` over always-populated pair-recovery dict (keys built from the same lists that populate it) | encoding ×3 | Direct indexing |
+| E — success⇒winner | encoding ×1 | Assert added; **latent bug fixed**: all-cache-hit path (line ~1162) returned `success=True, encoded_file=None` when every cached attempt missed targets — now falls back to `best_fail_attempt` like its fresh-path sibling, instead of becoming a phantom failed pair |
+| Singles | phase.py dep-walk, job.py ×2 | Asserts per house style (`"...set on every phase-built result"`) |
+| Truthiness sibling | optimization.py | `self._current_probe.crop if self._current_probe else None` → direct read |
+| Dead constant | audio.py | `_FALLBACK_LAYOUT_TOKEN` deleted (layout contract is enforced by asserts) |
+
+**User decisions applied:** merge.py:859 compound `is None or not .exists()` KEPT
+(defense-in-depth, fails loudly); three exception-form programmatic contracts CONVERTED
+to asserts (EncodingConfig.resolved_targets/strategies resolve-order RuntimeError;
+`_dep_result` + `_ensure_dependencies` registry TypeError; encoding COMPLETE-row
+winning_file ValueError) — docstrings updated to AssertionError.
+
+**Test fallout (both fixture defects, not behavior):** test_phase registry test now
+pins AssertionError; merge fixture's `probe_stream=None` default constructed the
+impossible state the new assert rejects — default is now a real stream.
+
+Post-check: ruff clean; full suite 696 passed / 9 skipped / 0 failed.
