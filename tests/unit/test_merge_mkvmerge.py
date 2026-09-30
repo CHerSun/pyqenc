@@ -712,6 +712,19 @@ class TestMergeFailsWithoutTimestamps:
 # Missed-targets warning (completion-line escalation)
 # ---------------------------------------------------------------------------
 
+def _make_phase(targets: list) -> MergePhase:
+    """A minimal MergePhase whose config carries exactly *targets*."""
+    from types import SimpleNamespace
+
+    from pyqenc.metrics import NoOpMetricsCollector
+
+    config = SimpleNamespace(
+        encoding  = SimpleNamespace(resolved_targets=targets),
+        measurement = SimpleNamespace(sampling=3),
+    )
+    return MergePhase(config, {}, collector=NoOpMetricsCollector())  # type: ignore[arg-type]
+
+
 class TestMissedTargetsWarning:
     """A missed quality target escalates to a WARNING naming every miss.
 
@@ -734,7 +747,7 @@ class TestMissedTargetsWarning:
         metrics = {"vmaf_min": 88.3, "psnr_min": 43.5}   # vmaf missed, psnr met
 
         with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
-            MergePhase._log_missed_targets_warning("ultrafast+h265", metrics, targets)
+            _make_phase(targets)._log_missed_targets_warning("ultrafast+h265", metrics)
 
         warnings = [r for r in caplog.records if r.levelno == _logging.WARNING]
         assert len(warnings) == 1, "exactly one warning expected"
@@ -752,6 +765,6 @@ class TestMissedTargetsWarning:
         metrics = {"vmaf_min": 96.5}
 
         with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
-            MergePhase._log_missed_targets_warning("ultrafast+h265", metrics, targets)
+            _make_phase(targets)._log_missed_targets_warning("ultrafast+h265", metrics)
 
         assert not [r for r in caplog.records if r.levelno == _logging.WARNING]

@@ -575,13 +575,11 @@ class MergePhase(Phase[MergePhaseResult]):
                 if job_result.config.encoding.resolved_targets:
                     try:
                         with self._collector.time(MetricKey.MERGE, METRIC_KEY_QUALITY_MEASURE):
-                            metrics_dict, targets_met, plot_path = MergePhase._measure_quality(
-                                final_result     = output_file,
-                                source_stream    = source_stream,
-                                ref_crop         = crop,
-                                quality_targets  = job_result.config.encoding.resolved_targets,
-                                output_dir       = merged_dir,
-                                metrics_sampling = self._dep_result(JobPhase).config.measurement.sampling,
+                            metrics_dict, targets_met, plot_path = self._measure_quality(
+                                final_result  = output_file,
+                                source_stream = source_stream,
+                                ref_crop      = crop,
+                                output_dir    = merged_dir,
                             )
                     except (OSError, ValueError) as exc:
                         logger.warning("  Could not measure quality: %s", exc)
@@ -608,28 +606,24 @@ class MergePhase(Phase[MergePhaseResult]):
                     logger.warning("No CRF data available for strategy %s — skipping CRF plot", strategy_name)
 
                 # Write sidecar (marks this output as COMPLETE)
-                MergePhase._write_merge_sidecar(
-                    output_file     = output_file,
-                    frame_count     = frame_count,
-                    all_metrics     = metrics_dict,
-                    quality_targets = self._dep_result(JobPhase).config.encoding.resolved_targets,
-                    targets_met     = targets_met,
-                    plot_path       = plot_path,
+                self._write_merge_sidecar(
+                    output_file = output_file,
+                    frame_count = frame_count,
+                    all_metrics = metrics_dict,
+                    targets_met = targets_met,
+                    plot_path   = plot_path,
                 )
 
                 frames_sym  = SUCCESS_SYMBOL_MINOR if frame_count_ok else FAILURE_SYMBOL_MINOR
                 frames_str  = str(frame_count) if frame_count is not None else "unknown"
-                metrics_str = MergePhase._fmt_inline_metrics(metrics_dict, self._dep_result(JobPhase).config.encoding.resolved_targets)
+                metrics_str = self._fmt_inline_metrics(metrics_dict)
                 logger.info(
                     "%s Merged %s:  frames=%s %s%s",
                     SUCCESS_SYMBOL_MAJOR, strategy_name, frames_str, frames_sym,
                     f"  {metrics_str}" if metrics_str else "",
                 )
                 if metrics_dict and not targets_met:
-                    MergePhase._log_missed_targets_warning(
-                        strategy_name, metrics_dict,
-                        self._dep_result(JobPhase).config.encoding.resolved_targets,
-                    )
+                    self._log_missed_targets_warning(strategy_name, metrics_dict)
 
                 final_rows.append(Artifact(
                     payload = MergedVideo(
@@ -660,11 +654,11 @@ class MergePhase(Phase[MergePhaseResult]):
             source_stream.stream.file.path,
         )
         MergePhase._log_merge_summary(
-            summaries          = strategy_summaries,
-            source_stem        = source_stem,
-            source_size_bytes  = safe_stat_size(source_stream.stream.file.path) or 0,
-            quality_targets    = self._dep_result(JobPhase).config.encoding.resolved_targets,
-            metrics_sampling   = self._dep_result(JobPhase).config.measurement.sampling,
+            summaries         = strategy_summaries,
+            source_stem       = source_stem,
+            source_size_bytes = safe_stat_size(source_stream.stream.file.path) or 0,
+            quality_targets   = self._config.encoding.resolved_targets,
+            metrics_sampling  = self._config.measurement.sampling,
         )
         if failed_strategies and not final_rows:
             return self._make_result(PhaseOutcome.FAILED, [], "All strategy merges failed")
@@ -775,14 +769,13 @@ class MergePhase(Phase[MergePhaseResult]):
             ))
         return source_size, summaries
 
-    @staticmethod
     def _write_merge_sidecar(
-        output_file:     Path,
-        frame_count:     int | None,
-        all_metrics:     dict[str, float],
-        quality_targets: list[QualityTarget],
-        targets_met:     bool,
-        plot_path:       Path | None,
+        self,
+        output_file:  Path,
+        frame_count:  int | None,
+        all_metrics:  dict[str, float],
+        targets_met:  bool,
+        plot_path:    Path | None,
     ) -> None:
         """Atomically write a merge sidecar alongside *output_file*.
 
@@ -791,6 +784,7 @@ class MergePhase(Phase[MergePhaseResult]):
         can directly compare target vs. actual in the YAML.
         Keys use ``{metric}-{statistic}`` form (e.g. ``vmaf-min``) matching the CLI convention.
         """
+        quality_targets = self._config.encoding.resolved_targets
         targets_section = {f"{t.metric}-{t.statistic}": t.value for t in quality_targets}
         # Only the user-requested targets' metrics; values coerced to plain Python
         # ``float`` to avoid numpy scalar serialisation artefacts.
@@ -813,14 +807,12 @@ class MergePhase(Phase[MergePhaseResult]):
         except (OSError, yaml.YAMLError) as exc:
             logger.warning("Could not write merge sidecar for %s: %s", output_file.name, exc)
 
-    @staticmethod
     def _measure_quality(
-        final_result:     Path,
-        source_stream:    ExtendedVideoStream,
-        ref_crop:         CropParams | None,
-        quality_targets:  list[QualityTarget],
-        output_dir:       Path,
-        metrics_sampling: int,
+        self,
+        final_result:  Path,
+        source_stream: ExtendedVideoStream,
+        ref_crop:      CropParams | None,
+        output_dir:    Path,
     ) -> tuple[dict[str, float], bool, Path | None]:
         """Measure final quality metrics for *final_result* against *source_stream*.
 
@@ -838,12 +830,12 @@ class MergePhase(Phase[MergePhaseResult]):
             encoded            = final_result,
             reference          = source_stream.stream.as_input(),
             ref_crop           = ref_crop,
-            targets            = quality_targets,
+            targets            = self._config.encoding.resolved_targets,
             output_dir         = output_dir,
             duration_seconds   = source_stream.stream.info.duration_seconds or 0.0,
             fps_value          = source_stream.stream.info.fps_fraction,
             metrics_output_dir = output_dir,
-            subsample_factor   = metrics_sampling,
+            subsample_factor   = self._config.measurement.sampling,
             show_progress      = True,
             plot_path          = plot_path,
         )
@@ -856,10 +848,9 @@ class MergePhase(Phase[MergePhaseResult]):
         plot_path = evaluation.logs.plot if evaluation.logs.plot else None
         return metrics_dict, evaluation.targets_met, plot_path
 
-    @staticmethod
     def _fmt_inline_metrics(
-        metrics_dict:    dict[str, float],
-        quality_targets: list[QualityTarget],
+        self,
+        metrics_dict: dict[str, float],
     ) -> str:
         """Return a compact single-line metrics string for the completion log line.
 
@@ -873,7 +864,7 @@ class MergePhase(Phase[MergePhaseResult]):
             Space-separated metric readings, or empty string if no targets.
         """
         parts: list[str] = []
-        for target in quality_targets:
+        for target in self._config.encoding.resolved_targets:
             key   = f"{target.metric}_{target.statistic}"
             value = metrics_dict.get(key)
             if value is None:
@@ -882,11 +873,10 @@ class MergePhase(Phase[MergePhaseResult]):
             parts.append(f"{target.metric}-{target.statistic}={fmt_metric_value(value)} {symbol}")
         return "  ".join(parts)
 
-    @staticmethod
     def _log_missed_targets_warning(
-        strategy_name:  str,
-        metrics_dict:   dict[str, float],
-        quality_targets: list[QualityTarget],
+        self,
+        strategy_name: str,
+        metrics_dict:  dict[str, float],
     ) -> None:
         """Log a WARNING naming every target this strategy missed, with wanted vs actual.
 
@@ -900,7 +890,7 @@ class MergePhase(Phase[MergePhaseResult]):
             quality_targets: The targets that were checked.
         """
         missed: list[str] = []
-        for target in quality_targets:
+        for target in self._config.encoding.resolved_targets:
             value = metrics_dict.get(f"{target.metric}_{target.statistic}")
             if value is not None and value < target.value:
                 missed.append(
