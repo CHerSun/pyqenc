@@ -51,23 +51,18 @@ Make zero-row omission display-only rather than load-bearing for resume?
 
 ---
 
-## 🤔 4. Pre-existing ruff violations (21) in `extraction.py` / `test_metrics_integration.py`
+## 🤔 4. Pre-existing ruff violations in `extraction.py` / `test_metrics_integration.py`
 
-**Status:** needs thinking (cleanup pass; identical on HEAD `1336cbf`, none
-introduced by the 0.14.2 fix — verified via stash)
+**Status:** needs thinking (cleanup pass; the `UP040` TypeAlias item died with
+`ExtractionArtifact` in the artifact-model migration, 2026-09-30)
 
-- `UP040` — `ExtractionArtifact: TypeAlias` should use the `type` keyword
-  (`pyqenc/phases/extraction.py:707`).
-- `BLE001` — blind `except Exception` ×2 (`pyqenc/phases/extraction.py:1000`,
-  `:1205`).
-- `F821` — undefined names in test-file annotations: `JobPhaseResult`,
-  `ExtractionPhase`, `ChunkingPhase`, `AudioPhase`, `OptimizationPhase`,
-  `EncodingPhase`, `MergePhase` and their results are used in return
-  annotations but only imported function-locally
-  (`tests/test_metrics_integration.py:180, 213, 351, 374, 393, 628, 782, 805,
-  829, 1068, 1091, 1109, 1128, 1386, 1409, 1433, 1448`). These are latent
+- `BLE001` — blind `except Exception` in `pyqenc/phases/extraction.py`
+  (the timestamps extractor path).
+- `F821` — undefined names in test-file annotations: the phase/result classes
+  are used in return annotations but only imported function-locally
+  (`tests/test_metrics_integration.py`, ~18 sites). These are latent
   annotation bugs, not just lint noise.
-- `F841` — unused `success_result` (`tests/test_metrics_integration.py:1545`).
+- `F841` — unused `success_result` (`tests/test_metrics_integration.py`).
 
 **Questions to think about:** one ruff-cleanup commit? For the test file:
 `TYPE_CHECKING` imports vs. local imports — note coding-standards prefers
@@ -426,71 +421,6 @@ coverage)?
 (Old DeepSeek chat link in the source notes is the original sketch.)
 
 ---
-
-## 🤔 37. Import cleanup (mid-file, stale, cyclic-import care)
-
-**Status:** needs thinking (localized)
-
-- Mid-file *module-level* imports persist in two of the largest files:
-  `pyqenc/phases/chunking.py:328-348` (duplicate `TYPE_CHECKING` import of
-  line 24, plus re-imports of constants/phase helpers) and
-  `pyqenc/phases/extraction.py:527-533` (mid-file TypeAlias/constants/models
-  imports incl. `from pyqenc.models import AudioMetadata` duplicating line
-  31). encoding/optimization/job are clean at module level.
-- Cyclic-import care is currently structural (deferred imports inside
-  `_build_registry`, `phase.py:382-418`) — any cleanup must preserve that.
-
-**Questions to think about:** one cleanup commit hoisting these to top?
-Combine with §4's ruff pass?
-
----
-
-# Checked against `D:\todo pyqenc.md` — already resolved (not carried over)
-
-- **"no app metrics from extraction" / "no dotted app metrics from
-  extraction"** — extraction now records top-level `extraction` + `recovery`
-  (`extraction.py:808,864`, the 0.14.2 fix); dotted keys under `extraction`
-  are intentionally absent per spec (staleness of that spec motivation is
-  tracked in §2).
-- **"remove phase.scan; run-only model; pipeline shouldn't hard-fail;
-  recover internal, returns all artifacts; per-phase _recover audit"** —
-  done. No `scan` exists; `Phase` has `run()` (`phase.py:207`);
-  `Runner.run` never raises on FAILED (`runner.py:166,233-246`), dependents
-  chain FAILED with a clear reason via `resolve_dependencies`
-  (`phase.py:275-313`); `_recover` returns ALL artifacts with `run()` doing
-  the single wanted-filter (extraction `extraction.py:947,820`, audio, merge;
-  chunking/encoding equivalents verified).
-- **"Attachments are not extracted by ffmpeg somewhy"** — fixed:
-  `AttachmentStream` + `ffmpeg -dump_attachment:{track}`
-  (`extraction.py:253-273,1328-1341`). Note: attachments are still never
-  merged back — final output is video-only by design (`merge.py:8-10`,
-  `--exclude` example at `cli.py:167-169`).
-- **"h.264 codec_private_data differs between chunks on merge"** — handled
-  via `-x264-params profile=high:level=5.1:sps-id=0`
-  ("ensures consistent codec_private_data across chunks",
-  `pyqenc/default_config.yaml:153-154`); PTS restored by mkvmerge
-  `--timestamps` (`merge.py:1217`).
-- **"DynAudNorm — set to 3…4 max"** — `maxgain: 3.0`
-  (`pyqenc/default_config.yaml:76`). (No hard cap validation on
-  `DynAudNormParams`, `audio/filters.py:242-246`, but the value is applied.)
-- **"codecs / profiles rework (codec = encoder setup, profile = tuning incl.
-  quality control)"** — implemented: `CodecConfig` owns quality control
-  (`models.py:331-371`), `ProfileConfig` is the tuning layer
-  (`app_config.py:100-134`), strategies resolve from `profile[+preset]`
-  patterns (`app_config.py:175-273`, `Strategy` at `models.py:136-171`).
-- **"Audio config — split into convert.* / normalize.* / dynaudnorm.*"** —
-  superseded by the audio-chains rework: `AudioConfig` is now a filter
-  palette + ordered chains + track select (`app_config.py:382-427`,
-  `audio/filters.py`).
-- **"quality.py `normalize_metric` — useless"** — removed; only the used
-  `MetricInfo.normalize` remains (`quality.py:114`).
-- **"`+` in file names — поменяляли, но теперь артефакты теряются"** — the
-  `+` experiment is absent from the tree; `":"→"_"` is applied consistently
-  and recovery re-indexes from disk each run; no artifact-loss path found
-  (residual dedup concern was resolved by the `2026-09-25 file-stream-model`
-  spec — strategy objects in-memory, sanitize in one place).
-- **VSCode Mermaid `/generate_diagram_from_code` tip** — tooling note for
-  the editor, not a project task; intentionally not carried over.
 
 ## 38. Single source of truth enforced via explicitly required function arguments
 
