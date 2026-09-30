@@ -159,3 +159,24 @@ Executed as three parallel passes (core+utils / phases / utils+config+models). P
 Commits: `1b9acae` (stages 1-2) → `cfe2582` (7a audio tests) → `431ee5c` (3 comments) → `6adb5e5` (7b measure crash) → `7323111` (4 imports) → `be9d1fd` (5 inlining) → `618276f` (6 DRY) → this commit (8 tests + 9 bookkeeping).
 
 Behavior changes (all deliberate, flagged in stage rows): fixed `pyqenc measure` crash; fixed sync-evaluation `fps_value` drop; ≥1000MB sizes lose decimals in two log tables; merge target list ordering now sorted (one-time merge.yaml invalidation on legacy workdirs); `.tmp` cleanup recursive everywhere; sidecar-load warnings logged from `yaml_utils`.
+
+## E2E verification (2026-09-30, post-cleanup)
+
+Work dir seeded with only `encoding/` (attempts + metric sidecars for
+ultrafast+h265 / -anime / -aq) — everything else had to rebuild:
+
+- `pyqenc auto test.mkv --strategies "h265*+ultrafast" -y` → ✅ success.
+  Extraction/probe/chunking/audio ran fresh; **Encoding recovered from
+  intermediates: 0 newly encoded, 214 reused, 0 failed** (winning CRFs
+  re-selected from persisted attempt metrics — all attempt lines `[reused]`).
+  Audio: 4 outputs (2 tracks × 2 chains). Merge: 2 strategies concatenated +
+  quality-measured (vmaf-min 88.3/88.2 vs 93 target — expected at ultrafast,
+  warned, non-fatal). Frame-preservation check skipped for attempts recovered
+  without frame counts (recovery nuance, logged).
+- `pyqenc measure test.mkv <merged h265> <merged h265-anime>` → ✅ success —
+  the Stage-7b crash fix verified live (this invocation previously died with
+  TypeError before any work). Crop auto-loaded from job.yaml (22,22,0,0);
+  60/60 screenshots; per-target metrics at sampling=1 (~10 min each):
+  both targets PSNR-med 48.7 / SSIM-med 99.0 / VMAF-med 96.5 / VIF-med 94.9 —
+  matching the merge-phase measurements. Graphs + sidecars written; 0 stale
+  .tmp files remain.
