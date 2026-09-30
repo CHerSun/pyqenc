@@ -84,16 +84,26 @@ def setup_logging(
     # Remove existing handlers
     root_logger.handlers.clear()
 
-    # Console handler with colors
+    # Console handler — colors only on a live terminal (a piped/redirected
+    # stream would garble the ANSI codes into unprintable bytes; alive_progress
+    # makes the same distinction for its progress bars).
     if console:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(level)
 
-        console_formatter = ColoredFormatter(
-            fmt="%(asctime)s [%(levelname)s] %(message)s",
-            datefmt="%Y-%m-%d %H:%M"
+        is_tty = getattr(sys.stdout, "isatty", lambda: True)()
+        formatter: logging.Formatter = (
+            ColoredFormatter(
+                fmt="%(asctime)s [%(levelname)s] %(message)s",
+                datefmt="%Y-%m-%d %H:%M",
+            )
+            if is_tty
+            else logging.Formatter(
+                fmt="%(asctime)s [%(levelname)s] %(message)s",
+                datefmt="%Y-%m-%d %H:%M",
+            )
         )
-        console_handler.setFormatter(console_formatter)
+        console_handler.setFormatter(formatter)
         root_logger.addHandler(console_handler)
 
     # File handler without colors
