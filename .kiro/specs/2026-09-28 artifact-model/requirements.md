@@ -4,7 +4,7 @@
 
 - Spec: Artifact Model — the generic recovery & contract layer over the file → stream object model
 - Created: 2026-09-28
-- Completed:
+- Completed: 2026-09-30
 
 ## Cross-Spec Notes
 

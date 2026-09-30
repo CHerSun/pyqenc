@@ -3,7 +3,7 @@
 <!-- markdownlint-disable MD024 -->
 
 - Created: 2026-09-28
-- Completed:
+- Completed: 2026-09-30
 
 ## Overview
 
@@ -78,15 +78,15 @@ Staged so every task lands green: payload entities land first (purely additive),
   - Property tests (design Correctness Properties): result/field correspondence incl. payload-type match; internal rows never in results; ledger completeness per phase
   - `uv run ruff check .`; full `uv run python -m pytest`
 
-- [ ] 10. Docs + full e2e verification
+- [x] 10. Docs + full e2e verification
   - `docs/architecture.md`: rewrite the artifact-states section for the generic model; uniform recovery reporting; `merged/` in the flow overview
   - Full e2e on real media + reuse-run: every phase logs the recovery line; optimization counts attempts; extraction table derives from payloads; merged outputs land in `merged/`; invariant chain intact (source == Σ attempts == final)
   - Sweep TODO §4/§37 leftovers if the migration erased their target sites (extraction ruff items, mid-file imports)
 
-- [ ] 11. Cross-spec review + TODO reconciliation
+- [x] 11. Cross-spec review + TODO reconciliation
   - Review this spec against `2026-09-09 artifact-state-refactor` (successor note already recorded) and `2026-09-25 file-stream-model` (related-successor note already recorded); verify both summaries still match what landed
   - Archive `2026-09-09 artifact-state-refactor` → `_archive/` (successor recorded, tasks complete)
   - Prune/annotate TODO entries covered here; confirm §4/§37 status
 
-- [ ] 12. Finalize
+- [x] 12. Finalize
   - Update `- Completed:` date in all three files
