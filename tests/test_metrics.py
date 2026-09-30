@@ -129,9 +129,11 @@ def test_write_failure_logs_warning_and_does_not_raise(
 ) -> None:
     """Write failure must log WARNING and not propagate (Req 1.5)."""
     collector = _make_collector(tmp_path)
-    with caplog.at_level(logging.WARNING, logger="pyqenc.metrics"):
-        with patch.object(Path, "replace", side_effect=OSError("disk full")):
-            collector.flush()  # must not raise
+    with (
+        caplog.at_level(logging.WARNING, logger="pyqenc.metrics"),
+        patch.object(Path, "replace", side_effect=OSError("disk full")),
+    ):
+        collector.flush()  # must not raise
 
     assert any("failed to write" in r.message for r in caplog.records), (
         "Expected a WARNING about write failure"
@@ -334,7 +336,7 @@ def test_active_timer_not_double_counted_after_exit(tmp_path: Path) -> None:
     raw = yaml.safe_load((tmp_path / METRICS_YAML_FILENAME).read_text(encoding="utf-8"))
     top_level = {e["key"]: e["seconds"] for e in raw["pipeline_metrics"]["time_distribution"]["top_level"]}
     # seconds is int(round(elapsed)); if it rounds to 0 the key is absent (zeros omitted)
-    expected_secs = int(round(elapsed_after))
+    expected_secs = round(elapsed_after)
     if expected_secs == 0:
         assert MetricKey.AUDIO.value not in top_level
     else:

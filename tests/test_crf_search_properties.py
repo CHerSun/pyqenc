@@ -107,7 +107,7 @@ class TestScoreAttemptSignContract:
         # Feature: crf-search-refactor, Property 5: _score_attempt sign contract
         **Validates: Requirements 1.3, 3.x**
         """
-        targets, metrics = target_data
+        targets, _ = target_data
 
         # Force all actuals to pass with surplus > acceptance_delta
         forced_metrics: dict[str, float] = {}
@@ -162,7 +162,6 @@ class TestScoreAttemptSignContract:
         forced_metrics: dict[str, float] = {}
         for target in targets:
             key  = f"{target.metric}_{target.statistic}"
-            info = MetricType(target.metric).info
             # surplus = 0 ≤ acceptance_delta always
             forced_metrics[key] = target.value
 
@@ -498,13 +497,11 @@ class TestFinalityAfterExhaustion:
         current_q = better + span / 2
         current_q = (current_q / granularity).to_integral_value() * granularity
 
-        idx = 0
         exhausted_at = None
-        for _ in range(200):
+        for idx in range(200):
             passes  = oracle[idx % len(oracle)]
             metrics = {"vmaf_min": 95.0 if passes else 80.0}
             next_q  = search.record(current_q, metrics)
-            idx += 1
             if next_q is None:
                 exhausted_at = search.attempts
                 break
@@ -578,7 +575,6 @@ class TestProtocolStateInvariants:
         #   QualitySearchV2 tracks the best-scoring attempt via _best_q.
         # P4 verifies the shared invariants (5.1, 5.2, 5.5) that hold for both,
         # plus the stronger best-quality invariants only for QualitySearchV2.
-        call_count = 0
         any_pass   = False
 
         current_q = better + span / 2
@@ -591,14 +587,13 @@ class TestProtocolStateInvariants:
             score = _score_attempt(metrics, [target])
 
             next_q = search.record(current_q, metrics)
-            call_count += 1
 
             if score >= 0.0:
                 any_pass = True
 
             # Invariant 5.5: attempts == number of calls made.
-            assert search.attempts == call_count, (
-                f"attempts={search.attempts} != call_count={call_count}"
+            assert search.attempts == i + 1, (
+                f"attempts={search.attempts} != calls={i + 1}"
             )
 
             # Invariant 5.2: after >= 1 call, best_quality is not None.

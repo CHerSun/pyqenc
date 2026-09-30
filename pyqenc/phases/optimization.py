@@ -240,13 +240,12 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             persisted = None
 
         # Step 2 — probe mismatch invalidation.
-        if persisted is not None and persisted.strategy_results:
-            if persisted.probe != current_probe:
-                raise RecoveryError(
-                    "Probe params changed since last optimization run "
-                    f"(persisted={persisted.probe}, current={current_probe}). "
-                    "Re-run with --force to delete stale optimization artifacts and continue."
-                )
+        if persisted is not None and persisted.strategy_results and persisted.probe != current_probe:
+            raise RecoveryError(
+                "Probe params changed since last optimization run "
+                f"(persisted={persisted.probe}, current={current_probe}). "
+                "Re-run with --force to delete stale optimization artifacts and continue."
+            )
 
         # Step 3 — quality-target / sampling change detection.
         current_targets  = _targets_as_strings(self._config.encoding.resolved_targets)

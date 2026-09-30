@@ -23,6 +23,7 @@ Covers:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -55,20 +56,16 @@ from pyqenc.phases.merge import (
 )
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import ArtifactState
-from pyqenc.stream_model import File, VideoStream, VideoStreamInfo
+from pyqenc.stream_model import (
+    ExtendedVideoStream,
+    File,
+    VideoStream,
+    VideoStreamInfo,
+)
 
 
-def _extended_stream(path: Path, frame_count: int) -> "ExtendedVideoStream":
+def _extended_stream(path: Path, frame_count: int) -> ExtendedVideoStream:
     """An ExtendedVideoStream for the source (fast facet + frame count)."""
-    from fractions import Fraction
-
-    from pyqenc.stream_model import (
-        ExtendedVideoStream,
-        File,
-        VideoStream,
-        VideoStreamInfo,
-    )
-
     return ExtendedVideoStream(
         stream=VideoStream(
             file=File(path=path, file_size_bytes=64),
@@ -145,15 +142,13 @@ def _make_chunk_window(source, chunk_id):
 
     start, end = 0.0, 1.0
     if "-" in chunk_id:
-        try:
+        with contextlib.suppress(ValueError):
             from pyqenc.stream_model import VideoStreamChunk as _VSC
             bounds = _VSC.parse_chunk_id(chunk_id, ExtendedVideoStream(
                 stream=VideoStream(file=File(path=source), info=VideoStreamInfo(track_id=0)),
                 frame_count=24, crop=CropParams(),
             ))
             start, end = bounds.start_timestamp, bounds.end_timestamp
-        except Exception:
-            pass
     return VideoStreamChunk(
         stream = ExtendedVideoStream(
             stream = VideoStream(

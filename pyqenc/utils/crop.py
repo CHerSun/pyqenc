@@ -98,6 +98,6 @@ def detect_crop_parameters(
         logger.info(f"Cropping: {crop.display()} (detected)")
         return crop
 
-    except Exception as e:
+    except (OSError, ValueError) as e:
         logger.error("Failed to detect crop parameters: %s", e)
         return CropParams()

@@ -112,7 +112,7 @@ class TestRecoverAttemptsComplete:
 
     def test_winning_file_exists(self, tmp_path: Path) -> None:
         out_dir = _encoded_dir(tmp_path)
-        winning = _make_complete_pair(out_dir)
+        _make_complete_pair(out_dir)
 
         result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY])
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
@@ -157,9 +157,11 @@ class TestWriteYamlAtomic:
         path = tmp_path / "out.yaml"
         tmp_path_expected = tmp_path / "out.tmp"
 
-        with patch("pyqenc.utils.yaml_utils.yaml.dump", side_effect=RuntimeError("boom")):
-            with pytest.raises(RuntimeError):
-                write_yaml_atomic(path, {"x": 1})
+        with (
+            patch("pyqenc.utils.yaml_utils.yaml.dump", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError),
+        ):
+            write_yaml_atomic(path, {"x": 1})
 
         assert not tmp_path_expected.exists(), ".tmp file must be deleted on failure"
 

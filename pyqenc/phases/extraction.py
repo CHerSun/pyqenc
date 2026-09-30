@@ -164,7 +164,6 @@ def _base_info_fields(raw: dict) -> dict:
         "codec_name":       raw.get("codec_name"),
         "language":         tags.get("language"),
         "title":            tags.get("title") or tags.get("TITLE"),
-        "start_timestamp":  _float_or_none(raw.get("start_time")),
         "duration_seconds": (
             _float_or_none(raw.get("duration"))
             if raw.get("duration") is not None
@@ -192,7 +191,6 @@ def _video_info(raw: dict) -> VideoStreamInfo:
         fps          = float(fps_fraction) if fps_fraction is not None else None,
         fps_fraction = fps_fraction,
         resolution   = f"{width}x{height}" if width and height else None,
-        pix_fmt      = raw.get("pix_fmt"),
     )
 
 
@@ -451,10 +449,6 @@ class ExtractionPhaseResult(PhaseResult):
     chapters:           Artifact[Chapters] | None         = None
     work_dir:           Path | None                       = None
 
-    # Transitional population (deleted in task 9 when the base field becomes
-    # the derived concatenation): the base ``artifacts`` field is populated
-    # from these fields by ``_make_result`` so generic consumers stay fed.
-
     @property
     def timestamps_path(self) -> Path | None:
         """The per-frame PTS index path — derived; ``None`` when absent (Req 3.5)."""
@@ -463,18 +457,6 @@ class ExtractionPhaseResult(PhaseResult):
         assert self.work_dir is not None, "work_dir set on every phase-built result"
         return _expected_index_path(self.work_dir)
 
-    @property
-    def chapters_path(self) -> Path | None:
-        """The extracted chapters.xml path — derived; ``None`` when absent."""
-        if self.chapters is None or self.chapters.state != ArtifactState.COMPLETE:
-            return None
-        assert self.work_dir is not None, "work_dir set on every phase-built result"
-        return _expected_chapters_path(self.work_dir)
-
-
-# ---------------------------------------------------------------------------
-# Interim legacy adapters (deleted with the last legacy consumer)
-# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # ExtractionPhase
@@ -913,7 +895,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
                 _expected_index_path(work_dir),
             )
             artifact.state = ArtifactState.COMPLETE
-        except Exception as exc:
+        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
             err = f"Failed to extract timestamps: {exc}"
             logger.critical(err)
             errors.append(err)

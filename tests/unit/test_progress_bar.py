@@ -30,7 +30,7 @@ def _collect(total: float, calls: list[tuple[float, AdvanceState]], show_counter
     import pyqenc.utils.alive as alive_mod
 
     @contextmanager
-    def _mock_alive_bar(**kwargs: object) -> Generator[_FakeBar, None, None]:
+    def _mock_alive_bar(**kwargs: object) -> Generator[_FakeBar]:
         yield fake
 
     original = alive_mod.alive_bar

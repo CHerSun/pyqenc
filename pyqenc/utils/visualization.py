@@ -27,11 +27,11 @@ from pyqenc.constants import (
 from pyqenc.models import CropParams, QualityTarget
 from pyqenc.quality import (
     ChunkQualityStats,
+    FullMetricStatistics,
     MetricStats,
     MetricType,
-    QualityLogs,
     QualityEvaluation,
-    _MetricStatistics,
+    QualityLogs,
     run_metrics,
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
@@ -251,6 +251,8 @@ def parse_vmaf_file(file_path: Path, factor: int = 1) -> pd.DataFrame:
 
     Raises:
         ValueError: If the file is not a valid VMAF JSON.
+        TypeError: If the VMAF JSON structure has wrong types (``frames`` is
+                   not an array, or a frame entry is not an object).
     """
     try:
         with file_path.open("r") as fh:
@@ -260,14 +262,14 @@ def parse_vmaf_file(file_path: Path, factor: int = 1) -> pd.DataFrame:
 
     frames = vmaf_data.get("frames")
     if not isinstance(frames, list):
-        raise ValueError(f"VMAF 'frames' is not an array: {file_path}")
+        raise TypeError(f"VMAF 'frames' is not an array: {file_path}")
     if not frames:
         raise ValueError(f"VMAF 'frames' array is empty: {file_path}")
 
     data: list[dict[str, float | int]] = []
     for frame in frames:
         if not isinstance(frame, dict):
-            raise ValueError(f"VMAF frame is not a dictionary: {file_path}")
+            raise TypeError(f"VMAF frame is not a dictionary: {file_path}")
         n    = frame.get("frameNum")
         vmaf = frame.get("metrics", {}).get("vmaf")
         if n is not None and vmaf is not None:
@@ -347,7 +349,7 @@ def compute_statistics(
     values:          pd.Series,
     std_cutoff_max:  float | None = None,
     std_cutoff_min:  float | None = None,
-) -> _MetricStatistics:
+) -> FullMetricStatistics:
     """Compute quantile-based statistics for any numeric metric series.
 
     Values are expected to already be on the display scale (normalized).
@@ -451,7 +453,7 @@ def create_unified_plot(
     styles:              dict[MetricType, MetricVisualStyle] | None = None,
     fps:                 float | None                         = None,
     chunk_start_seconds: float                               = 0.0,
-) -> dict[MetricType, _MetricStatistics]:
+) -> dict[MetricType, FullMetricStatistics]:
     """Create a unified quality-metrics plot and save it to disk.
 
     Generates a figure with:
@@ -478,7 +480,7 @@ def create_unified_plot(
                              from 0.
 
     Returns:
-        Mapping of ``MetricType`` to full ``_MetricStatistics``.
+        Mapping of ``MetricType`` to full ``FullMetricStatistics``.
 
     Raises:
         ValueError: If ``df_norm`` contains no recognized metric columns.
@@ -624,7 +626,7 @@ def create_unified_plot(
     lines:  list[plt.Line2D] = []
     labels: list[str]        = []
 
-    for metric_type in scaled_values:
+    for metric_type, plot_values in scaled_values.items():
         style  = effective_styles[metric_type]
 
         if style.y_axis == "left" and ax_left is not None:
@@ -634,7 +636,6 @@ def create_unified_plot(
         else:
             ax = ax_main
 
-        plot_values = scaled_values[metric_type]
         plot_index  = frame_index[metric_type] + frame_offset
 
         n_points = len(plot_values)
@@ -661,7 +662,7 @@ def create_unified_plot(
         labels.append(style.label)
 
     # Compute full statistics from scaled values
-    stats: dict[MetricType, _MetricStatistics] = {
+    stats: dict[MetricType, FullMetricStatistics] = {
         mt: compute_statistics(scaled_values[mt])
         for mt in scaled_values
     }
@@ -677,7 +678,7 @@ def create_unified_plot(
     _summary_boxes.append((
         current_x, _SUMMARY_BOX_Y_POS,
         f"Frames:\n  Total: {total_frames}\n  Checked: {frames_checked}\n  Factor: 1:{factor}",
-        dict(facecolor="wheat", alpha=_SUMMARY_BOX_ALPHA),
+        {"facecolor": "wheat", "alpha": _SUMMARY_BOX_ALPHA},
     ))
     current_x += _SUMMARY_BOX_WIDTH + _SUMMARY_BOX_SPACING
 
@@ -711,7 +712,7 @@ def create_unified_plot(
         )
         _summary_boxes.append((
             current_x, _SUMMARY_BOX_Y_POS, summary_text,
-            dict(facecolor=style.color, alpha=_SUMMARY_BOX_METRIC_ALPHA),
+            {"facecolor": style.color, "alpha": _SUMMARY_BOX_METRIC_ALPHA},
         ))
         current_x += _SUMMARY_BOX_WIDTH + _SUMMARY_BOX_SPACING
 
@@ -824,7 +825,7 @@ def _is_known_metric(col: str) -> bool:
         return False
 
 
-def extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) -> MetricStats:
+def extract_key_stats(full_stats: FullMetricStatistics, metric_type: MetricType) -> MetricStats:
     """Extract the key statistics subset from a full statistics dict.
 
     For PSNR, substitutes the highest non-inf percentile for ``max`` when the
@@ -902,7 +903,7 @@ def parse_metrics(artifacts: QualityLogs, factor: int = 1) -> pd.DataFrame:
             df = parser(path, factor)  # type: ignore[operator]
             frames.append(df)
             logger.debug("parse_metrics: parsed %s (%d frames)", metric_type.value, len(df))
-        except Exception as exc:
+        except (OSError, ValueError, TypeError) as exc:
             logger.warning("parse_metrics: failed to parse %s from %s: %s", metric_type.value, path, exc)
 
     if not frames:
@@ -965,117 +966,6 @@ def compute_metric_stats(df_norm: pd.DataFrame) -> ChunkQualityStats:
             "compute_metric_stats: %s min=%.2f med=%.2f max=%.2f",
             mt.value, result[mt]["min"], result[mt]["median"], result[mt]["max"],
         )
-    return result
-
-
-def _auto_output_path(artifacts: "QualityLogs") -> Path:
-    """Derive an output plot path from the first available metric file in *artifacts*."""
-    first = artifacts.psnr_log or artifacts.ssim_log or artifacts.vmaf_json or artifacts.vif_log
-    if not first:
-        raise ValueError("At least one metric file must be provided")
-    stem   = first.stem
-    prefix = stem.split(".")[0] if "." in stem else stem
-    return first.parent / f"{prefix}_metrics.png"
-
-
-def analyze_chunk_quality(
-    psnr_log:            Path | None  = None,
-    ssim_log:            Path | None  = None,
-    vmaf_json:           Path | None  = None,
-    vif_log:             Path | None  = None,
-    factor:              int          = 1,
-    output_path:         Path | None  = None,
-    title:               str | None   = None,
-    generate_plot:       bool         = True,
-    fps:                 float | None = None,
-    chunk_start_seconds: float        = 0.0,
-    delete_after_parse:  bool         = True,
-) -> ChunkQualityStats:
-    """Analyze video chunk quality from metric log files.
-
-    Parses the provided metric files, computes statistics, and optionally
-    generates a unified visualization plot.  Each raw ``.tmp`` log file is
-    deleted immediately after successful parsing when ``delete_after_parse``
-    is ``True`` (best-effort; a warning is logged on failure).
-
-    Internally uses the composable pipeline:
-    ``parse_metrics`` → ``normalize_metrics`` → ``compute_metric_stats``
-    → ``create_unified_plot``.
-
-    Args:
-        psnr_log:            Path to PSNR log file (optional).
-        ssim_log:            Path to SSIM log file (optional).
-        vmaf_json:           Path to VMAF JSON file (optional).
-        vif_log:             Path to VIF log file (optional).
-        factor:              Frame sampling factor used during metric generation.
-        output_path:         Destination for the plot PNG.  Auto-derived when ``None``.
-        title:               Plot title.  Auto-generated when ``None``.
-        generate_plot:       Whether to create and save the visualization.
-        fps:                 Frames per second of the encoded video.
-        chunk_start_seconds: Start timestamp of the chunk in seconds.
-        delete_after_parse:  When ``True`` (default), each raw metric file is
-                             deleted immediately after successful parsing.
-
-    Returns:
-        ``ChunkQualityStats`` with statistics for each available metric.
-
-    Raises:
-        ValueError: If no valid metric file could be parsed.
-    """
-    from pyqenc.quality import QualityLogs
-
-    artifacts = QualityLogs(
-        psnr_log  = psnr_log,
-        ssim_log  = ssim_log,
-        vmaf_json = vmaf_json,
-        vif_log   = vif_log,
-    )
-
-    # parse_metrics handles per-metric failures internally (logs warning, skips).
-    df_raw  = parse_metrics(artifacts, factor)
-    df_norm = normalize_metrics(df_raw)
-    result  = compute_metric_stats(df_norm)
-
-    # Deferred deletion — all parsers have finished, safe to remove files now.
-    # vif_log and vmaf_json may point to the same file; use a set to delete once.
-    if delete_after_parse:
-        to_delete: set[Path] = set()
-        for path in (psnr_log, ssim_log, vmaf_json, vif_log):
-            if path is not None and path.exists():
-                to_delete.add(path)
-        for path in to_delete:
-            try:
-                path.unlink(missing_ok=True)
-                logger.debug("Deleted raw metric tmp file: %s", path.name)
-            except Exception as exc:
-                logger.warning("Could not delete metric tmp file %s: %s", path.name, exc)
-
-    # Single concise info summary
-    parts = [
-        f"{mt.value.upper()} min={result[mt]['min']:.1f} med={result[mt]['median']:.1f}"
-        for mt in [MetricType.VMAF, MetricType.PSNR, MetricType.SSIM, MetricType.VIF]
-        if mt in result
-    ]
-    if parts:
-        logger.debug("Metrics (normalized): %s", " | ".join(parts))
-
-    if generate_plot:
-        if output_path is None:
-            output_path = _auto_output_path(artifacts)
-        if title is None:
-            names = [col.upper() for col in df_norm.columns if _is_known_metric(col)]
-            title = f"Video Quality Metrics Analysis ({', '.join(names)})"
-        logger.debug("Generating unified plot: %s", output_path)
-        create_unified_plot(
-            df_norm             = df_norm,
-            factor              = factor,
-            output_path         = output_path,
-            title               = title,
-            fps                 = fps,
-            chunk_start_seconds = chunk_start_seconds,
-        )
-        logger.debug("Plot saved to %s", output_path)
-
     return result
 
 
@@ -1238,7 +1128,7 @@ def create_crf_plot(
         transform         = fig.transFigure,
         fontsize          = _FONT_SUMMARY_BOX,
         verticalalignment = "bottom",
-        bbox              = dict(boxstyle="round", facecolor=_CRF_COLOR, alpha=_SUMMARY_BOX_METRIC_ALPHA),
+        bbox              = {"boxstyle": "round", "facecolor": _CRF_COLOR, "alpha": _SUMMARY_BOX_METRIC_ALPHA},
         family            = "monospace",
     )
 
@@ -1606,7 +1496,7 @@ class QualityEvaluator:
             try:
                 path.unlink(missing_ok=True)
                 logger.debug("Deleted raw metric tmp file: %s", path.name)
-            except Exception as exc:
+            except OSError as exc:
                 logger.warning("Could not delete metric tmp file %s: %s", path.name, exc)
 
         artifacts.plot = resolved_plot_path

@@ -15,7 +15,6 @@ from enum import Enum
 from pathlib import Path
 from typing import (
     TypedDict,
-    TypeVar,
 )
 
 import pandas as pd
@@ -97,7 +96,6 @@ class MetricInfo:
     """
 
     name:                 str
-    id:                   str
     higher_is_better:     bool
     _offset:              float
     _scale_factor:        float
@@ -193,7 +191,6 @@ class MetricType(Enum):
 _METRIC_INFO: dict[MetricType, MetricInfo] = {
     MetricType.VMAF: MetricInfo(
         name              = "VMAF",
-        id                = "vmaf",
         higher_is_better  = True,
         _offset           = 0.0,
         _scale_factor     = 1.0,
@@ -210,7 +207,6 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
     ),
     MetricType.SSIM: MetricInfo(
         name              = "SSIM",
-        id                = "ssim",
         higher_is_better  = True,
         _offset           = 0.0,
         _scale_factor     = 100.0,
@@ -227,7 +223,6 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
     ),
     MetricType.PSNR: MetricInfo(
         name              = "PSNR",
-        id                = "psnr",
         higher_is_better  = True,
         _offset           = 0.0,
         _scale_factor     = 1.0,
@@ -245,7 +240,6 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
     # VIF
     MetricType.VIF: MetricInfo(
         name              = "VIF",
-        id                = "vif",
         higher_is_better  = True,
         _offset           = 0.0,
         _scale_factor     = 100.0,
@@ -266,7 +260,7 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
 class MetricStats(TypedDict):
     """Key statistics for a single metric.
 
-    Subset of ``_MetricStatistics`` stored in sidecars and used for targeting.
+    Subset of :class:`FullMetricStatistics` stored in sidecars and used for targeting.
     Includes the same percentile selection used by the visualization plots:
     min, p05, p25, median (p50), p75, p95, max, std.
     """
@@ -284,8 +278,8 @@ ChunkQualityStats = dict[MetricType, MetricStats]
 """Quality statistics for a video chunk across all metrics."""
 
 
-class _MetricStatistics(TypedDict):
-    """Full percentile statistics used internally."""
+class FullMetricStatistics(TypedDict):
+    """Full percentile statistics (computed by the visualization layer)."""
 
     min: float
     p5:  float
@@ -474,7 +468,7 @@ class QualityLogs:
 
     All log paths point to ``.tmp``-suffixed files during their lifetime —
     they are never renamed to canonical names.  Each file is deleted
-    immediately after successful parsing by ``analyze_chunk_quality``.
+    immediately after successful parsing by the quality evaluator.
 
     Attributes:
         psnr_log:  Path to PSNR ``.tmp`` log file, or ``None`` if not generated.
@@ -626,16 +620,6 @@ class QualityPoint:
     def is_winner(self) -> bool:
         """``True`` when this point is an early-acceptance winner (score == 0, not sentinel)."""
         return self.score == 0 and not self.is_sentinel
-
-
-T_numeric = TypeVar("T_numeric", int, float, Decimal)
-
-
-def _in_range(value: T_numeric, start: T_numeric, end: T_numeric) -> bool:
-    """Check if a value belongs to a given range, handling inverted ranges too."""
-    low  = min(start, end)
-    high = max(start, end)
-    return low <= value <= high
 
 
 def _clamp_to_range(
@@ -1098,7 +1082,7 @@ class QualitySearch(QualitySearchBase):
         try:
             new_point = QualityPoint(quality, self._score(quality_results), quality_results)
         except ValueError:
-            raise ValueError("QualitySearch: missing metric key for quality=%s" % quality)
+            raise ValueError(f"QualitySearch: missing metric key for quality={quality}")
 
         # Early acceptance: score == 0 means targets met within acceptance_delta.
         if new_point.is_winner:
@@ -1260,7 +1244,7 @@ class QualitySearchV2(QualitySearchBase):
         try:
             new_point = QualityPoint(quality, self._score(quality_results), quality_results)
         except ValueError:
-            raise ValueError("QualitySearchV2: missing metric key for quality=%s" % quality)
+            raise ValueError(f"QualitySearchV2: missing metric key for quality={quality}")
 
         if self._exhausted:
             return None
@@ -1299,7 +1283,7 @@ class QualitySearchV2(QualitySearchBase):
                 self._attempted_points,
             )
 
-        #! NO `NEW_POINT` BELOW THIS POINT — only the best point and its adjacent points
+        # NO `NEW_POINT` BELOW THIS POINT — only the best point and its adjacent points
 
         # Sort quality values so that higher quality comes first.
         sorted_q = sorted(
@@ -1491,7 +1475,7 @@ class QualitySearchV3(QualitySearchBase):
         try:
             new_point = QualityPoint(quality, self._score(quality_results), quality_results)
         except ValueError:
-            raise ValueError("QualitySearchV3: missing metric key for quality=%s" % quality)
+            raise ValueError(f"QualitySearchV3: missing metric key for quality={quality}")
 
         # Record the attempt
         self._attempted_points[quality] = new_point

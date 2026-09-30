@@ -208,7 +208,7 @@ class EncodingConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
     @model_validator(mode="after")
-    def _invalidate_resolved_cache_on_mutation(self) -> "EncodingConfig":
+    def _invalidate_resolved_cache_on_mutation(self) -> EncodingConfig:
         """Invalidate the resolved caches whenever a field is assigned.
 
         ``AppConfig`` resolves eagerly at validation time and ``resolve()`` is

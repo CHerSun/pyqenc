@@ -91,7 +91,7 @@ class _SpyRunner:
 
     def argv_of(self, call_index: int) -> list[str]:
         """The composed launch argv of the recorded call, as plain strings."""
-        return [str(a) for a in compose_command(self.calls[call_index])]
+        return [str(a) for a in compose_command(self.calls[call_index])[0]]
 
     def af_of(self, call_index: int) -> str | None:
         """Return the ``-af`` value of the recorded call, or ``None`` if absent."""

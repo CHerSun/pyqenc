@@ -1,7 +1,5 @@
 """Unit tests for core data models."""
 
-from fractions import Fraction
-from pathlib import Path
 
 import pytest
 

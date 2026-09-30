@@ -19,6 +19,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
+import yaml
 from alive_progress import config_handler
 
 from pyqenc.constants import (
@@ -113,8 +114,8 @@ def _probe_resolution(path: Path) -> str | None:
             w, h = streams[0].get("width"), streams[0].get("height")
             if w and h:
                 return f"{w}x{h}"
-    except Exception:
-        pass
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        logger.debug("Failed to probe resolution of %s: %s", path.name, e)
     return None
 
 
@@ -135,8 +136,8 @@ def _read_metrics_sidecar(attempt_path: Path) -> dict | None:
         try:
             with yaml_sidecar.open("r", encoding="utf-8") as fh:
                 return _yaml.safe_load(fh)
-        except Exception:
-            pass
+        except (OSError, _yaml.YAMLError) as e:
+            logger.debug("Failed to read metrics sidecar %s: %s", yaml_sidecar.name, e)
 
     return None
 
@@ -170,7 +171,7 @@ def _write_metrics_sidecar(
     )
     try:
         write_yaml_atomic(sidecar, data.model_dump(exclude_none=True))
-    except Exception as e:
+    except (OSError, ValueError, yaml.YAMLError) as e:
         logger.warning("Failed to write metrics sidecar for %s: %s", attempt_path.name, e)
 
 
@@ -234,7 +235,7 @@ def _write_encoding_result_sidecar(
             "Wrote encoding result sidecar: %s (crf=%s, targets_met=%s)",
             sidecar_path.name, crf, targets_met,
         )
-    except Exception as e:
+    except (OSError, ValueError, yaml.YAMLError) as e:
         logger.warning(
             "Failed to write encoding result sidecar for %s/%s: %s",
             chunk_id, resolution, e,
@@ -833,7 +834,7 @@ class ChunkEncoder:
 
             return result
 
-        except Exception as e:
+        except (OSError, RuntimeError) as e:
             logger.error("Exception during encoding: %s", e)
             return None
 
@@ -1280,7 +1281,6 @@ class ChunkQueue:
         self.strategies = strategies
         self._pending:     list[tuple[VideoStreamChunk, Strategy]] = []
         self._in_progress: set[tuple[str, str]]                 = set()
-        self._completed:   set[tuple[str, str]]                 = set()
 
         # Build initial queue (all chunk+strategy combinations)
         for chunk in chunks:
@@ -1319,7 +1319,6 @@ class ChunkQueue:
             strategy: Encoding strategy.
         """
         self._in_progress.discard((chunk_id, strategy.display_name()))
-        self._completed.add((chunk_id, strategy.display_name()))
 
     def mark_failed(self, chunk_id: str, strategy: Strategy) -> None:
         """Mark chunk+strategy as failed.
@@ -1337,16 +1336,6 @@ class ChunkQueue:
             True if no more work to do.
         """
         return len(self._pending) == 0 and len(self._in_progress) == 0
-
-    def get_progress(self) -> tuple[int, int]:
-        """Get current progress.
-
-        Returns:
-            Tuple of (completed, total).
-        """
-        total     = len(self.chunks) * len(self.strategies)
-        completed = len(self._completed)
-        return (completed, total)
 
 
 async def _encode_chunk_async(
@@ -1421,7 +1410,6 @@ async def _encode_chunks_parallel(
     """
     result    = EncodingResult()
     semaphore = asyncio.Semaphore(max_parallel)
-    counter_failed = 0
 
     # Pre-populate result with COMPLETE pairs from recovery (skip them in the queue)
     complete_pairs: set[tuple[str, str]] = set()
@@ -1456,11 +1444,9 @@ async def _encode_chunks_parallel(
         (c, s) for (c, s) in queue._pending
         if (c.safe_name(), s.display_name()) not in complete_pairs
     ]
-    queue._completed = complete_pairs.copy()
 
     async def encode_worker() -> None:
         """Worker coroutine for encoding chunks."""
-        nonlocal counter_failed
         while not queue.is_empty():
             next_item = queue.get_next()
             if next_item is None:
@@ -1521,7 +1507,6 @@ async def _encode_chunks_parallel(
                 else:
                     queue.mark_failed(chunk.safe_name(), strategy)
                     result.failed_chunks.append(chunk.safe_name())
-                    counter_failed += 1
                     if advance is not None:
                         advance(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.FAILED)
 
@@ -1844,13 +1829,16 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             ) if probe_result is not None else None
             self.params   = EncodingParams(probe=current_probe)
 
-            if persisted_enc is not None and current_probe is not None:
-                if persisted_enc.probe != current_probe:
-                    raise RecoveryError(
-                        "Probe params changed since last encoding run "
-                        f"(persisted={persisted_enc.probe}, current={current_probe}). "
-                        "Re-run with --force to delete stale encoding artifacts and continue."
-                    )
+            if (
+                persisted_enc is not None
+                and current_probe is not None
+                and persisted_enc.probe != current_probe
+            ):
+                raise RecoveryError(
+                    "Probe params changed since last encoding run "
+                    f"(persisted={persisted_enc.probe}, current={current_probe}). "
+                    "Re-run with --force to delete stale encoding artifacts and continue."
+                )
 
         # Step 3: clean up .tmp files
         if enc_dir.exists():

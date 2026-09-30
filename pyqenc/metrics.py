@@ -23,33 +23,32 @@ Usage (standalone / tests)::
 from __future__ import annotations
 
 __all__ = [
-    # Enums
-    "MetricKey",
-    # Type aliases
-    "MetricsStore",
-    # Dataclasses
-    "ConvergenceUpdate",
     # Pydantic models
     "AttemptStats",
     "ConvergenceStats",
-    "TopLevelEntry",
+    # Dataclasses
+    "ConvergenceUpdate",
     "DottedEntry",
     "DottedGroup",
-    "TimeDistribution",
-    "PipelineMetrics",
+    # Enums
+    "MetricKey",
     # Protocol + implementations
     "MetricsCollector",
+    # Type aliases
+    "MetricsStore",
     "NoOpMetricsCollector",
-    # Interrupt-flush registry
-    "flush_all_metrics",
+    "PipelineMetrics",
+    "TimeDistribution",
+    "TopLevelEntry",
+    "YamlMetricsCollector",
     # Internal helpers exposed for testing
     "_ConvergenceAccumulator",
-    "_update_accumulator",
     "_compute_convergence",
-    "_compute_top_level_entries",
     "_compute_dotted_groups",
-    # Added in task 7:
-    "YamlMetricsCollector",
+    "_compute_top_level_entries",
+    "_update_accumulator",
+    # Interrupt-flush registry
+    "flush_all_metrics",
 ]
 
 import contextlib
@@ -466,10 +465,10 @@ def _compute_top_level_entries(store: MetricsStore) -> tuple[int, list[TopLevelE
         is the integer-rounded sum of all top-level values.
     """
     top_level_raw = {k: v for k, v in store.items() if _is_top_level(k)}
-    grand_total   = int(round(sum(top_level_raw.values()))) if top_level_raw else 0
+    grand_total   = round(sum(top_level_raw.values())) if top_level_raw else 0
     entries: list[TopLevelEntry] = []
     for key, val in top_level_raw.items():
-        secs = int(round(val))
+        secs = round(val)
         if secs == 0:
             continue
         percent = f"{secs / grand_total * 100:.1f}%" if grand_total > 0 else "0.0%"
@@ -503,12 +502,12 @@ def _compute_dotted_groups(store: MetricsStore) -> dict[str, DottedGroup]:
 
     result: dict[str, DottedGroup] = {}
     for prefix, siblings in prefix_groups.items():
-        prefix_total = int(round(sum(siblings.values())))
+        prefix_total = round(sum(siblings.values()))
         if prefix_total == 0:
             continue  # omit prefix groups where all values are zero
         breakdown: list[DottedEntry] = []
         for key, val in siblings.items():
-            secs = int(round(val))
+            secs = round(val)
             if secs == 0:
                 continue
             percent = f"{secs / prefix_total * 100:.1f}%" if prefix_total > 0 else "0.0%"
@@ -600,7 +599,7 @@ class YamlMetricsCollector(MetricsCollector):
                 logger.debug("Metrics: unknown key %r in persisted file, skipping", entry.key)
 
         # Restore dotted time accumulators
-        for _prefix, group in pm.time_distribution.dotted.items():
+        for group in pm.time_distribution.dotted.values():
             for entry in group.breakdown:
                 try:
                     self._store[entry.key] = float(entry.seconds)

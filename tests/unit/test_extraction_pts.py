@@ -299,7 +299,7 @@ def _run_and_capture(
     subprocess_cmds: list[list] = []
 
     def fake_run_ffmpeg(request: FFmpegRequest, **kwargs: object) -> FFmpegRunResult:
-        ffmpeg_cmds.append([str(a) for a in compose_command(request)])
+        ffmpeg_cmds.append([str(a) for a in compose_command(request)[0]])
         result = MagicMock()
         result.success = True
         result.returncode = 0

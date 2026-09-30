@@ -24,7 +24,6 @@ from pyqenc.constants import (
     METRIC_LOG_DECIMAL_PLACES,
     NEUTRAL_INDICATOR_SYMBOL,
     SUCCESS_SYMBOL_MAJOR,
-    SUCCESS_SYMBOL_MINOR,
     THICK_LINE,
     VISUAL_HASH_EMOJIS_WIDE,
 )
@@ -33,7 +32,6 @@ from pyqenc.state import ArtifactState
 if TYPE_CHECKING:
     from decimal import Decimal
 
-    from pyqenc.models import QualityTarget
     from pyqenc.phase import Artifact
 
 logger = logging.getLogger(__name__)
@@ -249,32 +247,6 @@ def _fmt_size_mb(size_bytes: int) -> str:
     mb = size_bytes / (1024 * 1024)
     # Format with comma thousands separator then swap to narrow no-break space (U+202F). Use single decimal place for <1000 MB values.
     return f"{mb:,.1f}".replace(",", "\u202f") if mb < 1000 else f"{mb:,.0f}".replace(",", "\u202f")
-
-
-def _fmt_savings(size_bytes: int, reference_size_bytes: int) -> str:
-    """Return savings percentage string, e.g. ``"77.0%"``."""
-    if reference_size_bytes <= 0:
-        return "N/A"
-    saved = (1 - size_bytes / reference_size_bytes) * 100
-    return f"{saved:.1f}%"
-
-
-def _fmt_target_value(
-    target:      QualityTarget,
-    metrics:     dict[str, float],
-    targets_met: bool | None,
-) -> str:
-    """Return a formatted metric value with pass/fail symbol for *target*.
-
-    Returns ``"N/A"`` when the metric key is absent from *metrics*.
-    """
-    key   = f"{target.metric}_{target.statistic}"
-    value = metrics.get(key)
-    if value is None:
-        return "N/A"
-    symbol = SUCCESS_SYMBOL_MINOR if value >= target.value else FAILURE_SYMBOL_MINOR
-    return f"{fmt_metric_value(value)} {symbol}"
-
 
 
 

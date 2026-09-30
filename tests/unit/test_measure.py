@@ -1,8 +1,6 @@
 """Unit tests for pyqenc/phases/measure.py helper functions.
 
-Covers: _parse_duration, _screenshot_timestamps_count,
-        _screenshot_timestamps_interval, _screenshot_filename,
-        _resolve_crop, make_screenshots.
+Covers: _parse_duration, _resolve_crop, make_screenshots.
 
 Run with: uv run python -m pytest tests/unit/test_measure.py
 """
@@ -15,17 +13,9 @@ from unittest.mock import patch
 
 import pytest
 
-from pyqenc.constants import TIME_SEPARATOR_MS, TIME_SEPARATOR_SAFE
 from pyqenc.phases.measure import (
     _parse_duration,
-    _screenshot_filename,
-    _screenshot_timestamps_count,
-    _screenshot_timestamps_interval,
 )
-
-SEP  = TIME_SEPARATOR_SAFE  # ꞉
-MSEP = TIME_SEPARATOR_MS    # ․
-
 
 # ---------------------------------------------------------------------------
 # _parse_duration
@@ -110,159 +100,6 @@ class TestParseDuration:
         # "m" alone has no numeric component — should raise
         with pytest.raises(ValueError):
             _parse_duration("m")
-
-
-# ---------------------------------------------------------------------------
-# _screenshot_timestamps_count
-# ---------------------------------------------------------------------------
-
-
-class TestScreenshotTimestampsCount:
-    """Tests for _screenshot_timestamps_count."""
-
-    def test_single_screenshot_midpoint(self) -> None:
-        """One screenshot lands at the midpoint."""
-        result = _screenshot_timestamps_count(10.0, 1)
-        assert result == pytest.approx([5.0])
-
-    def test_two_screenshots_thirds(self) -> None:
-        """Two screenshots land at 1/3 and 2/3."""
-        result = _screenshot_timestamps_count(9.0, 2)
-        assert result == pytest.approx([3.0, 6.0])
-
-    def test_three_screenshots_quarters(self) -> None:
-        """Three screenshots land at 1/4, 2/4, 3/4."""
-        result = _screenshot_timestamps_count(8.0, 3)
-        assert result == pytest.approx([2.0, 4.0, 6.0])
-
-    def test_all_timestamps_strictly_interior(self) -> None:
-        """All timestamps must be strictly between 0 and duration."""
-        result = _screenshot_timestamps_count(100.0, 10)
-        assert all(0.0 < t < 100.0 for t in result)
-
-    def test_count_matches_requested(self) -> None:
-        """Exactly count timestamps returned for normal inputs."""
-        result = _screenshot_timestamps_count(60.0, 20)
-        assert len(result) == 20
-
-    def test_evenly_spaced(self) -> None:
-        """Consecutive timestamps differ by the same step."""
-        result = _screenshot_timestamps_count(100.0, 4)
-        step = 100.0 / 5
-        for i, t in enumerate(result, start=1):
-            assert t == pytest.approx(i * step)
-
-
-# ---------------------------------------------------------------------------
-# _screenshot_timestamps_interval
-# ---------------------------------------------------------------------------
-
-
-class TestScreenshotTimestampsInterval:
-    """Tests for _screenshot_timestamps_interval."""
-
-    def test_basic_interval(self) -> None:
-        """Timestamps at multiples of interval up to duration."""
-        result = _screenshot_timestamps_interval(10.0, 3.0)
-        assert result == pytest.approx([3.0, 6.0, 9.0])
-
-    def test_interval_equals_duration_returns_empty(self) -> None:
-        """Interval >= duration → empty list."""
-        assert _screenshot_timestamps_interval(5.0, 5.0) == []
-
-    def test_interval_exceeds_duration_returns_empty(self) -> None:
-        """Interval > duration → empty list."""
-        assert _screenshot_timestamps_interval(5.0, 10.0) == []
-
-    def test_first_timestamp_is_one_interval(self) -> None:
-        """First timestamp is 1×interval, not 0."""
-        result = _screenshot_timestamps_interval(60.0, 15.0)
-        assert result[0] == pytest.approx(15.0)
-
-    def test_all_timestamps_strictly_less_than_duration(self) -> None:
-        """No timestamp reaches or exceeds duration."""
-        result = _screenshot_timestamps_interval(10.0, 3.0)
-        assert all(t < 10.0 for t in result)
-
-    def test_exact_multiple_excluded(self) -> None:
-        """When duration is an exact multiple of interval, last point is excluded."""
-        # 3 intervals of 3.0 fit in 9.0 exactly; 4th would be 12.0 > 9.0
-        result = _screenshot_timestamps_interval(9.0, 3.0)
-        assert result == pytest.approx([3.0, 6.0])
-        assert 9.0 not in result
-
-    def test_small_interval_many_timestamps(self) -> None:
-        """Many timestamps generated for small interval."""
-        result = _screenshot_timestamps_interval(10.0, 1.0)
-        assert len(result) == 9
-        assert result[0] == pytest.approx(1.0)
-        assert result[-1] == pytest.approx(9.0)
-
-
-# ---------------------------------------------------------------------------
-# _screenshot_filename
-# ---------------------------------------------------------------------------
-
-
-class TestScreenshotFilename:
-    """Tests for _screenshot_filename."""
-
-    def test_canonical_example(self) -> None:
-        """3723.456 s → 01꞉02꞉03․456_stem.png"""
-        result = _screenshot_filename(3723.456, "stem")
-        assert result == f"01{SEP}02{SEP}03{MSEP}456_stem.png"
-
-    def test_zero_timestamp(self) -> None:
-        """0 s → 00꞉00꞉00․000_stem.png"""
-        result = _screenshot_filename(0.0, "stem")
-        assert result == f"00{SEP}00{SEP}00{MSEP}000_stem.png"
-
-    def test_one_hour(self) -> None:
-        """3600 s → 01꞉00꞉00․000_stem.png"""
-        result = _screenshot_filename(3600.0, "stem")
-        assert result == f"01{SEP}00{SEP}00{MSEP}000_stem.png"
-
-    def test_milliseconds_zero_padded(self) -> None:
-        """Milliseconds < 10 are zero-padded to 3 digits (e.g. 008, not 8)."""
-        # 1.008 * 1000 == 1008 exactly in IEEE 754
-        result = _screenshot_filename(1.008, "v")
-        assert result == f"00{SEP}00{SEP}01{MSEP}008_v.png"
-
-    def test_seconds_zero_padded(self) -> None:
-        """Seconds component is zero-padded to 2 digits."""
-        result = _screenshot_filename(5.0, "v")
-        assert result.startswith(f"00{SEP}00{SEP}05{MSEP}")
-
-    def test_minutes_zero_padded(self) -> None:
-        """Minutes component is zero-padded to 2 digits."""
-        result = _screenshot_filename(60.0, "v")
-        assert result.startswith(f"00{SEP}01{SEP}00{MSEP}")
-
-    def test_uses_safe_separator(self) -> None:
-        """Filename uses TIME_SEPARATOR_SAFE (꞉), not a regular colon."""
-        result = _screenshot_filename(3723.0, "v")
-        assert ":" not in result
-        assert SEP in result
-
-    def test_uses_ms_separator(self) -> None:
-        """Filename uses TIME_SEPARATOR_MS (․), not a regular dot."""
-        result = _screenshot_filename(3723.456, "v")
-        assert MSEP in result
-
-    def test_stem_included(self) -> None:
-        """Video stem appears after the timestamp prefix."""
-        result = _screenshot_filename(10.0, "my_video")
-        assert result.endswith("_my_video.png")
-
-    def test_png_extension(self) -> None:
-        """Output always ends with .png."""
-        result = _screenshot_filename(10.0, "clip")
-        assert result.endswith(".png")
-
-    def test_large_hours(self) -> None:
-        """Hours > 99 are not truncated."""
-        result = _screenshot_filename(360000.0, "v")  # 100 hours
-        assert result.startswith(f"100{SEP}00{SEP}00{MSEP}")
 
 
 # ---------------------------------------------------------------------------
@@ -392,20 +229,19 @@ class TestWriteSidecar:
         with patch(
             "pyqenc.phases.measure.write_yaml_atomic",
             side_effect=OSError("disk full"),
-        ):
-            with caplog.at_level(logging.WARNING, logger="pyqenc.phases.measure"):
-                # Must not raise
-                _write_sidecar(
-                    path                       = tmp_path / "target.yaml",
-                    source_video               = tmp_path / "source.mkv",
-                    target_video               = tmp_path / "target.mkv",
-                    subsample_factor           = 10,
-                    crop_params                = CropParams(top=0, bottom=0, left=0, right=0),
-                    metrics                    = self._make_metrics(),
-                    source_duration_seconds    = 100.0,
-                    target_duration_seconds    = 98.0,
-                    effective_duration_seconds = 98.0,
-                )
+        ), caplog.at_level(logging.WARNING, logger="pyqenc.phases.measure"):
+            # Must not raise
+            _write_sidecar(
+                path                       = tmp_path / "target.yaml",
+                source_video               = tmp_path / "source.mkv",
+                target_video               = tmp_path / "target.mkv",
+                subsample_factor           = 10,
+                crop_params                = CropParams(top=0, bottom=0, left=0, right=0),
+                metrics                    = self._make_metrics(),
+                source_duration_seconds    = 100.0,
+                target_duration_seconds    = 98.0,
+                effective_duration_seconds = 98.0,
+            )
 
         assert any("Failed to write metrics sidecar" in r.message for r in caplog.records)
 
@@ -535,7 +371,7 @@ class TestMakeScreenshots:
         captured_cmds: list[list[str]] = []
 
         async def fake_ffmpeg(request: FFmpegRequest, **kwargs):
-            captured_cmds.append([str(a) for a in compose_command(request)])
+            captured_cmds.append([str(a) for a in compose_command(request)[0]])
             out = Path(str(request.output))
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(b"PNG")
@@ -564,7 +400,7 @@ class TestMakeScreenshots:
         captured_cmds: list[list[str]] = []
 
         async def fake_ffmpeg(request: FFmpegRequest, **kwargs):
-            captured_cmds.append([str(a) for a in compose_command(request)])
+            captured_cmds.append([str(a) for a in compose_command(request)[0]])
             out = Path(str(request.output))
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_bytes(b"PNG")
@@ -601,8 +437,10 @@ class TestMakeScreenshots:
                 (tmp_dir / "0002.png").write_bytes(b"PNG2")
             return _make_ffmpeg_result(success=True)
 
-        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
-            with caplog.at_level(logging.WARNING, logger="pyqenc.phases.measure"):
+        with (
+            patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg),
+            caplog.at_level(logging.WARNING, logger="pyqenc.phases.measure"),
+        ):
                 result = asyncio.run(
                     make_screenshots(
                         video_path      = tmp_path / "video.mkv",
@@ -635,8 +473,10 @@ class TestMakeScreenshots:
                 # A2 call — produce no output (zero files)
             return _make_ffmpeg_result(success=True)
 
-        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
-            with caplog.at_level(logging.WARNING, logger="pyqenc.phases.measure"):
+        with (
+            patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg),
+            caplog.at_level(logging.WARNING, logger="pyqenc.phases.measure"),
+        ):
                 result = asyncio.run(
                     make_screenshots(
                         video_path      = tmp_path / "video.mkv",
@@ -656,8 +496,10 @@ class TestMakeScreenshots:
         async def fake_ffmpeg(request: FFmpegRequest, **kwargs):
             return _make_ffmpeg_result(success=True)  # success but no files created
 
-        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
-            with caplog.at_level(logging.ERROR, logger="pyqenc.phases.measure"):
+        with (
+            patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg),
+            caplog.at_level(logging.ERROR, logger="pyqenc.phases.measure"),
+        ):
                 result = asyncio.run(
                     make_screenshots(
                         video_path      = tmp_path / "video.mkv",
@@ -684,8 +526,10 @@ class TestMakeScreenshots:
                 out.write_bytes(b"PNG")
             return _make_ffmpeg_result(success=True)
 
-        with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
-            with caplog.at_level(logging.WARNING, logger="pyqenc.phases.measure"):
+        with (
+            patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg),
+            caplog.at_level(logging.WARNING, logger="pyqenc.phases.measure"),
+        ):
                 result = asyncio.run(
                     make_screenshots(
                         video_path      = tmp_path / "video.mkv",
@@ -751,7 +595,7 @@ class TestScreenshotCommandGolden:
             asyncio.run(_capture_single_frame(video, "9.989583333", out, None))
 
         assert len(captured) == 1
-        argv = [str(a) for a in compose_command(captured[0])]
+        argv = [str(a) for a in compose_command(captured[0])[0]]
         assert argv == [
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
             "-ss", "9.989583333",
@@ -773,7 +617,7 @@ class TestScreenshotCommandGolden:
         with patch("pyqenc.phases.measure.run_ffmpeg_async", side_effect=fake_ffmpeg):
             asyncio.run(_capture_single_frame(Path("/v/video.mkv"), "9.989583333", Path("/shots/00.png"), crop))
 
-        argv = [str(a) for a in compose_command(captured[0])]
+        argv = [str(a) for a in compose_command(captured[0])[0]]
         vf_idx = argv.index("-vf")
         assert argv[vf_idx + 1] == "crop=iw-0:ih-2:0:1"
 
@@ -790,7 +634,7 @@ class TestScreenshotCommandGolden:
             asyncio.run(_capture_single_pass(video, "not(mod(n,240))", tmp_dir, None))
 
         assert len(captured) == 1
-        argv = [str(a) for a in compose_command(captured[0])]
+        argv = [str(a) for a in compose_command(captured[0])[0]]
         assert argv == [
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
             "-i", str(video),

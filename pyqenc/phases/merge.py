@@ -55,7 +55,7 @@ from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.state import MergeParams, MergeStrategySummary, ProbeState
 from pyqenc.stream_model import EncodedChunk, ExtendedVideoStream, MergedVideo
-from pyqenc.utils.ffmpeg_runner import get_frame_count
+from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
 from pyqenc.utils.log_format import (
     fmt_key_value_table,
     fmt_metric_value,
@@ -111,7 +111,7 @@ def _load_merge_sidecar(output_file: Path) -> dict | None:
     try:
         with path.open("r", encoding="utf-8") as fh:
             return yaml.safe_load(fh)
-    except Exception as exc:
+    except (OSError, yaml.YAMLError) as exc:
         logger.debug("Could not load merge sidecar %s: %s", path.name, exc)
         return None
 
@@ -204,7 +204,7 @@ def _write_merge_sidecar(
         data["plot"] = str(plot_path)
     try:
         write_yaml_atomic(_sidecar_path(output_file), data)
-    except Exception as exc:
+    except (OSError, yaml.YAMLError) as exc:
         logger.warning("Could not write merge sidecar for %s: %s", output_file.name, exc)
 
 
@@ -921,7 +921,7 @@ class MergePhase(Phase[MergePhaseResult]):
 
                 with self._collector.time(MetricKey.MERGE, "concat"):
                     mkvmerge_result = subprocess.run(
-                        cmd_mkvmerge, capture_output=True, text=True
+                        cmd_mkvmerge, capture_output=True, text=True, check=False,
                     )
 
                 if mkvmerge_result.returncode != 0:
@@ -970,7 +970,7 @@ class MergePhase(Phase[MergePhaseResult]):
                             )
                         else:
                             frame_count_ok = True
-                except Exception as exc:
+                except (OSError, FrameCountError) as exc:
                     logger.warning("  Could not verify frame count: %s", exc)
 
                 # Measure quality
@@ -989,7 +989,7 @@ class MergePhase(Phase[MergePhaseResult]):
                                 output_dir       = merged_dir,
                                 metrics_sampling = self._dep_result(JobPhase).config.measurement.sampling,
                             )
-                    except Exception as exc:
+                    except (OSError, ValueError) as exc:
                         logger.warning("  Could not measure quality: %s", exc)
 
                 # CRF distribution plot — reads the typed winners field
@@ -1008,7 +1008,7 @@ class MergePhase(Phase[MergePhaseResult]):
                             quality_label = qlabel,
                         )
                         logger.debug("  CRF plot saved: %s", crf_plot_path.name)
-                    except Exception as exc:
+                    except (OSError, ValueError) as exc:
                         logger.warning("  Could not generate CRF plot: %s", exc)
                 else:
                     logger.warning("No CRF data available for strategy %s — skipping CRF plot", strategy_name)
@@ -1050,8 +1050,8 @@ class MergePhase(Phase[MergePhaseResult]):
                     state   = ArtifactState.COMPLETE,
                 ))
 
-            except Exception as exc:  # one bad strategy must not kill the rest
-                logger.error("Merging strategy %s error: %s", strategy_name, exc, exc_info=True)
+            except Exception:  # one bad strategy must not kill the rest
+                logger.exception("Merging strategy %s error", strategy_name)
                 failed_strategies.append(strategy_name)
 
         # Phase completion summary

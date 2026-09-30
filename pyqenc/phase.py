@@ -172,34 +172,6 @@ class PhaseResult:
         """
         return self.outcome in (PhaseOutcome.COMPLETED, PhaseOutcome.REUSED)
 
-    @property
-    def complete(self) -> list[Artifact[object]]:
-        """Artifacts whose state is ``COMPLETE``."""
-        return [a for a in self.artifacts if a.state == ArtifactState.COMPLETE]
-
-    @property
-    def pending(self) -> list[Artifact[object]]:
-        """Artifacts that require active work this run.
-
-        Includes only ``ABSENT`` (must produce) and ``PARTIAL`` (protected
-        investment needing the missing component). Since the derived
-        ``artifacts`` lists only the declared (wanted) fields' rows, no
-        additional ``wanted`` filtering is needed here. Unwanted artifacts
-        stay internal and never reach this property.
-        """
-        return [
-            a for a in self.artifacts
-            if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)
-        ]
-
-    @property
-    def did_work(self) -> bool:
-        """``True`` when the phase performed real work this run.
-
-        Distinguishes ``COMPLETED`` (work done) from ``REUSED`` (all cached).
-        """
-        return self.outcome == PhaseOutcome.COMPLETED
-
 
 # ---------------------------------------------------------------------------
 # FinalizeContext

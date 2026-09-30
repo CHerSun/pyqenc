@@ -6,7 +6,6 @@ internal representation.
 """
 # CHerSun 2026
 
-from pathlib import Path
 
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.stream_model import AudioStream, AudioStreamInfo, File

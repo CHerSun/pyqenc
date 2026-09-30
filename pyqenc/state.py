@@ -183,7 +183,7 @@ class OptimizationParams(BaseModel):
             with path.open("r", encoding="utf-8") as fh:
                 data = yaml.safe_load(fh)
             return cls.model_validate(data or {})
-        except Exception as exc:
+        except (OSError, ValueError, yaml.YAMLError) as exc:
             logger.warning("Could not load %s: %s", path, exc)
             return None
 
@@ -218,7 +218,7 @@ class EncodingParams(BaseModel):
             with path.open("r", encoding="utf-8") as fh:
                 data = yaml.safe_load(fh)
             return cls.model_validate(data or {})
-        except Exception as exc:
+        except (OSError, ValueError, yaml.YAMLError) as exc:
             logger.warning("Could not load %s: %s", path, exc)
             return None
 
@@ -377,7 +377,7 @@ class AudioSidecar(BaseModel):
             with path.open("r", encoding="utf-8") as fh:
                 data = yaml.safe_load(fh)
             return cls.model_validate(data or {})
-        except Exception as exc:
+        except (OSError, ValueError, yaml.YAMLError) as exc:
             logger.warning("Could not load %s: %s", path, exc)
             return None
 
@@ -461,7 +461,7 @@ class MergeParams(BaseModel):
             with path.open("r", encoding="utf-8") as fh:
                 data = yaml.safe_load(fh)
             return cls.model_validate(data or {})
-        except Exception as exc:
+        except (OSError, ValueError, yaml.YAMLError) as exc:
             logger.warning("Could not load %s: %s", path, exc)
             return None
 

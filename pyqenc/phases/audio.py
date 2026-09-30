@@ -80,23 +80,13 @@ class AudioPhaseResult(PhaseResult):
     expected (track, chain) row — driving the standard ``pending`` /
     ``complete`` / ``is_complete`` machinery so MergePhase (which lists
     AudioPhase purely for ordering) resolves the dependency as COMPLETE /
-    REUSED. ``audio_files`` is the derived list of produced delivery-file
-    paths.
+    REUSED.
 
     Attributes:
         outputs: Typed chain-output rows (all wanted outputs).
     """
 
     outputs: list[Artifact[AudioOutput]] = _field(default_factory=list)
-
-    @property
-    def audio_files(self) -> list[Path]:
-        """Paths of the complete outputs' delivery files."""
-        return [
-            row.payload.output_path
-            for row in self.outputs
-            if row.state == ArtifactState.COMPLETE
-        ]
 
 
 class AudioPhase(Phase[AudioPhaseResult]):
@@ -504,7 +494,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
 
         Returns:
             The populated result (``outputs`` is the single storage driving
-            dependency resolution and the derived ``audio_files``).
+            dependency resolution).
         """
         outputs = [r for r in artifacts if isinstance(r.payload, AudioOutput)]
         return AudioPhaseResult(

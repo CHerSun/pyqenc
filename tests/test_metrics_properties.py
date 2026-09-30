@@ -653,9 +653,9 @@ def test_resume_restores_accumulated_store(store: dict[str, float]) -> None:
         # Each key must be restored within integer-rounding tolerance (YAML persists int seconds)
         for key, original_value in store.items():
             assert key in resumed._store, f"Key {key!r} missing from resumed store"
-            assert abs(resumed._store[key] - int(round(original_value))) <= 1, (
+            assert abs(resumed._store[key] - round(original_value)) <= 1, (
                 f"Key {key!r}: resumed={resumed._store[key]}, "
-                f"expected≈{int(round(original_value))} (original={original_value})"
+                f"expected≈{round(original_value)} (original={original_value})"
             )
 
 

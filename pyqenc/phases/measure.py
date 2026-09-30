@@ -214,62 +214,6 @@ def _parse_duration(value: str) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Screenshot timestamp helpers
-# ---------------------------------------------------------------------------
-
-
-def _screenshot_timestamps_count(duration: float, count: int) -> list[float]:
-    """Return up to ``count`` evenly-spaced timestamps in the interior of ``[0, duration]``.
-
-    ``step = duration / (count + 1)``; timestamps are ``[step, 2*step, ..., count*step]``.
-    Filters out any timestamp ``>= duration``. Returns fewer than ``count`` if duration is short.
-    """
-    step = duration / (count + 1)
-    return [t for i in range(1, count + 1) if (t := i * step) < duration]
-
-
-def _screenshot_timestamps_interval(duration: float, interval_s: float) -> list[float]:
-    """Return timestamps at ``[interval_s, 2*interval_s, ...]`` up to ``duration`` (exclusive).
-
-    First screenshot is at ``1×interval`` (skipping frame 0). Returns empty list if
-    ``interval_s >= duration``.
-    """
-    if interval_s >= duration:
-        return []
-    result: list[float] = []
-    t = interval_s
-    while t < duration:
-        result.append(t)
-        t += interval_s
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Screenshot filename formatting
-# ---------------------------------------------------------------------------
-
-
-def _screenshot_filename(timestamp_s: float, video_stem: str) -> str:
-    """Format a screenshot filename from a timestamp and video stem.
-
-    Format: ``HH꞉MM꞉SS․mmm_stem.png`` using ``TIME_SEPARATOR_SAFE`` (꞉) and
-    ``TIME_SEPARATOR_MS`` (․) from ``pyqenc/constants.py``. All components are
-    zero-padded.
-
-    Example: ``3723.456`` → ``01꞉02꞉03․456_my_video.png``
-    """
-    total_ms = int(timestamp_s * 1000)
-    ms       = total_ms % 1000
-    total_s  = total_ms // 1000
-    h, rem   = divmod(total_s, 3600)
-    m, s     = divmod(rem, 60)
-    sep      = TIME_SEPARATOR_SAFE
-    ms_sep   = TIME_SEPARATOR_MS
-    prefix   = f"{h:02d}{sep}{m:02d}{sep}{s:02d}{ms_sep}{ms:03d}"
-    return f"{prefix}_{video_stem}.png"
-
-
-# ---------------------------------------------------------------------------
 # Resolution validation
 # ---------------------------------------------------------------------------
 
@@ -661,7 +605,7 @@ def _write_sidecar(
     try:
         write_yaml_atomic(path, sidecar.model_dump(exclude_none=True))
         logger.debug("Wrote metrics sidecar: %s", path)
-    except Exception as exc:
+    except (OSError, ValueError, yaml.YAMLError) as exc:
         logger.warning("Failed to write metrics sidecar %s: %s", path, exc)
 
 
@@ -704,7 +648,7 @@ async def _capture_single_frame(
             logger.debug("Strategy C frame failed (%s) seek_ts=%s output=%s", reason, seek_ts, output_path.name)
             return reason
         return None
-    except Exception as exc:
+    except OSError as exc:
         reason = str(exc)
         logger.debug("Strategy C frame raised exception seek_ts=%s output=%s: %s", seek_ts, output_path.name, exc)
         return reason
@@ -739,7 +683,7 @@ async def _capture_single_pass(
         if not result.success:
             logger.debug("Single-pass capture failed (ffmpeg non-zero) tmp_dir=%s", tmp_dir)
             return []
-    except Exception as exc:
+    except OSError as exc:
         logger.debug("Single-pass capture raised exception tmp_dir=%s: %s", tmp_dir, exc)
         return []
     return sorted(tmp_dir.glob("*.png"))
@@ -769,12 +713,12 @@ def _rename_raw_screenshots(
             tmp_path.replace(final_path)
             written.append(final_path)
             logger.debug("Screenshot written: %s", final_path.name)
-        except Exception as exc:
+        except OSError as exc:
             logger.warning("Failed to write screenshot %s: %s", final_name, exc)
             try:
                 tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except OSError as e:
+                logger.debug("Failed to remove screenshot temp file %s: %s", tmp_path.name, e)
     return written
 
 
@@ -825,12 +769,12 @@ async def make_screenshots(
             try:
                 tmp_path.replace(final_path)
                 written.append(final_path)
-            except Exception as exc:
+            except OSError as exc:
                 logger.warning("Failed to rename screenshot %s: %s", final_name, exc)
                 try:
                     tmp_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                except OSError as e:
+                    logger.debug("Failed to remove screenshot temp file %s: %s", tmp_path.name, e)
         else:
             c_failure_reasons.add(failure)
 
@@ -1076,7 +1020,7 @@ async def run_measure(
         try:
             tmp_file.unlink()
             logger.debug("Cleaned up stale tmp file: %s", tmp_file.name)
-        except Exception as exc:
+        except OSError as exc:
             logger.warning("Could not delete stale tmp file %s: %s", tmp_file.name, exc)
 
     # ------------------------------------------------------------------
@@ -1183,7 +1127,7 @@ async def run_measure(
                 screenshots_dir = source_screenshots_dir,
                 crop_params     = resolved_crop if not resolved_crop.is_empty() else None,
             )
-        except Exception as exc:
+        except OSError as exc:
             logger.error("Screenshots failed for %s — skipping: %s", source_video.stem, exc)
 
     # ------------------------------------------------------------------
@@ -1201,7 +1145,7 @@ async def run_measure(
                     screenshots_dir = target_screenshots_dirs[target_video],
                     crop_params     = None,
                 )
-            except Exception as exc:
+            except OSError as exc:
                 logger.error("Screenshots failed for %s — skipping: %s", target_video.stem, exc)
                 shots = []
             target_screenshots_map[target_video] = shots
@@ -1211,7 +1155,7 @@ async def run_measure(
     # Summary log after all screenshot captures
     if positions is not None:
         expected_per_video = len(positions.frame_nums)
-        all_videos         = ([source_video] if not screenshots_only else [source_video]) + list(target_videos)
+        all_videos         = [source_video] + list(target_videos)
         total_expected     = expected_per_video * len(all_videos)
         total_taken        = len(source_screenshots) + sum(len(s) for s in target_screenshots_map.values())
         symbol             = "✅" if total_taken == total_expected else "⚠"

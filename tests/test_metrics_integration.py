@@ -22,8 +22,15 @@ from pyqenc.models import (
     Strategy,
 )
 from pyqenc.phase import Artifact, Recovery
+from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
+from pyqenc.phases.chunking import ChunkingPhase, ChunkingPhaseResult
+from pyqenc.phases.encoding import EncodingPhase, EncodingPhaseResult
+from pyqenc.phases.extraction import ExtractionPhase
+from pyqenc.phases.job import JobPhaseResult
+from pyqenc.phases.merge import MergePhase
+from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.state import ArtifactState
-from pyqenc.stream_model import File
+from pyqenc.stream_model import ExtendedVideoStream, File, VideoStreamChunk
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 _SHARED_APP_CONFIG: AppConfig = load_app_config(default_only=True)
@@ -46,7 +53,7 @@ def _make_config(tmp_path: Path) -> AppConfig:
     """
     return load_app_config(default_only=True)
 
-def _make_chunk_window(source: Path, start: float, end: float) -> "VideoStreamChunk":
+def _make_chunk_window(source: Path, start: float, end: float) -> VideoStreamChunk:
     """A VideoStreamChunk fixture over the source window."""
     from pyqenc.stream_model import VideoStreamChunk
 
@@ -150,7 +157,7 @@ def _make_volatile(tmp_path: Path) -> dict:
         "no_metrics": False,
     }
 
-def _make_extended_stream(path: Path, frame_count: int, duration: float) -> "ExtendedVideoStream":
+def _make_extended_stream(path: Path, frame_count: int, duration: float) -> ExtendedVideoStream:
     """An ExtendedVideoStream fixture (fast facet + frame count)."""
     from fractions import Fraction
 
@@ -1486,7 +1493,6 @@ class TestMergePhaseTiming:
         """
         from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
-        from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
@@ -1499,8 +1505,6 @@ class TestMergePhaseTiming:
         encoded_path = tmp_path / "work" / "encoded" / "slow+h265" / "chunk_0.mkv"
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
         encoded_path.write_bytes(b"\x00" * 128)
-
-        success_result = FFmpegRunResult(success=True, returncode=0)
 
         with (
             patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])),

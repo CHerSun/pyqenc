@@ -1,6 +1,7 @@
 """Unit tests for quality evaluation and CRF adjustment."""
 
 from decimal import Decimal
+from typing import ClassVar
 
 import pytest
 
@@ -13,7 +14,7 @@ _GRAN       = Decimal("0.5")   # default granularity used in tests
 _GRAN_INT   = Decimal("1")     # integer-step granularity (QP-style)
 
 
-def _d(v: str | int | float) -> Decimal:
+def _d(v: str | float) -> Decimal:
     """Shorthand: convert to Decimal via str to avoid float imprecision."""
     return Decimal(str(v))
 
@@ -52,7 +53,9 @@ class TestQualitySearch:
     _BETTER = Decimal("0")
     _WORSE  = Decimal("51")
     _GRAN   = Decimal("0.5")
-    _TARGET = [QualityTarget(metric="vmaf", statistic="min", value=95.0)]
+    _TARGET: ClassVar[list[QualityTarget]] = [
+        QualityTarget(metric="vmaf", statistic="min", value=95.0)
+    ]
 
     def _make(self, **kw: object) -> QualitySearch:
         return QualitySearch(
@@ -71,7 +74,7 @@ class TestQualitySearch:
 
     def test_pass_updates_best(self) -> None:
         s = self._make()
-        next_q = s.record(Decimal("18.0"), {"vmaf_min": 96.0})
+        s.record(Decimal("18.0"), {"vmaf_min": 96.0})
         assert s.best_targets_met is True
         assert s.best_quality == Decimal("18.0")
         assert s.attempts == 1
@@ -402,12 +405,14 @@ class TestQualitySearchV2:
     _BETTER  = Decimal("0")
     _WORSE   = Decimal("51")
     _GRAN    = Decimal("0.5")
-    _TARGET  = [QualityTarget(metric="vmaf", statistic="min", value=95.0)]
+    _TARGET: ClassVar[list[QualityTarget]] = [
+        QualityTarget(metric="vmaf", statistic="min", value=95.0)
+    ]
 
     # pass metrics: vmaf_min=96.0 → surplus > 0 → targets met
-    _PASS_M  = {"vmaf_min": 96.0}
+    _PASS_M: ClassVar[dict[str, float]] = {"vmaf_min": 96.0}
     # fail metrics: vmaf_min=80.0 → deficit → targets not met
-    _FAIL_M  = {"vmaf_min": 80.0}
+    _FAIL_M: ClassVar[dict[str, float]] = {"vmaf_min": 80.0}
 
     @staticmethod
     def _early_m() -> dict[str, float]:
@@ -686,10 +691,12 @@ class TestQualitySearchV3:
     _BETTER = Decimal('0')
     _WORSE  = Decimal('51')
     _GRAN   = Decimal('0.5')
-    _TARGET = [QualityTarget(metric='vmaf', statistic='min', value=95.0)]
+    _TARGET: ClassVar[list[QualityTarget]] = [
+        QualityTarget(metric='vmaf', statistic='min', value=95.0)
+    ]
 
-    _PASS_M = {'vmaf_min': 96.0}
-    _FAIL_M = {'vmaf_min': 80.0}
+    _PASS_M: ClassVar[dict[str, float]] = {'vmaf_min': 96.0}
+    _FAIL_M: ClassVar[dict[str, float]] = {'vmaf_min': 80.0}
 
     @staticmethod
     def _early_m() -> dict[str, float]:
@@ -1438,7 +1445,7 @@ class TestRunMetricsCommandGolden:
             "[1:v]crop=iw-0:ih-0:0:0,setpts=N/(FRAME_RATE*TB)[ref];"
             "[main][ref]psnr=stats_file=uuidpsnr.log"
         )
-        argv = [str(a) for a in compose_command(captured[0])]
+        argv = [str(a) for a in compose_command(captured[0])[0]]
         assert argv == [
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
             "-i", str(distorted),
@@ -1491,7 +1498,7 @@ class TestRunMetricsCommandGolden:
             )
 
         graph = "[0:v]crop=iw-0:ih-0:0:0,setpts=N/(23.976023976023978*TB)[main];[1:v]crop=iw-0:ih-0:0:0,setpts=N/(23.976023976023978*TB)[ref];[main][ref]psnr=stats_file=uuidpsnr.log"
-        argv = [str(a) for a in compose_command(captured[0])]
+        argv = [str(a) for a in compose_command(captured[0])[0]]
         assert argv == [
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
             "-i", str(distorted),
