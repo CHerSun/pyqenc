@@ -163,6 +163,7 @@ def _base_info_fields(raw: dict) -> dict:
         "codec_name":       raw.get("codec_name"),
         "language":         tags.get("language"),
         "title":            tags.get("title") or tags.get("TITLE"),
+        "start_timestamp":  _float_or_none(raw.get("start_time")),
         "duration_seconds": (
             _float_or_none(raw.get("duration"))
             if raw.get("duration") is not None
@@ -190,6 +191,7 @@ def _video_info(raw: dict) -> VideoStreamInfo:
         fps          = float(fps_fraction) if fps_fraction is not None else None,
         fps_fraction = fps_fraction,
         resolution   = f"{width}x{height}" if width and height else None,
+        pix_fmt      = raw.get("pix_fmt"),
     )
 
 

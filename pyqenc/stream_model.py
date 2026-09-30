@@ -144,6 +144,9 @@ class StreamInfo(BaseModel):
         codec_name:        ffprobe codec name (e.g. ``hevc``, ``flac``).
         language:          ISO language tag, when the stream declares one.
         title:             The stream's title tag (free media-sourced text).
+        start_timestamp:   The stream's start offset on the container timeline
+                           (ffprobe ``start_time``) — critical for aligning
+                           streams against each other if they are ever merged.
         duration_seconds:  The stream's own duration.
     """
 
@@ -153,6 +156,7 @@ class StreamInfo(BaseModel):
     codec_name:       str | None = None
     language:         str | None = None
     title:            str | None = None
+    start_timestamp:  float | None = None
     duration_seconds: float | None = None
 
 
@@ -164,11 +168,14 @@ class VideoStreamInfo(StreamInfo):
         fps_fraction:  Exact average fps as a rational (e.g. ``24000/1001``)
                        — the value timestamp conversions compute with.
         resolution:    ``"<width>x<height>"`` (e.g. ``"1920x1080"``).
+        pix_fmt:       Pixel format name (e.g. ``yuv420p10le``) — a source
+                       property worth preserving.
     """
 
     fps:          float | None       = None
     fps_fraction: FractionYaml | None = None
     resolution:   str | None         = None
+    pix_fmt:      str | None         = None
 
 
 class AudioStreamInfo(StreamInfo):

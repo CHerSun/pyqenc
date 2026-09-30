@@ -52,10 +52,12 @@ def _video_stream() -> VideoStream:
         info = VideoStreamInfo(
             track_id        = 0,
             codec_name      = "hevc",
+            start_timestamp = 0.0,
             duration_seconds = 5964.48,
             fps             = 23.976024,
             fps_fraction    = Fraction(24000, 1001),
             resolution      = "1920x1080",
+            pix_fmt         = "yuv420p10le",
         ),
     )
 
@@ -273,8 +275,8 @@ class TestUniqueSliceDumps:
         dumped = _video_stream().info.model_dump(exclude_none=True)
         assert "file" not in dumped
         assert set(dumped) == {
-            "track_id", "codec_name", "duration_seconds",
-            "fps", "fps_fraction", "resolution",
+            "track_id", "codec_name", "start_timestamp", "duration_seconds",
+            "fps", "fps_fraction", "resolution", "pix_fmt",
         }
 
     def test_fraction_serializes_as_num_den_pair(self) -> None:
