@@ -147,6 +147,7 @@ class MergePhase(Phase[MergePhaseResult]):
     SIDECAR_NAME = "merge.yaml"
     _NS_PER_SECOND       = 1_000_000_000
     _MKVPROPEDIT_VIDEO_TRACK = "track:v1"
+    _OUTPUT_SUFFIX       = ".mkv"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (
         JobPhase, ExtractionPhase, ProbePhase, EncodingPhase, AudioPhase,
     )
@@ -361,7 +362,7 @@ class MergePhase(Phase[MergePhaseResult]):
         # Retained in place, never pending; deletion only via explicit
         # cleanup.
         if merged_dir.exists():
-            for output_file in sorted(merged_dir.glob("*.mkv")):
+            for output_file in sorted(merged_dir.glob(f"*{MergePhase._OUTPUT_SUFFIX}")):
                 if output_file.name in expected_names:
                     continue
                 state = (
@@ -429,6 +430,10 @@ class MergePhase(Phase[MergePhaseResult]):
         (merge is not a readonly-execute phase; the template previews
         instead).
 
+        PARTIAL rows (final present, sidecar missing) skip concatenation
+        entirely — the rename-first contract makes them complete by
+        construction — and only re-measure.
+
         Args:
             wanted:  Wanted merged-output rows from ``_recover()``.
             dry_run: Unused for this phase (template guarantees ``False``).
@@ -469,90 +474,26 @@ class MergePhase(Phase[MergePhaseResult]):
             # The merge output name derives at the single site.
             output_file = MergePhase._expected_output_path(merged_dir, source_stem, strategy)
             assert output_file == payload.output_path, "recovery derived the same location"
-            logger.info("Merging: %s", strategy_name)
 
             try:
-                # Collect and sort chunks for this strategy
-                strategy_chunks: list[Path] = sorted(
-                    (
-                        encoded_chunks[chunk_id][strategy_name].stream.stream.file.path
-                        for chunk_id in sorted(encoded_chunks.keys())
-                        if strategy_name in encoded_chunks[chunk_id]
-                    ),
-                    key=lambda p: p.name,
-                )
-
-                if not strategy_chunks:
-                    logger.error("No encoded chunks found for strategy %s — skipping", strategy_name)
-                    failed_strategies.append(strategy_name)
-                    continue
-
-                logger.info("  Starting concatenation of %d chunks...", len(strategy_chunks))
-
-                # Resolve timestamps path from ExtractionPhase result
-                timestamps_path: Path | None = (
-                    self._dep_result(ExtractionPhase).timestamps_path
-                )
-
-                if timestamps_path is None or not timestamps_path.exists():
-                    logger.critical(
-                        "timestamps.txt not found — cannot restore PTS. "
-                        "Re-run the extraction phase to generate it."
-                    )
-                    failed_strategies.append(strategy_name)
-                    continue
-
-                # Write mkvmerge options file
-                options_file = merged_dir / f"concat_{strategy_name}.json"
-                args = MergePhase._build_mkvmerge_options(strategy_chunks, output_file, timestamps_path)
-                MergePhase._write_mkvmerge_options_file(options_file, args)
-
-                # Run mkvmerge via options file (avoids OS command-line length limits).
-                # The "@<file>" option embeds the path in a sub-string mkvmerge
-                # parses itself — plain form only, no extended-length prefix.
-                cmd_mkvmerge: list[str | os.PathLike] = ["mkvmerge", f"@{options_file}"]
-                logger.debug("mkvmerge command: %s", " ".join(str(a) for a in cmd_mkvmerge))
-
-                with self._collector.time(MetricKey.MERGE, "concat"):
-                    mkvmerge_result = subprocess.run(
-                        cmd_mkvmerge, capture_output=True, text=True, check=False,
-                    )
-
-                if mkvmerge_result.returncode != 0:
-                    logger.error(
-                        "mkvmerge failed for strategy %s (exit %d)",
-                        strategy_name, mkvmerge_result.returncode,
-                    )
-                    for line in mkvmerge_result.stderr.splitlines()[-20:]:
-                        logger.error("mkvmerge stderr: %s", line)
-                    # Leave options file on disk for debugging
-                    failed_strategies.append(strategy_name)
-                    continue
-
-                # Delete options file on success
-                options_file.unlink(missing_ok=True)
-
-                logger.debug("  Concatenation complete: %s", output_file.name)
-
-                # Restore the true frame rate in the track header —
-                # see _build_mkvpropedit_args for why mkvmerge cannot do it.
-                propedit_cmd: list[str | os.PathLike] = MergePhase._build_mkvpropedit_args(
-                    output_file, source_stream.stream.info.fps_fraction,
-                )
-                propedit_result = subprocess.run(propedit_cmd, capture_output=True, text=True, check=False)
-                if propedit_result.returncode != 0:
-                    logger.error(
-                        "mkvpropedit failed for strategy %s (exit %d) — frame-rate header not restored",
-                        strategy_name, propedit_result.returncode,
-                    )
-                    for line in propedit_result.stderr.splitlines()[-20:]:
-                        logger.error("mkvpropedit stderr: %s", line)
+                if artifact.state == ArtifactState.PARTIAL:
+                    # Rename-first contract: a sidecar-less final is complete
+                    # by construction — concat and propedit already succeeded,
+                    # only measurement and the sidecar are missing (and the
+                    # encoded chunks may not survive cleanup anyway).
+                    logger.info("Re-measuring: %s", strategy_name)
+                elif not self._concat_and_promote(
+                    strategy_name  = strategy_name,
+                    output_file    = output_file,
+                    source_stream  = source_stream,
+                    encoded_chunks = encoded_chunks,
+                ):
                     failed_strategies.append(strategy_name)
                     continue
 
                 # Verify frame count
-                frame_count:       int | None = None
-                frame_count_ok:    bool       = False
+                frame_count:       int | None       = None
+                frame_count_ok:    bool             = False
                 try:
                     frame_count = get_frame_count(output_file)
                     if source_frame_count > 0:
@@ -692,6 +633,116 @@ class MergePhase(Phase[MergePhaseResult]):
             f"{complete_count} output file(s) complete",
         )
 
+    def _concat_and_promote(
+        self,
+        strategy_name:  str,
+        output_file:    Path,
+        source_stream:  ExtendedVideoStream,
+        encoded_chunks: dict[str, dict[str, EncodedChunk]],
+    ) -> bool:
+        """Concatenate one strategy's encoded chunks into *output_file*.
+
+        The production path for an ABSENT output: chunk collection, mkvmerge
+        (via an options file, writing the ``.tmp`` twin), the mkvpropedit
+        frame-rate header patch, and the promotion rename to the final name.
+        Failures are logged here and reported as ``False`` for the caller to
+        record the strategy as failed.
+
+        Args:
+            strategy_name:  Display name; keys the ``encoded_chunks`` rows.
+            output_file:    The final output location; the tmp twin derives.
+            source_stream:  The source stream (its true fps feeds propedit).
+            encoded_chunks: Encoding winners keyed by chunk id, then strategy.
+
+        Returns:
+            ``True`` when *output_file* is ready at its final name.
+        """
+        logger.info("Merging: %s", strategy_name)
+
+        # Collect and sort chunks for this strategy
+        strategy_chunks: list[Path] = sorted(
+            (
+                encoded_chunks[chunk_id][strategy_name].stream.stream.file.path
+                for chunk_id in sorted(encoded_chunks.keys())
+                if strategy_name in encoded_chunks[chunk_id]
+            ),
+            key=lambda p: p.name,
+        )
+
+        if not strategy_chunks:
+            logger.error("No encoded chunks found for strategy %s — skipping", strategy_name)
+            return False
+
+        logger.info("  Starting concatenation of %d chunks...", len(strategy_chunks))
+
+        # Resolve timestamps path from ExtractionPhase result
+        timestamps_path: Path | None = (
+            self._dep_result(ExtractionPhase).timestamps_path
+        )
+
+        if timestamps_path is None or not timestamps_path.exists():
+            logger.critical(
+                "timestamps.txt not found — cannot restore PTS. "
+                "Re-run the extraction phase to generate it."
+            )
+            return False
+
+        merged_dir = output_file.parent
+        tmp_output = MergePhase._tmp_output_path(output_file)
+
+        # Write mkvmerge options file
+        options_file = merged_dir / f"concat_{strategy_name}.json"
+        args = MergePhase._build_mkvmerge_options(strategy_chunks, tmp_output, timestamps_path)
+        MergePhase._write_mkvmerge_options_file(options_file, args)
+
+        # Run mkvmerge via options file (avoids OS command-line length limits).
+        # The "@<file>" option embeds the path in a sub-string mkvmerge
+        # parses itself — plain form only, no extended-length prefix.
+        cmd_mkvmerge: list[str | os.PathLike] = ["mkvmerge", f"@{options_file}"]
+        logger.debug("mkvmerge command: %s", " ".join(str(a) for a in cmd_mkvmerge))
+
+        with self._collector.time(MetricKey.MERGE, "concat"):
+            mkvmerge_result = subprocess.run(
+                cmd_mkvmerge, capture_output=True, text=True, check=False,
+            )
+
+        if mkvmerge_result.returncode != 0:
+            logger.error(
+                "mkvmerge failed for strategy %s (exit %d)",
+                strategy_name, mkvmerge_result.returncode,
+            )
+            for line in mkvmerge_result.stderr.splitlines()[-20:]:
+                logger.error("mkvmerge stderr: %s", line)
+            # Leave options file on disk for debugging
+            return False
+
+        # Delete options file on success
+        options_file.unlink(missing_ok=True)
+
+        logger.debug("  Concatenation complete: %s", tmp_output.name)
+
+        # Restore the true frame rate in the track header —
+        # see _build_mkvpropedit_args for why mkvmerge cannot do it.
+        propedit_cmd: list[str | os.PathLike] = MergePhase._build_mkvpropedit_args(
+            tmp_output, source_stream.stream.info.fps_fraction,
+        )
+        propedit_result = subprocess.run(propedit_cmd, capture_output=True, text=True, check=False)
+        if propedit_result.returncode != 0:
+            logger.error(
+                "mkvpropedit failed for strategy %s (exit %d) — frame-rate header not restored",
+                strategy_name, propedit_result.returncode,
+            )
+            for line in propedit_result.stderr.splitlines()[-20:]:
+                logger.error("mkvpropedit stderr: %s", line)
+            return False
+
+        # Promote the finished concat to its final name — the tmp twin
+        # exists only while mkvmerge/propedit write it; a crash after the
+        # rename leaves a sidecar-less PARTIAL that recovery re-measures,
+        # never a swept-away investment.
+        tmp_output.replace(output_file)
+        return True
+
     def _collect_encoded_chunks(self) -> dict[str, dict[str, EncodedChunk]]:
         """Read the winning ``EncodedChunk`` objects from ``EncodingPhase.result``.
 
@@ -716,7 +767,20 @@ class MergePhase(Phase[MergePhaseResult]):
         ``<file stem> <strategy.safe_name()>.mkv`` below ``merged/``; names are
         safe by construction.
         """
-        return merged_dir / f"{source_stem} {strategy.safe_name()}.mkv"
+        return merged_dir / f"{source_stem} {strategy.safe_name()}{MergePhase._OUTPUT_SUFFIX}"
+
+    @staticmethod
+    def _tmp_output_path(output_file: Path) -> Path:
+        """The pre-rename destination a merge writes into (``<name>.tmp``).
+
+        The standard temp spelling, swept by :func:`remove_stale_tmp_files`
+        like every other remnant.  mkvmerge writes partial data directly at
+        its destination name, so the concat and the mkvpropedit header patch
+        run on the twin; the rename to *output_file* right after propedit is
+        the atomicity boundary — everything downstream (verification,
+        measurement, sidecar) targets the final path.
+        """
+        return output_file.with_name(f"{output_file.stem}{TEMP_SUFFIX}")
 
     @staticmethod
     def _sidecar_path(output_file: Path) -> Path:
@@ -1089,7 +1153,8 @@ class MergePhase(Phase[MergePhaseResult]):
 
         Args:
             chunks:          Ordered list of encoded chunk paths.
-            output:          Destination output MKV path.
+            output:          Destination output path — the pre-rename tmp
+                             twin during a run.
             timestamps_path: Path to the timestamps.txt file.
 
         Returns:

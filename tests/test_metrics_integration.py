@@ -1617,8 +1617,9 @@ class TestMergePhaseTiming:
                 }),
             ):
                 mock_subprocess.return_value = MagicMock(returncode=0, stderr="")
-                # Create the output file so the merge "succeeds"
-                output_file.write_bytes(b"\x00" * 128)
+                # The twin the mocked mkvmerge "wrote" — the phase promotes
+                # it to the final name via rename.
+                output_file.with_name(f"{output_file.stem}.tmp").write_bytes(b"\x00" * 128)
                 phase.run()
 
         metrics   = _recorded_metrics(tmp_path, run)
@@ -1672,7 +1673,9 @@ class TestMergePhaseTiming:
                 patch("pyqenc.phases.merge.MergePhase._measure_quality", return_value=({}, False, None)),
             ):
                 mock_subprocess.return_value = MagicMock(returncode=0, stderr="")
-                output_file.write_bytes(b"\x00" * 128)
+                # The twin the mocked mkvmerge "wrote" — the phase promotes
+                # it to the final name via rename.
+                output_file.with_name(f"{output_file.stem}.tmp").write_bytes(b"\x00" * 128)
                 phase.run()
 
         metrics   = _recorded_metrics(tmp_path, run)

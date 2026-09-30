@@ -19,6 +19,13 @@ Covers:
 - Options file deleted on success, retained on failure (via run())
 - mkvpropedit failure fails the strategy without writing a sidecar (via run())
 - Merge fails with a clear message when timestamps_path is None / missing (via run())
+- Output atomicity: mkvmerge writes the ``.tmp`` twin, propedit patches it,
+  then the rename promotes it — the final name appears only after propedit
+  succeeded; a failed merge leaves nothing at the final path (via run())
+- PARTIAL outputs (final present, sidecar missing) are salvaged by
+  re-measuring the existing file — no re-concatenation, encoded chunks not
+  required (via run())
+- Stale ``.tmp`` twins are swept at recovery (remove_stale_tmp_files)
 """
 
 from __future__ import annotations
@@ -55,6 +62,8 @@ from pyqenc.stream_model import (
     VideoStream,
     VideoStreamInfo,
 )
+from pyqenc.utils.fs import remove_stale_tmp_files
+from pyqenc.utils.long_path import LongPath
 
 
 def _extended_stream(path: Path, frame_count: int) -> ExtendedVideoStream:
@@ -424,6 +433,32 @@ class TestBuildMkvpropeditArgs:
 
 
 # ---------------------------------------------------------------------------
+# _tmp_output_path — the pre-rename twin name
+# ---------------------------------------------------------------------------
+
+class TestTmpOutputPath:
+    """The merge temp destination takes the standard ``<stem>.tmp`` spelling.
+
+    Verified against mkvmerge v102: it writes partial output directly at its
+    destination name, and an unrecognized extension defaults to Matroska —
+    so the plain temp name is a valid target and the standard ``*.tmp``
+    sweep owns the remnant.
+    """
+
+    def test_derivation_pinned(self) -> None:
+        output = Path("merged/movie slow_h265.mkv")
+
+        assert MergePhase._tmp_output_path(output) == Path("merged/movie slow_h265.tmp")
+
+    def test_long_path_type_preserved(self) -> None:
+        """LongPath must survive the derivation — the twin participates in
+        the same subprocess and file I/O as the final output."""
+        output = LongPath("merged/movie slow_h265.mkv")
+
+        assert isinstance(MergePhase._tmp_output_path(output), LongPath)
+
+
+# ---------------------------------------------------------------------------
 # _write_mkvmerge_options_file
 # ---------------------------------------------------------------------------
 
@@ -476,7 +511,8 @@ class TestMkvmergeOptionsFileLifecycle:
     def test_options_file_deleted_on_success(self) -> None:
         """Bug guarded: a leftover ``concat_*.json`` after a SUCCESSFUL merge
         would pollute ``final/`` and mislead recovery into thinking a merge is
-        mid-flight. On success the options file must be gone.
+        mid-flight. On success the options file must be gone, and the output
+        must have been promoted from its ``.tmp.mkv`` twin to the final name.
         """
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
@@ -496,19 +532,22 @@ class TestMkvmergeOptionsFileLifecycle:
 
             merged_dir   = work_dir / MERGED_OUTPUT_DIR
             output_file  = merged_dir / f"{source.stem} {_SAFE_NAME}.mkv"
+            tmp_output   = merged_dir / f"{source.stem} {_SAFE_NAME}.tmp"
             options_file = merged_dir / f"concat_{_SAFE_NAME}.json"
 
             def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
                 if cmd[0] == "mkvpropedit":
-                    # Header patch runs after the options file is cleaned up.
-                    assert output_file.exists(), "Output file must exist when mkvpropedit is called"
+                    # Header patch runs on the tmp twin, after the options
+                    # file is cleaned up and before the promotion rename.
+                    assert tmp_output.exists(), "Tmp twin must exist when mkvpropedit is called"
+                    assert not output_file.exists(), "Final name must not exist before the rename"
                     result = MagicMock()
                     result.returncode = 0
                     result.stderr = ""
                     return result
                 # Options file must exist at the moment mkvmerge is invoked.
                 assert options_file.exists(), "Options file must exist when mkvmerge is called"
-                output_file.write_bytes(b"\x00" * 128)
+                tmp_output.write_bytes(b"\x00" * 128)
                 result = MagicMock()
                 result.returncode = 0
                 result.stderr = ""
@@ -526,6 +565,8 @@ class TestMkvmergeOptionsFileLifecycle:
             assert not options_file.exists(), (
                 "Options file must be deleted after a successful merge"
             )
+            assert output_file.exists(), "Verified output must be promoted to the final name"
+            assert not tmp_output.exists(), "Tmp twin must be gone after the promotion rename"
 
     def test_options_file_retained_on_failure(self) -> None:
         """Bug guarded: discarding the ``concat_*.json`` when mkvmerge FAILS
@@ -566,13 +607,17 @@ class TestMkvmergeOptionsFileLifecycle:
             assert options_file.exists(), (
                 "Options file must be retained after a failed merge"
             )
+            output_file = merged_dir / f"{source.stem} {_SAFE_NAME}.mkv"
+            assert not output_file.exists(), (
+                "A failed merge must leave nothing at the final path"
+            )
 
     def test_propedit_failure_fails_strategy(self) -> None:
         """Bug guarded: silently swallowing a mkvpropedit failure would
         deliver a final whose header misdeclares the frame rate and reads as
         VFR — the exact defect the patch step exists to fix. A non-zero exit
         must fail the strategy merge (no sidecar → output stays PARTIAL for
-        recovery to re-merge).
+        recovery to re-merge) and must not promote the tmp twin.
         """
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
@@ -592,6 +637,7 @@ class TestMkvmergeOptionsFileLifecycle:
 
             merged_dir  = work_dir / MERGED_OUTPUT_DIR
             output_file = merged_dir / f"{source.stem} {_SAFE_NAME}.mkv"
+            tmp_output  = merged_dir / f"{source.stem} {_SAFE_NAME}.tmp"
 
             def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
                 result = MagicMock()
@@ -599,7 +645,7 @@ class TestMkvmergeOptionsFileLifecycle:
                     result.returncode = 2
                     result.stderr = "Error: The changes could not be written."
                 else:
-                    output_file.write_bytes(b"\x00" * 128)
+                    tmp_output.write_bytes(b"\x00" * 128)
                     result.returncode = 0
                     result.stderr = ""
                 return result
@@ -611,11 +657,98 @@ class TestMkvmergeOptionsFileLifecycle:
                 f"Expected FAILED, got {result.outcome}"
             )
             sidecar = output_file.with_suffix(".yaml")
-            assert output_file.exists(), "Concatenated output stays on disk for debugging"
-            assert not sidecar.exists(), (
-                "No sidecar may be written when the header patch fails — "
-                "the artifact must stay PARTIAL so recovery re-merges"
+            assert not output_file.exists(), (
+                "Final path must stay empty when the header patch fails — "
+                "the artifact must stay ABSENT so recovery re-merges"
             )
+            assert tmp_output.exists(), "Concatenated tmp twin stays on disk for debugging"
+            assert not sidecar.exists(), "No sidecar may be written when the header patch fails"
+
+
+# ---------------------------------------------------------------------------
+# Stale tmp twins (recovery sweep)
+# ---------------------------------------------------------------------------
+
+class TestStaleTmpTwinSwept:
+    """A crash mid-merge leaves only the ``.tmp`` twin on disk; the
+    recovery-time stale sweep must remove it so it can never be mistaken
+    for — or block — the real output."""
+
+    def test_sweep_removes_tmp_twin(self, tmp_path: Path) -> None:
+        twin = tmp_path / "movie slow_h265.tmp"
+        twin.write_bytes(b"\x00" * 16)
+
+        remove_stale_tmp_files(tmp_path)
+
+        assert not twin.exists()
+
+    def test_sweep_keeps_real_outputs(self, tmp_path: Path) -> None:
+        """Only temp spellings are removed — a real merged output (no
+        ``.tmp``) must survive the sweep."""
+        output = tmp_path / "movie slow_h265.mkv"
+        output.write_bytes(b"\x00" * 16)
+
+        remove_stale_tmp_files(tmp_path)
+
+        assert output.exists()
+
+
+# ---------------------------------------------------------------------------
+# PARTIAL salvage (driven through run())
+# ---------------------------------------------------------------------------
+
+class TestPartialSalvage:
+    """A PARTIAL output (final present, sidecar missing) is completed by
+    re-measuring the existing file — no re-concatenation.
+
+    Bug guarded: the rename-first contract guarantees a sidecar-less final
+    is complete by construction, so re-running mkvmerge over it would burn
+    the concat investment for nothing — and is impossible once cleanup has
+    removed the encoded chunks.
+    """
+
+    def test_partial_is_remeasured_without_concat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            work_dir = tmp_path / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            source = tmp_path / "source.mkv"
+            source.write_bytes(b"\x00" * 64)
+
+            ts_file = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+            ts_file.parent.mkdir(parents=True, exist_ok=True)
+            ts_file.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
+
+            chunk = work_dir / "chunk1.mkv"
+            chunk.write_bytes(b"\x00" * 64)
+
+            merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=ts_file)
+
+            # The PARTIAL state: finished output at the final name, no sidecar.
+            merged_dir  = work_dir / MERGED_OUTPUT_DIR
+            merged_dir.mkdir(parents=True, exist_ok=True)
+            output_file = merged_dir / f"{source.stem} {_SAFE_NAME}.mkv"
+            output_file.write_bytes(b"\x00" * 128)
+            # Cleanup may have removed the encoded chunks — salvage must not care.
+            chunk.unlink()
+
+            with (
+                patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
+                patch("pyqenc.phases.merge.get_frame_count", return_value=100),
+            ):
+                result = merge.run(dry_run=False)
+
+            mock_subprocess.assert_not_called()
+            assert result.outcome == PhaseOutcome.COMPLETED, (
+                f"Expected COMPLETED, got {result.outcome} (message={result.message!r})"
+            )
+            assert output_file.exists(), "Salvage must keep the existing output"
+            assert output_file.with_suffix(".yaml").exists(), (
+                "Sidecar must be written — the artifact completes"
+            )
+            complete = [a for a in result.merged if a.state == ArtifactState.COMPLETE]
+            assert len(complete) == 1
+            assert complete[0].payload.frame_count == 100
 
 
 # ---------------------------------------------------------------------------

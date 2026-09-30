@@ -570,15 +570,6 @@ Needs thinking.
 
 ---
 
-## 56. Merge output is not written atomically
-
-mkvmerge writes the final MKV directly at its destination name (`-o final/xxx.mkv`), violating the `.tmp`-then-rename phase contract: a crash mid-concat leaves a truncated `.mkv` at the final path. It self-recovers today only because the sidecar (written atomically after success) is the completeness marker — a sidecar-less output classifies as PARTIAL and is re-merged (overwritten). The mkvpropedit header patch added 2026-09-29 also runs on the pre-rename file path in spirit, but the file is already at its final name by then.
-Options to think about: mkvmerge to `xxx.mkv.tmp` + rename after propedit; or declare the sidecar the atomicity boundary and document the deviation.
-
-Human input: all materialized artifacts must follow .tmp then rename protocol. It is the base of trust.
-
----
-
 ## 59. Parallel metrics
 
 Currently, if we run 2 jobs onto the same folder (say, separate video and audio passes) - metrics will get garbled.

@@ -486,10 +486,12 @@ def test_frame_count_preservation(frame_count: int) -> None:
 
         source_stem = source.stem
         output_file = work_dir / MERGED_OUTPUT_DIR / f"{source_stem} {encoded_chunk.strategy.display_name()}.mkv"
+        # The pre-rename tmp twin mkvmerge writes into during a run.
+        tmp_output  = work_dir / MERGED_OUTPUT_DIR / f"{source_stem} {encoded_chunk.strategy.display_name()}.tmp"
 
         def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
             output_file.parent.mkdir(parents=True, exist_ok=True)
-            output_file.write_bytes(b"\x00" * 128)
+            tmp_output.write_bytes(b"\x00" * 128)
             result = MagicMock()
             result.returncode = 0
             result.stderr = ""
