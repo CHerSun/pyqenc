@@ -34,6 +34,7 @@ pre-resolved ``FinalizeContext.deep_cleanup`` flag is set.
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
@@ -275,7 +276,7 @@ class PhaseContractError(RuntimeError):
 # Phase — template-method base implementing the uniform run()
 # ---------------------------------------------------------------------------
 
-class Phase[ResultT: PhaseResult]:
+class Phase[ResultT: PhaseResult](ABC):
     """Template-method base class implementing the uniform phase ``run()``.
 
     Type parameter:
@@ -290,7 +291,10 @@ class Phase[ResultT: PhaseResult]:
     resolution → banner → timed ``_recover()`` → dry-run / no-pending
     branches → timed ``_execute(wanted, dry_run)``. The template never
     decides ``COMPLETED`` / ``FAILED`` and never computes per-phase payloads —
-    those live in the phase hooks; timing, banner, guards, and the
+    those live in the mandatory abstract methods (``_recover``, ``_execute``,
+    ``_make_result`` — every concrete phase implements all three) and the
+    optional hooks (``_skip_check``, ``_reused_result``, ``_log_key_params``,
+    ``_recovery_unit`` — base defaults); timing, banner, guards, and the
     wanted-filter exist exactly once, here.
 
     Class attributes:
@@ -604,6 +608,7 @@ class Phase[ResultT: PhaseResult]:
             message or f"all {self._recovery_unit()}s reused",
         )
 
+    @abstractmethod
     def _recover(self) -> Recovery:
         """Scan disk and build the single source of truth for this run.
 
@@ -617,8 +622,9 @@ class Phase[ResultT: PhaseResult]:
         Returns:
             The :class:`Recovery` single source of truth.
         """
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def _execute(self, wanted: list[Artifact], dry_run: bool) -> PhaseResult:
         """Produce every wanted artifact; the phase alone decides the outcome.
 
@@ -635,8 +641,9 @@ class Phase[ResultT: PhaseResult]:
         Returns:
             The typed phase result with the outcome the phase chooses.
         """
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def _make_result(
         self,
         outcome:   PhaseOutcome,
@@ -654,7 +661,7 @@ class Phase[ResultT: PhaseResult]:
         Returns:
             The populated typed result.
         """
-        raise NotImplementedError
+        ...
 
 
 # ---------------------------------------------------------------------------
