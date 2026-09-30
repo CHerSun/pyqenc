@@ -447,7 +447,7 @@ class TestPairLedger:
 
         assert result.outcome == PhaseOutcome.PENDING
         assert any(
-            "Recovery: 9 total, 9 wanted (0 complete, 0 partial, 9 absent) — full run needed"
+            "Recovery: 9 total, 9 wanted (0 complete, 0 partial, 9 absent) — nothing to reuse"
             in r.message
             for r in caplog.records
         ), [r.message for r in caplog.records if "Recovery" in r.message]

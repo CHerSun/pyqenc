@@ -159,7 +159,7 @@ THE Pipeline SHALL implement the following contracts (ledger = internal rows bui
 
 #### Acceptance Criteria
 
-1. Optimization's ledger SHALL contain one row per (test chunk × strategy) winning attempt. For 3 test chunks and 3 strategies the recovery line SHALL read `Recovery: 9 total, 9 wanted (0 complete, 0 partial, 9 absent) — full run needed` on a fresh run — not `3 total` as the per-strategy aggregation reports today.
+1. Optimization's ledger SHALL contain one row per (test chunk × strategy) winning attempt. For 3 test chunks and 3 strategies the recovery line SHALL read `Recovery: 9 total, 9 wanted (0 complete, 0 partial, 9 absent) — nothing to reuse` on a fresh run (2026-09-30 amendment: the suffix is three-state — `all reused` / `resuming` / `nothing to reuse`, keyed on the pending count) — not `3 total` as the per-strategy aggregation reports today.
 2. Row states SHALL be per-pair and presence-based (the shared attempt-recovery machinery already provides this). Internal derivation MAY aggregate from `optimization.yaml` per-strategy records, but a row SHALL be `COMPLETE` only when that pair's winner actually exists on disk.
 3. `optimization.yaml` KEEPS its current role unchanged (test-chunk selection, per-strategy aggregated sizes, tolerance, selection, invalidation) — it is settings/state, not artifacts.
 

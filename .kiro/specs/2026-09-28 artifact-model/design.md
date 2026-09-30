@@ -287,8 +287,14 @@ Today: `_strategy_artifacts(cached_results.keys(), …)` → `Recovery: 3 total,
 After: the ledger enumerates `Artifact[EncodedChunk]` per (test chunk × strategy), states from the shared per-pair attempt-recovery machinery (or aggregated from `optimization.yaml` provided a row is `COMPLETE` only when its winner exists on disk):
 
 ```text
-Recovery: 9 total, 9 wanted (0 complete, 0 partial, 9 absent) — full run needed
+Recovery: 9 total, 9 wanted (0 complete, 0 partial, 9 absent) — nothing to reuse
 ```
+
+*(2026-09-30 amendment, same day as closeout: the suffix became three-state,
+keyed on the pending count — `all reused` when nothing is pending, `resuming`
+when reusable work exists, `nothing to reuse` when no wanted row is complete.
+The old two-state wording said "resuming" on fully-reused phases and "full run
+needed" on fresh ones.)*
 
 `optimization.yaml` is unchanged in role. Orphaned strategy products surface as `wanted=False` rows, matching EncodingPhase's existing pattern.
 

@@ -123,6 +123,13 @@ def log_recovery_line(
     The identity ``wanted == complete + partial + absent`` always holds. All
     counts are always shown, even when zero.
 
+    The suffix states what the template does with this ledger, keyed on the
+    pending count (``partial + absent``): ``all reused`` when nothing is
+    pending (the template fast-exits to ``REUSED`` — this line is the only
+    uniform full-reuse signal a phase emits), ``resuming`` when reusable work
+    exists alongside the pending remainder, ``nothing to reuse`` when no
+    wanted row is complete.
+
     The returned string is the single source of truth for the recovery message:
     callers assign it directly to ``PhaseResult.message`` rather than building a
     separate message via a per-phase helper.
@@ -145,7 +152,12 @@ def log_recovery_line(
     partial  = sum(1 for a in artifacts if a.wanted and a.state == ArtifactState.PARTIAL)
     absent   = sum(1 for a in artifacts if a.wanted and a.state == ArtifactState.ABSENT)
 
-    suffix  = "resuming" if complete else "full run needed"
+    if partial + absent == 0:
+        suffix = "all reused"
+    elif complete > 0:
+        suffix = "resuming"
+    else:
+        suffix = "nothing to reuse"
     message = (
         f"Recovery: {total} total, {wanted} wanted"
         f" ({complete} complete, {partial} partial, {absent} absent)"

@@ -221,12 +221,53 @@ class TestRecovery:
             MetricKey.RECOVERY
         ]
         assert any(
-            "Recovery: 4 total, 3 wanted (1 complete, 1 partial, 1 absent)" in r.message
+            "Recovery: 4 total, 3 wanted (1 complete, 1 partial, 1 absent) — resuming"
+            in r.message
             for r in caplog.records
         )
         # Wanted-only exposure; the unwanted artifact stays internal.
         assert len(result.artifacts) == 3
         assert result.artifacts[0].wanted
+
+    def test_fully_reused_ledger_says_all_reused(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Bug guarded: the suffix claiming "resuming" (or anything but full
+        reuse) when every wanted row is complete — the template fast-exits to
+        REUSED and this line is the only uniform reuse signal a phase emits."""
+        artifacts = [
+            _art(ArtifactState.COMPLETE),
+            _art(ArtifactState.COMPLETE),
+            _art(ArtifactState.COMPLETE, wanted=False),
+        ]
+        phase = _StubPhase(NoOpMetricsCollector(), Recovery.from_artifacts(artifacts))
+        with caplog.at_level(logging.INFO):
+            phase.run()
+
+        assert any(
+            "Recovery: 3 total, 2 wanted (2 complete, 0 partial, 0 absent) — all reused"
+            in r.message
+            for r in caplog.records
+        )
+
+    def test_fresh_ledger_says_nothing_to_reuse(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Bug guarded: a fresh ledger (nothing complete) reported with a
+        resume-flavored suffix — no work exists to resume; every wanted row
+        must be produced."""
+        phase = _StubPhase(
+            NoOpMetricsCollector(),
+            Recovery.from_artifacts([_art(ArtifactState.ABSENT)]),
+        )
+        with caplog.at_level(logging.INFO):
+            phase.run()
+
+        assert any(
+            "Recovery: 1 total, 1 wanted (0 complete, 0 partial, 1 absent) — nothing to reuse"
+            in r.message
+            for r in caplog.records
+        )
 
     def test_recovery_error_becomes_failed_result(self) -> None:
         phase = _StubPhase(
