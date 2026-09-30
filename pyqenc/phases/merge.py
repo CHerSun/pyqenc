@@ -54,7 +54,7 @@ from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.state import MergeParams, MergeStrategySummary, ProbeState
-from pyqenc.stream_model import EncodedChunk, ExtendedVideoStream, MergedVideo
+from pyqenc.stream_model import EncodedChunk, ExtendedVideoStream, File, MergedVideo
 from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
 from pyqenc.utils.log_format import (
     fmt_key_value_table,
@@ -617,7 +617,6 @@ class MergePhase(Phase[MergePhaseResult]):
         Returns:
             The :class:`Recovery` single source of truth.
         """
-        from pyqenc.stream_model import File
 
         job_result = self._dep_result(JobPhase)
         work_dir   = job_result.work_dir
@@ -837,7 +836,6 @@ class MergePhase(Phase[MergePhaseResult]):
         Returns:
             ``MergePhaseResult`` after merging.
         """
-        from pyqenc.metrics import MetricKey
 
         rows = wanted
         work_dir   = self._dep_result(JobPhase).work_dir

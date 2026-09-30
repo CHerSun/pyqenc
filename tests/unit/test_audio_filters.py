@@ -261,5 +261,5 @@ class TestPassthroughStub:
         # Bug: a passthrough chain silently producing an incorrect/incomplete
         # file. Until implemented it must fail loudly.
         f = PassthroughFilter(PassthroughParams())
-        with pytest.raises(NotImplementedError, match="in-memory-stream"):
+        with pytest.raises(NotImplementedError, match="not implemented yet"):
             f.resolve(_STEREO, None)

@@ -43,6 +43,7 @@ from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.state import ProbeState
 from pyqenc.stream_model import ExtendedVideoStream, VideoStream
+from pyqenc.utils.crop import detect_crop_parameters
 from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
 from pyqenc.utils.timestamps import count_frames
 
@@ -223,8 +224,6 @@ class ProbePhase(Phase[ProbePhaseResult]):
         Returns:
             ``ProbePhaseResult`` with outcome ``COMPLETED``.
         """
-        from pyqenc.utils.crop import detect_crop_parameters
-
         probe_yaml = self._dep_result(JobPhase).work_dir / _PROBE_YAML_NAME
         probe_state = self._probe_state
         video       = self._video_stream

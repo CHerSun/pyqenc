@@ -768,7 +768,7 @@ def _build_registry(
         # ProbePhase sits between Extraction and the remaining video phases.
         # crop_params is forwarded here (not to JobPhase) so ProbePhase owns
         # crop detection and manual overrides.
-        from pyqenc.phases.chunking import ChunkingPhase
+        from pyqenc.phases.chunking import ChunkingPhase  # deferred: phases import phase (registry cycle)
         from pyqenc.phases.encoding import EncodingPhase
         from pyqenc.phases.merge import MergePhase
         from pyqenc.phases.optimization import OptimizationPhase

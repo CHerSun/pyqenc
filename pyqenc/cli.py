@@ -4,6 +4,8 @@
 import argparse
 import logging
 import os
+import shutil
+import signal
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -14,15 +16,30 @@ if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
 
 import pyqenc
+from pyqenc.api import (
+    chunk_video,
+    encode_chunks,
+    extract_streams,
+    measure_quality,
+    merge_final,
+    process_audio,
+    run_pipeline,
+)
+from pyqenc.app_config import load_app_config
 from pyqenc.constants import (
+    CONFIG_DIR_HOME,
+    CONFIG_FILENAME_CWD,
+    CONFIG_FILENAME_HOME,
     DEFAULT_SCREENSHOT_COUNT,
     FAILURE_SYMBOL_MAJOR,
     SUCCESS_SYMBOL_MAJOR,
 )
+from pyqenc.metrics import flush_all_metrics
 from pyqenc.models import (
     CleanupLevel,
     CropParams,
 )
+from pyqenc.utils.ffmpeg_runner import kill_all_ffmpeg
 from pyqenc.utils.log_format import fmt_key_value_table
 from pyqenc.utils.logging import setup_logging
 from pyqenc.utils.long_path import LongPath
@@ -279,8 +296,6 @@ def _build_config(args: argparse.Namespace) -> "AppConfig":
         Fully assembled ``AppConfig`` with CLI overrides applied and strategies
         resolved.
     """
-    from pyqenc.app_config import load_app_config
-
     config = load_app_config()
 
     # --- extraction ---
@@ -424,7 +439,6 @@ def _create_merge_subcommand(subparsers: argparse._SubParsersAction) -> None:
 
 def _cmd_auto(args: argparse.Namespace) -> int:
     """Execute the 'auto' subcommand."""
-    from pyqenc.api import run_pipeline
 
     logger.info("Starting automatic pipeline execution...")
     logger.info("")
@@ -480,7 +494,6 @@ def _cmd_auto(args: argparse.Namespace) -> int:
 
 def _cmd_extract(args: argparse.Namespace) -> int:
     """Execute the 'extract' subcommand."""
-    from pyqenc.api import extract_streams
 
     logger.info("Starting stream extraction")
     logger.info(f"Source: {args.source}")
@@ -517,7 +530,6 @@ def _cmd_extract(args: argparse.Namespace) -> int:
 
 def _cmd_chunk(args: argparse.Namespace) -> int:
     """Execute the 'chunk' subcommand."""
-    from pyqenc.api import chunk_video
 
     logger.info("Starting video chunking")
     logger.info(f"Source: {args.source}")
@@ -554,7 +566,6 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
 
 def _cmd_encode(args: argparse.Namespace) -> int:
     """Execute the 'encode' subcommand."""
-    from pyqenc.api import encode_chunks
 
     logger.info("Starting chunk encoding")
     logger.info(f"Source: {args.source}")
@@ -591,7 +602,6 @@ def _cmd_encode(args: argparse.Namespace) -> int:
 
 def _cmd_audio(args: argparse.Namespace) -> int:
     """Execute the 'audio' subcommand."""
-    from pyqenc.api import process_audio
 
     logger.info("Starting audio processing")
     logger.info(f"Source: {args.source}")
@@ -621,7 +631,6 @@ def _cmd_audio(args: argparse.Namespace) -> int:
 
 def _cmd_merge(args: argparse.Namespace) -> int:
     """Execute the 'merge' subcommand."""
-    from pyqenc.api import merge_final
 
     logger.info("Starting final merge")
     logger.info(f"Source: {args.source}")
@@ -711,14 +720,6 @@ def _create_config_subcommand(subparsers: argparse._SubParsersAction) -> None:
 
 def _cmd_config(args: argparse.Namespace) -> int:
     """Execute the 'config' subcommand."""
-    import shutil
-
-    from pyqenc.app_config import load_app_config
-    from pyqenc.constants import (
-        CONFIG_DIR_HOME,
-        CONFIG_FILENAME_CWD,
-        CONFIG_FILENAME_HOME,
-    )
 
     if args.target_dir is None:
         target = Path.home() / CONFIG_DIR_HOME / CONFIG_FILENAME_HOME
@@ -844,8 +845,6 @@ def _create_measure_subcommand(subparsers: argparse._SubParsersAction) -> None:
 
 def _cmd_measure(args: argparse.Namespace) -> int:
     """Execute the 'measure' subcommand."""
-    from pyqenc.api import measure_quality
-    from pyqenc.app_config import load_app_config
 
     try:
         crop_params = _resolve_crop_params(args)
@@ -966,10 +965,6 @@ Examples:
 
     _set_process_priority()
 
-    import signal
-
-    from pyqenc.metrics import flush_all_metrics
-    from pyqenc.utils.ffmpeg_runner import kill_all_ffmpeg
 
     def _sigint_handler(signum: int, frame: object) -> None:
         signal.signal(signal.SIGINT, signal.SIG_DFL)

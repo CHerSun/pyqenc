@@ -211,7 +211,7 @@ class TestProbePhaseReused:
         override_crop     = CropParams(top=0, bottom=0)
 
         with (
-            patch("pyqenc.utils.crop.detect_crop_parameters", return_value=override_crop),
+            patch("pyqenc.phases.probe.detect_crop_parameters", return_value=override_crop),
             patch("pyqenc.phases.probe.get_frame_count", return_value=1440),
         ):
             phase  = _make_probe_phase(job_result, extraction_result, crop_params=override_crop)
@@ -250,7 +250,7 @@ class TestProbePhaseCompleted:
         body = "".join(f"{i * 42}\n" for i in range(self._DETECTED_FRAME_COUNT))
         timestamps.write_text("# timestamp format v2\n" + body, encoding="utf-8")
 
-        with patch("pyqenc.utils.crop.detect_crop_parameters", return_value=self._DETECTED_CROP):
+        with patch("pyqenc.phases.probe.detect_crop_parameters", return_value=self._DETECTED_CROP):
             result = phase.run()
 
         return result, work_dir
@@ -313,7 +313,7 @@ class TestProbeTiming:
 
         # Frame count via the null-count fallback (no timestamps file).
         with (
-            patch("pyqenc.utils.crop.detect_crop_parameters", return_value=self._DETECTED_CROP),
+            patch("pyqenc.phases.probe.detect_crop_parameters", return_value=self._DETECTED_CROP),
             patch("pyqenc.phases.probe.get_frame_count", return_value=self._DETECTED_FRAME_COUNT),
         ):
             result = phase.run()

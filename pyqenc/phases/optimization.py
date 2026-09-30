@@ -445,7 +445,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         from pyqenc.phases.encoding import (
             _encode_chunks_parallel,
             _recover_encoding_attempts,
-        )
+        )  # deferred: circular import (encoding <-> optimization)
 
         phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, strategy_names)
 

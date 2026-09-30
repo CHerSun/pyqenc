@@ -22,7 +22,7 @@ class TestMeasureQualityWiring:
             captured.update(kwargs)
             return "measure-result"
 
-        with mock.patch("pyqenc.phases.measure.run_measure", _fake_run_measure):
+        with mock.patch("pyqenc.api.run_measure", _fake_run_measure):
             result = measure_quality(
                 source_video     = source,
                 work_dir         = tmp_path,
@@ -46,7 +46,7 @@ class TestMeasureQualityWiring:
             captured.update(kwargs)
             return "measure-result"
 
-        with mock.patch("pyqenc.phases.measure.run_measure", _fake_run_measure):
+        with mock.patch("pyqenc.api.run_measure", _fake_run_measure):
             measure_quality(
                 source_video        = source,
                 work_dir            = tmp_path,

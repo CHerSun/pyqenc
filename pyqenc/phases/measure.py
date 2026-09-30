@@ -18,18 +18,23 @@ from pathlib import Path
 import yaml
 
 from pyqenc.constants import (
+    DEFAULT_SCREENSHOT_COUNT,
     FFMPEG_ARG_VF,
     FFMPEG_MUXER_IMAGE2,
+    MEASURE_DIR,
     TEMP_SUFFIX,
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
 from pyqenc.models import CropParams
+from pyqenc.phases.extraction import _probe_streams_json, _video_info
 from pyqenc.quality import ChunkQualityStats, MetricType
-from pyqenc.state import MeasureSidecar
+from pyqenc.state import MeasureSidecar, ProbeState
 from pyqenc.stream_model import File, JobSidecar, VideoStream, VideoStreamInfo
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg_async
+from pyqenc.utils.log_format import _fmt_size_mb, fmt_key_value_table, fmt_metric_value
 from pyqenc.utils.long_path import LongPath
+from pyqenc.utils.visualization import QualityEvaluator
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 logger = logging.getLogger(__name__)
@@ -256,7 +261,6 @@ def _resolve_crop(
     # Prefer probe.yaml — crop is owned by ProbePhase. Loading materializes
     # an empty CropParams when the key is absent, and an empty crop is a
     # concrete resolution ("no crop") — never a reason to keep probing.
-    from pyqenc.state import ProbeState
     probe = ProbeState.load(work_dir / "probe.yaml")
     if probe is not None:
         logger.debug("Loaded crop from probe.yaml: %s", probe.crop)
@@ -342,7 +346,6 @@ async def _run_metrics(
     Returns:
         ``ChunkQualityStats`` mapping each ``MetricType`` to its key statistics.
     """
-    from pyqenc.utils.visualization import QualityEvaluator
 
     evaluator  = QualityEvaluator(metrics_dir)
     evaluation = await evaluator.evaluate_chunk_async(
@@ -376,7 +379,6 @@ def _load_video_stream(path: Path) -> VideoStream:
     Returns:
         The video stream; missing ffprobe fields stay ``None``.
     """
-    from pyqenc.phases.extraction import _probe_streams_json, _video_info
 
     try:
         data = _probe_streams_json(path)
@@ -841,7 +843,6 @@ def _log_measure_summary(targets: list[TargetMeasureResult]) -> None:
     Args:
         targets: List of completed target measure results.
     """
-    from pyqenc.utils.log_format import _fmt_size_mb, fmt_metric_value
 
     if not targets:
         return
@@ -941,8 +942,6 @@ async def run_measure(
         ValueError:        If ``sampling < 1``, ``screenshot_count < 1``,
                            or any resolution mismatch is detected.
     """
-    from pyqenc.constants import MEASURE_DIR
-    from pyqenc.utils.log_format import fmt_key_value_table
 
     # ------------------------------------------------------------------
     # Input validation and crop resolution
@@ -958,7 +957,6 @@ async def run_measure(
     if sampling < 1:
         raise ValueError(f"sampling must be ≥ 1, got {sampling}")
 
-    from pyqenc.constants import DEFAULT_SCREENSHOT_COUNT
     effective_screenshot_count = screenshot_count if screenshot_count is not None else DEFAULT_SCREENSHOT_COUNT
     if effective_screenshot_count < 1:
         raise ValueError(f"screenshot_count must be ≥ 1, got {effective_screenshot_count}")

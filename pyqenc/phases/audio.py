@@ -60,7 +60,7 @@ from pyqenc.phase import (
 from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.state import ArtifactState, AudioSidecar
-from pyqenc.stream_model import AudioOutput, AudioStream
+from pyqenc.stream_model import AudioOutput, AudioStream, File
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.long_path import LongPath
 
@@ -343,7 +343,6 @@ class AudioPhase(Phase[AudioPhaseResult]):
         Returns:
             The internal ledger (expected outputs + surplus files).
         """
-        from pyqenc.stream_model import File
 
         rows: list[Artifact] = []
         expected_names: set[str] = set()

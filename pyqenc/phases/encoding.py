@@ -7,6 +7,7 @@ quality targets, including parallel execution and artifact-based resumption.
 # CHerSun 2026
 
 import asyncio
+import json
 import logging
 import os
 import shutil as _shutil
@@ -98,7 +99,6 @@ logger = logging.getLogger(__name__)
 
 def _probe_resolution(path: Path) -> str | None:
     """Return the video resolution of *path* as ``'WxH'``, or ``None`` on failure."""
-    import json as _json
     cmd: list[str | os.PathLike] = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
@@ -108,7 +108,7 @@ def _probe_resolution(path: Path) -> str | None:
     ]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
-        data = _json.loads(result.stdout)
+        data = json.loads(result.stdout)
         streams = data.get("streams", [])
         if streams:
             w, h = streams[0].get("width"), streams[0].get("height")
@@ -129,14 +129,12 @@ def _read_metrics_sidecar(attempt_path: Path) -> dict | None:
         Parsed sidecar dict (keys: ``targets_met``, ``crf``, ``metrics``,
         ``sampling``), or ``None`` if no sidecar exists or it cannot be parsed.
     """
-    import yaml as _yaml
-
     yaml_sidecar = attempt_path.with_suffix(".yaml")
     if yaml_sidecar.exists():
         try:
             with yaml_sidecar.open("r", encoding="utf-8") as fh:
-                return _yaml.safe_load(fh)
-        except (OSError, _yaml.YAMLError) as e:
+                return yaml.safe_load(fh)
+        except (OSError, yaml.YAMLError) as e:
             logger.debug("Failed to read metrics sidecar %s: %s", yaml_sidecar.name, e)
 
     return None
@@ -184,16 +182,13 @@ def _hardlink_or_copy(src: Path, dst: Path) -> None:
         src: Source file path (the winning attempt ``.mkv``).
         dst: Destination path in ``encoded/<strategy>/``.
     """
-    import os
-    import shutil
-
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.link(src, dst)
         logger.debug("Hard-linked %s → %s", src.name, dst)
     except OSError:
         # Cross-device link or other OS restriction — fall back to copy
-        shutil.copy2(src, dst)
+        _shutil.copy2(src, dst)
         logger.debug("Copied (cross-device fallback) %s → %s", src.name, dst)
 
 
@@ -762,7 +757,6 @@ class ChunkEncoder:
                         # Also remove the per-attempt metrics subfolder if present
                         metrics_dir = encoding_dir / attempt_file.stem
                         if metrics_dir.is_dir():
-                            import shutil as _shutil
                             try:
                                 _shutil.rmtree(metrics_dir)
                                 logger.debug(
