@@ -54,14 +54,16 @@ flowchart LR
 ```mermaid
 flowchart TD
     subgraph Job["Job (job.yaml — source binding)"]
-        EX["Extraction\nextracted/ streams"]
-        CH["Chunking\nchunks/ scene splits"]
+        EX["Extraction\nstream inventory + extracted/\ncontainer artifacts"]
+        PR["Probe\nprobe.yaml (slow facet)"]
+        CH["Chunking\ntimestamp windows (no files)"]
         OP["Optimization\noptimization.yaml\n(optional)"]
-        EN["Encoding\nencoded/ winning chunks"]
-        AU["Audio\naudio/ processed streams"]
-        ME["Merge\nfinal/ output MKVs"]
+        EN["Encoding\nencoding/ attempts,\nencoded/ winners"]
+        AU["Audio\naudio/ chain outputs"]
+        ME["Merge\nmerged/ output MKVs"]
 
-        EX --> CH
+        EX --> PR
+        PR --> CH
         CH --> OP
         CH --> EN
         OP --> EN
@@ -73,99 +75,142 @@ flowchart TD
 
 ### Phase descriptions
 
-| Phase            | Inputs                  | Outputs                                      | Key sidecar                                                           |
-| ---------------- | ----------------------- | -------------------------------------------- | --------------------------------------------------------------------- |
-| **Job**          | `PipelineConfig`        | `job.yaml`                                   | `job.yaml`                                                            |
-| **Extraction**   | Source video            | `extracted/` streams                         | _(none — recovery re-probes source each run)_                        |
-| **Audio**        | Extracted audio streams | `audio/` normalized/converted files          | `audio.yaml`                                                          |
-| **Chunking**     | Extracted video stream  | `chunks/` FFV1 or remux chunks               | `chunking.yaml`                                                       |
-| **Optimization** | Chunks + strategies     | `optimization.yaml` with optimal strategy    | `optimization.yaml`                                                   |
-| **Encoding**     | Chunks + strategies     | `encoding/` attempts,<br> `encoded/` winners | • `encoding.yaml`, <br> • per-attempt `.yaml`, <br> • per-win `.yaml` |
-| **Merge**        | Encoded chunks + audio  | `final/` MKV file(s)                         | `merge.yaml`                                                          |
+| Phase            | Ledger rows (internal, complete)                                     | External contract (result fields)                                                       | Key sidecar(s)                                                         |
+| ---------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| **Job**          | `Artifact[File]` × 1                                                   | `file`; run parameters                                                                       | `job.yaml`                                                              |
+| **Extraction**   | video (index-gated), audio/subs/attachments, chapters rows            | `video_stream`, `audio_streams`, `subtitle_streams`, `attachment_streams`, `chapters`; derived `timestamps_path` / `chapters_path` | `extraction.yaml`                                  |
+| **Probe**        | `Artifact[ExtendedVideoStream]` × 1                                    | `stream`; derived `crop`                                                                     | `probe.yaml`                                                             |
+| **Chunking**     | `Artifact[VideoStreamChunk]` × N (set-flip)                            | `chunks`                                                                                      | `chunking.yaml`                                                          |
+| **Optimization** | `Artifact[EncodedChunk]` per (test chunk × strategy) + orphaned rows   | `winners` (unconsumed — sanctioned exception), `selected_strategies` (settings subset)      | `optimization.yaml`                                                      |
+| **Encoding**     | `Artifact[EncodedChunk]` per (chunk × strategy) + orphaned rows        | `winners` (consumed by Merge), `quality_labels` (settings)                                   | • `encoding.yaml`, <br> • per-attempt `.yaml`, <br> • per-win `.yaml`   |
+| **Audio**        | `Artifact[AudioOutput]` per (track × chain) + surplus rows             | `outputs`; derived `audio_files`                                                             | `audio.yaml`                                                             |
+| **Merge**        | `Artifact[MergedVideo]` per expected output + surplus rows             | `merged` (consumed by the runner as deliverables)                                            | `merge.yaml` + per-output `.yaml`                                        |
 
 > NOTE: Originally the intention was to merge both audio and video during Merge phase, but audio selection is an opinionated process, so I've decided to only merge the videos, leaving the final step for the end user and MKVmerge GUI.
 
 ### Phase object model
 
-Every phase implements a common protocol:
+Every phase inherits `Phase`, whose single concrete `run()` owns the uniform
+footprint — memoization guard, skip check, dependency walk, banner, timed
+`_recover()`, the recovery summary line, dry-run / no-pending branches, and
+timed `_execute()`:
 
 ```mermaid
 classDiagram
     direction LR
     class Phase {
-        +scan(dry_run) PhaseResult
         +run(dry_run) PhaseResult
+        _recover() Recovery
+        _execute(wanted, dry_run) PhaseResult
     }
-    class PhaseOutcome {
-        COMPLETED
-        REUSED
-        DRY_RUN
-        FAILED
+    class PhaseResult {
+        +outcome
+        +message
+        +artifacts .. derived
     }
-    Phase --> PhaseOutcome
+    Phase --> PhaseResult
 ```
 
-- `scan()` — read-only artifact enumeration; classifies each artifact without doing any work
-- `run()` — executes work for artifacts not already `COMPLETE`; calls `scan()` internally
+- `_recover()` — scans disk and builds the phase's complete internal ledger
+  (one `Artifact[PayloadT]` row per owned artifact, wanted or not); derives
+  whether work is pending
+- `_execute(wanted)` — produces every wanted row not already `COMPLETE`
 
-The orchestrator is a thin driver: it builds the phase registry in execution order and calls `phase.run(dry_run)` on each, stopping on the first `FAILED` or `DRY_RUN` outcome. Results are passed forward directly — no filesystem re-scanning between phases.
+The runner is a thin, phase-agnostic driver: it runs one *target* phase
+(dependencies resolve inside the phases via the registry), builds the uniform
+summary from cached results, and broadcasts `finalize`. Results are passed
+forward directly — no filesystem re-scanning between phases.
 
-### Chunking modes
+### Chunking
 
-| Mode | How | Trade-off |
-|------|-----|-----------|
-| **Lossless FFV1** (default) | Re-encode each chunk to lossless FFV1 | Frame-perfect splits; ~5× source size on disk |
-| **Remux / stream-copy** | Copy stream segments aligned to source I-frames | Faster, ~1× source size; imprecise boundaries, potential audio desync |
+Chunks are timestamp windows over the source's extended video stream
+(`VideoStreamChunk`) — no files are produced. `chunking.yaml` persists the
+detector's scene boundaries; windows derive from them at load time, and each
+chunk's frame count derives from consecutive boundary frames (the counts
+telescope to the source total by construction).
 
 ---
 
 ## Artifact-Based Recovery
 
-There is no central progress tracker or state file. Recovery is fully filesystem-driven.
+There is no central progress tracker or state file. Recovery is fully
+filesystem-driven, and every phase speaks the same artifact vocabulary.
 
-### How it works
+### The generic artifact
 
-Each phase follows the same pattern:
+One wrapper — `Artifact[PayloadT]` — wraps every artifact: a typed payload
+(the stream-model entity: `File`, `VideoStream`, `AudioStream`,
+`SubtitleStream`, `AttachmentStream`, `Chapters`, `ExtendedVideoStream`,
+`VideoStreamChunk`, `EncodedChunk`, `AudioOutput`, `MergedVideo`) plus its two
+recovery axes. No subclasses exist; identity lives on the payload, and
+file-backed locations derive from it — the wrapper has no `path` field.
 
-```mermaid
-flowchart LR
-    A["Phase starts"] --> B["Load stored parameters\n(phase YAML sidecar)"]
-    B --> C{"Parameters\nchanged?"}
-    C -->|yes| D["Invalidate affected artifacts"]
-    C -->|no| E["Scan artifacts"]
-    D --> E
-    E --> F["Classify each artifact"]
-    F --> G["Execute only ABSENT / STALE work"]
-    G --> H["Write artifact + sidecar atomically"]
-```
+- **state** — presence-based completeness (see below)
+- **wanted** — whether the current run selects it; a value derived from
+  external input (the stream filter + pipeline mode, the configured
+  strategies/chains), never chosen by the phase
+
+Virtual entities (streams, chunk windows) are artifacts too — they carry no
+file, and their completeness is gated by their material components (the
+video artifact's per-frame PTS index; the persisted scene boundaries).
+
+### The recovery ledger
+
+Each phase's `_recover()` builds the **complete internal ledger**: one row per
+owned artifact — wanted and unwanted, external and internal. The ledger is the
+single source of truth for pending derivation, resumption, and the recovery
+line. Internal rows (`wanted=False` — orphaned strategy directories, surplus
+chain outputs) never reach a result: a result's derived `artifacts` is the
+read-only concatenation of its **declared typed fields**, the phase's external
+contract.
 
 ### Artifact states
 
-| State           | Meaning                                                 |
-| --------------- | ------------------------------------------------------- |
-| `ABSENT`        | File missing — must produce                             |
-| `ARTIFACT_ONLY` | File present, sidecar missing — repair sidecar only     |
-| `STALE`         | File + sidecar present, parameters changed — re-produce |
-| `COMPLETE`      | File + sidecar present, parameters match — skip         |
+| State      | Meaning                                                                        |
+| ---------- | ------------------------------------------------------------------------------ |
+| `ABSENT`   | Components missing — must produce (trivially-reproducible leftovers included)  |
+| `PARTIAL`  | Protected investment incomplete — e.g. output present without its sidecar, or attempts exist without a finalized winner |
+| `COMPLETE` | All expected components present — ready to be worked on by later stages        |
+
+Selection is orthogonal to completeness: an unwanted-but-present product is
+`COMPLETE` with `wanted=False` — retained in place, visible in the ledger for
+honest reporting, never pending, deleted only via explicit cleanup.
+
+### Uniform recovery reporting
+
+Every phase emits the standard line over its internal ledger:
+
+```text
+Recovery: 9 total, 8 wanted (3 complete, 0 partial, 5 absent) — resuming
+```
+
+`total` counts every internal row; the state counts group under `wanted`
+(`wanted == complete + partial + absent` always holds). Previously-silent
+phases (job, probe, chunking) report it too — their ledgers are non-empty.
 
 ### YAML sidecars
 
+Sidecars persist payload info slices and phase parameters — never artifact
+wrappers. Each phase owns exactly one parameter sidecar (one phase, one
+sidecar); per-attempt and per-output sidecars mark pair/output completeness.
+
 | File                 | Contents                                                                |
 | -------------------- | ----------------------------------------------------------------------- |
-| `job.yaml`           | Source path, size, duration, fps, resolution                            |
+| `job.yaml`           | Source identity (path + size)                                           |
+| `extraction.yaml`    | Stream inventory (info slices) + chapters presence                      |
 | `probe.yaml`         | Frame count, crop params                                                |
-| `chunking.yaml`      | Scene boundaries (frame index + timestamp per chunk)                    |
-| `optimization.yaml`  | Test chunk IDs, per-strategy results, selected optimal strategy         |
+| `chunking.yaml`      | Scene boundaries (frame index + timestamp)                              |
+| `optimization.yaml`  | Test chunk IDs, per-strategy results, tolerance, selection, targets     |
 | `encoding.yaml`      | Probe state (crop params + frame count) active during encoding          |
-| `audio.yaml`         | Audio codec and base bitrate                                            |
-| `<chunk>.yaml`       | Chunk duration, frame count, fps, resolution                            |
+| `audio.yaml`         | Per-chain signatures (resolved definitions)                             |
+| `merge.yaml`         | Targets/sampling/probe + per-strategy summary rows                      |
 | `<attempt>.yaml`     | Quality value, targets met, all measured metrics                        |
-| `<chunk>.<res>.yaml` | Winning attempt path, quality value, targeted metrics                   |
+| `<chunk>.<res>.yaml` | Winning attempt name, quality value, targeted metrics                   |
 | `metrics.yaml`       | Pipeline execution metrics (time/space distribution, convergence stats) |
 
 ### What this enables
 
-- **Interruption recovery** — re-run the same command; completed artifacts are reused
+- **Interruption recovery** — re-run the same command; complete artifacts are reused
 - **Parameter changes** — change quality targets or add a strategy; only affected work is redone
 - **Manual inspection** — all intermediate files are preserved and human-readable
 - **No corruption risk** — all writes use `.tmp`-then-rename; a partial write leaves no stale artifact
@@ -354,16 +399,19 @@ All models are Pydantic.
 
 | Model | Purpose |
 |-------|---------|
-| `PipelineConfig` | Full pipeline configuration — source, work_dir, strategies, quality targets, audio settings, cleanup level |
-| `VideoMetadata` | Lazy-loading video properties (path, duration, fps, resolution, frame_count); probe on first access, cached |
-| `ChunkMetadata` | Extends `VideoMetadata` with chunk_id, start/end timestamps |
-| `AudioMetadata` | Audio stream properties (path, codec, channels, language, duration, delay) |
-| `AttemptMetadata` | Encoded attempt artifact (path, chunk_id, strategy, quality value, resolution, file size) |
-| `CropParams` | Crop geometry (top, bottom, left, right pixel offsets) |
-| `Strategy` | Encoding strategy (name, safe_name, codec config, resolved ffmpeg args) |
+| `AppConfig` | Full validated application configuration (layers: defaults → user → CLI) |
+| `Artifact[PayloadT]` | The generic artifact wrapper: typed payload + `state` + `wanted` |
+| `File` | A file on disk plus its identity metadata (path + size) |
+| `Stream` family | `VideoStream` / `AudioStream` / `SubtitleStream` / `AttachmentStream` — a `File` composed with its typed info slice |
+| `ExtendedVideoStream` | The slow facet (frame count + crop) over the base video stream |
+| `VideoStreamChunk` | An extended stream bounded by a `[start, end)` timestamp window; owns the chunk-id name family |
+| `EncodedChunk` | A winning attempt as a stream, composed with its chunk, strategy and quality value; owns the attempt-file name family |
+| `Chapters` / `AudioOutput` / `MergedVideo` | Artifact payloads: the chapter edition, one (track, chain) audio output, one merged output with measured facts |
+| `Strategy` | Encoding strategy (`display_name()`/`safe_name()` pair, codec config, resolved ffmpeg args) |
 | `QualityTarget` | Quality constraint (metric, statistic, threshold value) |
 | `CodecConfig` | Encoder configuration (quality range, granularity, max_step, label, profiles) |
-| `PhaseOutcome` | `COMPLETED` / `REUSED` / `DRY_RUN` / `FAILED` |
+| `CropParams` | Crop geometry (top, bottom, left, right pixel offsets) |
+| `PhaseOutcome` | `COMPLETED` / `REUSED` / `PENDING` / `FAILED` |
 
 ---
 

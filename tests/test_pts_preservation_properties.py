@@ -28,12 +28,12 @@ from pyqenc.models import CleanupLevel, PhaseOutcome
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import (
     ExtractionPhase,
-    TimestampArtifact,
+    ExtractionPhaseResult,
     _extract_timestamps,
 )
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.state import ArtifactState
-from pyqenc.stream_model import File
+from pyqenc.stream_model import File, VideoStream, VideoStreamInfo
 
 
 def _merge_encoded_chunk(path, chunk_id: str, strategy_name: str):
@@ -136,9 +136,8 @@ def _make_extraction_phase(
     config.extraction.include = include
     config.extraction.exclude = exclude
     job_result = JobPhaseResult(
-        file       = File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64),
+        file       = Artifact(payload=File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64), state=ArtifactState.COMPLETE),
         outcome    = PhaseOutcome.COMPLETED,
-        artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message    = "job complete",
         force_wipe = False,
         config     = config,
@@ -256,10 +255,11 @@ def test_timestamp_filter_independence(
     exclude_pattern: str | None,
 ) -> None:
     """For any include/exclude filter combination, the extraction result must
-    always carry exactly one TimestampArtifact whose state is COMPLETE or ABSENT
-    only — the timestamp artifact is never affected by stream filtering.
+    always carry the video artifact (stream + per-frame index) with state
+    COMPLETE or ABSENT only — the video row is never affected by stream
+    filtering (its wanted is the pipeline mode, Req 3.3).
 
-    Bug guarded: if the timestamp artifact were routed through the same
+    Bug guarded: if the video artifact were routed through the same
     include/exclude selection as stream tracks, an aggressive filter could drop
     it (or a filter change could leave it in a spurious state), silently losing
     PTS preservation for the merge phase.
@@ -290,14 +290,17 @@ def test_timestamp_filter_independence(
                    return_value={"streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc"}], "chapters": []}):
             result = phase.run(dry_run=True)
 
-    ts_artifacts = [a for a in result.artifacts if isinstance(a, TimestampArtifact)]
-
-    assert len(ts_artifacts) == 1, (
-        f"Expected exactly 1 TimestampArtifact in the result, got {len(ts_artifacts)} "
+    video = result.video_stream
+    assert video is not None, (
+        f"Expected the video artifact in the result "
         f"(include={include_pattern!r}, exclude={exclude_pattern!r})"
     )
-    assert ts_artifacts[0].state in (ArtifactState.COMPLETE, ArtifactState.ABSENT), (
-        f"TimestampArtifact state must be COMPLETE or ABSENT, got {ts_artifacts[0].state} "
+    assert video.wanted is True, (
+        f"Video artifact must be mode-wanted, never filter-gated "
+        f"(include={include_pattern!r}, exclude={exclude_pattern!r})"
+    )
+    assert video.state in (ArtifactState.COMPLETE, ArtifactState.ABSENT), (
+        f"Video artifact state must be COMPLETE or ABSENT, got {video.state} "
         f"(include={include_pattern!r}, exclude={exclude_pattern!r})"
     )
 
@@ -310,11 +313,11 @@ def test_timestamp_filter_independence(
 @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(file_present=st.booleans())
 def test_timestamp_artifact_classification(file_present: bool) -> None:
-    """For any state of extracted/timestamps.txt on disk, the extraction result
-    must classify the TimestampArtifact as COMPLETE iff the file exists, and
-    ABSENT otherwise.
+    """For any state of the per-frame index on disk, the extraction result must
+    classify the video artifact as COMPLETE iff the index file exists, and
+    ABSENT otherwise (the index is the video artifact's material component).
 
-    Bug guarded: a misclassified timestamp artifact would either trigger a
+    Bug guarded: a misclassified video artifact would either trigger a
     needless re-extraction (COMPLETE reported ABSENT) or let the merge phase
     proceed with a missing timestamps.txt (ABSENT reported COMPLETE), corrupting
     PTS restoration.
@@ -341,18 +344,18 @@ def test_timestamp_artifact_classification(file_present: bool) -> None:
                    return_value={"streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc"}], "chapters": []}):
             result = phase.run(dry_run=True)
 
-    ts_artifacts = [a for a in result.artifacts if isinstance(a, TimestampArtifact)]
-    assert len(ts_artifacts) == 1
+    video = result.video_stream
+    assert video is not None
 
     expected_state = ArtifactState.COMPLETE if file_present else ArtifactState.ABSENT
-    assert ts_artifacts[0].state == expected_state, (
+    assert video.state == expected_state, (
         f"file_present={file_present}: expected {expected_state}, "
-        f"got {ts_artifacts[0].state}"
+        f"got {video.state}"
     )
 
-    # The result's timestamps_path must be set exactly when the file is present.
+    # The derived index path must be set exactly when the component is present.
     if file_present:
-        assert result.timestamps_path is not None
+        assert result.timestamps_path == work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
     else:
         assert result.timestamps_path is None
 
@@ -384,13 +387,12 @@ def test_frame_count_preservation(frame_count: int) -> None:
 
     **Validates: Requirement 6.1**
     """
-    from pyqenc.constants import FINAL_OUTPUT_DIR
+    from pyqenc.constants import MERGED_OUTPUT_DIR
     from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
     from pyqenc.phases.encoding import (
         EncodingPhase,
         EncodingPhaseResult,
     )
-    from pyqenc.phases.extraction import ExtractionPhaseResult
     from pyqenc.phases.merge import MergePhase
     from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 
@@ -430,7 +432,6 @@ def test_frame_count_preservation(frame_count: int) -> None:
         )
         job.result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
-            artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
             message    = "job complete",
             force_wipe = False,
             config     = config,
@@ -442,45 +443,49 @@ def test_frame_count_preservation(frame_count: int) -> None:
 
         extraction = ExtractionPhase(config, registry, video_required=True, collector=collector)
         extraction.result = ExtractionPhaseResult(
-            outcome         = PhaseOutcome.COMPLETED,
-            artifacts       = [Artifact(path=ts_file, state=ArtifactState.COMPLETE)],
-            message         = "extraction complete",
-            timestamps_path = ts_file,
+            outcome     = PhaseOutcome.COMPLETED,
+            message     = "extraction complete",
+            video_stream = Artifact(
+                payload = VideoStream(file=File(path=source), info=VideoStreamInfo(track_id=0)),
+                state   = ArtifactState.COMPLETE,
+            ),
+            work_dir    = work_dir,
         )
         registry[ExtractionPhase] = extraction
 
         probe = ProbePhase(config, registry, collector=collector, crop_params=None)
         probe.result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [Artifact(path=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
             message   = "probe complete",
-            stream    = _extended_stream(source, frame_count),
+            stream    = Artifact(
+                payload = _extended_stream(source, frame_count),
+                state   = ArtifactState.COMPLETE,
+            ),
         )
         registry[ProbePhase] = probe
 
         encoding = EncodingPhase(config, registry, collector=collector)
         encoded_chunk = _merge_encoded_chunk(chunk, "chunk1", "slow+h265")
+        from pyqenc.phase import Artifact as _Art
+        from pyqenc.state import ArtifactState as _St
         encoding.result = EncodingPhaseResult(
-            outcome        = PhaseOutcome.COMPLETED,
-            artifacts      = [],
-            message        = "encoding complete",
-            encoded_chunks = {"chunk1": {encoded_chunk.strategy.display_name(): encoded_chunk}},
+            outcome   = PhaseOutcome.COMPLETED,
+            message   = "encoding complete",
+            winners   = [_Art(payload=encoded_chunk, state=_St.COMPLETE)],
         )
         registry[EncodingPhase] = encoding
 
         audio = AudioPhase(config, registry, collector=collector)
         audio.result = AudioPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "audio complete",
-            audio_files = [],
         )
         registry[AudioPhase] = audio
 
         merge = MergePhase(config, registry, collector=collector)
 
         source_stem = source.stem
-        output_file = work_dir / FINAL_OUTPUT_DIR / f"{source_stem} {encoded_chunk.strategy.display_name()}.mkv"
+        output_file = work_dir / MERGED_OUTPUT_DIR / f"{source_stem} {encoded_chunk.strategy.display_name()}.mkv"
 
         def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
             output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -498,13 +503,13 @@ def test_frame_count_preservation(frame_count: int) -> None:
 
     assert merge_result.outcome in (PhaseOutcome.COMPLETED, PhaseOutcome.REUSED), (
         f"Expected COMPLETED or REUSED, got {merge_result.outcome} "
-        f"(error={merge_result.error!r})"
+        f"(message={merge_result.message!r})"
     )
 
-    complete_artifacts = [a for a in merge_result.merged if a.state == ArtifactState.COMPLETE]
-    assert len(complete_artifacts) == 1
-    assert complete_artifacts[0].frame_count == frame_count, (
-        f"Expected frame_count={frame_count}, got {complete_artifacts[0].frame_count}"
+    complete_rows = [a for a in merge_result.merged if a.state == ArtifactState.COMPLETE]
+    assert len(complete_rows) == 1
+    assert complete_rows[0].payload.frame_count == frame_count, (
+        f"Expected frame_count={frame_count}, got {complete_rows[0].payload.frame_count}"
     )
 
 

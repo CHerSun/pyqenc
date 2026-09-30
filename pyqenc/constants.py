@@ -25,9 +25,9 @@ A 20% buffer on top of the upper-bound estimate."""
 BITS_PER_PIXEL_ENCODED = 0.10
 """Estimated bits per pixel for encoded video output (attempts, final). Covers a wide range of
 content at typical quality targets. Tune this constant if estimates are consistently off."""
-AVG_ATTEMPTS_PER_CHUNK = 5.5
+AVG_ATTEMPTS_PER_CHUNK = 4.1
 """Average number of CRF search attempts per chunk per strategy. Used to estimate space consumed
-by intermediate attempt files during the encoding phase."""
+by intermediate attempt files during the encoding phase. Value was taken from metrics measured."""
 
 # Fallback source-size multiplier (used only when stream pixel data is unavailable)
 OVERHEAD_PER_STRATEGY_FALLBACK = 2.5
@@ -102,8 +102,10 @@ ENCODED_OUTPUT_DIR     = "encoded"
 """Output directory for finalized encoded artifacts (hard-linked winning attempts)."""
 AUDIO_OUTPUT_DIR       = "audio"
 """Output directory for processed audio files (AudioPhase)."""
-FINAL_OUTPUT_DIR       = "final"
-"""Output directory for merged final outputs (MergePhase)."""
+MERGED_OUTPUT_DIR      = "merged"
+"""Output directory for merged outputs (MergePhase) — completing the
+past-participle family (``extracted/``, ``encoded/``, ``merged/``): the merged
+output is the merge phase's product, not a fully finalized container."""
 MEASURE_DIR            = "measure"
 """Output subdirectory name for standalone measure artifacts."""
 
@@ -137,7 +139,9 @@ CONFIG_DIR_HOME      = ".config/pyqenc"
 
 # Extraction artifact filenames
 TIMESTAMPS_FILENAME = "timestamps.txt"
-"""Filename for the per-frame PTS timestamp file produced by ExtractionPhase."""
+"""Filename for the per-frame PTS timestamp index produced by ExtractionPhase."""
+CHAPTERS_FILENAME = "chapters.xml"
+"""Filename for the extracted chapter edition produced by ExtractionPhase."""
 
 # Artifact discovery patterns
 CHUNK_NAME_PATTERN = re.compile(

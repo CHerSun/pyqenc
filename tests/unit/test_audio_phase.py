@@ -109,8 +109,13 @@ def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioStream]) 
     job_mock = MagicMock()
     job_mock.result = job_result
 
+    from pyqenc.phase import Artifact
+    from pyqenc.state import ArtifactState
+
     extraction_result = MagicMock()
-    extraction_result.audio_streams = tracks
+    extraction_result.audio_streams = [
+        Artifact(payload=t, state=ArtifactState.COMPLETE) for t in tracks
+    ]
 
     extraction_mock = MagicMock()
     extraction_mock.result = extraction_result

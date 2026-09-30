@@ -252,7 +252,7 @@ class TestEncodeChunkQualitySearchV2Integration:
 
         from pyqenc.models import QualityTarget
         from pyqenc.phases.encoding import ChunkEncoder
-        from pyqenc.quality import MetricType, QualityArtifacts, QualityEvaluation
+        from pyqenc.quality import MetricType, QualityLogs, QualityEvaluation
         from pyqenc.utils.visualization import QualityEvaluator
 
         strategy = self._make_strategy()
@@ -263,7 +263,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         fake_eval = MagicMock(spec=QualityEvaluation)
         fake_eval.targets_met    = True
         fake_eval.failed_targets = []
-        fake_eval.artifacts      = QualityArtifacts()
+        fake_eval.logs           = QualityLogs()
         fake_eval.metrics        = {
             MetricType.VMAF: {"min": 95.1, "median": 96.0, "p05": 94.0, "p25": 95.0,
                               "p75": 97.0, "p95": 98.0, "max": 99.0, "std": 1.0},

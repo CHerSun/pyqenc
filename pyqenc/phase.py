@@ -3,7 +3,8 @@
 This module defines the structural backbone of the phase object model:
 
 - ``ArtifactState``   — re-exported from ``state`` for convenience.
-- ``Artifact``        — base dataclass for all phase output artifacts.
+- ``Artifact``        — the generic artifact wrapper: a typed payload plus
+                        its recovery/selection facts (the only artifact class).
 - ``PhaseOutcome``    — re-exported from ``models`` for convenience.
 - ``PhaseResult``     — result returned by every phase's ``run()``.
 - ``FinalizeContext`` — pre-resolved end-of-run decisions passed to ``finalize``.
@@ -33,9 +34,9 @@ pre-resolved ``FinalizeContext.deep_cleanup`` flag is set.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from pyqenc.metrics import MetricKey
 from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, Strategy
@@ -65,46 +66,52 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-TPhase = TypeVar("TPhase", bound="Phase")
-"""A Phase subclass; the return type of ``Phase._dep()``."""
-
-
 # ---------------------------------------------------------------------------
 # Strategy is now defined in models.py and re-exported here for convenience.
 # ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
-# Artifact base
+# Artifact — the generic wrapper (the only artifact class)
 # ---------------------------------------------------------------------------
 
 @dataclass
-class Artifact:
-    """Base class for all phase output artifacts.
+class Artifact[PayloadT]:
+    """One investable entity (the payload) plus its recovery/selection facts.
 
-    Each phase defines a concrete subclass that adds fully typed metadata
-    fields (e.g. ``ChunkArtifact`` adds ``metadata: ChunkMetadata | None``).
+    An artifact is the thing we act on and invest in — the unit of recovery
+    (presence-based, resumable), of selection, and of inter-phase transfer.
+    Identity and metadata live on the typed payload (a stream-model entity);
+    the wrapper adds only the two recovery axes. No subclass of this class
+    exists; every ledger row and result field is a direct ``Artifact[...]``
+    instantiation with a concrete payload type.
+
+    There is no ``path`` field: file-backed locations derive from the payload;
+    virtual payloads have none. The wrapper is mutable and never persisted —
+    the owning phase flips ``state`` to ``COMPLETE`` as ``_execute()``
+    verifies each production; sidecars persist payload info slices only.
+
+    Type parameter:
+        PayloadT: The stream-model entity this artifact wraps.
 
     Attributes:
-        path:   Path to the primary artifact file on disk.
-        state:  Completeness of this artifact.
-        wanted: Whether this artifact is selected by the current run. This is a
-                DERIVED value: it comes from external input — the user's stream
-                filter plus the pipeline mode (e.g. ``video_required``) for
-                extraction, and scene detection for chunking — and is never
-                chosen or mutated by a phase on its own during recovery.
-                Orthogonal to completeness. ``True`` = must be produced if not
-                already ``COMPLETE``. ``False`` = present or expected on disk
-                but not needed this run; it is retained in place unchanged and
-                is not a deletion candidate — deletion only ever happens when
-                the user explicitly sets a cleanup level, applied uniformly.
-                The default ``True`` ensures all existing construction sites
-                are unaffected.
+        payload: The typed entity this row is about.
+        state:   Completeness of this artifact (presence-based).
+        wanted:  Whether this artifact is selected by the current run. This is a
+                 DERIVED value: it comes from external input — the user's stream
+                 filter plus the pipeline mode (e.g. ``video_required``) for
+                 extraction, and scene detection for chunking — and is never
+                 chosen or mutated by a phase on its own during recovery.
+                 Orthogonal to completeness. ``True`` = must be produced if not
+                 already ``COMPLETE``. ``False`` = present or expected on disk
+                 but not needed this run; it is retained in place unchanged and
+                 is not a deletion candidate — deletion only ever happens when
+                 the user explicitly sets a cleanup level, applied uniformly.
     """
 
-    path:   Path
-    state:  ArtifactState
-    wanted: bool = True
+    payload: PayloadT
+    state:   ArtifactState
+    wanted:  bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -115,23 +122,41 @@ class Artifact:
 class PhaseResult:
     """Result returned by a phase's ``run()`` method.
 
+    ``artifacts`` is NOT storage: it is the derived, read-only concatenation
+    of the subclass's declared artifact fields (in declaration order) — the
+    external contract. Internal ledger rows (``wanted=False``, internal
+    artifacts) have no path into a result; phases place wanted rows into
+    their declared fields in ``_make_result``.
+
     Attributes:
-        outcome:   High-level outcome of the phase execution.
-        artifacts: Wanted artifacts only (``wanted=True``). Phases build a full
-                   internal artifact list in ``_recover()`` covering both
-                   wanted and unwanted entries, then filter to ``wanted=True``
-                   before constructing ``PhaseResult``. ``pending`` and
-                   ``complete`` derive from this list directly, so callers
-                   never need to filter by ``wanted`` themselves.
-        message:   Human-readable summary of the phase outcome.
-        error:     Error description when ``outcome`` is ``FAILED``; ``None``
-                   otherwise.
+        outcome: The phase outcome.
+        message: The single human-readable string. On ``FAILED`` this IS the
+                 failure description; partial-failure detail (count plus
+                 identifiers) folds into it.
     """
 
-    outcome:   PhaseOutcome
-    artifacts: list[Artifact]
-    message:   str
-    error:     str | None = None
+    outcome: PhaseOutcome
+    message: str
+
+    @property
+    def artifacts(self) -> list[Artifact[object]]:
+        """Derived concatenation of the declared artifact fields.
+
+        Dataclass-fields introspection over the concrete result class,
+        ``Artifact``-typed fields only, in declaration order — the declared
+        fields are the contract (Req 6.2). Plain settings/run-parameter
+        fields never contribute. Field names come from the dataclass field
+        list itself, so this is the one sanctioned dynamic access in the
+        codebase.
+        """
+        rows: list[Artifact[object]] = []
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if isinstance(value, Artifact):
+                rows.append(value)
+            elif isinstance(value, list):
+                rows.extend(v for v in value if isinstance(v, Artifact))
+        return rows
 
     # ------------------------------------------------------------------
     # Derived helpers
@@ -148,19 +173,19 @@ class PhaseResult:
         return self.outcome in (PhaseOutcome.COMPLETED, PhaseOutcome.REUSED)
 
     @property
-    def complete(self) -> list[Artifact]:
+    def complete(self) -> list[Artifact[object]]:
         """Artifacts whose state is ``COMPLETE``."""
         return [a for a in self.artifacts if a.state == ArtifactState.COMPLETE]
 
     @property
-    def pending(self) -> list[Artifact]:
+    def pending(self) -> list[Artifact[object]]:
         """Artifacts that require active work this run.
 
         Includes only ``ABSENT`` (must produce) and ``PARTIAL`` (protected
-        investment needing the missing component). Since ``artifacts`` already
-        contains only ``wanted=True`` entries, no additional ``wanted``
-        filtering is needed here. Unwanted artifacts are excluded upstream and
-        never reach this property.
+        investment needing the missing component). Since the derived
+        ``artifacts`` lists only the declared (wanted) fields' rows, no
+        additional ``wanted`` filtering is needed here. Unwanted artifacts
+        stay internal and never reach this property.
         """
         return [
             a for a in self.artifacts
@@ -214,13 +239,14 @@ class Recovery:
     remains this run.
 
     Attributes:
-        artifacts: Full internal artifact list — wanted AND unwanted entries.
-                   Phases whose outputs are state sidecars rather than
-                   artifacts (job, probe) return an empty list and signal
-                   everything through ``pending``.
+        artifacts: The full internal artifact ledger — wanted AND unwanted
+                   rows. Every phase emits a real ledger (job's source File,
+                   probe's extended stream, chunking's windows included); the
+                   only empty-ledger case is a phase whose row set is
+                   unknowable before its work runs (chunking before scene
+                   detection), which signals ``pending`` directly.
         pending:   Whether any work remains this run (any wanted artifact
-                   ``ABSENT`` / ``PARTIAL``, or — for state phases — the
-                   sidecar is absent or invalidated). The template maps it
+                   ``ABSENT`` / ``PARTIAL``). The template maps it
                    mechanically: ``pending and dry_run`` → ``PENDING``,
                    ``not pending`` → ``REUSED``, ``pending`` → execute.
     """
@@ -277,8 +303,15 @@ class PhaseContractError(RuntimeError):
 # Phase — template-method base implementing the uniform run()
 # ---------------------------------------------------------------------------
 
-class Phase:
+class Phase[ResultT: PhaseResult]:
     """Template-method base class implementing the uniform phase ``run()``.
+
+    Type parameter:
+        ResultT: The phase's typed result class — declared by subclassing
+                 (``class JobPhase(Phase[JobPhaseResult])``), which links the
+                 class to its result type through inheritance: ``_dep_result``
+                 and ``.result`` then carry the concrete type with no casts,
+                 overloads, or base-module imports (no circular dependencies).
 
     The single concrete ``run()`` below owns the run footprint shared by every
     phase, in this exact order:
@@ -361,28 +394,38 @@ class Phase:
         self._config:    AppConfig        = config
         self._collector: MetricsCollector = collector
         self._phases:    PhaseRegistry = phases if phases is not None else {}
-        self.result:     PhaseResult | None = None
+        self.result:     ResultT | None  = None
 
     # ------------------------------------------------------------------
     # Dependency resolution — DEPENDS_ON is the declaration, the registry
     # link is the source of truth, fetched fresh at run time.
     # ------------------------------------------------------------------
 
-    def _dep(self, dep_cls: type[TPhase]) -> TPhase:
-        """Return the dependency instance of ``dep_cls`` from the registry.
+    def _dep_result[R: PhaseResult](self, dep_cls: type[Phase[R]]) -> R:
+        """Return the dependency's cached typed result — the dependency accessor.
 
-        Fetches fresh on every call — the registry is the single source of
-        truth, and it may have been populated after this phase's construction.
+        Fetches the ``dep_cls`` instance from the registry fresh on every call
+        (the registry is the single source of truth, and it may have been
+        populated after this phase's construction). The shared dependency walk
+        guarantees every declared dependency has run (and cached its result)
+        before this phase's hooks execute, so consumers read dependency facts
+        through this typed getter instead of re-narrowing ``Phase.result`` at
+        every call site. The declared ``Phase[R]`` parametrization is what
+        recovers the concrete result type from the phase class at each call
+        site.
 
         Args:
             dep_cls: The dependency's phase class.
 
         Returns:
-            The concrete instance from the registry.
+            The dependency's typed result.
 
         Raises:
             TypeError: When the declared dependency is missing from the
                 registry (mis-wired registry — a programming error).
+            AssertionError: When the dependency has no cached result — a
+                phase hook ran before the dependency walk (a programming
+                error, never a runtime condition to handle).
         """
         instance = self._phases.get(dep_cls)
         if instance is None:
@@ -390,7 +433,11 @@ class Phase:
                 f"{type(self).__name__} requires {dep_cls.__name__} "
                 "in the phase registry (declared in DEPENDS_ON)"
             )
-        return cast(TPhase, instance)
+        result = instance.result
+        assert result is not None, (
+            f"{dep_cls.__name__}.result guaranteed by the dependency walk"
+        )
+        return result
 
     # ------------------------------------------------------------------
     # Public Phase interface — the template run() and default finalize
@@ -443,9 +490,7 @@ class Phase:
             # Fatal recover-time invalidation — a hard stop (same severity the
             # phases already used for mode/probe/source mismatches).
             self._logger.critical(exc.message)
-            self.result = self._make_result(
-                PhaseOutcome.FAILED, [], exc.message, error=exc.message,
-            )
+            self.result = self._make_result(PhaseOutcome.FAILED, [], exc.message)
             return self.result
 
         # 7. Recovery summary over the unfiltered internal list; wanted
@@ -539,7 +584,7 @@ class Phase:
             names = ", ".join(n.capitalize() for n in failed)
             err = f"{self.name.capitalize()} cannot run — failed dependencies: {names}"
             self._logger.error(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+            return self._make_result(PhaseOutcome.FAILED, [], err)
         if pending:
             names = ", ".join(n.capitalize() for n in pending)
             msg = f"{self.name.capitalize()} dry-run is impossible — work still pending at: {names}"
@@ -647,15 +692,14 @@ class Phase:
         outcome:   PhaseOutcome,
         artifacts: list[Artifact],
         message:   str,
-        error:     str | None = None,
     ) -> PhaseResult:
         """Assemble the phase's typed result (payload defaults for the phase).
 
         Args:
             outcome:   The phase outcome.
             artifacts: The wanted artifact list (``PhaseResult.artifacts``).
-            message:   Human-readable summary.
-            error:     Error description when ``outcome`` is ``FAILED``.
+            message:   Human-readable summary — on ``FAILED``, the error
+                       description.
 
         Returns:
             The populated typed result.

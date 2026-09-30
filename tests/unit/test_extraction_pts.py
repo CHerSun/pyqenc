@@ -36,8 +36,6 @@ from pyqenc.models import CleanupLevel, PhaseOutcome
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import (
     ExtractionPhase,
-    ExtractionPhaseResult,
-    TimestampArtifact,
     _enumerate_streams,
     _extract_timestamps,
 )
@@ -88,9 +86,8 @@ def _make_extraction_phase(
 
     job_result = JobPhaseResult(
         outcome    = PhaseOutcome.COMPLETED,
-        artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message    = "job complete",
-        file       = File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64),
+        file       = Artifact(payload=File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64), state=ArtifactState.COMPLETE),
         force_wipe = force_wipe,
         config     = config,
         work_dir   = work_dir,
@@ -367,12 +364,11 @@ class TestNoVideoAudioExtraction:
             result = phase.run(dry_run=True)
 
         assert result.video_stream is not None
-        assert result.video_stream.info.fps_fraction is not None
+        assert result.video_stream.payload.info.fps_fraction is not None
         assert len(result.audio_streams) == 1
-        assert result.audio_streams[0].info.layout is not None
+        assert result.audio_streams[0].payload.info.layout is not None
         # Stream objects compose the job File — path is the source.
-        assert result.video_stream is not None
-        assert result.video_stream.file.path == File(path=source).path
+        assert result.video_stream.payload.file.path == File(path=source).path
 
 
 # ---------------------------------------------------------------------------
@@ -477,8 +473,9 @@ class TestExtractionSidecarLifecycle:
             tmp_path, _ffprobe_json(_video_json(), _audio_json(), _subtitle_json()),
         )
         data = yaml.safe_load((work_dir / "extraction.yaml").read_text(encoding="utf-8"))
-        assert set(data) == {"source", "streams", "timestamps_path"}
+        assert set(data) == {"source", "streams", "chapters"}
         assert data["source"]["path"] == str(source)
+        assert data["chapters"] is False
         assert data["streams"]["video"]["fps_fraction"] == [24000, 1001]
         assert len(data["streams"]["audio"]) == 1
         assert data["streams"]["subtitles"][0]["track_id"] == 3
@@ -500,7 +497,7 @@ class TestExtractionSidecarLifecycle:
 
         probe_mock.assert_not_called()
         assert result.video_stream is not None
-        assert result.video_stream.info.codec_name == "hevc"
+        assert result.video_stream.payload.info.codec_name == "hevc"
         assert len(result.audio_streams) == 1
 
     def test_identity_mismatch_reenumerates(self, tmp_path: Path) -> None:
@@ -527,47 +524,49 @@ class TestExtractionSidecarLifecycle:
 
 
 # ---------------------------------------------------------------------------
-# Timestamps artifact result plumbing
+# The video artifact: stream + per-frame index (Req 3, Correctness Property 3)
 # ---------------------------------------------------------------------------
 
-class TestTimestampsPathOnResult:
-    """ExtractionPhaseResult.timestamps_path carries the value it is built with."""
+class TestVideoArtifact:
+    """One Artifact[VideoStream] row; the index is its material component."""
 
-    def test_timestamps_path_none_when_absent(self) -> None:
-        result = ExtractionPhaseResult(
-            outcome         = PhaseOutcome.PENDING,
-            artifacts       = [],
-            message         = "",
-            timestamps_path = None,
-        )
-        assert result.timestamps_path is None
-
-    def test_timestamps_path_set_when_complete(self, tmp_path: Path) -> None:
-        ts_path = tmp_path / TIMESTAMPS_FILENAME
-        ts_path.write_text("# timestamp format v2\n0\n", encoding="utf-8")
-        result = ExtractionPhaseResult(
-            outcome         = PhaseOutcome.COMPLETED,
-            artifacts       = [],
-            message         = "",
-            timestamps_path = ts_path,
-        )
-        assert result.timestamps_path == ts_path
-
-
-class TestMergeFailsWithoutTimestamps:
-    """The public run() result carries timestamps_path=None when no file exists."""
-
-    def test_extraction_result_timestamps_path_none_when_artifact_absent(
-        self, tmp_path: Path,
-    ) -> None:
+    def test_state_tracks_index_presence(self, tmp_path: Path) -> None:
+        """Bug prevented: the video row reporting COMPLETE while its single
+        material component (the per-frame PTS index) is missing — downstream
+        probe/merge would read a nonexistent file."""
         work_dir, source = _make_work_and_source(tmp_path)
         phase = _make_extraction_phase(work_dir, source)
 
         with patch("pyqenc.phases.extraction._probe_streams_json",
                    return_value=_ffprobe_json(_video_json())):
+            absent = phase.run(dry_run=True)
+        assert absent.video_stream is not None
+        assert absent.video_stream.state == ArtifactState.ABSENT
+        assert absent.timestamps_path is None
+
+        (work_dir / EXTRACTED_DIR).mkdir(parents=True, exist_ok=True)
+        (work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME).write_text(
+            "# timestamp format v2\n0\n", encoding="utf-8")
+        phase2 = _make_extraction_phase(work_dir, source)
+        with patch("pyqenc.phases.extraction._probe_streams_json",
+                   return_value=_ffprobe_json(_video_json())):
+            complete = phase2.run(dry_run=True)
+        assert complete.video_stream is not None
+        assert complete.video_stream.state == ArtifactState.COMPLETE
+        assert complete.timestamps_path == work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+
+    def test_wanted_is_mode_not_filter(self, tmp_path: Path) -> None:
+        """Bug prevented: the include/exclude filter gating the video row —
+        timestamps extraction is mode-gated only (Req 3.3); a filter matching
+        nothing must not silently drop the video artifact from the ledger."""
+        work_dir, source = _make_work_and_source(tmp_path)
+        phase = _make_extraction_phase(work_dir, source, exclude=".")
+
+        with patch("pyqenc.phases.extraction._probe_streams_json",
+                   return_value=_ffprobe_json(_video_json(), _audio_json())):
             result = phase.run(dry_run=True)
 
-        ts_artifacts = [a for a in result.artifacts if isinstance(a, TimestampArtifact)]
-        assert len(ts_artifacts) == 1
-        assert ts_artifacts[0].state == ArtifactState.ABSENT
-        assert result.timestamps_path is None
+        assert result.video_stream is not None
+        assert result.video_stream.wanted is True
+        # The filter still deselects the audio rows — they stay internal.
+        assert result.audio_streams == []

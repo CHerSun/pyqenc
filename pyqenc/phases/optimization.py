@@ -12,6 +12,8 @@ Two modes are supported:
 * **Optimization mode** (``config.optimize=True``): runs test encodes on
   representative chunks, persists per-strategy results to ``optimization.yaml``,
   and selects strategies within the configured tolerance of the best result.
+  The ledger counts winning ATTEMPTS — one ``Artifact[EncodedChunk]`` row per
+  (test chunk, strategy) pair — not per-strategy records.
 """
 # CHerSun 2026
 
@@ -23,7 +25,7 @@ import random
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from alive_progress import config_handler
 
@@ -47,8 +49,8 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
-from pyqenc.phases.chunking import ChunkingPhase, ChunkingPhaseResult
-from pyqenc.phases.job import JobPhase, JobPhaseResult
+from pyqenc.phases.chunking import ChunkingPhase
+from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.state import (
     ArtifactState,
@@ -56,7 +58,7 @@ from pyqenc.state import (
     ProbeState,
     StrategyTestResult,
 )
-from pyqenc.stream_model import VideoStreamChunk
+from pyqenc.stream_model import EncodedChunk, VideoStreamChunk
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.visualization import QualityEvaluator
 
@@ -80,20 +82,28 @@ class OptimizationPhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying optimization-specific payload.
 
     Attributes:
-        selected_strategies: Strategies selected as optimal (or all strategies
-                             in all-strategies mode).
-        strategy_results:    Per-strategy test results; empty in all-strategies mode.
+        winners: The winning test attempts — one ``Artifact[EncodedChunk]``
+                 per (test chunk, strategy) pair. The single sanctioned
+                 exception to the consumption-graph rule (Req 5.2): nothing
+                 downstream consumes them, but carrying the winners keeps
+                 this phase structurally identical to EncodingPhase (same
+                 result shape, same sort-into-fields step) so the base run
+                 mechanics apply with zero special cases. The aggregated
+                 per-strategy records stay in ``optimization.yaml``.
+        selected_strategies: The settings subset — strategies selected as
+                             optimal (or all strategies in all-strategies
+                             mode); consumed by Encoding and Merge.
     """
 
-    selected_strategies: list[Strategy] = field(default_factory=list)
-    strategy_results:    list[StrategyTestResult] = field(default_factory=list)
+    winners:            list[Artifact[EncodedChunk]] = field(default_factory=list)
+    selected_strategies: list[Strategy]              = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
 # OptimizationPhase
 # ---------------------------------------------------------------------------
 
-class OptimizationPhase(Phase):
+class OptimizationPhase(Phase[OptimizationPhaseResult]):
     """Phase object for strategy optimization.
 
     In **all-strategies mode** (``config.optimize=False`` or a single
@@ -133,6 +143,7 @@ class OptimizationPhase(Phase):
         self._persisted:         OptimizationParams | None          = None
         self._cached_results:    dict[str, StrategyTestResult]     = {}
         self._strategies_to_test: list[Strategy]                   = []
+        self._test_chunks:       list[VideoStreamChunk]            = []
         self._tolerance_reapply: bool                              = False
         self._selected_names:    list[str]                         = []
         self._strategy_results:  list[StrategyTestResult]          = []
@@ -162,7 +173,7 @@ class OptimizationPhase(Phase):
         if not strategies:
             err = "No strategies configured"
             logger.error(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+            return self._make_result(PhaseOutcome.FAILED, [], err)
 
         # All-strategies mode: triggered by the optimize flag being off or a
         # single strategy given (nothing to optimize against).
@@ -180,8 +191,8 @@ class OptimizationPhase(Phase):
         logger.info("Tolerance:   %.1f%%", self._config.encoding.optimize_tolerance)
 
     def _recovery_unit(self) -> str:
-        """The recovery summary counts strategy results."""
-        return "strategy result"
+        """The recovery summary counts winning attempts (one per pair)."""
+        return "attempt"
 
     def _recover(self) -> Recovery:
         """Resolve optimization state currency: invalidations first, then caches.
@@ -206,8 +217,8 @@ class OptimizationPhase(Phase):
             RecoveryError: On a probe change without ``--force``, or when
                 ChunkingPhase produced no chunks.
         """
-        job_result   = self._dep(JobPhase).result  # type: ignore[union-attr]
-        probe_result = self._dep(ProbePhase).result  # type: ignore[union-attr]
+        job_result   = self._dep_result(JobPhase)
+        probe_result = self._dep_result(ProbePhase)
         work_dir     = job_result.work_dir
         opt_yaml     = work_dir / _OPTIMIZATION_YAML
         tolerance    = self._config.encoding.optimize_tolerance
@@ -216,7 +227,7 @@ class OptimizationPhase(Phase):
 
         crop           = probe_result.crop
         current_probe  = ProbeState(
-            frame_count = probe_result.stream.frame_count if probe_result.stream is not None else 0,
+            frame_count = probe_result.stream.payload.frame_count if probe_result.stream is not None else 0,
             crop        = crop if crop else None,
         )
         self._current_probe = current_probe
@@ -271,7 +282,7 @@ class OptimizationPhase(Phase):
             )
         self._persisted = persisted
 
-        # Step 4 — all cached, only tolerance changed → cheap re-select work.
+        # Step 4 — cached results per strategy + the re-select decision.
         cached_results: dict[str, StrategyTestResult] = {}
         if persisted is not None:
             for r in persisted.strategy_results:
@@ -286,10 +297,6 @@ class OptimizationPhase(Phase):
             and persisted.tolerance_pct != tolerance
         ):
             self._tolerance_reapply = True
-            return Recovery(
-                artifacts=_strategy_artifacts(list(cached_results.keys())),
-                pending=True,
-            )
 
         # All cached with matching tolerance → current; seed the reused payload.
         if not self._strategies_to_test and cached_results and persisted is not None:
@@ -298,12 +305,46 @@ class OptimizationPhase(Phase):
                 persisted.strategy_results, tolerance,
             )
 
-        # Step 5 — one artifact per strategy result.
-        artifacts = _strategy_artifacts(
-            complete_names = list(cached_results.keys()),
-            absent_names   = [s.display_name() for s in self._strategies_to_test],
-        )
-        return Recovery.from_artifacts(artifacts)
+        # Step 5 — the per-pair ledger: one Artifact[EncodedChunk] row per
+        # (test chunk, strategy) winning attempt, presence-based via the
+        # shared attempt-recovery machinery (Req 8).
+        self._test_chunks = self._resolve_test_chunks(persisted)
+        if self._strategies_to_test and not self._test_chunks:
+            raise RecoveryError("No chunks available from ChunkingPhase")
+        rows = self._pair_ledger(work_dir, strategies)
+        if self._tolerance_reapply:
+            # Every pair is COMPLETE but the tolerance is stale — cheap
+            # re-select work. Settings staleness, not artifact presence:
+            # pending is set explicitly (the ledger alone would read current).
+            return Recovery(artifacts=rows, pending=True)
+        return Recovery.from_artifacts(rows)
+
+    def _resolve_test_chunks(self, persisted: OptimizationParams | None) -> list[VideoStreamChunk]:
+        """The test-chunk set: the persisted selection, or a fresh pick.
+
+        The fresh selection is stashed here (recovery) so ``_execute`` uses
+        the same set that produced the ledger counts.
+        """
+        chunks: list[VideoStreamChunk] = [
+            a.payload for a in self._dep_result(ChunkingPhase).chunks
+        ]
+
+        test_ids = persisted.test_chunks if persisted is not None and persisted.test_chunks else []
+        if test_ids:
+            by_id = {c.safe_name(): c for c in chunks}
+            selected = [by_id[i] for i in test_ids if i in by_id]
+            if selected:
+                return selected
+            logger.warning("Persisted test chunk IDs not found — re-selecting")
+        return _select_test_chunks(chunks)
+
+    def _pair_ledger(self, work_dir: Path, strategies: list[Strategy]) -> list[Artifact]:
+        """The per-pair ledger plus orphaned-strategy rows (Req 8.1/8.2)."""
+        from pyqenc.phases.encoding import _orphan_strategy_rows, _pair_rows
+
+        rows: list[Artifact] = _pair_rows(work_dir, self._test_chunks, strategies)
+        rows += _orphan_strategy_rows(work_dir, strategies)
+        return rows
 
     def _execute(
         self,
@@ -326,7 +367,7 @@ class OptimizationPhase(Phase):
         Returns:
             ``OptimizationPhaseResult`` with ``selected_strategies`` set.
         """
-        job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
+        job_result = self._dep_result(JobPhase)
         work_dir   = job_result.work_dir
         opt_yaml   = work_dir / _OPTIMIZATION_YAML
         tolerance  = self._config.encoding.optimize_tolerance
@@ -356,36 +397,28 @@ class OptimizationPhase(Phase):
             self._selected_names   = selected
             self._strategy_results = persisted.strategy_results
             self._log_optimization_summary(persisted.strategy_results, selected)
+            rows = self._pair_ledger(work_dir, self._config.encoding.resolved_strategies)
             return self._make_result(
-                PhaseOutcome.COMPLETED, [],
+                PhaseOutcome.COMPLETED,
+                [r for r in rows if r.wanted],
                 "tolerance re-applied from cached results",
             )
 
         cached_results     = self._cached_results
         strategies_to_test = self._strategies_to_test
 
-        # Test encodes need chunks from ChunkingPhase.
-        chunking_result = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result)
-        chunks: list[VideoStreamChunk] = chunking_result.chunks
-        if strategies_to_test and not chunks:
+        # The test-chunk set was resolved by recovery (persisted selection or
+        # the fresh pick that produced the ledger counts).
+        test_chunks = self._test_chunks
+        if strategies_to_test and not test_chunks:
             err = "No chunks available from ChunkingPhase"
             logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
-
-        test_chunk_ids = persisted.test_chunks if persisted and persisted.test_chunks else []
-        if test_chunk_ids:
-            chunk_by_id = {c.chunk_id: c for c in chunks}
-            test_chunks = [chunk_by_id[cid] for cid in test_chunk_ids if cid in chunk_by_id]
-            if not test_chunks:
-                logger.warning("Persisted test chunk IDs not found — re-selecting")
-                test_chunks = _select_test_chunks(chunks)
-        else:
-            test_chunks = _select_test_chunks(chunks)
+            return self._make_result(PhaseOutcome.FAILED, [], err)
 
         # Persist test chunk selection early (before encoding starts).
         OptimizationParams(
             probe            = self._current_probe,
-            test_chunks      = [c.chunk_id for c in test_chunks],
+            test_chunks      = [c.safe_name() for c in test_chunks],
             strategy_results = list(cached_results.values()),
             tolerance_pct    = tolerance,
             selected         = [],
@@ -408,7 +441,7 @@ class OptimizationPhase(Phase):
         total_seconds      = test_chunk_seconds * len(strategies_to_test)
         total_count        = len(test_chunks) * len(strategies_to_test)
 
-        test_chunk_ids = [c.chunk_id for c in test_chunks]
+        test_chunk_ids = [c.safe_name() for c in test_chunks]
         strategy_names = [s.display_name() for s in strategies_to_test]
         from pyqenc.phases.encoding import (
             _encode_chunks_parallel,
@@ -419,7 +452,7 @@ class OptimizationPhase(Phase):
 
         with ProgressBar(total_seconds, title="Optimization", total_count=total_count) as advance:
             # Pre-advance bar for already-complete pairs
-            chunks_by_id = {c.chunk_id: c for c in test_chunks}
+            chunks_by_id = {c.safe_name(): c for c in test_chunks}
             for r in phase_recovery.pairs.values():
                 if r.state == ArtifactState.COMPLETE:
                     advance((chunks_by_id[r.chunk_id].end_timestamp - chunks_by_id[r.chunk_id].start_timestamp), AdvanceState.SKIPPED)
@@ -462,7 +495,7 @@ class OptimizationPhase(Phase):
         # Persist final state with current quality targets and sampling.
         OptimizationParams(
             probe            = self._current_probe,
-            test_chunks      = [c.chunk_id for c in test_chunks],
+            test_chunks      = [c.safe_name() for c in test_chunks],
             strategy_results = final_results,
             tolerance_pct    = tolerance,
             selected         = selected,
@@ -475,8 +508,10 @@ class OptimizationPhase(Phase):
 
         self._log_optimization_summary(final_results, selected)
 
+        rows = self._pair_ledger(work_dir, self._config.encoding.resolved_strategies)
         return self._make_result(
-            PhaseOutcome.COMPLETED, [],
+            PhaseOutcome.COMPLETED,
+            [r for r in rows if r.wanted],
             f"{len(selected)} strategy(ies) selected",
         )
 
@@ -484,7 +519,7 @@ class OptimizationPhase(Phase):
         """Build the reused result from the cached strategy results stash."""
         self._log_optimization_summary(self._strategy_results, self._selected_names)
         return self._make_result(
-            PhaseOutcome.REUSED, [], "all strategy results reused",
+            PhaseOutcome.REUSED, wanted, "all strategy results reused",
         )
 
     def _make_result(
@@ -492,15 +527,14 @@ class OptimizationPhase(Phase):
         outcome:   PhaseOutcome,
         artifacts: list[Artifact],
         message:   str,
-        error:     str | None = None,
     ) -> OptimizationPhaseResult:
         """Assemble an ``OptimizationPhaseResult`` from the payload stashes.
 
         Args:
             outcome:   The phase outcome.
             artifacts: Artifact list (empty on non-execute paths).
-            message:   Human-readable summary.
-            error:     Error description when ``outcome`` is ``FAILED``.
+            message:   Human-readable summary — on ``FAILED``, the error
+                       description.
 
         Returns:
             The populated result (``selected_strategies`` resolved from the
@@ -509,11 +543,12 @@ class OptimizationPhase(Phase):
         """
         return OptimizationPhaseResult(
             outcome             = outcome,
-            artifacts           = artifacts,
             message             = message,
-            error               = error,
+            winners             = [
+                r for r in artifacts
+                if isinstance(r.payload, EncodedChunk) and r.state == ArtifactState.COMPLETE
+            ],
             selected_strategies = self._resolve_selected(self._selected_names),
-            strategy_results    = list(self._strategy_results),
         )
 
     # ------------------------------------------------------------------
@@ -549,8 +584,7 @@ class OptimizationPhase(Phase):
         Returns:
             ``OptimizationPhaseResult`` with all configured strategies selected.
         """
-        job_result       = self._dep(JobPhase).result  # type: ignore[union-attr]
-        work_dir         = job_result.work_dir
+        work_dir         = self._dep_result(JobPhase).work_dir
         opt_yaml         = work_dir / _OPTIMIZATION_YAML
         current_targets  = _targets_as_strings(self._config.encoding.resolved_targets)
         current_sampling = self._config.measurement.sampling
@@ -590,10 +624,8 @@ class OptimizationPhase(Phase):
 
         return OptimizationPhaseResult(
             outcome             = PhaseOutcome.REUSED,
-            artifacts           = [],
             message             = "all-strategies mode — skipping optimization",
             selected_strategies = list(self._config.encoding.resolved_strategies),
-            strategy_results    = [],
         )
 
     def _wipe_artifacts(self, work_dir: Path) -> None:
@@ -685,37 +717,6 @@ class OptimizationPhase(Phase):
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
-
-def _strategy_artifacts(
-    complete_names: list[str],
-    absent_names:   list[str] | None = None,
-) -> list[Artifact]:
-    """Build a lightweight ``Artifact`` list representing strategy results.
-
-    The optimization phase tracks strategy test results rather than a standard
-    on-disk artifact list, so this adapts them to the artifact model consumed by
-    ``log_recovery_line()`` (which reads only ``.wanted`` and ``.state``). Every
-    strategy result is ``wanted=True``; cached results are ``COMPLETE`` and
-    strategies still needing a test encode are ``ABSENT``. The synthetic path is
-    derived from the strategy name purely for readability.
-
-    Args:
-        complete_names: Names of strategies with cached (finished) results.
-        absent_names:   Names of strategies still requiring a test encode.
-
-    Returns:
-        Combined artifact list, complete entries first then absent entries.
-    """
-    artifacts:  list[Artifact] = [
-        Artifact(path=Path(name), state=ArtifactState.COMPLETE, wanted=True)
-        for name in complete_names
-    ]
-    artifacts += [
-        Artifact(path=Path(name), state=ArtifactState.ABSENT, wanted=True)
-        for name in (absent_names or [])
-    ]
-    return artifacts
-
 
 def _targets_as_strings(quality_targets: list[QualityTarget]) -> list[str]:
     """Serialise *quality_targets* to ``"metric-statistic:value"`` strings.
@@ -816,7 +817,7 @@ def _select_test_chunks(
     num = min(num, len(eligible))
 
     selected = random.sample(eligible, num)
-    selected.sort(key=lambda c: c.chunk_id)
+    selected.sort(key=lambda c: c.safe_name())
     return selected
 
 

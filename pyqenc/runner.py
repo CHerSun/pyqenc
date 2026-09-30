@@ -14,8 +14,10 @@ responsibilities are deliberately narrow and phase-agnostic:
    (Req 5, 6).
 
 The runner knows only the ``Phase`` / ``PhaseResult`` protocol surface,
-``CleanupLevel``, ``PhaseOutcome``, and the registry ``dict``. It has no
-phase-specific knowledge and never names a phase-specific artifact path.
+``CleanupLevel``, ``PhaseOutcome``, and the registry ``dict`` — plus the one
+sanctioned exception: reading the merge target's deliverable contract
+(``Artifact[MergedVideo]`` payloads, Req 9.3) to collect the run's output
+files. It never names any other phase's internals.
 """
 # CHerSun 2026
 
@@ -35,6 +37,8 @@ from pyqenc.phase import (
     PhaseRegistry,
     PhaseResult,
 )
+from pyqenc.phases.merge import MergePhaseResult
+from pyqenc.state import ArtifactState
 from pyqenc.utils.long_path import LongPath
 
 logger = logging.getLogger(__name__)
@@ -66,10 +70,11 @@ class RunResult:
                              would need to do work).
         phases_failed:       Names of phases whose outcome is ``FAILED``.
         output_files:        Final output file paths, taken from the *target*
-                             phase's result only (artifacts under a ``final/``
-                             directory).
-        error:               Failure description when ``success`` is ``False``;
-                             ``None`` otherwise.
+                             phase's result only — the merge target's complete
+                             outputs; empty for every other target.
+        error:               Failure description when ``success`` is ``False``
+                             (the target result's ``message`` — on ``FAILED``
+                             it IS the error description); ``None`` otherwise.
     """
 
     success:             bool
@@ -236,8 +241,9 @@ class Runner:
 
         Args:
             run_ok:        Whether the target phase completed successfully.
-            target_result: The target phase's result (its ``error``/``message``
-                           populates ``RunResult.error`` on failure).
+            target_result: The target phase's result (its ``message``
+                           populates ``RunResult.error`` on failure — on
+                           ``FAILED`` the message IS the error description).
 
         Returns:
             The assembled ``RunResult``.
@@ -263,16 +269,17 @@ class Runner:
                 case PhaseOutcome.FAILED:
                     phases_failed.append(phase.name)
 
-        # Final output paths come from the TARGET phase's result only (Req 4.5).
-        output_files = _collect_output_files(target_result)
+        # Final output paths come from the TARGET phase's result only (Req 4.5);
+        # a merge target carries the deliverable contract, every other target
+        # has none.
+        output_files: list[Path] = (
+            _collect_output_files(target_result)
+            if isinstance(target_result, MergePhaseResult) else []
+        )
 
         error: str | None = None
         if not run_ok:
-            error = (
-                target_result.error
-                or target_result.message
-                or "run did not complete successfully"
-            )
+            error = target_result.message or "run did not complete successfully"
 
         return RunResult(
             success             = run_ok,
@@ -323,19 +330,23 @@ class Runner:
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
-def _collect_output_files(result: PhaseResult) -> list[Path]:
-    """Return the final output paths from a single phase result.
+def _collect_output_files(result: MergePhaseResult) -> list[Path]:
+    """Return the deliverable paths from the merge target's result.
 
-    A phase (``MergePhase``) stores its artifacts in ``result.artifacts``; each
-    ``COMPLETE`` artifact whose path lives inside a ``final/`` directory is a
-    pipeline output file. Reads the given (target) phase's result only (Req 4.5).
+    The merge result's ``Artifact[MergedVideo]`` rows carry their materialized
+    locations; every ``COMPLETE`` row's payload path is a pipeline output file
+    (Req 9.3 — no directory sniffing).
 
     Args:
-        result: The target phase's result.
+        result: The merge target's result.
 
     Returns:
-        The list of final output file paths (empty when none qualify).
+        The list of merged output file paths.
     """
-    return [artifact.path for artifact in result.complete if "final" in artifact.path.parts]
+    return [
+        row.payload.output_path
+        for row in result.merged
+        if row.state == ArtifactState.COMPLETE
+    ]
 
 

@@ -469,7 +469,7 @@ async def run_metrics(
 
 
 @dataclass
-class QualityArtifacts:
+class QualityLogs:
     """Artifacts generated during quality evaluation.
 
     All log paths point to ``.tmp``-suffixed files during their lifetime —
@@ -499,13 +499,13 @@ class QualityEvaluation:
         metrics: Parsed quality metrics with statistics
         targets_met: Whether all quality targets were met
         failed_targets: List of targets that were not met
-        artifacts: Paths to generated metric files and plots
+        logs: The transient metric logs/paths (``QualityLogs``)
     """
 
     metrics:        ChunkQualityStats
     targets_met:    bool
     failed_targets: list[QualityTarget]
-    artifacts:      QualityArtifacts
+    logs:           QualityLogs
 
 
 # ---------------------------------------------------------------------------

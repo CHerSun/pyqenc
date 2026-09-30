@@ -32,6 +32,7 @@ from pyqenc.models import (
 )
 from pyqenc.phase import (
     Artifact,
+    ArtifactState,
     Phase,
     PhaseRegistry,
     PhaseResult,
@@ -63,22 +64,26 @@ class ProbePhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying probe-specific payload.
 
     Attributes:
-        stream: The source's extended video stream (fast facet + frame count
-                + crop); ``None`` when no video stream exists and
-                ``ProbePhase`` returned ``FAILED``.
-        crop:   Resolved crop parameters (mirror of ``stream.crop`` for
-                convenience); all-zero when no cropping is needed.
+        stream: The extended-video-stream artifact — the slow facet (frame
+                count + crop) over the base video stream; ``None`` when no
+                video stream exists and ``ProbePhase`` returned ``FAILED``.
     """
 
-    stream: ExtendedVideoStream | None = field(default=None)
-    crop:   CropParams                 = field(default_factory=CropParams)
+    stream: Artifact[ExtendedVideoStream] | None = field(default=None)
+
+    @property
+    def crop(self) -> CropParams:
+        """Resolved crop — derived from the stream artifact; empty when absent."""
+        if self.stream is None:
+            return CropParams()
+        return self.stream.payload.crop
 
 
 # ---------------------------------------------------------------------------
 # ProbePhase
 # ---------------------------------------------------------------------------
 
-class ProbePhase(Phase):
+class ProbePhase(Phase[ProbePhaseResult]):
     """Phase object that resolves crop parameters and the source frame count.
 
     Depends on ``JobPhase`` and ``ExtractionPhase``.  Returns ``FAILED`` when
@@ -86,12 +91,14 @@ class ProbePhase(Phase):
     phases via their ``_ensure_dependencies()`` mechanism.
 
     The facet is written to ``probe.yaml`` after a successful run so
-    subsequent runs skip re-probing. ``probe.yaml`` is phase STATE, not an
-    artifact: the result carries no artifacts and ``pending`` comes from the
-    sidecar's currency (absent, or invalidated by a manual ``--crop``
-    override). The phase emits no banner — it logs a concise INFO line when
-    the slow probe starts and a result line with the probed (or cached)
-    details.
+    subsequent runs skip re-probing. The ledger carries one
+    ``Artifact[ExtendedVideoStream]`` row — ``COMPLETE`` iff ``probe.yaml`` is
+    current for the live inputs (absent or invalidated by a manual ``--crop``
+    override → ``ABSENT``, with the unknown-sentinel composition as the
+    payload: frame count 0, empty crop). ``probe.yaml`` remains phase STATE
+    (the sidecar), distinct from the artifact. The phase emits no banner — it
+    logs a concise INFO line when the slow probe starts and a result line with
+    the probed (or cached) details.
 
     Args:
         config:      Full validated application configuration.
@@ -146,22 +153,25 @@ class ProbePhase(Phase):
            data (no content peeking).
 
         Returns:
-            ``Recovery(artifacts=[], pending=...)`` — probe.yaml is state,
-            not an artifact; the loaded state is stashed on ``self._probe_state``.
+            The :class:`Recovery` single source of truth — one
+            ``Artifact[ExtendedVideoStream]`` row (``ABSENT`` with the
+            unknown-sentinel composition while pending; ``COMPLETE`` with the
+            resolved slow facet when current, stashed on ``self._resolved``).
 
         Raises:
             RecoveryError: When the source has no video stream.
         """
-        job_result        = self._dep(JobPhase).result        # type: ignore[union-attr]
-        extraction_result = self._dep(ExtractionPhase).result # type: ignore[union-attr]
-        probe_yaml        = job_result.work_dir / _PROBE_YAML_NAME  # type: ignore[operator]
+        job_result        = self._dep_result(JobPhase)
+        extraction_result = self._dep_result(ExtractionPhase)
+        probe_yaml        = job_result.work_dir / _PROBE_YAML_NAME
 
         # Step 1 — no video stream: fatal for all downstream video phases.
-        if extraction_result.video_stream is None:  # type: ignore[union-attr]
+        video_artifact = extraction_result.video_stream
+        if video_artifact is None:
             raise RecoveryError(
                 "No video stream in the source — video processing cannot continue"
             )
-        self._video_stream = extraction_result.video_stream  # type: ignore[union-attr]
+        self._video_stream = video_artifact.payload
 
         # Step 2 — .tmp pre-clean (probe.yaml is written via .tmp-then-rename).
         tmp = probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX)
@@ -174,13 +184,28 @@ class ProbePhase(Phase):
 
         # Step 3 — load + currency.
         self._probe_state = ProbeState.load(probe_yaml)
-        if self._probe_state is None:
-            return Recovery(pending=True)
-        if self._crop_params is not None:
-            # Manual --crop invalidates the cached crop: rewrite (cheap — the
-            # frame count stays cached).
-            return Recovery(pending=True)
-        return Recovery(pending=False)
+        if self._probe_state is None or self._crop_params is not None:
+            # Absent (full probe needed), or a manual --crop override
+            # invalidates the cached crop (cheap rewrite: the frame count
+            # stays cached). The row is ABSENT with the unknown-sentinel
+            # composition — the slow facet is unresolved until probed.
+            placeholder = ExtendedVideoStream(
+                stream      = self._video_stream,
+                frame_count = 0,
+                crop        = CropParams(),
+            )
+            return Recovery.from_artifacts([
+                Artifact(payload=placeholder, state=ArtifactState.ABSENT),
+            ])
+
+        self._resolved = ExtendedVideoStream(
+            stream      = self._video_stream,
+            frame_count = self._probe_state.frame_count,
+            crop        = self._probe_state.crop,
+        )
+        return Recovery.from_artifacts([
+            Artifact(payload=self._resolved, state=ArtifactState.COMPLETE),
+        ])
 
     def _execute(self, wanted: list[Artifact], dry_run: bool) -> ProbePhaseResult:
         """Resolve crop + frame count and persist ``probe.yaml``.
@@ -200,8 +225,7 @@ class ProbePhase(Phase):
         """
         from pyqenc.utils.crop import detect_crop_parameters
 
-        job_result  = self._dep(JobPhase).result         # type: ignore[union-attr]
-        probe_yaml  = job_result.work_dir / _PROBE_YAML_NAME  # type: ignore[operator]
+        probe_yaml = self._dep_result(JobPhase).work_dir / _PROBE_YAML_NAME
         probe_state = self._probe_state
         video       = self._video_stream
         assert video is not None  # recovery guarantees a video stream
@@ -249,15 +273,9 @@ class ProbePhase(Phase):
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> ProbePhaseResult:
         """Build the reused result from the cached ``probe.yaml`` state."""
-        state = self._probe_state
-        video = self._video_stream
-        assert state is not None  # current currency implies a loaded state
-        assert video is not None  # recovery guarantees a video stream
-        self._resolved = ExtendedVideoStream(
-            stream      = video,
-            frame_count = state.frame_count,
-            crop        = state.crop,
-        )
+        assert self._probe_state is not None  # current currency implies a loaded state
+        assert self._video_stream is not None  # recovery guarantees a video stream
+        assert self._resolved is not None  # stashed by the current-currency path
         logger.info("Probe: all values cached — reusing probe.yaml")
         logger.info(THICK_LINE)
         return self._make_result(PhaseOutcome.REUSED, [], "probe.yaml reused")
@@ -267,15 +285,14 @@ class ProbePhase(Phase):
         outcome:   PhaseOutcome,
         artifacts: list[Artifact],
         message:   str,
-        error:     str | None = None,
     ) -> ProbePhaseResult:
         """Assemble a ``ProbePhaseResult`` from the resolved payload stash.
 
         Args:
             outcome:   The phase outcome.
-            artifacts: Always empty (probe.yaml is state, not an artifact).
-            message:   Human-readable summary.
-            error:     Error description when ``outcome`` is ``FAILED``.
+            artifacts: The wanted row list (transitional population).
+            message:   Human-readable summary — on ``FAILED``, the error
+                       description.
 
         Returns:
             The populated result (``stream`` defaults to ``None`` on
@@ -283,11 +300,11 @@ class ProbePhase(Phase):
         """
         return ProbePhaseResult(
             outcome   = outcome,
-            artifacts = artifacts,
             message   = message,
-            error     = error,
-            stream    = self._resolved,
-            crop      = self._resolved.crop if self._resolved is not None else CropParams(),
+            stream    = (
+                Artifact(payload=self._resolved, state=ArtifactState.COMPLETE)
+                if self._resolved is not None else None
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -303,7 +320,7 @@ class ProbePhase(Phase):
         """
         video = self._video_stream
         assert video is not None
-        timestamps_path = self._dep(ExtractionPhase).result.timestamps_path  # type: ignore[union-attr]
+        timestamps_path = self._dep_result(ExtractionPhase).timestamps_path
 
         if timestamps_path is not None:
             counted = count_frames(timestamps_path)

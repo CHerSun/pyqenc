@@ -21,7 +21,8 @@ from pyqenc.models import (
     PhaseOutcome,
     Strategy,
 )
-from pyqenc.phase import Recovery
+from pyqenc.phase import Artifact, Recovery
+from pyqenc.state import ArtifactState
 from pyqenc.stream_model import File
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
@@ -52,6 +53,71 @@ def _make_chunk_window(source: Path, start: float, end: float) -> "VideoStreamCh
     stream = _make_extended_stream(source, frame_count=640, duration=end)
     return VideoStreamChunk(
         stream=stream, start_timestamp=start, end_timestamp=end, frame_count=24,
+    )
+
+
+def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
+    """An EncodedChunk payload over a one-window chunk of the named strategy."""
+    from decimal import Decimal
+
+    from pyqenc.stream_model import EncodedChunk
+
+    strategy = _make_strategy_by_name(strategy_name)
+    return EncodedChunk(
+        stream=_make_extended_stream(path, frame_count=24, duration=1.0),
+        chunk=_make_chunk_window(path.parent / "source.mkv", 0.0, 1.0),
+        strategy=strategy,
+        crf=Decimal(20),
+    )
+
+
+def _audio_output(out_path: Path):
+    """An AudioOutput payload over a minimal audio stream."""
+    from pyqenc.audio.layout import ChannelLayout
+    from pyqenc.stream_model import AudioOutput, AudioStream, AudioStreamInfo
+
+    return AudioOutput(
+        stream=AudioStream(
+            file=File(path=out_path.parent.parent / "source.mkv", file_size_bytes=64),
+            info=AudioStreamInfo(
+                track_id=1, codec_name="flac", language="eng",
+                layout=ChannelLayout.parse("stereo"), duration_seconds=100.0,
+            ),
+        ),
+        chain_name="normal",
+        output_path=out_path,
+    )
+
+
+def _merged_row(out_path: Path, state) -> Artifact:
+    """A merged-output row over a minimal MergedVideo payload."""
+    from pyqenc.stream_model import MergedVideo
+
+    return Artifact(
+        payload=MergedVideo(
+            source_stem="source",
+            strategy=_make_strategy_by_name("slow+h265"),
+            output_path=out_path,
+        ),
+        state=state,
+    )
+
+
+def _make_strategy_by_name(name: str) -> Strategy:
+    """A minimal Strategy for a ``preset+profile`` display name."""
+    from decimal import Decimal
+
+    from pyqenc.models import CodecConfig, Strategy
+
+    preset, _, profile = name.partition("+")
+    return Strategy(
+        preset=preset, profile=profile,
+        codec=CodecConfig(
+            name="h265-10bit", default_quality=Decimal(20),
+            default_preset="ultrafast",
+            quality_range=(Decimal(0), Decimal(51)), presets=["ultrafast"],
+        ),
+        profile_args=[],
     )
 
 
@@ -228,10 +294,9 @@ class TestExtractionPhaseTiming:
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
-            artifacts  = [],
             message    = "ok",
             force_wipe = False,
-            file       = File(path=source, file_size_bytes=64),
+            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         )
         result.source   = source                          # type: ignore[attr-defined]
         result.work_dir = source.parent / "work"          # type: ignore[attr-defined]
@@ -264,17 +329,30 @@ class TestExtractionPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.phases.extraction import ExtractionPhase, SubtitleArtifact
+        from pyqenc.phase import Artifact
+        from pyqenc.phases.extraction import ExtractionPhase
         from pyqenc.state import ArtifactState
+        from pyqenc.stream_model import (
+            File,
+            SubtitleStream,
+            SubtitleStreamInfo,
+        )
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        # Stub a complete artifact so _recover returns all-complete → REUSED path
-        stub_artifact = MagicMock(spec=SubtitleArtifact)
-        stub_artifact.state = ArtifactState.COMPLETE
-        stub_artifact.path  = tmp_path / "sub.srt"
-        stub_artifact.wanted = True
+        # A complete subtitle row so _recover returns all-complete → REUSED path
+        stub_artifact = Artifact(
+            payload = SubtitleStream(
+                file = File(path=tmp_path / "source.mkv"),
+                info = SubtitleStreamInfo(
+                    track_id=3, codec_name="subrip",
+                    extracted_path=tmp_path / "work" / "extracted" / "sub.srt",
+                ),
+            ),
+            state   = ArtifactState.COMPLETE,
+            wanted  = True,
+        )
 
         with patch.object(
             ExtractionPhase, "_recover",
@@ -297,8 +375,14 @@ class TestExtractionPhaseTiming:
 
         Validates: Requirements 6.5, 2.5
         """
-        from pyqenc.phases.extraction import ExtractionPhase, SubtitleArtifact
+        from pyqenc.phase import Artifact
+        from pyqenc.phases.extraction import ExtractionPhase
         from pyqenc.state import ArtifactState
+        from pyqenc.stream_model import (
+            File,
+            SubtitleStream,
+            SubtitleStreamInfo,
+        )
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
@@ -308,10 +392,17 @@ class TestExtractionPhaseTiming:
 
         absent_path = extracted_dir / "sub_0_eng.srt"
 
-        stub_artifact = MagicMock(spec=SubtitleArtifact)
-        stub_artifact.state = ArtifactState.ABSENT
-        stub_artifact.path  = absent_path
-        stub_artifact.wanted = True
+        stub_artifact = Artifact(
+            payload = SubtitleStream(
+                file = File(path=tmp_path / "source.mkv"),
+                info = SubtitleStreamInfo(
+                    track_id=3, codec_name="subrip",
+                    extracted_path=absent_path,
+                ),
+            ),
+            state   = ArtifactState.ABSENT,
+            wanted  = True,
+        )
 
         with (
             patch.object(
@@ -339,16 +430,29 @@ class TestExtractionPhaseTiming:
 
         Validates: Requirements 6.4, 6.5
         """
-        from pyqenc.phases.extraction import ExtractionPhase, SubtitleArtifact
+        from pyqenc.phase import Artifact
+        from pyqenc.phases.extraction import ExtractionPhase
         from pyqenc.state import ArtifactState
+        from pyqenc.stream_model import (
+            File,
+            SubtitleStream,
+            SubtitleStreamInfo,
+        )
 
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
 
-        stub_artifact = MagicMock(spec=SubtitleArtifact)
-        stub_artifact.state = ArtifactState.COMPLETE
-        stub_artifact.path  = tmp_path / "sub.srt"
-        stub_artifact.wanted = True
+        stub_artifact = Artifact(
+            payload = SubtitleStream(
+                file = File(path=tmp_path / "source.mkv"),
+                info = SubtitleStreamInfo(
+                    track_id=3, codec_name="subrip",
+                    extracted_path=tmp_path / "work" / "extracted" / "sub.srt",
+                ),
+            ),
+            state   = ArtifactState.COMPLETE,
+            wanted  = True,
+        )
 
         with patch.object(
             ExtractionPhase, "_recover",
@@ -376,10 +480,9 @@ class TestChunkingPhaseTiming:
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
-            artifacts  = [],
             message    = "ok",
             force_wipe = False,
-            file       = File(path=source, file_size_bytes=64),
+            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         )
         result.source   = source              # type: ignore[attr-defined]
         result.work_dir = tmp_path / "work"   # type: ignore[attr-defined]
@@ -409,14 +512,14 @@ class TestChunkingPhaseTiming:
 
         extraction_mock = MagicMock(spec=ExtractionPhase)
         extraction_mock.result = ExtractionPhaseResult(
-            outcome=PhaseOutcome.COMPLETED, artifacts=[], message="ok",
+            outcome=PhaseOutcome.COMPLETED, message="ok",
             video_stream=stream.stream,
         )
 
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = ProbePhaseResult(
-            outcome=PhaseOutcome.COMPLETED, artifacts=[], message="ok",
-            stream=stream,
+            outcome=PhaseOutcome.COMPLETED, message="ok",
+            stream=Artifact(payload=stream, state=ArtifactState.COMPLETE),
         )
 
         from pyqenc.phases.chunking import ChunkingPhase
@@ -536,10 +639,9 @@ class TestAudioPhaseTiming:
         work_dir.mkdir(parents=True, exist_ok=True)
         job_result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
-            artifacts  = [],
             message    = "ok",
             force_wipe = False,
-            file       = File(path=source, file_size_bytes=64),
+            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         )
         job_result.source   = source      # type: ignore[attr-defined]
         job_result.work_dir = work_dir    # type: ignore[attr-defined]
@@ -547,7 +649,6 @@ class TestAudioPhaseTiming:
 
         extraction_result = ExtractionPhaseResult(
             outcome      = PhaseOutcome.COMPLETED,
-            artifacts    = [],
             message      = "ok",
             video_stream = _make_video_stream_fixture(source),
         )
@@ -569,17 +670,17 @@ class TestAudioPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.phases.audio import AudioArtifact, AudioPhase
-        from pyqenc.state import ArtifactState
+        from pyqenc.phases.audio import AudioPhase
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        stub_artifact = MagicMock(spec=AudioArtifact)
-        stub_artifact.state = ArtifactState.COMPLETE
-        stub_artifact.path  = tmp_path / "track.aac"
+        stub_row = Artifact(
+            payload=_audio_output(tmp_path / "work" / "audio" / "track.aac"),
+            state=ArtifactState.COMPLETE,
+        )
 
-        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
+        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -593,20 +694,19 @@ class TestAudioPhaseTiming:
         Validates: Requirements 6.5
         """
         from pyqenc.models import PhaseOutcome
-        from pyqenc.phases.audio import AudioArtifact, AudioPhase, AudioPhaseResult
-        from pyqenc.state import ArtifactState
+        from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        stub_artifact = MagicMock(spec=AudioArtifact)
-        stub_artifact.state = ArtifactState.ABSENT
+        stub_artifact = Artifact(
+            payload=_audio_output(tmp_path / "work" / "audio" / "track.aac"),
+            state=ArtifactState.ABSENT,
+        )
 
         stub_result = AudioPhaseResult(
-            outcome     = PhaseOutcome.COMPLETED,
-            artifacts   = [],
-            message     = "ok",
-            audio_files = [],
+            outcome   = PhaseOutcome.COMPLETED,
+            message   = "ok",
         )
 
         with (
@@ -625,17 +725,17 @@ class TestAudioPhaseTiming:
 
         Validates: Requirements 6.5
         """
-        from pyqenc.phases.audio import AudioArtifact, AudioPhase
-        from pyqenc.state import ArtifactState
+        from pyqenc.phases.audio import AudioPhase
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        stub_artifact = MagicMock(spec=AudioArtifact)
-        stub_artifact.state = ArtifactState.COMPLETE
-        stub_artifact.path  = tmp_path / "track.aac"
+        stub_row = Artifact(
+            payload=_audio_output(tmp_path / "work" / "audio" / "track.aac"),
+            state=ArtifactState.COMPLETE,
+        )
 
-        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
+        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -648,17 +748,17 @@ class TestAudioPhaseTiming:
 
         Validates: Requirements 6.4, 6.5
         """
-        from pyqenc.phases.audio import AudioArtifact, AudioPhase
-        from pyqenc.state import ArtifactState
+        from pyqenc.phases.audio import AudioPhase
 
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
 
-        stub_artifact = MagicMock(spec=AudioArtifact)
-        stub_artifact.state = ArtifactState.COMPLETE
-        stub_artifact.path  = tmp_path / "track.aac"
+        stub_row = Artifact(
+            payload=_audio_output(tmp_path / "work" / "audio" / "track.aac"),
+            state=ArtifactState.COMPLETE,
+        )
 
-        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
+        with patch.object(AudioPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
             result = phase.run()
 
         assert result is not None
@@ -682,10 +782,9 @@ class TestOptimizationPhaseTiming:
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
-            artifacts  = [],
             message    = "ok",
             force_wipe = False,
-            file       = File(path=source, file_size_bytes=64),
+            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         )
         result.source   = source                                       # type: ignore[attr-defined]
         result.work_dir = tmp_path / "work"                            # type: ignore[attr-defined]
@@ -701,9 +800,8 @@ class TestOptimizationPhaseTiming:
 
         return ChunkingPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "ok",
-            chunks    = [chunk],
+            chunks    = [Artifact(payload=chunk, state=ArtifactState.COMPLETE)],
         )
 
     def _make_phase(
@@ -740,15 +838,12 @@ class TestOptimizationPhaseTiming:
         # completed probe result must be present for the reuse path to be reached.
         # The result is a REAL typed result (recovery builds a ProbeState from
         # .source/.crop — bare Mocks would fail pydantic validation).
-        from pyqenc.models import CropParams
         from pyqenc.phases.probe import ProbePhaseResult
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "probe complete",
             stream    = None,
-            crop      = CropParams(),
         )
 
         chunking_mock = MagicMock(spec=ChunkingPhase)
@@ -780,7 +875,7 @@ class TestOptimizationPhaseTiming:
             test_chunks      = ["chunk_0"],
             strategy_results = [
                 StrategyTestResult(strategy=strategy.display_name(), total_size=1024),
-                StrategyTestResult(strategy=_STRATEGY_H265_AQ.name, total_size=512),
+                StrategyTestResult(strategy=_STRATEGY_H265_AQ.display_name(), total_size=512),
             ],
             tolerance_pct    = 5.0,   # matches AppConfig.encoding.strategy_selection_tolerance default
             selected         = [strategy.display_name()],
@@ -938,7 +1033,7 @@ class TestOptimizationPhaseTiming:
             test_chunks      = ["chunk_0"],
             strategy_results = [
                 StrategyTestResult(strategy=strategy.display_name(), total_size=1024),
-                StrategyTestResult(strategy=_STRATEGY_H265_AQ.name, total_size=512),
+                StrategyTestResult(strategy=_STRATEGY_H265_AQ.display_name(), total_size=512),
             ],
             tolerance_pct    = 0.0,
             selected         = [strategy.display_name()],
@@ -970,10 +1065,9 @@ class TestEncodingPhaseTiming:
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
-            artifacts  = [],
             message    = "ok",
             force_wipe = False,
-            file       = File(path=source, file_size_bytes=64),
+            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         )
         result.source   = source              # type: ignore[attr-defined]
         result.work_dir = tmp_path / "work"   # type: ignore[attr-defined]
@@ -989,24 +1083,18 @@ class TestEncodingPhaseTiming:
 
         return ChunkingPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "ok",
-            chunks    = [chunk],
+            chunks    = [Artifact(payload=chunk, state=ArtifactState.COMPLETE)],
         )
 
     def _make_optimization_result(self, tmp_path: Path) -> OptimizationPhaseResult:
         """Return a minimal complete ``OptimizationPhaseResult`` stub."""
-        from pyqenc.models import PhaseOutcome
         from pyqenc.phases.optimization import OptimizationPhaseResult
-        from pyqenc.state import StrategyTestResult
 
-        strategy = _STRATEGY_SLOW_H265
         return OptimizationPhaseResult(
             outcome           = PhaseOutcome.COMPLETED,
-            artifacts         = [],
             message           = "ok",
-            selected_strategies = [strategy],
-            strategy_results  = [StrategyTestResult(strategy=strategy.display_name(), total_size=1024)],
+            selected_strategies = [_STRATEGY_SLOW_H265],
         )
 
     def _make_phase(
@@ -1015,7 +1103,7 @@ class TestEncodingPhaseTiming:
         collector: MagicMock,
     ) -> EncodingPhase:
         """Return an ``EncodingPhase`` with pre-wired job, probe, chunking, and optimization deps."""
-        from pyqenc.models import CropParams, PhaseOutcome
+        from pyqenc.models import PhaseOutcome
         from pyqenc.phases.chunking import ChunkingPhase
         from pyqenc.phases.encoding import EncodingPhase
         from pyqenc.phases.job import JobPhase
@@ -1031,10 +1119,8 @@ class TestEncodingPhaseTiming:
 
         probe_result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "ok",
             stream    = None,
-            crop      = CropParams(),
         )
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = probe_result
@@ -1058,18 +1144,17 @@ class TestEncodingPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.phases.encoding import EncodedArtifact, EncodingPhase
-        from pyqenc.state import ArtifactState
+        from pyqenc.phases.encoding import EncodingPhase
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        stub_artifact = MagicMock(spec=EncodedArtifact)
-        stub_artifact.state    = ArtifactState.COMPLETE
-        stub_artifact.chunk_id = "chunk_0"
-        stub_artifact.strategy = "slow+h265"
+        stub_row = Artifact(
+            payload=_encoded_chunk(tmp_path / "chunk_0.mkv", "chunk_0", "slow+h265"),
+            state=ArtifactState.COMPLETE,
+        )
 
-        with patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
+        with patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
             phase.run()
 
         time_keys_called = [call.args[0] for call in collector.time.call_args_list]
@@ -1088,23 +1173,20 @@ class TestEncodingPhaseTiming:
         """
         from pyqenc.models import PhaseOutcome
         from pyqenc.phases.encoding import (
-            EncodedArtifact,
             EncodingPhase,
             EncodingPhaseResult,
         )
-        from pyqenc.state import ArtifactState
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        stub_artifact = MagicMock(spec=EncodedArtifact)
-        stub_artifact.state    = ArtifactState.ABSENT
-        stub_artifact.chunk_id = "chunk_0"
-        stub_artifact.strategy = "slow+h265"
+        stub_artifact = Artifact(
+            payload=_encoded_chunk(tmp_path / "chunk_0.mkv", "chunk_0", "slow+h265"),
+            state=ArtifactState.ABSENT,
+        )
 
         stub_result = EncodingPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "ok",
         )
 
@@ -1169,7 +1251,7 @@ class TestEncodingPhaseTiming:
         call_update = step_calls[0].kwargs.get("convergence_update")
         assert call_key == MetricKey.ENCODING, f"Wrong key: {call_key}"
         assert isinstance(call_update, ConvergenceUpdate), f"Expected ConvergenceUpdate, got: {call_update}"
-        assert call_update.strategy      == _STRATEGY_SLOW_H265.name, f"Wrong strategy: {call_update.strategy}"
+        assert call_update.strategy      == _STRATEGY_SLOW_H265.display_name(), f"Wrong strategy: {call_update.strategy}"
         assert call_update.attempt_count == 3,                         f"Wrong attempt_count: {call_update.attempt_count}"
 
     def test_step_not_called_for_reused_pairs(self, tmp_path: Path) -> None:
@@ -1224,18 +1306,17 @@ class TestEncodingPhaseTiming:
 
         Validates: Requirements 6.4, 6.5
         """
-        from pyqenc.phases.encoding import EncodedArtifact, EncodingPhase
-        from pyqenc.state import ArtifactState
+        from pyqenc.phases.encoding import EncodingPhase
 
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
 
-        stub_artifact = MagicMock(spec=EncodedArtifact)
-        stub_artifact.state    = ArtifactState.COMPLETE
-        stub_artifact.chunk_id = "chunk_0"
-        stub_artifact.strategy = "slow+h265"
+        stub_row = Artifact(
+            payload=_encoded_chunk(tmp_path / "chunk_0.mkv", "chunk_0", "slow+h265"),
+            state=ArtifactState.COMPLETE,
+        )
 
-        with patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
+        with patch.object(EncodingPhase, "_recover", return_value=Recovery.from_artifacts([stub_row])):
             result = phase.run()
 
         assert result is not None
@@ -1259,10 +1340,9 @@ class TestMergePhaseTiming:
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
-            artifacts  = [],
             message    = "ok",
             force_wipe = False,
-            file       = File(path=source, file_size_bytes=64),
+            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         )
         result.source   = source              # type: ignore[attr-defined]
         result.work_dir = tmp_path / "work"   # type: ignore[attr-defined]
@@ -1270,27 +1350,22 @@ class TestMergePhaseTiming:
         return result
 
     def _make_encoding_result(self, tmp_path: Path) -> EncodingPhaseResult:
-        """Return a minimal complete ``EncodingPhaseResult`` stub with one encoded artifact."""
+        """Return a minimal complete ``EncodingPhaseResult`` with one winner row."""
         from pyqenc.models import PhaseOutcome
-        from pyqenc.phases.encoding import EncodedArtifact, EncodingPhaseResult
-        from pyqenc.state import ArtifactState
+        from pyqenc.phases.encoding import EncodingPhaseResult
 
         encoded_path = tmp_path / "work" / "encoded" / "slow+h265" / "chunk_0.mkv"
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
         encoded_path.write_bytes(b"\x00" * 128)
 
-        artifact = EncodedArtifact(
-            path     = encoded_path,
+        winner = Artifact(
+            payload  = _encoded_chunk(encoded_path, "chunk_0", "slow+h265"),
             state    = ArtifactState.COMPLETE,
-            chunk_id = "chunk_0",
-            strategy = "slow+h265",
-            crf      = 28.0,
         )
         return EncodingPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [artifact],
             message   = "ok",
-            encoded   = [artifact],
+            winners   = [winner],
         )
 
     def _make_audio_result(self) -> AudioPhaseResult:
@@ -1300,7 +1375,6 @@ class TestMergePhaseTiming:
 
         return AudioPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "ok",
         )
 
@@ -1329,11 +1403,30 @@ class TestMergePhaseTiming:
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
 
+        from pyqenc.phase import Artifact as _Artifact
+        from pyqenc.state import ArtifactState as _ArtifactState
+        from pyqenc.stream_model import (
+            File as _File,
+        )
+        from pyqenc.stream_model import (
+            VideoStream as _VideoStream,
+        )
+        from pyqenc.stream_model import (
+            VideoStreamInfo as _VideoStreamInfo,
+        )
+
+        video_row = _Artifact(
+            payload = _VideoStream(
+                file = _File(path=work_dir / "source.mkv"),
+                info = _VideoStreamInfo(track_id=0),
+            ),
+            state   = _ArtifactState.COMPLETE,
+        )
         extraction_result = ExtractionPhaseResult(
-            outcome         = PhaseOutcome.COMPLETED,
-            artifacts       = [],
-            message         = "ok",
-            timestamps_path = ts_file,
+            outcome      = PhaseOutcome.COMPLETED,
+            message      = "ok",
+            video_stream = video_row,
+            work_dir     = work_dir,
         )
         extraction_mock = MagicMock(spec=ExtractionPhase)
         extraction_mock.result = extraction_result
@@ -1344,15 +1437,12 @@ class TestMergePhaseTiming:
         audio_mock = MagicMock(spec=AudioPhase)
         audio_mock.result = self._make_audio_result()
 
-        from pyqenc.models import CropParams
         from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "probe complete",
             stream    = None,
-            crop      = CropParams(),
         )
 
         registry: dict[type, object] = {}
@@ -1369,21 +1459,17 @@ class TestMergePhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.phases.merge import MergeArtifact, MergePhase
+        from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        output_file = tmp_path / "work" / "final" / "source slow+h265.mkv"
+        output_file = tmp_path / "work" / "merged" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
         output_file.write_bytes(b"\x00" * 64)
 
-        stub_artifact = MergeArtifact(
-            path          = output_file,
-            state         = ArtifactState.COMPLETE,
-            strategy_name = "slow+h265",
-        )
+        stub_artifact = _merged_row(output_file, ArtifactState.COMPLETE)
 
         with patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             phase.run()
@@ -1398,21 +1484,17 @@ class TestMergePhaseTiming:
 
         Validates: Requirements 6.5
         """
-        from pyqenc.phases.merge import MergeArtifact, MergePhase
+        from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
         from pyqenc.utils.ffmpeg_runner import FFmpegRunResult
 
         collector = _spy_collector()
         phase     = self._make_phase(tmp_path, collector)
 
-        output_file = tmp_path / "work" / "final" / "source slow+h265.mkv"
+        output_file = tmp_path / "work" / "merged" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        stub_artifact = MergeArtifact(
-            path          = output_file,
-            state         = ArtifactState.ABSENT,
-            strategy_name = "slow+h265",
-        )
+        stub_artifact = _merged_row(output_file, ArtifactState.ABSENT)
 
         encoded_path = tmp_path / "work" / "encoded" / "slow+h265" / "chunk_0.mkv"
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1444,7 +1526,7 @@ class TestMergePhaseTiming:
         Validates: Requirements 6.5
         """
         from pyqenc.models import PhaseOutcome
-        from pyqenc.phases.merge import MergeArtifact, MergePhase
+        from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
 
         collector = _spy_collector()
@@ -1468,11 +1550,30 @@ class TestMergePhaseTiming:
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
 
+        from pyqenc.phase import Artifact as _Artifact
+        from pyqenc.state import ArtifactState as _ArtifactState
+        from pyqenc.stream_model import (
+            File as _File,
+        )
+        from pyqenc.stream_model import (
+            VideoStream as _VideoStream,
+        )
+        from pyqenc.stream_model import (
+            VideoStreamInfo as _VideoStreamInfo,
+        )
+
+        video_row = _Artifact(
+            payload = _VideoStream(
+                file = _File(path=work_dir / "source.mkv"),
+                info = _VideoStreamInfo(track_id=0),
+            ),
+            state   = _ArtifactState.COMPLETE,
+        )
         extraction_result = ExtractionPhaseResult(
-            outcome         = PhaseOutcome.COMPLETED,
-            artifacts       = [],
-            message         = "ok",
-            timestamps_path = ts_file,
+            outcome      = PhaseOutcome.COMPLETED,
+            message      = "ok",
+            video_stream = video_row,
+            work_dir     = work_dir,
         )
         extraction_mock = MagicMock(spec=ExtractionPhase)
         extraction_mock.result = extraction_result
@@ -1483,15 +1584,12 @@ class TestMergePhaseTiming:
         audio_mock = MagicMock(spec=AudioPhase)
         audio_mock.result = self._make_audio_result()
 
-        from pyqenc.models import CropParams
         from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "probe complete",
             stream    = None,
-            crop      = CropParams(),
         )
 
         registry: dict[type, object] = {}
@@ -1502,14 +1600,10 @@ class TestMergePhaseTiming:
         registry[EncodingPhase]   = encoding_mock    # type: ignore[index]
         registry[AudioPhase]      = audio_mock       # type: ignore[index]
 
-        output_file = tmp_path / "work" / "final" / "source slow+h265.mkv"
+        output_file = tmp_path / "work" / "merged" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        stub_artifact = MergeArtifact(
-            path          = output_file,
-            state         = ArtifactState.ABSENT,
-            strategy_name = "slow+h265",
-        )
+        stub_artifact = _merged_row(output_file, ArtifactState.ABSENT)
 
         encoded_path = tmp_path / "work" / "encoded" / "slow+h265" / "chunk_0.mkv"
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1538,21 +1632,17 @@ class TestMergePhaseTiming:
 
         Validates: Requirements 6.4, 6.5
         """
-        from pyqenc.phases.merge import MergeArtifact, MergePhase
+        from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
 
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
 
-        output_file = tmp_path / "work" / "final" / "source slow+h265.mkv"
+        output_file = tmp_path / "work" / "merged" / "source slow+h265.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
         output_file.write_bytes(b"\x00" * 64)
 
-        stub_artifact = MergeArtifact(
-            path          = output_file,
-            state         = ArtifactState.COMPLETE,
-            strategy_name = "slow+h265",
-        )
+        stub_artifact = _merged_row(output_file, ArtifactState.COMPLETE)
 
         with patch.object(MergePhase, "_recover", return_value=Recovery.from_artifacts([stub_artifact])):
             result = phase.run()

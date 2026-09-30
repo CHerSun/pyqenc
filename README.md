@@ -97,10 +97,10 @@ Results are written under the working directory:
 
 ```log
 <work-dir>/
-├── 📁 final/      ← ✅ your encoded video(s), one per selected strategy
+├── 📁 merged/     ← ✅ your encoded video(s), one per selected strategy
 ├── 📁 audio/      ← ✅ processed audio (one file per selected source track per chain)
-├── 📁 measure/    ← quality measurement outputs, if measure was run
-├── 📂 extracted/  ← extracted source streams (intermediate)
+├── 📂 extracted/  ← ✨ extracted source streams (subtitles, chapters, covers)
+├── 📁 measure/    ← ✨ quality measurement outputs, if `measure` subcommand was run
 ├── 📂 chunks/     ← scene-based video chunks (intermediate)
 ├── 📂 encoding/   ← per-chunk encoding attempts with metrics (intermediate)
 ├── 📂 encoded/    ← winning chunk attempts (intermediate)
@@ -108,7 +108,10 @@ Results are written under the working directory:
 └── 📄 *.yaml      ← phase parameters
 ```
 
-`final/` and `audio/` folders hold the results you should care about. Pick the video and audio streams you want, then mux them together with MKVmerge GUI (drag&drop streams, export). Everything else is intermediate — preserved for inspection and resumption unless you use `--cleanup`.
+- `merged/` and `audio/` folders hold the results you should care about. Pick the video and audio streams you want, then mux them together with MKVmerge GUI (drag&drop streams, export).
+- `extracted/` might be useful if you want to add translations, for example, or edit subtitles.
+- `measure/` holds results if you used `measure` subcommand directly.
+- Everything else is intermediate — preserved for inspection and resumption unless you use `--cleanup`.
 
 Audio outputs are produced by user-defined **chains** (ordered filter recipes) applied to **selected** tracks, configured under `audio:` in your config file. Each output is named `<source-stem> chain=<name>.<ext>`. See the [Audio Processing Guide](docs/audio-processing.md) for filters, chains, and track selection.
 

@@ -1,8 +1,8 @@
 """
 Merging phase for the quality-based encoding pipeline.
 
-This module handles concatenation of encoded video chunks to produce final
-MKV output files.  It also measures final quality metrics and generates
+This module handles concatenation of encoded video chunks to produce the
+merged MKV outputs.  It also measures final quality metrics and generates
 visual plots for verification.
 
 Audio muxing is intentionally omitted — the final output is video-only.
@@ -22,16 +22,14 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 import yaml
 
 from pyqenc.constants import (
-    ENCODED_ATTEMPT_NAME_PATTERN,
     FAILURE_SYMBOL_MINOR,
-    FINAL_OUTPUT_DIR,
+    MERGED_OUTPUT_DIR,
     METRIC_KEY_QUALITY_MEASURE,
-    RANGE_SEPARATOR,
     SUCCESS_SYMBOL_MAJOR,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
@@ -41,7 +39,7 @@ from pyqenc.constants import (
     WARNING_SYMBOL,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import CropParams, PhaseOutcome, QualityTarget
+from pyqenc.models import CropParams, PhaseOutcome, QualityTarget, Strategy
 from pyqenc.phase import (
     Artifact,
     ArtifactState,
@@ -51,24 +49,24 @@ from pyqenc.phase import (
     Recovery,
 )
 from pyqenc.phases.audio import AudioPhase
-from pyqenc.phases.encoding import EncodingPhase, EncodingPhaseResult
+from pyqenc.phases.encoding import EncodingPhase
 from pyqenc.phases.extraction import ExtractionPhase
-from pyqenc.phases.job import JobPhase, JobPhaseResult
-from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
+from pyqenc.phases.job import JobPhase
+from pyqenc.phases.probe import ProbePhase
 from pyqenc.state import MergeParams, MergeStrategySummary, ProbeState
-from pyqenc.stream_model import EncodedChunk, ExtendedVideoStream
+from pyqenc.stream_model import EncodedChunk, ExtendedVideoStream, MergedVideo
 from pyqenc.utils.ffmpeg_runner import get_frame_count
 from pyqenc.utils.log_format import (
     fmt_key_value_table,
     fmt_metric_value,
 )
+from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.visualization import QualityEvaluator, create_crf_plot
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
-    from pyqenc.phases.encoding import EncodedArtifact
 
 logger = logging.getLogger(__name__)
 
@@ -87,27 +85,13 @@ def _targets_as_strings(targets: list[QualityTarget]) -> list[str]:
     return [f"{t.metric}-{t.statistic}:{t.value}" for t in targets]
 
 
-# ---------------------------------------------------------------------------
-# MergeArtifact
-# ---------------------------------------------------------------------------
+def _expected_output_path(merged_dir: Path, source_stem: str, strategy: Strategy) -> Path:
+    """The merged output location — the single derivation site (Req 15.8).
 
-@dataclass
-class MergeArtifact(Artifact):
-    """Artifact for a single merged output file.
-
-    Attributes:
-        strategy_name: Display name of the encoding strategy (e.g. ``slow+h265-aq``).
-        frame_count:   Frame count of the merged output; ``None`` until measured.
-        metrics:       Final quality metrics dict; empty until measured.
-        targets_met:   Whether quality targets were met; ``False`` until measured.
-        plot_path:     Path to the quality plot PNG; ``None`` if not produced.
+    ``<file stem> <strategy.safe_name()>.mkv`` below ``merged/``; names are
+    safe by construction (Req 15.6).
     """
-
-    strategy_name: str        = ""
-    frame_count:   int | None = None
-    metrics:       dict[str, float] = field(default_factory=dict)
-    targets_met:   bool             = False
-    plot_path:     Path | None      = None
+    return merged_dir / f"{source_stem} {strategy.safe_name()}.mkv"
 
 
 # ---------------------------------------------------------------------------
@@ -158,13 +142,13 @@ def _safe_file_size(path: Path) -> int:
 
 
 def _build_strategy_summaries(
-    artifacts:         list[MergeArtifact],
+    rows:              list[Artifact[MergedVideo]],
     source_video_path: Path | None,
 ) -> tuple[int, list[MergeStrategySummary]]:
-    """Build per-strategy summary rows and source size from completed artifacts.
+    """Build per-strategy summary rows and source size from complete rows.
 
     Args:
-        artifacts:         Completed ``MergeArtifact`` objects.
+        rows:              The merged-output rows (complete ones are summarized).
         source_video_path: Path to the source video for size capture; ``None`` if unavailable.
 
     Returns:
@@ -178,15 +162,16 @@ def _build_strategy_summaries(
             pass
 
     summaries: list[MergeStrategySummary] = []
-    for artifact in artifacts:
-        if artifact.state != ArtifactState.COMPLETE:
+    for row in rows:
+        if row.state != ArtifactState.COMPLETE:
             continue
+        payload = row.payload
         summaries.append(MergeStrategySummary(
-            strategy_name   = artifact.strategy_name,
-            output_path     = artifact.path,
-            file_size_bytes = _safe_file_size(artifact.path),
-            metrics         = artifact.metrics,
-            targets_met     = artifact.targets_met,
+            strategy_name   = payload.strategy.display_name(),
+            output_path     = payload.output_path,
+            file_size_bytes = _safe_file_size(payload.output_path),
+            metrics         = payload.metrics,
+            targets_met     = payload.targets_met,
         ))
     return source_size, summaries
 
@@ -268,7 +253,7 @@ def _measure_quality(
         for stat_name, stat_value in metric_stats.items():
             metrics_dict[f"{metric_name.value}_{stat_name}"] = stat_value
 
-    plot_path = evaluation.artifacts.plot if evaluation.artifacts.plot else None
+    plot_path = evaluation.logs.plot if evaluation.logs.plot else None
     return metrics_dict, evaluation.targets_met, plot_path
 
 
@@ -330,30 +315,30 @@ def _log_missed_targets_warning(
 
 
 def _log_merge_summary(
-    artifacts:        list[MergeArtifact],
-    source_stem:      str,
+    summaries:         list[MergeStrategySummary],
+    source_stem:       str,
     source_size_bytes: int,
-    quality_targets:  list[QualityTarget],
-    metrics_sampling: int,
+    quality_targets:   list[QualityTarget],
+    metrics_sampling:  int,
 ) -> None:
-    """Log the final merge summary: source row + strategy table with sizes, % of source,
+    """Log the merge summary: source row + strategy table with sizes, % of source,
     and quality pass/miss marks; followed by a targets reminder and per-miss details.
 
     Args:
-        artifacts:         Completed merge artifacts, sorted by file size ascending.
+        summaries:         Per-strategy summary rows, sorted by file size ascending.
         source_stem:       Source video stem (filename without extension).
         source_size_bytes: Size of the source video in bytes; ``0`` if unavailable.
         quality_targets:   Quality targets that were checked.
         metrics_sampling:  Frame subsampling factor used during measurement.
     """
-    if not artifacts:
+    if not summaries:
         logger.info("  No output files produced.")
         return
 
     source_size = source_size_bytes
     has_targets = bool(quality_targets)
 
-    sorted_artifacts = sorted(artifacts, key=lambda a: _safe_file_size(a.path))
+    sorted_summaries = sorted(summaries, key=lambda r: _safe_file_size(r.output_path))
 
     def _pct_str(size: int) -> str:
         if source_size <= 0:
@@ -379,25 +364,25 @@ def _log_merge_summary(
 
     # --- Strategy rows ---
     any_miss = False
-    for artifact in sorted_artifacts:
-        size_bytes = _safe_file_size(artifact.path)
+    for summary in sorted_summaries:
+        size_bytes = _safe_file_size(summary.output_path)
         size_mb    = size_bytes / (1024 * 1024)
         size_str   = f"{size_mb:,.1f}".replace(",", "\u202f")
         pct        = _pct_str(size_bytes)
 
         if has_targets:
-            if artifact.metrics:
-                mark = SUCCESS_SYMBOL_MINOR if artifact.targets_met else FAILURE_SYMBOL_MINOR
-                if not artifact.targets_met:
+            if summary.metrics:
+                mark = SUCCESS_SYMBOL_MINOR if summary.targets_met else FAILURE_SYMBOL_MINOR
+                if not summary.targets_met:
                     any_miss = True
             else:
                 mark = "-"
-            logger.info("  %-25s  %12s  %7s  %s", artifact.strategy_name[:25], size_str, pct, mark)
+            logger.info("  %-25s  %12s  %7s  %s", summary.strategy_name[:25], size_str, pct, mark)
         else:
-            logger.info("  %-25s  %12s  %7s", artifact.strategy_name[:25], size_str, pct)
+            logger.info("  %-25s  %12s  %7s", summary.strategy_name[:25], size_str, pct)
 
     # --- Output location note ---
-    output_dir = sorted_artifacts[0].path.parent
+    output_dir = sorted_summaries[0].output_path.parent
     logger.info("")
     logger.info("  Files named: %s *.mkv  (where * is the strategy)", source_stem)
     logger.info("  Location: %s", output_dir)
@@ -420,19 +405,19 @@ def _log_merge_summary(
     # --- Per-miss details as key-value table ---
     miss_table: dict[str, str | list] = {}
 
-    for artifact in sorted_artifacts:
-        if artifact.targets_met or not artifact.metrics:
+    for summary in sorted_summaries:
+        if summary.targets_met or not summary.metrics:
             continue
         missed_lines = []
         for target in quality_targets:
             key   = f"{target.metric}_{target.statistic}"
-            value = artifact.metrics.get(key)
+            value = summary.metrics.get(key)
             if value is None:
                 missed_lines.append(f"{target.metric}-{target.statistic}: not measured (target: {target.value:.2f})")
             elif value < target.value:
                 missed_lines.append(f"{target.metric}-{target.statistic}: {value:.2f} (target: {target.value:.2f})")
         if missed_lines:
-            miss_table[f"{WARNING_SYMBOL} {artifact.strategy_name}"] = missed_lines if len(missed_lines) > 1 else missed_lines[0]
+            miss_table[f"{WARNING_SYMBOL} {summary.strategy_name}"] = missed_lines if len(missed_lines) > 1 else missed_lines[0]
 
     fmt_key_value_table(miss_table)
 
@@ -447,9 +432,9 @@ def _log_merge_summary_from_params(
 ) -> None:
     """Replay the merge summary table from persisted ``MergeParams``.
 
-    Reconstructs ``MergeArtifact`` objects from ``params.strategy_summaries``
-    and delegates to ``_log_merge_summary``.  Called on the REUSED path so the
-    user sees the same table as on the original run.
+    Delegates to ``_log_merge_summary`` over the persisted summary rows.
+    Called on the REUSED path so the user sees the same table as on the
+    original run.
 
     Args:
         params:          Loaded ``MergeParams`` from ``merge.yaml``.
@@ -459,19 +444,8 @@ def _log_merge_summary_from_params(
         logger.info("  No summary data saved — re-run to generate.")
         return
 
-    artifacts: list[MergeArtifact] = [
-        MergeArtifact(
-            path          = s.output_path,
-            state         = ArtifactState.COMPLETE,
-            strategy_name = s.strategy_name,
-            metrics       = s.metrics,
-            targets_met   = s.targets_met,
-        )
-        for s in params.strategy_summaries
-    ]
-
     _log_merge_summary(
-        artifacts         = artifacts,
+        summaries         = params.strategy_summaries,
         source_stem       = params.source_stem,
         source_size_bytes = params.source_size_bytes,
         quality_targets   = quality_targets,
@@ -480,58 +454,27 @@ def _log_merge_summary_from_params(
 
 
 def _collect_crf_data(
-    encoded:     list[EncodedArtifact],
-    strategy:    str,
+    winners:  list[Artifact[EncodedChunk]],
+    strategy: str,
 ) -> list[tuple[float, float, Decimal]]:
-    """Extract ``(start_seconds, end_seconds, crf)`` tuples for winning chunks of *strategy*.
+    """Extract ``(start_seconds, end_seconds, crf)`` tuples for a strategy's winners.
 
-    Timestamps are parsed from the ``chunk_id`` stem, which encodes the range
-    as ``HH꞉MM꞉SS․mmm-HH꞉MM꞉SS․mmm`` using filesystem-safe separators.
+    Reads the winning attempts via their payloads — ``payload.crf`` and the
+    window through ``payload.chunk`` (the chunk id re-parser is gone: chunk-id
+    parsing belongs to :meth:`VideoStreamChunk.parse_chunk_id`).
 
     Args:
-        encoded:  All ``EncodedArtifact`` objects from the encoding phase.
-        strategy: Strategy name to filter by.
+        winners:  The encoding phase's winner rows.
+        strategy: Strategy display name to filter by.
 
     Returns:
         List of ``(start_s, end_s, crf)`` sorted by start time.
-        Chunks with missing CRF or unparseable IDs are silently skipped.
     """
-    def _parse_ts(ts_str: str) -> float:
-        """Parse ``HH꞉MM꞉SS․mmm`` into seconds."""
-        parts = ts_str.split(TIME_SEPARATOR_SAFE)
-        if len(parts) != 3:
-            raise ValueError(f"Unexpected timestamp format: {ts_str!r}")
-        h, m, s_ms = parts
-        s, ms = s_ms.split(TIME_SEPARATOR_MS)
-        return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
-
-    result: list[tuple[float, float, float]] = []
-    for artifact in encoded:
-        if artifact.strategy != strategy:
-            continue
-
-        crf = artifact.crf
-        if crf is None:
-            # Fallback: parse quality from the artifact filename (e.g. "…q26.5.mkv")
-            m = ENCODED_ATTEMPT_NAME_PATTERN.match(artifact.path.name)
-            if m:
-                try:
-                    crf = Decimal(str(m.group("quality")))
-                except (ValueError, IndexError):
-                    pass
-
-        if crf is None:
-            logger.debug("No CRF available for chunk %r — skipping", artifact.chunk_id)
-            continue
-
-        try:
-            start_str, end_str = artifact.chunk_id.split(RANGE_SEPARATOR, 1)
-            start_s = _parse_ts(start_str)
-            end_s   = _parse_ts(end_str)
-            result.append((start_s, end_s, crf))
-        except Exception as exc:
-            logger.debug("Could not parse chunk_id %r for CRF plot: %s", artifact.chunk_id, exc)
-
+    result: list[tuple[float, float, Decimal]] = [
+        (payload.chunk.start_timestamp, payload.chunk.end_timestamp, payload.crf)
+        for payload in (row.payload for row in winners)
+        if payload.strategy.display_name() == strategy
+    ]
     result.sort(key=lambda t: t[0])
     return result
 
@@ -548,17 +491,18 @@ class MergePhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying merge-specific payload.
 
     Attributes:
-        merged: All ``MergeArtifact`` objects produced by this phase.
+        merged: The merged-output rows — one ``Artifact[MergedVideo]`` per
+                expected output; consumed by the runner as deliverables.
     """
 
-    merged: list[MergeArtifact] = field(default_factory=list)
+    merged: list[Artifact[MergedVideo]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
 # MergePhase
 # ---------------------------------------------------------------------------
 
-class MergePhase(Phase):
+class MergePhase(Phase[MergePhaseResult]):
     """Phase object for final video merging.
 
     Owns artifact enumeration, recovery, execution, and logging for the merge
@@ -597,19 +541,19 @@ class MergePhase(Phase):
     def params(self) -> MergeParams:
         """Current merge params derived from the job result config and probe result.
 
-        Built at runtime from ``self._dep(JobPhase).result`` and ``self._dep(ProbePhase).result``
+        Built at runtime from ``self._dep_result(JobPhase)`` and ``self._dep_result(ProbePhase)``
         so the values are always current (e.g. after CLI overrides) rather than
         snapshotted at construction time.
         """
         probe: ProbeState | None = None
-        probe_result = cast(ProbePhaseResult, self._dep(ProbePhase).result)
+        probe_result = self._dep_result(ProbePhase)
         if probe_result is not None:
             probe = ProbeState(
-                frame_count = probe_result.stream.frame_count if probe_result.stream is not None else 0,
+                frame_count = probe_result.stream.payload.frame_count if probe_result.stream is not None else 0,
                 crop        = probe_result.crop,
             )
 
-        job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
+        job_result = self._dep_result(JobPhase)
         if job_result is not None:
             return MergeParams(
                 quality_targets  = _targets_as_strings(job_result.config.encoding.resolved_targets),
@@ -625,7 +569,7 @@ class MergePhase(Phase):
 
     def _log_key_params(self) -> None:
         """Log the source stem and quality targets (key parameters)."""
-        logger.info("Source stem:  %s", cast(JobPhaseResult, self._dep(JobPhase).result).source.stem)
+        logger.info("Source stem:  %s", self._dep_result(JobPhase).source.stem)
         if self._config.encoding.resolved_targets:
             logger.info("Targets:      %s", ", ".join(
                 f"{t.metric}-{t.statistic}≥{t.value}" for t in self._config.encoding.resolved_targets
@@ -644,52 +588,56 @@ class MergePhase(Phase):
             A typed ``FAILED`` result, or ``None`` when the phase may proceed.
         """
         incomplete = [
-            a for a in cast(EncodingPhaseResult, self._dep(EncodingPhase).result).encoded
+            a for a in self._dep_result(EncodingPhase).winners
             if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)
         ]
         if incomplete:
             err = f"EncodingPhase has {len(incomplete)} incomplete artifact(s) — cannot merge"
             logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err, error=err)
+            return self._make_result(PhaseOutcome.FAILED, [], err)
 
         return None
 
     def _recover(self) -> Recovery:
-        """Classify merge artifacts and handle force-wipe / param invalidation.
+        """Classify merge rows and handle force-wipe / param invalidation.
 
         Steps:
-        1. If ``force_wipe``: delete ``final/`` and ``merge.yaml``.
+        1. If ``force_wipe``: delete ``merged/`` and ``merge.yaml``.
         2. Detect quality-target / metrics_sampling change — delete per-output
-           sidecars so stale COMPLETE artifacts are reclassified as PARTIAL
+           sidecars so stale COMPLETE rows are reclassified as PARTIAL
            and the merge re-runs with fresh metrics. A probe change deletes
-           the whole ``final/`` (outputs are re-merged).
+           the whole ``merged/`` (outputs are re-merged).
         3. Clean up leftover ``.tmp`` files.
-        4. Determine expected strategies from ``EncodingPhase.result``.
-        5. Scan ``final/`` for output + sidecar pairs; classify each. Output
-           files not matching any expected strategy surface as ``wanted=False``
-           artifacts (kept in place; deletion only via explicit cleanup).
+        4. Determine expected strategies from the encoding winners.
+        5. Classify each expected output: COMPLETE (output + sidecar; the
+           measured facts load into the payload), PARTIAL (output without its
+           sidecar), ABSENT (not yet produced). Output files not matching any
+           expected strategy surface as ``wanted=False`` rows (kept in place;
+           deletion only via explicit cleanup).
 
         Returns:
             The :class:`Recovery` single source of truth.
         """
-        job_result: JobPhaseResult = cast(JobPhaseResult, self._dep(JobPhase).result)
+        from pyqenc.stream_model import File
+
+        job_result = self._dep_result(JobPhase)
         work_dir   = job_result.work_dir
-        final_dir  = work_dir / FINAL_OUTPUT_DIR
+        merged_dir = work_dir / MERGED_OUTPUT_DIR
         merge_yaml = work_dir / _MERGE_YAML
         force_wipe = job_result.force_wipe
 
         # Step 1: force-wipe
         if force_wipe:
-            if final_dir.exists():
-                shutil.rmtree(final_dir)
-                logger.debug("force_wipe: deleted %s", final_dir)
+            if merged_dir.exists():
+                shutil.rmtree(merged_dir)
+                logger.debug("force_wipe: deleted %s", merged_dir)
             merge_yaml.unlink(missing_ok=True)
             logger.debug("force_wipe: deleted %s", merge_yaml)
 
         # Step 2: quality-target / metrics_sampling change detection.
-        # When params change, delete all per-output sidecars so every artifact
+        # When params change, delete all per-output sidecars so every row
         # is reclassified as PARTIAL and the merge re-runs with fresh metrics.
-        if not force_wipe and final_dir.exists():
+        if not force_wipe and merged_dir.exists():
             persisted = MergeParams.load(merge_yaml)
             if persisted is not None and persisted != self.params:
                 targets_changed  = bool(persisted.quality_targets) and persisted.quality_targets != self.params.quality_targets
@@ -704,7 +652,7 @@ class MergePhase(Phase):
                         "Merge params changed (%s) — deleting merge sidecars to re-measure quality",
                         "quality targets" if targets_changed else "sampling",
                     )
-                    for sidecar in final_dir.glob("*.yaml"):
+                    for sidecar in merged_dir.glob("*.yaml"):
                         try:
                             sidecar.unlink()
                             logger.debug("Deleted stale merge sidecar: %s", sidecar.name)
@@ -717,37 +665,38 @@ class MergePhase(Phase):
                         "(persisted=%s, current=%s) — deleting merge artifacts to re-merge",
                         persisted.probe, self.params.probe,
                     )
-                    if final_dir.exists():
-                        shutil.rmtree(final_dir)
-                        logger.debug("Probe mismatch: deleted %s", final_dir)
+                    if merged_dir.exists():
+                        shutil.rmtree(merged_dir)
+                        logger.debug("Probe mismatch: deleted %s", merged_dir)
                     merge_yaml.unlink(missing_ok=True)
 
         # Step 3: clean up .tmp files
-        if final_dir.exists():
-            for tmp in final_dir.glob(f"*{TEMP_SUFFIX}"):
+        if merged_dir.exists():
+            for tmp in merged_dir.glob(f"*{TEMP_SUFFIX}"):
                 try:
                     tmp.unlink()
                     logger.warning("Removed leftover temp file: %s", tmp)
                 except OSError as exc:
                     logger.warning("Could not remove temp file %s: %s", tmp, exc)
 
-        # Step 4: determine expected strategies
+        # Step 4: determine expected strategies from the typed winners field
         strategies = self._get_expected_strategies()
         if not strategies:
             return Recovery()
 
         source_stem = job_result.source.stem
 
-        # Step 5: classify each expected output
-        artifacts: list[MergeArtifact] = []
+        # Step 5: classify each expected output — the output name derives at
+        # the single site from File.path.stem + the strategy's safe name.
+        rows: list[Artifact] = []
         expected_names: set[str] = set()
-        for strategy_name, strategy_display in strategies:
-            output_file = final_dir / f"{source_stem} {strategy_display}.mkv"
+        for strategy in strategies:
+            output_file = _expected_output_path(merged_dir, source_stem, strategy)
             expected_names.add(output_file.name)
-            sidecar     = _load_merge_sidecar(output_file)
+            sidecar = _load_merge_sidecar(output_file)
 
             if output_file.exists() and sidecar is not None:
-                # COMPLETE — file and sidecar both present
+                # COMPLETE — output and sidecar both present
                 frame_count = sidecar.get("frame_count")
                 metrics     = {k: float(v) for k, v in sidecar.get("metrics", {}).items()}
                 targets_met = bool(sidecar.get("targets_met", False))
@@ -757,60 +706,65 @@ class MergePhase(Phase):
                     if p.exists():
                         plot_path = p
 
-                artifacts.append(MergeArtifact(
-                    path          = output_file,
-                    state         = ArtifactState.COMPLETE,
-                    strategy_name = strategy_name,
-                    frame_count   = int(frame_count) if frame_count is not None else None,
-                    metrics       = metrics,
-                    targets_met   = targets_met,
-                    plot_path     = plot_path,
+                rows.append(Artifact(
+                    payload = MergedVideo(
+                        source_stem = source_stem,
+                        strategy    = strategy,
+                        output_path = LongPath(output_file),
+                        frame_count = int(frame_count) if frame_count is not None else None,
+                        metrics     = metrics,
+                        targets_met = targets_met,
+                        plot_path   = LongPath(plot_path) if plot_path is not None else None,
+                    ),
+                    state   = ArtifactState.COMPLETE,
                 ))
             elif output_file.exists():
-                # PARTIAL — file present but sidecar missing
-                artifacts.append(MergeArtifact(
-                    path          = output_file,
-                    state         = ArtifactState.PARTIAL,
-                    strategy_name = strategy_name,
+                # PARTIAL — output present but its sidecar missing
+                rows.append(Artifact(
+                    payload = MergedVideo(
+                        source_stem = source_stem,
+                        strategy    = strategy,
+                        output_path = LongPath(output_file),
+                    ),
+                    state   = ArtifactState.PARTIAL,
                 ))
             else:
                 # ABSENT — not yet produced
-                artifacts.append(MergeArtifact(
-                    path          = output_file,
-                    state         = ArtifactState.ABSENT,
-                    strategy_name = strategy_name,
+                rows.append(Artifact(
+                    payload = MergedVideo(
+                        source_stem = source_stem,
+                        strategy    = strategy,
+                        output_path = LongPath(output_file),
+                    ),
+                    state   = ArtifactState.ABSENT,
                 ))
 
         # Surface present-but-unwanted surplus outputs (a strategy dropped from
-        # the selection whose final file still exists). Retained in place,
-        # never pending; deletion only via explicit cleanup.
-        if final_dir.exists():
-            prefix = f"{source_stem} "
-            for output_file in sorted(final_dir.glob("*.mkv")):
+        # the selection whose merged file still exists). The producing entity
+        # no longer exists — the on-disk product itself (a File) is the
+        # payload. Retained in place, never pending; deletion only via
+        # explicit cleanup.
+        if merged_dir.exists():
+            for output_file in sorted(merged_dir.glob("*.mkv")):
                 if output_file.name in expected_names:
                     continue
-                surplus_strategy = (
-                    output_file.name[len(prefix):-len(".mkv")]
-                    if output_file.name.startswith(prefix) else output_file.stem
-                )
                 state = (
                     ArtifactState.COMPLETE
                     if _load_merge_sidecar(output_file) is not None
                     else ArtifactState.PARTIAL
                 )
-                artifacts.append(MergeArtifact(
-                    path          = output_file,
-                    state         = state,
-                    wanted        = False,
-                    strategy_name = surplus_strategy,
+                rows.append(Artifact(
+                    payload = File(path=LongPath(output_file), file_size_bytes=_safe_file_size(output_file)),
+                    state   = state,
+                    wanted  = False,
                 ))
-                logger.debug("Final output %s is surplus (strategy no longer selected) — unwanted", output_file.name)
+                logger.debug("Merged output %s is surplus (strategy no longer selected) — unwanted", output_file.name)
 
-        return Recovery.from_artifacts(artifacts)
+        return Recovery.from_artifacts(rows)
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> MergePhaseResult:
         """Build the reused result, replaying the persisted merge summary."""
-        merge_yaml = cast(JobPhaseResult, self._dep(JobPhase).result).work_dir / _MERGE_YAML
+        merge_yaml = self._dep_result(JobPhase).work_dir / _MERGE_YAML
         persisted  = MergeParams.load(merge_yaml)
         if persisted is not None:
             logger.info(THICK_LINE)
@@ -822,26 +776,23 @@ class MergePhase(Phase):
     def _make_result(
         self,
         outcome:   PhaseOutcome,
-        artifacts: list[MergeArtifact],
+        artifacts: list[Artifact[MergedVideo]],
         message:   str,
-        error:     str | None = None,
     ) -> MergePhaseResult:
-        """Assemble a ``MergePhaseResult`` from the final-output artifacts.
+        """Assemble a ``MergePhaseResult`` from the merged-output rows.
 
         Args:
             outcome:   The phase outcome.
-            artifacts: The wanted artifact list.
-            message:   Human-readable summary.
-            error:     Error description when ``outcome`` is ``FAILED``.
+            artifacts: The wanted merged-output rows.
+            message:   Human-readable summary — on ``FAILED``, the error
+                       description (count plus identifiers).
 
         Returns:
-            The populated result (``merged`` mirrors ``artifacts``).
+            The populated result (``merged`` is the single storage).
         """
         return MergePhaseResult(
             outcome   = outcome,
-            artifacts = artifacts,
             message   = message,
-            error     = error,
             merged    = artifacts,
         )
 
@@ -849,34 +800,27 @@ class MergePhase(Phase):
     # Public Phase interface
     # ------------------------------------------------------------------
 
-    def _get_expected_strategies(self) -> list[tuple[str, str]]:
-        """Return ``(strategy_name, strategy_name)`` pairs for the expected outputs.
+    def _get_expected_strategies(self) -> list[Strategy]:
+        """The strategies expected to have merged outputs.
 
-        Reads the already-cached ``EncodingPhase.result.encoded_chunks`` — the
-        winning :class:`~pyqenc.stream_model.EncodedChunk` objects composed
+        Reads the already-cached ``EncodingPhase.result`` winners — the
+        winning :class:`~pyqenc.stream_model.EncodedChunk` payloads composed
         with their :class:`~pyqenc.models.Strategy` — resolved once by the
-        shared dependency walk. Names are safe by construction (Req 15.6), so
-        the display pair is the name twice.
+        shared dependency walk.
 
         Returns:
-            List of ``(strategy_name, strategy_name)`` tuples.
+            The distinct strategies, in first-seen order.
         """
-        encoding = self._dep(EncodingPhase)
-        if encoding.result is None:
-            return []
-
-        encoded_chunks = cast(EncodingPhaseResult, encoding.result).encoded_chunks
-        seen: dict[str, str] = {}
-        for by_strategy in encoded_chunks.values():
-            for encoded in by_strategy.values():
-                # Filesystem form throughout — merge outputs and the concat
-                # options file embed this name (Req 15.10).
-                seen[encoded.strategy.safe_name()] = encoded.strategy.safe_name()
-        return list(seen.items())
+        winners = self._dep_result(EncodingPhase).winners
+        seen: dict[str, Strategy] = {}
+        for row in winners:
+            strategy = row.payload.strategy
+            seen.setdefault(strategy.safe_name(), strategy)
+        return list(seen.values())
 
     def _execute(
         self,
-        wanted:  list[MergeArtifact],
+        wanted:  list[Artifact[MergedVideo]],
         dry_run: bool,
     ) -> MergePhaseResult:
         """Merge pending strategies by concatenating encoded chunks.
@@ -888,7 +832,7 @@ class MergePhase(Phase):
         instead).
 
         Args:
-            wanted:  Wanted artifact list from ``_recover()``.
+            wanted:  Wanted merged-output rows from ``_recover()``.
             dry_run: Unused for this phase (template guarantees ``False``).
 
         Returns:
@@ -896,19 +840,19 @@ class MergePhase(Phase):
         """
         from pyqenc.metrics import MetricKey
 
-        artifacts = wanted
-        work_dir  = cast(JobPhaseResult, self._dep(JobPhase).result).work_dir
-        final_dir = work_dir / FINAL_OUTPUT_DIR
-        final_dir.mkdir(parents=True, exist_ok=True)
+        rows = wanted
+        work_dir   = self._dep_result(JobPhase).work_dir
+        merged_dir = work_dir / MERGED_OUTPUT_DIR
+        merged_dir.mkdir(parents=True, exist_ok=True)
 
-        job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
-        probe_result = cast(ProbePhaseResult, self._dep(ProbePhase).result)
+        job_result = self._dep_result(JobPhase)
+        probe_result = self._dep_result(ProbePhase)
         crop: CropParams | None = probe_result.crop if probe_result is not None else None
         source_stream: ExtendedVideoStream | None = (
-            probe_result.stream if probe_result is not None else None
+            probe_result.stream.payload if (probe_result is not None and probe_result.stream is not None) else None
         )
         source_frame_count: int = (
-            probe_result.stream.frame_count
+            probe_result.stream.payload.frame_count
             if (probe_result is not None and probe_result.stream is not None) else 0
         )
         source_stem = job_result.source.stem
@@ -916,19 +860,21 @@ class MergePhase(Phase):
         # Build encoded_chunks dict from EncodingPhase result
         encoded_chunks = self._collect_encoded_chunks()
 
-        final_artifacts: list[MergeArtifact] = []
+        final_rows: list[Artifact[MergedVideo]] = []
         failed_strategies: list[str] = []
 
-        for artifact in artifacts:
-            strategy_name = artifact.strategy_name
+        for artifact in rows:
+            payload      = artifact.payload
+            strategy     = payload.strategy
+            strategy_name = strategy.display_name()
 
             if artifact.state == ArtifactState.COMPLETE:
-                final_artifacts.append(artifact)
+                final_rows.append(artifact)
                 continue
 
-            # The merge output name derives in one place from the source stem
-            # + the strategy name (filesystem-safe by construction, Req 15.8).
-            output_file = final_dir / f"{source_stem} {strategy_name}.mkv"
+            # The merge output name derives at the single site (Req 15.8).
+            output_file = _expected_output_path(merged_dir, source_stem, strategy)
+            assert output_file == payload.output_path, "recovery derived the same location"
             logger.info("Merging: %s", strategy_name)
 
             try:
@@ -951,7 +897,7 @@ class MergePhase(Phase):
 
                 # Resolve timestamps path from ExtractionPhase result
                 timestamps_path: Path | None = (
-                    self._dep(ExtractionPhase).result.timestamps_path
+                    self._dep_result(ExtractionPhase).timestamps_path
                 )
 
                 if timestamps_path is None or not timestamps_path.exists():
@@ -963,7 +909,7 @@ class MergePhase(Phase):
                     continue
 
                 # Write mkvmerge options file
-                options_file = final_dir / f"concat_{strategy_name}.json"
+                options_file = merged_dir / f"concat_{strategy_name}.json"
                 args = _build_mkvmerge_options(strategy_chunks, output_file, timestamps_path)
                 _write_mkvmerge_options_file(options_file, args)
 
@@ -1040,21 +986,21 @@ class MergePhase(Phase):
                                 source_stream    = source_stream,
                                 ref_crop         = crop,
                                 quality_targets  = job_result.config.encoding.resolved_targets,
-                                output_dir       = final_dir,
-                                metrics_sampling = self._dep(JobPhase).result.config.measurement.sampling,  # type: ignore[union-attr]
+                                output_dir       = merged_dir,
+                                metrics_sampling = self._dep_result(JobPhase).config.measurement.sampling,
                             )
                     except Exception as exc:
                         logger.warning("  Could not measure quality: %s", exc)
 
-                # CRF distribution plot
-                encoded_artifacts = cast(
-                    EncodingPhaseResult, self._dep(EncodingPhase).result
-                ).encoded
-                crf_data = _collect_crf_data(encoded_artifacts, strategy_name)
+                # CRF distribution plot — reads the typed winners field
+                crf_data = _collect_crf_data(
+                    self._dep_result(EncodingPhase).winners,
+                    strategy_name,
+                )
                 if crf_data:
-                    crf_plot_path = final_dir / f"{output_file.stem}.crf.png"
+                    crf_plot_path = merged_dir / f"{output_file.stem}.crf.png"
                     try:
-                        qlabel = self._dep(EncodingPhase).quality_labels.get(strategy_name, "CRF")
+                        qlabel = self._dep_result(EncodingPhase).quality_labels.get(strategy_name, "CRF")
                         create_crf_plot(
                             chunks        = crf_data,
                             output_path   = crf_plot_path,
@@ -1072,14 +1018,14 @@ class MergePhase(Phase):
                     output_file     = output_file,
                     frame_count     = frame_count,
                     all_metrics     = metrics_dict,
-                    quality_targets = self._dep(JobPhase).result.config.encoding.resolved_targets,  # type: ignore[union-attr]
+                    quality_targets = self._dep_result(JobPhase).config.encoding.resolved_targets,
                     targets_met     = targets_met,
                     plot_path       = plot_path,
                 )
 
                 frames_sym  = SUCCESS_SYMBOL_MINOR if frame_count_ok else FAILURE_SYMBOL_MINOR
                 frames_str  = str(frame_count) if frame_count is not None else "unknown"
-                metrics_str = _fmt_inline_metrics(metrics_dict, self._dep(JobPhase).result.config.encoding.resolved_targets)  # type: ignore[union-attr]
+                metrics_str = _fmt_inline_metrics(metrics_dict, self._dep_result(JobPhase).config.encoding.resolved_targets)
                 logger.info(
                     "%s Merged %s:  frames=%s %s%s",
                     SUCCESS_SYMBOL_MAJOR, strategy_name, frames_str, frames_sym,
@@ -1088,47 +1034,54 @@ class MergePhase(Phase):
                 if metrics_dict and not targets_met:
                     _log_missed_targets_warning(
                         strategy_name, metrics_dict,
-                        self._dep(JobPhase).result.config.encoding.resolved_targets,  # type: ignore[union-attr]
+                        self._dep_result(JobPhase).config.encoding.resolved_targets,
                     )
 
-                final_artifacts.append(MergeArtifact(
-                    path          = output_file,
-                    state         = ArtifactState.COMPLETE,
-                    strategy_name = strategy_name,
-                    frame_count   = frame_count,
-                    metrics       = metrics_dict,
-                    targets_met   = targets_met,
-                    plot_path     = plot_path,
+                final_rows.append(Artifact(
+                    payload = MergedVideo(
+                        source_stem = source_stem,
+                        strategy    = strategy,
+                        output_path = LongPath(output_file),
+                        frame_count = frame_count,
+                        metrics     = metrics_dict,
+                        targets_met = targets_met,
+                        plot_path   = LongPath(plot_path) if plot_path is not None else None,
+                    ),
+                    state   = ArtifactState.COMPLETE,
                 ))
 
-            except Exception as exc:
+            except Exception as exc:  # one bad strategy must not kill the rest
                 logger.error("Merging strategy %s error: %s", strategy_name, exc, exc_info=True)
                 failed_strategies.append(strategy_name)
 
         # Phase completion summary
-        complete_count = sum(1 for a in final_artifacts if a.state == ArtifactState.COMPLETE)
+        complete_count = sum(1 for a in final_rows if a.state == ArtifactState.COMPLETE)
         logger.info(THICK_LINE)
         logger.info("MERGE SUMMARY")
         logger.info(THICK_LINE)
         if failed_strategies:
             logger.error("  Failed strategies: %s", ", ".join(failed_strategies))
+        _, strategy_summaries = _build_strategy_summaries(
+            final_rows,
+            source_stream.stream.file.path if source_stream is not None else None,
+        )
         _log_merge_summary(
-            artifacts          = [a for a in final_artifacts if a.state == ArtifactState.COMPLETE],
+            summaries          = strategy_summaries,
             source_stem        = source_stem,
             source_size_bytes  = (
                 _safe_file_size(source_stream.stream.file.path) if source_stream is not None else 0
             ),
-            quality_targets    = self._dep(JobPhase).result.config.encoding.resolved_targets,  # type: ignore[union-attr]
-            metrics_sampling   = self._dep(JobPhase).result.config.measurement.sampling,  # type: ignore[union-attr]
+            quality_targets    = self._dep_result(JobPhase).config.encoding.resolved_targets,
+            metrics_sampling   = self._dep_result(JobPhase).config.measurement.sampling,
         )
-        if failed_strategies and not final_artifacts:
-            return self._make_result(PhaseOutcome.FAILED, [], "All strategy merges failed", error="All strategy merges failed")
+        if failed_strategies and not final_rows:
+            return self._make_result(PhaseOutcome.FAILED, [], "All strategy merges failed")
 
         # Persist merge params (with summary) so quality-target / sampling changes are
         # detected next run and the summary table can be replayed on rerun.
         if complete_count > 0:
             source_size_bytes, strategy_summaries = _build_strategy_summaries(
-                final_artifacts,
+                final_rows,
                 source_stream.stream.file.path if source_stream is not None else None,
             )
             MergeParams(
@@ -1138,19 +1091,18 @@ class MergePhase(Phase):
                 source_stem        = source_stem,
                 source_size_bytes  = source_size_bytes,
                 strategy_summaries = strategy_summaries,
-            ).save(self._dep(JobPhase).result.work_dir / _MERGE_YAML)  # type: ignore[union-attr]
+            ).save(self._dep_result(JobPhase).work_dir / _MERGE_YAML)
 
         if failed_strategies:
             return self._make_result(
-                PhaseOutcome.FAILED, final_artifacts,
-                f"{len(failed_strategies)} strategy(ies) failed",
-                error=f"Failed: {', '.join(failed_strategies[:5])}",
+                PhaseOutcome.FAILED, final_rows,
+                f"{len(failed_strategies)} strategy(ies) failed: {', '.join(failed_strategies[:5])}",
             )
 
-        did_work = any(a.state == ArtifactState.COMPLETE for a in final_artifacts)
+        did_work = any(a.state == ArtifactState.COMPLETE for a in final_rows)
         return self._make_result(
             PhaseOutcome.COMPLETED if did_work else PhaseOutcome.REUSED,
-            final_artifacts,
+            final_rows,
             f"{complete_count} output file(s) complete",
         )
 
@@ -1163,10 +1115,7 @@ class MergePhase(Phase):
         Returns:
             Nested dict mapping chunk IDs to strategy-name-to-``EncodedChunk``.
         """
-        encoding = self._dep(EncodingPhase)
-        if encoding.result is None:
-            return {}
-        return cast(EncodingPhaseResult, encoding.result).encoded_chunks
+        return self._dep_result(EncodingPhase).encoded_chunks
 
 
 # ---------------------------------------------------------------------------
@@ -1258,27 +1207,3 @@ def _write_mkvmerge_options_file(path: Path, args: list[str]) -> None:
     tmp = path.parent / f"{path.stem}{TEMP_SUFFIX}"
     tmp.write_text(json.dumps(args, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
-
-
-def _outcome_from_artifacts(
-    artifacts: list[MergeArtifact],
-    did_work:  bool,
-) -> PhaseOutcome:
-    """Derive ``PhaseOutcome`` purely from artifact states (mode-free).
-
-    Any ``ABSENT`` or ``PARTIAL`` artifact means wanted work remains, so the
-    phase is ``PENDING`` regardless of run mode; the runner owns the dry-run
-    vs execute distinction. When every artifact is ``COMPLETE`` the phase is
-    ``COMPLETED`` (did work) or ``REUSED`` (nothing to do). With no artifacts
-    there is nothing to produce, so the phase is ``REUSED``.
-    """
-    if not artifacts:
-        return PhaseOutcome.REUSED
-    if any(a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL) for a in artifacts):
-        return PhaseOutcome.PENDING
-    if all(a.state == ArtifactState.COMPLETE for a in artifacts):
-        return PhaseOutcome.REUSED if not did_work else PhaseOutcome.COMPLETED
-    return PhaseOutcome.PENDING
-
-
-

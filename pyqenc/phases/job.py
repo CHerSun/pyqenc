@@ -33,6 +33,7 @@ from pyqenc.models import (
 )
 from pyqenc.phase import (
     Artifact,
+    ArtifactState,
     FinalizeContext,
     Phase,
     PhaseRegistry,
@@ -61,11 +62,10 @@ class JobPhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying job-level data for downstream phases.
 
     Attributes:
-        file:       The run's single :class:`~pyqenc.stream_model.File` — the
-                    source identity (path + size) established eagerly by
-                    JobPhase.
-        job:        Interim in-memory fast-metadata state (until downstream
-                    phases migrate to the stream model).
+        file:       The source-file artifact — the run's single
+                    :class:`~pyqenc.stream_model.File` (path + size) wrapped
+                    with its recovery facts; ``COMPLETE`` once established and
+                    persisted.
         force_wipe: ``True`` when ``--force`` was provided and a source mismatch
                     was detected; downstream phases must delete their own output
                     directories and phase parameter YAMLs before proceeding.
@@ -76,26 +76,26 @@ class JobPhaseResult(PhaseResult):
         no_metrics: When ``True``, skip writing ``metrics.yaml`` files.
     """
 
-    file:       File | None       = field(default=None)
-    force_wipe: bool              = field(default=False)
-    config:     AppConfig | None = field(default=None)
-    work_dir:   Path | None       = field(default=None)
-    source:     Path | None       = field(default=None)
-    cleanup:    CleanupLevel      = field(default=CleanupLevel.NONE)
-    no_metrics: bool              = field(default=False)
+    file:       Artifact[File] | None = field(default=None)
+    force_wipe: bool                   = field(default=False)
+    config:     AppConfig | None       = field(default=None)
+    work_dir:   Path | None            = field(default=None)
+    source:     Path | None            = field(default=None)
+    cleanup:    CleanupLevel           = field(default=CleanupLevel.NONE)
+    no_metrics: bool                   = field(default=False)
 
 
 # ---------------------------------------------------------------------------
 # JobPhase
 # ---------------------------------------------------------------------------
 
-class JobPhase(Phase):
+class JobPhase(Phase[JobPhaseResult]):
     """Phase that establishes the source identity and owns ``job.yaml``.
 
     This phase has no dependencies and is a declared dependency of every other
-    phase. ``job.yaml`` is phase STATE, not an artifact: the result carries no
-    artifacts and ``pending`` comes from the sidecar's currency (absent, or
-    invalidated by a source mismatch).
+    phase. Its ledger is one ``Artifact[File]`` row — ``COMPLETE`` once the
+    source identity is verified and persisted; ``job.yaml`` remains phase STATE
+    (the sidecar), distinct from the artifact.
 
     The phase is ``_DRY_RUN_READONLY``: a dry-run still establishes the
     :class:`~pyqenc.stream_model.File` and builds the interim in-memory state
@@ -164,9 +164,13 @@ class JobPhase(Phase):
            ``force_wipe`` and go pending (rebuild for the new source);
            without ``--force`` this is a fatal invalidation.
 
+        The ledger carries one ``Artifact[File]`` row — ``COMPLETE`` by
+        construction once the source is verified (a missing source fails the
+        phase before recovery); the pending paths leave it ``ABSENT`` with
+        the freshly probed identity as the payload.
+
         Returns:
-            ``Recovery(artifacts=[], pending=...)`` — job.yaml is state, not
-            an artifact; the loaded File is stashed on ``self._file``.
+            The :class:`Recovery` single source of truth (one row).
 
         Raises:
             RecoveryError: On a source mismatch without ``--force``.
@@ -185,7 +189,10 @@ class JobPhase(Phase):
         # Step 2 — load the File dump; absent/unparseable → must create.
         existing = self._load_job_sidecar(job_yaml)
         if existing is None:
-            return Recovery(pending=True)
+            self._file = self._probe_file()
+            return Recovery.from_artifacts([
+                Artifact(payload=self._file, state=ArtifactState.ABSENT),
+            ])
         self._file = existing.source
 
         # Step 3 — source-mismatch invalidation (path + size vs live values).
@@ -201,15 +208,19 @@ class JobPhase(Phase):
                     mismatch_desc,
                 )
                 self._force_wipe = True
-                self._file = None
-                return Recovery(pending=True)
+                self._file = self._probe_file()
+                return Recovery.from_artifacts([
+                    Artifact(payload=self._file, state=ArtifactState.ABSENT),
+                ])
             raise RecoveryError(
                 "Source file mismatch detected — stopping execution.  "
                 "Re-run with --force to wipe existing artifacts and continue with the new source.  "
                 f"Mismatch: {mismatch_desc}"
             )
 
-        return Recovery(pending=False)
+        return Recovery.from_artifacts([
+            Artifact(payload=self._file, state=ArtifactState.COMPLETE),
+        ])
 
     def _execute(self, wanted: list[Artifact], dry_run: bool) -> JobPhaseResult:
         """Establish the source identity and (unless dry-run) write ``job.yaml``.
@@ -229,15 +240,21 @@ class JobPhase(Phase):
         """
         job_yaml = self._work_dir / _JOB_YAML_FILENAME
 
-        # Fresh identity (job.yaml absent, or force_wipe after a source mismatch).
-        self._file = self._probe_file()
+        # Fresh identity (job.yaml absent, or force_wipe after a source
+        # mismatch) — recovery already probed it eagerly for the ledger row.
+        if self._file is None:
+            self._file = self._probe_file()
         if not dry_run:
             write_yaml_atomic(
                 job_yaml,
                 JobSidecar(source=self._file).model_dump(exclude_none=True),
             )
             logger.info("Initialized job.yaml for new pipeline run")
-        return self._make_result(PhaseOutcome.COMPLETED, [], "job.yaml initialised")
+        return self._make_result(
+            PhaseOutcome.COMPLETED, [],
+            "job.yaml initialised",
+            file_state=ArtifactState.COMPLETE,
+        )
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> JobPhaseResult:
         """Build the reused result; rebuild the interim in-memory state.
@@ -250,32 +267,39 @@ class JobPhase(Phase):
             ``JobPhaseResult`` with outcome ``REUSED``.
         """
         assert self._file is not None, "file guaranteed by the _recover reuse path"
-        return self._make_result(PhaseOutcome.REUSED, [], "job.yaml already up to date")
+        return self._make_result(
+            PhaseOutcome.REUSED, [], "job.yaml already up to date",
+            file_state=ArtifactState.COMPLETE,
+        )
 
     def _make_result(
         self,
-        outcome:   PhaseOutcome,
-        artifacts: list[Artifact],
-        message:   str,
-        error:     str | None = None,
+        outcome:    PhaseOutcome,
+        artifacts:  list[Artifact],
+        message:    str,
+        file_state: ArtifactState = ArtifactState.ABSENT,
     ) -> JobPhaseResult:
         """Assemble a ``JobPhaseResult`` from constructor + recovery state.
 
         Args:
-            outcome:   The phase outcome.
-            artifacts: Always empty (job.yaml is state, not an artifact).
-            message:   Human-readable summary.
-            error:     Error description when ``outcome`` is ``FAILED``.
+            outcome:    The phase outcome.
+            artifacts:  The wanted row list (transitional population).
+            message:    Human-readable summary — on ``FAILED``, the error
+                        description.
+            file_state: The File row's state for this result (``COMPLETE``
+                        once the identity is established on this path).
 
         Returns:
             The populated result.
         """
+        file_row = (
+            Artifact(payload=self._file, state=file_state)
+            if self._file is not None else None
+        )
         return JobPhaseResult(
             outcome     = outcome,
-            artifacts   = artifacts,
             message     = message,
-            error       = error,
-            file        = self._file,
+            file        = file_row,
             force_wipe  = self._force_wipe,
             config      = self._config,
             work_dir    = self._work_dir,

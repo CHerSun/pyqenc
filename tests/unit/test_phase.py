@@ -14,6 +14,7 @@ log stream (banner / recovery line), the collector's ``time`` calls, and
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock
@@ -37,6 +38,13 @@ from pyqenc.runner import Runner
 from pyqenc.state import ArtifactState
 
 _APP_CONFIG: AppConfig = load_app_config(default_only=True)
+
+
+@dataclass
+class _StubResult(PhaseResult):
+    """The stub's declared artifact contract: one list field."""
+
+    rows: list[Artifact] = field(default_factory=list)
 
 
 class _StubPhase(Phase):
@@ -84,10 +92,9 @@ class _StubPhase(Phase):
         outcome: PhaseOutcome,
         artifacts: list[Artifact],
         message: str,
-        error: str | None = None,
     ) -> PhaseResult:
-        return PhaseResult(
-            outcome=PhaseOutcome(outcome), artifacts=artifacts, message=message, error=error
+        return _StubResult(
+            outcome=PhaseOutcome(outcome), message=message, rows=list(artifacts),
         )
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> PhaseResult:
@@ -125,7 +132,7 @@ class TestDeclaredDependencies:
 
         result = target.run()
         assert result.outcome is PhaseOutcome.REUSED
-        assert target._dep(_StubPhase) is dep
+        assert target._dep_result(_StubPhase) is dep.result
 
     def test_missing_declared_dependency_raises_loudly(self) -> None:
         """A declared dependency absent from the registry is never dropped."""
@@ -146,7 +153,7 @@ def _spy_collector() -> MagicMock:
 
 
 def _art(state: ArtifactState, *, wanted: bool = True) -> Artifact:
-    return Artifact(path=Path(f"{state.value}_{wanted}.mkv"), state=state, wanted=wanted)
+    return Artifact(payload=Path(f"{state.value}_{wanted}.mkv"), state=state, wanted=wanted)
 
 
 # ---------------------------------------------------------------------------
@@ -194,21 +201,73 @@ class TestBanner:
 
 
 class TestRecovery:
-    def test_recovery_timed_and_line_logged_with_unwanted_count(
+    def test_recovery_timed_and_line_counts_wanted_states(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        artifacts = [_art(ArtifactState.COMPLETE), _art(ArtifactState.COMPLETE, wanted=False)]
+        """Bug guarded: the recovery line dropping the internal/unwanted split
+        or breaking the identity wanted == complete + partial + absent — the
+        line is the user's only honest view of what remains."""
+        artifacts = [
+            _art(ArtifactState.COMPLETE),
+            _art(ArtifactState.ABSENT),
+            _art(ArtifactState.PARTIAL),
+            _art(ArtifactState.COMPLETE, wanted=False),
+        ]
         phase = _StubPhase(_spy_collector(), Recovery.from_artifacts(artifacts))
         with caplog.at_level(logging.INFO):
             result = phase.run()
 
-        assert [call.args[0] for call in _collector_of(phase).time.call_args_list] == [
+        assert [call.args[0] for call in _collector_of(phase).time.call_args_list][:1] == [
             MetricKey.RECOVERY
         ]
-        assert any("2 total, 1 unwanted" in r.message for r in caplog.records)
+        assert any(
+            "Recovery: 4 total, 3 wanted (1 complete, 1 partial, 1 absent) — resuming"
+            in r.message
+            for r in caplog.records
+        )
         # Wanted-only exposure; the unwanted artifact stays internal.
-        assert len(result.artifacts) == 1
+        assert len(result.artifacts) == 3
         assert result.artifacts[0].wanted
+
+    def test_fully_reused_ledger_says_all_reused(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Bug guarded: the suffix claiming "resuming" (or anything but full
+        reuse) when every wanted row is complete — the template fast-exits to
+        REUSED and this line is the only uniform reuse signal a phase emits."""
+        artifacts = [
+            _art(ArtifactState.COMPLETE),
+            _art(ArtifactState.COMPLETE),
+            _art(ArtifactState.COMPLETE, wanted=False),
+        ]
+        phase = _StubPhase(NoOpMetricsCollector(), Recovery.from_artifacts(artifacts))
+        with caplog.at_level(logging.INFO):
+            phase.run()
+
+        assert any(
+            "Recovery: 3 total, 2 wanted (2 complete, 0 partial, 0 absent) — all reused"
+            in r.message
+            for r in caplog.records
+        )
+
+    def test_fresh_ledger_says_nothing_to_reuse(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Bug guarded: a fresh ledger (nothing complete) reported with a
+        resume-flavored suffix — no work exists to resume; every wanted row
+        must be produced."""
+        phase = _StubPhase(
+            NoOpMetricsCollector(),
+            Recovery.from_artifacts([_art(ArtifactState.ABSENT)]),
+        )
+        with caplog.at_level(logging.INFO):
+            phase.run()
+
+        assert any(
+            "Recovery: 1 total, 1 wanted (0 complete, 0 partial, 1 absent) — nothing to reuse"
+            in r.message
+            for r in caplog.records
+        )
 
     def test_recovery_error_becomes_failed_result(self) -> None:
         phase = _StubPhase(
@@ -218,7 +277,7 @@ class TestRecovery:
         )
         result = phase.run()
         assert result.outcome is PhaseOutcome.FAILED
-        assert result.error == "fatal mismatch"
+        assert result.message == "fatal mismatch"
         assert phase.execute_calls == 0
 
 
@@ -302,6 +361,54 @@ def _runner_with(target: _StubPhase, collector, *, no_metrics: bool = False) -> 
         cleanup=CleanupLevel.NONE,
         no_metrics=no_metrics,
         is_terminal_most=False,
+    )
+
+
+class TestCollectOutputFiles:
+    def test_complete_merged_rows_paths_only(self) -> None:
+        """Bug guarded: deliverable collection taking anything but the merge
+        result's complete MergedVideo payloads (a directory sniff, an
+        incomplete row, a mirror field) — the runner's output_files would
+        lie about what the run produced."""
+        from pyqenc.models import PhaseOutcome
+        from pyqenc.phases.merge import MergePhaseResult
+        from pyqenc.runner import _collect_output_files
+        from pyqenc.stream_model import MergedVideo
+
+        def _row(stem: str, state: ArtifactState) -> Artifact:
+            return Artifact(
+                payload=MergedVideo(
+                    source_stem=stem,
+                    strategy=_STRATEGY,
+                    output_path=Path(f"D:/w/merged/{stem} {_STRATEGY.safe_name()}.mkv"),
+                ),
+                state=state,
+            )
+
+        _STRATEGY = _merge_strategy()
+        result = MergePhaseResult(
+            outcome=PhaseOutcome.COMPLETED,
+            message="ok",
+            merged=[_row("a", ArtifactState.COMPLETE), _row("b", ArtifactState.ABSENT)],
+        )
+        assert _collect_output_files(result) == [
+            Path(f"D:/w/merged/a {_STRATEGY.safe_name()}.mkv"),
+        ]
+
+
+def _merge_strategy():
+    from decimal import Decimal
+
+    from pyqenc.models import CodecConfig, Strategy
+
+    return Strategy(
+        preset="slow", profile="h265",
+        codec=CodecConfig(
+            name="h265-10bit", default_quality=Decimal(20),
+            default_preset="slow",
+            quality_range=(Decimal(0), Decimal(51)), presets=["slow"],
+        ),
+        profile_args=[],
     )
 
 

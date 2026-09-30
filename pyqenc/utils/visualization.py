@@ -29,7 +29,7 @@ from pyqenc.quality import (
     ChunkQualityStats,
     MetricStats,
     MetricType,
-    QualityArtifacts,
+    QualityLogs,
     QualityEvaluation,
     _MetricStatistics,
     run_metrics,
@@ -857,7 +857,7 @@ def extract_key_stats(full_stats: _MetricStatistics, metric_type: MetricType) ->
     }
 
 
-def parse_metrics(artifacts: QualityArtifacts, factor: int = 1) -> pd.DataFrame:
+def parse_metrics(artifacts: QualityLogs, factor: int = 1) -> pd.DataFrame:
     """Parse all available metric files from *artifacts* into a single DataFrame.
 
     Dispatches to the individual parsers (``parse_psnr_file``, ``parse_ssim_file``,
@@ -876,7 +876,7 @@ def parse_metrics(artifacts: QualityArtifacts, factor: int = 1) -> pd.DataFrame:
     omitted from the result.
 
     Args:
-        artifacts: ``QualityArtifacts`` with paths to metric files.
+        artifacts: ``QualityLogs`` with paths to metric files.
         factor:    Frame sampling factor used during metric generation.
 
     Returns:
@@ -968,7 +968,7 @@ def compute_metric_stats(df_norm: pd.DataFrame) -> ChunkQualityStats:
     return result
 
 
-def _auto_output_path(artifacts: "QualityArtifacts") -> Path:
+def _auto_output_path(artifacts: "QualityLogs") -> Path:
     """Derive an output plot path from the first available metric file in *artifacts*."""
     first = artifacts.psnr_log or artifacts.ssim_log or artifacts.vmaf_json or artifacts.vif_log
     if not first:
@@ -1022,9 +1022,9 @@ def analyze_chunk_quality(
     Raises:
         ValueError: If no valid metric file could be parsed.
     """
-    from pyqenc.quality import QualityArtifacts
+    from pyqenc.quality import QualityLogs
 
-    artifacts = QualityArtifacts(
+    artifacts = QualityLogs(
         psnr_log  = psnr_log,
         ssim_log  = ssim_log,
         vmaf_json = vmaf_json,
@@ -1275,12 +1275,12 @@ class QualityEvaluator:
         width:            int                            = 0,
         cwd:              Path | None                    = None,
         fps_value:        Fraction | None                = None,
-    ) -> QualityArtifacts:
+    ) -> QualityLogs:
         """Generate metric log files for quality comparison.
 
         Runs all four metrics (PSNR, SSIM, VMAF, VIF) in a single ffmpeg pass
         via ``run_metrics``.  Each metric is written to a ``.tmp``-suffixed file;
-        the ``.tmp`` paths are returned directly in a ``QualityArtifacts`` instance
+        the ``.tmp`` paths are returned directly in a ``QualityLogs`` instance
         — no rename is performed.
 
         Args:
@@ -1300,7 +1300,7 @@ class QualityEvaluator:
                               ``None``, derived from ``output_prefix``'s parent.
 
         Returns:
-            ``QualityArtifacts`` with ``.tmp`` paths for all four metrics
+            ``QualityLogs`` with ``.tmp`` paths for all four metrics
             (``plot`` is ``None`` — filled in by ``_finish_evaluation``).
         """
         uuid_hex   = uuid.uuid4().hex
@@ -1350,7 +1350,7 @@ class QualityEvaluator:
         # VIF data is embedded in the VMAF JSON (via feature=name=vif), so
         # vif_log points to the same file as vmaf_json — explicit for clarity.
         vmaf_tmp = output_dir / f"{tmp_prefix}{MetricType.VMAF.value}.tmp"
-        artifacts = QualityArtifacts(
+        artifacts = QualityLogs(
             psnr_log  = output_dir / f"{tmp_prefix}{MetricType.PSNR.value}.tmp",
             ssim_log  = output_dir / f"{tmp_prefix}{MetricType.SSIM.value}.tmp",
             vmaf_json = vmaf_tmp,
@@ -1538,7 +1538,7 @@ class QualityEvaluator:
     def _finish_evaluation(
         self,
         encoded:             Path,
-        artifacts:           QualityArtifacts,
+        artifacts:           QualityLogs,
         output_dir:          Path,
         targets:             list[QualityTarget],
         subsample_factor:    int,
@@ -1553,7 +1553,7 @@ class QualityEvaluator:
 
         Args:
             encoded:             Path to the encoded video (used for plot title/path).
-            artifacts:           ``QualityArtifacts`` returned by ``_generate_metrics``.
+            artifacts:           ``QualityLogs`` returned by ``_generate_metrics``.
             output_dir:          Directory for the plot PNG.
             targets:             Quality targets to evaluate.
             subsample_factor:    Frame subsampling factor.
@@ -1567,7 +1567,7 @@ class QualityEvaluator:
         logger.debug("Parsing metrics and generating plots")
         resolved_plot_path = plot_path if plot_path is not None else output_dir / f"{encoded.stem}.png"
 
-        artifacts_for_parse = QualityArtifacts(
+        artifacts_for_parse = QualityLogs(
             psnr_log  = artifacts.psnr_log  if artifacts.psnr_log  is not None and artifacts.psnr_log.exists()  else None,
             ssim_log  = artifacts.ssim_log  if artifacts.ssim_log  is not None and artifacts.ssim_log.exists()  else None,
             vmaf_json = artifacts.vmaf_json if artifacts.vmaf_json is not None and artifacts.vmaf_json.exists() else None,
@@ -1636,5 +1636,5 @@ class QualityEvaluator:
             metrics        = metrics,
             targets_met    = len(failed_targets) == 0,
             failed_targets = failed_targets,
-            artifacts      = artifacts,
+            logs           = artifacts,
         )

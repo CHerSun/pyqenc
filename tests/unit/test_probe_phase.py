@@ -51,7 +51,6 @@ def _make_job_result(work_dir: Path, source: Path) -> JobPhaseResult:
     """Return a COMPLETED JobPhaseResult carrying the source and work_dir."""
     return JobPhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
-        artifacts = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message   = "job complete",
         work_dir  = work_dir,
         source    = source,
@@ -70,13 +69,23 @@ def _make_video_stream(path: Path) -> VideoStream:
     )
 
 
-def _make_extraction_result(video_stream: VideoStream | None) -> ExtractionPhaseResult:
-    """Return a COMPLETED ExtractionPhaseResult carrying the video stream."""
+def _make_extraction_result(
+    work_dir: Path, video_stream: VideoStream | None,
+) -> ExtractionPhaseResult:
+    """Return a COMPLETED ExtractionPhaseResult carrying the video artifact.
+
+    The video row is COMPLETE (its material component — the per-frame index —
+    present), so the derived ``timestamps_path`` resolves to the conventional
+    location below ``work_dir``.
+    """
     return ExtractionPhaseResult(
         outcome      = PhaseOutcome.COMPLETED,
-        artifacts    = [],
         message      = "extraction complete",
-        video_stream = video_stream,
+        video_stream = (
+            Artifact(payload=video_stream, state=ArtifactState.COMPLETE)
+            if video_stream is not None else None
+        ),
+        work_dir     = work_dir,
     )
 
 
@@ -142,14 +151,14 @@ class TestProbePhaseFailedNoVideo:
         work_dir          = tmp_path / "work"
         work_dir.mkdir()
         job_result        = _make_job_result(work_dir, tmp_path / "source.mkv")
-        extraction_result = _make_extraction_result(video_stream=None)
+        extraction_result = _make_extraction_result(work_dir, video_stream=None)
         phase             = _make_probe_phase(job_result, extraction_result)
 
         result = phase.run()
 
         assert result.outcome == PhaseOutcome.FAILED
         assert result.stream is None
-        assert result.error is not None
+        assert result.message
         assert not (work_dir / "probe.yaml").exists()
 
 
@@ -173,14 +182,16 @@ class TestProbePhaseReused:
 
         job_result        = _make_job_result(work_dir, tmp_path / "source.mkv")
         extraction_result = _make_extraction_result(
-            _make_video_stream(tmp_path / "source.mkv"))
+            work_dir, _make_video_stream(tmp_path / "source.mkv"))
         phase             = _make_probe_phase(job_result, extraction_result, crop_params=None)
 
         result = phase.run()
 
         assert result.outcome == PhaseOutcome.REUSED
         assert result.stream is not None
-        assert result.stream.frame_count == 72000
+        assert result.stream is not None
+        assert result.stream.state == ArtifactState.COMPLETE
+        assert result.stream.payload.frame_count == 72000
         assert result.crop.top    == 140
         assert result.crop.bottom == 140
 
@@ -196,7 +207,7 @@ class TestProbePhaseReused:
 
         job_result        = _make_job_result(work_dir, tmp_path / "source.mkv")
         extraction_result = _make_extraction_result(
-            _make_video_stream(tmp_path / "source.mkv"))
+            work_dir, _make_video_stream(tmp_path / "source.mkv"))
         override_crop     = CropParams(top=0, bottom=0)
 
         with (
@@ -229,16 +240,15 @@ class TestProbePhaseCompleted:
         work_dir.mkdir()
         job_result        = _make_job_result(work_dir, tmp_path / "source.mkv")
         extraction_result = _make_extraction_result(
-            _make_video_stream(tmp_path / "source.mkv"))
+            work_dir, _make_video_stream(tmp_path / "source.mkv"))
         phase             = _make_probe_phase(job_result, extraction_result, crop_params=None)
 
-        # Extraction result exposes a timestamps path → the frame count is
-        # read from it (timestamps.txt is the primary source).
+        # The video artifact's index (its material component) exists at the
+        # conventional location → the frame count is read from it.
         timestamps = work_dir / "extracted" / "timestamps.txt"
         timestamps.parent.mkdir(parents=True, exist_ok=True)
         body = "".join(f"{i * 42}\n" for i in range(self._DETECTED_FRAME_COUNT))
         timestamps.write_text("# timestamp format v2\n" + body, encoding="utf-8")
-        object.__setattr__(extraction_result, "timestamps_path", timestamps)
 
         with patch("pyqenc.utils.crop.detect_crop_parameters", return_value=self._DETECTED_CROP):
             result = phase.run()
@@ -250,7 +260,9 @@ class TestProbePhaseCompleted:
 
         assert result.outcome == PhaseOutcome.COMPLETED
         assert result.stream is not None
-        assert result.stream.frame_count == self._DETECTED_FRAME_COUNT
+        assert result.stream is not None
+        assert result.stream.state == ArtifactState.COMPLETE
+        assert result.stream.payload.frame_count == self._DETECTED_FRAME_COUNT
         assert result.crop.top    == self._DETECTED_CROP.top
         assert result.crop.bottom == self._DETECTED_CROP.bottom
 
@@ -293,7 +305,7 @@ class TestProbeTiming:
         source = tmp_path / "source.mkv"
         source.write_bytes(bytes(64))
         job_result = _make_job_result(tmp_path, source)
-        extraction_result = _make_extraction_result(_make_video_stream(source))
+        extraction_result = _make_extraction_result(tmp_path, _make_video_stream(source))
 
         phase = _make_probe_phase(
             job_result, extraction_result, collector=collector
@@ -325,7 +337,7 @@ class TestProbeTiming:
         source = tmp_path / "source.mkv"
         source.write_bytes(bytes(64))
         job_result = _make_job_result(tmp_path, source)
-        extraction_result = _make_extraction_result(_make_video_stream(source))
+        extraction_result = _make_extraction_result(tmp_path, _make_video_stream(source))
 
         phase = _make_probe_phase(
             job_result, extraction_result, collector=collector

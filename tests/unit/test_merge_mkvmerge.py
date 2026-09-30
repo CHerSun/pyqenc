@@ -31,7 +31,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from pyqenc.app_config import load_app_config
-from pyqenc.constants import EXTRACTED_DIR, FINAL_OUTPUT_DIR, TIMESTAMPS_FILENAME
+from pyqenc.constants import EXTRACTED_DIR, MERGED_OUTPUT_DIR, TIMESTAMPS_FILENAME
 from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import (
     CleanupLevel,
@@ -55,6 +55,7 @@ from pyqenc.phases.merge import (
 )
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import ArtifactState
+from pyqenc.stream_model import File, VideoStream, VideoStreamInfo
 
 
 def _extended_stream(path: Path, frame_count: int) -> "ExtendedVideoStream":
@@ -191,8 +192,9 @@ def _make_merge_phase(
         work_dir:        Pipeline work directory.
         source:          Source video path.
         chunk:           A real encoded chunk file on disk.
-        timestamps_path: Timestamps file for the ExtractionPhase result; may be
-                         ``None`` (or a missing path) to exercise the guard.
+        timestamps_path: The index location the extraction result reports;
+                         ``None`` reports the video component absent, a missing
+                         path exercises the merge guard's existence check.
         frame_count:     Source frame count recorded by the ProbePhase result.
     """
     collector = NoOpMetricsCollector()
@@ -209,7 +211,6 @@ def _make_merge_phase(
     )
     job.result = JobPhaseResult(
         outcome    = PhaseOutcome.COMPLETED,
-        artifacts  = [Artifact(path=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message    = "job complete",
         force_wipe = False,
         config     = config,
@@ -220,45 +221,52 @@ def _make_merge_phase(
     registry: PhaseRegistry = {JobPhase: job}
 
     extraction = ExtractionPhase(config, registry, video_required=True, collector=collector)
-    ts_artifacts = (
-        [Artifact(path=timestamps_path, state=ArtifactState.COMPLETE)]
-        if timestamps_path is not None
-        else []
+    video_row = Artifact(
+        payload = VideoStream(
+            file = File(path=source),
+            info = VideoStreamInfo(track_id=0, resolution="1920x1080"),
+        ),
+        state   = (
+            ArtifactState.COMPLETE
+            if timestamps_path is not None
+            else ArtifactState.ABSENT
+        ),
     )
     extraction.result = ExtractionPhaseResult(
-        outcome         = PhaseOutcome.COMPLETED,
-        artifacts       = ts_artifacts,
-        message         = "extraction complete",
-        timestamps_path = timestamps_path,
+        outcome      = PhaseOutcome.COMPLETED,
+        message      = "extraction complete",
+        video_stream = video_row,
+        work_dir     = work_dir,
     )
     registry[ExtractionPhase] = extraction
 
     probe = ProbePhase(config, registry, collector=collector, crop_params=None)
     probe.result = ProbePhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
-        artifacts = [Artifact(path=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
         message   = "probe complete",
-        stream    = _extended_stream(source, frame_count),
+        stream    = Artifact(
+            payload = _extended_stream(source, frame_count),
+            state   = ArtifactState.COMPLETE,
+        ),
     )
     registry[ProbePhase] = probe
 
     encoding = EncodingPhase(config, registry, collector=collector)
+    winner   = Artifact(
+        payload = _encoded_chunk(chunk, "chunk1", _STRATEGY),
+        state   = ArtifactState.COMPLETE,
+    )
     encoding.result = EncodingPhaseResult(
-        outcome        = PhaseOutcome.COMPLETED,
-        artifacts      = [],
-        message        = "encoding complete",
-        encoded_chunks = {
-            "chunk1": _by_strategy_name(_encoded_chunk(chunk, "chunk1", _STRATEGY)),
-        },
+        outcome   = PhaseOutcome.COMPLETED,
+        message   = "encoding complete",
+        winners   = [winner],
     )
     registry[EncodingPhase] = encoding
 
     audio = AudioPhase(config, registry, collector=collector)
     audio.result = AudioPhaseResult(
-        outcome     = PhaseOutcome.COMPLETED,
-        artifacts   = [],
-        message     = "audio complete",
-        audio_files = [],
+        outcome   = PhaseOutcome.COMPLETED,
+        message   = "audio complete",
     )
     registry[AudioPhase] = audio
 
@@ -495,9 +503,9 @@ class TestMkvmergeOptionsFileLifecycle:
 
             merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=ts_file)
 
-            final_dir    = work_dir / FINAL_OUTPUT_DIR
-            output_file  = final_dir / f"{source.stem} {_SAFE_NAME}.mkv"
-            options_file = final_dir / f"concat_{_SAFE_NAME}.json"
+            merged_dir   = work_dir / MERGED_OUTPUT_DIR
+            output_file  = merged_dir / f"{source.stem} {_SAFE_NAME}.mkv"
+            options_file = merged_dir / f"concat_{_SAFE_NAME}.json"
 
             def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
                 if cmd[0] == "mkvpropedit":
@@ -522,7 +530,7 @@ class TestMkvmergeOptionsFileLifecycle:
                 result = merge.run(dry_run=False)
 
             assert result.outcome == PhaseOutcome.COMPLETED, (
-                f"Expected COMPLETED, got {result.outcome} (error={result.error!r})"
+                f"Expected COMPLETED, got {result.outcome} (message={result.message!r})"
             )
             assert not options_file.exists(), (
                 "Options file must be deleted after a successful merge"
@@ -549,8 +557,8 @@ class TestMkvmergeOptionsFileLifecycle:
 
             merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=ts_file)
 
-            final_dir    = work_dir / FINAL_OUTPUT_DIR
-            options_file = final_dir / f"concat_{_SAFE_NAME}.json"
+            merged_dir   = work_dir / MERGED_OUTPUT_DIR
+            options_file = merged_dir / f"concat_{_SAFE_NAME}.json"
 
             def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
                 result = MagicMock()
@@ -591,8 +599,8 @@ class TestMkvmergeOptionsFileLifecycle:
 
             merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=ts_file)
 
-            final_dir   = work_dir / FINAL_OUTPUT_DIR
-            output_file = final_dir / f"{source.stem} {_SAFE_NAME}.mkv"
+            merged_dir  = work_dir / MERGED_OUTPUT_DIR
+            output_file = merged_dir / f"{source.stem} {_SAFE_NAME}.mkv"
 
             def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
                 result = MagicMock()
@@ -703,7 +711,7 @@ class TestMergeFailsWithoutTimestamps:
             with patch("pyqenc.phases.merge.subprocess.run"):
                 result = merge.run(dry_run=False)
 
-            combined = f"{result.message} {result.error or ''}"
+            combined = result.message
             assert "fail" in combined.lower() or "timestamps" in combined.lower(), (
                 f"Expected failure message to mention 'fail' or 'timestamps', got: {combined!r}"
             )

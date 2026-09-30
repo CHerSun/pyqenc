@@ -30,9 +30,9 @@ Legend:
 
 Notes:
 
-¹ chunking_mode is not stored in any sidecar. Changing it without --force will leave existing chunks (produced with the old mode) classified as COMPLETE and reused as-is. Requires --force to actually re-chunk.
+¹ chunking.yaml does not persist scene-detection parameters. Changing scene_threshold without --force reuses the persisted boundaries as-is (TODO §46 tracks persisting and comparing them).
 
-² quality_targets change is detected by OptimizationPhase, which deletes encoding result sidecars (.yaml per chunk/strategy pair). EncodingPhase then sees ARTIFACT_ONLY artifacts and re-evaluates them against the new targets using stored per-attempt metrics — no re-encode needed if metrics were already measured.
+² quality_targets change is detected by OptimizationPhase, which deletes encoding result sidecars (.yaml per chunk/strategy pair). EncodingPhase then sees PARTIAL artifacts and re-evaluates them against the new targets using stored per-attempt metrics — no re-encode needed if metrics were already measured.
 
 ³ MergePhase re-measures final quality metrics against current targets, but existing merged .mkv files are reused if their sidecar is present. A target change alone doesn't wipe merge artifacts.
 
@@ -40,4 +40,4 @@ Notes:
 
 ⁵ audio_convert (the regex filter) is intentionally not tracked across runs — AudioEngine.build_plan() with the current filter defines the expected outputs, so the phase naturally produces/skips the right files without needing cross-run comparison.
 
-⁶ include/exclude are intentionally not tracked across runs — ExtractionPhase re-probes the source and re-applies the current filter every run, so the selection is fully expressed through each artifact's `wanted` flag. A track dropped by a filter change simply becomes unwanted (removed only at deep cleanup); a newly-included track is extracted. Nothing is persisted, so extraction has no sidecar.
+⁶ include/exclude are intentionally not tracked across runs — ExtractionPhase re-probes the source and re-applies the current filter every run, so the selection is fully expressed through each artifact row's `wanted` flag. A track dropped by a filter change simply becomes unwanted (kept in place; deletion only via explicit cleanup); a newly-included track is extracted. The stream inventory itself is persisted in extraction.yaml and reused when the source identity matches.
