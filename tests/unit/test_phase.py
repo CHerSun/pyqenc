@@ -398,7 +398,6 @@ class TestCollectOutputFiles:
         lie about what the run produced."""
         from pyqenc.models import PhaseOutcome
         from pyqenc.phases.merge import MergePhaseResult
-        from pyqenc.runner import _collect_output_files
         from pyqenc.stream_model import MergedVideo
 
         def _row(stem: str, state: ArtifactState) -> Artifact:
@@ -417,7 +416,7 @@ class TestCollectOutputFiles:
             message="ok",
             merged=[_row("a", ArtifactState.COMPLETE), _row("b", ArtifactState.ABSENT)],
         )
-        assert _collect_output_files(result) == [
+        assert result.output_paths == [
             Path(f"D:/w/merged/a {_STRATEGY.safe_name()}.mkv"),
         ]
 

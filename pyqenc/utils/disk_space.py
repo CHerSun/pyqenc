@@ -70,37 +70,6 @@ def get_disk_space(path: Path) -> DiskSpaceInfo:
     return DiskSpaceInfo(total_gb=total_gb, used_gb=used_gb, free_gb=free_gb, percent_used=percent_used)
 
 
-def _parse_resolution(resolution: str) -> tuple[int, int] | None:
-    """Parse a ``'WxH'`` resolution string into ``(width, height)``.
-
-    Returns ``None`` if parsing fails.
-    """
-    try:
-        w, h = resolution.split("x")
-        return int(w), int(h)
-    except (ValueError, AttributeError):
-        return None
-
-
-def _estimate_total_pixels(stream: VideoStream) -> int | None:
-    """Derive total pixel count from the stream's real fast-facet data.
-
-    Uses ``resolution`` and ``fps * duration_seconds`` from the enumerated
-    :class:`~pyqenc.stream_model.VideoStreamInfo`; returns ``None`` if
-    insufficient data is available.
-    """
-    res = _parse_resolution(stream.info.resolution) if stream.info.resolution else None
-    if res is None:
-        return None
-
-    fps      = stream.info.fps
-    duration = stream.info.duration_seconds
-    if fps is None or duration is None or fps <= 0:
-        return None
-
-    return res[0] * res[1] * int(fps * duration)
-
-
 def estimate_required_space(
     stream:         VideoStream,
     num_strategies: int = 1,
@@ -129,7 +98,7 @@ def estimate_required_space(
         return 0.0
 
     source_size_gb = size_bytes / (1024 ** 3)
-    total_pixels   = _estimate_total_pixels(stream)
+    total_pixels   = stream.info.total_pixels
 
     if total_pixels is not None:
         logger.debug("Space estimate: pixel-based (%d Mpx total)", total_pixels // 1_000_000)

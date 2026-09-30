@@ -38,7 +38,6 @@ from pyqenc.phase import (
     PhaseResult,
 )
 from pyqenc.phases.merge import MergePhaseResult
-from pyqenc.state import ArtifactState
 from pyqenc.utils.long_path import LongPath
 
 logger = logging.getLogger(__name__)
@@ -271,7 +270,7 @@ class Runner:
         # Final output paths come from the TARGET phase's result only; a merge
         # target carries the deliverable contract, every other target has none.
         output_files: list[Path] = (
-            _collect_output_files(target_result)
+            target_result.output_paths
             if isinstance(target_result, MergePhaseResult) else []
         )
 
@@ -327,24 +326,3 @@ class Runner:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
-
-def _collect_output_files(result: MergePhaseResult) -> list[Path]:
-    """Return the deliverable paths from the merge target's result.
-
-    The merge result's ``Artifact[MergedVideo]`` rows carry their materialized
-    locations; every ``COMPLETE`` row's payload path is a pipeline output file
-    (no directory sniffing).
-
-    Args:
-        result: The merge target's result.
-
-    Returns:
-        The list of merged output file paths.
-    """
-    return [
-        row.payload.output_path
-        for row in result.merged
-        if row.state == ArtifactState.COMPLETE
-    ]
-
-

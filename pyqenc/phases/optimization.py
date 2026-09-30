@@ -71,7 +71,6 @@ if TYPE_CHECKING:
 config_handler.set_global(enrich_print=False)  # type: ignore
 logger = logging.getLogger(__name__)
 
-_OPTIMIZATION_YAML    = "optimization.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +126,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
     """
 
     name:        str       = "optimization"
+    SIDECAR_NAME = "optimization.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ProbePhase, ChunkingPhase)
     _METRIC_KEY: MetricKey = MetricKey.OPTIMIZATION
 
@@ -221,7 +221,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         job_result   = self._dep_result(JobPhase)
         probe_result = self._dep_result(ProbePhase)
         work_dir     = job_result.work_dir
-        opt_yaml     = work_dir / _OPTIMIZATION_YAML
+        opt_yaml     = work_dir / OptimizationPhase.SIDECAR_NAME
         tolerance    = self._config.encoding.optimize_tolerance
         strategies   = self._config.encoding.resolved_strategies
         force_wipe   = job_result.force_wipe
@@ -365,7 +365,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         """
         job_result = self._dep_result(JobPhase)
         work_dir   = job_result.work_dir
-        opt_yaml   = work_dir / _OPTIMIZATION_YAML
+        opt_yaml   = work_dir / OptimizationPhase.SIDECAR_NAME
         tolerance  = self._config.encoding.optimize_tolerance
         persisted  = self._persisted
         crop       = self._current_probe.crop
@@ -570,7 +570,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             ``OptimizationPhaseResult`` with all configured strategies selected.
         """
         work_dir         = self._dep_result(JobPhase).work_dir
-        opt_yaml         = work_dir / _OPTIMIZATION_YAML
+        opt_yaml         = work_dir / OptimizationPhase.SIDECAR_NAME
         current_targets  = targets_as_strings(self._config.encoding.resolved_targets)
         current_sampling = self._config.measurement.sampling
 
@@ -622,7 +622,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         Args:
             work_dir: Pipeline working directory.
         """
-        opt_yaml = work_dir / _OPTIMIZATION_YAML
+        opt_yaml = work_dir / OptimizationPhase.SIDECAR_NAME
         if opt_yaml.exists():
             opt_yaml.unlink()
             logger.debug("force_wipe: deleted %s", opt_yaml)

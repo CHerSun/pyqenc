@@ -63,8 +63,6 @@ from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
 from pyqenc.utils.long_path import LongPath
 
-_AUDIO_YAML = "audio.yaml"
-
 
 @dataclass
 class AudioPhaseResult(PhaseResult):
@@ -98,6 +96,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
     """
 
     name:        str       = "audio"
+    SIDECAR_NAME = "audio.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase)
     _METRIC_KEY: MetricKey = MetricKey.AUDIO
 
@@ -151,7 +150,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
         """
         job_result = self._dep_result(JobPhase)
         work_dir    = LongPath(job_result.work_dir)
-        sidecar_path = work_dir / _AUDIO_YAML
+        sidecar_path = work_dir / AudioPhase.SIDECAR_NAME
         audio_cfg   = job_result.config.audio
         force_wipe  = job_result.force_wipe
 

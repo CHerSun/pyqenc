@@ -49,7 +49,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_JOB_YAML_FILENAME = "job.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +112,7 @@ class JobPhase(Phase[JobPhaseResult]):
     """
 
     name:              str       = "job"
+    SIDECAR_NAME = "job.yaml"
     DEPENDS_ON:        ClassVar[tuple[type[Phase], ...]] = ()
     BANNER:            bool      = False
     _METRIC_KEY:       MetricKey = MetricKey.JOB
@@ -174,7 +174,7 @@ class JobPhase(Phase[JobPhaseResult]):
         Raises:
             RecoveryError: On a source mismatch without ``--force``.
         """
-        job_yaml = self._work_dir / _JOB_YAML_FILENAME
+        job_yaml = self._work_dir / JobPhase.SIDECAR_NAME
 
         # Step 1 — .tmp pre-clean (job.yaml is written via .tmp-then-rename).
         remove_stale_tmp_file(job_yaml.with_name(job_yaml.name + TEMP_SUFFIX))
@@ -231,7 +231,7 @@ class JobPhase(Phase[JobPhaseResult]):
         Returns:
             ``JobPhaseResult`` with outcome ``COMPLETED`` (work ran).
         """
-        job_yaml = self._work_dir / _JOB_YAML_FILENAME
+        job_yaml = self._work_dir / JobPhase.SIDECAR_NAME
 
         # Fresh identity (job.yaml absent, or force_wipe after a source
         # mismatch) — recovery already probed it eagerly for the ledger row.

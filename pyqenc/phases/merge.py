@@ -82,7 +82,6 @@ logger = logging.getLogger(__name__)
 # Module-level constants
 # ---------------------------------------------------------------------------
 
-_MERGE_YAML = "merge.yaml"
 
 _NS_PER_SECOND = 1_000_000_000
 _MKVPROPEDIT_VIDEO_TRACK = "track:v1"
@@ -477,6 +476,19 @@ class MergePhaseResult(PhaseResult):
 
     merged: list[Artifact[MergedVideo]] = field(default_factory=list)
 
+    @property
+    def output_paths(self) -> list[Path]:
+        """Deliverable paths of the ``COMPLETE`` merged outputs.
+
+        Every ``COMPLETE`` row's payload path is a pipeline output file (no
+        directory sniffing).
+        """
+        return [
+            row.payload.output_path
+            for row in self.merged
+            if row.state == ArtifactState.COMPLETE
+        ]
+
 
 # ---------------------------------------------------------------------------
 # MergePhase
@@ -498,6 +510,7 @@ class MergePhase(Phase[MergePhaseResult]):
     """
 
     name:        str       = "merge"
+    SIDECAR_NAME = "merge.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (
         JobPhase, ExtractionPhase, ProbePhase, EncodingPhase, AudioPhase,
     )
@@ -591,7 +604,7 @@ class MergePhase(Phase[MergePhaseResult]):
         job_result = self._dep_result(JobPhase)
         work_dir   = job_result.work_dir
         merged_dir = work_dir / MERGED_OUTPUT_DIR
-        merge_yaml = work_dir / _MERGE_YAML
+        merge_yaml = work_dir / MergePhase.SIDECAR_NAME
         force_wipe = job_result.force_wipe
 
         # Step 1: force-wipe
@@ -731,7 +744,7 @@ class MergePhase(Phase[MergePhaseResult]):
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> MergePhaseResult:
         """Build the reused result, replaying the persisted merge summary."""
-        merge_yaml = self._dep_result(JobPhase).work_dir / _MERGE_YAML
+        merge_yaml = self._dep_result(JobPhase).work_dir / MergePhase.SIDECAR_NAME
         persisted  = MergeParams.load(merge_yaml)
         if persisted is not None:
             logger.info(THICK_LINE)
@@ -1034,7 +1047,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 source_stem        = source_stem,
                 source_size_bytes  = source_size_bytes,
                 strategy_summaries = strategy_summaries,
-            ).save(self._dep_result(JobPhase).work_dir / _MERGE_YAML)
+            ).save(self._dep_result(JobPhase).work_dir / MergePhase.SIDECAR_NAME)
 
         if failed_strategies:
             return self._make_result(

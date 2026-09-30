@@ -54,7 +54,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_PROBE_YAML_NAME = "probe.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +113,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
     """
 
     name:        str       = "probe"
+    SIDECAR_NAME = "probe.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase)
     BANNER:      bool      = False
     _METRIC_KEY: MetricKey = MetricKey.PROBE
@@ -165,7 +165,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         """
         job_result        = self._dep_result(JobPhase)
         extraction_result = self._dep_result(ExtractionPhase)
-        probe_yaml        = job_result.work_dir / _PROBE_YAML_NAME
+        probe_yaml        = job_result.work_dir / ProbePhase.SIDECAR_NAME
 
         # Step 1 — no video stream: fatal for all downstream video phases.
         video_artifact = extraction_result.video_stream
@@ -219,7 +219,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         Returns:
             ``ProbePhaseResult`` with outcome ``COMPLETED``.
         """
-        probe_yaml = self._dep_result(JobPhase).work_dir / _PROBE_YAML_NAME
+        probe_yaml = self._dep_result(JobPhase).work_dir / ProbePhase.SIDECAR_NAME
         probe_state = self._probe_state
         video       = self._video_stream
         assert video is not None  # recovery guarantees a video stream

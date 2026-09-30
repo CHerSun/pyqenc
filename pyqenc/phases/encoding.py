@@ -90,7 +90,6 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
 
-_ENCODING_YAML = "encoding.yaml"
 
 config_handler.set_global(enrich_print=False) # type: ignore
 logger = logging.getLogger(__name__)
@@ -1680,6 +1679,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
     """
 
     name:        str       = "encoding"
+    SIDECAR_NAME = "encoding.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (
         JobPhase, ProbePhase, ChunkingPhase, OptimizationPhase,
     )
@@ -1778,7 +1778,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         work_dir   = job_result.work_dir
         enc_dir    = work_dir / ENCODING_WORKSPACE_DIR
         out_dir    = work_dir / ENCODED_OUTPUT_DIR
-        yaml_path  = work_dir / _ENCODING_YAML
+        yaml_path  = work_dir / EncodingPhase.SIDECAR_NAME
         force_wipe = job_result.force_wipe
 
         # Step 1: force-wipe
@@ -1902,7 +1902,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         self.quality_labels = {s.display_name(): s.codec.quality_label for s in strategies}
 
         # Persist encoding.yaml with current probe state
-        encoding_yaml = work_dir / _ENCODING_YAML
+        encoding_yaml = work_dir / EncodingPhase.SIDECAR_NAME
         if self.params is None:
             self.params = EncodingParams(probe=ProbeState.from_probe(probe_result))
         self.params.save(encoding_yaml)

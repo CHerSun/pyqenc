@@ -51,7 +51,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CHUNKING_YAML = "chunking.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +206,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
     """
 
     name:        str       = "chunking"
+    SIDECAR_NAME = "chunking.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase, ProbePhase)
     _METRIC_KEY: MetricKey = MetricKey.CHUNKING
 
@@ -249,7 +249,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         """
         job_result = self._dep_result(JobPhase)
         work_dir   = job_result.work_dir
-        yaml_path  = work_dir / _CHUNKING_YAML
+        yaml_path  = work_dir / ChunkingPhase.SIDECAR_NAME
         force_wipe = job_result.force_wipe
 
         # Step 1: force-wipe.
@@ -314,7 +314,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
             except Exception as exc:
                 logger.exception("Scene detection failed")
                 return self._make_result(PhaseOutcome.FAILED, [], str(exc))
-            sidecar_path = work_dir / _CHUNKING_YAML
+            sidecar_path = work_dir / ChunkingPhase.SIDECAR_NAME
             sidecar = ChunkingSidecar(scenes=[
                 SceneRecord(timestamp_seconds=b.timestamp_seconds, frame=b.frame)
                 for b in boundaries

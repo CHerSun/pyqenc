@@ -22,11 +22,9 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import (
     CHAPTERS_FILENAME,
     EXTRACTED_DIR,
@@ -59,6 +57,7 @@ from pyqenc.stream_model import (
     ExtractionSidecar,
     File,
     SourceMismatchError,
+    StreamInfo,
     StreamsInventory,
     SubtitleStream,
     SubtitleStreamInfo,
@@ -76,7 +75,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_EXTRACTION_YAML_FILENAME = "extraction.yaml"
 
 _SUBTITLE_FFMPEG_FORMAT: dict[str, str] = {
     "srt": "srt",
@@ -121,106 +119,6 @@ def _probe_streams_json(source: Path) -> dict:
         raise RuntimeError(f"Failed to parse FFprobe output: {exc}") from exc
 
 
-def _tags_of(raw: dict) -> dict:
-    """The stream's tags dict (possibly nested under the container's tag list)."""
-    return raw.get("tags") or {}
-
-
-def _float_or_none(value: object) -> float | None:
-    """Parse an ffprobe scalar into a float, tolerating missing/bad values."""
-    if value is None:
-        return None
-    try:
-        return float(str(value))  # type: ignore[arg-type]
-    except (ValueError, TypeError):
-        return None
-
-
-def _duration_from_tags(tags: dict) -> float | None:
-    """Parse a Matroska ``DURATION`` tag (``HH:MM:SS.nnnnnnnnn``) to seconds.
-
-    MKV streams carry no ffprobe-level ``duration`` float — the stream duration
-    lives only in the per-track ``DURATION`` tag.
-    """
-    raw = tags.get("DURATION")
-    if not isinstance(raw, str):
-        return None
-    parts = raw.split(":")
-    if len(parts) != 3:
-        return None
-    try:
-        hours, minutes, seconds = (float(part) for part in parts)
-    except ValueError:
-        return None
-    return hours * 3600 + minutes * 60 + seconds
-
-
-def _base_info_fields(raw: dict) -> dict:
-    """The container-level ``StreamInfo`` fields from one ffprobe stream dict."""
-    tags = _tags_of(raw)
-    return {
-        "track_id":         int(raw.get("index", -1)),
-        "codec_name":       raw.get("codec_name"),
-        "language":         tags.get("language"),
-        "title":            tags.get("title") or tags.get("TITLE"),
-        "start_timestamp":  _float_or_none(raw.get("start_time")),
-        "duration_seconds": (
-            _float_or_none(raw.get("duration"))
-            if raw.get("duration") is not None
-            else _duration_from_tags(tags)
-        ),
-    }
-
-
-def _video_info(raw: dict) -> VideoStreamInfo:
-    """Build a :class:`VideoStreamInfo` from one ffprobe video stream dict."""
-    fps_fraction: Fraction | None = None
-    frame_rate = raw.get("r_frame_rate")
-    if isinstance(frame_rate, str) and "/" in frame_rate:
-        num_s, den_s = frame_rate.split("/", 1)
-        try:
-            den = int(den_s)
-            if den != 0:
-                fps_fraction = Fraction(int(num_s), den)
-        except ValueError:
-            pass
-
-    width, height = raw.get("width"), raw.get("height")
-    return VideoStreamInfo(
-        **_base_info_fields(raw),
-        fps          = float(fps_fraction) if fps_fraction is not None else None,
-        fps_fraction = fps_fraction,
-        resolution   = f"{width}x{height}" if width and height else None,
-        pix_fmt      = raw.get("pix_fmt"),
-    )
-
-
-def _audio_info(raw: dict) -> AudioStreamInfo:
-    """Build an :class:`AudioStreamInfo` from one ffprobe audio stream dict."""
-    layout: ChannelLayout | None = None
-    if channel_layout := raw.get("channel_layout"):
-        layout = ChannelLayout.parse(channel_layout)
-    elif channels := raw.get("channels"):
-        layout = ChannelLayout.parse(f"{channels}.0")
-    return AudioStreamInfo(**_base_info_fields(raw), layout=layout)
-
-
-def _subtitle_info(raw: dict) -> SubtitleStreamInfo:
-    """Build a :class:`SubtitleStreamInfo` from one ffprobe subtitle stream dict."""
-    return SubtitleStreamInfo(
-        **_base_info_fields(raw),
-        is_forced=(raw.get("disposition") or {}).get("forced") == 1,
-    )
-
-
-def _attachment_info(raw: dict) -> AttachmentStreamInfo:
-    """Build an :class:`AttachmentStreamInfo` from one ffprobe attachment dict."""
-    return AttachmentStreamInfo(
-        **_base_info_fields(raw),
-        filename=_tags_of(raw).get("filename"),
-    )
-
-
 def _enumerate_streams(
     data:    dict,
     source_file: File,
@@ -247,14 +145,14 @@ def _enumerate_streams(
         codec_type = raw.get("codec_type", "")
         # Attachment (attached picture/font): the disposition flag, or an image/* mimetype.
         if (raw.get("disposition") or {}).get("attached_pic", 0) == 1 \
-                or str(_tags_of(raw).get("mimetype", "")).startswith("image/"):
-            attachments.append(AttachmentStream(file=source_file, info=_attachment_info(raw)))
+                or str(StreamInfo._tags_of(raw).get("mimetype", "")).startswith("image/"):
+            attachments.append(AttachmentStream(file=source_file, info=AttachmentStreamInfo.from_ffprobe(raw)))
         elif codec_type == "video":
-            video.append(VideoStream(file=source_file, info=_video_info(raw)))
+            video.append(VideoStream(file=source_file, info=VideoStreamInfo.from_ffprobe(raw)))
         elif codec_type == "audio":
-            audio.append(AudioStream(file=source_file, info=_audio_info(raw)))
+            audio.append(AudioStream(file=source_file, info=AudioStreamInfo.from_ffprobe(raw)))
         elif codec_type == "subtitle":
-            subtitles.append(SubtitleStream(file=source_file, info=_subtitle_info(raw)))
+            subtitles.append(SubtitleStream(file=source_file, info=SubtitleStreamInfo.from_ffprobe(raw)))
         # Data and unknown streams are not consumable payload — skipped.
 
     if len(video) > 1:
@@ -475,6 +373,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
     """
 
     name:        str       = "extraction"
+    SIDECAR_NAME = "extraction.yaml"
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase,)
     _METRIC_KEY: MetricKey = MetricKey.EXTRACTION
 
@@ -541,7 +440,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         job_result = self._dep_result(JobPhase)
         work_dir      = job_result.work_dir
         extracted_dir = work_dir / EXTRACTED_DIR
-        sidecar_path  = work_dir / _EXTRACTION_YAML_FILENAME
+        sidecar_path  = work_dir / ExtractionPhase.SIDECAR_NAME
         force_wipe    = job_result.force_wipe
 
         # Step 1: force-wipe.
@@ -797,7 +696,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         extracted_dir.mkdir(parents=True, exist_ok=True)
 
         if self._sidecar_dirty:
-            self._persist_sidecar(work_dir / _EXTRACTION_YAML_FILENAME)
+            self._persist_sidecar(work_dir / ExtractionPhase.SIDECAR_NAME)
 
         # Disk-space estimate on the enumerated stream data (log-only).
         if self._video is not None:

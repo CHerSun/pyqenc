@@ -41,7 +41,7 @@ from abc import abstractmethod
 from dataclasses import replace
 from decimal import Decimal
 from fractions import Fraction
-from typing import Annotated
+from typing import Annotated, Self
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer
 
@@ -160,6 +160,67 @@ class StreamInfo(BaseModel):
     start_timestamp:  float | None = None
     duration_seconds: float | None = None
 
+    @staticmethod
+    def _tags_of(raw: dict) -> dict:
+        """The stream's tags dict (possibly nested under the container's tag list)."""
+        return raw.get("tags") or {}
+
+    @staticmethod
+    def _float_or_none(value: object) -> float | None:
+        """Parse an ffprobe scalar into a float, tolerating missing/bad values."""
+        if value is None:
+            return None
+        try:
+            return float(str(value))  # type: ignore[arg-type]
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _duration_from_tags(tags: dict) -> float | None:
+        """Parse a Matroska ``DURATION`` tag (``HH:MM:SS.nnnnnnnnn``) to seconds.
+
+        MKV streams carry no ffprobe-level ``duration`` float — the stream
+        duration lives only in the per-track ``DURATION`` tag.
+        """
+        raw = tags.get("DURATION")
+        if not isinstance(raw, str):
+            return None
+        parts = raw.split(":")
+        if len(parts) != 3:
+            return None
+        try:
+            hours, minutes, seconds = (float(part) for part in parts)
+        except ValueError:
+            return None
+        return hours * 3600 + minutes * 60 + seconds
+
+    @classmethod
+    def _base_ffprobe_fields(cls, raw: dict) -> dict:
+        """The container-level fields every stream carries, from one ffprobe dict."""
+        tags = cls._tags_of(raw)
+        return {
+            "track_id":         int(raw.get("index", -1)),
+            "codec_name":       raw.get("codec_name"),
+            "language":         tags.get("language"),
+            "title":            tags.get("title") or tags.get("TITLE"),
+            "start_timestamp":  cls._float_or_none(raw.get("start_time")),
+            "duration_seconds": (
+                cls._float_or_none(raw.get("duration"))
+                if raw.get("duration") is not None
+                else cls._duration_from_tags(tags)
+            ),
+        }
+
+    @classmethod
+    def from_ffprobe(cls, raw: dict) -> Self:
+        """Build the info slice from one ffprobe stream dict.
+
+        The info classes own their external-data mapping: ffprobe dicts become
+        typed fields exactly once, here. Subclasses extend with their own
+        fields.
+        """
+        return cls(**cls._base_ffprobe_fields(raw))
+
 
 class VideoStreamInfo(StreamInfo):
     """Video-specific fast-facet properties.
@@ -178,6 +239,54 @@ class VideoStreamInfo(StreamInfo):
     resolution:   str | None         = None
     pix_fmt:      str | None         = None
 
+    @staticmethod
+    def _parse_resolution(resolution: str) -> tuple[int, int] | None:
+        """Parse a ``'WxH'`` resolution string into ``(width, height)``;
+        ``None`` if parsing fails.
+        """
+        try:
+            w, h = resolution.split("x")
+            return int(w), int(h)
+        except (ValueError, AttributeError):
+            return None
+
+    @property
+    def total_pixels(self) -> int | None:
+        """Total pixel count over the stream's duration, from the fast facets.
+
+        Resolution area × ``fps * duration_seconds``; ``None`` when any input
+        facet is missing or invalid. Feeds the disk-space estimate.
+        """
+        if not self.resolution:
+            return None
+        res = self._parse_resolution(self.resolution)
+        if res is None or self.fps is None or self.duration_seconds is None or self.fps <= 0:
+            return None
+        return res[0] * res[1] * int(self.fps * self.duration_seconds)
+
+    @classmethod
+    def from_ffprobe(cls, raw: dict) -> Self:
+        """Build from one ffprobe video stream dict (fps as an exact rational)."""
+        fps_fraction: Fraction | None = None
+        frame_rate = raw.get("r_frame_rate")
+        if isinstance(frame_rate, str) and "/" in frame_rate:
+            num_s, den_s = frame_rate.split("/", 1)
+            try:
+                den = int(den_s)
+                if den != 0:
+                    fps_fraction = Fraction(int(num_s), den)
+            except ValueError:
+                pass
+
+        width, height = raw.get("width"), raw.get("height")
+        return cls(
+            **StreamInfo._base_ffprobe_fields(raw),
+            fps          = float(fps_fraction) if fps_fraction is not None else None,
+            fps_fraction = fps_fraction,
+            resolution   = f"{width}x{height}" if width and height else None,
+            pix_fmt      = raw.get("pix_fmt"),
+        )
+
 
 class AudioStreamInfo(StreamInfo):
     """Audio-specific fast-facet properties.
@@ -188,6 +297,20 @@ class AudioStreamInfo(StreamInfo):
     """
 
     layout: ChannelLayout | None = None
+
+    @classmethod
+    def from_ffprobe(cls, raw: dict) -> Self:
+        """Build from one ffprobe audio stream dict, resolving the channel layout.
+
+        Layout fallback: the declared ``channel_layout``, else ``<channels>.0``
+        derived from the raw channel count.
+        """
+        layout: ChannelLayout | None = None
+        if channel_layout := raw.get("channel_layout"):
+            layout = ChannelLayout.parse(channel_layout)
+        elif channels := raw.get("channels"):
+            layout = ChannelLayout.parse(f"{channels}.0")
+        return cls(**StreamInfo._base_ffprobe_fields(raw), layout=layout)
 
 
 class SubtitleStreamInfo(StreamInfo):
@@ -202,6 +325,14 @@ class SubtitleStreamInfo(StreamInfo):
     is_forced:      bool               = False
     extracted_path: LongPathYaml | None = None
 
+    @classmethod
+    def from_ffprobe(cls, raw: dict) -> Self:
+        """Build from one ffprobe subtitle stream dict (forced flag from disposition)."""
+        return cls(
+            **StreamInfo._base_ffprobe_fields(raw),
+            is_forced=(raw.get("disposition") or {}).get("forced") == 1,
+        )
+
 
 class AttachmentStreamInfo(StreamInfo):
     """Attachment-specific properties plus the extracted-file path.
@@ -214,6 +345,14 @@ class AttachmentStreamInfo(StreamInfo):
 
     filename:       str | None         = None
     extracted_path: LongPathYaml | None = None
+
+    @classmethod
+    def from_ffprobe(cls, raw: dict) -> Self:
+        """Build from one ffprobe attachment dict (filename from its tags)."""
+        return cls(
+            **StreamInfo._base_ffprobe_fields(raw),
+            filename=StreamInfo._tags_of(raw).get("filename"),
+        )
 
 
 class Stream[InfoT: StreamInfo](BaseModel):

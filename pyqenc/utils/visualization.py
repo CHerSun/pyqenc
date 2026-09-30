@@ -797,7 +797,7 @@ def _is_known_metric(col: str) -> bool:
         return False
 
 
-def extract_key_stats(full_stats: FullMetricStatistics, metric_type: MetricType) -> MetricStats:
+def _extract_key_stats(full_stats: FullMetricStatistics, metric_type: MetricType) -> MetricStats:
     """Extract the key statistics subset from a full statistics dict.
 
     For PSNR, substitutes the highest non-inf percentile for ``max`` when the
@@ -915,7 +915,7 @@ def compute_metric_stats(df_norm: pd.DataFrame) -> ChunkQualityStats:
     """Compute key statistics for each metric column in a normalized DataFrame.
 
     For each column whose name matches a ``MetricType.value``, calls
-    ``compute_statistics`` then ``extract_key_stats`` and stores the result.
+    ``compute_statistics`` then ``_extract_key_stats`` and stores the result.
     Columns not matching any ``MetricType.value`` are silently skipped.
 
     Args:
@@ -933,7 +933,7 @@ def compute_metric_stats(df_norm: pd.DataFrame) -> ChunkQualityStats:
             continue
         std_cutoff = 100.0 if mt == MetricType.PSNR else None
         full = compute_statistics(df_norm[col], std_cutoff_max=std_cutoff)
-        result[mt] = extract_key_stats(full, mt)
+        result[mt] = _extract_key_stats(full, mt)
         logger.debug(
             "compute_metric_stats: %s min=%.2f med=%.2f max=%.2f",
             mt.value, result[mt]["min"], result[mt]["median"], result[mt]["max"],

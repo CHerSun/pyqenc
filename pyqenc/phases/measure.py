@@ -27,7 +27,7 @@ from pyqenc.constants import (
     TIME_SEPARATOR_SAFE,
 )
 from pyqenc.models import CropParams
-from pyqenc.phases.extraction import _probe_streams_json, _video_info
+from pyqenc.phases.extraction import _probe_streams_json
 from pyqenc.quality import ChunkQualityStats, MetricType
 from pyqenc.state import MeasureSidecar, ProbeState
 from pyqenc.stream_model import File, JobSidecar, VideoStream, VideoStreamInfo
@@ -384,7 +384,7 @@ def _load_video_stream(path: Path) -> VideoStream:
     except (RuntimeError, OSError) as exc:
         logger.warning("Could not probe %s: %s", path.name, exc)
         raw = None
-    info = _video_info(raw) if raw is not None else VideoStreamInfo(track_id=0)
+    info = VideoStreamInfo.from_ffprobe(raw) if raw is not None else VideoStreamInfo(track_id=0)
     return VideoStream(file=File(path=path), info=info)
 
 
