@@ -153,13 +153,15 @@ Executed as three parallel passes (core+utils / phases / utils+config+models). P
 | pytest | 11 failed / 721 passed / 9 skipped | **0 failed / 696 passed / 9 skipped** | green |
 | vulture findings | 88 | 64 (remainder = pydantic/framework 60%-noise + 2 documented false positives) | −24 |
 | ty diagnostics | 357 (incl. tests) | 83 production-only (type-modeling noise; triaged) | −274 |
-| source code lines (scc) | 11,352 | 10,970 | **−382** |
+| source code lines (scc) | 11,352 | 10,962 | **−390** |
 | source comment/docstring lines | 8,163 | 7,898 | **−265** |
 | source complexity | 2,164 | 2,037 | −127 |
-| test code lines (scc) | 11,243 | 11,004 | −239 |
+| test code lines (scc) | 11,243 | 11,008 | −235 |
 | files (source) | 42 | 42 (recovery.py out, utils/fs.py in) | 0 |
 
-Commits: `1b9acae` (stages 1-2) → `cfe2582` (7a audio tests) → `431ee5c` (3 comments) → `6adb5e5` (7b measure crash) → `7323111` (4 imports) → `be9d1fd` (5 inlining) → `618276f` (6 DRY) → this commit (8 tests + 9 bookkeeping).
+Final review rounds (post-e2e): abstract contract methods (Stream.display_name, Phase's mandatory three), contract audit (24 silent None-guards → asserts), external-fact fields restored, §57 re-homing (from_ffprobe family, MergePhase swarm with static/instance split), §66 isatty colors. Full narrative in the sections above; every decision audited.
+
+Commits: `1b9acae` (1-2) → `cfe2582` (7a) → `431ee5c` (3) → `6adb5e5` (7b) → `7323111` (4) → `be9d1fd` (5) → `618276f` (6) → `245a08d` (8+9) → review round: `e5d5d0b` `0b296d0` `4671a92` `3401ddd` `4d091a0` `fc45a42` `b3d4100` → 57/66 round: `e316154` `6f2e70b` `d0a8f29` `277fa6b` `fe03d97` → e2e: `04697bc` → docs: `5613420` + owner's docs/version commits.
 
 Behavior changes (all deliberate, flagged in stage rows): fixed `pyqenc measure` crash; fixed sync-evaluation `fps_value` drop; ≥1000MB sizes lose decimals in two log tables; merge target list ordering now sorted (one-time merge.yaml invalidation on legacy workdirs); `.tmp` cleanup recursive everywhere; sidecar-load warnings logged from `yaml_utils`.
 
