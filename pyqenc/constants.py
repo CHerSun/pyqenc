@@ -25,9 +25,9 @@ A 20% buffer on top of the upper-bound estimate."""
 BITS_PER_PIXEL_ENCODED = 0.10
 """Estimated bits per pixel for encoded video output (attempts, final). Covers a wide range of
 content at typical quality targets. Tune this constant if estimates are consistently off."""
-AVG_ATTEMPTS_PER_CHUNK = 5.5
+AVG_ATTEMPTS_PER_CHUNK = 4.1
 """Average number of CRF search attempts per chunk per strategy. Used to estimate space consumed
-by intermediate attempt files during the encoding phase."""
+by intermediate attempt files during the encoding phase. Value was taken from metrics measured."""
 
 # Fallback source-size multiplier (used only when stream pixel data is unavailable)
 OVERHEAD_PER_STRATEGY_FALLBACK = 2.5

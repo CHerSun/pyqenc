@@ -32,6 +32,11 @@ Status legend: 🤔 needs thinking · 🔍 verified against code
 **Questions to think about:** implement the field, or reconcile the spec down
 to what exists? Worth a general pass over `app-metrics-two-tier` vs. current code.
 
+Also, it looks like parallelism should be separate for video and for audio. For video in general parallelism should be == 1 by default.
+For audio it can be higher. Probably 2 or 4 by default.
+
+Worth noting too. With parallelism==1 we could stick to sync mode. While parallelism >1 requires async.
+
 ---
 
 ## 🤔 3. Sub-second metric keys are lossy across runs
@@ -51,22 +56,9 @@ Make zero-row omission display-only rather than load-bearing for resume?
 
 ---
 
-## 🤔 4. Pre-existing ruff violations in `extraction.py` / `test_metrics_integration.py`
+## 🤔 4. There are man ruff violations
 
-**Status:** needs thinking (cleanup pass; the `UP040` TypeAlias item died with
-`ExtractionArtifact` in the artifact-model migration, 2026-09-30)
-
-- `BLE001` — blind `except Exception` in `pyqenc/phases/extraction.py`
-  (the timestamps extractor path).
-- `F821` — undefined names in test-file annotations: the phase/result classes
-  are used in return annotations but only imported function-locally
-  (`tests/test_metrics_integration.py`, ~18 sites). These are latent
-  annotation bugs, not just lint noise.
-- `F841` — unused `success_result` (`tests/test_metrics_integration.py`).
-
-**Questions to think about:** one ruff-cleanup commit? For the test file:
-`TYPE_CHECKING` imports vs. local imports — note coding-standards prefers
-top-level imports.
+We need to revise ruff violations.
 
 ---
 
@@ -135,6 +127,18 @@ re-verify (chain signature embedded in output names?) or force re-run?
 **Questions to think about:** rebuild the matrix from first principles;
 drop stale rows and fields; is config-fingerprint-based invalidation
 warranted anywhere?
+
+Need to build first the inputs per phase (what it consumes from user/cli, config, dependencies phases).
+Then we need to articulate what changes on each input change. Does that really affect our invesment and needs a new investment? Or is that just an instant selection change for example?
+Say, tolerance for optimization phase - its change - does it really need reinvestment, if we previously fully completed optimization? My best guess is - no - we have all previous results on sidecar, it is instant re-evaluation.
+
+After that we need to check code to see which invalidations are actually in-place (only after logical part, not to interfere with logical thinking).
+Cross-check results from logical vs code.
+
+One thing to note here. We must reuse existing objects. I don't want introduction of custom objects. So if tolerance is part of that - it's ok to keep it for example. But if it is just a standalone field on the sidecar - definitely worth assesment.
+After that we must stop and validate with human the reasoning.
+
+This is also a chance to reestablish sidecars using class model introduced in file-stream-model and artifact-model recent specs, or the prior config rework spec - to use standard objects on sidecars.
 
 ---
 
@@ -323,8 +327,6 @@ parameters to expose (title, fps, year, strategy, …)?
 
 ---
 
-## Architecture
-
 ## 🤔 24. Phase registry is a static hand-ordered list, not derived from dependencies
 
 **Status:** needs thinking (partially addressed)
@@ -444,6 +446,8 @@ Defaults in functions for values, which must come from config - is the way to sh
 
 Need to check footprints and adjust accordingly for explicitly required values (what is provided from config).
 
+---
+
 ## 39. 🤔 Forced wipe idempotency
 
 Currently forced run is a flag on Job phase result, which must be respected by each phase. Problem is, if we don't run till the end and exit in the middle, 
@@ -457,6 +461,8 @@ Or... should we remove it completely?
 - The only true usecase is when crop changed between runs. And here it works as a safeguard against accidentally deleting a lot of work (all attempts become invalid; not detectable with current light invalidation checks; don't want per-attempt sidecar reading for heavy invalidation checks for this usecase as that will affect all runs).
 - If user wants another file - he can either use new dir or purge current dir. So this one isn't a true usecase.
 
+---
+
 ## 41. Assertions and exhaustiveness checks are rarely used.
 
 A lot of things, like None guards or PENDING phase result state on run - are NOT user validations. Those are programmatic errors. They should use assertions 
@@ -467,6 +473,8 @@ Exhaustiveness checks like for enums if we later add a new value - we might not 
 we don't forget to update.
 
 Those probably should be added to steering docs and memory as key principles. And checked against current codebase.
+
+---
 
 ## 42. Adding ability to fix quality range has broken optimization phase
 
@@ -503,17 +511,15 @@ behavior change that landed without them — decide whether the astats/downmix
 behavior itself is approved as-is (then update the canned data/assertions) or
 needs revisiting. Should the audio-chains spec get a difference note?
 
+---
+
 ## 45. Summary table for audio
 
 Like for extraction phase - I want a similar table for audio phase - a summary on which streams were picked up (wanted flag), maybe with a chain counter per stream. Maybe also add after the table - the selector - selected tracks (as a clear reason for the choice).
 
 With the `2026-09-28 artifact-model` spec the data lives in one place: the audio ledger rows (`Artifact[AudioOutput]` = source stream + chain, with `wanted`) — pure UX on top.
 
-## 46. Scene detection threshold propagation from config
-
-One more consideration here - it is possible that some code default is taken instead of config value.
-See also #47, #38
-
+---
 
 ## 47. Scene detection threshold search
 
@@ -524,6 +530,8 @@ But not to split on every min frames (too low value).
 With all params being configurable in the config, including ability to disable the search.
 
 Why? I'm often seeing a movie being split like - titles, full movie as SINGLE HUGE chunk, finals as separate chunks.
+
+---
 
 ## 48. Remove include/exclude filters?
 
@@ -536,6 +544,8 @@ Now, we have audio selectors, which give a more controllable choice with sub-pre
 It looks like we should consider:
 - completely removing the include/exclude filters (materialize all non video/audio things; video and audio has separate processing)
 - or maybe keep filters but re-add the ability to materialize audio/video (not for processing, but for the end-user) via some special option? Maybe even with video/audio stream retartgetting to extracted files, if actually materialized.
+
+---
 
 ## 50. Better space estimations
 
@@ -554,7 +564,7 @@ Just a few thoughts:
 
 ## 51. QualitySearchV3 is outright broken.
 
-One of examples - it gets the same values on CRF 12.0 and 11.5 and starts treading back upwards.
+One of examples - it gets the same values on CRF 12.0 and 11.5 and starts treading back upwards, even though the direction wasn't exhausted and no passing (opposite result) was achieved.
 
 ```
 2026-09-28 17:40 [[96mINFO[0m] 👊 ｟ultrafast+h265-anime ｠ 00꞉05꞉49․140-00꞉06꞉32․601 attempt #1: ✘ miss with CRF 18.0 (psnr_min=16.6  psnr_median=44.4  ssim_min=60.2  ssim_median=98.4  vmaf_min=0.0✘ vmaf_median=93.6  vif_min=4.9  vif_median=92.2)
@@ -568,21 +578,41 @@ One of examples - it gets the same values on CRF 12.0 and 11.5 and starts treadi
 
 We need to rework this again and make a v4:
 - We need to merge V2 and V3 ideas
-- Basic idea is the same as it was in V2 - by default we work in 2-point mode, reducing either left or right side. And at some point we go for 3-way attempt to find sweet spot.
-- Idea from V3 with allowing extrapolation outside the range - holds
-- Idea from V3 that if we reached boundary without success and need to do 1 binary step back - holds
+- Basic idea is the same as it was in V2 - by default we work in 2-point mode, reducing the window range for quality, until we converge - either left or right side. And at some point we go for 3-way attempt to find sweet spot - question is when.
+- Idea from V3 with allowing extrapolation outside the range - holds, but we probably need to add a min step - half of leftover range to that side. Min - and extrapolation - are for the same reason, to make initial steps larger, until we find a breaking point or exhaust search range.
+- Idea from V3 that if we reached boundary without success and need to do 1 binary step back - holds. If we go too fast - we could miss a sweet spot. But this only applies to moving towars higher quality (i.e. all attempts failed yet). For going towards worse quality we DO NOT CARE about sweet spot at all - we reduce quality as long as it still passes our metrics.
 - Criterias for 3-way sweet spot change:
     - When go towards lower quality (i.e. we do have a success already) - continue as 2-point up to any point until we reach boundary or get a miss.
     - 3 way activates only when we do NOT have a success (not once) + reached the highest quality boundary + made a step back. This is the only way to activate 3-way. But needs 1 extra condition - best matching point (a failure still) is in the middle, i.e. we have 2 other points with worse score.
 
 Scoring, points selection, extrapolation - all look working in v3. Just conditions are wrong. And the code is too complex, I believe it could be simplified.
 
-One note worth attention in example above are points CRF 12.0 and CRF 11.5 - they get absolutely the same score. This ruins the line slope and can't really use 3-way algorithm there. Need to think how to work with that. Maybe dedup such points during 3-point selection? Not sure, but this happens quite often (often binary-identical files).
+One note worth attention in example above are points CRF 12.0 and CRF 11.5 - they get absolutely the same score. This ruins the line slope and can't really use 3-way algorithm there. Need to think how to work with that. Maybe dedup such points during 3-point selection (i.e. try picking next point in that direction till it differs from middle point, where middle point is the best score (Failing)?)? Not sure, but this happens quite often (often binary-identical files).
+
+I also want your take on search algorithm:
+- we have starting point and range to explore
+- encoding is heavy-weight, so we need to minimize number of steps
+- we need to pick attempt with optimal score
+   - optimal score currently is the closest to 0, but positive score is better then negative score.
+- quality must be granular (respecting quality granularity)
+- duplicate quality must never be seen for the same attempt
+- purpose is to select least size output (normally - size is directly related to quality value), while matching the score; with minimal possible number of steps
+- a fast exit on miniscule difference is acceptable
+- there could be cases, where we never reach wanted targets - in this case we should find the best scoring quality value (could be non-linear; like a quadratic / polynomic curve, but considering we have limited points (3-4 max normally) we can't really find its true form)
+- one extra note to consider - after the first attemp we do have multiple points and measurements.
+
+Current V3 search normally converges in ~4.1 attempts.
+Old V2 search converged normally in ~3.8 attempts, but had problems with attempts where we never reach a passing score (binary convergence is too slow for this case, like 8-10 attempts there).
+I belive a value of ~3.5 is possible for convergence. This directly affects speed of the pipeline, as each encode is very costly.
+
+---
 
 ## 52. h264 codec private data differs between winning encoding attempts
 
 h264 uses a single instance of codec private data. If it differs between chunks' winning attempts - h264 video cannot be merged and played later, unlike h265 or av1, which have local copies in blocks.
 Need to investigate why this is happening and if we can fix this without ruining processing for other codecs.
+
+---
 
 ## 53. Ensure mkvextract with fallback
 
@@ -597,10 +627,14 @@ For the outputs - we support only mkv and we prefer mkvmerge.
 
 Need to check code. Especially metadata extraction, files materialization (extraction phase), screenshotting.
 
+---
+
 ## 54. Validate Phase's DEPENDS_ON by actual usage
 
 Validate Phase's class field DEPENDS_ON vs actual inputs used from those phases via `_deps` or similar mechanics. We need a clean concise dependencies graph.
 Also need to build a table or a graph with actual dependencies - inputs, internals, results - both artifacts and settings. between phases and phase's internals.
+
+---
 
 ## 55. Fixed-crf encoding
 
@@ -608,8 +642,87 @@ Current UX for fixed CRF encoding is rather complicated for end-user, involving 
 There should be some easier way. Problem is how to fluently do that without affecting multi-strategy settings. Maybe enforce single strategy if fixed crf key is used?
 Needs thinking.
 
+---
+
 ## 56. Merge output is not written atomically
 
 mkvmerge writes the final MKV directly at its destination name (`-o final/xxx.mkv`), violating the `.tmp`-then-rename phase contract: a crash mid-concat leaves a truncated `.mkv` at the final path. It self-recovers today only because the sidecar (written atomically after success) is the completeness marker — a sidecar-less output classifies as PARTIAL and is re-merged (overwritten). The mkvpropedit header patch added 2026-09-29 also runs on the pre-rename file path in spirit, but the file is already at its final name by then.
 Options to think about: mkvmerge to `xxx.mkv.tmp` + rename after propedit; or declare the sidecar the atomicity boundary and document the deviation.
+
+Human input: all materialized artifacts must follow .tmp then rename protocol. It is the base of trust.
+
+---
+
+## 57. Check standalone functions
+
+Are they really meant to be on module level? Is there really no class that should own them?
+Need a review. Disowned functions are strongly discouraged, at least without clear reason for it to be disowned.
+
+---
+
+## 58. Code and comments sprawl.
+
+This is a pet project. Expected to be rather small. Key metadata classes (streams, chapters, file, etc), key results classes, direct carryover (single instanciation)
+and ffmpeg calling / progress reporting.
+
+It feels like project size is stupidly bloated.
+
+We need to review the code to reduce the footprint. A few notes I see directly (but there could be more):
+
+- microscopic functions (often pure accessors) with only 1 consumer - why not inline? (there could be legitimate use cases)
+- bloated tests for None in functions for programmatic errors - should be plain assertions or changed footprint. Like, if we don't accept None - mark it in footprint.
+- importing the same thing like a dozen times at different places in the same module - imports should be at the top. Mid-way imports allowed only to break circular dependencies - clearly marked for that. Also, we should record such cases for later review. Circular dependencies is generally a bad smell.
+- dead code leftovers
+- long comments - sometimes up to a few screens of text, including historical drama, etc. We don't need to be too agressive here,
+  but comments should be concise, they are about the CURRENT state/usage.
+- many tests don't add value. They check implementation details instead of external behavior properties. Like, checking string format instead of checking that unique strings are produced, or that escaped display_name == safe_name
+
+What can we do? ruff? codebase-memory-mcp?
+
+---
+
+## 59. Parallel metrics
+
+Currently, if we run 2 jobs onto the same folder (say, separate video and audio passes) - metrics will get garbled.
+Not sure this is a really required thing, but we can think of how to alleviate this. My current thoughts:
+- a lock file (as a marker that metrics are being written right now). If the dump sees this - it can either postpone the write (with limit how far) or wait a bit for the write.
+- in-memory store of only a delta since last dump. Writing becomes - read-modify by delta-write
+- same old atomic writing
+- release of lock file
+
+On the other hands, other sidecars could also be modified. Probably not worth the effort. Need to think this over.
+
+---
+
+## 60. Logging review for debug and higher
+
+Current logging is inconsistent.
+
+What should be:
+
+- every long job and every external call (ffmpeg, mkvextract, etc) should get a DEBUG level starting and finished line. Starting line should include full command (or details on what is being ran if that's not a command running). Ending line - same details (as a way to identify for parallel logging) and results of the run - success, failure, etc.
+- INFO level and higher are only allowed from public footprint functions. Runner, phases basically, they control what user sees.
+- if there's an error - we categorize it if this prevents further work or not. If we can continue - that's a warning (like, missing targets on quality). INFO line is not a place for warnings (like using emoji warnings).
+- CRITICAL level if reserved only for catastrophic failures.
+- Exceptions shouldn't be printed probably, at least to info and higher levels. Ordinary users are affraid of such walls of text. But there must be a way for us (developers/AI) to get them.
+  Could be flag-walled, or debug level printed (reusing our printing level flag).
+- For exceptions there must be clear concise proper-level messages logged, which include - what happened, how that will affect end-user (pipeline broken, exitting, can't continue, quality can't be reached; something end-user can understand).
+
+---
+
+## 61. Quality graph - adjust placement of metrics boxes
+
+Currently there are 5 boxes placed on main graph - frames and per-quality metric box with its stats.
+Problem is the right-most box overlaps the legend for the main graph.
+
+Frames box can be moved a bit to the left. And per-quality metrics should start right after it, using same padding between boxes, so that the right-most end is moved not to overlap the legend - significantly left (2/3 of its width approximately or more).
+
+---
+
+## 62. Sidecars - are owned by the Phase
+
+Phase sidecars and internal machinery of the phase. Not part of model or stream_model. No1 else by their respected phase should ever be accessing them.
+Probably worth moving to the phase.
+
+---
 

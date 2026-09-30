@@ -247,12 +247,12 @@ select:
 
 Given a track set:
 
-| Track | Conventional string | Selected? |
-|-------|----------------------|-----------|
-| A | `lang=rus ch=5.1 title=Dub` | yes |
-| B | `lang=rus ch=2.0 title=Director comment` | no (excluded by title) |
-| C | `lang=eng ch=5.1 title=Original` | no (fails `for`) |
-| D | `lang=rus ch=2.0` | yes |
+| Track | Conventional string                      | Selected?              |
+| ----- | ---------------------------------------- | ---------------------- |
+| A     | `lang=rus ch=5.1 title=Dub`              | yes                    |
+| B     | `lang=rus ch=2.0 title=Director comment` | no (excluded by title) |
+| C     | `lang=eng ch=5.1 title=Original`         | no (fails `for`)       |
+| D     | `lang=rus ch=2.0`                        | yes                    |
 
 This entry has no `prefer`, so it contributes all surviving candidates — both Russian dubs (A and D). The English track and the Russian commentary are left out.
 
@@ -273,12 +273,12 @@ Note the escaped dots (`7\.1`) — `.` is a regex wildcard, so escape it to matc
 
 What this selects for different track sets:
 
-| English tracks present | Winning tier | Selected |
-|------------------------|--------------|----------|
-| `ch=7.1`, `ch=5.1`, `ch=2.0` | tier 1 (`ch=7\.1`) | the 7.1 track only |
-| `ch=5.1`, `ch=2.0`           | tier 2 (`ch=5\.1`) | the 5.1 track only |
-| `ch=2.0` only                | no tier matches → fallback | the 2.0 track (all English candidates) |
-| two `ch=7.1` tracks          | tier 1 | **both** 7.1 tracks (a winning tier contributes all its matches) |
+| English tracks present       | Winning tier               | Selected                                                         |
+| ---------------------------- | -------------------------- | ---------------------------------------------------------------- |
+| `ch=7.1`, `ch=5.1`, `ch=2.0` | tier 1 (`ch=7\.1`)         | the 7.1 track only                                               |
+| `ch=5.1`, `ch=2.0`           | tier 2 (`ch=5\.1`)         | the 5.1 track only                                               |
+| `ch=2.0` only                | no tier matches → fallback | the 2.0 track (all English candidates)                           |
+| two `ch=7.1` tracks          | tier 1                     | **both** 7.1 tracks (a winning tier contributes all its matches) |
 
 To also process all Russian dubs alongside the English preference, add the Russian entry from example (a) as a second list item — the two entries are additive.
 
