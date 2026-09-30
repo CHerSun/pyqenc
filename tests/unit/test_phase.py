@@ -364,6 +364,54 @@ def _runner_with(target: _StubPhase, collector, *, no_metrics: bool = False) -> 
     )
 
 
+class TestCollectOutputFiles:
+    def test_complete_merged_rows_paths_only(self) -> None:
+        """Bug guarded: deliverable collection taking anything but the merge
+        result's complete MergedVideo payloads (a directory sniff, an
+        incomplete row, a mirror field) — the runner's output_files would
+        lie about what the run produced."""
+        from pyqenc.models import PhaseOutcome
+        from pyqenc.phases.merge import MergePhaseResult
+        from pyqenc.runner import _collect_output_files
+        from pyqenc.stream_model import MergedVideo
+
+        def _row(stem: str, state: ArtifactState) -> Artifact:
+            return Artifact(
+                payload=MergedVideo(
+                    source_stem=stem,
+                    strategy=_STRATEGY,
+                    output_path=Path(f"D:/w/merged/{stem} {_STRATEGY.safe_name()}.mkv"),
+                ),
+                state=state,
+            )
+
+        _STRATEGY = _merge_strategy()
+        result = MergePhaseResult(
+            outcome=PhaseOutcome.COMPLETED,
+            message="ok",
+            merged=[_row("a", ArtifactState.COMPLETE), _row("b", ArtifactState.ABSENT)],
+        )
+        assert _collect_output_files(result) == [
+            Path(f"D:/w/merged/a {_STRATEGY.safe_name()}.mkv"),
+        ]
+
+
+def _merge_strategy():
+    from decimal import Decimal
+
+    from pyqenc.models import CodecConfig, Strategy
+
+    return Strategy(
+        preset="slow", profile="h265",
+        codec=CodecConfig(
+            name="h265-10bit", default_quality=Decimal(20),
+            default_preset="slow",
+            quality_range=(Decimal(0), Decimal(51)), presets=["slow"],
+        ),
+        profile_args=[],
+    )
+
+
 class TestRunnerContractAssertion:
     def test_pending_on_execute_raises_phase_contract_error(self) -> None:
         collector = _spy_collector()
