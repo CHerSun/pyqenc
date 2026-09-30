@@ -6,8 +6,9 @@ the dry-run / no-pending branches, and the runner's hard assertion on a
 PENDING-surviving execute run.
 
 Only observable surfaces are asserted: the returned ``PhaseResult``, the
-log stream (banner / recovery line), the collector's ``time`` calls, and
-``finalize`` being called or not. No template internals are inspected.
+log stream (banner / recovery line), the ``metrics.yaml`` report written by
+a real collector (shared helpers from ``tests.test_metrics_integration``),
+and ``finalize`` being called or not. No template internals are inspected.
 """
 # CHerSun 2026
 
@@ -22,7 +23,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from pyqenc.app_config import AppConfig, load_app_config
-from pyqenc.metrics import MetricKey, NoOpMetricsCollector
+from pyqenc.metrics import (
+    MetricKey,
+    NoOpMetricsCollector,
+    YamlMetricsCollector,
+    _live_collectors,
+)
 from pyqenc.models import CleanupLevel, PhaseOutcome
 from pyqenc.phase import (
     Artifact,
@@ -36,6 +42,7 @@ from pyqenc.phase import (
 )
 from pyqenc.runner import Runner
 from pyqenc.state import ArtifactState
+from tests.test_metrics_integration import _recorded_metrics, _top_level_keys
 
 _APP_CONFIG: AppConfig = load_app_config(default_only=True)
 
@@ -202,30 +209,36 @@ class TestBanner:
 
 class TestRecovery:
     def test_recovery_timed_and_line_counts_wanted_states(
-        self, caplog: pytest.LogCaptureFixture
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Bug guarded: the recovery line dropping the internal/unwanted split
         or breaking the identity wanted == complete + partial + absent — the
-        line is the user's only honest view of what remains."""
+        line is the user's only honest view of what remains.  The recovery
+        scan must also reach the run's metrics.yaml as a recorded timing row."""
         artifacts = [
             _art(ArtifactState.COMPLETE),
             _art(ArtifactState.ABSENT),
             _art(ArtifactState.PARTIAL),
             _art(ArtifactState.COMPLETE, wanted=False),
         ]
-        phase = _StubPhase(_spy_collector(), Recovery.from_artifacts(artifacts))
-        with caplog.at_level(logging.INFO):
-            result = phase.run()
+        holder: dict[str, PhaseResult] = {}
 
-        assert [call.args[0] for call in _collector_of(phase).time.call_args_list][:1] == [
-            MetricKey.RECOVERY
-        ]
+        def run(collector) -> None:
+            phase = _StubPhase(collector, Recovery.from_artifacts(artifacts))
+            with caplog.at_level(logging.INFO):
+                holder["result"] = phase.run()
+
+        metrics = _recorded_metrics(tmp_path, run)
+        assert "recovery" in _top_level_keys(metrics), (
+            f"recovery timing missing from metrics.yaml, got: {_top_level_keys(metrics)}"
+        )
         assert any(
             "Recovery: 4 total, 3 wanted (1 complete, 1 partial, 1 absent) — resuming"
             in r.message
             for r in caplog.records
         )
         # Wanted-only exposure; the unwanted artifact stays internal.
+        result = holder["result"]
         assert len(result.artifacts) == 3
         assert result.artifacts[0].wanted
 
@@ -281,10 +294,6 @@ class TestRecovery:
         assert phase.execute_calls == 0
 
 
-def _collector_of(phase: _StubPhase) -> MagicMock:
-    return phase._collector
-
-
 # ---------------------------------------------------------------------------
 # Branches: dry-run, reuse, execute
 # ---------------------------------------------------------------------------
@@ -312,21 +321,38 @@ class TestBranches:
         assert result.outcome is PhaseOutcome.REUSED
         assert phase.execute_calls == 0
 
-    def test_execute_runs_under_top_level_key_with_wanted_only(self) -> None:
+    def test_execute_run_records_recovery_and_phase_time(self, tmp_path: Path) -> None:
+        """An execute run reports both the recovery scan and the phase's own
+        execution time in metrics.yaml, and executes with wanted rows only.
+
+        Bug guarded: an execute run losing either timing row from the report,
+        or the template handing ``_execute`` unwanted rows (internal ledger
+        leakage into production).
+
+        Validates: Requirements 6.5
+        """
         artifacts = [
             _art(ArtifactState.ABSENT),
             _art(ArtifactState.COMPLETE),
             _art(ArtifactState.COMPLETE, wanted=False),
         ]
-        collector = _spy_collector()
-        phase = _StubPhase(collector, Recovery.from_artifacts(artifacts))
-        phase.run(dry_run=False)
+        holder: dict[str, _StubPhase] = {}
 
+        def run(collector) -> None:
+            phase = _StubPhase(collector, Recovery.from_artifacts(artifacts))
+            holder["phase"] = phase
+            phase.run(dry_run=False)
+
+        metrics   = _recorded_metrics(tmp_path, run)
+        top_level = _top_level_keys(metrics)
+        assert {"recovery", "probe"} <= top_level, (
+            f"expected recovery and the phase key in metrics.yaml, got: {sorted(top_level)}"
+        )
+
+        phase = holder["phase"]
         assert phase.execute_calls == 1
         assert phase.executed_wanted is not None
         assert all(a.wanted for a in phase.executed_wanted)
-        keys = [call.args[0] for call in collector.time.call_args_list]
-        assert keys == [MetricKey.RECOVERY, MetricKey.PROBE]
 
 
 # ---------------------------------------------------------------------------
@@ -351,13 +377,13 @@ class _FinalizeRecorder(_StubPhase):
         self.finalized = True
 
 
-def _runner_with(target: _StubPhase, collector, *, no_metrics: bool = False) -> Runner:
+def _runner_with(target: _StubPhase, collector, *, no_metrics: bool = False, work_dir: Path | None = None) -> Runner:
     registry: PhaseRegistry = {type(target): target}
     return Runner(
         registry,
         type(target),
         collector,
-        work_dir=Path("."),
+        work_dir=work_dir if work_dir is not None else Path("."),
         cleanup=CleanupLevel.NONE,
         no_metrics=no_metrics,
         is_terminal_most=False,
@@ -413,18 +439,23 @@ def _merge_strategy():
 
 
 class TestRunnerContractAssertion:
-    def test_pending_on_execute_raises_phase_contract_error(self) -> None:
-        collector = _spy_collector()
+    def test_pending_on_execute_raises_phase_contract_error(self, tmp_path: Path) -> None:
+        """Bug guarded: a contract-violating run losing its metrics — the
+        metrics.yaml written by the runner's flush is the debug evidence for
+        the crash report, so it must exist even on the violation path."""
+        collector = YamlMetricsCollector(work_dir=tmp_path, force_wipe=True)
         target = _PendingStub(collector, Recovery(pending=True))
-        runner = _runner_with(target, collector)
+        runner = _runner_with(target, collector, work_dir=tmp_path)
 
         with pytest.raises(PhaseContractError, match="PENDING on an execute run"):
             runner.run(dry_run=False)
 
-        # Debug evidence preserved and the always-unregister invariant holds
-        # even on the violation path.
-        assert collector.flush.called
-        assert collector.close.called
+        # Debug evidence preserved (metrics.yaml flushed before the loud raise)
+        # and the always-unregister invariant holds even on the violation path.
+        assert (tmp_path / "metrics.yaml").exists(), (
+            "metrics.yaml must be flushed even on a contract-violating run"
+        )
+        assert collector not in _live_collectors
 
     def test_pending_on_dry_run_does_not_raise(self) -> None:
         collector = _spy_collector()

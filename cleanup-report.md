@@ -108,6 +108,22 @@ Executed as three parallel passes (core+utils / phases / utils+config+models). P
 
 | # | Item | Category | What / why candidate | Action taken | Reason | Post-check |
 |---|---|---|---|---|---|---|
+| 1 | `.tmp` pre-clean loop ×9 (+ encoding double-scan) | DRY | 9 copies of glob→unlink→warn | New `utils/fs.py: remove_stale_tmp_files/remove_stale_tmp_file`; 9 sites replaced; the duplicate second scan of `encoding/` in `encode_all_chunks` deleted (verified sole caller always follows `_recover`'s clean of the same tree; optimization uses `_encode_chunks_parallel`, unaffected) | Steering DRY rule | suite 698/9/0; ruff clean |
+| 2 | YAML sidecar load ×11 / save ×5 | DRY | Repeated exists→safe_load→validate→warn scaffolds | `yaml_utils.load_model/save_model` (generic, PEP 695 type param); 5 state classes + 4 phase loaders now one-liners; raw-dict loaders (merge/encoding) left (different shape, noted) | DRY | suite green |
+| 3 | safe-stat-size ×4 | DRY | 4 copies of stat→except→None/0 | `fs.safe_stat_size`; audio/merge local helpers deleted | DRY | suite green |
+| 4 | MB formatting hand-inlines ×3 | DRY | Existing `_fmt_size_mb` bypassed | Made public `fmt_size_mb`, used at optimization/merge sites. Note: those sites lacked the <1000MB special case — ≥1000MB values now render without decimals (cosmetic, consistent with measure summary) | DRY | suite green |
+| 5 | `_targets_as_strings` twins (merge unsorted / optimization sorted) | DRY | Same serialization, two owners | Single `targets_as_strings` (sorted) in models.py. Note: merge ordering becomes sorted; a legacy `merge.yaml` mismatches once → single re-merge, no re-encode | DRY + one source of truth | suite green |
+| 6 | ProbeState-from-probe-result ×4 | DRY | Hand-rolled construction in encoding×2/optimization/merge | `ProbeState.from_probe(probe_result)` classmethod (guards verified semantically identical; optimization's `crop if crop else None` was a no-op) | DRY | suite green |
+| 7 | Decimal quality-range coercion ×2 | DRY | models vs app_config validators duplicate `Decimal(str(v))` pair logic | Shared private `_coerce_decimal_pair` in models.py; both validators delegate | DRY | suite green |
+| 8 | `evaluate_chunk` sync/async full twins (~150 lines duplicated) | DRY | Only await-vs-asyncio.run differed | Async core + thin sync wrapper. **Bonus bug fixed**: sync no-progress branch silently omitted `fps_value` from `_generate_metrics` | DRY | suite green |
+| 9 | Deferred (logged to TODO.md): CLI `_cmd_*` bodies ×6; test fixture factories ×5; EncodedChunk composition dup; ASCII summary-table scaffold ×2; repeated guard blocks; `MergePhaseResult`-owned output collection; measure→extraction private imports | DRY | Costly/structural | Deferred | Blast radius vs this branch's scope | TODO.md updated |
+
+## Stage 6 — semantic notes (deliberate, cosmetic)
+
+- `.tmp` cleanup is now recursive (`rglob`) at all sites — strictly wider hygiene; `.tmp_a2_*` scratch dirs unaffected.
+- Sidecar-load warnings now emit from the `pyqenc.utils.yaml_utils` logger (was per-phase loggers).
+- job.py source-stat warning loses the exception detail (helper is silent — majority semantics of the 4 unified sites).
+- `evaluate_chunk` sync wrapper passes `fps_value` in the no-progress branch (was dropped — bug fixed, flagged by the dedup read).
 
 ## Stage 7 — repairs
 
@@ -121,7 +137,25 @@ Executed as three parallel passes (core+utils / phases / utils+config+models). P
 
 | # | Item | Category | What / why candidate | Action taken | Reason | Post-check |
 |---|---|---|---|---|---|---|
+| 1 | test_metrics_integration.py + test_phase.py + test_probe_phase.py: ~25 MagicMock-spy tests asserting on `collector.time` call args / `step()` call counts | test | TODO §5: internal-instrumentation pinning | Converted to behavior tests: real `YamlMetricsCollector` into tmp dir → flush → close → assert on the written `metrics.yaml` (top-level keys, dotted groups, convergence section, reuse-without-reaccrual). `_SteppingClock` (1s/step monotonic patch) makes spans survive the report's integer-second rounding | External behavior > internal calls; each retained test keeps/gets a bug-condition docstring | 96 scoped tests pass; full suite 696/9/0 |
+| 2 | 2 tests deleted outright (audio reuse twin merged; optimization step-call-count pin — identical scenario covered by the convergence-report test) | test | Pure internal pinning | Deleted with coverage mapped | step() prefix is unobservable in the report (convergence keyed by strategy only — documented in the converted test) | n/a |
+| 3 | Broken fixtures unmasked by the conversion (old spy assertions hid them) | test | — | (a) optimization "reuse" test never actually hit reuse (persisted IDs never matched — phase re-executed; test renamed to say what it really checks); (b) merge tests' stub returned `Path`s where `EncodedChunk`s were required — every strategy `AttributeError`'d before `merge.concat`; fixture now returns real EncodedChunks; (c) merge quality test could never reach `merge.quality_measure` (probe stream None) — fixed via `probe_stream` fixture param | Spy assertions passed while the scenario was broken — exactly the §5 failure mode | converted tests assert the spans now actually execute |
+| 4 | tests/integration/test_encoding_quality.py stale `ChunkEncoder(...)` construction (missing `collector`, unknown `sampling` — would TypeError when un-skipped; found via ty) | test | kwarg drift | Fixed construction (`collector=MagicMock(spec=MetricsCollector)`, `metrics_sampling=10`) | Keep skipped integration tests runnable | 4 passed / 3 skipped |
 
 ## Totals
 
-(filled at the end)
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| ruff findings | 367 (no config, unpinned) | **0** (pinned, configured) | −367 |
+| pytest | 11 failed / 721 passed / 9 skipped | **0 failed / 696 passed / 9 skipped** | green |
+| vulture findings | 88 | 64 (remainder = pydantic/framework 60%-noise + 2 documented false positives) | −24 |
+| ty diagnostics | 357 (incl. tests) | 83 production-only (type-modeling noise; triaged) | −274 |
+| source code lines (scc) | 11,352 | 10,970 | **−382** |
+| source comment/docstring lines | 8,163 | 7,898 | **−265** |
+| source complexity | 2,164 | 2,037 | −127 |
+| test code lines (scc) | 11,243 | 11,004 | −239 |
+| files (source) | 42 | 42 (recovery.py out, utils/fs.py in) | 0 |
+
+Commits: `1b9acae` (stages 1-2) → `cfe2582` (7a audio tests) → `431ee5c` (3 comments) → `6adb5e5` (7b measure crash) → `7323111` (4 imports) → `be9d1fd` (5 inlining) → `618276f` (6 DRY) → this commit (8 tests + 9 bookkeeping).
+
+Behavior changes (all deliberate, flagged in stage rows): fixed `pyqenc measure` crash; fixed sync-evaluation `fps_value` drop; ≥1000MB sizes lose decimals in two log tables; merge target list ordering now sorted (one-time merge.yaml invalidation on legacy workdirs); `.tmp` cleanup recursive everywhere; sidecar-load warnings logged from `yaml_utils`.

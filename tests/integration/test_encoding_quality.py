@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from pyqenc.metrics import MetricsCollector
 from pyqenc.models import QualityTarget
 from pyqenc.utils.visualization import QualityEvaluator
 from tests.fixtures.metric_fixtures import (
@@ -219,7 +220,8 @@ class TestEncodeChunkQualitySearchV2Integration:
         encoder = ChunkEncoder(
             quality_evaluator = evaluator,
             work_dir          = tmp_path,
-            sampling = 10,
+            collector         = MagicMock(spec=MetricsCollector),
+            metrics_sampling  = 10,
         )
 
         reference = MagicMock()
