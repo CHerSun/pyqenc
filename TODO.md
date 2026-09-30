@@ -668,3 +668,26 @@ Deferred as costly/structural:
 
 ---
 
+## 66. CLI subcommands review
+
+Do we really need all current subcommands? From UX point of view for end-user. 
+Current setup was mirroring the initial phases structure and allowed better testing for devs.
+But ordinary user likely doesn't need that.
+
+What would ordinary user need? I'd guess it should be intent based. Something like:
+- auto - kept for full default pipeline
+- video - for video only processing
+- audio - for audio only processing
+- measure - for measuring, including EXTERNAL videos (i.e. things produced not by pyqenc).
+
+anything else?
+
+I was thinking about a way to give user mechanics to extract (materialize) anything from source really. 
+Maybe this should be the function of `extract` subcommand (a bit different from extract mechanics in auto/video/audio), if we moved to virtual streams in main phases.
+This is also a question specifically for audio - user might want source audio available as standalone files to use in external audio editors. 
+I was thinking of maybe introducing a dump filter (like passthrough, but to a file). But direct extract command might be a better way.
+As another point for extract subcommand working like this - it was always a problem to just extract everything from mkv. Most CLI tools require explicit
+streams listing, which is quite painful when making commands manually. with `extract` subcommand it could be something like `pyqenc extract source.mkv --exclude "video-" -y` to dump everything.
+Ideally reusing the current extract phase mechanics.
+
+other considerations?
