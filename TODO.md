@@ -334,22 +334,6 @@ attempts as "measurement") worth anything for video?
 
 ---
 
-## 🤔 32. `dict[type[Phase], Phase]` pattern ×13; quoted `cast()` ×8 remain
-
-**Status:** needs thinking (typing polish)
-
-- `dict[type[Phase], Phase]` (and quoted variants) at `phase.py:330,378,387`,
-  `runner.py:106,115`, `job.py:99`, and each phase `__init__`
-  (`extraction.py:742`, `probe.py:96`, `audio.py:132`, `chunking.py:419`,
-  `optimization.py:118`, `encoding.py:1523`, `merge.py:546`).
-- Quoted forward-ref casts remain at `probe.py:107-108`, `extraction.py:752`,
-  `encoding.py:1534-1537`, `merge.py:560` (others already de-quoted).
-
-**Questions to think about:** is the type-keyed dict load-bearing (registry
-lookup) or replaceable? De-quote remaining casts where imports allow.
-
----
-
 ## 🤔 33. Disk-space estimation is JobPhase-only, log-only
 
 **Status:** needs thinking (partially implemented)
@@ -437,19 +421,6 @@ Explicitly triggered once in reversed order (from end). And only after that is t
 Or... should we remove it completely? 
 - The only true usecase is when crop changed between runs. And here it works as a safeguard against accidentally deleting a lot of work (all attempts become invalid; not detectable with current light invalidation checks; don't want per-attempt sidecar reading for heavy invalidation checks for this usecase as that will affect all runs).
 - If user wants another file - he can either use new dir or purge current dir. So this one isn't a true usecase.
-
----
-
-## 41. Assertions and exhaustiveness checks are rarely used.
-
-A lot of things, like None guards or PENDING phase result state on run - are NOT user validations. Those are programmatic errors. They should use assertions 
-(assertions help with static checks, help avoid part of unnecessary tests, and could be disabled when running in production for better perf).
-User validations should be on things that users or inputs could affect (like, a broken input file with wrong streams metadata - it is a bad input).
-
-Exhaustiveness checks like for enums if we later add a new value - we might not update all places. So often thing like `else assert_never...` are added to ensure
-we don't forget to update.
-
-Those probably should be added to steering docs and memory as key principles. And checked against current codebase.
 
 ---
 
@@ -608,13 +579,6 @@ Human input: all materialized artifacts must follow .tmp then rename protocol. I
 
 ---
 
-## 57. Check standalone functions
-
-Are they really meant to be on module level? Is there really no class that should own them?
-Need a review. Disowned functions are strongly discouraged, at least without clear reason for it to be disowned.
-
----
-
 ## 59. Parallel metrics
 
 Currently, if we run 2 jobs onto the same folder (say, separate video and audio passes) - metrics will get garbled.
@@ -641,6 +605,8 @@ What should be:
 - Exceptions shouldn't be printed probably, at least to info and higher levels. Ordinary users are affraid of such walls of text. But there must be a way for us (developers/AI) to get them.
   Could be flag-walled, or debug level printed (reusing our printing level flag).
 - For exceptions there must be clear concise proper-level messages logged, which include - what happened, how that will affect end-user (pipeline broken, exitting, can't continue, quality can't be reached; something end-user can understand).
+
+Ideally, internal things shouldn't log anything but debug messages and propagate their problems via exceptions higher, where proper logging should take place. But if they already log - need to review if it should really log there or if it should be moved.
 
 ---
 
@@ -701,3 +667,4 @@ Deferred as costly/structural:
   false positive on `MetricsCollector.step(*parts)` with zero parts).
 
 ---
+

@@ -39,6 +39,14 @@
 
 - NO MAGIC NUMBERS or MAGIC STRINGS allowed. Use named constants or enum values. `"psnr"` is NOT allowed; `MetricType.PSNR.value` is.
 - Constants used multiple times must go into `constants.py`. `constants.py` must have no imports from the module (to avoid cycles).
+- A constant (or function) with a single consuming class belongs to that class (attribute/method). If it is internal to the class, prefix it with `_`. If instance-independent, mark `staticmethod`/`classmethod`.
+
+## Contracts vs External Validation
+
+- `isinstance` / `is None` checks are for EXTERNAL optionality: CLI arguments not supplied, config-file fields absent, sidecar/media (ffprobe)-sourced data missing, or a genuine API Optional. These are normal conditionals.
+- PROGRAMMATIC contracts — values our own construction guarantees (a dependency result after the dependency walk, a COMPLETE recovery row's winning file, a resolved config after `resolve()`), are enforced with `assert` (with a short why-message) or by tightening the footprint to the concrete type. Never with silent `if x is None` fallbacks, and not with exception raises for programmer errors.
+- Mandatory contract methods are `@abstractmethod` — never a bare `raise NotImplementedError`.
+- Model fields capturing external facts (ffprobe `start_time`, `pix_fmt`, …) are retained even when currently unread — data preservation is not dead code.
 
 ## Logging
 
