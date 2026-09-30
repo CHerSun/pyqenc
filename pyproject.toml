@@ -61,4 +61,8 @@ ignore = [
     # String-form Decimal literals are the house convention (uniform with
     # Decimal("0.5"), where the string form is required for exactness).
     "FURB157",
+    # int|float unions in progress footprints are deliberate: audio advances
+    # per result (int) against an int total, video advances seconds (float);
+    # ProgressBarState renders the two differently (isinstance check).
+    "PYI041",
 ]

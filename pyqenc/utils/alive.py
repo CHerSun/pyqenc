@@ -40,7 +40,7 @@ class ProgressBarState:
 
     as_float: bool = False
 
-    def __init__(self, total: float) -> None:
+    def __init__(self, total: int|float) -> None:
         self.total = total
         self.remaining = self.total
         self.as_float = isinstance(total, float)
@@ -48,7 +48,7 @@ class ProgressBarState:
 
 @contextmanager
 def ProgressBar(
-    total: float,
+    total: int | float,
     title: str,
     show_counters: bool = True,
     total_count:   int | None = None,
@@ -95,7 +95,7 @@ def ProgressBar(
     if total <= 0:
         # Indeterminate spinner — no fraction arithmetic possible.
         with alive_bar(title=title) as bar:
-            def advance(increment: float = 1, state: AdvanceState = AdvanceState.SUCCESS) -> None:
+            def advance(increment: int | float = 1, state: AdvanceState = AdvanceState.SUCCESS) -> None:
                 if state == AdvanceState.SUCCESS:
                     bar_state.success_count += 1
                 elif state == AdvanceState.SKIPPED:
@@ -108,7 +108,7 @@ def ProgressBar(
         return
 
     with alive_bar(manual=True, title=title) as bar:
-        def advance(increment: float = 1, state: AdvanceState = AdvanceState.SUCCESS) -> None:
+        def advance(increment: int | float = 1, state: AdvanceState = AdvanceState.SUCCESS) -> None:
             if state == AdvanceState.COMPLETE:
                 # Phase explicitly declares full completion — force 100 %, no counter change.
                 bar(1.0)
