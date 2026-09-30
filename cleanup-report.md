@@ -220,3 +220,19 @@ pins AssertionError; merge fixture's `probe_stream=None` default constructed the
 impossible state the new assert rejects — default is now a real stream.
 
 Post-check: ruff clean; full suite 696 passed / 9 skipped / 0 failed.
+
+## §57 re-homing + §66 (2026-09-30, follow-up review round)
+
+| # | Item | Category | Action taken | Reason | Post-check |
+|---|---|---|---|---|---|
+| 1 | Extraction ffprobe dict→model builders (8 fns) | §57 | `StreamInfo.from_ffprobe` classmethod family on stream_model (base fields + video/audio/subtitle/attachment extensions); `_probe_streams_json` subprocess boundary stays in the phase; measure's private cross-module import → public classmethod | Info classes own their external-data mapping | 135 tests green |
+| 2 | `runner._collect_output_files` | §57 | `MergePhaseResult.output_paths` property | Single-class consumer | tests green |
+| 3 | `disk_space._estimate_total_pixels` + `_parse_resolution` | §57 | `VideoStreamInfo.total_pixels` property (+ private static parser) | Consumes only info facets | tests green |
+| 4 | `visualization.extract_key_stats` | §57 | Renamed `_extract_key_stats` (in-module only) | FullMetricStatistics is a TypedDict — cannot own methods; kept with reason | tests green |
+| 5 | 8 phase sidecar-name constants | §57 | Uniform `SIDECAR_NAME` class attribute per phase; all references qualified `Phase.SIDECAR_NAME` | Sidecar-ownership contract made literal | 521 tests green |
+| 6 | §66 ANSI colors in piped output | repair | ColoredFormatter only when `sys.stdout.isatty()`; plain identical formatter otherwise (alive_progress precedent) | Piped streams garble escape codes | verified: piped capture has zero escapes |
+| 7 | Merge helper swarm (14 fns + 2 constants) | §57 | All → `@staticmethod`s / class attrs on MergePhase; isolated final commit with complete test-change list in the message | Single-class consumers | 696/9/0 |
+| 8 | Keeps (decided, no TODO entries per owner): chunking pure scene math, metrics store computers, chain.py, measure.py module functions, encoding/optimization machinery | §57 | Kept as-is | Pure algorithm functions or awaiting their own design; owner directed no tracking entries | n/a |
+
+Closed TODO: §32 (stale — 0 quoted casts remain), §41 (doctrine → steering docs), §57 (executed + keeps), §66 (fixed).
+Steering gained the "Contracts vs External Validation" section.
