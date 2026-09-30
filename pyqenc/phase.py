@@ -307,8 +307,15 @@ class PhaseContractError(RuntimeError):
 # Phase — template-method base implementing the uniform run()
 # ---------------------------------------------------------------------------
 
-class Phase:
+class Phase[ResultT: PhaseResult]:
     """Template-method base class implementing the uniform phase ``run()``.
+
+    Type parameter:
+        ResultT: The phase's typed result class — declared by subclassing
+                 (``class JobPhase(Phase[JobPhaseResult])``), which links the
+                 class to its result type through inheritance: ``_dep_result``
+                 and ``.result`` then carry the concrete type with no casts,
+                 overloads, or base-module imports (no circular dependencies).
 
     The single concrete ``run()`` below owns the run footprint shared by every
     phase, in this exact order:
@@ -391,7 +398,7 @@ class Phase:
         self._config:    AppConfig        = config
         self._collector: MetricsCollector = collector
         self._phases:    PhaseRegistry = phases if phases is not None else {}
-        self.result:     PhaseResult | None = None
+        self.result:     ResultT | None  = None
 
     # ------------------------------------------------------------------
     # Dependency resolution — DEPENDS_ON is the declaration, the registry
@@ -421,6 +428,35 @@ class Phase:
                 "in the phase registry (declared in DEPENDS_ON)"
             )
         return cast(TPhase, instance)
+
+    def _dep_result[R: PhaseResult](self, dep_cls: type[Phase[R]]) -> R:
+        """Return the dependency's cached typed result.
+
+        The shared dependency walk guarantees every declared dependency has
+        run (and cached its result) before this phase's hooks execute, so
+        consumers read dependency facts through this typed getter instead of
+        re-narrowing ``Phase.result`` at every call site. The declared
+        ``Phase[R]`` parametrization is what recovers the concrete result
+        type from the phase class at each call site.
+
+        Args:
+            dep_cls: The dependency's phase class.
+
+        Returns:
+            The dependency's typed result.
+
+        Raises:
+            TypeError: When the declared dependency is missing from the
+                registry (mis-wired registry — a programming error).
+            AssertionError: When the dependency has no cached result — a
+                phase hook ran before the dependency walk (a programming
+                error, never a runtime condition to handle).
+        """
+        result = self._dep(dep_cls).result
+        assert result is not None, (
+            f"{dep_cls.__name__}.result guaranteed by the dependency walk"
+        )
+        return result
 
     # ------------------------------------------------------------------
     # Public Phase interface — the template run() and default finalize

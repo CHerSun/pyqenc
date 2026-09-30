@@ -17,7 +17,7 @@ from dataclasses import dataclass as _dataclass
 from dataclasses import replace as _dc_replace
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from alive_progress import config_handler
 
@@ -50,9 +50,9 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
-from pyqenc.phases.chunking import ChunkingPhase, ChunkingPhaseResult
-from pyqenc.phases.job import JobPhase, JobPhaseResult
-from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
+from pyqenc.phases.chunking import ChunkingPhase
+from pyqenc.phases.job import JobPhase
+from pyqenc.phases.optimization import OptimizationPhase
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.quality import QualitySearchV3
 from pyqenc.state import (
@@ -1708,7 +1708,7 @@ class EncodingPhaseResult(PhaseResult):
         return lookup
 
 
-class EncodingPhase(Phase):
+class EncodingPhase(Phase[EncodingPhaseResult]):
     """Phase object for CRF-search chunk encoding.
 
     Owns artifact enumeration, recovery, invalidation, execution, and logging
@@ -1756,8 +1756,8 @@ class EncodingPhase(Phase):
         probe_result = self._dep(ProbePhase).result
         crop         = probe_result.crop if probe_result is not None else None
 
-        strategies = cast(OptimizationPhaseResult, self._dep(OptimizationPhase).result).selected_strategies
-        chunks     = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result).chunks
+        strategies = self._dep_result(OptimizationPhase).selected_strategies
+        chunks     = self._dep_result(ChunkingPhase).chunks
         logger.info("Chunks:      %d", len(chunks))
         logger.info("Strategies:  %s", ", ".join(s.display_name() for s in strategies) if strategies else "none")
         if crop:
@@ -1818,7 +1818,7 @@ class EncodingPhase(Phase):
             RecoveryError: On a probe change without ``--force``, or when
                 chunking/optimization produced no chunks / strategies.
         """
-        job_result: JobPhaseResult = cast(JobPhaseResult, self._dep(JobPhase).result)
+        job_result = self._dep_result(JobPhase)
         work_dir   = job_result.work_dir
         enc_dir    = work_dir / ENCODING_WORKSPACE_DIR
         out_dir    = work_dir / ENCODED_OUTPUT_DIR
@@ -1839,7 +1839,7 @@ class EncodingPhase(Phase):
         # removed encoding.yaml, so a mismatch can only be seen without it).
         if not force_wipe:
             persisted_enc = EncodingParams.load(yaml_path)
-            probe_result  = self._dep(ProbePhase).result  # type: ignore[union-attr]
+            probe_result  = self._dep_result(ProbePhase)
             crop          = probe_result.crop if probe_result is not None else None
             current_probe = ProbeState(
                 frame_count = probe_result.stream.payload.frame_count if (probe_result is not None and probe_result.stream is not None) else 0,
@@ -1865,8 +1865,8 @@ class EncodingPhase(Phase):
                     logger.warning("Could not remove temp file %s: %s", tmp, exc)
 
         # Step 4: get chunks and strategies from dependencies
-        chunking_result     = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result)
-        optimization_result = cast(OptimizationPhaseResult, self._dep(OptimizationPhase).result)
+        chunking_result     = self._dep_result(ChunkingPhase)
+        optimization_result = self._dep_result(OptimizationPhase)
 
         chunks: list[VideoStreamChunk] = [a.payload for a in chunking_result.chunks]
         strategies = optimization_result.selected_strategies
@@ -1933,13 +1933,13 @@ class EncodingPhase(Phase):
         Returns:
             ``EncodingPhaseResult`` after encoding.
         """
-        work_dir = cast(JobPhaseResult, self._dep(JobPhase).result).work_dir
+        work_dir = self._dep_result(JobPhase).work_dir
         probe_result = self._dep(ProbePhase).result
         crop         = probe_result.crop if probe_result is not None else None
 
         # Resolve chunks and strategies from dependencies
-        chunking_result     = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result)
-        optimization_result = cast(OptimizationPhaseResult, self._dep(OptimizationPhase).result)
+        chunking_result     = self._dep_result(ChunkingPhase)
+        optimization_result = self._dep_result(OptimizationPhase)
 
         chunks: list[VideoStreamChunk] = [a.payload for a in chunking_result.chunks]
         strategies = optimization_result.selected_strategies
@@ -1976,11 +1976,11 @@ class EncodingPhase(Phase):
             work_dir         = work_dir,
             collector        = self._collector,
             max_parallel     = self._config.encoding.concurrency,
-            force            = self._dep(JobPhase).result.force_wipe,  # type: ignore[union-attr]
+            force            = self._dep_result(JobPhase).force_wipe,
             dry_run          = False,
             crop_params      = crop,
             encoding_yaml    = None,  # already persisted above with ProbeState
-            cleanup_level    = self._dep(JobPhase).result.cleanup,  # type: ignore[union-attr]
+            cleanup_level    = self._dep_result(JobPhase).cleanup,
             visual_hash      = self._config.encoding.visual_hash,
             metrics_sampling = self._config.measurement.sampling,
         )

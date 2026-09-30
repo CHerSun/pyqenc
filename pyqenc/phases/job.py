@@ -89,7 +89,7 @@ class JobPhaseResult(PhaseResult):
 # JobPhase
 # ---------------------------------------------------------------------------
 
-class JobPhase(Phase):
+class JobPhase(Phase[JobPhaseResult]):
     """Phase that establishes the source identity and owns ``job.yaml``.
 
     This phase has no dependencies and is a declared dependency of every other

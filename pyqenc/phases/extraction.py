@@ -480,7 +480,7 @@ class ExtractionPhaseResult(PhaseResult):
 # ExtractionPhase
 # ---------------------------------------------------------------------------
 
-class ExtractionPhase(Phase):
+class ExtractionPhase(Phase[ExtractionPhaseResult]):
     """Phase object for stream enumeration and container-artifact extraction.
 
     Owns the source's stream inventory: enumeration (or sidecar load),
@@ -527,8 +527,9 @@ class ExtractionPhase(Phase):
 
     def _log_key_params(self) -> None:
         """Log the source path and the active include/exclude filter."""
-        logger.info("Source:   %s", self._dep(JobPhase).result.source.name)  # type: ignore[union-attr]
-        extraction_cfg = self._dep(JobPhase).result.config.extraction  # type: ignore[union-attr]
+        job = self._dep_result(JobPhase)
+        logger.info("Source:   %s", job.source.name)
+        extraction_cfg = job.config.extraction
         if extraction_cfg.include or extraction_cfg.exclude:
             logger.info("Filter:")
             if extraction_cfg.include:
@@ -559,7 +560,7 @@ class ExtractionPhase(Phase):
         Raises:
             RecoveryError: When the source cannot be analysed at all.
         """
-        job_result: JobPhaseResult = cast(JobPhaseResult, self._dep(JobPhase).result)
+        job_result = self._dep_result(JobPhase)
         work_dir      = job_result.work_dir
         extracted_dir = work_dir / EXTRACTED_DIR
         sidecar_path  = work_dir / _EXTRACTION_YAML_FILENAME
@@ -831,7 +832,7 @@ class ExtractionPhase(Phase):
             ``ExtractionPhaseResult`` built directly from the updated rows.
         """
         artifacts = wanted
-        job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
+        job_result = self._dep_result(JobPhase)
         work_dir      = job_result.work_dir
         extracted_dir = work_dir / EXTRACTED_DIR
         extracted_dir.mkdir(parents=True, exist_ok=True)

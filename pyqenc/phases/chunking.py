@@ -196,7 +196,7 @@ class ChunkingPhaseResult(PhaseResult):
 # ChunkingPhase
 # ---------------------------------------------------------------------------
 
-class ChunkingPhase(Phase):
+class ChunkingPhase(Phase[ChunkingPhaseResult]):
     """Phase object turning scene boundaries into timestamp-window chunks.
 
     Owns scene detection and the ``chunking.yaml`` boundary sidecar. The
@@ -271,8 +271,7 @@ class ChunkingPhase(Phase):
                 for record in sidecar.scenes
             ]
             logger.info("Scenes:  %d (from chunking.yaml)", len(self._recovered_scenes))
-            probe_result = self._dep(ProbePhase).result  # type: ignore[union-attr]
-            stream = probe_result.stream  # type: ignore[union-attr]
+            stream = self._dep_result(ProbePhase).stream
             assert stream is not None, "probe guaranteed complete by the dependency walk"
             # RecoveryError (unknown duration) propagates — the template
             # converts it to the typed FAILED result.
@@ -300,10 +299,8 @@ class ChunkingPhase(Phase):
         Returns:
             ``ChunkingPhaseResult`` with the chunk-window rows.
         """
-        job_result   = self._dep(JobPhase).result  # type: ignore[union-attr]
-        probe_result = self._dep(ProbePhase).result  # type: ignore[union-attr]
-        work_dir     = job_result.work_dir  # type: ignore[union-attr]
-        stream       = probe_result.stream  # type: ignore[union-attr]
+        work_dir = self._dep_result(JobPhase).work_dir
+        stream   = self._dep_result(ProbePhase).stream
         if stream is None:
             err = "No extended video stream available for chunking"
             logger.critical(err)
@@ -344,8 +341,7 @@ class ChunkingPhase(Phase):
 
     def _reused_result(self, wanted: list, message: str) -> ChunkingPhaseResult:
         """Build the reused result from the cached boundaries."""
-        probe_result = self._dep(ProbePhase).result  # type: ignore[union-attr]
-        stream       = probe_result.stream  # type: ignore[union-attr]
+        stream = self._dep_result(ProbePhase).stream
         if stream is None:
             err = "No extended video stream available for chunking"
             logger.critical(err)

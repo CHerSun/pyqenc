@@ -25,7 +25,7 @@ import random
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 from alive_progress import config_handler
 
@@ -49,8 +49,8 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
-from pyqenc.phases.chunking import ChunkingPhase, ChunkingPhaseResult
-from pyqenc.phases.job import JobPhase, JobPhaseResult
+from pyqenc.phases.chunking import ChunkingPhase
+from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.state import (
     ArtifactState,
@@ -103,7 +103,7 @@ class OptimizationPhaseResult(PhaseResult):
 # OptimizationPhase
 # ---------------------------------------------------------------------------
 
-class OptimizationPhase(Phase):
+class OptimizationPhase(Phase[OptimizationPhaseResult]):
     """Phase object for strategy optimization.
 
     In **all-strategies mode** (``config.optimize=False`` or a single
@@ -217,8 +217,8 @@ class OptimizationPhase(Phase):
             RecoveryError: On a probe change without ``--force``, or when
                 ChunkingPhase produced no chunks.
         """
-        job_result   = self._dep(JobPhase).result  # type: ignore[union-attr]
-        probe_result = self._dep(ProbePhase).result  # type: ignore[union-attr]
+        job_result   = self._dep_result(JobPhase)
+        probe_result = self._dep_result(ProbePhase)
         work_dir     = job_result.work_dir
         opt_yaml     = work_dir / _OPTIMIZATION_YAML
         tolerance    = self._config.encoding.optimize_tolerance
@@ -325,8 +325,9 @@ class OptimizationPhase(Phase):
         The fresh selection is stashed here (recovery) so ``_execute`` uses
         the same set that produced the ledger counts.
         """
-        chunking_result = cast(ChunkingPhaseResult, self._dep(ChunkingPhase).result)
-        chunks: list[VideoStreamChunk] = [a.payload for a in chunking_result.chunks]
+        chunks: list[VideoStreamChunk] = [
+            a.payload for a in self._dep_result(ChunkingPhase).chunks
+        ]
 
         test_ids = persisted.test_chunks if persisted is not None and persisted.test_chunks else []
         if test_ids:
@@ -366,7 +367,7 @@ class OptimizationPhase(Phase):
         Returns:
             ``OptimizationPhaseResult`` with ``selected_strategies`` set.
         """
-        job_result = cast(JobPhaseResult, self._dep(JobPhase).result)
+        job_result = self._dep_result(JobPhase)
         work_dir   = job_result.work_dir
         opt_yaml   = work_dir / _OPTIMIZATION_YAML
         tolerance  = self._config.encoding.optimize_tolerance
@@ -583,8 +584,7 @@ class OptimizationPhase(Phase):
         Returns:
             ``OptimizationPhaseResult`` with all configured strategies selected.
         """
-        job_result       = self._dep(JobPhase).result  # type: ignore[union-attr]
-        work_dir         = job_result.work_dir
+        work_dir         = self._dep_result(JobPhase).work_dir
         opt_yaml         = work_dir / _OPTIMIZATION_YAML
         current_targets  = _targets_as_strings(self._config.encoding.resolved_targets)
         current_sampling = self._config.measurement.sampling

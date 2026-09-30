@@ -83,7 +83,7 @@ class ProbePhaseResult(PhaseResult):
 # ProbePhase
 # ---------------------------------------------------------------------------
 
-class ProbePhase(Phase):
+class ProbePhase(Phase[ProbePhaseResult]):
     """Phase object that resolves crop parameters and the source frame count.
 
     Depends on ``JobPhase`` and ``ExtractionPhase``.  Returns ``FAILED`` when
@@ -161,12 +161,12 @@ class ProbePhase(Phase):
         Raises:
             RecoveryError: When the source has no video stream.
         """
-        job_result        = self._dep(JobPhase).result        # type: ignore[union-attr]
-        extraction_result = self._dep(ExtractionPhase).result # type: ignore[union-attr]
-        probe_yaml        = job_result.work_dir / _PROBE_YAML_NAME  # type: ignore[operator]
+        job_result        = self._dep_result(JobPhase)
+        extraction_result = self._dep_result(ExtractionPhase)
+        probe_yaml        = job_result.work_dir / _PROBE_YAML_NAME
 
         # Step 1 — no video stream: fatal for all downstream video phases.
-        video_artifact = extraction_result.video_stream  # type: ignore[union-attr]
+        video_artifact = extraction_result.video_stream
         if video_artifact is None:
             raise RecoveryError(
                 "No video stream in the source — video processing cannot continue"
@@ -225,8 +225,7 @@ class ProbePhase(Phase):
         """
         from pyqenc.utils.crop import detect_crop_parameters
 
-        job_result  = self._dep(JobPhase).result         # type: ignore[union-attr]
-        probe_yaml  = job_result.work_dir / _PROBE_YAML_NAME  # type: ignore[operator]
+        probe_yaml = self._dep_result(JobPhase).work_dir / _PROBE_YAML_NAME
         probe_state = self._probe_state
         video       = self._video_stream
         assert video is not None  # recovery guarantees a video stream
@@ -321,7 +320,7 @@ class ProbePhase(Phase):
         """
         video = self._video_stream
         assert video is not None
-        timestamps_path = self._dep(ExtractionPhase).result.timestamps_path  # type: ignore[union-attr]
+        timestamps_path = self._dep_result(ExtractionPhase).timestamps_path
 
         if timestamps_path is not None:
             counted = count_frames(timestamps_path)
