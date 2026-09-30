@@ -42,13 +42,6 @@ class MetricInfo:
     Single source of truth for normalization, display, and CRF search behaviour.
     Accessed via ``MetricType.PSNR.info``, etc.
 
-    Public fields: ``name``, ``id``, ``higher_is_better``, ``lossless_value``,
-    ``lossless_raw_repr``, ``display_unit``, ``plot_y_min``, ``plot_y_max``,
-    ``comparison_range``, ``acceptance_delta``.
-
-    Internal fields (not part of public API — used only by ``normalize()``):
-    ``_offset``, ``_scale_factor``, ``_clip_lower``, ``_clip_upper``.
-
     Attributes:
         name:              Human-readable display name (e.g. ``"PSNR"``).
         id:                Lowercase string key matching ``MetricType.value``
@@ -237,7 +230,6 @@ _METRIC_INFO: dict[MetricType, MetricInfo] = {
         acceptance_delta  = 0.3,   # 0.3 dB surplus should be negligible
         subsample_via_filter = True,   # uses select='not(mod(n,factor))' on its branch
     ),
-    # VIF
     MetricType.VIF: MetricInfo(
         name              = "VIF",
         higher_is_better  = True,
@@ -381,14 +373,11 @@ async def run_metrics(
     retime_rate = repr(fps) if fps is not None else "FRAME_RATE"
 
     # Re-time both inputs to exact index-based CFR before the metric filters.
-    # framesync (the dualinput core of psnr/ssim/libvmaf) pairs frames by PTS:
-    # the attempt's and the source window's ms-rounded timestamp grids carry
-    # different rounding phases, and where they diverge framesync duplicates/
-    # skips a frame — intermittent single-frame mispairings (~14 dB PSNR drops
-    # every few frames, vmaf_min=0). setpts=N/(FRAME_RATE*TB) rewrites PTS to
-    # the frame index on both sides, so pairing is index-perfect — verified
-    # against per-frame PNG comparison on real media. PTS-STARTPTS only rebases
-    # the origin and preserves the grid mismatch (empirically a no-op here).
+    # framesync (the dualinput core of psnr/ssim/libvmaf) pairs frames by PTS,
+    # and the two inputs' ms-rounded timestamp grids can carry different
+    # rounding phases, making framesync duplicate/skip a frame where they
+    # diverge.  setpts=N/(FRAME_RATE*TB) rewrites PTS to the frame index on
+    # both sides, so pairing is index-perfect.
     if n_branches == 1:
         # No split needed — single branch uses [main]/[ref] directly
         sel = f",select='not(mod(n,{subsample}))',setpts=N/({retime_rate}*TB)" if (
@@ -426,7 +415,6 @@ async def run_metrics(
         f_dist = f_dist_base + ";" + ";".join(branch_parts_d)
         f_ref  = f_ref_base  + ";" + ";".join(branch_parts_r)
 
-    # Build per-branch metric filters
     metric_filters: list[str] = []
     for i, branch in enumerate(branches):
         ld = branch_labels_d[i]
@@ -503,7 +491,7 @@ class QualityEvaluation:
 
 
 # ---------------------------------------------------------------------------
-# Scoring helpers (module-level, kept for backward compatibility with tests)
+# Scoring helpers
 # ---------------------------------------------------------------------------
 
 def _score_attempt(
@@ -733,7 +721,7 @@ class QualitySearchBase(ABC):
         self._exhausted:        bool                = False
 
     # ------------------------------------------------------------------
-    # Abstract contract (same as the former QualitySearchProtocol)
+    # Abstract contract
     # ------------------------------------------------------------------
 
     @property
@@ -980,15 +968,17 @@ class QualitySearchBase(ABC):
 
 
 # ---------------------------------------------------------------------------
-# QualitySearch — legacy proportional interpolation algorithm
+# QualitySearch — proportional interpolation algorithm (V1)
+#
+# V1/V2 are unused by the pipeline (V3 is the active search); kept as
+# reference for the planned V4 rework (TODO §51).
 # ---------------------------------------------------------------------------
 
 class QualitySearch(QualitySearchBase):
-    """Quality search using proportional interpolation (legacy algorithm).
+    """Quality search using proportional interpolation.
 
-    Encapsulates the binary-bracket search previously split across
-    ``CRFHistory`` and ``adjust_crf()``.  Direction-agnostic: uses
-    ``quality_better``/``quality_worse`` instead of assuming lower=better.
+    Direction-agnostic: uses ``quality_better``/``quality_worse`` instead of
+    assuming lower=better.
 
     When ``quality_better == quality_worse``, the first ``record()`` call
     records the result and returns ``None`` (single fixed quality value).
@@ -1063,9 +1053,6 @@ class QualitySearch(QualitySearchBase):
 
     def record(self, quality: Decimal, quality_results: dict[str, float]) -> Decimal | None:
         """Record one attempt and return the next quality value to try.
-
-        Mirrors the logic of the former ``adjust_crf()`` function using
-        instance state instead of a ``CRFHistory`` object.
 
         Args:
             quality:         Quality value used for this attempt.
@@ -1306,9 +1293,8 @@ class QualitySearchV2(QualitySearchBase):
         best_p       = self._best_score_point
         best_q_index = sorted_q.index(best_p.q)  # type: ignore[union-attr]
 
-        # Still doing outward search — go in binary steps between bounds and last attempt.
-        # ATTENTION: Proportional search could work here, but it often loses sweet-point
-        # curve shape, thus never reaching 3-point mode. Keep it at binary.
+        # Still doing outward search — binary only: proportional steps often
+        # lose the sweet-point curve shape and never reach 3-point mode.
         if best_p.is_fail and best_q_index == 0:
             return self._next_or_exhaust(
                 self._compute_next_quality(
@@ -1379,21 +1365,12 @@ class QualitySearchV2(QualitySearchBase):
 # ---------------------------------------------------------------------------
 
 class QualitySearchV3(QualitySearchBase):
-    """Quality search using linear extrapolation and a midpoint-probe safety net.
+    """Quality search using linear extrapolation with a midpoint-probe safety net.
 
-    Replaces V2's binary half-steps toward the codec boundary (when both known
-    points are on the same side) with **linear extrapolation**: given two
-    same-side points, it projects where the quality curve would cross zero and
-    jumps directly there.  On a monotonic linear curve this finds the crossing
-    in O(1) steps instead of O(log N).
-
-    A **midpoint-probe safety net** is added for the edge case where the outward
-    direction is exhausted (the boundary has actually been tested and both points
-    are still on the same side): one midpoint probe is inserted before declaring
-    full exhaustion, catching non-monotonic curves that V2 would miss.
-
-    V3 is a drop-in replacement for V2 — same ``QualitySearchBase`` interface,
-    same constructor signature.
+    Given two same-side points, projects where the quality curve crosses zero
+    and jumps directly there — O(1) steps on a monotonic linear curve.  When
+    the outward direction is exhausted (boundary tested, both points still on
+    the same side), one midpoint probe runs before declaring full exhaustion.
 
     When ``quality_better == quality_worse``, the first ``record()`` call
     records the result and returns ``None`` (single fixed quality value).
@@ -1711,21 +1688,12 @@ class QualitySearchV3(QualitySearchBase):
         else:
             closer_p, further_p = p2, p1
 
-        # For proportional extrapolation we need both points to have real metrics.
-        # Pass the two tested points as better_point/worse_point so that
-        # _compute_proportional_candidate can compute t from their metric values.
-        # The outward clamp (sentinel or best opposite-side tested point) is used
-        # only in _finalize_q to enforce the hard boundary.
-        #
-        # For two fails: closer_p is the fail nearest the target (smallest deficit).
-        #   better_point = closer_p, worse_point = further_p
-        #   t > 1 extrapolates past further_p toward quality_better (outward) ✓
-        #   t = 0.5 binary midpoint lands between the two fails (inward) — but
-        #   _finalize_q clamps to [outward_clamp, closer_p) so it still moves outward ✓
-        #
-        # For two passes: closer_p is the pass nearest the target (smallest surplus).
-        #   better_point = closer_p, worse_point = further_p
-        #   t > 1 extrapolates past further_p toward quality_worse (outward) ✓
+        # Order the points as better_point=closer_p, worse_point=further_p so
+        # that t > 1 extrapolates outward, past further_p toward the relevant
+        # boundary (quality_better for two fails, quality_worse for two
+        # passes).  The t = 0.5 binary fallback would land inward, between the
+        # two points, but _finalize_q clamps against outward_clamp so the step
+        # still moves outward.
         if p1.is_pass:
             fail_points   = [pt for pt in self._attempted_points.values() if pt.is_fail]
             outward_clamp = min(fail_points, key=lambda pt: abs(pt.score)) if fail_points else QualityPoint(self._quality_worse, 0, None)

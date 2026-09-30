@@ -10,7 +10,7 @@ Responsibilities:
   from the filesystem — and expose it on ``JobPhaseResult``.
 - Persist ``job.yaml`` as the :class:`File` dump only
   (``{source: {path, file_size_bytes?}}``) and validate it against the live
-  file (path + size); the resolution re-probe comparison is gone.
+  file (path + size).
 - Propagate ``force_wipe=True`` to downstream phases when ``--force`` is
   provided and a source mismatch is detected.
 """
@@ -156,8 +156,8 @@ class JobPhase(Phase[JobPhaseResult]):
         1. Remove a leftover ``job.yaml.tmp`` from an interrupted write.
         2. Load the :class:`~pyqenc.stream_model.JobSidecar` (the ``File``
            dump); when absent or unparseable the phase is pending (must
-           create). A pre-stream-model ``job.yaml`` does not parse as the
-           shrunk schema — it is treated as absent and rebuilt (pre-alpha
+           create). A ``job.yaml`` written by an older version does not parse
+           as this schema — it is treated as absent and rebuilt (pre-alpha
            policy: no mid-work upgrades).
         3. Compare the persisted source identity (path + ``file_size_bytes``)
            against live values. On mismatch: with ``--force`` set
@@ -364,8 +364,7 @@ class JobPhase(Phase[JobPhaseResult]):
     ) -> list[tuple[str, object, object]]:
         """Compare the persisted source identity against the live file.
 
-        Checks the persisted path and ``file_size_bytes`` only (Req 1.5) —
-        the resolution re-probe comparison is gone with the fast-video slice.
+        Checks the persisted path and ``file_size_bytes`` only.
 
         Args:
             persisted: The sidecar's recorded :class:`File`.

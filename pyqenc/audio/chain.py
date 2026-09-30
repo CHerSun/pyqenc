@@ -18,10 +18,9 @@ Two concerns live here:
   fully generic: it holds the accumulating invariant ``-af`` chain, the current
   layout, the effective output format, and the current filter's most recent
   measurement result, and drives each filter through :meth:`FilterType.resolve`.
-  It contains **zero** filter-type-specific logic (Req 6.5). A filter finishes
+  It contains **zero** filter-type-specific logic. A filter finishes
   the instant it returns ``needs_pass=False``; at that moment its fragment is
-  frozen and ``last_output`` is cleared so it can never leak to the next filter
-  (Req 6.3).
+  frozen and ``last_output`` is cleared so it can never leak to the next filter.
 
 The ffmpeg run callable is **injectable** (``runner`` parameter, defaulting to
 :func:`~pyqenc.utils.ffmpeg_runner.run_ffmpeg_async`) so tests drive the loop
@@ -84,8 +83,7 @@ FLAC_DEFAULT: EncodeParams = EncodeParams(
 FLAC is lossless and bitrate-agnostic, so ``bitrate_per_channel`` is a documented
 **unused placeholder** for the FLAC default — the executor emits ``-c:a flac``
 with **no** ``-b:a`` (FLAC ignores bitrate). It is realised as the executor's
-initial ``output_format`` rather than a synthetic filter injected into the chain
-(Req 4.7)."""
+initial ``output_format`` rather than a synthetic filter injected into the chain."""
 
 
 # ---------------------------------------------------------------------------
@@ -153,8 +151,8 @@ def resolve_chain(spec: ChainSpec, palette: dict[str, FilterInstance]) -> Resolv
 
     Inlines each referenced filter's params (by palette lookup) and computes the
     effective ``encode``: the **last** ``encode`` filter's format (last-encode-
-    wins, Req 4.8), or :data:`FLAC_DEFAULT` when the chain declares none
-    (Req 4.7). No synthetic FLAC filter is appended to ``filters``.
+    wins), or :data:`FLAC_DEFAULT` when the chain declares none. No synthetic
+    FLAC filter is appended to ``filters``.
 
     Args:
         spec:    The config-side chain definition (name + ordered filter names).
@@ -238,8 +236,8 @@ def chain_output_path(
     """Build the output path for a (track, chain) job.
 
     The name is ``<stream safe name> chain=<chain-name>.<ext>`` — the
-    stream's display name made filesystem-safe (Req 15.2 two-name pattern),
-    carrying the full per-track identity (track id, codec, lang, title,
+    stream's display name made filesystem-safe, carrying the full per-track
+    identity (track id, codec, lang, title,
     channels) so outputs never collide across tracks. The output **directory**
     is supplied by the caller (the phase owns its dedicated audio dir) rather
     than derived from the source's parent, so chain outputs never land next to
@@ -269,8 +267,7 @@ def _build_measurement_request(stream: AudioStream, af: str) -> FFmpegRequest:
     No file is produced (null output), and the filter reads its measured value
     from the result's ``stderr_lines``. The input is the stream itself
     (``stream.as_input()`` — the source file + the track's ``-map`` selector),
-    so the pass operates on exactly that audio stream; the explicit
-    single-stream map subsumes the old ``-vn/-sn/-dn`` drops (Req 7.5).
+    so the pass operates on exactly that audio stream.
 
     Args:
         stream: The source audio stream.
@@ -297,11 +294,9 @@ def _build_application_request(
 
     The input is the stream itself (``stream.as_input()`` — the source file +
     the track's ``-map`` selector), so the produced file contains ONLY that
-    audio stream; the explicit single-stream map subsumes the old
-    ``-vn/-sn/-dn`` drops (Req 7.5) and never resamples or retimes the audio.
+    audio stream; the single-stream map never resamples or retimes the audio.
 
-    Emits ``-af`` only when ``af`` is non-empty (an all-empty chain omits it,
-    Req 6.1). Emits ``-c:a <codec>``; for lossy codecs also ``-b:a <scaled>``
+    Emits ``-af`` only when ``af`` is non-empty (an all-empty chain omits it). Emits ``-c:a <codec>``; for lossy codecs also ``-b:a <scaled>``
     (bitrate scaled by the final layout's channel count). FLAC emits **no**
     ``-b:a`` (it ignores bitrate). The output goes through the runner's
     ``.tmp`` protocol with the target container's muxer (``flac`` → ``flac``,
@@ -347,18 +342,18 @@ async def execute_chain(
 ) -> LongPath:
     """Execute one (track, chain) job as a combined ``-af`` chain, split at passes.
 
-    The loop is fully generic (Req 6.5): it drives each filter through
+    The loop is fully generic: it drives each filter through
     :meth:`FilterType.resolve`, comma-joining non-empty fragments, running a
     measurement pass whenever a filter reports ``needs_pass`` and feeding only
     that single latest result back to the same filter. When a filter finishes it
     freezes its fragment into the invariant chain, adopts its ``out_layout``, and
-    clears ``last_output`` (Req 6.3). With K measuring filters the loop issues
-    exactly K measurement passes + 1 final application pass (Req 6.2, 6.4).
+    clears ``last_output``. With K measuring filters the loop issues
+    exactly K measurement passes + 1 final application pass.
 
     Args:
         resolved:   The resolved chain (inlined filters + effective ``encode``).
         stream:     The source audio stream — read from the source file through
-                    its own ``-map`` selector (Req 7.5).
+                    its own ``-map`` selector.
         output_dir: The dedicated directory the output file (and its ``.tmp``
                     sibling) is written to.
         runner:       The ffmpeg run callable (injectable for tests; defaults to

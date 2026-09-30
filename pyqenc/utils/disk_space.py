@@ -108,8 +108,7 @@ def estimate_required_space(
     """Estimate required disk space for pipeline execution.
 
     The direct-from-source pipeline materializes only encoding attempts and
-    final outputs, so the estimate covers exactly those (the extraction and
-    chunk-tree multiplier terms are gone with the files they described):
+    final outputs, so the estimate covers exactly those:
 
     - Attempts: ``total_pixels x (BITS_PER_PIXEL_ENCODED / 8) x AVG_ATTEMPTS_PER_CHUNK x num_strategies``
     - Final output: ``total_pixels x (BITS_PER_PIXEL_ENCODED / 8) x num_strategies``

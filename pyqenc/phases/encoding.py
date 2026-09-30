@@ -153,7 +153,7 @@ def _write_metrics_sidecar(
 
     Uses ``write_yaml_atomic`` so a crash during writing never leaves a partial
     sidecar.  Stores ALL measured metric values (not filtered to current targets)
-    so the CRF history is reusable when quality targets change (Req 6a.1).
+    so the CRF history is reusable when quality targets change.
 
     Args:
         attempt_path:     Path to the encoded attempt ``.mkv`` file.
@@ -209,8 +209,7 @@ def _write_encoding_result_sidecar(
     """Atomically write an encoding result sidecar when CRF search converges.
 
     Written as ``<chunk_id>.<res>.yaml`` in the strategy output directory.
-    Its presence marks the ``(chunk_id, strategy)`` pair as ``COMPLETE``
-    (Req 6b.1, 6b.2).
+    Its presence marks the ``(chunk_id, strategy)`` pair as ``COMPLETE``.
 
     Args:
         output_dir:      Strategy output directory.
@@ -316,7 +315,7 @@ def _pair_rows(
                         crf        = record.crf,
                         path       = pair.winning_file,
                         resolution = record.resolution,
-                        frame_count= 0,  # unknown on recovery (Req 14.2)
+                        frame_count= 0,  # unknown on recovery
                     ),
                     state   = ArtifactState.COMPLETE,
                 ))
@@ -331,8 +330,8 @@ def _pair_rows(
 def _orphan_strategy_rows(work_dir: Path, strategies: list[Strategy]) -> list[Artifact[StreamFile]]:
     """Rows for orphaned ``encoded/<strategy>/`` directories.
 
-    A strategy directory no longer selected by the current configuration has
-    no reconstructible entity (its Strategy object is gone) — the on-disk
+    A strategy directory absent from the current selection has no
+    reconstructible entity (its Strategy object is gone) — the on-disk
     product itself is the only identity left. Ledger-only rows (``wanted=
     False``): retained in place, never pending; deletion only via explicit
     cleanup.
@@ -356,7 +355,7 @@ def _orphan_strategy_rows(work_dir: Path, strategies: list[Strategy]) -> list[Ar
 
 
 # ---------------------------------------------------------------------------
-# Encoding recovery helpers (moved from recovery.py — Req 4.3)
+# Encoding recovery helpers
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -548,7 +547,7 @@ class ChunkEncoder:
             collector:         Metrics collector for per-attempt timing.
             crop_params:       Optional crop parameters to apply to every chunk attempt.
             cleanup_level:     Controls deletion of intermediate attempt files after
-                               a pair converges (Req 12.3).
+                               a pair converges.
             visual_hash:       When ``True``, prepend a deterministic emoji to every
                                chunk log line for visual distinction in parallel output.
             metrics_sampling:  Frame subsampling factor for quality metric generation.
@@ -717,19 +716,16 @@ class ChunkEncoder:
         encoded_dir = self._get_encoded_dir(strategy)
         encoded_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. Hard-link the winning .mkv
         dst_mkv = encoded_dir / winning_attempt.name
         if not dst_mkv.exists():
             _hardlink_or_copy(winning_attempt, dst_mkv)
 
-        # 2. Hard-link the winning quality graph (.png) if it exists
         src_graph = winning_attempt.with_suffix(".png")
         if src_graph.exists():
             dst_graph = encoded_dir / src_graph.name
             if not dst_graph.exists():
                 _hardlink_or_copy(src_graph, dst_graph)
 
-        # 3. Write the encoding result sidecar into encoded/
         _write_encoding_result_sidecar(
             output_dir  = encoded_dir,
             chunk_id    = chunk_id,
@@ -740,8 +736,8 @@ class ChunkEncoder:
             targets_met = targets_met,
         )
 
-        # 4. Intermediate cleanup: delete all attempt files for this pair from encoding/
-        #    (Req 6.6, 12.3) — only after the hard-link and sidecar are safely written.
+        # Intermediate cleanup: delete all attempt files for this pair from
+        # encoding/ — only after the hard-link and sidecar are safely written.
         if self._cleanup_level >= CleanupLevel.INTERMEDIATE:
             encoding_dir = self._get_output_dir(strategy)
             if encoding_dir.exists():
@@ -1012,7 +1008,7 @@ class ChunkEncoder:
                         error       = error_msg,
                     )
 
-                # Preservation invariant (Req 9.6): attempts of the same chunk
+                # Preservation invariant: attempts of the same chunk
                 # must encode the same frames — a differing count is an error.
                 attempt_frame_count = run_result.frame_count or 0
                 if attempt_frame_count > 0:
@@ -1031,8 +1027,8 @@ class ChunkEncoder:
                             error       = f"Attempt frame count mismatch for {chunk.safe_name()}",
                         )
                     last_frame_count = attempt_frame_count
-                    # Vocal cross-check vs the detector-derived chunk count
-                    # (Req 9.5): ±1 boundary disagreement is an expected
+                    # Vocal cross-check vs the detector-derived chunk count:
+                    # ±1 boundary disagreement is an expected
                     # artifact of seek-target rounding, not a lost frame.
                     if chunk.frame_count > 0 and attempt_frame_count != chunk.frame_count:
                         logger.warning(
@@ -1220,7 +1216,7 @@ def build_encoded_chunk(
     resolution:   str,
     frame_count:  int,
 ) -> EncodedChunk:
-    """Compose the winning attempt as an :class:`EncodedChunk` (Req 14).
+    """Compose the winning attempt as an :class:`EncodedChunk`.
 
     The attempt's own video stream: crop empty by construction (applied
     during the encode), frame count from the encode run, info from the
@@ -1433,7 +1429,7 @@ async def _encode_chunks_parallel(
                         crf          = name_record.crf,
                         path         = pair_recovery.winning_file,
                         resolution   = name_record.resolution,
-                        frame_count  = 0,  # unknown on recovery (Req 14.2)
+                        frame_count  = 0,  # unknown on recovery
                     )
                     result.reused_count += 1
                     complete_pairs.add((chunk.safe_name(), strategy.display_name()))
@@ -1540,11 +1536,13 @@ def encode_all_chunks(
     """Encode all chunks with quality-targeted CRF adjustment.
 
     This is the main entry point for the encoding phase. It handles:
-    - Pre-validating crop params against ``encoding.yaml`` (Req 3.5)
-    - Writing ``encoding.yaml`` with current crop params (Req 2.4)
-    - Calling ``recover_attempts`` to classify all ``(chunk, strategy)`` pairs
-    - Skipping ``COMPLETE`` pairs and resuming ``PARTIAL`` pairs
+    - Classifying all ``(chunk, strategy)`` pairs via
+      ``_recover_encoding_attempts``
+    - Skipping ``COMPLETE`` pairs and resuming pending pairs
     - Parallel encoding of chunks that need work
+
+    ``encoding.yaml`` persistence and probe-mismatch validation are owned by
+    ``EncodingPhase``.
 
     Args:
         chunks:            List of chunk windows to encode.
@@ -1555,15 +1553,12 @@ def encode_all_chunks(
         max_parallel:      Maximum concurrent encoding processes
         force:             If False, reuse existing encodings that meet current targets
         dry_run:           If True, only report what would be done without encoding
-        crop_params:       Crop parameters to apply uniformly to every chunk attempt.                           When ``None``, no cropping is applied.
+        crop_params:       Crop parameters to apply uniformly to every chunk attempt.
                            When ``None``, no cropping is applied.
-        encoding_yaml:     Optional path to ``encoding.yaml`` for crop pre-validation
-                           and persistence.  When provided, crop pre-validation
-                           and ``encoding.yaml`` persistence are enabled.
+        encoding_yaml:     Unused — ``encoding.yaml`` persistence is owned by
+                           ``EncodingPhase``.
         cleanup_level:     Controls deletion of intermediate attempt files after each
-                           pair converges (Req 6.6, 12.3).
-        collector:         Metrics collector; passed through to
-                           ``_encode_chunks_parallel`` for timing and convergence tracking.
+                           pair converges.
         metrics_sampling:  Frame subsampling factor for quality metric generation.
                            Passed through to ``ChunkEncoder`` and then to
                            ``QualityEvaluator.evaluate_chunk``.
@@ -1576,7 +1571,7 @@ def encode_all_chunks(
         len(chunks), len(strategies), len(quality_targets),
     )
 
-    # --- Stale .tmp cleanup (Req 7.7) ---
+    # Stale .tmp cleanup
     encoding_base = work_dir / ENCODING_WORKSPACE_DIR
     if encoding_base.exists():
         for tmp_file in encoding_base.rglob(f"*{TEMP_SUFFIX}"):
@@ -1586,12 +1581,7 @@ def encode_all_chunks(
             except OSError as e:
                 logger.warning("Could not remove stale temp file %s: %s", tmp_file, e)
 
-    # --- Step 2: Write encoding.yaml (Req 2.4) — handled by EncodingPhase ---
-    # encoding.yaml persistence and probe mismatch validation are owned by
-    # EncodingPhase._recover() and _execute(). encoding_yaml is
-    # always None when called from the Phase path.
-
-    # --- Step 3: Artifact recovery via _recover_encoding_attempts (Req 3.6) ---
+    # Artifact recovery: classify every (chunk, strategy) pair.
     chunk_ids      = [c.safe_name() for c in chunks]
     strategy_names = [s.display_name() for s in strategies]
     phase_recovery = _recover_encoding_attempts(work_dir, chunk_ids, strategy_names)
@@ -1663,7 +1653,7 @@ def encode_all_chunks(
     return result
 
 # ---------------------------------------------------------------------------
-# EncodingPhase — Phase object (task 9)
+# EncodingPhase — Phase object
 # ---------------------------------------------------------------------------
 
 @_dataclass
@@ -1697,8 +1687,8 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
     """Phase object for CRF-search chunk encoding.
 
     Owns artifact enumeration, recovery, invalidation, execution, and logging
-    for the encoding phase.  Wraps the existing ``encode_all_chunks`` helper.
-    The uniform run footprint is inherited from :class:`Phase`.
+    for the encoding phase.  Execution delegates to the ``encode_all_chunks``
+    helper. The uniform run footprint is inherited from :class:`Phase`.
 
     Args:
         config: Full pipeline configuration.
@@ -1975,7 +1965,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             logger.critical(err)
             return self._make_result(PhaseOutcome.FAILED, [], err)
 
-        # Preservation invariant (Req 9.1/9.7): Σ winning-attempt frame counts
+        # Preservation invariant: Σ winning-attempt frame counts
         # must equal the source count. Recovered winners without a known count
         # (0 sentinel) skip the check with a warning — the final-merge
         # verification remains the hard backstop.

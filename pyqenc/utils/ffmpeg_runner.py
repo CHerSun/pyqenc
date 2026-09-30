@@ -158,12 +158,7 @@ _PROGRESS_FLAGS: list[str] = ["-hide_banner", "-nostats", "-progress", "pipe:1"]
 
 
 def _format_seconds(value: float) -> str:
-    """Format a window bound for ``-ss``/``-t``.
-
-    Plain ``str(float)`` reproduces the pre-request formatting at every
-    converted call site (seek-target flooring to microseconds is a
-    direct-from-source wiring decision and lands with that spec task).
-    """
+    """Format a window bound for ``-ss``/``-t`` as plain ``str(float)``."""
     return str(value)
 
 

@@ -421,9 +421,9 @@ def merge_final(
 def measure_quality(
     source_video:             Path,
     work_dir:                 Path,
+    metrics_sampling:         int,
     target_videos:            list[Path]        | None = None,
     crop_params:              CropParams | None = None,
-    metrics_sampling:         int               = 3,
     screenshot_count:         int | None        = DEFAULT_SCREENSHOT_COUNT,
     screenshot_interval:      str | None        = None,
     width:                    int | None        = None,
@@ -449,7 +449,7 @@ def measure_quality(
                                   computation. Pass ``None`` to auto-load from
                                   ``job.yaml`` in ``work_dir`` if present; pass an
                                   empty ``CropParams`` to explicitly disable cropping.
-        metrics_sampling:         Frame subsampling factor (≥1, default 3).
+        metrics_sampling:         Frame subsampling factor (≥1).
         screenshot_count:         Screenshots to capture from each video (≥1, default 20).
                                   In interval mode, acts as a cap on the total count.
         screenshot_interval:      Interval string between screenshots in interval mode
@@ -486,7 +486,7 @@ def measure_quality(
         target_videos            = target_videos or [],
         work_dir                 = work_dir,
         crop_params              = crop_params,
-        metrics_sampling         = metrics_sampling,
+        sampling                  = metrics_sampling,
         width                    = width,
         screenshot_count         = screenshot_count,
         screenshot_interval      = parsed_interval,

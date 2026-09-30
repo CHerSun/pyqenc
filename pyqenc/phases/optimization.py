@@ -84,7 +84,7 @@ class OptimizationPhaseResult(PhaseResult):
     Attributes:
         winners: The winning test attempts — one ``Artifact[EncodedChunk]``
                  per (test chunk, strategy) pair. The single sanctioned
-                 exception to the consumption-graph rule (Req 5.2): nothing
+                 exception to the consumption-graph rule: nothing
                  downstream consumes them, but carrying the winners keeps
                  this phase structurally identical to EncodingPhase (same
                  result shape, same sort-into-fields step) so the base run
@@ -306,7 +306,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         # Step 5 — the per-pair ledger: one Artifact[EncodedChunk] row per
         # (test chunk, strategy) winning attempt, presence-based via the
-        # shared attempt-recovery machinery (Req 8).
+        # shared attempt-recovery machinery.
         self._test_chunks = self._resolve_test_chunks(persisted)
         if self._strategies_to_test and not self._test_chunks:
             raise RecoveryError("No chunks available from ChunkingPhase")
@@ -338,7 +338,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         return _select_test_chunks(chunks)
 
     def _pair_ledger(self, work_dir: Path, strategies: list[Strategy]) -> list[Artifact]:
-        """The per-pair ledger plus orphaned-strategy rows (Req 8.1/8.2)."""
+        """The per-pair ledger plus orphaned-strategy rows."""
         from pyqenc.phases.encoding import _orphan_strategy_rows, _pair_rows
 
         rows: list[Artifact] = _pair_rows(work_dir, self._test_chunks, strategies)
@@ -737,7 +737,7 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
     attempts from ``encoding/`` and re-evaluate them from scratch.
 
     Called when quality targets or ``metrics_sampling`` change, since both
-    invalidate the previously selected winners and their recorded metrics.
+    invalidate the selected winners and their recorded metrics.
 
     If the strategy list does not cover all subdirs present (e.g. strategies
     were renamed), wipes the entire ``encoded/`` base directory as a fallback

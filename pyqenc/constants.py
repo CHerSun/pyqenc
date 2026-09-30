@@ -71,9 +71,7 @@ within a phase.  Combined with a ``MetricKey`` prefix it forms keys such as
 ``"encoding.quality_measure"`` and ``"merge.quality_measure"``.  Using a shared
 constant ensures the suffix is identical across all phases that measure quality."""
 BRACKET_LEFT = "｟"
-"""Left bracket symbol for visually distinct log formatting."""
 BRACKET_RIGHT = " ｠"
-"""Right bracket symbol for visually distinct log formatting."""
 UP_ARROW="↑"
 DOWN_ARROW="↓"
 LEFT_ARROW="←"
@@ -188,21 +186,16 @@ FFMPEG_NULL_SINK  = "-"
 # ---------------------------------------------------------------------------
 # Output-container muxers
 # ---------------------------------------------------------------------------
-# The shared ffmpeg runner writes every file output to a ``.tmp`` sibling first
-# (atomicity). The ``.tmp`` extension carries no container hint, so ffmpeg cannot
-# infer the muxer from the extension and needs an explicit ``-f <muxer>``. Each
-# call site supplies the correct muxer for its target container (per the project
-# ffmpeg philosophy: be explicit about the container). When a caller supplies no
-# muxer, the runner defaults to ``matroska`` (the historical behaviour for all
-# video outputs).
+# The runner writes every file output to a ``.tmp`` sibling (atomicity), and the
+# ``.tmp`` extension carries no container hint — so each call site supplies an
+# explicit ``-f <muxer>``; the runner default is ``matroska``.
 
 FFMPEG_MUXER_MATROSKA = "matroska"
 """Default ``-f`` muxer for ``.tmp`` outputs — Matroska (all video call sites)."""
 FFMPEG_MUXER_FLAC     = "flac"
-"""``-f`` muxer for raw FLAC audio outputs (``.flac``)."""
 FFMPEG_MUXER_IPOD     = "ipod"
-"""``-f`` muxer for MP4/M4A audio outputs (``.m4a``) — the conventional ffmpeg
-muxer for an ``.m4a`` audio-only container."""
+"""``-f`` muxer for ``.m4a`` audio-only containers — ffmpeg's conventional
+choice (not derivable from the extension)."""
 FFMPEG_MUXER_IMAGE2   = "image2"
 """``-f`` muxer for single-frame PNG screenshot outputs written through the
 ``.tmp`` protocol (the ``.tmp`` extension hides the image container hint)."""
@@ -230,7 +223,7 @@ extension falls back to the runner default (Matroska)."""
 FILENAME_FORBIDDEN_CHARS: frozenset[str] = frozenset('<>:"/\\|?*')
 """Characters forbidden in a chain name because they are unsafe in filenames on
 common filesystems (Windows especially). A chain name containing any of these —
-or any control character (U+0000–U+001F) — is rejected at config load (Req 8.4)."""
+or any control character (U+0000–U+001F) — is rejected at config load."""
 
 FILENAME_CONTROL_CHARS: frozenset[str] = frozenset(chr(code) for code in range(0x20))
 """Control characters (U+0000–U+001F) — unsafe in filenames alongside
@@ -238,7 +231,7 @@ FILENAME_CONTROL_CHARS: frozenset[str] = frozenset(chr(code) for code in range(0
 
 FILENAME_SANITIZATION_REPLACEMENT = "_"
 """Replacement character for :func:`pyqenc.utils.naming.sanitize_filesystem_text`
-— media-sourced free text is sanitized by replacement, never rejected (Req 15.2)."""
+— media-sourced free text is sanitized by replacement, never rejected."""
 
 SELECTOR_KEY_LANG  = "lang"
 """Conventional-string token key for an audio track's language (e.g. ``lang=eng``)."""
@@ -253,11 +246,9 @@ STDERR_TAIL_LINES = 20
 ``_drain_stderr``.  These lines are available for error logging after the
 subprocess exits."""
 
-# Visual hash emoji pool
-# Classification: East Asian Width property of the base codepoint.
-#   WIDE — eaw == "W": renders as 2 terminal columns in monospace fonts.
-#          No variation-selector suffix (U+FE0F) — those render inconsistently.
-# Used for chunk log prefixes (consistent 2-column alignment).
+# Visual hash emoji pool — East-Asian-Width "W" codepoints only (2 terminal
+# columns each in monospace fonts); no variation-selector suffixes (U+FE0F),
+# which render inconsistently.
 
 VISUAL_HASH_EMOJIS_WIDE: list[str] = [
     # Animals

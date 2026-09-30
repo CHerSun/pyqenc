@@ -302,7 +302,7 @@ class AudioSidecar(BaseModel):
     """Sidecar model for the audio phase (``audio.yaml``).
 
     Records ONLY a compact, per-chain **signature** for each chain this work-dir
-    is committed to, keyed by chain name (Req 9.1). ``select`` is deliberately
+    is committed to, keyed by chain name. ``select`` is deliberately
     NOT persisted: selection is a pure function of the current extracted tracks
     plus the current ``select`` config, recomputed for free every run, so there
     is nothing to track across runs.
@@ -318,9 +318,9 @@ class AudioSidecar(BaseModel):
 
     The sidecar records committed **intent**, decoupled from completion —
     completion is always read from the presence of output files on disk, never
-    inferred from this sidecar (Req 9.6). A differing or removed chain (detected
+    inferred from this sidecar. A differing or removed chain (detected
     by signature comparison) triggers invalidation of that chain's on-disk
-    outputs (Req 9.2, 9.3, 9.4).
+    outputs.
 
     On-disk shape (``audio.yaml``)::
 
@@ -384,7 +384,7 @@ class AudioSidecar(BaseModel):
     def save(self, path: Path) -> None:
         """Write this ``AudioSidecar`` to *path* atomically.
 
-        Uses the ``.tmp``-then-rename protocol (Req 9.7). Creates parent
+        Uses the ``.tmp``-then-rename protocol. Creates parent
         directories as needed.
 
         Args:

@@ -134,22 +134,21 @@ class AudioPhase(Phase[AudioPhaseResult]):
     def _recover(self) -> Recovery:
         """Resolve the plan, invalidate changed chains, classify on-disk outputs.
 
-        Steps (Req 9.x, 10.x):
+        Steps (in execution order):
 
-        1. ``force_wipe`` (Req 9.9) → delete every chain output and the sidecar.
-        2. Clean up leftover ``.tmp`` files (Req 8.5).
-        3. Resolve the working track set (``resolve_selection`` — select is never
-           persisted, Req 9.1) and every configured chain
-           (``resolve_chain``).
+        1. Resolve the working track set (``resolve_selection`` — select is
+           never persisted) and every configured chain (``resolve_chain``).
+        2. ``force_wipe`` → delete every chain output and the sidecar.
+        3. Clean up leftover ``.tmp`` files.
         4. Compare each resolved chain against the persisted sidecar entry of the
-           same name (Req 9.2). For a **differing** chain, delete its on-disk
-           outputs for ALL tracks by exact chain-name match (Req 9.4) so they are
+           same name. For a **differing** chain, delete its on-disk
+           outputs for ALL tracks by exact chain-name match so they are
            reproduced. For a chain **removed** from config, delete its persisted
            outputs (cleanup — unwanted now).
         5. Write the updated sidecar (current resolved chains) **before producing
-           anything** (Req 9.5) when it differs from what is on disk.
+           anything** when it differs from what is on disk.
         6. Classify each expected (track, chain) output COMPLETE (file present) /
-           ABSENT (missing) — completion is read from disk only (Req 9.6).
+           ABSENT (missing) — completion is read from disk only.
 
         Returns:
             The :class:`Recovery` single source of truth (internal artifact
@@ -162,22 +161,20 @@ class AudioPhase(Phase[AudioPhaseResult]):
         audio_cfg   = job_result.config.audio
         force_wipe  = job_result.force_wipe
 
-        # Step 3 — resolve the working plan (selection is recomputed every run).
+        # Step 1 — resolve the working plan (selection is recomputed every run).
         tracks   = self._selected_tracks()
         resolved = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
 
-        # Chain outputs go to the phase's DEDICATED audio directory (Phase
-        # Contract: each phase owns its own folder). Deletion / .tmp-cleanup /
-        # surplus scanning / production all use this dir — never the extraction
-        # dir. Created up front so producing can write into it.
+        # The phase-owned audio output dir — created up front so producing
+        # can write into it.
         audio_dir = self._output_dir(tracks, work_dir)
         audio_dir.mkdir(parents=True, exist_ok=True)
 
-        # Step 1 — force wipe.
+        # Step 2 — force wipe.
         if force_wipe:
             self._force_wipe(audio_dir, sidecar_path, resolved)
 
-        # Step 2 — clear leftover .tmp files.
+        # Step 3 — clear leftover .tmp files.
         self._clean_tmp(audio_dir)
 
         # Step 4 + 5 — invalidate differing/removed chains and rewrite the sidecar
@@ -188,17 +185,14 @@ class AudioPhase(Phase[AudioPhaseResult]):
         return Recovery.from_artifacts(self._classify(audio_dir, tracks, resolved))
 
     def _output_dir(self, tracks: list[AudioStream], work_dir: LongPath) -> LongPath:
-        """Return the phase's DEDICATED audio output directory (``work_dir/audio``).
+        """Return the phase's dedicated audio output directory (``work_dir/audio``).
 
-        The audio phase owns this folder (Phase Contract). Chain outputs are
-        written here — never next to the source tracks — so all deletion,
-        ``.tmp``-cleanup, surplus-scanning, and production operate on one
-        phase-owned directory regardless of where the sources live. The
-        ``tracks`` argument is accepted for a uniform signature but no longer
-        influences the location.
+        All chain outputs, deletion, ``.tmp``-cleanup, surplus-scanning, and
+        production operate on this one phase-owned directory regardless of
+        where the source tracks live.
 
         Args:
-            tracks:   The working track set (unused; kept for signature uniformity).
+            tracks:   Unused (the location depends only on *work_dir*).
             work_dir: The job work directory.
 
         Returns:
@@ -212,11 +206,10 @@ class AudioPhase(Phase[AudioPhaseResult]):
         sidecar_path: LongPath,
         resolved:     dict[str, ResolvedChain],
     ) -> None:
-        """Delete every chain output and the sidecar (Req 9.9).
+        """Delete every chain output and the sidecar.
 
-        The dedicated audio dir holds only chain outputs, but the
-        ``chain=<name>`` token guard is kept (extra-safe): only files carrying it
-        are removed, so any unrelated file dropped into the dir survives.
+        Only files carrying the ``chain=<name>`` token are removed, so any
+        unrelated file dropped into the dedicated audio dir survives.
 
         Args:
             audio_dir:    The dedicated audio output directory.
@@ -245,7 +238,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
                 logger.warning("Could not remove temp file %s: %s", tmp, exc)
 
     def _selected_tracks(self) -> list[AudioStream]:
-        """Resolve the working track set from extraction + ``audio.select`` (Req 9.1)."""
+        """Resolve the working track set from extraction + ``audio.select``."""
         extraction_result = self._dep_result(ExtractionPhase)
         audio_streams: list[AudioStream] = [
             a.payload for a in extraction_result.audio_streams
@@ -261,11 +254,11 @@ class AudioPhase(Phase[AudioPhaseResult]):
     ) -> None:
         """Delete outputs of differing/removed chains, then commit the sidecar.
 
-        Compares each resolved chain to the persisted sidecar (Req 9.2). A
-        differing chain's outputs are deleted for all tracks (reproduced,
-        Req 9.3/9.4); a removed chain's persisted outputs are deleted (cleanup).
-        The updated sidecar is written **before any output is produced**
-        (Req 9.5); when nothing differs the rewrite is skipped (the sidecar is
+        Compares each resolved chain to the persisted sidecar. A
+        differing chain's outputs are deleted for all tracks (reproduced);
+        a removed chain's persisted outputs are deleted (cleanup). The
+        updated sidecar is written **before any output is produced**;
+        when nothing differs the rewrite is skipped (the sidecar is
         already correct).
 
         Args:
@@ -295,14 +288,14 @@ class AudioPhase(Phase[AudioPhaseResult]):
             logger.info("Chain %r removed from config — cleaning up its outputs", name)
             self._delete_chain_outputs(audio_dir, name)
 
-        # Commit the current signatures before producing (Req 9.5). Skip the
-        # rewrite when the sidecar already matches exactly (Req 9.5 last sentence).
+        # Commit the current signatures before producing. Skip the rewrite
+        # when the sidecar already matches exactly.
         if prior_sigs != current_sigs:
             current.save(sidecar_path)
             logger.debug("Committed audio sidecar (%d chain(s)) before producing", len(resolved))
 
     def _delete_chain_outputs(self, audio_dir: LongPath, chain_name: str) -> None:
-        """Delete on-disk outputs of ``chain_name`` by EXACT chain-name (Req 9.4).
+        """Delete on-disk outputs of ``chain_name`` by EXACT chain-name.
 
         Output files are ``<stream safe name> chain=<name>.<ext>``. The trailing
         ``chain=<name>`` token is parsed from each candidate and compared for
@@ -333,14 +326,14 @@ class AudioPhase(Phase[AudioPhaseResult]):
     ) -> list[Artifact]:
         """Build one row per expected (track, chain), classified from disk.
 
-        Completion is read solely from output-file presence (Req 9.6): present →
+        Completion is read solely from output-file presence: present →
         COMPLETE, missing → ABSENT. Expected rows carry an
         :class:`~pyqenc.stream_model.AudioOutput` payload composed at the
         chain-output materialization site. Any present file that is not an
         expected output of a configured chain is surfaced as present-but-
-        unwanted (``COMPLETE``, ``wanted=False``) per the Phase Contract
-        (Req 9.8) — the producing entity no longer exists, so the on-disk
-        product itself (a :class:`~pyqenc.stream_model.File`) is the payload.
+        unwanted (``COMPLETE``, ``wanted=False``) — its chain is gone from
+        the config, so the on-disk product itself (a
+        :class:`~pyqenc.stream_model.File`) is the payload.
 
         Args:
             audio_dir: The dedicated audio output directory.
@@ -392,11 +385,11 @@ class AudioPhase(Phase[AudioPhaseResult]):
 
         Pending artifacts (ABSENT / PARTIAL) are produced one at a time through
         :func:`~pyqenc.audio.chain.execute_chain`, advancing a count-based
-        :class:`ProgressBar` (total = pending job count, Req 10.6). A
+        :class:`ProgressBar` (total = pending job count). A
         ``passthrough`` chain raises ``NotImplementedError`` and a failing chain
         raises ``ChainExecutionError``; both are caught per-job and surfaced as a
         FAILED artifact for that output — the phase never crashes on one bad
-        chain (Req 11.1, 11.4). ``dry_run`` is never ``True`` here (audio is not
+        chain. ``dry_run`` is never ``True`` here (audio is not
         a readonly-execute phase; the template previews instead).
 
         Args:
@@ -472,7 +465,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
             output_dir: The dedicated audio output directory.
 
         Raises:
-            NotImplementedError: For a ``passthrough`` chain (Req 11).
+            NotImplementedError: For a ``passthrough`` chain.
             ChainExecutionError: When a measurement or application pass fails.
         """
         asyncio.run(execute_chain(chain, output.stream, output_dir))
@@ -520,7 +513,7 @@ def _parse_chain_name(filename: str) -> str | None:
     """Return the exact chain name from a ``<stream safe name> chain=<name>.<ext>`` filename.
 
     Splits on the ``chain=`` suffix delimiter and strips the extension, returning
-    the chain name verbatim for exact-match invalidation (Req 9.4). Returns
+    the chain name verbatim for exact-match invalidation. Returns
     ``None`` when the filename carries no ``chain=`` token (not a chain output).
 
     Args:

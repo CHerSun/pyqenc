@@ -12,7 +12,7 @@ end-of-stream marker rather than a frame.
 A total involves no windowing, so the format's millisecond rounding cannot
 cause boundary-attribution errors — this is the exact, free source frame
 count the frame-preservation invariant builds on (spec
-``2026-09-25 file-stream-model``, Req 9.2).
+``2026-09-25 file-stream-model``).
 """
 # CHerSun 2026
 

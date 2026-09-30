@@ -310,12 +310,12 @@ def streams_filter_plain_regex(
 # ---------------------------------------------------------------------------
 
 def _expected_index_path(work_dir: Path) -> Path:
-    """The per-frame PTS index location — the single owning site (Req 3.4)."""
+    """The per-frame PTS index location — the single owning site."""
     return work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
 
 
 def _expected_chapters_path(work_dir: Path) -> Path:
-    """The extracted chapter edition location (fixed-constant name, Req 2.2)."""
+    """The extracted chapter edition location (fixed-constant name)."""
     return work_dir / EXTRACTED_DIR / CHAPTERS_FILENAME
 
 
@@ -420,7 +420,7 @@ def _extract_timestamps(
 type _ExtractionRow = Artifact[
     VideoStream | AudioStream | SubtitleStream | AttachmentStream | Chapters
 ]
-"""One ledger row of the extraction phase (Req 7)."""
+"""One ledger row of the extraction phase."""
 
 
 @dataclass
@@ -451,7 +451,7 @@ class ExtractionPhaseResult(PhaseResult):
 
     @property
     def timestamps_path(self) -> Path | None:
-        """The per-frame PTS index path — derived; ``None`` when absent (Req 3.5)."""
+        """The per-frame PTS index path — derived; ``None`` when absent."""
         if self.video_stream is None or self.video_stream.state != ArtifactState.COMPLETE:
             return None
         assert self.work_dir is not None, "work_dir set on every phase-built result"
@@ -571,7 +571,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         self._normalize_extracted_paths(work_dir)
 
         # The filter selects extractable streams only — the video row's wanted
-        # is the pipeline mode, never the filter (Req 3.3).
+        # is the pipeline mode, never the filter.
         selected = streams_filter_plain_regex(
             [
                 *self._audio,
@@ -595,7 +595,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
         if self._video is not None:
             # The video artifact: a virtual stream whose single expected
-            # material component is the per-frame PTS index (Req 3.1/3.2) —
+            # material component is the per-frame PTS index —
             # COMPLETE iff the index is present; no PARTIAL (both producer
             # paths write through .tmp-then-rename, so presence implies a
             # complete write). The stream's existence in the source is a
@@ -801,8 +801,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         freshly enumerated inventory), runs the disk-space estimate on the
         real video stream data, then produces each ``ABSENT`` row's component
         by payload type — the video row's extractor path IS the per-frame PTS
-        index path (the TimestampArtifact fold, Req 3.1). ``dry_run`` is never
-        ``True`` here (extraction is not a readonly-execute phase; the
+        index path. ``dry_run`` is never ``True`` here (extraction is not a readonly-execute phase; the
         template previews instead).
 
         Args:
@@ -932,7 +931,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         source:    Path,
         errors:    list[str],
     ) -> None:
-        """Dump one attachment through the file-trust rule (Req 7.7).
+        """Dump one attachment through the file-trust rule.
 
         ``-dump_attachment`` writes directly (not a muxer output), so the
         phase wraps it: the dump targets a ``.tmp`` sibling, renamed to the
@@ -1018,10 +1017,9 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
     def finalize(self, ctx: FinalizeContext) -> None:
         """Perform end-of-run housekeeping for the extraction phase.
 
-        ``extracted/`` keeps its surviving small content (timestamps,
-        chapters, subtitles, attachments) — deep cleanup no longer deletes it
-        (Req 11.4); reproducibility is guaranteed by the atomic write
-        protocol, and the artifacts are cheap to keep.
+        No-op: ``extracted/`` content (timestamps, chapters, subtitles,
+        attachments) survives deep cleanup — the atomic write protocol
+        guarantees reproducibility, and the artifacts are cheap to keep.
 
         Args:
             ctx: Pre-resolved end-of-run decisions from the runner.
@@ -1050,8 +1048,8 @@ def _log_stream_table(
     - Present: ``✔`` if ``row.state`` is ``COMPLETE`` else ``✘``
                (completeness only; ``ABSENT`` and ``PARTIAL`` both show ``✘``).
     - Name:    The payload's ``display_name()`` — no per-artifact-type
-               dispatch (Req 9.4); the chapters row shows its fixed-constant
-               file name (nothing generated to pair, Req 2.5).
+               dispatch; the chapters row shows its fixed-constant
+               file name (nothing generated to pair).
 
     Stream-table asymmetry is honest: the video row's "Present" means
     "index extracted" (real work); audio rows are pure virtual.

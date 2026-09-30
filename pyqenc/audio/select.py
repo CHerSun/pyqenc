@@ -4,25 +4,24 @@
 ``audio.select`` config into the *working track set* — the tracks that chains
 will then process. It is a **pure** function: it matches user regexes against
 each track's conventional string (:meth:`AudioStream.selector_string`) and
-returns a subset of the given tracks. It performs no I/O and never re-probes
-(Requirement 7.6).
+returns a subset of the given tracks. It performs no I/O and never re-probes.
 
-Selection model (Requirement 5):
+Selection model:
 
 - **Empty/absent ``select``** → every track is selected, original order
-  preserved (Req 5.3).
+  preserved.
 - **Per entry, independently** — candidates are the tracks whose conventional
-  string matches ``for`` and (when set) do *not* match ``exclude`` (Req 5.5).
+  string matches ``for`` and (when set) do *not* match ``exclude``.
   Matching is case-insensitive (``re.IGNORECASE``); the conventional string
   itself is never lower-cased so it stays faithful (e.g. ``ch=5.1(side)``).
 - **Within an entry**, ``prefer`` tiers are evaluated in order: the first tier
   matching ≥1 candidate wins and contributes *all* of its matching candidates;
-  tiers are never merged (Req 5.6). If no tier matches, the implicit fallback
-  contributes all candidates (Req 5.7). With no ``prefer``, all candidates are
-  contributed (Req 5.8).
+  tiers are never merged. If no tier matches, the implicit fallback
+  contributes all candidates. With no ``prefer``, all candidates are
+  contributed.
 - **Across entries**, picks are *additive*: the per-entry sets are unioned into
-  the working set, and a track picked by more than one entry appears once
-  (Req 5.9). Order follows the original track order for determinism.
+  the working set, and a track picked by more than one entry appears once.
+  Order follows the original track order for determinism.
 
 Dedup key: the track's ``path``. Each extracted audio track is written to its
 combination, so ``(file path, track_id)`` is the robust,
@@ -68,7 +67,7 @@ def resolve_selection(
 
 
 def _pick_entry(tracks: list[AudioStream], entry: SelectEntry) -> list[AudioStream]:
-    """Return the tracks a single select entry contributes (Req 5.5–5.8).
+    """Return the tracks a single select entry contributes.
 
     Args:
         tracks: All extracted tracks.
@@ -96,5 +95,5 @@ def _pick_entry(tracks: list[AudioStream], entry: SelectEntry) -> list[AudioStre
         if tier_matches:
             return tier_matches
 
-    # No tier matched any candidate — implicit fallback is all candidates (Req 5.7).
+    # No tier matched any candidate — implicit fallback is all candidates.
     return candidates

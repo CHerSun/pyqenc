@@ -1,9 +1,4 @@
-"""
-Unified visualization and quality metrics analysis for video encoding pipeline.
-
-Consolidates metric parsing, statistics computation, and plot generation
-from the legacy metrics_visualization module.
-"""
+"""Unified visualization and quality metrics analysis for video encoding pipeline."""
 # CHerSun 2026
 
 import asyncio
@@ -485,9 +480,9 @@ def create_unified_plot(
     Raises:
         ValueError: If ``df_norm`` contains no recognized metric columns.
     """
-    # Callers pass the exact rational ``fps_fraction`` (Req 9.9) — coerce to
-    # float here so every x-axis arithmetic stays float (Fraction + float
-    # index would produce object-dtype arrays matplotlib cannot plot).
+    # Callers pass the exact rational ``fps_fraction`` — coerce to float here
+    # so every x-axis arithmetic stays float (Fraction + float index would
+    # produce object-dtype arrays matplotlib cannot plot).
     if fps is not None:
         fps = float(fps)
 
@@ -764,32 +759,9 @@ def create_unified_plot(
                                 message="This figure includes Axes that are not compatible with tight_layout")
         plt.tight_layout(pad=_TIGHT_LAYOUT_PAD)
 
-    # -----------------------------------------------------------------------
-    # Summary boxes — why fig.text() and NOT ax.text()
-    # -----------------------------------------------------------------------
-    # When a twinx() axes is present it sits in a separate axes layer that is
-    # rendered on top of ax_main in the figure's stacking order.  Any text
-    # added via ax_main.text(..., transform=ax_main.transAxes) lives in
-    # ax_main's layer and is therefore drawn *under* the twinx axes — meaning
-    # the twinx grid lines and background patch overdraw it regardless of the
-    # zorder value set on the Text artist (zorder only sorts within one axes).
-    #
-    # The fix: use fig.text() with figure-level coordinates so the text is
-    # composited in the figure layer, which is always above all axes layers.
-    #
-    # The coordinate conversion (axes → figure) must happen AFTER tight_layout()
-    # because tight_layout repositions the axes; computing the transform before
-    # that call would produce stale coordinates and misplace the boxes.
-    #
-    # What NOT to do:
-    #   - ax.text(..., zorder=<large number>) — zorder is intra-axes only.
-    #   - iterating gridlines and setting their zorder — seaborn styles render
-    #     the grid as part of the axes background, not as Line2D artists, so
-    #     get_xgridlines() / get_ygridlines() may return nothing useful.
-    #   - switching to a "darkgrid" or "whitegrid" seaborn style and hoping
-    #     rcParams["axes.grid"] = False suppresses it — it does not fully
-    #     suppress the background patch that carries the grid texture.
-    # -----------------------------------------------------------------------
+    # Summary boxes use fig.text() (figure-layer coordinates): ax.text would be
+    # drawn under the twinx axes — zorder only sorts within one axes. The
+    # axes→figure transform must run after tight_layout, which repositions axes.
     axes_to_fig = ax_main.transAxes + fig.transFigure.inverted()
     for ax_x, ax_y, text, bbox_kw in _summary_boxes:
         fx, fy = axes_to_fig.transform((ax_x, ax_y))
@@ -981,10 +953,7 @@ def create_crf_plot(
 ) -> None:
     """Create a quality-parameter-over-time plot and save it to disk.
 
-    Layout mirrors ``create_unified_plot`` exactly for side-by-side comparison:
-    same figure size, same gridspec (main + stats row), dual Y-axes both
-    labeled with *quality_label*, same x-axis formatter (``HH:MM:SS`` / seconds,
-    two lines), same summary box, same DPI.
+    Layout mirrors ``create_unified_plot`` for side-by-side comparison.
 
     Args:
         chunks:        List of ``(start_seconds, end_seconds, quality_value)`` tuples,
@@ -1007,8 +976,8 @@ def create_crf_plot(
     plt.style.use("seaborn-v0_8")
     plt.rcParams["axes.grid"] = False
 
-    # Mirror create_unified_plot: 2 rows × 3 columns (same ratios/spacing as 3-metric plot)
-    # The stats subplot spans all 3 columns so the main plot width matches exactly.
+    # 2 rows × 3 columns; the stats subplot spans all 3 columns so the main
+    # plot width matches the 3-metric metrics plot.
     _N_STAT_COLS: int = 3
     fig = plt.figure(figsize=(_FIG_WIDTH, _FIG_HEIGHT))
     gs  = fig.add_gridspec(
@@ -1039,7 +1008,7 @@ def create_crf_plot(
     ax_left.set_title(title, fontsize=_FONT_TITLE, fontweight="bold", pad=20)
     ax_left.tick_params(axis="x", labelsize=_FONT_AXIS_TICKS_X)
 
-    # X-axis: seconds, formatted as HH:MM:SS / s (two lines to match metrics plot height)
+    # X-axis: seconds, formatted as HH:MM:SS / s (two lines like the metrics plot)
     x_min = float(starts.min())
     x_max = float(ends.max())
     x_pad = (x_max - x_min) * _X_PADDING_RATIO
@@ -1074,7 +1043,7 @@ def create_crf_plot(
     )
     ax_left.legend([line], [quality_label], loc="lower right", fontsize=_FONT_LEGEND, framealpha=_LEGEND_ALPHA)
 
-    # Stats subplot — same structure as metric subplots in create_unified_plot
+    # Stats subplot
     crf_series  = pd.Series(crfs)
     crf_stats   = compute_statistics(crf_series, std_cutoff_max=_CRF_Y_MAX)
 
@@ -1106,7 +1075,7 @@ def create_crf_plot(
     ax_stats.grid(True, axis="x", alpha=_GRID_ALPHA_MAJOR, zorder=0)
     ax_stats.set_axisbelow(True)
 
-    # Summary box — same pattern as create_unified_plot (fig.text after tight_layout)
+    # Summary box — fig.text after tight_layout
     summary_text = (
         f"{quality_label}:\n"
         f"  Chunks: {len(chunks)}\n"
@@ -1236,20 +1205,19 @@ class QualityEvaluator:
         if not result.success:
             logger.warning("Metrics run had non-zero exit code: %d", result.returncode)
 
-        # Build artifact paths — .tmp files stay as-is, no rename.
-        # VIF data is embedded in the VMAF JSON (via feature=name=vif), so
-        # vif_log points to the same file as vmaf_json — explicit for clarity.
+        # Build artifact paths — .tmp files stay as-is, no rename. VIF is
+        # embedded in the VMAF JSON (feature=name=vif), so vif_log shares the
+        # vmaf_json path.
         vmaf_tmp = output_dir / f"{tmp_prefix}{MetricType.VMAF.value}.tmp"
         artifacts = QualityLogs(
             psnr_log  = output_dir / f"{tmp_prefix}{MetricType.PSNR.value}.tmp",
             ssim_log  = output_dir / f"{tmp_prefix}{MetricType.SSIM.value}.tmp",
             vmaf_json = vmaf_tmp,
-            vif_log   = vmaf_tmp,   # VIF is parsed from the same VMAF JSON
+            vif_log   = vmaf_tmp,
             plot      = None,
         )
 
-        # Warn for any missing tmp file (ffmpeg failure).
-        # vif_log intentionally shares the vmaf_json path — only check distinct paths.
+        # Warn for any missing tmp file (ffmpeg failure); distinct paths only.
         checked: set[Path] = set()
         for attr, path in [
             ("psnr_log",  artifacts.psnr_log),
@@ -1481,8 +1449,8 @@ class QualityEvaluator:
             chunk_start_seconds = chunk_start_seconds,
         )
 
-        # Delete tmp files after both parse_metrics and create_unified_plot have consumed them.
-        # vif_log and vmaf_json may share the same path — use a set.
+        # Delete tmp files after both parse_metrics and create_unified_plot have
+        # consumed them; the set dedups the shared VIF/VMAF path.
         to_delete: set[Path] = set()
         for path in (
             artifacts_for_parse.psnr_log,

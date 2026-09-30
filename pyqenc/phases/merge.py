@@ -86,10 +86,10 @@ def _targets_as_strings(targets: list[QualityTarget]) -> list[str]:
 
 
 def _expected_output_path(merged_dir: Path, source_stem: str, strategy: Strategy) -> Path:
-    """The merged output location — the single derivation site (Req 15.8).
+    """The merged output location — the single derivation site.
 
     ``<file stem> <strategy.safe_name()>.mkv`` below ``merged/``; names are
-    safe by construction (Req 15.6).
+    safe by construction.
     """
     return merged_dir / f"{source_stem} {strategy.safe_name()}.mkv"
 
@@ -460,8 +460,8 @@ def _collect_crf_data(
     """Extract ``(start_seconds, end_seconds, crf)`` tuples for a strategy's winners.
 
     Reads the winning attempts via their payloads — ``payload.crf`` and the
-    window through ``payload.chunk`` (the chunk id re-parser is gone: chunk-id
-    parsing belongs to :meth:`VideoStreamChunk.parse_chunk_id`).
+    window through ``payload.chunk`` (chunk-id parsing belongs to
+    :meth:`VideoStreamChunk.parse_chunk_id`).
 
     Args:
         winners:  The encoding phase's winner rows.
@@ -506,8 +506,7 @@ class MergePhase(Phase[MergePhaseResult]):
     """Phase object for final video merging.
 
     Owns artifact enumeration, recovery, execution, and logging for the merge
-    phase.  Wraps the existing ``merge_final_video`` helper. The uniform run
-    footprint is inherited from :class:`Phase`.
+    phase. The uniform run footprint is inherited from :class:`Phase`.
 
     In pipeline mode encoded chunks are read directly from
     ``EncodingPhase.result`` without rescanning the filesystem.  In standalone
@@ -739,11 +738,11 @@ class MergePhase(Phase[MergePhaseResult]):
                     state   = ArtifactState.ABSENT,
                 ))
 
-        # Surface present-but-unwanted surplus outputs (a strategy dropped from
-        # the selection whose merged file still exists). The producing entity
-        # no longer exists — the on-disk product itself (a File) is the
-        # payload. Retained in place, never pending; deletion only via
-        # explicit cleanup.
+        # Surface present-but-unwanted surplus outputs (a strategy absent from
+        # the selection whose merged file still exists — its Strategy object
+        # is gone, so the on-disk product itself, a File, is the payload).
+        # Retained in place, never pending; deletion only via explicit
+        # cleanup.
         if merged_dir.exists():
             for output_file in sorted(merged_dir.glob("*.mkv")):
                 if output_file.name in expected_names:
@@ -872,7 +871,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 final_rows.append(artifact)
                 continue
 
-            # The merge output name derives at the single site (Req 15.8).
+            # The merge output name derives at the single site.
             output_file = _expected_output_path(merged_dir, source_stem, strategy)
             assert output_file == payload.output_path, "recovery derived the same location"
             logger.info("Merging: %s", strategy_name)
@@ -1110,7 +1109,7 @@ class MergePhase(Phase[MergePhaseResult]):
         """Read the winning ``EncodedChunk`` objects from ``EncodingPhase.result``.
 
         The composed objects are resolved once by the shared dependency walk —
-        path via ``stream.file.path`` (Req 14: no duplicated fields).
+        path via ``stream.file.path`` (no duplicated fields).
 
         Returns:
             Nested dict mapping chunk IDs to strategy-name-to-``EncodedChunk``.

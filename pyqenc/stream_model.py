@@ -248,14 +248,14 @@ class Stream[InfoT: StreamInfo](BaseModel):
         )
 
     def display_name(self) -> str:
-        """Display name — identity fields verbatim, any symbols, never on disk (Req 15.2).
+        """Display name — identity fields verbatim, any symbols, never on disk.
 
         Contract method: every concrete stream class overrides it.
         """
         raise NotImplementedError
 
     def safe_name(self) -> str:
-        """The display name made filesystem-safe (Req 15.2 two-name pattern).
+        """The display name made filesystem-safe (the two-name pattern).
 
         The same name with every filesystem-unsafe character replaced through
         the shared sanitize primitive — the form used wherever a stream's
@@ -293,7 +293,7 @@ class AudioStream(Stream[AudioStreamInfo]):
         the layout's faithful source token (``ChannelLayout.original``) so a
         user's select regex matches the source layout exactly (e.g.
         ``ch=5.1(side)``). Derived purely from the enumerated info fields —
-        a display string (Req 15.2), never used on disk.
+        a display string, never used on disk.
 
         Returns:
             The conventional string (e.g. ``"lang=eng ch=5.1(side) title=Surround"``).
@@ -345,7 +345,7 @@ class AttachmentStream(Stream[AttachmentStreamInfo]):
 def _display_tags(info: StreamInfo) -> list[str]:
     """Shared identity tags for display names: language and the title verbatim.
 
-    Display names carry identity fields as-is (Req 15.2); the filesystem-safe
+    Display names carry identity fields as-is; the filesystem-safe
     form is :meth:`Stream.safe_name`, never a pre-sanitized display name.
     """
     tags: list[str] = []
@@ -442,7 +442,7 @@ class VideoStreamChunk(BaseModel):
 
     @staticmethod
     def _format_window(start_ts: float, end_ts: float) -> str:
-        """The window in natural separators — the single name generator (Req 15.10).
+        """The window in natural separators — the single name generator.
 
         ``HH:MM:SS.mmm-HH:MM:SS.mmm``; the chunk id (:meth:`safe_name`) is this
         display form with the time separators substituted, never a second
@@ -531,7 +531,7 @@ class VideoStreamChunk(BaseModel):
 # ---------------------------------------------------------------------------
 
 class EncodedAttemptName(BaseModel):
-    """The typed record parsed from an encoded attempt's file name (Req 15.5).
+    """The typed record parsed from an encoded attempt's file name.
 
     The name carries only part of a composed identity — recovery joins this
     record against phase results rather than pretending the name reconstructs
@@ -553,7 +553,7 @@ class EncodedChunk(BaseModel):
     construction (applied during the encode); the attempt's
     :class:`VideoStreamInfo` is populated eagerly, once, after the encode.
 
-    This class owns the attempt-file name family (Req 15.5): the name is a
+    This class owns the attempt-file name family: the name is a
     pure function of the composed identity, generation and parsing living
     here as a strict inverse pair — presence-based recovery is trustworthy
     only because ``parse(format(x)) == x`` is pinned by tests.
@@ -607,10 +607,10 @@ class EncodedChunk(BaseModel):
 class Chapters(BaseModel):
     """The container's chapter edition — an extraction payload, not a stream.
 
-    Container-level (no ``track_id``, no ``-map`` selector; file-stream-model
-    Req 2.5). Its file name is the fixed constant ``chapters.xml`` — not a
-    generated name, nothing to pair (Req 15.10); the extracted location
-    derives at the extraction phase's single owning site.
+    Container-level (no ``track_id``, no ``-map`` selector). Its file name is
+    the fixed constant ``chapters.xml`` — not a generated name, nothing to
+    pair; the extracted location derives at the extraction phase's single
+    owning site.
 
     Attributes:
         file: The source file the edition belongs to (identity anchor).
@@ -629,7 +629,7 @@ class AudioOutput(BaseModel):
     ``stream.info.layout``, codec via the chain resolvable from
     ``chain_name`` + config). Disk name follows the existing derivation: the
     stream's safe name plus ``" chain=<name>"``, the extension appended at the
-    materialization site (file-stream-model Req 15.7).
+    materialization site.
 
     Attributes:
         stream:     The source audio stream the output was produced from.
@@ -658,8 +658,7 @@ class MergedVideo(BaseModel):
 
     Composes the strategy with the source identity needed for naming plus the
     measured facts consumers need. The output name materializes from
-    ``<file stem> <strategy>.mkv`` at the merge phase's single derivation site
-    (file-stream-model Req 15.8).
+    ``<file stem> <strategy>.mkv`` at the merge phase's single derivation site.
 
     Attributes:
         source_stem:  The source file's name stem (naming identity).
@@ -728,8 +727,7 @@ class _SourceSidecarBase(BaseModel):
 class JobSidecar(_SourceSidecarBase):
     """The ``job.yaml`` slice: the :class:`File` dump under the ``source`` key.
 
-    The shrunk schema — job-level cached heuristics are gone; the persisted
-    path + size are the source-mismatch comparison basis.
+    The persisted path + size are the source-mismatch comparison basis.
     """
 
 

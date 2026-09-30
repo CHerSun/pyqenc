@@ -33,11 +33,6 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Internal probe helpers (module-level, not part of public API)
-
-
-
-# ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
 
@@ -116,7 +111,7 @@ class Strategy(BaseModel):
     def display_name(self) -> str:
         """Display name — the composed identity, verbatim (``'slow+h265-aq'``).
 
-        The single generator (Req 15.10); the safe form is :meth:`safe_name`.
+        The single generator; the safe form is :meth:`safe_name`.
         """
         return f"{self.preset}+{self.profile}"
 

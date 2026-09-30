@@ -7,17 +7,11 @@ Metrics are accumulated throughout a pipeline run and persisted incrementally to
 ``metrics.yaml`` in the work directory root using the `.tmp`-then-rename atomic
 write protocol.  The report survives interruptions and resumes across runs.
 
-Usage (orchestrator)::
+Usage::
 
     collector = YamlMetricsCollector(work_dir=config.work_dir)
-    registry  = _build_registry(config, collector)
     # ... run phases ...
-    collector.flush(partial=False)
-
-Usage (standalone / tests)::
-
-    collector = NoOpMetricsCollector()
-    registry  = _build_registry(config, collector)
+    collector.flush()
 """
 
 from __future__ import annotations
@@ -56,11 +50,11 @@ import logging
 import math
 import threading
 import time as _time
-from dataclasses import (  # noqa: F401  (field used in ConvergenceAccumulator — task 5)
+from dataclasses import (  # noqa: F401
     dataclass,
     field,
 )
-from datetime import datetime  # noqa: F401  (used in flush — task 7)
+from datetime import datetime  # noqa: F401
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -264,13 +258,9 @@ class PipelineMetrics(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Interrupt-flush registry
+# Interrupt-flush registry — reached directly by the CLI SIGINT handler
+# (never through the runner) to flush partial timing before ``os._exit``.
 # ---------------------------------------------------------------------------
-#
-# Symmetric with ffmpeg's ``_live_procs`` / ``kill_all_ffmpeg`` in
-# ``ffmpeg_runner``: the collectors own their own registry, and the CLI SIGINT
-# handler reaches this registry (never through the runner) to flush partial
-# timing before ``os._exit``.
 
 _live_collectors_lock: threading.Lock = threading.Lock()
 _live_collectors: set[YamlMetricsCollector] = set()

@@ -9,10 +9,6 @@ plus the stream duration at load time, and each chunk's frame count derives
 from the detector-reported boundary frames (the last chunk closes against
 the source total) — Σ chunk counts telescope to the source count by
 construction.
-
-The FFV1/remux split machinery, ``ChunkingMode`` and the ``chunks/``
-directory are gone: positioning is timestamp-based and frame-exactness is a
-verified invariant, not positional machinery.
 """
 # CHerSun 2026
 
@@ -135,7 +131,7 @@ def build_chunks(
     Every boundary opens a ``[start, end)`` window; each window's frame count
     is the difference of consecutive detector-reported boundary frames, the
     last closing against the source total. The counts telescope, so
-    ``Σ chunk.frame_count == stream.frame_count`` by construction (Req 9.4).
+    ``Σ chunk.frame_count == stream.frame_count`` by construction.
 
     Args:
         boundaries: Scene boundaries in order (the first at the stream start).
@@ -240,8 +236,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         """Determine ``chunking.yaml`` currency: absent boundaries or current.
 
         Steps:
-        1. If ``force_wipe``: delete ``chunking.yaml`` and any legacy
-           ``chunks/`` directory from the pre-spec pipeline.
+        1. If ``force_wipe``: delete ``chunking.yaml``.
         2. Load scene boundaries from ``chunking.yaml``; pending when absent
            or empty (detection must run), current otherwise.
 

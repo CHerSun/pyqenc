@@ -285,8 +285,7 @@ def _resolve_crop(
 def _load_job_source_path(job_yaml: Path) -> LongPath | None:
     """Read the source path recorded in ``job.yaml`` (the File dump).
 
-    Interim reader for the crop fallback's source-identity check; measure
-    adopts the stream-model loaders when its phase migrates.
+    Serves the crop fallback's source-identity check.
 
     Args:
         job_yaml: The ``job.yaml`` path.
@@ -369,8 +368,7 @@ def _load_video_stream(path: Path) -> VideoStream:
 
     Composes a :class:`~pyqenc.stream_model.File` with a freshly probed
     :class:`~pyqenc.stream_model.VideoStreamInfo` (fast facet of the first
-    video stream) — the stream-model replacement for the ad-hoc
-    ``VideoMetadata`` instances this module used to build (deleted in Task 9).
+    video stream).
 
     Args:
         path: The video file to probe.

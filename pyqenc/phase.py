@@ -67,7 +67,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Strategy is now defined in models.py and re-exported here for convenience.
+# Strategy — re-exported from models.py for convenience.
 # ---------------------------------------------------------------------------
 
 
@@ -144,7 +144,7 @@ class PhaseResult:
 
         Dataclass-fields introspection over the concrete result class,
         ``Artifact``-typed fields only, in declaration order — the declared
-        fields are the contract (Req 6.2). Plain settings/run-parameter
+        fields are the contract. Plain settings/run-parameter
         fields never contribute. Field names come from the dataclass field
         list itself, so this is the one sanctioned dynamic access in the
         codebase.
@@ -285,35 +285,13 @@ class Phase[ResultT: PhaseResult]:
                  and ``.result`` then carry the concrete type with no casts,
                  overloads, or base-module imports (no circular dependencies).
 
-    The single concrete ``run()`` below owns the run footprint shared by every
-    phase, in this exact order:
-
-    1. In-run memoization guard — a cached ``self.result`` is returned
-       verbatim: no re-resolution, no banner, no re-classification.
-    2. ``_skip_check()`` — phase-specific skip (e.g. optimization disabled);
-       reads constructor state (config) only, never dependency results.
-    3. ``_ensure_dependencies()`` — shared dependency walk; a ``FAILED``
-       dependency chains a typed ``FAILED`` result with one ERROR line, a
-       ``PENDING`` one (dry-run only) chains a typed ``PENDING`` with one
-       INFO line. No banner is emitted on either short-circuit.
-    4. Banner — iff the ``BANNER`` class flag; exactly once, after deps.
-    5. ``_log_key_params()`` — key-parameter logging.
-    6. Timed ``_recover()`` under the top-level ``recovery`` metric key;
-       returns the :class:`Recovery` single source of truth. A
-       :class:`RecoveryError` converts to a typed ``FAILED`` result.
-    7. ``log_recovery_line`` over the unfiltered internal artifact list
-       (skipped when the phase has no artifacts).
-    8. Dry-run branch — unless ``_DRY_RUN_READONLY``: ``PENDING`` when work
-       remains, otherwise the reused result. No writes happen.
-    9. No pending work — the phase-built reused result (``REUSED``).
-    10. Timed ``_execute(wanted, dry_run)`` under the phase's top-level
-        metric key. The concrete phase alone decides ``COMPLETED`` /
-        ``FAILED``; returning ``PENDING`` from ``_execute`` violates the
-        contract and the runner fails loudly on it.
-
-    The template never decides ``COMPLETED`` / ``FAILED`` and never computes
-    per-phase payloads — those live in the phase hooks. Timing, banner, guards
-    and the wanted-filter exist exactly once, here.
+    The single concrete ``run()`` owns the run footprint shared by every
+    phase, in exact order: memoization guard → ``_skip_check()`` → dependency
+    resolution → banner → timed ``_recover()`` → dry-run / no-pending
+    branches → timed ``_execute(wanted, dry_run)``. The template never
+    decides ``COMPLETED`` / ``FAILED`` and never computes per-phase payloads —
+    those live in the phase hooks; timing, banner, guards, and the
+    wanted-filter exist exactly once, here.
 
     Class attributes:
         name:              Human-readable phase name (logs, banners, summary).
@@ -712,9 +690,9 @@ def _build_registry(
     ``JobPhase`` receives all volatile per-run parameters (``source``,
     ``work_dir``, ``force``, ``cleanup``, ``no_metrics``) as plain kwargs and
     stores them on ``JobPhaseResult`` so all downstream phases can read them
-    via ``self._job.result.*``.  All other phases are constructed with only
-    ``(config, registry, collector=collector)`` — they never receive volatile
-    args directly.
+    via ``self._dep_result(JobPhase)``.  All other phases are constructed with
+    only ``(config, registry, collector=collector)`` — they never receive
+    volatile args directly.
 
     The registry is a plain ``dict`` keyed by phase *class* (not instance),
     preserving insertion order (Python 3.7+).
@@ -766,7 +744,7 @@ def _build_registry(
     registry: PhaseRegistry = {}
 
     # JobPhase receives all volatile kwargs — it stores them on JobPhaseResult
-    # so downstream phases can access them via self._job.result.*.
+    # so downstream phases can access them via _dep_result(JobPhase).
     registry[JobPhase] = JobPhase(
         config, registry,
         source     = source,
@@ -779,7 +757,7 @@ def _build_registry(
 
     # ExtractionPhase follows Job unconditionally.
     # video_required is forwarded so ExtractionPhase can skip video/timestamp
-    # extraction when running in audio-only mode (Task 9).
+    # extraction when running in audio-only mode.
     registry[ExtractionPhase] = ExtractionPhase(
         config, registry,
         video_required = video_required,
