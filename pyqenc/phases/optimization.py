@@ -98,9 +98,6 @@ class OptimizationPhaseResult(PhaseResult):
     winners:            list[Artifact[EncodedChunk]] = field(default_factory=list)
     selected_strategies: list[Strategy]              = field(default_factory=list)
 
-    # Transitional population (deleted in task 9 when the base field becomes
-    # the derived concatenation).
-
 
 # ---------------------------------------------------------------------------
 # OptimizationPhase
@@ -545,7 +542,6 @@ class OptimizationPhase(Phase):
         """
         return OptimizationPhaseResult(
             outcome             = outcome,
-            artifacts           = artifacts,  # transitional (task 9 derives it)
             message             = message,
             winners             = [
                 r for r in artifacts
@@ -628,7 +624,6 @@ class OptimizationPhase(Phase):
 
         return OptimizationPhaseResult(
             outcome             = PhaseOutcome.REUSED,
-            artifacts           = [],
             message             = "all-strategies mode — skipping optimization",
             selected_strategies = list(self._config.encoding.resolved_strategies),
         )

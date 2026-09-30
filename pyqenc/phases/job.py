@@ -298,7 +298,6 @@ class JobPhase(Phase):
         )
         return JobPhaseResult(
             outcome     = outcome,
-            artifacts   = artifacts,
             message     = message,
             file        = file_row,
             force_wipe  = self._force_wipe,

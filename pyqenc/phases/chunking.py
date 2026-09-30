@@ -191,9 +191,6 @@ class ChunkingPhaseResult(PhaseResult):
 
     chunks: list[Artifact[VideoStreamChunk]] = field(default_factory=list)
 
-    # Transitional population (deleted in task 9 when the base field becomes
-    # the derived concatenation).
-
 
 # ---------------------------------------------------------------------------
 # ChunkingPhase
@@ -384,7 +381,6 @@ class ChunkingPhase(Phase):
         """
         return ChunkingPhaseResult(
             outcome   = outcome,
-            artifacts = artifacts,
             message   = message,
             chunks    = chunks or [],
         )

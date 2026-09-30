@@ -80,7 +80,6 @@ def _make_registry(
 
     job_result = JobPhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
-        artifacts = [],
         message   = "job complete",
         file      = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         config    = config,
@@ -93,7 +92,7 @@ def _make_registry(
 
     extraction = ExtractionPhase(config, None, collector=collector)
     extraction.result = ExtractionPhaseResult(
-        outcome=PhaseOutcome.COMPLETED, artifacts=[], message="extraction",
+        outcome=PhaseOutcome.COMPLETED, message="extraction",
         video_stream=(
             Artifact(payload=stream.stream, state=ArtifactState.COMPLETE)
             if stream is not None else None
@@ -102,7 +101,7 @@ def _make_registry(
 
     probe = ProbePhase(config, None, collector=collector)
     probe.result = ProbePhaseResult(
-        outcome=PhaseOutcome.COMPLETED, artifacts=[], message="probe",
+        outcome=PhaseOutcome.COMPLETED, message="probe",
         stream=(
             Artifact(payload=stream, state=ArtifactState.COMPLETE)
             if stream is not None else None

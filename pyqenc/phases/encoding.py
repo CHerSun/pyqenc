@@ -1695,9 +1695,6 @@ class EncodingPhaseResult(PhaseResult):
     winners:        list[Artifact[EncodedChunk]] = field(default_factory=list)
     quality_labels: dict[str, str]               = field(default_factory=dict)
 
-    # Transitional population (deleted in task 9 when the base field becomes
-    # the derived concatenation).
-
     @property
     def encoded_chunks(self) -> dict[str, dict[str, EncodedChunk]]:
         """Derived lookup over the winners: chunk safe name -> strategy name
@@ -1908,7 +1905,6 @@ class EncodingPhase(Phase):
         """
         return EncodingPhaseResult(
             outcome        = outcome,
-            artifacts      = artifacts,  # transitional (task 9 derives it)
             message        = message,
             winners        = [
                 r for r in artifacts

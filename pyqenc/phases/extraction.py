@@ -795,7 +795,6 @@ class ExtractionPhase(Phase):
         """
         return ExtractionPhaseResult(
             outcome            = outcome,
-            artifacts          = list(artifacts),  # transitional (task 9 derives it)
             message            = message,
             video_stream       = next(
                 (r for r in artifacts if isinstance(r.payload, VideoStream)), None),

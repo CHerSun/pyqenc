@@ -34,7 +34,7 @@ pre-resolved ``FinalizeContext.deep_cleanup`` flag is set.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
 
@@ -126,22 +126,41 @@ class Artifact[PayloadT]:
 class PhaseResult:
     """Result returned by a phase's ``run()`` method.
 
+    ``artifacts`` is NOT storage: it is the derived, read-only concatenation
+    of the subclass's declared artifact fields (in declaration order) — the
+    external contract. Internal ledger rows (``wanted=False``, internal
+    artifacts) have no path into a result; phases place wanted rows into
+    their declared fields in ``_make_result``.
+
     Attributes:
-        outcome:   High-level outcome of the phase execution.
-        artifacts: Wanted artifacts only (``wanted=True``). Phases build a full
-                   internal recovery ledger in ``_recover()`` covering both
-                   wanted and unwanted entries, then filter to ``wanted=True``
-                   before constructing ``PhaseResult``. ``pending`` and
-                   ``complete`` derive from this list directly, so callers
-                   never need to filter by ``wanted`` themselves.
-        message:   The single human-readable string. On ``FAILED`` this IS the
-                   failure description; partial-failure detail (count plus
-                   identifiers) folds into it.
+        outcome: The phase outcome.
+        message: The single human-readable string. On ``FAILED`` this IS the
+                 failure description; partial-failure detail (count plus
+                 identifiers) folds into it.
     """
 
-    outcome:   PhaseOutcome
-    artifacts: list[Artifact]
-    message:   str
+    outcome: PhaseOutcome
+    message: str
+
+    @property
+    def artifacts(self) -> list[Artifact[object]]:
+        """Derived concatenation of the declared artifact fields.
+
+        Dataclass-fields introspection over the concrete result class,
+        ``Artifact``-typed fields only, in declaration order — the declared
+        fields are the contract (Req 6.2). Plain settings/run-parameter
+        fields never contribute. Field names come from the dataclass field
+        list itself, so this is the one sanctioned dynamic access in the
+        codebase.
+        """
+        rows: list[Artifact[object]] = []
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if isinstance(value, Artifact):
+                rows.append(value)
+            elif isinstance(value, list):
+                rows.extend(v for v in value if isinstance(v, Artifact))
+        return rows
 
     # ------------------------------------------------------------------
     # Derived helpers
@@ -158,19 +177,19 @@ class PhaseResult:
         return self.outcome in (PhaseOutcome.COMPLETED, PhaseOutcome.REUSED)
 
     @property
-    def complete(self) -> list[Artifact]:
+    def complete(self) -> list[Artifact[object]]:
         """Artifacts whose state is ``COMPLETE``."""
         return [a for a in self.artifacts if a.state == ArtifactState.COMPLETE]
 
     @property
-    def pending(self) -> list[Artifact]:
+    def pending(self) -> list[Artifact[object]]:
         """Artifacts that require active work this run.
 
         Includes only ``ABSENT`` (must produce) and ``PARTIAL`` (protected
-        investment needing the missing component). Since ``artifacts`` already
-        contains only ``wanted=True`` entries, no additional ``wanted``
-        filtering is needed here. Unwanted artifacts are excluded upstream and
-        never reach this property.
+        investment needing the missing component). Since the derived
+        ``artifacts`` lists only the declared (wanted) fields' rows, no
+        additional ``wanted`` filtering is needed here. Unwanted artifacts
+        stay internal and never reach this property.
         """
         return [
             a for a in self.artifacts

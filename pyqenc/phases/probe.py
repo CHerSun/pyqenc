@@ -71,9 +71,6 @@ class ProbePhaseResult(PhaseResult):
 
     stream: Artifact[ExtendedVideoStream] | None = field(default=None)
 
-    # Transitional population (deleted in task 9 when the base field becomes
-    # the derived concatenation).
-
     @property
     def crop(self) -> CropParams:
         """Resolved crop — derived from the stream artifact; empty when absent."""
@@ -304,7 +301,6 @@ class ProbePhase(Phase):
         """
         return ProbePhaseResult(
             outcome   = outcome,
-            artifacts = artifacts,
             message   = message,
             stream    = (
                 Artifact(payload=self._resolved, state=ArtifactState.COMPLETE)

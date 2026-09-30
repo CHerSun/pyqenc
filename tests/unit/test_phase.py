@@ -14,6 +14,7 @@ log stream (banner / recovery line), the collector's ``time`` calls, and
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock
@@ -37,6 +38,13 @@ from pyqenc.runner import Runner
 from pyqenc.state import ArtifactState
 
 _APP_CONFIG: AppConfig = load_app_config(default_only=True)
+
+
+@dataclass
+class _StubResult(PhaseResult):
+    """The stub's declared artifact contract: one list field."""
+
+    rows: list[Artifact] = field(default_factory=list)
 
 
 class _StubPhase(Phase):
@@ -85,8 +93,8 @@ class _StubPhase(Phase):
         artifacts: list[Artifact],
         message: str,
     ) -> PhaseResult:
-        return PhaseResult(
-            outcome=PhaseOutcome(outcome), artifacts=artifacts, message=message
+        return _StubResult(
+            outcome=PhaseOutcome(outcome), message=message, rows=list(artifacts),
         )
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> PhaseResult:

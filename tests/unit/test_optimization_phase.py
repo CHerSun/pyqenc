@@ -102,13 +102,11 @@ def _make_phase(
     pre-set to a COMPLETED typed result (the walk then treats them as already
     run without mocking phase internals).
     """
-    from pyqenc.phase import Artifact
     from pyqenc.phases.chunking import ChunkingPhase as _CP
     from pyqenc.phases.chunking import ChunkingPhaseResult
     from pyqenc.phases.job import JobPhase as _JP
     from pyqenc.phases.probe import ProbePhase as _PP
     from pyqenc.phases.probe import ProbePhaseResult
-    from pyqenc.state import ArtifactState
 
     job, work_dir = _make_job_phase(tmp_path, strategies, optimize=optimize, tolerance=tolerance, force=force)
     config = job._config  # already resolved AppConfig
@@ -117,7 +115,6 @@ def _make_phase(
     probe = _PP(config, phases, collector=MagicMock(), crop_params=None)  # type: ignore[arg-type]
     probe.result = ProbePhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
-        artifacts = [Artifact(payload=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
         message   = "probe complete",
         stream    = None,
     )
@@ -126,7 +123,6 @@ def _make_phase(
     chunking = _CP(config, phases, collector=MagicMock())  # type: ignore[arg-type]
     chunking.result = ChunkingPhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
-        artifacts = [Artifact(payload=work_dir / "chunks", state=ArtifactState.COMPLETE)],
         message   = "chunking complete",
         chunks    = [],
     )
@@ -426,7 +422,6 @@ class TestPairLedger:
         )
         chunking.result = ChunkingPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "chunking complete",
             chunks    = [Artifact(payload=c, state=ArtifactState.COMPLETE) for c in chunks],
         )

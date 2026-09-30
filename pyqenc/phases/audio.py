@@ -89,9 +89,6 @@ class AudioPhaseResult(PhaseResult):
 
     outputs: list[Artifact[AudioOutput]] = _field(default_factory=list)
 
-    # Transitional population (deleted in task 9 when the base field becomes
-    # the derived concatenation).
-
     @property
     def audio_files(self) -> list[Path]:
         """Paths of the complete outputs' delivery files."""
@@ -512,7 +509,6 @@ class AudioPhase(Phase):
         outputs = [r for r in artifacts if isinstance(r.payload, AudioOutput)]
         return AudioPhaseResult(
             outcome   = outcome,
-            artifacts = artifacts,  # transitional (task 9 derives it)
             message   = message,
             outputs   = outputs,
         )

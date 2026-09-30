@@ -497,9 +497,6 @@ class MergePhaseResult(PhaseResult):
 
     merged: list[Artifact[MergedVideo]] = field(default_factory=list)
 
-    # Transitional population (deleted in task 9 when the base field becomes
-    # the derived concatenation).
-
 
 # ---------------------------------------------------------------------------
 # MergePhase
@@ -795,7 +792,6 @@ class MergePhase(Phase):
         """
         return MergePhaseResult(
             outcome   = outcome,
-            artifacts = artifacts,  # transitional (task 9 derives it)
             message   = message,
             merged    = artifacts,
         )

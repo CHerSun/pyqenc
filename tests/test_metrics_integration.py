@@ -294,7 +294,6 @@ class TestExtractionPhaseTiming:
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
-            artifacts  = [],
             message    = "ok",
             force_wipe = False,
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
@@ -481,7 +480,6 @@ class TestChunkingPhaseTiming:
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
-            artifacts  = [],
             message    = "ok",
             force_wipe = False,
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
@@ -514,13 +512,13 @@ class TestChunkingPhaseTiming:
 
         extraction_mock = MagicMock(spec=ExtractionPhase)
         extraction_mock.result = ExtractionPhaseResult(
-            outcome=PhaseOutcome.COMPLETED, artifacts=[], message="ok",
+            outcome=PhaseOutcome.COMPLETED, message="ok",
             video_stream=stream.stream,
         )
 
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = ProbePhaseResult(
-            outcome=PhaseOutcome.COMPLETED, artifacts=[], message="ok",
+            outcome=PhaseOutcome.COMPLETED, message="ok",
             stream=Artifact(payload=stream, state=ArtifactState.COMPLETE),
         )
 
@@ -641,7 +639,6 @@ class TestAudioPhaseTiming:
         work_dir.mkdir(parents=True, exist_ok=True)
         job_result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
-            artifacts  = [],
             message    = "ok",
             force_wipe = False,
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
@@ -652,7 +649,6 @@ class TestAudioPhaseTiming:
 
         extraction_result = ExtractionPhaseResult(
             outcome      = PhaseOutcome.COMPLETED,
-            artifacts    = [],
             message      = "ok",
             video_stream = _make_video_stream_fixture(source),
         )
@@ -710,7 +706,6 @@ class TestAudioPhaseTiming:
 
         stub_result = AudioPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "ok",
         )
 
@@ -787,7 +782,6 @@ class TestOptimizationPhaseTiming:
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
-            artifacts  = [],
             message    = "ok",
             force_wipe = False,
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
@@ -806,7 +800,6 @@ class TestOptimizationPhaseTiming:
 
         return ChunkingPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "ok",
             chunks    = [Artifact(payload=chunk, state=ArtifactState.COMPLETE)],
         )
@@ -849,7 +842,6 @@ class TestOptimizationPhaseTiming:
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "probe complete",
             stream    = None,
         )
@@ -1073,7 +1065,6 @@ class TestEncodingPhaseTiming:
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
-            artifacts  = [],
             message    = "ok",
             force_wipe = False,
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
@@ -1092,7 +1083,6 @@ class TestEncodingPhaseTiming:
 
         return ChunkingPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "ok",
             chunks    = [Artifact(payload=chunk, state=ArtifactState.COMPLETE)],
         )
@@ -1103,7 +1093,6 @@ class TestEncodingPhaseTiming:
 
         return OptimizationPhaseResult(
             outcome           = PhaseOutcome.COMPLETED,
-            artifacts         = [],
             message           = "ok",
             selected_strategies = [_STRATEGY_SLOW_H265],
         )
@@ -1130,7 +1119,6 @@ class TestEncodingPhaseTiming:
 
         probe_result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "ok",
             stream    = None,
         )
@@ -1199,7 +1187,6 @@ class TestEncodingPhaseTiming:
 
         stub_result = EncodingPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "ok",
         )
 
@@ -1353,7 +1340,6 @@ class TestMergePhaseTiming:
 
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
-            artifacts  = [],
             message    = "ok",
             force_wipe = False,
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
@@ -1378,7 +1364,6 @@ class TestMergePhaseTiming:
         )
         return EncodingPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [winner],
             message   = "ok",
             winners   = [winner],
         )
@@ -1390,7 +1375,6 @@ class TestMergePhaseTiming:
 
         return AudioPhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "ok",
         )
 
@@ -1440,7 +1424,6 @@ class TestMergePhaseTiming:
         )
         extraction_result = ExtractionPhaseResult(
             outcome      = PhaseOutcome.COMPLETED,
-            artifacts    = [video_row],
             message      = "ok",
             video_stream = video_row,
             work_dir     = work_dir,
@@ -1458,7 +1441,6 @@ class TestMergePhaseTiming:
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "probe complete",
             stream    = None,
         )
@@ -1589,7 +1571,6 @@ class TestMergePhaseTiming:
         )
         extraction_result = ExtractionPhaseResult(
             outcome      = PhaseOutcome.COMPLETED,
-            artifacts    = [video_row],
             message      = "ok",
             video_stream = video_row,
             work_dir     = work_dir,
@@ -1607,7 +1588,6 @@ class TestMergePhaseTiming:
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
-            artifacts = [],
             message   = "probe complete",
             stream    = None,
         )

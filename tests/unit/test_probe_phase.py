@@ -51,7 +51,6 @@ def _make_job_result(work_dir: Path, source: Path) -> JobPhaseResult:
     """Return a COMPLETED JobPhaseResult carrying the source and work_dir."""
     return JobPhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
-        artifacts = [Artifact(payload=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message   = "job complete",
         work_dir  = work_dir,
         source    = source,
@@ -81,7 +80,6 @@ def _make_extraction_result(
     """
     return ExtractionPhaseResult(
         outcome      = PhaseOutcome.COMPLETED,
-        artifacts    = [],
         message      = "extraction complete",
         video_stream = (
             Artifact(payload=video_stream, state=ArtifactState.COMPLETE)

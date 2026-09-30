@@ -211,7 +211,6 @@ def _make_merge_phase(
     )
     job.result = JobPhaseResult(
         outcome    = PhaseOutcome.COMPLETED,
-        artifacts  = [Artifact(payload=work_dir / "job.yaml", state=ArtifactState.COMPLETE)],
         message    = "job complete",
         force_wipe = False,
         config     = config,
@@ -235,7 +234,6 @@ def _make_merge_phase(
     )
     extraction.result = ExtractionPhaseResult(
         outcome      = PhaseOutcome.COMPLETED,
-        artifacts    = [video_row],
         message      = "extraction complete",
         video_stream = video_row,
         work_dir     = work_dir,
@@ -245,7 +243,6 @@ def _make_merge_phase(
     probe = ProbePhase(config, registry, collector=collector, crop_params=None)
     probe.result = ProbePhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
-        artifacts = [Artifact(payload=work_dir / "probe.yaml", state=ArtifactState.COMPLETE)],
         message   = "probe complete",
         stream    = Artifact(
             payload = _extended_stream(source, frame_count),
@@ -261,7 +258,6 @@ def _make_merge_phase(
     )
     encoding.result = EncodingPhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
-        artifacts = [winner],
         message   = "encoding complete",
         winners   = [winner],
     )
@@ -270,7 +266,6 @@ def _make_merge_phase(
     audio = AudioPhase(config, registry, collector=collector)
     audio.result = AudioPhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
-        artifacts = [],
         message   = "audio complete",
     )
     registry[AudioPhase] = audio
