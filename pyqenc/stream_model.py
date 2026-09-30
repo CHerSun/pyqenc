@@ -37,6 +37,7 @@ are declared once on the annotated types below.
 
 from __future__ import annotations
 
+from abc import abstractmethod
 from dataclasses import replace
 from decimal import Decimal
 from fractions import Fraction
@@ -254,12 +255,12 @@ class Stream[InfoT: StreamInfo](BaseModel):
             selector = f"{FFMPEG_SELECTOR_PREFIX}{self.info.track_id}",
         )
 
+    @abstractmethod
     def display_name(self) -> str:
         """Display name — identity fields verbatim, any symbols, never on disk.
 
-        Contract method: every concrete stream class overrides it.
+        Contract method: every concrete stream class must implement it.
         """
-        raise NotImplementedError
 
     def safe_name(self) -> str:
         """The display name made filesystem-safe (the two-name pattern).
