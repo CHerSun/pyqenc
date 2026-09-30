@@ -124,15 +124,6 @@ class Strategy(BaseModel):
         """
         return sanitize_filesystem_text(self.display_name())
 
-    @property
-    def pre_input_args(self) -> tuple[str, ...]:
-        """The codec's pre-input stage (``-hwaccel`` / ``-init_hw_device`` / vulkan setup).
-
-        The encoder merges these into the encode request's input; the runner
-        emits them before the input's window flags and ``-i``.
-        """
-        return tuple(self.codec.pre_input_args)
-
     def to_output_args(self, quality: Decimal, vf_filter: str | None = None) -> list[str]:
         """Expand the codec's ``encoder_args`` template into the output-stage args.
 
@@ -352,17 +343,6 @@ class CodecConfig(BaseModel):
     def quality_worse(self) -> Decimal:
         """The quality value representing the *worse* end of the range (``quality_range[1]``)."""
         return self.quality_range[1]
-
-    @property
-    def quality_higher_is_better(self) -> bool:
-        """``True`` when a higher quality value means better quality (e.g. VBR bitrate).
-
-        Derived from ``quality_range``: when ``quality_range[0] > quality_range[1]``,
-        higher values are better (e.g. ``[99, 0]`` for Mbit/s).
-        When ``quality_range[0] < quality_range[1]``, lower values are better
-        (e.g. ``[0, 51]`` for CRF/CQ/QP).
-        """
-        return self.quality_range[0] > self.quality_range[1]
 
     @field_validator("quality_range", mode="before")
     @classmethod

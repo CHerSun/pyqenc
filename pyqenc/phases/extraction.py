@@ -220,13 +220,6 @@ def _attachment_info(raw: dict) -> AttachmentStreamInfo:
     )
 
 
-def _is_attachment(raw: dict) -> bool:
-    """Whether an ffprobe stream is an attachment (attached picture/font)."""
-    if (raw.get("disposition") or {}).get("attached_pic", 0) == 1:
-        return True
-    return str(_tags_of(raw).get("mimetype", "")).startswith("image/")
-
-
 def _enumerate_streams(
     data:    dict,
     source_file: File,
@@ -251,7 +244,9 @@ def _enumerate_streams(
 
     for raw in data.get("streams", []):
         codec_type = raw.get("codec_type", "")
-        if _is_attachment(raw):
+        # Attachment (attached picture/font): the disposition flag, or an image/* mimetype.
+        if (raw.get("disposition") or {}).get("attached_pic", 0) == 1 \
+                or str(_tags_of(raw).get("mimetype", "")).startswith("image/"):
             attachments.append(AttachmentStream(file=source_file, info=_attachment_info(raw)))
         elif codec_type == "video":
             video.append(VideoStream(file=source_file, info=_video_info(raw)))
@@ -730,8 +725,12 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
     def _persist_sidecar(self, sidecar_path: Path) -> None:
         """Write the inventory to ``extraction.yaml`` (the unique info slices)."""
+        # The inventory's source identity — the first enumerated stream's File.
+        stream = self._video or next(iter(self._audio), None) \
+            or next(iter(self._subtitles), None) or next(iter(self._attachments), None)
+        assert stream is not None, "inventory has at least one stream (video required for timestamps)"
         sidecar = ExtractionSidecar(
-            source          = self._sidecar_source(),
+            source          = stream.file,
             streams         = StreamsInventory(
                 video       = self._video.info if self._video is not None else None,
                 audio       = [s.info for s in self._audio],
@@ -743,13 +742,6 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         write_yaml_atomic(sidecar_path, sidecar.model_dump(exclude_none=True))
         self._sidecar_dirty = False
         logger.debug("Wrote stream inventory: %s", sidecar_path.name)
-
-    def _sidecar_source(self) -> File:
-        """The inventory's source identity — the first enumerated stream's File."""
-        stream = self._video or next(iter(self._audio), None) \
-            or next(iter(self._subtitles), None) or next(iter(self._attachments), None)
-        assert stream is not None, "inventory has at least one stream (video required for timestamps)"
-        return stream.file
 
     # ------------------------------------------------------------------
     # Result / finalize

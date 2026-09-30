@@ -74,18 +74,35 @@ Baseline 367 findings (no config existed; ruff 0.16.8 defaults). Outcome: **`uv 
 
 ## Stage 3 — comments
 
+Executed as three parallel passes (core+utils / phases / utils+config+models). Policy: current-state, concise; short spec links allowed; essays/task notes/history removed. All passes verified ruff-clean + module tests green.
+
 | # | Item | Category | What / why candidate | Action taken | Reason | Post-check |
 |---|---|---|---|---|---|---|
+| 1 | quality.py | comment | Worst offender: PTS debugging narrative, "former/backward-compat" banners, V1/V2/V3 history essays, 23-line ✓-diagram extrapolation essay, MetricInfo preamble, code-restating one-liners | Framesync narrative 13→6 lines (kept the load-bearing why); banners de-narrated; V3 docstring states what it IS; extrapolation essay 23→6; ONE V1/V2 keep-note for planned V4 (TODO §51); preamble + one-liners deleted | History lives in git/specs | 146 tests pass |
+| 2 | runner.py | comment | "replaces PipelineOrchestrator" + 9 Req citations + ~9 inline Req tags | De-narrated; one short spec link kept (phase-terminal-runner) | Current-state | tests pass |
+| 3 | metrics.py | comment | "Symmetric with ffmpeg's…" 8-line banner; 2 Usage examples; stale `flush(partial=False)` doc | 1-line banner; one shortened example; doc fixed to `flush()` | Accuracy | tests pass |
+| 4 | phase.py | comment | 10-step run() narration (29 lines); stale `self._job.result` refs; "(Task 9)" | 4-line summary; refs fixed to `_dep_result(JobPhase)`; task note dropped | Contract docs kept (load-bearing) | tests pass |
+| 5 | encoding.py | comment | "moved from recovery.py" banner; duplicated `crop_params`/`collector` docs; missing Step 1; false claims about encoding.yaml pre-validation; numbered narration of straight-line code; ~12 Req tags | All fixed per policy; ownership claims corrected to one sentence each | Accuracy | 145 phase tests pass |
+| 6 | audio.py | comment | Recovery steps numbered out of execution order; `tracks` unused-note ×2; 4-line Phase-Contract aside; ~20 Req tags | Steps renumbered to actual order (verified against code); notes merged to one Args line; aside → 1 line; Req tags removed | Accuracy | tests pass |
+| 7 | extraction/merge/measure/optimization.py | comment | "no longer/deleted in Task 9/TimestampArtifact fold/deleted `mode` field docs/phantom merge_final_video refs" | Current-state phrasing; stale refs fixed or deleted; step comments matching code order kept | Accuracy | tests pass |
+| 8 | visualization.py | comment | 26-line "why fig.text()" essay; "mirror create_unified_plot" ×4; VIF/VMAF note ×4 | Essay → 3 lines; mirror-note → 1 line at top site; same-file note stated once | Current-state | tests pass |
+| 9 | constants.py, app_config.py, stream_model.py, models.py, state.py, audio/*, utils/*, chunking/job/probe | comment | Muxer "historical behaviour" rationale; name-restating docstrings; EAW essay; "Task 4/6" notes; "Replaces the former flat model"; deleted-field docs; "Preserved verbatim" ×2; `#@` markers; unwrapped docstring | Trimmed per policy; kept: David's-LFE provenance comments (curation), DON'T-use-volumedetect warning, real-constraint docstrings | Current-state | 155 tests pass |
+| 10 | cli.py epilog / api.py | comment | Flagged for review | **Kept unchanged** — user-facing `--help` text; api docstrings already current | User-facing surface | n/a |
 
 ## Stage 4 — imports
 
 | # | Item | Category | What / why candidate | Action taken | Reason | Post-check |
 |---|---|---|---|---|---|---|
+| 1 | ~28 function-body imports across encoding/audio/merge/measure/probe/api/cli | import | Not cycle breaks; several re-imported modules already at module top; steering rule: top-level imports only | Hoisted all to module top; duplicates deleted (`import os/shutil` inside `_hardlink_or_copy`, `MetricKey` in merge) | CLI laziness was pointless — `pyqenc/__init__` already imports api eagerly, so `import pyqenc.cli` pays the full 1.5s regardless (measured) | ruff clean; imports verified |
+| 2 | Genuine cycle breaks: models.py:255 (marked), phase.py `_build_registry`, optimization⇄encoding ×3 sites, long_path.py:104 (documented) | import | Legit deferred imports, unmarked | Added explicit `# deferred: circular import (...)` markers per steering rule | Record for later review (encoding⇄optimization cycle noted in TODO.md) | grep shows only these remain |
+| 3 | Cross-module private imports (measure→extraction `_probe_streams_json/_video_info`; api→measure `_parse_duration`; measure→log_format `_fmt_size_mb`) | import | Privates consumed cross-module (§57 smell) | Hoisted as-is (names unchanged) | Re-homing/renaming is a design call (TODO §57), out of cleanup scope | imports work |
 
 ## Stage 5 — inlining
 
 | # | Item | Category | What / why candidate | Action taken | Reason | Post-check |
 |---|---|---|---|---|---|---|
+| 1 | 16 microscopic single-caller helpers: `_parse_quality_targets` (cli), `Strategy.pre_input_args` + `CodecConfig.quality_higher_is_better` (models — dumb accessor wrappers), `AudioSidecar.signature_of` (state), `_is_attachment`/`_sidecar_source` (extraction), `_persist_scenes` (chunking), `_enc_encoded_strategy_dir` (encoding), `_targeted_metrics`/`_get_expected_strategies`/`_default_duration_ns` (merge), `_build_key` (metrics), `_fmt_chunk_prefix` (log_format), `_pick_entry` (select), `_resolve_selected` (optimization), `_normalize_token` (layout) | inline | TODO §58 first bullet; each verified single-caller | All 16 inlined into their consumers; behavior byte-identical (same expressions, same logs). Tests retargeted where they pinned the symbol: TestDefaultDurationNs → asserts argv from `_build_mkvpropedit_args`; metrics property test computes the joined key inline | Footprint shrink; no accessor wrappers | 698/9/0 maintained; ruff clean; grep: no inlined symbol survives |
+| 2 | KEEP list: `_set_process_priority`, `_audio_info`/`_subtitle_info`/`_attachment_info`/`_duration_from_tags` (readability of `_enumerate_streams`; re-homing is TODO §57), `AudioSidecar.from_resolved` (named constructor), `_write_mkvmerge_options_file`, `_fmt_inline_metrics`, `_collect_output_files`/`_write_atomic`/`_clean_tmp`/`_safe_size` (Stage-6 dedup targets) | inline | Single-caller but non-microscopic or concept-naming | **Kept** with reasons | A helper earning its keep stays | n/a |
 
 ## Stage 6 — DRY
 
@@ -96,6 +113,9 @@ Baseline 367 findings (no config existed; ruff 0.16.8 defaults). Outcome: **`uv 
 
 | # | Item | Category | What / why candidate | Action taken | Reason | Post-check |
 |---|---|---|---|---|---|---|
+| 1 | tests/unit/test_audio_chain.py ×5, test_audio_filters.py ×4, test_audio_matrices.py ×2 | test | TODO §43: 11 failures — tests pin pre-astats (`volumedetect`/`max_volume:`) and pre-aformat/pre-recoefficiented downmix behavior that production left behind | Updated canned stderr to astats `Peak level dB:` format; `af` expectations gained the `aformat=sample_fmts=flt,` prefix; matrix expectations → current coefficients; error-match → "parseable peak volume"; renamed `test_51_to_20_lfe_preserved_verbatim` → `test_51_to_20_lfe_is_dolby_power_balanced_fold` (the "verbatim night fold" framing was the stale part) | Pins CURRENT behavior; whether the astats/downmix change itself needs revisiting stays a TODO note (kept) | 51 passed across the 3 files; full-suite failures drop 11 → 0 |
+| 2 | `pyqenc measure` kwarg crash | repair | cli.py:868 passed `sampling=` ↔ api.py declared `metrics_sampling`; api.py passed `metrics_sampling=` ↔ run_measure declared `sampling` — TypeError before any work | Names aligned (api keeps `metrics_sampling`, forwards `sampling=`); config-derived `= 3` default dropped from api signature (moved to 3rd, required, position — all callers keyword-only); new tests/unit/test_measure_api.py pins the chain + interval parsing | Single source of truth for the config default is the CLI/config layer (§38 spirit) | 2/2 new tests pass; `pyqenc measure --help` path intact |
+| 3 | Passthrough stub error message | test | Stage-3 comment trim shortened filters.py NotImplementedError; test matched the removed "in-memory-stream" phrase | Test now matches "not implemented yet" (the fail-loud behavior is the contract, not the spec name) | Message-content pinning reduced to the stable part | 18/18 audio filter tests pass |
 
 ## Stage 8 — tests
 

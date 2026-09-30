@@ -318,7 +318,13 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
             except Exception as exc:
                 logger.exception("Scene detection failed")
                 return self._make_result(PhaseOutcome.FAILED, [], str(exc))
-            self._persist_scenes(work_dir / _CHUNKING_YAML, boundaries)
+            sidecar_path = work_dir / _CHUNKING_YAML
+            sidecar = ChunkingSidecar(scenes=[
+                SceneRecord(timestamp_seconds=b.timestamp_seconds, frame=b.frame)
+                for b in boundaries
+            ])
+            write_yaml_atomic(sidecar_path, sidecar.model_dump(exclude_none=True))
+            logger.debug("Wrote scene boundaries: %s", sidecar_path.name)
 
         try:
             chunks = build_chunks(boundaries, extended)
@@ -402,13 +408,3 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         except Exception as exc:  # noqa: BLE001 — any parse failure means "detect"
             logger.warning("Could not load %s: %s", path, exc)
             return None
-
-    @staticmethod
-    def _persist_scenes(path, boundaries: list[SceneBoundary]) -> None:
-        """Persist the boundaries (the detector's own frame values included)."""
-        sidecar = ChunkingSidecar(scenes=[
-            SceneRecord(timestamp_seconds=b.timestamp_seconds, frame=b.frame)
-            for b in boundaries
-        ])
-        write_yaml_atomic(path, sidecar.model_dump(exclude_none=True))
-        logger.debug("Wrote scene boundaries: %s", path.name)

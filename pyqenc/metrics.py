@@ -142,15 +142,6 @@ def _last_dot_prefix(key: str) -> str:
     return key.rsplit(DOTTED_KEY_SEPARATOR, 1)[0]
 
 
-def _build_key(key: MetricKey, *parts: str) -> str:
-    """Join *key* and zero or more *parts* with the metric key separator.
-
-    With no parts returns the top-level key string (e.g. ``"encoding"``).
-    With one or more parts returns a dotted key (e.g. ``"encoding.h265"``).
-    """
-    return DOTTED_KEY_SEPARATOR.join((key, *parts))
-
-
 # ---------------------------------------------------------------------------
 # Helper formatting functions
 # ---------------------------------------------------------------------------
@@ -625,7 +616,7 @@ class YamlMetricsCollector(MetricsCollector):
         incremental flush if needed.  Exceptions are re-raised after recording
         elapsed time so timing is never lost.
         """
-        return self._TimingContext(self, _build_key(key, *parts))
+        return self._TimingContext(self, DOTTED_KEY_SEPARATOR.join((key, *parts)))
 
     class _TimingContext:
         """Inner context manager used by :meth:`YamlMetricsCollector.time`."""

@@ -784,7 +784,7 @@ def _validate_profile_quality_range(
     p_better, p_worse = profile_range
     c_better, c_worse = codec.quality_better, codec.quality_worse
 
-    if codec.quality_higher_is_better:
+    if codec.quality_range[0] > codec.quality_range[1]:
         # VBR: better > worse (e.g. [99.5, 0.5] Mbit/s).
         # Profile better must not exceed codec better; profile worse must not go below codec worse.
         out_of_range = p_better > c_better or p_worse < c_worse

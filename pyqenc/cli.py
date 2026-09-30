@@ -56,11 +56,6 @@ def _set_process_priority() -> None:
         logger.warning(f"Failed to set process priority: {e}")
 
 
-def _parse_quality_targets(targets_str: str) -> list[str]:
-    """Parse comma-separated quality targets, i.e. "vmaf-min:95,ssim-med:98" into a list of strings."""
-    return [t.strip() for t in targets_str.split(",") if t.strip()]
-
-
 def _parse_strategies(strategies_str: str | None) -> list[str] | None:
     """Parse comma-separated encoding strategies into a list of pattern strings.
 
@@ -313,7 +308,7 @@ def _build_config(args: argparse.Namespace) -> "AppConfig":
     # --- encoding / quality ---
     quality_target_str = getattr(args, "targets", None)
     if quality_target_str is not None:
-        config.encoding.targets = _parse_quality_targets(quality_target_str)
+        config.encoding.targets = [t.strip() for t in quality_target_str.split(",") if t.strip()]
 
     strategies = _parse_strategies(getattr(args, "strategies", None))
     if strategies is not None:

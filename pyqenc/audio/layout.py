@@ -37,26 +37,6 @@ _ALIAS_NORMALIZED: dict[str, str] = {
 }
 
 
-def _normalize_token(raw: str) -> str:
-    """Return the canonical base layout for a raw ffmpeg channel-layout token.
-
-    Strips any parenthesised qualifier (``5.1(side)`` → ``5.1``) and maps known
-    aliases (``stereo`` → ``2.0``, ``mono`` → ``1.0``). Unknown tokens are
-    returned trimmed and lower-cased so comparison is stable.
-
-    Args:
-        raw: A raw ffmpeg channel-layout token (e.g. ``5.1(side)``, ``stereo``).
-
-    Returns:
-        The normalized base layout token.
-    """
-    token = raw.strip().lower()
-    # Strip a parenthesised qualifier, e.g. "5.1(side)" -> "5.1".
-    if "(" in token:
-        token = token.split("(", 1)[0].strip()
-    return _ALIAS_NORMALIZED.get(token, token)
-
-
 def _derive_channels(normalized: str) -> int:
     """Return the channel count for a normalized layout token.
 
@@ -123,7 +103,13 @@ class ChannelLayout(BaseModel):
             ``channels`` populated.
         """
         original = raw.strip()
-        normalized = _normalize_token(original)
+        # Canonical base layout: lower-cased, parenthesised qualifier stripped
+        # (``5.1(side)`` → ``5.1``), known aliases mapped (``stereo`` → ``2.0``,
+        # ``mono`` → ``1.0``); unknown tokens pass through as-is.
+        token = original.lower()
+        if "(" in token:
+            token = token.split("(", 1)[0].strip()
+        normalized = _ALIAS_NORMALIZED.get(token, token)
         return cls(
             original   = original,
             normalized = normalized,

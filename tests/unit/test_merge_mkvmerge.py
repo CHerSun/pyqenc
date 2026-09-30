@@ -14,7 +14,7 @@ no private-attr poking.
 
 Covers:
 - _build_mkvmerge_options: single chunk, multiple chunks, timestamps placement
-- _default_duration_ns / _build_mkvpropedit_args: exact ns conversion, argv pin
+- _build_mkvpropedit_args: exact default-duration ns conversion, argv pin
 - _write_mkvmerge_options_file: JSON written atomically
 - Options file deleted on success, retained on failure (via run())
 - mkvpropedit failure fails the strategy without writing a sidecar (via run())
@@ -50,7 +50,6 @@ from pyqenc.phases.merge import (
     MergePhase,
     _build_mkvmerge_options,
     _build_mkvpropedit_args,
-    _default_duration_ns,
     _log_missed_targets_warning,
     _write_mkvmerge_options_file,
 )
@@ -382,7 +381,7 @@ class TestBuildMkvmergeOptions:
 
 
 # ---------------------------------------------------------------------------
-# _default_duration_ns / _build_mkvpropedit_args
+# _build_mkvpropedit_args — default-duration ns conversion
 # ---------------------------------------------------------------------------
 
 class TestDefaultDurationNs:
@@ -392,18 +391,21 @@ class TestDefaultDurationNs:
         """Bug guarded: float math drifts at NTSC rates — the exact rational
         path must produce the canonical 24000/1001 duration of 41 708 333 ns
         (the value the source container itself carries)."""
-        assert _default_duration_ns(Fraction(24000, 1001)) == 41_708_333
+        args = _build_mkvpropedit_args(Path("output.mkv"), Fraction(24000, 1001))
+        assert "default-duration=41708333" in args
 
     def test_integer_rate(self) -> None:
         """24 fps → 1e9/24 ns rounded to the nearest integer."""
-        assert _default_duration_ns(Fraction(24, 1)) == 41_666_667
+        args = _build_mkvpropedit_args(Path("output.mkv"), Fraction(24, 1))
+        assert "default-duration=41666667" in args
 
     def test_common_rates_stay_exact(self) -> None:
         """25/50/60 fps divide 1e9 exactly — no rounding may occur."""
         for fps, expected in ((Fraction(25), 40_000_000),
                               (Fraction(50), 20_000_000),
                               (Fraction(60), 16_666_667)):
-            assert _default_duration_ns(fps) == expected
+            args = _build_mkvpropedit_args(Path("output.mkv"), fps)
+            assert f"default-duration={expected}" in args
 
 
 class TestBuildMkvpropeditArgs:

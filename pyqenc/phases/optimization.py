@@ -540,6 +540,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             live config; ``None``-safe on dep-failure paths where no stash
             exists).
         """
+        # Resolve strategy name strings to Strategy objects from the live config.
+        by_name = {s.display_name(): s for s in self._config.encoding.resolved_strategies}
         return OptimizationPhaseResult(
             outcome             = outcome,
             message             = message,
@@ -547,25 +549,12 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 r for r in artifacts
                 if isinstance(r.payload, EncodedChunk) and r.state == ArtifactState.COMPLETE
             ],
-            selected_strategies = self._resolve_selected(self._selected_names),
+            selected_strategies = [by_name[n] for n in self._selected_names if n in by_name],
         )
 
     # ------------------------------------------------------------------
     # Public Phase interface
     # ------------------------------------------------------------------
-
-    def _resolve_selected(self, selected_names: list[str]) -> list[Strategy]:
-        """Resolve strategy name strings to ``Strategy`` objects from the live config.
-
-        Args:
-            selected_names: Strategy display names from ``_apply_tolerance``.
-
-        Returns:
-            Matching ``Strategy`` objects from the resolved strategies,
-            preserving the order of *selected_names*.
-        """
-        by_name = {s.display_name(): s for s in self._config.encoding.resolved_strategies}
-        return [by_name[n] for n in selected_names if n in by_name]
 
     def _all_strategies(self, dry_run: bool) -> OptimizationPhaseResult:
         """All-strategies mode: bookkeeping + the skip result (no banner).

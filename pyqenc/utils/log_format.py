@@ -183,12 +183,9 @@ def visual_hash(strategy: str, chunk_id: str) -> str:
     return VISUAL_HASH_EMOJIS_WIDE[h % len(VISUAL_HASH_EMOJIS_WIDE)]
 
 
-def _fmt_chunk_prefix(strategy: str, chunk_id: str, use_visual_hash: bool = True) -> str:
-    prefix = f"{visual_hash(strategy, chunk_id)} " if use_visual_hash else ""
-    return f"{prefix}{BRACKET_LEFT}{strategy}{BRACKET_RIGHT} {chunk_id}"
-
 def fmt_chunk(strategy: str, chunk_id: str, msg: str, use_visual_hash: bool = True) -> str:
-    return _fmt_chunk_prefix(strategy, chunk_id, use_visual_hash) + f" {msg}"
+    prefix = f"{visual_hash(strategy, chunk_id)} " if use_visual_hash else ""
+    return f"{prefix}{BRACKET_LEFT}{strategy}{BRACKET_RIGHT} {chunk_id} {msg}"
 
 def fmt_chunk_start(strategy: str, chunk_id: str, use_visual_hash: bool = True) -> str:
     return fmt_chunk(strategy, chunk_id, "starting ...", use_visual_hash)

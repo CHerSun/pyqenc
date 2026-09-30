@@ -371,12 +371,6 @@ class _PhaseRecovery:
     pending: list[tuple[str, str]]                    = field(default_factory=list)
 
 
-def _enc_encoded_strategy_dir(work_dir: Path, strategy: str) -> Path:
-    """Return the finalized output directory for *strategy* under ``encoded/``."""
-    safe = strategy.replace(":", "_")
-    return work_dir / ENCODED_OUTPUT_DIR / safe
-
-
 def _recover_encoding_attempts(
     work_dir:  Path,
     chunk_ids: list[str],
@@ -406,7 +400,8 @@ def _recover_encoding_attempts(
     complete_count = absent_count = 0
 
     for strategy in strategies:
-        encoded_dir = _enc_encoded_strategy_dir(work_dir, strategy)
+        # The finalized output directory for this strategy under encoded/ (':' sanitized).
+        encoded_dir = work_dir / ENCODED_OUTPUT_DIR / strategy.replace(":", "_")
 
         # Build index: chunk_id -> winning .mkv path, from a single directory listing.
         # Layout in encoded/<strategy>/:
@@ -805,7 +800,7 @@ class ChunkEncoder:
             inputs      = [
                 _dc_replace(
                     chunk.as_input(),
-                    pre_input_args = strategy.pre_input_args,
+                    pre_input_args = tuple(strategy.codec.pre_input_args),
                 ),
             ],
             output_args = tuple(strategy.to_output_args(crf, vf_filter=vf_filter)),

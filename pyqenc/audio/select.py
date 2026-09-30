@@ -59,41 +59,27 @@ def resolve_selection(
 
     picked_ids: set[tuple[Path, int]] = set()
     for entry in select:
-        for stream in _pick_entry(tracks, entry):
+        for_re = re.compile(entry.for_, re.IGNORECASE)
+        exclude_re = re.compile(entry.exclude, re.IGNORECASE) if entry.exclude else None
+
+        candidates = [
+            track for track in tracks
+            if for_re.search(track.selector_string())
+            and not (exclude_re and exclude_re.search(track.selector_string()))
+        ]
+
+        # The entry's picks: the winning ``prefer`` tier's matches, or all
+        # candidates when no tier matches or ``prefer`` is absent.
+        picked = candidates
+        for tier in entry.prefer:
+            tier_re = re.compile(tier, re.IGNORECASE)
+            tier_matches = [track for track in candidates if tier_re.search(track.selector_string())]
+            if tier_matches:
+                picked = tier_matches
+                break
+
+        for stream in picked:
             picked_ids.add((stream.file.path, stream.info.track_id))
 
     # Preserve original track order for deterministic output.
     return [stream for stream in tracks if (stream.file.path, stream.info.track_id) in picked_ids]
-
-
-def _pick_entry(tracks: list[AudioStream], entry: SelectEntry) -> list[AudioStream]:
-    """Return the tracks a single select entry contributes.
-
-    Args:
-        tracks: All extracted tracks.
-        entry:  The select entry to evaluate.
-
-    Returns:
-        The entry's picked tracks: the winning ``prefer`` tier's matches, or all
-        candidates when no tier matches or ``prefer`` is absent.
-    """
-    for_re = re.compile(entry.for_, re.IGNORECASE)
-    exclude_re = re.compile(entry.exclude, re.IGNORECASE) if entry.exclude else None
-
-    candidates = [
-        track for track in tracks
-        if for_re.search(track.selector_string())
-        and not (exclude_re and exclude_re.search(track.selector_string()))
-    ]
-
-    if not entry.prefer:
-        return candidates
-
-    for tier in entry.prefer:
-        tier_re = re.compile(tier, re.IGNORECASE)
-        tier_matches = [track for track in candidates if tier_re.search(track.selector_string())]
-        if tier_matches:
-            return tier_matches
-
-    # No tier matched any candidate — implicit fallback is all candidates.
-    return candidates

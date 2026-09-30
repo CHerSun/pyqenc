@@ -334,24 +334,12 @@ class AudioSidecar(BaseModel):
 
     chains: dict[str, str]
 
-    @staticmethod
-    def signature_of(chain: ResolvedChain) -> str:
-        """Return the canonical signature string for a resolved chain.
-
-        Delegates to :func:`~pyqenc.audio.chain.chain_signature` so the sidecar
-        and the audio phase use the SAME canonical function (DRY).
-
-        Args:
-            chain: The resolved chain to sign.
-
-        Returns:
-            The canonical signature string.
-        """
-        return chain_signature(chain)
-
     @classmethod
     def from_resolved(cls, resolved: dict[str, ResolvedChain]) -> AudioSidecar:
         """Build an ``AudioSidecar`` from resolved chains, computing each signature.
+
+        Each signature is the canonical :func:`~pyqenc.audio.chain.chain_signature`
+        — the SAME canonical function the audio phase uses (DRY).
 
         Args:
             resolved: Map of chain name → :class:`ResolvedChain`.
@@ -359,7 +347,7 @@ class AudioSidecar(BaseModel):
         Returns:
             The sidecar holding one signature string per chain.
         """
-        return cls(chains={name: cls.signature_of(chain) for name, chain in resolved.items()})
+        return cls(chains={name: chain_signature(chain) for name, chain in resolved.items()})
 
     @classmethod
     def load(cls, path: Path) -> Self | None:

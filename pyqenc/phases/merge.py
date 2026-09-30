@@ -116,23 +116,6 @@ def _load_merge_sidecar(output_file: Path) -> dict | None:
         return None
 
 
-def _targeted_metrics(
-    all_metrics:     dict[str, float],
-    quality_targets: list[QualityTarget],
-) -> dict[str, float]:
-    """Return only the metric keys that correspond to user-requested quality targets.
-
-    Keys are in ``{metric}-{statistic}`` form (e.g. ``vmaf-min``), matching the
-    CLI input format and optimization.yaml convention.
-    Values are coerced to plain Python ``float`` to avoid numpy scalar serialisation artefacts.
-    """
-    return {
-        f"{t.metric}-{t.statistic}": float(all_metrics[f"{t.metric}_{t.statistic}"])
-        for t in quality_targets
-        if f"{t.metric}_{t.statistic}" in all_metrics
-    }
-
-
 def _safe_file_size(path: Path) -> int:
     """Return the file size of *path* in bytes, or ``0`` on any OS error."""
     try:
@@ -192,7 +175,13 @@ def _write_merge_sidecar(
     Keys use ``{metric}-{statistic}`` form (e.g. ``vmaf-min``) matching the CLI convention.
     """
     targets_section = {f"{t.metric}-{t.statistic}": t.value for t in quality_targets}
-    metrics_section = _targeted_metrics(all_metrics, quality_targets)
+    # Only the user-requested targets' metrics; values coerced to plain Python
+    # ``float`` to avoid numpy scalar serialisation artefacts.
+    metrics_section = {
+        f"{t.metric}-{t.statistic}": float(all_metrics[f"{t.metric}_{t.statistic}"])
+        for t in quality_targets
+        if f"{t.metric}_{t.statistic}" in all_metrics
+    }
 
     data: dict = {
         "frame_count":   frame_count,
@@ -677,8 +666,14 @@ class MergePhase(Phase[MergePhaseResult]):
                 except OSError as exc:
                     logger.warning("Could not remove temp file %s: %s", tmp, exc)
 
-        # Step 4: determine expected strategies from the typed winners field
-        strategies = self._get_expected_strategies()
+        # Step 4: determine expected strategies from the typed winners field —
+        # the already-cached EncodingPhase winners, distinct by safe name, in
+        # first-seen order.
+        winners = self._dep_result(EncodingPhase).winners
+        seen: dict[str, Strategy] = {}
+        for row in winners:
+            seen.setdefault(row.payload.strategy.safe_name(), row.payload.strategy)
+        strategies = list(seen.values())
         if not strategies:
             return Recovery()
 
@@ -797,24 +792,6 @@ class MergePhase(Phase[MergePhaseResult]):
     # ------------------------------------------------------------------
     # Public Phase interface
     # ------------------------------------------------------------------
-
-    def _get_expected_strategies(self) -> list[Strategy]:
-        """The strategies expected to have merged outputs.
-
-        Reads the already-cached ``EncodingPhase.result`` winners — the
-        winning :class:`~pyqenc.stream_model.EncodedChunk` payloads composed
-        with their :class:`~pyqenc.models.Strategy` — resolved once by the
-        shared dependency walk.
-
-        Returns:
-            The distinct strategies, in first-seen order.
-        """
-        winners = self._dep_result(EncodingPhase).winners
-        seen: dict[str, Strategy] = {}
-        for row in winners:
-            strategy = row.payload.strategy
-            seen.setdefault(strategy.safe_name(), strategy)
-        return list(seen.values())
 
     def _execute(
         self,
@@ -1158,15 +1135,6 @@ def _build_mkvmerge_options(
     return args
 
 
-def _default_duration_ns(fps: Fraction) -> int:
-    """Convert *fps* to a track-header ``DefaultDuration`` in nanoseconds.
-
-    Exact rational arithmetic: the float path drifts at NTSC rates
-    (24000/1001 → 41 708 333.33 ns).
-    """
-    return round(_NS_PER_SECOND / fps)
-
-
 def _build_mkvpropedit_args(output: Path, fps: Fraction) -> list[str | os.PathLike]:
     """Build the mkvpropedit argument list restoring the video track's frame-rate header.
 
@@ -1175,6 +1143,9 @@ def _build_mkvpropedit_args(output: Path, fps: Fraction) -> list[str | os.PathLi
     stream).  Header-only consumers then misdeclare the frame rate and flag
     the output VFR (MediaInfo: "Frame rate mode: Variable").  The edit is
     instant, does not touch block data, and takes an integer ns value.
+
+    The ns value uses exact rational arithmetic: the float path drifts at
+    NTSC rates (24000/1001 → 41 708 333.33 ns).
 
     Args:
         output: The merged MKV whose track header is patched in place.
@@ -1188,7 +1159,7 @@ def _build_mkvpropedit_args(output: Path, fps: Fraction) -> list[str | os.PathLi
     return [
         "mkvpropedit", output,
         "--edit", _MKVPROPEDIT_VIDEO_TRACK,
-        "--set", f"default-duration={_default_duration_ns(fps)}",
+        "--set", f"default-duration={round(_NS_PER_SECOND / fps)}",
     ]
 
 
