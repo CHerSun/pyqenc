@@ -5,12 +5,6 @@ call before any implementation. Nothing here is blocking. Entries are removed
 outright once a plan covering them is finalized or they are fixed — git and
 spec history are the record.
 
-Sources:
-- §1–7: 2026-09-19/20 investigation of the extraction-metrics bug (fixed in 0.14.2).
-- §8–37: imported 2026-09-20 from `D:\todo pyqenc.md`, after re-verifying every
-  claim against the working tree (HEAD `1336cbf` + the uncommitted 0.14.2 fix).
-  Items already resolved are listed at the bottom, not carried over.
-
 Status legend: 🤔 needs thinking · 🔍 verified against code
 
 ---
@@ -584,7 +578,6 @@ Deferred as costly/structural:
 - `EncodedChunk` composition duplicated (`_pair_placeholder` vs
   `build_encoded_chunk` shapes).
 - ASCII summary-table scaffold duplicated (optimization vs merge).
-- `runner._collect_output_files` belongs on `MergePhaseResult`.
 - measure→extraction private imports (`_probe_streams_json`, `_video_info`)
   and api→measure `_parse_duration` — re-homing per §57.
 - Broader test-surface rework beyond metrics (string-format pinning etc.);
@@ -635,40 +628,6 @@ Investigation needed.
 We already support config changes for audio chain via a full-string preservation and per-chain comparisson. This allows end-user to change the chain and get proper results still, even if previous outputs exist.
 
 We should consider similar approach for encoding/optimization phases, where we use strategy name alone currently. Should we also support for params change invalidation (needs force wipe flag).
-
----
-
-## 69. Frame counts not persisted — preservation invariant skipped on recovery runs
-
-**Status:** needs thinking (decision 2026-10-01: deferred; refined shape below
-follows the limiter-summary route — per-user 2026-10-01)
-
-- The frame-preservation invariant (Σ winning-attempt frames == source frames,
-  `pyqenc/phases/encoding.py` `_execute`) is skipped on any recovery flavor:
-  winners are composed with `frame_count=0` ("unknown" sentinel) at both
-  composition sites (`_pair_rows`, `_encode_chunks_parallel` seeding) →
-  WARNING "skipped: some winning attempts were recovered without a known
-  frame count". The count IS known per fresh attempt for free
-  (`FFmpegRunResult.frame_count`) but persisted nowhere (neither the
-  per-attempt `MetricsSidecar` nor the winner `EncodingResultSidecar`);
-  within-run cache hits lose it too.
-- **Refined shape (supersedes "restore per-chunk counts at composition"):**
-  - Persist `frame_count` in BOTH sidecars: attempt sidecar lets cache-hit
-    winners propagate their count at finalize; winner sidecar is the durable
-    per-pair record.
-  - Do NOT restore per-chunk counts into `EncodedChunk` on recovery —
-    composition stays listing-only (zero recovery reads), the sentinel stays.
-  - The processing path's end-of-run full scan (already reads every winner
-    sidecar for the winning-limiter summary) also sums winner frame counts;
-    the invariant uses that sum — correct on mixed fresh/reused runs, unlike
-    today's in-memory winners check which sees 0 for seeded pairs.
-  - Persist the single aggregate (winners frame total) in `encoding.yaml`
-    alongside `limiter_summary`; the fast exit reads that one property —
-    optionally enforcing it against the probe's in-memory frame count —
-    instead of restoring per-chunk counts.
-  - Read accounting: zero new reads (piggybacks the limiter-summary scan).
-  - Pre-change sidecars lack the field — acceptable pre-alpha (workdirs are
-    one-time); keep skip-if-any-unknown semantics.
 
 ---
 

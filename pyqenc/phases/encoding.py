@@ -127,8 +127,8 @@ def _read_sidecar_yaml(sidecar_path: Path) -> dict | None:
     """Read a metrics/result sidecar YAML next to an encoded attempt.
 
     Both sidecar kinds share the schema (keys: ``targets_met``, ``crf``,
-    ``metrics``): the per-attempt metrics sidecar in the workspace and the
-    encoding result sidecar in ``encoded/``.
+    ``metrics``, ``frame_count``): the per-attempt metrics sidecar in the
+    workspace and the encoding result sidecar in ``encoded/``.
 
     Args:
         sidecar_path: Exact path to the sidecar ``.yaml`` file.
@@ -162,6 +162,7 @@ def _write_metrics_sidecar(
     crf:              Decimal,
     metrics:          dict[str, float],
     metrics_sampling: int,
+    frame_count:      int,
 ) -> None:
     """Atomically write a per-attempt metrics sidecar alongside an encoded attempt.
 
@@ -175,6 +176,9 @@ def _write_metrics_sidecar(
         crf:              CRF value used for this attempt.
         metrics:          ALL measured quality metrics dict (not filtered to targets).
         metrics_sampling: Frame subsampling factor used when metrics were measured.
+        frame_count:      Frames of the attempt file from its encode run — a fact
+                          of the file, carried over unchanged on re-measure;
+                          ``0`` = could not be determined.
     """
     sidecar = attempt_path.with_suffix(".yaml")
     data    = MetricsSidecar(
@@ -182,6 +186,7 @@ def _write_metrics_sidecar(
         targets_met = targets_met,
         metrics     = metrics,
         sampling    = metrics_sampling,
+        frame_count = frame_count,
     )
     try:
         write_yaml_atomic(sidecar, data.model_dump(exclude_none=True))
@@ -215,6 +220,7 @@ def _write_encoding_result_sidecar(
     winning_attempt: Path,
     crf:             Decimal,
     metrics:         dict[str, float],
+    frame_count:     int,
     targets_met:     bool = True,
 ) -> None:
     """Atomically write an encoding result sidecar when CRF search converges.
@@ -229,6 +235,8 @@ def _write_encoding_result_sidecar(
         winning_attempt: Path to the winning encoded attempt ``.mkv``.
         crf:             Winning CRF value.
         metrics:         All measured metric values for the winning attempt.
+        frame_count:     Frames of the winning attempt (``0`` = could not be
+                         determined).
         targets_met:     Whether quality targets were met; ``False`` when the
                          search was exhausted without a passing attempt.
     """
@@ -237,6 +245,7 @@ def _write_encoding_result_sidecar(
         winning_attempt = winning_attempt.name,
         crf             = crf,
         metrics         = metrics,
+        frame_count     = frame_count,
         targets_met     = targets_met,
     )
     try:
@@ -485,8 +494,11 @@ class ChunkEncodingResult:
         final_crf:    Final CRF value used.
         attempts:     Number of encoding attempts.
         encoded_file: Metadata for the final encoded attempt artifact.
-        frame_count:  Frames in the winning attempt's latest encode run (0
-                      when reused — unknown); feeds the preservation invariant.
+        frame_count:  Frames of the winning attempt's file when known — from
+                      the fresh encode run, or carried from the attempt
+                      sidecar on a cache hit; 0 when unknown.  Feeds the
+                      winner composition; the preservation invariant sums the
+                      winner result sidecars instead.
         reused:       Whether existing encoding was reused.
         error:        Error message if failed.
     """
@@ -501,6 +513,32 @@ class ChunkEncodingResult:
     frame_count:  int                     = 0
     reused:       bool                  = False
     error:        str            | None = None
+
+
+@dataclass
+class _WinnerScan:
+    """End-of-run scan over the winner result sidecars.
+
+    One read per winner feeds two consumers: the winning-limiter tallies
+    (when targets are configured) and the frame accounting behind the
+    frame-preservation invariant and its persisted aggregate.
+
+    Attributes:
+        summaries:    Per-strategy limiter summaries, or ``None`` when there
+                      is nothing to show (no targets, or no readable sidecars).
+        frames_known: Whether every winner contributed a frame count.
+        frames:       Strategy display name -> ``[(chunk safe name, frames)]``
+                      per winner with a readable sidecar — the violation-detail
+                      source; partial when ``frames_known`` is ``False``.
+    """
+
+    summaries:    list[LimiterSummary] | None
+    frames_known: bool
+    frames:       dict[str, list[tuple[str, int]]]
+
+    def frame_totals(self) -> dict[str, int]:
+        """Per-strategy Σ winner frame counts (valid only when ``frames_known``)."""
+        return {name: sum(n for _, n in pairs) for name, pairs in self.frames.items()}
 
 
 @dataclass
@@ -523,7 +561,7 @@ class EncodingResult:
     outcome:        PhaseOutcome                = PhaseOutcome.COMPLETED
     failed_chunks:  list[str]                   = field(default_factory=list)
     error:          str | None                  = None
-    limiter_summary: list[LimiterSummary] | None = None
+    winner_scan:    _WinnerScan | None          = None
 
 
 class ChunkEncoder:
@@ -697,6 +735,7 @@ class ChunkEncoder:
         winning_attempt: Path,
         crf:             Decimal,
         metrics:         dict[str, float],
+        frame_count:     int,
         targets_met:     bool = True,
     ) -> None:
         """Hard-link the winning attempt into ``encoded/`` and write the result sidecar.
@@ -715,6 +754,9 @@ class ChunkEncoder:
             winning_attempt: Path to the winning attempt ``.mkv`` in ``encoding/``.
             crf:             Winning CRF value.
             metrics:         All measured metric values for the winning attempt.
+            frame_count:     Frames of the winning attempt — the winning encode
+                             run's count, or the attempt sidecar's count for a
+                             cache-hit winner; ``0`` = could not be determined.
             targets_met:     Whether quality targets were met; ``False`` when the
                              search was exhausted without a passing attempt.
         """
@@ -738,6 +780,7 @@ class ChunkEncoder:
             winning_attempt = dst_mkv,
             crf         = crf,
             metrics     = metrics,
+            frame_count = frame_count,
             targets_met = targets_met,
         )
 
@@ -875,7 +918,12 @@ class ChunkEncoder:
         attempt_number = 0
         final_attempt:      AttemptMetadata | None = None
         best_fail_attempt:  AttemptMetadata | None = None
-        last_frame_count:   int | None             = None
+        last_frame_count:   int                    = 0
+        frame_counts:  dict[Path, int]             = {}
+        """Attempt file path → its frame count when known this session (fresh
+        encode run, or carried from the attempt sidecar on a cache hit /
+        re-measure; 0 = could not be determined).  Feeds the winner sidecar
+        and the result's frame_count."""
         _any_real_work: bool                       = False
 
         while True:
@@ -908,6 +956,7 @@ class ChunkEncoder:
             # Check for existing encoding at this quality value (filesystem scan, no tracker).
             goto_eval   = False
             output_file: Path | None = None
+            attempt_frames: int = 0
             if not force:
                 existing = self._check_existing_encoding(
                     chunk.safe_name(), strategy, check_resolution, current_q
@@ -927,8 +976,13 @@ class ChunkEncoder:
                         and not sampling_stale
                         and required_keys.issubset(sidecar.get("metrics", {}).keys())
                     )
+                    # The file's frame count survives regardless of sidecar
+                    # staleness — re-measure never changes the encoded file
+                    # (0 = not on record).
+                    file_frames = int(sidecar.get("frame_count") or 0) if sidecar is not None else 0
                     if sidecar_valid and sidecar is not None:
                         # Full cache hit — no real work performed.
+                        frame_counts[existing.path] = file_frames
                         all_sidecar_metrics: dict[str, float] = {
                             k: float(v) for k, v in sidecar.get("metrics", {}).items()
                         }
@@ -985,9 +1039,10 @@ class ChunkEncoder:
                                 f"existing attempt ({strategy.codec.quality_label.lower()}={str(existing.crf).rjust(strategy.codec.quality_log_padding)}) — re-evaluating metrics ({reason})",
                                 self._visual_hash),
                         )
-                        _any_real_work = True
-                        output_file    = existing.path
-                        goto_eval      = True
+                        _any_real_work  = True
+                        output_file     = existing.path
+                        attempt_frames  = file_frames
+                        goto_eval       = True
 
             if not goto_eval:
                 # Encode — real work.
@@ -1014,13 +1069,13 @@ class ChunkEncoder:
 
                 # Preservation invariant: attempts of the same chunk
                 # must encode the same frames — a differing count is an error.
-                attempt_frame_count = run_result.frame_count or 0
-                if attempt_frame_count > 0:
-                    if last_frame_count is not None and attempt_frame_count != last_frame_count:
+                attempt_frames = run_result.frame_count or 0
+                if attempt_frames > 0:
+                    if last_frame_count > 0 and attempt_frames != last_frame_count:
                         logger.critical(
                             "Frame count disagreement between attempts of chunk %s: "
                             "%d vs %d — the same window must encode the same frames",
-                            chunk.safe_name(), last_frame_count, attempt_frame_count,
+                            chunk.safe_name(), last_frame_count, attempt_frames,
                         )
                         return ChunkEncodingResult(
                             chunk_id    = chunk.safe_name(),
@@ -1030,16 +1085,16 @@ class ChunkEncoder:
                             attempts    = attempt_number,
                             error       = f"Attempt frame count mismatch for {chunk.safe_name()}",
                         )
-                    last_frame_count = attempt_frame_count
+                    last_frame_count = attempt_frames
                     # Vocal cross-check vs the detector-derived chunk count:
                     # ±1 boundary disagreement is an expected
                     # artifact of seek-target rounding, not a lost frame.
-                    if chunk.frame_count > 0 and attempt_frame_count != chunk.frame_count:
+                    if chunk.frame_count > 0 and attempt_frames != chunk.frame_count:
                         logger.warning(
                             "Chunk %s: attempt encoded %d frame(s) vs detector-derived %d "
                             "(boundaries [%s, %s)) — seek rounding may shift a boundary frame; "
                             "the invariant sums remain the hard verification",
-                            chunk.safe_name(), attempt_frame_count, chunk.frame_count,
+                            chunk.safe_name(), attempt_frames, chunk.frame_count,
                             chunk.start_timestamp, chunk.end_timestamp,
                         )
 
@@ -1086,8 +1141,13 @@ class ChunkEncoder:
             targets_set  = {f"{t.metric}_{t.statistic}" for t in quality_targets}
             metrics_dict = {k: v for k, v in all_metrics.items() if k in targets_set}
 
-            # Write per-attempt metrics sidecar atomically.
-            _write_metrics_sidecar(output_file, evaluation.targets_met, current_q, all_metrics, self._metrics_sampling)
+            # Record the final path's count (post resolution-correction rename)
+            # and write the per-attempt metrics sidecar atomically.
+            frame_counts[output_file] = attempt_frames
+            _write_metrics_sidecar(
+                output_file, evaluation.targets_met, current_q, all_metrics,
+                self._metrics_sampling, attempt_frames,
+            )
 
             # Build AttemptMetadata for this attempt.
             attempt_meta = AttemptMetadata(
@@ -1151,6 +1211,7 @@ class ChunkEncoder:
                 winning_attempt = final_attempt.path,
                 crf             = search.best_quality,  # type: ignore[arg-type]
                 metrics         = search.best_metrics or {},
+                frame_count     = frame_counts.get(final_attempt.path),
                 targets_met     = True,
             )
         elif not search.best_targets_met and best_fail_attempt is not None:
@@ -1166,6 +1227,7 @@ class ChunkEncoder:
                 winning_attempt = best_fail_attempt.path,
                 crf             = search.best_quality,  # type: ignore[arg-type]
                 metrics         = search.best_metrics or {},
+                frame_count     = frame_counts.get(best_fail_attempt.path),
                 targets_met     = False,
             )
             final_attempt = best_fail_attempt
@@ -1180,6 +1242,7 @@ class ChunkEncoder:
             # All cache hits — chunk was fully recovered from existing artifacts.
             # Same winner rule as the fresh path: a passing attempt when one exists,
             # otherwise the best failing attempt (still the best recovered state).
+            winner = final_attempt if final_attempt is not None else best_fail_attempt
             return ChunkEncodingResult(
                 chunk_id     = chunk.safe_name(),
                 strategy     = strategy.display_name(),
@@ -1187,7 +1250,8 @@ class ChunkEncoder:
                 targets_met  = search.best_targets_met,
                 final_crf    = search.best_quality,
                 attempts     = attempt_number,
-                encoded_file = final_attempt if final_attempt is not None else best_fail_attempt,
+                encoded_file = winner,
+                frame_count  = frame_counts.get(winner.path, 0) if winner is not None else 0,
                 reused       = True,
             )
 
@@ -1201,6 +1265,7 @@ class ChunkEncoder:
                 final_crf    = search.best_quality,
                 attempts     = attempt_number,
                 encoded_file = winning,
+                frame_count  = frame_counts.get(winning.path, 0),
                 reused       = False,
             )
         else:
@@ -1546,44 +1611,49 @@ class _LimiterTally:
     crfs:     list[Decimal] = field(default_factory=list)
 
 
-def _build_limiter_summary(
+def _scan_winner_sidecars(
     work_dir:        Path,
     encoded_chunks:  dict[str, dict[str, EncodedChunk]],
     strategy_order:  list[str],
     quality_targets: list[QualityTarget],
-) -> list[LimiterSummary] | None:
-    """Build the winning-limiter summary from the winner result sidecars.
+) -> _WinnerScan:
+    """Scan every winner's result sidecar once: limiter tallies + frame counts.
 
-    One row per limiter — the ``"<metric>_<statistic>"`` of each winning
-    attempt's worst target — grouped by strategy, rows sorted by chunk count
-    descending.  Derived from the encoding-phase result artifacts
+    Derived from the encoding-phase result artifacts
     (``encoded/<strategy>/<chunk_id>.<res>.yaml``), written for every
-    concluded pair — so the build is identical on fresh, resumed, and
+    concluded pair — so the scan is identical on fresh, resumed, and
     recovered runs, and survives intermediate cleanup of the attempt
-    workspace.
+    workspace.  Winners with a pattern-mismatched file name, a missing
+    sidecar, or no persisted frame count are excluded from the affected
+    output and mark ``frames_known=False`` (skip semantics).
 
     Args:
         work_dir:        Work dir root (locates ``encoded/<strategy>/``).
         encoded_chunks:  Chunk safe name -> strategy display name -> winner.
         strategy_order:  Strategy display names in pipeline order.
-        quality_targets: Targets the winning attempts are judged against.
+        quality_targets: Targets the winning attempts are judged against
+                         (empty → ``summaries`` stays ``None``; frame
+                         accounting is target-independent).
 
     Returns:
-        The per-strategy summaries, or ``None`` when there is nothing to
-        show (no targets, no winners, or no readable sidecars).
+        The :class:`_WinnerScan`.
     """
-    if not quality_targets or not encoded_chunks:
-        return None
+    if not encoded_chunks:
+        return _WinnerScan(summaries=None, frames_known=True, frames={})
 
-    tallies: dict[str, dict[str, _LimiterTally]] = {}
+    tallies:     dict[str, dict[str, _LimiterTally]] = {}
+    frames:      dict[str, list[tuple[str, int]]]    = {}
+    frames_known = True
+
     for by_strategy in encoded_chunks.values():
         for strategy_name, winner in by_strategy.items():
             name_match = ENCODED_ATTEMPT_NAME_PATTERN.match(winner.stream.stream.file.path.name)
             if name_match is None:
                 logger.debug(
-                    "Winner %s does not match the attempt name pattern — excluded from limiter summary",
+                    "Winner %s does not match the attempt name pattern — excluded from the winner scan",
                     winner.stream.stream.file.path.name,
                 )
+                frames_known = False
                 continue
             sidecar = _read_sidecar_yaml(
                 _encoded_dir(work_dir, winner.strategy)
@@ -1591,9 +1661,21 @@ def _build_limiter_summary(
             )
             if sidecar is None:
                 logger.debug(
-                    "Winner %s has no result sidecar — excluded from limiter summary",
+                    "Winner %s has no result sidecar — excluded from the winner scan",
                     winner.stream.stream.file.path.name,
                 )
+                frames_known = False
+                continue
+
+            frames_value = int(sidecar.get("frame_count") or 0)
+            if frames_value > 0:
+                frames.setdefault(strategy_name, []).append(
+                    (name_match.group("chunk_id"), frames_value)
+                )
+            else:
+                frames_known = False
+
+            if not quality_targets:
                 continue
             metrics     = {k: float(v) for k, v in sidecar.get("metrics", {}).items()}
             targets_met = bool(sidecar.get("targets_met", False))
@@ -1610,30 +1692,30 @@ def _build_limiter_summary(
                 tally.missed += 1
                 tally.deficits.append(worst[1])
 
-    ordered = [name for name in strategy_order if name in tallies]
-    ordered += sorted(set(tallies) - set(strategy_order))
-    if not ordered:
-        return None
-
-    summaries: list[LimiterSummary] = []
-    for strategy_name in ordered:
-        rows_map = tallies[strategy_name]
-        total    = sum(t.passed + t.missed for t in rows_map.values())
-        summaries.append(LimiterSummary(
-            strategy = strategy_name,
-            chunks   = total,
-            rows     = [
-                LimiterSummaryRow(
-                    limiter     = key,
-                    passed      = t.passed,
-                    missed      = t.missed,
-                    med_deficit = statistics.median(t.deficits) if t.deficits else None,
-                    med_crf     = statistics.median(t.crfs),
-                )
-                for key, t in sorted(rows_map.items(), key=lambda kv: (-kv[1].passed - kv[1].missed, kv[0]))
-            ],
-        ))
-    return summaries
+    summaries: list[LimiterSummary] | None = None
+    if quality_targets:
+        ordered = [name for name in strategy_order if name in tallies]
+        ordered += sorted(set(tallies) - set(strategy_order))
+        if ordered:
+            summaries = []
+            for strategy_name in ordered:
+                rows_map = tallies[strategy_name]
+                total    = sum(t.passed + t.missed for t in rows_map.values())
+                summaries.append(LimiterSummary(
+                    strategy = strategy_name,
+                    chunks   = total,
+                    rows     = [
+                        LimiterSummaryRow(
+                            limiter     = key,
+                            passed      = t.passed,
+                            missed      = t.missed,
+                            med_deficit = statistics.median(t.deficits) if t.deficits else None,
+                            med_crf     = statistics.median(t.crfs),
+                        )
+                        for key, t in sorted(rows_map.items(), key=lambda kv: (-kv[1].passed - kv[1].missed, kv[0]))
+                    ],
+                ))
+    return _WinnerScan(summaries=summaries, frames_known=frames_known, frames=frames)
 
 
 def encode_all_chunks(
@@ -1765,7 +1847,7 @@ def encode_all_chunks(
         # Duplicate to ERROR level on failed chunks
         logger.error("Failed chunks: %s", ", ".join(result.failed_chunks))
 
-    result.limiter_summary = _build_limiter_summary(
+    result.winner_scan = _scan_winner_sidecars(
         work_dir,
         result.encoded_chunks,
         [s.display_name() for s in strategies],
@@ -2004,12 +2086,14 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         return Recovery.from_artifacts(rows)
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> "EncodingPhaseResult":
-        """Resurface the persisted winning-limiter table on a fully-reused run.
+        """Resurface the persisted aggregates on a fully-reused run.
 
-        Mirrors ``OptimizationPhase``: shown from the stash loaded during
-        recovery — no winner-sidecar reads on the fast path.  Freshness is
+        Mirrors ``OptimizationPhase``: the winning-limiter table is shown from
+        the stash loaded during recovery, and the persisted winners frame
+        totals are re-asserted against the probe's frame count — no
+        winner-sidecar reads on the fast path.  Freshness of both is
         guaranteed by the pending gate: any invalidated pair routes the run
-        through the processing path, which rebuilds and re-saves the table.
+        through the processing path, which rebuilds and re-saves them.
 
         Args:
             wanted:   Wanted artifact rows (COMPLETE pairs carry winners).
@@ -2023,7 +2107,36 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             self._log_limiter_summary(self._persisted.limiter_summary)
         else:
             logger.debug("No persisted limiter summary — table skipped on reused run")
+        self._reassert_frame_preservation(self._persisted)
         return result
+
+    def _reassert_frame_preservation(self, persisted: EncodingParams | None) -> None:
+        """Re-assert frame preservation from the persisted aggregate (fast exit).
+
+        Reads the single ``winners_frame_totals`` property — never per-winner
+        sidecars — and compares each strategy's total against the probe's
+        in-memory frame count.  A disagreement is surfaced as a warning (the
+        hook contract keeps the REUSED outcome); the merge-time frame
+        verification remains the hard backstop.  Empty totals (unknown)
+        keep the skip semantics and stay silent.
+        """
+        if persisted is None:
+            return
+        totals = persisted.winners_frame_totals
+        if not totals:
+            return
+        probe_stream = self._dep_result(ProbePhase).stream
+        if probe_stream is None or probe_stream.payload.frame_count <= 0:
+            return
+        source_total = probe_stream.payload.frame_count
+        mismatched = {name: total for name, total in totals.items() if total != source_total}
+        if mismatched:
+            logger.warning(
+                "Persisted winners frame totals disagree with the source frame count "
+                "(source=%d): %s — merge-time verification remains the backstop",
+                source_total,
+                ", ".join(f"{name}={total}" for name, total in mismatched.items()),
+            )
 
     def _make_result(
         self,
@@ -2126,42 +2239,6 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             logger.critical(err)
             return self._make_result(PhaseOutcome.FAILED, [], err)
 
-        # Preservation invariant: Σ winning-attempt frame counts
-        # must equal the source count. Recovered winners without a known count
-        # (0 sentinel) skip the check with a warning — the final-merge
-        # verification remains the hard backstop.
-        # The dependency walk guarantees a completed probe with a resolved stream.
-        assert probe_result.stream is not None, "probe guaranteed complete by the dependency walk"
-        source_total = probe_result.stream.payload.frame_count
-        winners = [
-            (chunk_id, strategy_name, encoded)
-            for chunk_id, by_strategy in enc_result.encoded_chunks.items()
-            for strategy_name, encoded in by_strategy.items()
-        ]
-        if source_total > 0:
-            if any(encoded.stream.frame_count <= 0 for _, _, encoded in winners):
-                logger.warning(
-                    "Frame-preservation check skipped: some winning attempts were "
-                    "recovered without a known frame count"
-                )
-            else:
-                attempt_total = sum(encoded.stream.frame_count for _, _, encoded in winners)
-                if attempt_total != source_total:
-                    detail = "; ".join(
-                        f"{chunk_id}/{strategy_name}={encoded.stream.frame_count}"
-                        for chunk_id, strategy_name, encoded in winners
-                    )
-                    err = (
-                        f"Frame preservation violated: Σ winning attempts "
-                        f"({attempt_total}) != source ({source_total}). Per-chunk: {detail}"
-                    )
-                    logger.critical(err)
-                    return self._make_result(PhaseOutcome.FAILED, [], err)
-                logger.debug(
-                    "Frame preservation verified: Σ winning attempts == source == %d",
-                    source_total,
-                )
-
         # Winners come from the fresh encode result — every complete pair,
         # with freshly measured payloads (frame counts from the run itself).
         winners = [
@@ -2193,16 +2270,61 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
                 f"{len(failed_pairs)} pair(s) failed: {', '.join(failed_pairs[:5])}",
             )
 
-        # Winning-limiter summary: rendered once here and persisted into the
-        # phase sidecar so fully-reused runs resurface it without re-reading
-        # every winner sidecar. Only on full success — a failed pair leaves
-        # the phase pending on rerun, which rebuilds the table instead.
-        if enc_result.limiter_summary is not None:
+        # Preservation invariant: each strategy's winners tile the source —
+        # per-strategy Σ winner frame counts must equal the probe count.  The
+        # sums come from the end-of-run winner-sidecar scan (uniform for
+        # fresh, seeded, and cache-hit winners — the composition's 0 sentinel
+        # for recovered pairs is never consulted here).  A winner without a
+        # persisted count (sidecar predates the field, re-measured attempt)
+        # skips the check with a warning — the final-merge verification
+        # remains the hard backstop.
+        # The dependency walk guarantees a completed probe with a resolved stream.
+        assert probe_result.stream is not None, "probe guaranteed complete by the dependency walk"
+        source_total = probe_result.stream.payload.frame_count
+        scan         = enc_result.winner_scan
+        if source_total > 0 and scan is not None:
+            if not scan.frames_known:
+                logger.warning(
+                    "Frame-preservation check skipped: some winning attempts have "
+                    "no known frame count"
+                )
+            else:
+                violated = [
+                    (name, total) for name, total in scan.frame_totals().items()
+                    if total != source_total
+                ]
+                if violated:
+                    totals  = ", ".join(f"{name}={total}" for name, total in violated)
+                    details = "; ".join(
+                        f"{name}: " + ", ".join(f"{cid}={n}" for cid, n in scan.frames[name])
+                        for name, _ in violated
+                    )
+                    err = (
+                        f"Frame preservation violated: per-strategy Σ winning attempts "
+                        f"({totals}) != source ({source_total}). Per-chunk: {details}"
+                    )
+                    logger.critical(err)
+                    return self._make_result(PhaseOutcome.FAILED, [], err)
+                logger.debug(
+                    "Frame preservation verified: per-strategy Σ winning attempts "
+                    "== source == %d",
+                    source_total,
+                )
+
+        # Second post-success write (the probe-only write above stays the
+        # crash-safe early one): the winning-limiter table and the winners
+        # frame totals are persisted so fully-reused runs resurface both
+        # without re-reading every winner sidecar.  Only on full success — a
+        # failed pair leaves the phase pending on rerun, which rebuilds them
+        # via the processing path.
+        if scan is not None:
             assert self.params is not None, "params persisted before encode"
-            self._log_limiter_summary(enc_result.limiter_summary)
+            if scan.summaries is not None:
+                self._log_limiter_summary(scan.summaries)
             self.params = EncodingParams(
-                probe           = self.params.probe,
-                limiter_summary = enc_result.limiter_summary,
+                probe                = self.params.probe,
+                limiter_summary      = scan.summaries,
+                winners_frame_totals = scan.frame_totals() if scan.frames_known else {},
             )
             self.params.save(encoding_yaml)
 

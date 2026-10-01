@@ -231,10 +231,19 @@ class EncodingParams(BaseModel):
     pass, shown on fully-reused runs; its freshness is guaranteed by the
     pending gate: any invalidated pair routes the run through the processing
     path, which rebuilds and re-saves it).
+
+    ``winners_frame_totals`` is the same pattern applied to the
+    frame-preservation invariant: per-strategy sums of the winning attempts'
+    frame counts from the concluded pass's winner-sidecar scan, replayed on
+    fully-reused runs to re-assert preservation against the probe's frame
+    count without any per-winner reads.  Empty (``{}``) when any winner's
+    count is unknown (skip semantics) or before a concluded pass wrote it;
+    a non-empty map holds only positive totals.
     """
 
-    probe: ProbeState | None = None
-    limiter_summary: list[LimiterSummary] | None = None
+    probe:                ProbeState | None          = None
+    limiter_summary:      list[LimiterSummary] | None = None
+    winners_frame_totals: dict[str, int]              = Field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
@@ -270,11 +279,19 @@ class MetricsSidecar(BaseModel):
     The ``metrics`` field uses the flat ``{metric_stat: value}`` format
     (e.g. ``vmaf_min``, ``ssim_median``) consistent with ``ChunkQualityStats``
     serialisation.
+
+    ``frame_count`` is a fact of the attempt file, from the encode run that
+    produced it — measurement passes never change it (a re-measured attempt
+    carries its previously persisted count over).  ``0`` is the sentinel for
+    "could not be determined" (no valid video has zero frames): the attempt
+    was re-measured with no prior count on record, or the sidecar predates
+    the field.
     """
 
     crf:         DecimalYaml         # exact string round-trip (no float drift)
     targets_met: bool                # for human inspection only
     sampling:    int | None = None   # subsampling factor used when metrics were measured
+    frame_count: int         = 0     # frames of the attempt file (0 = unknown)
     metrics:     dict[str, float]    # all measured values, e.g. vmaf_min, ssim_median
 
 
@@ -289,12 +306,20 @@ class EncodingResultSidecar(BaseModel):
     ``optimization.yaml``.  ``OptimizationPhase`` deletes stale result sidecars
     before ``EncodingPhase`` runs, so ``EncodingPhase._recover()`` simply sees
     ``PARTIAL`` pairs naturally when targets change.
+
+    ``frame_count`` is the winning attempt's frame count carried over from
+    its attempt sidecar at finalize — the durable per-pair record the
+    end-of-run scan sums into the frame-preservation invariant.  ``0`` is
+    the "could not be determined" sentinel (sidecar predates the field, or
+    the winner was accepted from a re-measured attempt with no count on
+    record).
     """
 
     winning_attempt: str                # filename of the winning attempt .mkv
     crf:             DecimalYaml        # exact string round-trip (no float drift)
     metrics:         dict[str, float]   # only the targeted metric values
-    targets_met:     bool = True        # False when search exhausted without a passing attempt
+    frame_count:     int         = 0    # frames of the winning attempt (0 = unknown)
+    targets_met:     bool        = True # False when search exhausted without a passing attempt
 
 
 class MeasureSidecar(BaseModel):
