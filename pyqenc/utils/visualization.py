@@ -76,7 +76,10 @@ _PSNR_Y_MIN:        int = 0
 _PSNR_Y_MAX:        int = 103
 _PSNR_Y_MAJOR_TICK: int = 10
 _PSNR_Y_MINOR_TICK: int = 2
-_PCT_Y_MIN:         int = 0
+# SSIM/VMAF/VIF values live in the upper band (good encodes sit 90+); a 0
+# floor crams them into a thin top strip on both the main right axis and the
+# distribution bar subplots.
+_PCT_Y_MIN:         int = 50
 _PCT_Y_MAX:         int = 103
 _PCT_Y_MAJOR_TICK:  int = 10
 _PCT_Y_MINOR_TICK:  int = 2
@@ -94,13 +97,11 @@ _X_MINOR_TICKS:   int   = 100
 _X_PADDING_RATIO: float = 0.003
 
 # Summary boxes
-_SUMMARY_BOX_Y_POS:       float = 0.02
-_SUMMARY_BOX_WIDTH:       float = 0.18
-_SUMMARY_BOX_SPACING:     float = 0.02
-_SUMMARY_BOX_START_X:     float = 0.05
-_SUMMARY_BOX_ALPHA:       float = 0.8
+_SUMMARY_BOX_Y_POS:        float = 0.02
+_SUMMARY_BOX_START_X:      float = 0.02
+_SUMMARY_BOX_SPACING:      float = 0.016  # text-to-text gap between boxes, figure fraction
+_SUMMARY_BOX_ALPHA:        float = 0.8
 _SUMMARY_BOX_METRIC_ALPHA: float = 0.3
-_SUMMARY_BOX_ZORDER:      int   = 10
 
 # Bar chart
 _BAR_HEIGHT: float = 0.7
@@ -539,9 +540,8 @@ def create_unified_plot(
 
     def _configure_pct_axis(ax: plt.Axes, color: str) -> None:
         ax.set_ylabel("SSIM / VMAF / VIF", color=color, fontsize=_FONT_AXIS_LABEL, fontweight="bold")
-        # Use the plot range from the first percentage metric present
-        pct_metric = MetricType.SSIM if has_ssim else (MetricType.VMAF if has_vmaf else MetricType.VIF)
-        ax.set_ylim(pct_metric.info.plot_y_min, pct_metric.info.plot_y_max)
+        # All percentage metrics share one plot range; PSNR keeps its own dB range
+        ax.set_ylim(_PCT_Y_MIN, _PCT_Y_MAX)
         ax.tick_params(axis="y", labelcolor=color, labelsize=_FONT_AXIS_TICKS)
         ax.yaxis.set_major_locator(plt.MultipleLocator(_PCT_Y_MAJOR_TICK))
         ax.yaxis.set_minor_locator(plt.MultipleLocator(_PCT_Y_MINOR_TICK))
@@ -662,20 +662,19 @@ def create_unified_plot(
         for mt in scaled_values
     }
 
-    # Collect summary box data — rendered after tight_layout so axes position is final
-    _summary_boxes: list[tuple[float, float, str, dict]] = []
+    # Collect summary box payloads — placed after tight_layout by MEASURED text
+    # width (lossless counts and value digits vary the rendered box width run
+    # to run; a fixed advance step overlaps on wide boxes).
+    _summary_boxes: list[tuple[str, dict]] = []
 
     total_frames   = total_frames_for_summary if fps is not None and fps > 0 \
                      else int(max(idx.max() for idx in frame_index.values()) + 1)
     frames_checked = max(len(v) for v in scaled_values.values())
-    current_x      = _SUMMARY_BOX_START_X
 
     _summary_boxes.append((
-        current_x, _SUMMARY_BOX_Y_POS,
         f"Frames:\n  Total: {total_frames}\n  Checked: {frames_checked}\n  Factor: 1:{factor}",
         {"facecolor": "wheat", "alpha": _SUMMARY_BOX_ALPHA},
     ))
-    current_x += _SUMMARY_BOX_WIDTH + _SUMMARY_BOX_SPACING
 
     for metric_type in metrics:
         if metric_type not in scaled_values:
@@ -706,16 +705,15 @@ def create_unified_plot(
             f"  Lossless: {lossless_count} ({style.lossless_label})"
         )
         _summary_boxes.append((
-            current_x, _SUMMARY_BOX_Y_POS, summary_text,
+            summary_text,
             {"facecolor": style.color, "alpha": _SUMMARY_BOX_METRIC_ALPHA},
         ))
-        current_x += _SUMMARY_BOX_WIDTH + _SUMMARY_BOX_SPACING
 
     ax_main.legend(lines, labels, loc="lower right", fontsize=_FONT_LEGEND, framealpha=_LEGEND_ALPHA)
 
     # Statistics bar subplots
-    bar_labels = ["Min", "5%", "25%", "50%", "75%", "95%", "Max"]
-    stat_keys  = ["min", "p5", "p25", "p50", "p75", "p95", "max"]
+    bar_labels = ["Min", "5%", "10%", "25%", "50%", "75%", "90%", "95%", "Max"]
+    stat_keys  = ["min", "p5", "p10", "p25", "p50", "p75", "p90", "p95", "max"]
     subplot_idx = 0
 
     for metric_type in metrics:
@@ -762,16 +760,21 @@ def create_unified_plot(
     # Summary boxes use fig.text() (figure-layer coordinates): ax.text would be
     # drawn under the twinx axes — zorder only sorts within one axes. The
     # axes→figure transform must run after tight_layout, which repositions axes.
+    # Boxes are placed left-to-right, each advancing by its MEASURED text width
+    # plus SPACING — the only way the row packs with uniform gaps regardless of
+    # how wide the run's values make the text, while staying clear of the
+    # lower-right legend.
+    fig.canvas.draw()
+    renderer  = fig.canvas.get_renderer()
     axes_to_fig = ax_main.transAxes + fig.transFigure.inverted()
-    for ax_x, ax_y, text, bbox_kw in _summary_boxes:
-        fx, fy = axes_to_fig.transform((ax_x, ax_y))
-        fig.text(
-            fx, fy, text,
-            transform=fig.transFigure, fontsize=_FONT_SUMMARY_BOX,
-            verticalalignment="bottom",
-            bbox=dict(boxstyle="round", **bbox_kw),
-            family="monospace",
-        )
+    fx, fy    = axes_to_fig.transform((_SUMMARY_BOX_START_X, _SUMMARY_BOX_Y_POS))
+    fig_width = fig.bbox.width
+    cursor    = fx
+    for text, bbox_kw in _summary_boxes:
+        box = fig.text(cursor, fy, text, transform=fig.transFigure,
+                       fontsize=_FONT_SUMMARY_BOX, verticalalignment="bottom",
+                       bbox=dict(boxstyle="round", **bbox_kw), family="monospace")
+        cursor += (box.get_window_extent(renderer).width / fig_width) + _SUMMARY_BOX_SPACING
 
     fig.set_size_inches(_FIG_WIDTH, _FIG_HEIGHT)
     fig.savefig(output_path, dpi=_PLOT_DPI)
@@ -808,8 +811,8 @@ def _extract_key_stats(full_stats: FullMetricStatistics, metric_type: MetricType
         metric_type: Metric type (affects PSNR max handling).
 
     Returns:
-        ``MetricStats`` with ``min``, ``p05``, ``p25``, ``median``, ``p75``,
-        ``p95``, ``max``, and ``std``.
+        ``MetricStats`` with ``min``, ``p05``, ``p10``, ``p25``, ``median``,
+        ``p75``, ``p90``, ``p95``, ``max``, and ``std``.
     """
     max_value = full_stats["max"]
     if metric_type == MetricType.PSNR and np.isinf(max_value):
@@ -821,9 +824,11 @@ def _extract_key_stats(full_stats: FullMetricStatistics, metric_type: MetricType
     return {
         "min":    full_stats["min"],
         "p05":    full_stats["p5"],
+        "p10":    full_stats["p10"],
         "p25":    full_stats["p25"],
         "median": full_stats["p50"],
         "p75":    full_stats["p75"],
+        "p90":    full_stats["p90"],
         "p95":    full_stats["p95"],
         "max":    max_value,
         "std":    full_stats["std"],
