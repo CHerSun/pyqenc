@@ -214,10 +214,7 @@ class TestRecovery:
         """Bug guarded: the recovery line dropping the internal/unwanted split
         or breaking the identity wanted == complete + partial + absent — the
         line is the user's only honest view of what remains.  The recovery
-        scan must also reach the run's metrics.yaml as a recorded timing row.
-        The line must also carry the phase name — a banner-less phase's
-        unattributed line reads as a duplicate of the previous phase's
-        summary."""
+        scan must also reach the run's metrics.yaml as a recorded timing row."""
         artifacts = [
             _art(ArtifactState.COMPLETE),
             _art(ArtifactState.ABSENT),
@@ -235,21 +232,40 @@ class TestRecovery:
         assert "recovery" in _top_level_keys(metrics), (
             f"recovery timing missing from metrics.yaml, got: {_top_level_keys(metrics)}"
         )
-        line = next(
-            (r for r in caplog.records if "Recovery: 4 total, 3 wanted" in r.message),
-            None,
-        )
-        assert line is not None, (
-            f"recovery summary line missing from INFO logs: "
-            f"{[r.message for r in caplog.records]}"
-        )
-        assert line.message.startswith("stub: Recovery: "), (
-            f"recovery line not attributed to its phase: {line.message!r}"
+        assert any(
+            "Recovery: 4 total, 3 wanted (1 complete, 1 partial, 1 absent) — resuming"
+            in r.message
+            for r in caplog.records
         )
         # Wanted-only exposure; the unwanted artifact stays internal.
         result = holder["result"]
         assert len(result.artifacts) == 3
         assert result.artifacts[0].wanted
+
+    def test_bannerless_phase_emits_soft_start_separator(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Bug guarded: a banner-less phase (job, probe) emitted its output
+        with no separator at all — its lines visually merged into the previous
+        phase's section and read as that phase logging twice."""
+        phase = _StubPhase(
+            NoOpMetricsCollector(),
+            Recovery.from_artifacts([_art(ArtifactState.COMPLETE)]),
+            banner=False,
+        )
+        with caplog.at_level(logging.INFO):
+            phase.run()
+
+        messages = [r.message for r in caplog.records]
+        assert "" in messages, (
+            f"blank separator line missing before the start line: {messages}"
+        )
+        assert "Starting stub..." in messages, (
+            f"soft start line missing: {messages}"
+        )
+        assert messages.index("Starting stub...") < next(
+            i for i, m in enumerate(messages) if m.startswith("Recovery:")
+        ), f"start line must precede the recovery line: {messages}"
 
     def test_fully_reused_ledger_says_all_reused(
         self, caplog: pytest.LogCaptureFixture

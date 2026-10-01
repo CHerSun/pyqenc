@@ -104,10 +104,24 @@ def emit_phase_banner(name: str, log: logging.Logger) -> None:
     log.info(THICK_LINE)
 
 
+def emit_phase_start(name: str, log: logging.Logger) -> None:
+    """Emit the soft separator for banner-less phases.
+
+    A blank line plus a lowercase start line — clear section separation at a
+    fraction of the banner's visual weight, so a banner-less phase's output
+    can never read as a continuation of the previous phase's.
+
+    Args:
+        name: Phase name (e.g. ``"probe"``).
+        log:  Logger instance belonging to the calling phase module.
+    """
+    log.info("")
+    log.info("Starting %s...", name)
+
+
 def log_recovery_line(
     log:       logging.Logger,
     artifacts: list[Artifact],
-    phase:     str,
     unit:      str = "artifact",
 ) -> str:
     """Log the recovery summary and return the same human-readable message.
@@ -115,11 +129,6 @@ def log_recovery_line(
     Takes the phase's INTERNAL artifact ledger (pre-filter, including
     ``wanted=False`` entries) — NOT ``PhaseResult.artifacts``.  Derives all
     counts itself; callers never compute recovery counts locally.
-
-    The line is prefixed with the phase name (``<phase>: Recovery: …``): the
-    summary must stay attributable when the phase emits no banner of its own
-    (job, probe) — an unattributed line reads as a duplicate of the previous
-    phase's output.
 
     The counts are: ``total`` (every internal row — internal artifacts and
     ``wanted=False`` rows included), ``wanted`` (the selected rows), and
@@ -142,7 +151,6 @@ def log_recovery_line(
         log:       Logger instance belonging to the calling phase module.
         artifacts: The phase's internal artifact list (including ``wanted=False``
                    entries).
-        phase:     The emitting phase's name (``Phase.name``) — the line prefix.
         unit:      Singular noun for the artifact type (e.g. ``"chunk"``,
                    ``"pair"``, ``"attempt"``). Reserved for callers that
                    want a noun other than the default; it does not affect the
@@ -164,7 +172,7 @@ def log_recovery_line(
     else:
         suffix = "nothing to reuse"
     message = (
-        f"{phase}: Recovery: {total} total, {wanted} wanted"
+        f"Recovery: {total} total, {wanted} wanted"
         f" ({complete} complete, {partial} partial, {absent} absent)"
         f" — {suffix}"
     )

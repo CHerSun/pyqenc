@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, ClassVar
 from pyqenc.metrics import MetricKey
 from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, Strategy
 from pyqenc.state import ArtifactState
-from pyqenc.utils.log_format import emit_phase_banner, log_recovery_line
+from pyqenc.utils.log_format import emit_phase_banner, emit_phase_start, log_recovery_line
 from pyqenc.utils.long_path import LongPath
 
 if TYPE_CHECKING:
@@ -307,8 +307,10 @@ class Phase[ResultT: PhaseResult](ABC):
                            incrementally, so construction time is too early).
         BANNER:            Whether ``run()`` emits the thick-line banner.
                            Phases whose work is not user-significant (job
-                           setup, probe) set ``False`` and log concise INFO
-                           substitutes instead.
+                           setup, probe) set ``False`` and get the soft
+                           separator instead — a blank line plus
+                           ``Starting <name>…`` — so their output stays
+                           visually separate from the previous phase's.
         _METRIC_KEY:       Top-level metric key timing this phase's execution.
         _DRY_RUN_READONLY: When ``True``, a dry-run still performs the
                            phase's read-only work (only writes are skipped)
@@ -430,9 +432,13 @@ class Phase[ResultT: PhaseResult](ABC):
             self.result = dep_result
             return self.result
 
-        # 4./5. Banner (once, after deps) and key-parameter logging.
+        # 4./5. Phase-intro separator (once, after deps) and key-parameter
+        #        logging — full banner or the soft start line for banner-less
+        #        phases.
         if self.BANNER:
             emit_phase_banner(self.name.upper(), self._logger)
+        else:
+            emit_phase_start(self.name, self._logger)
         self._log_key_params()
 
         # 6. Timed recovery — the single source of truth.
@@ -447,12 +453,10 @@ class Phase[ResultT: PhaseResult](ABC):
             return self.result
 
         # 7. Recovery summary over the unfiltered internal list; wanted
-        #    artifacts are selected exactly once, here. The line carries the
-        #    phase name — banner-less phases would otherwise read as a
-        #    duplicate of the previous phase's summary.
+        #    artifacts are selected exactly once, here.
         wanted = [a for a in recovery.artifacts if a.wanted]
         message = (
-            log_recovery_line(self._logger, recovery.artifacts, self.name, unit=self._recovery_unit())
+            log_recovery_line(self._logger, recovery.artifacts, unit=self._recovery_unit())
             if recovery.artifacts
             else ""
         )
