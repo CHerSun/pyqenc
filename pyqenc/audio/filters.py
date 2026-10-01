@@ -215,7 +215,15 @@ class PeakNormParams(BaseModel):
 
 
 class LoudNormParams(BaseModel):
-    """Parameters for the ``loudnorm`` filter (EBU R128 targets)."""
+    """Parameters for the ``loudnorm`` filter (EBU R128 targets).
+
+    Config-facing field names are lower-case; the filter emits loudnorm's
+    canonical upper-case option names (``I=``/``TP=``/``LRA=`` and
+    ``measured_*``) — per ``ffmpeg -h filter=loudnorm`` the lower-case
+    ``i``/``tp``/``lra`` spellings are the aliases, so no long-name switch is
+    needed (unlike ``dynaudnorm``, where ``f``/``g``/``p``/``m``/``r`` were
+    the short forms actually used).
+    """
 
     model_config = ConfigDict(extra="forbid")
 

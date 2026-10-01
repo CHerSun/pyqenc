@@ -162,9 +162,12 @@ band? Only when subsampling was active (cf. §16)?
   `metrics_sampling >= 1` (`pyqenc/phases/measure.py:933-934`). No frame-count
   guard anywhere; `merge.py:404-405` only logs that subsampling may miss
   outliers.
+- Related (ex-§73): with p10 now targetable, adaptive sampling must keep
+  enough readings for it — min 20 readings so `vmaf-p10` spans >=2 frames;
+  when the chunk has too few frames, revert to a lower sampling value.
 
 **Questions to think about:** auto-set sampling=1 below a frame-count
-threshold (with a log line)?
+threshold (with a log line)? Adapt sampling down when frames/sampling < 20?
 
 ---
 
@@ -552,15 +555,6 @@ Ideally, internal things shouldn't log anything but debug messages and propagate
 
 ---
 
-## 61. Quality graph - adjust placement of metrics boxes
-
-Currently there are 5 boxes placed on main graph - frames and per-quality metric box with its stats.
-Problem is the right-most box overlaps the legend for the main graph.
-
-Frames box can be moved a bit to the left. And per-quality metrics should start right after it, using same padding between boxes, so that the right-most end is moved not to overlap the legend - significantly left (2/3 of its width approximately or more).
-
----
-
 ## 62. Sidecars - are owned by the Phase
 
 Phase sidecars and internal machinery of the phase. Not part of model or stream_model. No1 else by their respected phase should ever be accessing them.
@@ -675,39 +669,6 @@ follows the limiter-summary route — per-user 2026-10-01)
   - Read accounting: zero new reads (piggybacks the limiter-summary scan).
   - Pre-change sidecars lack the field — acceptable pre-alpha (workdirs are
     one-time); keep skip-if-any-unknown semantics.
-
----
-
-## 71. dynaudnorm was switched to long argument names. loudnorm looks to be with short argument names
-
-Short argument names are difficult for humans, not self-explanatory. We need to check all audio filter types.
-And make them use long ffmpeg filter arguments, if short are used (only where we directly map to ffmpeg arg names).
-Dynaudnorm is already good.
-
-
----
-
-## 72. audio naming - wrong fields order
-
-Currently docs state and code produce:
-
-> The stream name is the track's display identity — `#<track-id> (audio-<codec>) lang=<code> [title=<text>] ch=<layout>`
-
-Note that `title` is free form text from end-user. To be better parsable - free form field must come last. Parsing is often on the first-occurence base.
-
----
-
-## 73. we need 10 and 90 percentiles targetting ability
-
-For vmaf the very first frame is unreliable. Considering default min scene length of 24 frames and that a single frame could be unreliable - we need a way to express
-at least 2 frames. 2/24 - ~10%. Currently we have a note - use `vmaf-p05` instead of `vmaf-min`, but that won't work if we have only 24 frames (i.e. shortest possible chunk).
-
-So we need to add p10 and p90 back to targetting capabilities and artifacts sidecars serialization (should be 1 class edit and transfer from full stats). Update the docs for this
-too - recommend `vmaf-p10`.
-
-This also closely related to adaptive metrics.sampling value if user wants >1, but we have too low frames for that - revert back to lower value (we must get at min 20 readings for p10>=2 frames setup).
-
-Need to check if can get those for all metrics (we do full parsing, right, so shouldn't be a problem?).
 
 ---
 
