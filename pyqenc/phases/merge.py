@@ -156,7 +156,7 @@ class MergePhase(Phase[MergePhaseResult]):
     def __init__(
         self,
         config:    AppConfig,
-        phases:    PhaseRegistry | None = None,
+        phases:    PhaseRegistry,
         *,
         collector: MetricsCollector,
     ) -> None:

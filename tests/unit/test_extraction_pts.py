@@ -96,7 +96,7 @@ def _make_extraction_phase(
     )
 
     job = JobPhase(
-        config, None,
+        config, {},
         source     = source,
         work_dir   = work_dir,
         force      = False,

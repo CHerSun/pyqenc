@@ -26,6 +26,8 @@ from the dotted notation.
 """
 # CHerSun 2026
 
+from __future__ import annotations
+
 from pydantic import BaseModel, ConfigDict
 
 from pyqenc.audio.matrices import Layout, layout_channels
@@ -87,7 +89,7 @@ class ChannelLayout(BaseModel):
     channels:   int
 
     @classmethod
-    def parse(cls, raw: str) -> "ChannelLayout":
+    def parse(cls, raw: str) -> ChannelLayout:
         """Parse a raw ffmpeg channel-layout token into a ``ChannelLayout``.
 
         Normalization maps ``stereo`` → ``2.0`` and strips parenthesised

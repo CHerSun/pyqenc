@@ -220,7 +220,7 @@ def test_job_phase_stores_collector(tmp_path: Path) -> None:
     source    = tmp_path / "source.mkv"
     source.write_bytes(b"\x00" * 64)
     phase     = JobPhase(
-        config,
+        config, {},
         collector  = collector,
         source     = source,
         work_dir   = tmp_path / "work",
@@ -236,7 +236,7 @@ def test_extraction_phase_stores_collector(tmp_path: Path) -> None:
     from pyqenc.phases.extraction import ExtractionPhase
     config    = _make_app_config()
     collector = NoOpMetricsCollector()
-    phase     = ExtractionPhase(config, collector=collector)
+    phase     = ExtractionPhase(config, {}, collector=collector)
     assert phase._collector is collector
 
 
@@ -245,7 +245,7 @@ def test_chunking_phase_stores_collector(tmp_path: Path) -> None:
     from pyqenc.phases.chunking import ChunkingPhase
     config    = _make_app_config()
     collector = NoOpMetricsCollector()
-    phase     = ChunkingPhase(config, collector=collector)
+    phase     = ChunkingPhase(config, {}, collector=collector)
     assert phase._collector is collector
 
 
@@ -254,7 +254,7 @@ def test_optimization_phase_stores_collector(tmp_path: Path) -> None:
     from pyqenc.phases.optimization import OptimizationPhase
     config    = _make_app_config()
     collector = NoOpMetricsCollector()
-    phase     = OptimizationPhase(config, collector=collector)
+    phase     = OptimizationPhase(config, {}, collector=collector)
     assert phase._collector is collector
 
 
@@ -263,7 +263,7 @@ def test_encoding_phase_stores_collector(tmp_path: Path) -> None:
     from pyqenc.phases.encoding import EncodingPhase
     config    = _make_app_config()
     collector = NoOpMetricsCollector()
-    phase     = EncodingPhase(config, collector=collector)
+    phase     = EncodingPhase(config, {}, collector=collector)
     assert phase._collector is collector
 
 
@@ -272,7 +272,7 @@ def test_audio_phase_stores_collector(tmp_path: Path) -> None:
     from pyqenc.phases.audio import AudioPhase
     config    = _make_app_config()
     collector = NoOpMetricsCollector()
-    phase     = AudioPhase(config, collector=collector)
+    phase     = AudioPhase(config, {}, collector=collector)
     assert phase._collector is collector
 
 
@@ -281,7 +281,7 @@ def test_merge_phase_stores_collector(tmp_path: Path) -> None:
     from pyqenc.phases.merge import MergePhase
     config    = _make_app_config()
     collector = NoOpMetricsCollector()
-    phase     = MergePhase(config, collector=collector)
+    phase     = MergePhase(config, {}, collector=collector)
     assert phase._collector is collector
 
 

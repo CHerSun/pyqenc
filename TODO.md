@@ -633,7 +633,13 @@ We should consider similar approach for encoding/optimization phases, where we u
 
 ===
 
-## Last known = 74
+## 75. Flaky: test_pts_conversion_correctness under load — needs thinking
+
+2026-10-01: failed once mid-suite (4-file batch: probe + merge_mkvmerge + pts_preservation + metrics_integration), then passed on immediate re-run of the same batch and in isolation. Suspect timing/IO-load sensitivity or shared-state assumption. Not reproducible on demand.
+
+---
+
+## Last known = 75
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

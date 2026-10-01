@@ -146,7 +146,7 @@ def _make_extraction_phase(
     )
 
     job = JobPhase(
-        config, None,
+        config, {},
         source     = source,
         work_dir   = work_dir,
         force      = False,
@@ -422,7 +422,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
 
         # --- Real dependency phases with pre-set COMPLETED results ---
         job = JobPhase(
-            config, None,
+            config, {},
             source     = source,
             work_dir   = work_dir,
             force      = False,
@@ -433,6 +433,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
         job.result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "job complete",
+            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             force_wipe = False,
             config     = config,
             work_dir   = work_dir,

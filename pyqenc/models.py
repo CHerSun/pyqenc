@@ -7,6 +7,8 @@ All models use Pydantic BaseModel for validation and serialisation.
 """
 # CHerSun 2026
 
+from __future__ import annotations
+
 import logging
 from decimal import Decimal
 from enum import Enum, IntEnum
@@ -99,7 +101,7 @@ class Strategy(BaseModel):
 
     preset:       str
     profile:      str
-    codec:        "CodecConfig"
+    codec:        CodecConfig
     profile_args: list[str]
 
     @field_validator("preset", "profile", mode="before")
@@ -226,7 +228,7 @@ class QualityTarget(BaseModel):
     value:     float
 
     @staticmethod
-    def parse(target_str: str) -> "QualityTarget":
+    def parse(target_str: str) -> QualityTarget:
         """Parse quality target from string format.
 
         Args:
@@ -356,7 +358,7 @@ class CodecConfig(BaseModel):
     presets:             list[str]      = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _validate_default_preset(self) -> "CodecConfig":
+    def _validate_default_preset(self) -> CodecConfig:
         """Ensure ``default_preset`` is a member of ``presets``.
 
         Raises:
@@ -478,7 +480,7 @@ class CropParams(BaseModel):
         return f"{UP_ARROW}{self.top} {DOWN_ARROW}{self.bottom} {LEFT_ARROW}{self.left} {RIGHT_ARROW}{self.right}"
 
     @staticmethod
-    def parse(crop_str: str) -> "CropParams":
+    def parse(crop_str: str) -> CropParams:
         """Parse from comma-separated string format.
 
         Accepts 2 or 4 comma-separated values:

@@ -74,11 +74,13 @@ class JobPhaseResult(PhaseResult):
         no_metrics: When ``True``, skip writing ``metrics.yaml`` files.
     """
 
-    file:       Artifact[File] | None = field(default=None)
+    # Always-present payload (every phase-built result populates all of it —
+    # required, never Optional) comes before the defaulted conveniences.
+    file:       Artifact[File]
+    config:     AppConfig
+    work_dir:   Path
+    source:     Path
     force_wipe: bool                   = field(default=False)
-    config:     AppConfig | None       = field(default=None)
-    work_dir:   Path | None            = field(default=None)
-    source:     Path | None            = field(default=None)
     cleanup:    CleanupLevel           = field(default=CleanupLevel.NONE)
     no_metrics: bool                   = field(default=False)
 
@@ -121,7 +123,7 @@ class JobPhase(Phase[JobPhaseResult]):
     def __init__(
         self,
         config:     AppConfig,
-        phases:     PhaseRegistry | None = None,
+        phases:     PhaseRegistry,
         *,
         source:      LongPath,
         work_dir:    Path,

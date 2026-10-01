@@ -51,7 +51,7 @@ def _make_phase(
 ) -> JobPhase:
     config = _APP_CONFIG.model_copy(deep=True)
     return JobPhase(
-        config,
+        config, {},
         source      = source,
         work_dir    = tmp_path / "work",
         force       = force,

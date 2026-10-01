@@ -86,11 +86,11 @@ def _make_registry(
         work_dir  = work_dir,
         source    = source,
     )
-    job = JobPhase(config, None, source=source, work_dir=work_dir, force=False,
+    job = JobPhase(config, {}, source=source, work_dir=work_dir, force=False,
                    cleanup=CleanupLevel.NONE, no_metrics=True, collector=collector)
     job.result = job_result
 
-    extraction = ExtractionPhase(config, None, collector=collector)
+    extraction = ExtractionPhase(config, {}, collector=collector)
     extraction.result = ExtractionPhaseResult(
         outcome=PhaseOutcome.COMPLETED, message="extraction",
         video_stream=(
@@ -99,7 +99,7 @@ def _make_registry(
         ),
     )
 
-    probe = ProbePhase(config, None, collector=collector)
+    probe = ProbePhase(config, {}, collector=collector)
     probe.result = ProbePhaseResult(
         outcome=PhaseOutcome.COMPLETED, message="probe",
         stream=(

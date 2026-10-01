@@ -327,7 +327,7 @@ class Phase[ResultT: PhaseResult](ABC):
     def __init__(
         self,
         config:  AppConfig,
-        phases:  PhaseRegistry | None = None,
+        phases:  PhaseRegistry,
         *,
         collector: MetricsCollector,
     ) -> None:
@@ -339,17 +339,17 @@ class Phase[ResultT: PhaseResult](ABC):
 
         Args:
             config:    Full validated application configuration.
-            phases:    Phase registry link. Must contain an instance of every
+            phases:    Phase registry link (the shared dict, filled
+                       incrementally). Must contain an instance of every
                        type in ``DEPENDS_ON`` by the time ``run()`` is called;
                        a declared dependency still missing then trips an
                        ``assert`` (mis-wired registry — a programming
-                       error, never silently dropped). ``None`` is legal only
-                       for phases with no dependencies.
+                       error, never silently dropped).
             collector: Metrics collector; the template owns all timing calls.
         """
         self._config:    AppConfig        = config
         self._collector: MetricsCollector = collector
-        self._phases:    PhaseRegistry = phases if phases is not None else {}
+        self._phases:    PhaseRegistry    = phases
         self.result:     ResultT | None  = None
 
     # ------------------------------------------------------------------
@@ -403,7 +403,7 @@ class Phase[ResultT: PhaseResult](ABC):
         """Logger of the concrete phase's module (keeps log provenance)."""
         return logging.getLogger(type(self).__module__)
 
-    def run(self, dry_run: bool = False) -> PhaseResult:
+    def run(self, dry_run: bool = False) -> ResultT:
         """Run the uniform footprint once; the concrete hooks do the work.
 
         Args:
@@ -498,7 +498,7 @@ class Phase[ResultT: PhaseResult](ABC):
     # Shared dependency resolution (thin, uniform wrapper)
     # ------------------------------------------------------------------
 
-    def _ensure_dependencies(self, *, dry_run: bool) -> PhaseResult | None:
+    def _ensure_dependencies(self, *, dry_run: bool) -> ResultT | None:
         """Resolve dependencies and build the typed short-circuit.
 
         First fetches every type declared in ``DEPENDS_ON`` from the registry
@@ -552,7 +552,7 @@ class Phase[ResultT: PhaseResult](ABC):
             return self._make_result(PhaseOutcome.PENDING, [], msg)
         return self._post_dependency_check()
 
-    def _post_dependency_check(self) -> PhaseResult | None:
+    def _post_dependency_check(self) -> ResultT | None:
         """Phase-specific validation after the dependency walk succeeded.
 
         Override to refuse proceeding on a dependency whose result is
@@ -569,7 +569,7 @@ class Phase[ResultT: PhaseResult](ABC):
     # Hooks — concrete phases implement / override these
     # ------------------------------------------------------------------
 
-    def _skip_check(self, dry_run: bool) -> PhaseResult | None:
+    def _skip_check(self, dry_run: bool) -> ResultT | None:
         """Phase-specific skip decision made before the template resolves deps.
 
         Must decide from constructor state (config) only. When the skip path
@@ -594,7 +594,7 @@ class Phase[ResultT: PhaseResult](ABC):
         """Singular noun for the recovery summary line (e.g. ``"chunk"``)."""
         return "artifact"
 
-    def _reused_result(self, wanted: list[Artifact], message: str) -> PhaseResult:
+    def _reused_result(self, wanted: list[Artifact], message: str) -> ResultT:
         """Build the typed result for the nothing-pending path.
 
         Default: ``_make_result(REUSED, wanted, message)``. Override when the
@@ -631,7 +631,7 @@ class Phase[ResultT: PhaseResult](ABC):
         ...
 
     @abstractmethod
-    def _execute(self, wanted: list[Artifact], dry_run: bool) -> PhaseResult:
+    def _execute(self, wanted: list[Artifact], dry_run: bool) -> ResultT:
         """Produce every wanted artifact; the phase alone decides the outcome.
 
         A pure executor: it receives the wanted list selected by recovery and
@@ -655,7 +655,7 @@ class Phase[ResultT: PhaseResult](ABC):
         outcome:   PhaseOutcome,
         artifacts: list[Artifact],
         message:   str,
-    ) -> PhaseResult:
+    ) -> ResultT:
         """Assemble the phase's typed result (payload defaults for the phase).
 
         Args:

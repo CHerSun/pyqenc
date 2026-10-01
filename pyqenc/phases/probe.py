@@ -121,7 +121,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
     def __init__(
         self,
         config:      AppConfig,
-        phases:      PhaseRegistry | None = None,
+        phases:      PhaseRegistry,
         *,
         collector:   MetricsCollector,
         crop_params: CropParams | None = None,

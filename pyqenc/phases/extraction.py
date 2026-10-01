@@ -15,6 +15,8 @@ is present and its source identity matches the job's live ``File``.
 """
 # CHerSun 2026
 
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -388,11 +390,11 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
     def __init__(
         self,
-        config:         "AppConfig",
-        phases:         PhaseRegistry | None = None,
+        config:         AppConfig,
+        phases:         PhaseRegistry,
         *,
         video_required: bool              = True,
-        collector:      "MetricsCollector",
+        collector:      MetricsCollector,
     ) -> None:
         super().__init__(config, phases, collector=collector)
 

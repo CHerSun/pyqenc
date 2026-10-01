@@ -198,7 +198,7 @@ def _make_merge_phase(
     config    = _APP_CONFIG.model_copy(deep=True)
 
     job = JobPhase(
-        config, None,
+        config, {},
         source     = source,
         work_dir   = work_dir,
         force      = False,
@@ -209,6 +209,7 @@ def _make_merge_phase(
     job.result = JobPhaseResult(
         outcome    = PhaseOutcome.COMPLETED,
         message    = "job complete",
+        file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         force_wipe = False,
         config     = config,
         work_dir   = work_dir,

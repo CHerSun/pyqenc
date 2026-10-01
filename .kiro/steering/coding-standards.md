@@ -7,6 +7,7 @@
 ## Python Language & Style
 
 - Targeting Python>=3.13 syntax.
+- Every module starts (after its docstring and author notice) with `from __future__ import annotations`. Annotations are NEVER written as strings — no `"AppConfig"` quoting for forward references or `TYPE_CHECKING`-only imports; the future import defers their evaluation.
 - For volatile things - try (not check).
 - All functions, classes and class members MUST BE type-hinted.
 - Type-hint using newer syntax: `int|None` instead of `Optional[int]`, newer generic classes without imports from `typing` where possible.
@@ -36,10 +37,18 @@
 
 ## Paths, Files & Subprocesses
 
-- `LongPath` from `pyqenc.utils.long_path` is mandatory for all project file I/O — it subclasses `Path` and transparently handles Windows extended-length paths (>260 chars). NO `str` for paths.
+- `LongPath` from `pyqenc.utils.long_path` transparently handles Windows extended-length paths (>260 chars). NO `str` for paths.
+- **Signatures declare `Path`** — the honest footprint (the body works with any `Path`). **Callers construct `LongPath` at the boundary** where a path first enters our code (CLI args, sidecar/model loads, test fixtures) and pass it through.
+- Never re-instantiate `Path(...)`/`LongPath(...)` around an existing path inside logic — chain with `/` and path methods; `LongPath` overrides the composition operators, so the subtype is preserved without re-wrapping. (Pydantic model fields may still be annotated `LongPath` — its schema coerces.)
 - Use `LongPath` everywhere a path is constructed, stored, or passed to Python file I/O (`open`, `mkdir`, `exists`, `replace`, `shutil.*`, etc.). This does NOT apply to libraries that handle their own file I/O (JSON, PNG, etc.).
 - For any on-disk results use `.tmp`-then-rename protocol for atomicity and consistency enforcement.
 - For subprocess cmd building use type hint `list[str|os.PathLike]` and supply `LongPath`/`Path` variables directly (without converting to `str`). The subprocess layer calls `os.fspath()` which injects the `\\?\` prefix when needed. Sub-string arguments that a tool parses itself (mkvmerge `@options.json`, mkvextract `0:timestamps.txt`, ffmpeg filter args) take the plain form via `str(path)` — these parsers are picky and must not receive an extended-length prefix. `str(path)` is otherwise allowed for printing/logging only, never for command building or file operations.
+
+## Optionality (None policy)
+
+- Prefer non-Optional: if a value is always present by construction, the type must say so (`work_dir: Path`, never `Path | None`). An Optional footprint consumed unconditionally is a lie the type checker will flag.
+- Avoid `None` as a sentinel where an empty container expresses it. Empty containers are checked Python-style (`if not mapping:`); direct `.get()`/`in` are fine. Use `None` only where "absent" is semantically distinct from "empty".
+- Presence guaranteed by our own construction is enforced with `assert` at the consuming site — not by widening footprints to Optional (see Contracts below).
 
 ## Constants & Magic Values
 

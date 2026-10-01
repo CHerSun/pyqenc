@@ -297,7 +297,7 @@ class TestJobPhaseTiming:
         volatile = _make_volatile(tmp_path)
 
         def run(collector: MetricsCollector) -> None:
-            JobPhase(config, collector=collector, **volatile).run()
+            JobPhase(config, {}, collector=collector, **volatile).run()
 
         metrics    = _recorded_metrics(tmp_path, run)
         top_level  = _top_level_keys(metrics)
@@ -322,7 +322,7 @@ class TestJobPhaseTiming:
         config   = _make_config(tmp_path)
         volatile = _make_volatile(tmp_path)
         collector = _spy_collector()
-        phase    = JobPhase(config, collector=collector, **volatile)
+        phase    = JobPhase(config, {}, collector=collector, **volatile)
 
         # Pre-create a valid job.yaml (the File dump) so the phase takes the
         # REUSED path.
@@ -350,7 +350,7 @@ class TestJobPhaseTiming:
         config   = _make_config(tmp_path)
         volatile = _make_volatile(tmp_path)
         collector = NoOpMetricsCollector()
-        phase    = JobPhase(config, collector=collector, **volatile)
+        phase    = JobPhase(config, {}, collector=collector, **volatile)
 
         result = phase.run()
 
@@ -387,10 +387,10 @@ class TestExtractionPhaseTiming:
             message    = "ok",
             force_wipe = False,
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            source     = source,
+            work_dir   = source.parent / "work",
+            config     = _make_config(source.parent),
         )
-        result.source   = source                          # type: ignore[attr-defined]
-        result.work_dir = source.parent / "work"          # type: ignore[attr-defined]
-        result.config   = _make_config(source.parent)     # type: ignore[attr-defined]
         result.file     = File(                           # type: ignore[attr-defined]
             path=source, file_size_bytes=source.stat().st_size,
         )
@@ -579,10 +579,10 @@ class TestChunkingPhaseTiming:
             message    = "ok",
             force_wipe = False,
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            source     = source,
+            work_dir   = tmp_path / "work",
+            config     = _make_config(tmp_path),
         )
-        result.source   = source              # type: ignore[attr-defined]
-        result.work_dir = tmp_path / "work"   # type: ignore[attr-defined]
-        result.config   = _make_config(tmp_path)  # type: ignore[attr-defined]
         return result
 
     def _make_phase(
@@ -770,10 +770,10 @@ class TestAudioPhaseTiming:
             message    = "ok",
             force_wipe = False,
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            source     = source,
+            work_dir   = work_dir,
+            config     = config,
         )
-        job_result.source   = source      # type: ignore[attr-defined]
-        job_result.work_dir = work_dir    # type: ignore[attr-defined]
-        job_result.config   = config      # type: ignore[attr-defined]
 
         extraction_result = ExtractionPhaseResult(
             outcome      = PhaseOutcome.COMPLETED,
@@ -903,10 +903,10 @@ class TestOptimizationPhaseTiming:
             message    = "ok",
             force_wipe = False,
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            source     = source,
+            work_dir   = tmp_path / "work",
+            config     = config if config is not None else _make_config(tmp_path),
         )
-        result.source   = source                                       # type: ignore[attr-defined]
-        result.work_dir = tmp_path / "work"                            # type: ignore[attr-defined]
-        result.config   = config if config is not None else _make_config(tmp_path)  # type: ignore[attr-defined]
         return result
 
     def _make_chunking_result(self, tmp_path: Path) -> ChunkingPhaseResult:
@@ -1139,10 +1139,10 @@ class TestEncodingPhaseTiming:
             message    = "ok",
             force_wipe = False,
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            source     = source,
+            work_dir   = tmp_path / "work",
+            config     = _make_config(tmp_path),
         )
-        result.source   = source              # type: ignore[attr-defined]
-        result.work_dir = tmp_path / "work"   # type: ignore[attr-defined]
-        result.config   = _make_config(tmp_path)  # type: ignore[attr-defined]
         return result
 
     def _make_chunking_result(self, tmp_path: Path) -> ChunkingPhaseResult:
@@ -1429,10 +1429,10 @@ class TestMergePhaseTiming:
             message    = "ok",
             force_wipe = False,
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            source     = source,
+            work_dir   = tmp_path / "work",
+            config     = _make_config(tmp_path),
         )
-        result.source   = source              # type: ignore[attr-defined]
-        result.work_dir = tmp_path / "work"   # type: ignore[attr-defined]
-        result.config   = _make_config(tmp_path)  # type: ignore[attr-defined]
         return result
 
     def _make_encoding_result(self, tmp_path: Path) -> EncodingPhaseResult:

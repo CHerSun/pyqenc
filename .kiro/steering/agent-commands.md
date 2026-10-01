@@ -10,11 +10,12 @@
 - Note to self: for structural code changes (renaming a symbol/module, moving a class or function, extracting a method, inlining a variable) prefer the refactoring MCP (e.g. rope) over manual multi-file text edits. In practice it gives more consistent, complete results — it updates the definition plus every reference and import in one operation, which manual edits tend to miss.
 - The MCP renames identifiers only. It does NOT touch string literals (e.g. an enum's `value`), docstrings, or comments — do those manually as a follow-up.
 - It also cannot perform semantic changes that are not pure renames/moves (e.g. splitting one concept into two, changing logic). Those stay manual.
-- Verify with a project-wide search after the MCP refactor to catch any leftover string/docstring/comment mentions, then run ruff and the tests.
+- Verify with a project-wide search after the MCP refactor to catch any leftover string/docstring/comment mentions, then run ruff, ty, and the tests.
 
-- To check with ruff use `uv run ruff ...`.
+- Static-check gates run via `uvx` (always the newest release — for static analysis newer means better rules and fixed bugs): `uvx ruff check` and `uvx ty check`. The locked dev deps exist for editor/MCP integration; refresh them occasionally with `uv lock --upgrade-package ruff ty` so `uv run` doesn't rot.
 - To run tests use `uv run python -m pytest ...`.
 - To run the project use `uv run pyqenc` with required arguments.
+- **Green status requires ALL THREE gates passing:** `uvx ruff check` clean, `uvx ty check` clean, and pytest green. A ruff+pytest-only "green" is not green.
 - Don't use pipes when running pipeline - this ruins alive_progress bar display for the end-user.
 - Use `steering/environment.md` for local environment details, like workdir, sample target, etc.
 - When writing tests - public (external) behavior or expected behavior must be tested, not internal implementation. For each test there must be a bug we are trying to eliminate (write the bug conditions inside the function).

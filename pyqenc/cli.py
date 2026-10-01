@@ -1,6 +1,8 @@
 """CLI interface for the quality-based encoding pipeline."""
 # CHerSun 2026
 
+from __future__ import annotations
+
 import argparse
 import logging
 import os
@@ -282,7 +284,7 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
 # Config assembly helper
 # ---------------------------------------------------------------------------
 
-def _build_config(args: argparse.Namespace) -> "AppConfig":
+def _build_config(args: argparse.Namespace) -> AppConfig:
     """Load app config and apply all CLI overrides present in *args*.
 
     Only attributes that are actually defined on *args* are applied, so the

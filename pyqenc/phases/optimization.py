@@ -27,8 +27,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
-from alive_progress import config_handler
-
 from pyqenc.constants import (
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
@@ -68,7 +66,6 @@ if TYPE_CHECKING:
     from pyqenc.metrics import MetricsCollector
     from pyqenc.phases.encoding import ChunkEncoder
 
-config_handler.set_global(enrich_print=False)  # type: ignore
 logger = logging.getLogger(__name__)
 
 
@@ -133,7 +130,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
     def __init__(
         self,
         config:    AppConfig,
-        phases:    PhaseRegistry | None = None,
+        phases:    PhaseRegistry,
         *,
         collector: MetricsCollector,
     ) -> None:

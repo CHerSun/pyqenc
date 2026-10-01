@@ -213,7 +213,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
     def __init__(
         self,
         config:    AppConfig,
-        phases:    PhaseRegistry | None = None,
+        phases:    PhaseRegistry,
         *,
         collector: MetricsCollector,
     ) -> None:

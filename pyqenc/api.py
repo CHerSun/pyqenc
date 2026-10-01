@@ -22,6 +22,8 @@ it to the runner.
 """
 # CHerSun 2026
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from pathlib import Path
@@ -52,7 +54,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 def _drive(
-    config:   "AppConfig",
+    config:   AppConfig,
     source:   LongPath,
     work_dir: Path,
     target:   type[Phase],
@@ -132,7 +134,7 @@ def _drive(
 # ---------------------------------------------------------------------------
 
 def run_pipeline(
-    config:   "AppConfig",
+    config:   AppConfig,
     source:   Path,
     work_dir: Path,
     *,
@@ -181,7 +183,7 @@ def run_pipeline(
 
 
 def extract_streams(
-    config:   "AppConfig",
+    config:   AppConfig,
     source:   Path,
     work_dir: Path,
     *,
@@ -229,7 +231,7 @@ def extract_streams(
 
 
 def chunk_video(
-    config:   "AppConfig",
+    config:   AppConfig,
     source:   Path,
     work_dir: Path,
     *,
@@ -278,7 +280,7 @@ def chunk_video(
 
 
 def process_audio(
-    config:   "AppConfig",
+    config:   AppConfig,
     source:   Path,
     work_dir: Path,
     *,
@@ -324,7 +326,7 @@ def process_audio(
 
 
 def encode_chunks(
-    config:   "AppConfig",
+    config:   AppConfig,
     source:   Path,
     work_dir: Path,
     *,
@@ -373,7 +375,7 @@ def encode_chunks(
 
 
 def merge_final(
-    config:   "AppConfig",
+    config:   AppConfig,
     source:   Path,
     work_dir: Path,
     *,
@@ -430,7 +432,7 @@ def measure_quality(
     screenshot_interval:      str | None        = None,
     width:                    int | None        = None,
     screenshot_include_edges: bool              = False,
-) -> "MeasureResult":
+) -> MeasureResult:
     """Measure quality metrics between a source and one or more encoded videos.
 
     Computes VMAF, SSIM, and PSNR metrics for each target, writes a metrics

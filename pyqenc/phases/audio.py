@@ -15,9 +15,6 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from alive_progress import config_handler
-
-config_handler.set_global(enrich_print=False) # type: ignore
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -103,7 +100,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
     def __init__(
         self,
         config:    AppConfig,
-        phases:    PhaseRegistry | None = None,
+        phases:    PhaseRegistry,
         *,
         collector: MetricsCollector,
     ) -> None:

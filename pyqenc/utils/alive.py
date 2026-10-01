@@ -7,9 +7,14 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import assert_never
 
-from alive_progress import alive_bar
+from alive_progress import alive_bar, config_handler
 
 from pyqenc.constants import FAILURE_SYMBOL_MINOR, SKIPPED_SYMBOL, SUCCESS_SYMBOL_MINOR
+
+# The single global bar configuration (this module owns all alive_progress
+# usage): output printed while a bar is active must pass through byte-stable,
+# not re-styled by the bar — so print enrichment is off program-wide.
+config_handler.set_global(enrich_print=False)
 
 
 class AdvanceState(Enum):

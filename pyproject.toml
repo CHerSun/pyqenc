@@ -66,3 +66,7 @@ ignore = [
     # ProgressBarState renders the two differently (isinstance check).
     "PYI041",
 ]
+
+[tool.ty.src]
+# Archived spec material under .kiro/specs is kept verbatim (same as ruff).
+exclude = [".kiro"]

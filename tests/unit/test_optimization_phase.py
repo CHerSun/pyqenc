@@ -74,7 +74,7 @@ def _make_job_phase(
     config.encoding.resolve(config.codecs, config.profiles)
 
     job = JobPhase(
-        config,
+        config, {},
         source     = src,
         work_dir   = work_dir,
         force      = force,

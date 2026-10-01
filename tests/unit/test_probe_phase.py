@@ -58,6 +58,8 @@ def _make_job_result(work_dir: Path, source: Path) -> JobPhaseResult:
     return JobPhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
         message   = "job complete",
+        file      = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+        config    = _APP_CONFIG,
         work_dir  = work_dir,
         source    = source,
     )
@@ -112,7 +114,7 @@ def _make_probe_phase(
         collector = NoOpMetricsCollector()
 
     job = JobPhase(
-        _APP_CONFIG, None,
+        _APP_CONFIG, {},
         source     = job_result.source,      # type: ignore[arg-type]
         work_dir   = job_result.work_dir,    # type: ignore[arg-type]
         force      = False,

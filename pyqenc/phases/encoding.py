@@ -6,6 +6,8 @@ quality targets, including parallel execution and artifact-based resumption.
 """
 # CHerSun 2026
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -21,7 +23,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 import yaml
-from alive_progress import config_handler
 
 from pyqenc.constants import (
     BRACKET_LEFT,
@@ -96,8 +97,6 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
 
-
-config_handler.set_global(enrich_print=False) # type: ignore
 logger = logging.getLogger(__name__)
 
 
@@ -1446,7 +1445,7 @@ async def _encode_chunks_parallel(
     max_parallel:     int,
     force:            bool,
     collector:        MetricsCollector,
-    phase_recovery:   "_PhaseRecovery | None"                                  = None,
+    phase_recovery:   _PhaseRecovery | None                                  = None,
     advance:          Callable[[int | float, AdvanceState], None] | None = None,
     metric_prefix:    MetricKey                                                  = MetricKey.ENCODING,
 ) -> EncodingResult:
@@ -1908,10 +1907,10 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
 
     def __init__(
         self,
-        config:    "AppConfig",
-        phases:    PhaseRegistry | None = None,
+        config:    AppConfig,
+        phases:    PhaseRegistry,
         *,
-        collector: "MetricsCollector",
+        collector: MetricsCollector,
     ) -> None:
         super().__init__(config, phases, collector=collector)
 
@@ -2085,7 +2084,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         rows += _orphan_strategy_rows(work_dir, strategies)
         return Recovery.from_artifacts(rows)
 
-    def _reused_result(self, wanted: list[Artifact], message: str) -> "EncodingPhaseResult":
+    def _reused_result(self, wanted: list[Artifact], message: str) -> EncodingPhaseResult:
         """Resurface the persisted aggregates on a fully-reused run.
 
         Mirrors ``OptimizationPhase``: the winning-limiter table is shown from
@@ -2143,7 +2142,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         outcome:   PhaseOutcome,
         artifacts: list[Artifact[EncodedChunk]],
         message:   str,
-    ) -> "EncodingPhaseResult":
+    ) -> EncodingPhaseResult:
         """Assemble an ``EncodingPhaseResult`` from the pair rows.
 
         Args:
@@ -2170,7 +2169,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         self,
         wanted:  list[Artifact[EncodedChunk]],
         dry_run: bool,
-    ) -> "EncodingPhaseResult":
+    ) -> EncodingPhaseResult:
         """Encode all pending ``(chunk, strategy)`` pairs.
 
         The top-level ``encoding`` span belongs to the template and therefore
