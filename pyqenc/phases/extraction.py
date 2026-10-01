@@ -30,6 +30,7 @@ from pyqenc.constants import (
     EXTRACTED_DIR,
     FAILURE_SYMBOL_MINOR,
     FFMPEG_CODEC_COPY,
+    FFMPEG_MUXER_DATA,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
     THICK_LINE,
@@ -143,10 +144,18 @@ def _enumerate_streams(
 
     for raw in data.get("streams", []):
         codec_type = raw.get("codec_type", "")
-        # Attachment (attached picture/font): the disposition flag, or an image/* mimetype.
+        # Attachment (attached picture, font, any attached file): the
+        # disposition flag, the dedicated codec_type, or an image/* mimetype.
         if (raw.get("disposition") or {}).get("attached_pic", 0) == 1 \
+                or codec_type == "attachment" \
                 or str(StreamInfo._tags_of(raw).get("mimetype", "")).startswith("image/"):
-            attachments.append(AttachmentStream(file=source_file, info=AttachmentStreamInfo.from_ffprobe(raw)))
+            attachments.append(AttachmentStream(
+                file = source_file,
+                # mkvextract/mkvmerge key attachments by their own 1-based
+                # positional IDs; ffprobe preserves the file order, so the
+                # append position is that ID.
+                info = AttachmentStreamInfo.from_ffprobe(raw, len(attachments) + 1),
+            ))
         elif codec_type == "video":
             video.append(VideoStream(file=source_file, info=VideoStreamInfo.from_ffprobe(raw)))
         elif codec_type == "audio":
@@ -716,6 +725,15 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
         errors: list[str] = []
 
+        # Attachments extract as one mkvextract batch (their own numbering
+        # space, one call for every pair) before the per-row loop.
+        attachment_rows = [
+            a for a in artifacts
+            if a.state == ArtifactState.ABSENT and isinstance(a.payload, AttachmentStream)
+        ]
+        if attachment_rows:
+            self._extract_attachments(attachment_rows, source, errors)
+
         for artifact in artifacts:
             if artifact.state != ArtifactState.ABSENT:
                 continue
@@ -724,8 +742,6 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
                     self._extract_index(artifact, work_dir, errors)
                 case SubtitleStream():
                     self._extract_subtitle(artifact, source, errors)
-                case AttachmentStream():
-                    self._extract_attachment(artifact, source, errors)
                 case Chapters():
                     self._extract_chapters(artifact, work_dir, source, errors)
                 case AudioStream():
@@ -803,40 +819,108 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             logger.error(err)
             errors.append(err)
 
-    def _extract_attachment(
+    def _extract_attachments(
         self,
-        artifact:  Artifact[AttachmentStream],
+        artifacts: list[Artifact[AttachmentStream]],
         source:    Path,
         errors:    list[str],
     ) -> None:
-        """Dump one attachment through the file-trust rule.
+        """Dump every absent attachment — one mkvextract call, ffmpeg fallback.
 
-        ``-dump_attachment`` writes directly (not a muxer output), so the
-        phase wraps it: the dump targets a ``.tmp`` sibling, renamed to the
-        final name only on verified success — presence at the final name
-        always implies a complete write.
+        mkvextract is the primary: one call dumps every pair
+        ``attachment_id:<tmp>`` (the mkv numbering space — see
+        :meth:`AttachmentStreamInfo.from_ffprobe`). Exit 0 means every pair
+        was written, so each ``.tmp`` sibling is renamed straight to its
+        final name — a pair that never materialized surfaces as ``OSError``
+        at the rename. On any failure the tmps are wiped (mkvextract writes
+        the pairs it can before failing) and every row goes to the per-kind
+        ffmpeg fallback.
+        """
+        rows: list[tuple[Artifact[AttachmentStream], Path, Path]] = []
+        for artifact in artifacts:
+            final = artifact.payload.info.extracted_path
+            assert final is not None, "expected location set by _normalize_extracted_paths"
+            rows.append((artifact, final, final.parent / f"{final.stem}{TEMP_SUFFIX}"))
+
+        mkvextract_cmd: list[str | os.PathLike] = [
+            "mkvextract", source, "attachments",
+            # "N:<file>" is a track spec sub-string mkvextract parses itself —
+            # plain form only, no extended-length prefix.
+            *(f"{a.payload.info.attachment_id}:{tmp}" for a, _, tmp in rows),
+        ]
+        logger.debug("Extracting %d attachment(s) via mkvextract", len(rows))
+        try:
+            subprocess.run(mkvextract_cmd, capture_output=True, check=True)
+            for _, final, tmp in rows:
+                tmp.replace(final)
+            for artifact, _, _ in rows:
+                artifact.state = ArtifactState.COMPLETE
+            return
+        except (subprocess.CalledProcessError, OSError) as exc:
+            logger.debug("mkvextract attachments failed (%s), falling back to ffmpeg", exc)
+            for _, _, tmp in rows:
+                tmp.unlink(missing_ok=True)
+
+        for artifact, _, _ in rows:
+            self._dump_attachment_ffmpeg(artifact, source, errors)
+
+    def _dump_attachment_ffmpeg(
+        self,
+        artifact: Artifact[AttachmentStream],
+        source:   Path,
+        errors:   list[str],
+    ) -> None:
+        """Dump one attachment through ffmpeg — the ffprobe kind picks the path.
+
+        Attached pictures are ``video``-codec streams that never materialize
+        via ``-dump_attachment`` on this ffmpeg line ("No extradata to
+        dump", exit 0, no file) — a ``-c copy -f data`` stream copy is
+        byte-faithful instead. True ``attachment``-codec streams (fonts) are
+        the exact inverse: the dump option works while stream copy produces
+        an empty file (again exit 0). Every failure mode exits 0, so each
+        path verifies its own artifact through the file-trust rule.
         """
         stream = artifact.payload
         final  = stream.info.extracted_path
         assert final is not None, "expected location set by _normalize_extracted_paths"
-        tmp     = final.parent / f"{final.stem}{TEMP_SUFFIX}"
-        # -dump_attachment is an INPUT-side per-stream option — it must precede
-        # -i; ffmpeg rejects it in the output stage.
+
+        if stream.info.codec_type == "video":
+            request = FFmpegRequest(
+                inputs        = [stream.as_input()],
+                output_args   = ("-c", FFMPEG_CODEC_COPY),
+                output        = final,
+                output_format = FFMPEG_MUXER_DATA,
+            )
+            logger.debug("Stream-copying attachment track %d: %s", stream.info.track_id, final.name)
+            res = run_ffmpeg(request)
+            if res.success:  # the runner verified the .tmp write and renamed
+                artifact.state = ArtifactState.COMPLETE
+            else:
+                err = f"ffmpeg failed stream-copying attachment track {stream.info.track_id}"
+                logger.error(err)
+                errors.append(err)
+            return
+
+        # True attachment: -dump_attachment is an INPUT-side per-stream
+        # option — it must precede -i. The dump writes directly (not a muxer
+        # output), so the phase verifies the .tmp sibling and renames only
+        # on verified success.
+        tmp = final.parent / f"{final.stem}{TEMP_SUFFIX}"
         request = FFmpegRequest(
             inputs = [FFmpegInput(
                 path           = source,
                 pre_input_args = (f"-dump_attachment:{stream.info.track_id}", tmp),
             )],
-            output_args = ("-t", "0"),
+            output_args = (),
         )
-        logger.debug("Extracting attachment track %d: %s", stream.info.track_id, final.name)
+        logger.debug("Dumping attachment track %d: %s", stream.info.track_id, final.name)
         res = run_ffmpeg(request)
         if res.success and tmp.exists() and tmp.stat().st_size > 0:
             tmp.replace(final)
             artifact.state = ArtifactState.COMPLETE
         else:
             tmp.unlink(missing_ok=True)
-            err = f"ffmpeg failed extracting attachment track {stream.info.track_id}"
+            err = f"ffmpeg failed dumping attachment track {stream.info.track_id}"
             logger.error(err)
             errors.append(err)
 

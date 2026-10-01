@@ -23,6 +23,7 @@ Covers:
 
 from __future__ import annotations
 
+import os
 import subprocess as _subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -150,11 +151,23 @@ def _subtitle_json(track_id: int = 3, codec: str = "subrip", forced: int = 0) ->
     }
 
 
-def _attachment_json(track_id: int = 4, filename: str = "font.ttf") -> dict:
+def _attachment_json(track_id: int = 4, filename: str = "cover.jpg") -> dict:
+    """An attached-picture attachment — a video-codec stream (ffprobe keeps
+    attached pics on video streams; the disposition flag is the marker)."""
     return {
-        "index": track_id, "codec_type": "video", "codec_name": "ttf",
+        "index": track_id, "codec_type": "video", "codec_name": "mjpeg",
         "disposition": {"attached_pic": 1},
-        "tags": {"filename": filename, "mimetype": "image/x-font"},
+        "tags": {"filename": filename, "mimetype": "image/jpeg"},
+    }
+
+
+def _font_attachment_json(track_id: int = 5, filename: str = "font.ttf") -> dict:
+    """A true attachment (a font): its own codec_type, no codec name, no
+    attached_pic disposition — only the dedicated type reveals it."""
+    return {
+        "index": track_id, "codec_type": "attachment", "codec_name": None,
+        "disposition": {"attached_pic": 0},
+        "tags": {"filename": filename, "mimetype": "font/ttf"},
     }
 
 
@@ -187,10 +200,31 @@ class TestEnumerateStreams:
         assert len(audio) == 1 and audio[0].info.layout is not None
         assert audio[0].info.layout.normalized == "5.1"
         assert len(subs) == 1 and subs[0].info.is_forced is False
-        assert len(attachments) == 1 and attachments[0].info.filename == "font.ttf"
+        assert len(attachments) == 1 and attachments[0].info.filename == "cover.jpg"
         assert has_chapters is True
         # Every stream composes the single job File.
         assert all(s.file is file for s in [*video, *audio, *subs, *attachments])
+
+    def test_true_attachments_are_enumerated_with_mkv_ids(self) -> None:
+        """Bug prevented: fonts (codec_type "attachment", no attached_pic
+        disposition, non-image mimetype) silently dropped from the inventory.
+        Mixed-kind attachments carry 1-based positional mkv IDs alongside
+        their ffprobe track ids, and preserve mimetype/codec_type."""
+        file = File(path=LongPath("src.mkv"))
+        _, _, _, attachments, _ = _enumerate_streams(
+            _ffprobe_json(
+                _video_json(),
+                _attachment_json(track_id=6, filename="cover.jpg"),
+                _font_attachment_json(track_id=7, filename="font.ttf"),
+            ),
+            file,
+        )
+        assert [(a.info.track_id, a.info.attachment_id) for a in attachments] == [(6, 1), (7, 2)]
+        pic, font = attachments
+        assert pic.info.codec_type == "video" and pic.info.codec_name == "mjpeg"
+        assert pic.info.mimetype == "image/jpeg"
+        assert font.info.codec_type == "attachment" and font.info.codec_name is None
+        assert font.info.mimetype == "font/ttf"
 
     def test_data_streams_are_skipped(self) -> None:
         file = File(path=LongPath("src.mkv"))
@@ -308,10 +342,22 @@ def _run_and_capture(
         if make_outputs and request.output is not None:
             request.output.parent.mkdir(parents=True, exist_ok=True)
             request.output.write_bytes(b"x" * 16)
+        if make_outputs:
+            # -dump_attachment targets write directly (not muxer outputs).
+            for inp in request.inputs:
+                for j, arg in enumerate(inp.pre_input_args):
+                    if str(arg).startswith("-dump_attachment"):
+                        target = Path(os.fspath(inp.pre_input_args[j + 1]))
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(b"x" * 16)
         return result
 
     def default_subprocess(cmd: list, **kwargs: object) -> MagicMock:
         subprocess_cmds.append(list(cmd))
+        if str(cmd[0]) == "mkvextract" and "attachments" in cmd:
+            # Success including outputs: materialize each "N:<target>" pair.
+            for token in cmd[cmd.index("attachments") + 1:]:
+                Path(str(token).split(":", 1)[1]).write_bytes(b"x" * 16)
         result = MagicMock()
         result.returncode = 0
         result.stdout     = ""
@@ -396,25 +442,84 @@ class TestExtractionCommandGolden:
             "-f", "srt", str(out_tmp),
         ]
 
-    def test_attachment_dump_golden(self, tmp_path: Path) -> None:
-        """Attachments dump to a .tmp sibling (file-trust rule, Req 7.7) — the
-        phase renames only on verified success. -dump_attachment is an
-        input-side option: it must precede -i."""
+    def test_attachment_mkvextract_batch_golden(self, tmp_path: Path) -> None:
+        """Attachments extract as ONE mkvextract call — the mkv numbering
+        space (1-based positional, not the ffprobe index), every absent
+        attachment as an ``N:<tmp>`` pair in that single call."""
+        ffmpeg_cmds, subprocess_cmds, work_dir, _ = _run_and_capture(
+            tmp_path, _ffprobe_json(_video_json(), _attachment_json(track_id=6)),
+        )
+        tmp_target = work_dir / EXTRACTED_DIR / "#6 (attachment-mjpeg) filename=cover.tmp"
+        recorded = [[str(a) for a in cmd] for cmd in subprocess_cmds]
+        assert recorded == [[
+            "mkvextract", str(work_dir.parent / "source.mkv"),
+            "attachments", f"1:{tmp_target}",
+        ]], f"Unexpected mkvextract calls: {subprocess_cmds}"
+        assert ffmpeg_cmds == [], "primary success must not reach the ffmpeg fallback"
+        final = work_dir / EXTRACTED_DIR / "#6 (attachment-mjpeg) filename=cover.jpg"
+        assert final.exists() and final.stat().st_size > 0
+
+    def test_attachment_mkvextract_batches_all_attachments(self, tmp_path: Path) -> None:
+        """Multiple attachments (mixed kinds) land in one call as successive
+        ID:target pairs — IDs are 1-based positions, not track ids."""
+        _, subprocess_cmds, work_dir, _ = _run_and_capture(
+            tmp_path, _ffprobe_json(
+                _video_json(),
+                _attachment_json(track_id=6, filename="cover.jpg"),
+                _font_attachment_json(track_id=7, filename="font.ttf"),
+            ),
+        )
+        extracted = work_dir / EXTRACTED_DIR
+        recorded = [[str(a) for a in cmd] for cmd in subprocess_cmds]
+        assert recorded == [[
+            "mkvextract", str(work_dir.parent / "source.mkv"),
+            "attachments",
+            f"1:{extracted / '#6 (attachment-mjpeg) filename=cover.tmp'}",
+            f"2:{extracted / '#7 (attachment-font) filename=font.tmp'}",
+        ]]
+
+    def test_attachment_fallback_stream_copy_golden(self, tmp_path: Path) -> None:
+        """Attached pictures fall back to a byte-faithful ``-c copy -f data``
+        stream copy when mkvextract fails (non-MKV source) — the runner's
+        .tmp-then-rename protocol carries the file-trust rule."""
+        def _mkvextract_fails(cmd: list, **kwargs: object) -> MagicMock:
+            raise _subprocess.CalledProcessError(2, cmd, stderr=b"not a Matroska file")
+
         ffmpeg_cmds, _, work_dir, _ = _run_and_capture(
             tmp_path, _ffprobe_json(_video_json(), _attachment_json(track_id=4)),
-            make_outputs=False,
+            subprocess_side_effect=_mkvextract_fails,
         )
-        att_cmds = [c for c in ffmpeg_cmds if "-dump_attachment:4" in c]
-        assert att_cmds, f"Expected an attachment command: {ffmpeg_cmds}"
-        tmp_target = work_dir / EXTRACTED_DIR / "#4 (attachment-ttf) filename=font.tmp"
-        assert att_cmds[0] == [
+        out_tmp = work_dir / EXTRACTED_DIR / "#4 (attachment-mjpeg) filename=cover.tmp"
+        assert ffmpeg_cmds == [[
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
-            "-dump_attachment:4", str(tmp_target),
             "-i", str(work_dir.parent / "source.mkv"),
-            "-t", "0",
+            "-map", "0:4",
+            "-c", "copy",
+            "-map_chapters", "-1",
+            "-f", "data", str(out_tmp),
+        ]], f"Unexpected fallback commands: {ffmpeg_cmds}"
+
+    def test_attachment_fallback_dump_golden(self, tmp_path: Path) -> None:
+        """True attachments (fonts) fall back to the input-side
+        ``-dump_attachment`` option — stream copy yields an empty file for
+        them; the dump writes directly, so the .tmp sibling is the target."""
+        def _mkvextract_fails(cmd: list, **kwargs: object) -> MagicMock:
+            raise _subprocess.CalledProcessError(2, cmd, stderr=b"not a Matroska file")
+
+        ffmpeg_cmds, _, work_dir, _ = _run_and_capture(
+            tmp_path, _ffprobe_json(_video_json(), _font_attachment_json(track_id=5)),
+            subprocess_side_effect=_mkvextract_fails,
+        )
+        tmp_target = work_dir / EXTRACTED_DIR / "#5 (attachment-font) filename=font.tmp"
+        assert ffmpeg_cmds == [[
+            "ffmpeg", *_PROGRESS_FLAGS, "-y",
+            "-dump_attachment:5", str(tmp_target),
+            "-i", str(work_dir.parent / "source.mkv"),
             "-map_chapters", "-1",
             "-f", "null", "-",
-        ]
+        ]], f"Unexpected fallback commands: {ffmpeg_cmds}"
+        final = work_dir / EXTRACTED_DIR / "#5 (attachment-font) filename=font.ttf"
+        assert final.exists() and final.stat().st_size > 0
 
     def test_bitmap_subtitle_stays_on_matroska_muxer(self, tmp_path: Path) -> None:
         ffmpeg_cmds, _, _, _ = _run_and_capture(

@@ -192,6 +192,9 @@ FFMPEG_NULL_SINK  = "-"
 
 FFMPEG_MUXER_MATROSKA = "matroska"
 """Default ``-f`` muxer for ``.tmp`` outputs — Matroska (all video call sites)."""
+FFMPEG_MUXER_DATA     = "data"
+"""``-f`` muxer for raw stream-copy outputs — attached-picture attachments
+dumped as their verbatim bytes (the ``.tmp`` extension hides nothing to sniff)."""
 FFMPEG_MUXER_FLAC     = "flac"
 FFMPEG_MUXER_IPOD     = "ipod"
 """``-f`` muxer for ``.m4a`` audio-only containers — ffmpeg's conventional

@@ -260,8 +260,9 @@ def _extraction_sidecar() -> ExtractionSidecar:
                 extracted_path=LongPath("extracted/#3 (subtitle-subrip) lang=eng.srt"),
             )],
             "attachments": [AttachmentStreamInfo(
-                track_id=4, filename="font.ttf",
-                extracted_path=LongPath("extracted/#4 (attachment-ttf) filename=font.ttf"),
+                track_id=4, attachment_id=1, codec_type="video",
+                codec_name="mjpeg", mimetype="image/jpeg", filename="cover.jpg",
+                extracted_path=LongPath("extracted/#4 (attachment-mjpeg) filename=cover.jpg"),
             )],
         },
         chapters = True,
@@ -420,10 +421,41 @@ class TestStreamTwoNames:
 
         att = AttachmentStream(
             file = File(path=_file().path),
-            info = AttachmentStreamInfo(track_id=4, codec_name="ttf", filename="font.ttf"),
+            info = AttachmentStreamInfo(
+                track_id=4, attachment_id=1, codec_type="video",
+                codec_name="mjpeg", filename="font.ttf",
+            ),
         )
-        assert att.display_name() == "#4 (attachment-ttf) filename=font.ttf"
-        assert att.safe_name() == "#4 (attachment-ttf) filename=font.ttf"
+        assert att.display_name() == "#4 (attachment-mjpeg) filename=font.ttf"
+        assert att.safe_name() == "#4 (attachment-mjpeg) filename=font.ttf"
+
+    def test_true_attachment_display_uses_mimetype_type(self) -> None:
+        """A true attachment (no codec name) shows its MIME type's type
+        portion in the codec slot — never "attachment-None" — and the safe
+        name keeps it a single direct name (no separators)."""
+        from pyqenc.stream_model import AttachmentStream, AttachmentStreamInfo
+
+        font = AttachmentStream(
+            file = File(path=_file().path),
+            info = AttachmentStreamInfo(
+                track_id=5, attachment_id=1, codec_type="attachment",
+                mimetype="font/ttf", filename="some font.ttf",
+            ),
+        )
+        assert font.display_name() == "#5 (attachment-font) filename=some font.ttf"
+        assert font.safe_name() == "#5 (attachment-font) filename=some font.ttf"
+
+        neither = AttachmentStream(
+            file = File(path=_file().path),
+            info = AttachmentStreamInfo(
+                track_id=6, attachment_id=2, codec_type="attachment",
+                filename="dir/file.bin",
+            ),
+        )
+        assert neither.display_name() == "#6 (attachment) filename=dir/file.bin"
+        # The sanitize primitive collapses separators — a safe name is always
+        # a single direct name, never a subdirectory path.
+        assert neither.safe_name() == "#6 (attachment) filename=dir_file.bin"
 
 
 class TestChunkTwoNames:

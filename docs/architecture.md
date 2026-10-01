@@ -41,7 +41,7 @@ flowchart LR
 | Package    | Tools                                   | Used for                                                                                                                                                                           |
 | ---------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | FFmpeg     | `ffmpeg`, `ffprobe`                     | Encoding, metrics, audio processing, crop detection, stream materialization (`ffmpeg`); video metadata probing, timestamps fallback (`ffprobe`)                                    |
-| MKVToolNix | `mkvmerge`, `mkvextract`, `mkvpropedit` | Chunk concatenation and final MKV assembly (`mkvmerge`); per-frame timestamps extraction in timecodes_v2 format (`mkvextract`); post-merge frame-rate header patch (`mkvpropedit`) |
+| MKVToolNix | `mkvmerge`, `mkvextract`, `mkvpropedit` | Chunk concatenation and final MKV assembly (`mkvmerge`); per-frame timestamps (timecodes_v2), chapters and attachments extraction (`mkvextract`); post-merge frame-rate header patch (`mkvpropedit`) |
 
 Python-side dependencies are managed by `pyproject.toml` — notably `scenedetect-headless` for scene detection (which invokes `ffmpeg` internally to decode).
 

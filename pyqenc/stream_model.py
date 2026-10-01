@@ -338,20 +338,41 @@ class AttachmentStreamInfo(StreamInfo):
     """Attachment-specific properties plus the extracted-file path.
 
     Attributes:
+        attachment_id:  The attachment's ID in the mkvextract/mkvmerge
+                        numbering — its own 1-based positional space,
+                        separate from the ffprobe stream index
+                        (``track_id``).
+        codec_type:     ffprobe's codec_type verbatim: ``"video"`` for
+                        attached pictures, ``"attachment"`` for true
+                        attachments (fonts and other attached files).
+        mimetype:       The declared MIME type from the container tags —
+                        external fact, preserved for downstream use.
         filename:       The attachment's original filename (from its tags).
         extracted_path: Path of the dumped attachment file (relative to the
                         work dir on disk), or ``None`` before extraction.
     """
 
+    attachment_id:  int
+    codec_type:     str
+    mimetype:       str | None         = None
     filename:       str | None         = None
     extracted_path: LongPathYaml | None = None
 
     @classmethod
-    def from_ffprobe(cls, raw: dict) -> Self:
-        """Build from one ffprobe attachment dict (filename from its tags)."""
+    def from_ffprobe(cls, raw: dict, attachment_id: int) -> Self:
+        """Build from one ffprobe attachment dict at its positional mkv ID.
+
+        ``attachment_id`` is the 1-based position among the source's
+        attachments — the numbering mkvextract/mkvmerge key on. The
+        enumerator walking the streams in file order assigns it.
+        """
+        tags = StreamInfo._tags_of(raw)
         return cls(
             **StreamInfo._base_ffprobe_fields(raw),
-            filename=StreamInfo._tags_of(raw).get("filename"),
+            attachment_id = attachment_id,
+            codec_type    = raw.get("codec_type", ""),
+            mimetype      = tags.get("mimetype"),
+            filename      = tags.get("filename"),
         )
 
 
@@ -482,11 +503,18 @@ class AttachmentStream(Stream[AttachmentStreamInfo]):
     """An attachment stream — ``info`` is statically :class:`AttachmentStreamInfo`."""
 
     def display_name(self) -> str:
-        """Display name for logs and include/exclude filtering (never on disk)."""
+        """Display name for logs and include/exclude filtering (never on disk).
+
+        Attached pictures carry their codec name (e.g. ``mjpeg``); true
+        attachments carry their MIME type's type portion (``font`` from
+        ``font/ttf``); with neither, the codec slot is omitted.
+        """
         tags = _display_tags(self.info)
         if self.info.filename:
             tags.append(f"filename={self.info.filename}")
-        return _format_display_name("attachment", self.info, tags)
+        codec = self.info.codec_name or (
+            self.info.mimetype.split("/", 1)[0] if self.info.mimetype else None)
+        return _format_display_name("attachment", self.info, tags, codec)
 
 
 def _display_tags(info: StreamInfo) -> list[str]:
@@ -503,12 +531,22 @@ def _display_tags(info: StreamInfo) -> list[str]:
     return tags
 
 
-def _format_display_name(stream_type: str, info: StreamInfo, tags: list[str]) -> str:
-    """Assemble ``#N (type-codec) tag…`` — display names never touch the disk."""
-    return " ".join(filter(None, [
-        f"#{info.track_id} ({stream_type}-{info.codec_name})",
-        *tags,
-    ]))
+def _format_display_name(
+    stream_type: str,
+    info:        StreamInfo,
+    tags:        list[str],
+    codec:       str | None = None,
+) -> str:
+    """Assemble ``#N (type-codec) tag…`` — display names never touch the disk.
+
+    ``codec`` overrides the info's ``codec_name`` in the ``type-codec`` slot
+    (an attachment without a codec name substitutes its MIME type's type
+    portion); a missing codec token omits the slot — ``#N (type)``.
+    """
+    token = info.codec_name if codec is None else codec
+    head = (f"#{info.track_id} ({stream_type}-{token})" if token
+                      else f"#{info.track_id} ({stream_type})")
+    return " ".join(filter(None, [head, *tags]))
 
 
 # ---------------------------------------------------------------------------

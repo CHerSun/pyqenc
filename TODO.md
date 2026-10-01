@@ -711,30 +711,6 @@ Need to check if can get those for all metrics (we do full parsing, right, so sh
 
 ---
 
-## 74. Attachment extraction via ffmpeg `-dump_attachment` produces no file
-
-**Status:** needs thinking (known problem, observed live 2026-10-01)
-
-- The option placement was fixed the same day (it sat in the output stage where
-  ffmpeg rejects it — "cannot be applied to output url"; now input-side via
-  `FFmpegInput.pre_input_args`, golden-pinned in `test_extraction_pts.py`).
-- Remaining problem, reproduced manually against a real source: with the
-  correctly-placed option ffmpeg exits 0 but the dump file is never written —
-  with `-t 0` (current call) the attachment stream is not read at all; even
-  with `-map 0:6 -c copy -f data` (stream processed, 117KiB) no dump file
-  appears. Currently masked by the common `attachment-` exclude filter.
-- **Questions to think about:** is `-dump_attachment` reliable on Windows /
-  this ffmpeg build at all? Alternative: materialize attachments via
-  mkvextract (cf. §53) or read via `ffprobe -show_attachments`?
-
-There are some caveats with ffmpeg attachments dumping. mkvextract should be easier as primary tool, keeping ffmpeg as fallback (on mkvextract failure - try the ffmpeg).
-It looks like attachments have own numbering from 1 (or from 0?)
-
-Googling up recommends this command template for ffpmeg attachment dump:
-	`ffmpeg -i input.mkv -dump_attachment:t "filename.ttf" -t 0 -f null "-"`
----
-
-
 ===
 
 ## Last known = 74
