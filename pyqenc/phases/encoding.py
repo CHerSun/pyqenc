@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import shutil
+import statistics
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -23,11 +24,14 @@ import yaml
 from alive_progress import config_handler
 
 from pyqenc.constants import (
+    BRACKET_LEFT,
+    BRACKET_RIGHT,
     ENCODED_ATTEMPT_NAME_PATTERN,
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
     FAILURE_SYMBOL_MINOR,
     METRIC_KEY_QUALITY_MEASURE,
+    NEUTRAL_INDICATOR_SYMBOL,
     SUCCESS_SYMBOL_MINOR,
     THRESHOLD_ATTEMPTS_WARNING,
     WARNING_SYMBOL,
@@ -54,11 +58,13 @@ from pyqenc.phases.chunking import ChunkingPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.optimization import OptimizationPhase
 from pyqenc.phases.probe import ProbePhase
-from pyqenc.quality import QualitySearchV3
+from pyqenc.quality import QualitySearchBase, QualitySearchV3
 from pyqenc.state import (
     ArtifactState,
     EncodingParams,
     EncodingResultSidecar,
+    LimiterSummary,
+    LimiterSummaryRow,
     MetricsSidecar,
     ProbeState,
 )
@@ -117,25 +123,37 @@ def _probe_resolution(path: Path) -> str | None:
     return None
 
 
-def _read_metrics_sidecar(attempt_path: Path) -> dict | None:
-    """Read a per-attempt metrics sidecar for an encoded attempt.
+def _read_sidecar_yaml(sidecar_path: Path) -> dict | None:
+    """Read a metrics/result sidecar YAML next to an encoded attempt.
+
+    Both sidecar kinds share the schema (keys: ``targets_met``, ``crf``,
+    ``metrics``): the per-attempt metrics sidecar in the workspace and the
+    encoding result sidecar in ``encoded/``.
 
     Args:
-        attempt_path: Path to the encoded attempt ``.mkv`` file.
+        sidecar_path: Exact path to the sidecar ``.yaml`` file.
 
     Returns:
-        Parsed sidecar dict (keys: ``targets_met``, ``crf``, ``metrics``,
-        ``sampling``), or ``None`` if no sidecar exists or it cannot be parsed.
+        Parsed sidecar dict, or ``None`` if it does not exist or cannot be
+        parsed.
     """
-    yaml_sidecar = attempt_path.with_suffix(".yaml")
-    if yaml_sidecar.exists():
+    if sidecar_path.exists():
         try:
-            with yaml_sidecar.open("r", encoding="utf-8") as fh:
+            with sidecar_path.open("r", encoding="utf-8") as fh:
                 return yaml.safe_load(fh)
         except (OSError, yaml.YAMLError) as e:
-            logger.debug("Failed to read metrics sidecar %s: %s", yaml_sidecar.name, e)
+            logger.debug("Failed to read metrics sidecar %s: %s", sidecar_path.name, e)
 
     return None
+
+
+def _encoded_dir(work_dir: Path, strategy: Strategy) -> Path:
+    """Finalized winners directory for *strategy*.
+
+    Hard-linked winning attempts, result sidecars, and quality graphs live
+    here; the presence of a result sidecar marks a pair as ``COMPLETE``.
+    """
+    return work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
 
 
 def _write_metrics_sidecar(
@@ -504,6 +522,7 @@ class EncodingResult:
     outcome:        PhaseOutcome                = PhaseOutcome.COMPLETED
     failed_chunks:  list[str]                   = field(default_factory=list)
     error:          str | None                  = None
+    limiter_summary: list[LimiterSummary] | None = None
 
 
 class ChunkEncoder:
@@ -579,7 +598,7 @@ class ChunkEncoder:
         Returns:
             Path to ``<work_dir>/encoded/<safe_strategy>/``.
         """
-        return self.work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
+        return _encoded_dir(self.work_dir, strategy)
 
     def _get_attempt_path(
         self,
@@ -893,7 +912,7 @@ class ChunkEncoder:
                     chunk.safe_name(), strategy, check_resolution, current_q
                 )
                 if existing is not None:
-                    sidecar = _read_metrics_sidecar(existing.path)
+                    sidecar = _read_sidecar_yaml(existing.path.with_suffix(".yaml"))
                     # Validate sidecar contains all required metric keys.
                     required_keys        = {f"{t.metric}_{t.statistic}" for t in quality_targets}
                     raw_sidecar_sampling = sidecar.get("sampling") if sidecar is not None else None
@@ -920,7 +939,7 @@ class ChunkEncoder:
                             all_sidecar_metrics.get(f"{t.metric}_{t.statistic}", 0.0) >= t.value
                             for t in quality_targets
                         )
-                        _worst         = search._find_worst_target(metrics_dict)
+                        _worst         = QualitySearchBase.find_worst_target(metrics_dict, quality_targets)
                         metric_summary = fmt_metric_summary(
                             metrics_dict,
                             worst_key    = f"{_worst[0].metric}_{_worst[0].statistic}" if _worst else None,
@@ -1089,7 +1108,7 @@ class ChunkEncoder:
             elif not search.best_targets_met and search.best_quality == current_q:
                 best_fail_attempt = attempt_meta
 
-            _worst         = search._find_worst_target(metrics_dict)
+            _worst         = QualitySearchBase.find_worst_target(metrics_dict, quality_targets)
             metric_summary = fmt_metric_summary(
                 metrics_dict,
                 worst_key    = f"{_worst[0].metric}_{_worst[0].statistic}" if _worst else None,
@@ -1117,9 +1136,12 @@ class ChunkEncoder:
         # --- Post-loop: finalize ---
 
         if search.best_targets_met and final_attempt is not None:
+            worst      = QualitySearchBase.find_worst_target(search.best_metrics, quality_targets) if search.best_metrics else None
+            limited_by = f"{worst[0].metric}_{worst[0].statistic}" if worst is not None else None
             logger.info(fmt_chunk_final(
                 strategy.display_name(), chunk.safe_name(), search.best_quality, attempt_number,
                 strategy.codec.quality_label, self._visual_hash, strategy.codec.quality_log_padding,
+                limited_by,
             ))
             self._finalize_winning_attempt(
                 strategy        = strategy,
@@ -1504,6 +1526,115 @@ async def _encode_chunks_parallel(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Winning-limiter distribution summary
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _LimiterTally:
+    """Accumulation over winning attempts sharing one limiter metric.
+
+    Deficits are collected for misses only (how far the unreachable target
+    was); CRFs over every winner in the row feed the med CRF column.
+    """
+
+    passed:   int           = 0
+    missed:   int           = 0
+    deficits: list[float]   = field(default_factory=list)
+    crfs:     list[Decimal] = field(default_factory=list)
+
+
+def _build_limiter_summary(
+    work_dir:        Path,
+    encoded_chunks:  dict[str, dict[str, EncodedChunk]],
+    strategy_order:  list[str],
+    quality_targets: list[QualityTarget],
+) -> list[LimiterSummary] | None:
+    """Build the winning-limiter summary from the winner result sidecars.
+
+    One row per limiter — the ``"<metric>_<statistic>"`` of each winning
+    attempt's worst target — grouped by strategy, rows sorted by chunk count
+    descending.  Derived from the encoding-phase result artifacts
+    (``encoded/<strategy>/<chunk_id>.<res>.yaml``), written for every
+    concluded pair — so the build is identical on fresh, resumed, and
+    recovered runs, and survives intermediate cleanup of the attempt
+    workspace.
+
+    Args:
+        work_dir:        Work dir root (locates ``encoded/<strategy>/``).
+        encoded_chunks:  Chunk safe name -> strategy display name -> winner.
+        strategy_order:  Strategy display names in pipeline order.
+        quality_targets: Targets the winning attempts are judged against.
+
+    Returns:
+        The per-strategy summaries, or ``None`` when there is nothing to
+        show (no targets, no winners, or no readable sidecars).
+    """
+    if not quality_targets or not encoded_chunks:
+        return None
+
+    tallies: dict[str, dict[str, _LimiterTally]] = {}
+    for by_strategy in encoded_chunks.values():
+        for strategy_name, winner in by_strategy.items():
+            name_match = ENCODED_ATTEMPT_NAME_PATTERN.match(winner.stream.stream.file.path.name)
+            if name_match is None:
+                logger.debug(
+                    "Winner %s does not match the attempt name pattern — excluded from limiter summary",
+                    winner.stream.stream.file.path.name,
+                )
+                continue
+            sidecar = _read_sidecar_yaml(
+                _encoded_dir(work_dir, winner.strategy)
+                / f"{name_match.group('chunk_id')}.{name_match.group('resolution')}.yaml"
+            )
+            if sidecar is None:
+                logger.debug(
+                    "Winner %s has no result sidecar — excluded from limiter summary",
+                    winner.stream.stream.file.path.name,
+                )
+                continue
+            metrics     = {k: float(v) for k, v in sidecar.get("metrics", {}).items()}
+            targets_met = bool(sidecar.get("targets_met", False))
+            worst       = QualitySearchBase.find_worst_target(metrics, quality_targets)
+            if worst is None:
+                continue
+            tally = tallies.setdefault(strategy_name, {}).setdefault(
+                f"{worst[0].metric}_{worst[0].statistic}", _LimiterTally(),
+            )
+            tally.crfs.append(winner.crf)
+            if targets_met:
+                tally.passed += 1
+            else:
+                tally.missed += 1
+                tally.deficits.append(worst[1])
+
+    ordered = [name for name in strategy_order if name in tallies]
+    ordered += sorted(set(tallies) - set(strategy_order))
+    if not ordered:
+        return None
+
+    summaries: list[LimiterSummary] = []
+    for strategy_name in ordered:
+        rows_map = tallies[strategy_name]
+        total    = sum(t.passed + t.missed for t in rows_map.values())
+        summaries.append(LimiterSummary(
+            strategy = strategy_name,
+            chunks   = total,
+            rows     = [
+                LimiterSummaryRow(
+                    limiter     = key,
+                    passed      = t.passed,
+                    missed      = t.missed,
+                    med_deficit = statistics.median(t.deficits) if t.deficits else None,
+                    med_crf     = statistics.median(t.crfs),
+                )
+                for key, t in sorted(rows_map.items(), key=lambda kv: (-kv[1].passed - kv[1].missed, kv[0]))
+            ],
+        ))
+    return summaries
+
+
 def encode_all_chunks(
     chunks:            list[VideoStreamChunk],
     strategies:        list[Strategy],
@@ -1633,6 +1764,13 @@ def encode_all_chunks(
         # Duplicate to ERROR level on failed chunks
         logger.error("Failed chunks: %s", ", ".join(result.failed_chunks))
 
+    result.limiter_summary = _build_limiter_summary(
+        work_dir,
+        result.encoded_chunks,
+        [s.display_name() for s in strategies],
+        quality_targets,
+    )
+
     return result
 
 # ---------------------------------------------------------------------------
@@ -1695,6 +1833,9 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         super().__init__(config, phases, collector=collector)
 
         self.params:        EncodingParams | None     = None
+        self._persisted:    EncodingParams | None     = None
+        """Params loaded from ``encoding.yaml`` during recovery (``None`` when
+        absent) — the fast-exit source for the persisted limiter summary."""
         self.quality_labels: dict[str, str]           = {}
         """Maps strategy name → quality_label (e.g. ``'CRF'``, ``'CQ'``) for all
         strategies resolved during the last ``run()`` call.  Empty until ``run()``
@@ -1722,6 +1863,35 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         if crop:
             logger.info("Crop:        %s", crop)
         logger.info("Targets:     %s", ", ".join(f"{t.metric}-{t.statistic}≥{t.value}" for t in self._config.encoding.resolved_targets))
+
+    def _log_limiter_summary(self, summaries: list[LimiterSummary]) -> None:
+        """Emit the winning-limiter distribution table at INFO.
+
+        Args:
+            summaries: Per-strategy groups (rows sorted by chunk count desc).
+        """
+        # Column widths
+        LIMIT_WIDTH = 14
+        PASS_WIDTH  = 8
+        MISS_WIDTH  = 12
+        SHARE_WIDTH = 7
+        CRF_WIDTH   = 8
+
+        logger.info("Winning-limiter distribution")
+        header = (
+            f"  {'Limiter':<{LIMIT_WIDTH}}   {f'pass {NEUTRAL_INDICATOR_SYMBOL}':>{PASS_WIDTH}}   "
+            f"{f'miss {FAILURE_SYMBOL_MINOR}':>{MISS_WIDTH}}   {'share':>{SHARE_WIDTH}}   {'med CRF':>{CRF_WIDTH}}"
+        )
+        for summary in summaries:
+            logger.info("%s — %d chunks", f"{BRACKET_LEFT}{summary.strategy}{BRACKET_RIGHT}", summary.chunks)
+            logger.info(header)
+            for row in summary.rows:
+                miss_cell = f"{row.missed} ({row.med_deficit:.1f})" if row.missed else "0"
+                share     = 100.0 * (row.passed + row.missed) / summary.chunks if summary.chunks else 0.0
+                logger.info(
+                    f"  {row.limiter:<{LIMIT_WIDTH}}   {row.passed:>{PASS_WIDTH}}   {miss_cell:>{MISS_WIDTH}}   "
+                    f"{share:>{SHARE_WIDTH - 1}.1f}%   {row.med_crf:{CRF_WIDTH}.1f}"
+                )
 
     def finalize(self, ctx: FinalizeContext) -> None:
         """Perform end-of-run housekeeping for the encoding phase.
@@ -1795,6 +1965,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # removed encoding.yaml, so a mismatch can only be seen without it).
         if not force_wipe:
             persisted_enc = EncodingParams.load(yaml_path)
+            self._persisted = persisted_enc
             current_probe = ProbeState.from_probe(self._dep_result(ProbePhase))
             self.params   = EncodingParams(probe=current_probe)
 
@@ -1828,6 +1999,28 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         rows: list[Artifact] = _pair_rows(work_dir, chunks, strategies)
         rows += _orphan_strategy_rows(work_dir, strategies)
         return Recovery.from_artifacts(rows)
+
+    def _reused_result(self, wanted: list[Artifact], message: str) -> "EncodingPhaseResult":
+        """Resurface the persisted winning-limiter table on a fully-reused run.
+
+        Mirrors ``OptimizationPhase``: shown from the stash loaded during
+        recovery — no winner-sidecar reads on the fast path.  Freshness is
+        guaranteed by the pending gate: any invalidated pair routes the run
+        through the processing path, which rebuilds and re-saves the table.
+
+        Args:
+            wanted:   Wanted artifact rows (COMPLETE pairs carry winners).
+            message:  Reuse message from the template.
+
+        Returns:
+            The reused ``EncodingPhaseResult``.
+        """
+        result = super()._reused_result(wanted, message)
+        if self._persisted is not None and self._persisted.limiter_summary is not None:
+            self._log_limiter_summary(self._persisted.limiter_summary)
+        else:
+            logger.debug("No persisted limiter summary — table skipped on reused run")
+        return result
 
     def _make_result(
         self,
@@ -1996,6 +2189,19 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
                 [r for r in final_rows if r.wanted],
                 f"{len(failed_pairs)} pair(s) failed: {', '.join(failed_pairs[:5])}",
             )
+
+        # Winning-limiter summary: rendered once here and persisted into the
+        # phase sidecar so fully-reused runs resurface it without re-reading
+        # every winner sidecar. Only on full success — a failed pair leaves
+        # the phase pending on rerun, which rebuilds the table instead.
+        if enc_result.limiter_summary is not None:
+            assert self.params is not None, "params persisted before encode"
+            self._log_limiter_summary(enc_result.limiter_summary)
+            self.params = EncodingParams(
+                probe           = self.params.probe,
+                limiter_summary = enc_result.limiter_summary,
+            )
+            self.params.save(encoding_yaml)
 
         outcome = PhaseOutcome.COMPLETED if enc_result.encoded_count > 0 else PhaseOutcome.REUSED
         return self._make_result(

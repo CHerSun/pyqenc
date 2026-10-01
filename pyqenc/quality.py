@@ -795,9 +795,10 @@ class QualitySearchBase(ABC):
         """
         return _score_attempt(metrics, self._quality_targets)
 
-    def _find_worst_target(
-        self,
-        metrics: dict[str, float],
+    @staticmethod
+    def find_worst_target(
+        metrics:         dict[str, float],
+        quality_targets: list[QualityTarget],
     ) -> tuple[QualityTarget, float, float] | None:
         """Find the worst-performing target and return it with its deficit and actual value.
 
@@ -805,7 +806,8 @@ class QualitySearchBase(ABC):
         target with the least surplus (or largest deficit).
 
         Args:
-            metrics: Measured quality metrics keyed as ``"<metric>_<stat>"``.
+            metrics:         Measured quality metrics keyed by ``"<metric>_<statistic>"``.
+            quality_targets: The targets the metrics are judged against.
 
         Returns:
             ``(worst_target, worst_deficit, worst_actual)`` or ``None`` when no
@@ -815,7 +817,7 @@ class QualitySearchBase(ABC):
         worst_target:  QualityTarget | None = None
         worst_actual:  float               = 0.0
 
-        for target in self._quality_targets:
+        for target in quality_targets:
             metric_key = f"{target.metric}_{target.statistic}"
             actual     = metrics.get(metric_key)
             if actual is None:
@@ -927,10 +929,10 @@ class QualitySearchBase(ABC):
 
         # Determine worst target from current result and from opposite boundary.
         opposite_metrics = worse_point.metrics if new_point.is_pass else better_point.metrics
-        opp_worst        = self._find_worst_target(opposite_metrics) if opposite_metrics else None
+        opp_worst        = self.find_worst_target(opposite_metrics, self._quality_targets) if opposite_metrics else None
         opp_target       = opp_worst[0] if opp_worst is not None else None
 
-        found_worst  = self._find_worst_target(new_point.metrics)  # type: ignore[arg-type]
+        found_worst  = self.find_worst_target(new_point.metrics, self._quality_targets)  # type: ignore[arg-type]
         worst_target = found_worst[0] if found_worst is not None else None
 
         # Build candidates list: primary proportional, reverse proportional, binary.
@@ -1702,7 +1704,7 @@ class QualitySearchV3(QualitySearchBase):
             outward_clamp = min(pass_points, key=lambda pt: abs(pt.score)) if pass_points else QualityPoint(self._quality_better, 0, None)
 
         # Find the worst target from further_p's metrics for the proportional candidate.
-        found_worst  = self._find_worst_target(further_p.metrics)  # type: ignore[arg-type]
+        found_worst  = self.find_worst_target(further_p.metrics, self._quality_targets)  # type: ignore[arg-type]
         worst_target = found_worst[0] if found_worst is not None else None
 
         # Compute t: extrapolate using the two real tested points.

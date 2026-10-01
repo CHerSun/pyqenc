@@ -4,6 +4,11 @@
 
 pyqenc is a video/audio re-encoding tool. The primary goal is to **preserve source qualities and properties** while performing re-encoding work — not to alter them.
 
+## Versioning & Commits
+
+- **Versioning**: [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH` in `pyqenc/__init__.py` (`__version__`). Pre-alpha: breaking changes may still land as MINOR bumps.
+- **Commits**: [Conventional Commits](https://www.conventionalcommits.org/) — `type(scope): summary`, lowercase imperative subject, body bullets list only the actual changes (no test results, findings, or verification history). Version bumps are included as a body bullet.
+
 ## Source Fidelity Principles
 
 - **Frame rate**: Preserve the source frame rate exactly — whether constant (CFR) or variable (VFR). Never force a uniform frame rate unless explicitly requested.

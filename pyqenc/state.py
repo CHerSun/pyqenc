@@ -200,13 +200,41 @@ class OptimizationParams(BaseModel):
         save_model(path, self)
 
 
+class LimiterSummaryRow(BaseModel):
+    """One winning-limiter row of the encoding summary table (persisted form).
+
+    Purely presentational data for ``encoding.yaml`` — rebuilt from the
+    winner sidecars on every concluded encoding pass, shown verbatim on
+    fully-reused runs.
+    """
+
+    limiter:     str                 # "<metric>_<statistic>" of the worst target
+    passed:      int
+    missed:      int
+    med_deficit: float | None = None  # median deficit among the misses
+    med_crf:     DecimalYaml         # median winning CRF of the row's chunks
+
+
+class LimiterSummary(BaseModel):
+    """One strategy group of the encoding summary table (persisted form)."""
+
+    strategy: str
+    chunks:   int
+    rows:     list[LimiterSummaryRow]
+
+
 class EncodingParams(BaseModel):
     """Phase parameter file model for encoding (``encoding.yaml``).
 
-    Stores probe state (crop + frame count) active when encoding ran.
+    Stores probe state (crop + frame count) active when encoding ran, and the
+    winning-limiter summary table (presentational — written after a concluded
+    pass, shown on fully-reused runs; its freshness is guaranteed by the
+    pending gate: any invalidated pair routes the run through the processing
+    path, which rebuilds and re-saves it).
     """
 
     probe: ProbeState | None = None
+    limiter_summary: list[LimiterSummary] | None = None
 
     @classmethod
     def load(cls, path: Path) -> Self | None:

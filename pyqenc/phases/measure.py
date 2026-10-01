@@ -830,8 +830,8 @@ def _log_measure_summary(targets: list[TargetMeasureResult]) -> None:
     """Emit a summary table at INFO level after all metric computations complete.
 
     One row per target showing: stem (truncated to 30 chars), file size in MB,
-    and per-metric median for every MetricType that appears in any target's
-    metrics.  Missing metrics display as ``N/A``.
+    and each metric's ``min…med`` pair for every MetricType that appears in
+    any target's metrics.  Missing metrics display as ``N/A``.
 
     Args:
         targets: List of completed target measure results.
@@ -852,11 +852,12 @@ def _log_measure_summary(targets: list[TargetMeasureResult]) -> None:
     # Column widths
     STEM_WIDTH   = 30
     SIZE_WIDTH   = 9
-    METRIC_WIDTH = 9
+    METRIC_WIDTH = 13
+    range_suffix = " min…med"
 
     # Header
     metric_headers = "   ".join(
-        f"{mt.value.upper()[:METRIC_WIDTH - 4]} med".rjust(METRIC_WIDTH)
+        f"{mt.value.upper()[:METRIC_WIDTH - len(range_suffix)]}{range_suffix}".rjust(METRIC_WIDTH)
         for mt in all_metric_types
     )
     header = f"{'Target':<{STEM_WIDTH}}   {'Size (MB)':>{SIZE_WIDTH}}   {metric_headers}"
@@ -870,9 +871,10 @@ def _log_measure_summary(targets: list[TargetMeasureResult]) -> None:
         size_str  = fmt_size_mb(t.target_video.stat().st_size) if t.target_video.exists() else "N/A"
         row_parts = [f"{stem:<{STEM_WIDTH}}", f"{size_str:>{SIZE_WIDTH}}"]
         for mt in all_metric_types:
-            stats  = t.metrics.get(mt, {})
-            median = stats.get("median")
-            cell   = fmt_metric_value(median) if median is not None else "N/A"
+            stats = t.metrics.get(mt, {})
+            low   = stats.get("min")
+            med   = stats.get("median")
+            cell  = f"{fmt_metric_value(low)}…{fmt_metric_value(med)}" if low is not None and med is not None else "N/A"
             row_parts.append(f"{cell:>{METRIC_WIDTH}}")
         logger.info("   ".join(row_parts))
 

@@ -70,6 +70,9 @@ Make zero-row omission display-only rather than load-bearing for resume?
 **Questions to think about:** is WARNING sufficient? Surface
 "metrics not written / resumed from stale file" in the end-of-run summary?
 
+Human input: metrics are not what the user wants to get - he wants to get audio/video processed. So it's just an extra nice-to-have info.
+Warning is enough, but maybe make it log rarer, like exponential delay (first failure - ignore, happens; on second failure - log warning; on forth failure - log failure that still failing after N attempts; max at say 8 failures to write - after that keep logging every few failures; on success - reset counter))
+
 ---
 
 # Imported from `D:\todo pyqenc.md` (verified 2026-09-20)
@@ -131,37 +134,6 @@ This is also a chance to reestablish sidecars using class model introduced in fi
 
 **Questions to think about:** time per chain under dotted keys? Needs the
 the same prefix-injection mechanism the optimization phase already uses (metric_prefix on ChunkEncoder).
-
----
-
-## 🤔 13. Winning-attempt log lacks the limiting metric; no per-attempt stats table
-
-**Status:** needs thinking (partially addressed)
-
-- Per-attempt lines already mark the bottleneck metric (`•`/`✘` via
-  `_find_worst_target` + `fmt_metric_summary`, `pyqenc/phases/encoding.py:956-973`).
-- But the final "success ✅ with CRF X after N attempts" line carries no
-  "limited by <metric>" (`pyqenc/utils/log_format.py:192-193`, called at
-  `encoding.py:984-987`), and the end-of-phase summary is counts only
-  (`encoding.py:1458-1465`) — no quality-search stats table (PNG graphs are
-  saved per attempt instead, `encoding.py:917,603-607`).
-
-**Questions to think about:** append limiting metric to the final line; add a
-summary table (attempt → CRF → key metrics → verdict)?
-
----
-
-## 🤔 14. Measure summary table shows median only, no min
-
-**Status:** needs thinking (UX polish)
-
-- `_log_measure_summary` prints per-target rows with `... med` columns only
-  (`pyqenc/phases/measure.py:809-858`); min+med appear together only in plot
-  captions (`pyqenc/utils/visualization.py:1047`) and the merge miss-table
-  (`pyqenc/phases/merge.py:277`).
-
-**Questions to think about:** `{min}...{med}` columns per metric as originally
-sketched?
 
 ---
 
@@ -682,3 +654,79 @@ streams listing, which is quite painful when making commands manually. with `ext
 Ideally reusing the current extract phase mechanics.
 
 other considerations?
+
+---
+
+## 67. The very first frame often gets very different measured quality from the rest of the video
+
+I'm not sure what happens there. But many graphs look to start at nearly the same measured quality point at the first frame, as if it was fixed & controlled
+by other means then the other video. I'm not sure if it is i-frame controls, or maybe measuring specifics, but ideally we need a way to affect that
+or at least better understand it. It often affects min or max statistics, making them not very reliable.
+
+Investigation needed.
+
+---
+
+## 68. Support invalidation of encoding/optimization results on config change for strategy
+
+We already support config changes for audio chain via a full-string preservation and per-chain comparisson. This allows end-user to change the chain and get proper results still, even if previous outputs exist.
+
+We should consider similar approach for encoding/optimization phases, where we use strategy name alone currently. Should we also support for params change invalidation (needs force wipe flag).
+
+---
+
+## 69. Frame counts not persisted — preservation invariant skipped on recovery runs
+
+**Status:** needs thinking (decision 2026-10-01: deferred; refined shape below
+follows the limiter-summary route — per-user 2026-10-01)
+
+- The frame-preservation invariant (Σ winning-attempt frames == source frames,
+  `pyqenc/phases/encoding.py` `_execute`) is skipped on any recovery flavor:
+  winners are composed with `frame_count=0` ("unknown" sentinel) at both
+  composition sites (`_pair_rows`, `_encode_chunks_parallel` seeding) →
+  WARNING "skipped: some winning attempts were recovered without a known
+  frame count". The count IS known per fresh attempt for free
+  (`FFmpegRunResult.frame_count`) but persisted nowhere (neither the
+  per-attempt `MetricsSidecar` nor the winner `EncodingResultSidecar`);
+  within-run cache hits lose it too.
+- **Refined shape (supersedes "restore per-chunk counts at composition"):**
+  - Persist `frame_count` in BOTH sidecars: attempt sidecar lets cache-hit
+    winners propagate their count at finalize; winner sidecar is the durable
+    per-pair record.
+  - Do NOT restore per-chunk counts into `EncodedChunk` on recovery —
+    composition stays listing-only (zero recovery reads), the sentinel stays.
+  - The processing path's end-of-run full scan (already reads every winner
+    sidecar for the winning-limiter summary) also sums winner frame counts;
+    the invariant uses that sum — correct on mixed fresh/reused runs, unlike
+    today's in-memory winners check which sees 0 for seeded pairs.
+  - Persist the single aggregate (winners frame total) in `encoding.yaml`
+    alongside `limiter_summary`; the fast exit reads that one property —
+    optionally enforcing it against the probe's in-memory frame count —
+    instead of restoring per-chunk counts.
+  - Read accounting: zero new reads (piggybacks the limiter-summary scan).
+  - Pre-change sidecars lack the field — acceptable pre-alpha (workdirs are
+    one-time); keep skip-if-any-unknown semantics.
+
+---
+
+## 70. Strategy name order is preset+profile — should be profile+preset everywhere
+
+**Status:** needs thinking (naming-convention flip left over from the
+`--strategies` rework)
+
+- `Strategy.display_name()` composes `preset+profile` (`pyqenc/models.py:111`,
+  e.g. ``'ultrafast+h265'``) — the reverse of the CLI `--strategies`
+  `profile[+preset]` matcher convention (e.g. `h265*+ultrafast`).
+- Surfaces everywhere the strategy name appears: log lines (chunk prefixes,
+  optimization summary, winning-limiter groups), sidecar payloads
+  (`optimization.yaml` strategy_results/selected, `encoding.yaml`
+  limiter_summary), metrics dotted keys (`encoding.<strategy>`), and — via
+  `safe_name()` — on-disk `encoded/<strategy>/`/`encoding/<strategy>/`
+  directory names.
+- Ask: flip to `profile+preset` everywhere. `display_name()` and
+  `safe_name()` must flip together (single composition, two-name doctrine);
+  on-disk naming change is acceptable pre-alpha (workdirs are one-time).
+  Grep sweep for the `+`-joined name in logs/sidecars/metrics keys after
+  the flip.
+
+---
