@@ -6,8 +6,6 @@ Run with: uv run python -m pytest tests/test_vif_properties.py
 
 # Feature: vif-metric-support
 
-from __future__ import annotations
-
 import asyncio
 import json
 import math

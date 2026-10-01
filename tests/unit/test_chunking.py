@@ -9,8 +9,6 @@ Covers the window model (spec ``2026-09-25 file-stream-model``, Req 4/9.4):
   from ``chunking.yaml`` without re-detection, absent → pending
 """
 
-from __future__ import annotations
-
 from fractions import Fraction
 from pathlib import Path
 from unittest.mock import patch

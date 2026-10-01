@@ -28,8 +28,6 @@ Covers:
 - Stale ``.tmp`` twins are swept at recovery (remove_stale_tmp_files)
 """
 
-from __future__ import annotations
-
 import contextlib
 import json
 import os

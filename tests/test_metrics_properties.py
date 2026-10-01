@@ -6,8 +6,6 @@ Run with: uv run python -m pytest tests/test_metrics_properties.py
 
 # Feature: app-metrics-two-tier, Property 5: YAML serialisation round-trip preserves all values
 
-from __future__ import annotations
-
 import math
 import tempfile
 from pathlib import Path

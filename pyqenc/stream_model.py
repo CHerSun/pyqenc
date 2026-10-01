@@ -35,8 +35,6 @@ are declared once on the annotated types below.
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 from abc import abstractmethod
 from dataclasses import replace
 from decimal import Decimal

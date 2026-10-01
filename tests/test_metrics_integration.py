@@ -14,8 +14,6 @@ Tests live here per the spec: tests/test_metrics_integration.py
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 import contextlib
 from collections.abc import Callable
 from pathlib import Path

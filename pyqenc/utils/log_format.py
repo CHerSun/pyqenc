@@ -10,8 +10,6 @@ at ``info`` level and the pattern is too mechanical to benefit from separation.
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 import decimal
 import hashlib
 import logging

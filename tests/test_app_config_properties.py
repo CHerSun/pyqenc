@@ -4,8 +4,6 @@
 **Validates: Requirements 2.2, 2.5**
 """
 
-from __future__ import annotations
-
 from hypothesis import given, settings
 from hypothesis import strategies as st
 

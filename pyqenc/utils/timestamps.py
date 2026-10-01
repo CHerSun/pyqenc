@@ -16,8 +16,6 @@ count the frame-preservation invariant builds on (spec
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 

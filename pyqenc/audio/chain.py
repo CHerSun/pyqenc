@@ -33,8 +33,6 @@ imports from ``filters.py``, never the reverse.
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 import logging
 from collections import deque
 from collections.abc import Awaitable, Callable

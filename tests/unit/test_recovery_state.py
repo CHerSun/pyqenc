@@ -9,8 +9,6 @@ Covers:
          ValueError when output path not in cmd.
 """
 
-from __future__ import annotations
-
 from decimal import Decimal
 from pathlib import Path
 

@@ -7,8 +7,6 @@ casts at use sites), unique-slice dumps (no composed references leak),
 filesystem-name primitives.
 """
 
-from __future__ import annotations
-
 from decimal import Decimal
 from fractions import Fraction
 

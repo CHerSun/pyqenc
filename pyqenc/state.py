@@ -13,8 +13,6 @@ file and ``instance.save(path)`` to persist atomically.
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Self

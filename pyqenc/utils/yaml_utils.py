@@ -11,8 +11,6 @@ failure → warning + ``None`` (the phase rebuilds), save → atomic dump.
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 

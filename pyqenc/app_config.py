@@ -7,8 +7,6 @@ parameters (source, work_dir, force, etc.) are passed separately as plain
 keyword arguments to ``_build_registry`` and are never stored here.
 """
 
-from __future__ import annotations
-
 import fnmatch
 import logging
 from decimal import Decimal

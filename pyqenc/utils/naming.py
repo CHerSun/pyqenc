@@ -13,8 +13,6 @@ builds on:
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 from pyqenc.constants import (
     FILENAME_CONTROL_CHARS,
     FILENAME_FORBIDDEN_CHARS,

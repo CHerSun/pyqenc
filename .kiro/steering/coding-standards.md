@@ -6,8 +6,8 @@
 
 ## Python Language & Style
 
-- Targeting Python>=3.13 syntax.
-- Every module starts (after its docstring and author notice) with `from __future__ import annotations`. Annotations are NEVER written as strings — no `"AppConfig"` quoting for forward references or `TYPE_CHECKING`-only imports; the future import defers their evaluation.
+- Targeting Python>=3.14 syntax. Interpreter pinned via `.python-version` (3.14.x line, not 3.15).
+- Annotations rely on PEP 649 lazy evaluation (3.14 default): NEVER write `from __future__ import annotations` (a deprecated no-op on 3.14) and NEVER quote annotations (`"AppConfig"`) — bare names work for forward references and `TYPE_CHECKING`-only imports.
 - For volatile things - try (not check).
 - All functions, classes and class members MUST BE type-hinted.
 - Type-hint using newer syntax: `int|None` instead of `Optional[int]`, newer generic classes without imports from `typing` where possible.

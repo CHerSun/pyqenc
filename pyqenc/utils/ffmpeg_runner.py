@@ -15,8 +15,6 @@ Callers optionally supply a :data:`ProgressCallback` for live progress updates;
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import os

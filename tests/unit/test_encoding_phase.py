@@ -8,8 +8,6 @@ Covers the fast presence-based recovery in ``_recover_encoding_attempts``:
 - The index is built from a single ``iterdir()`` per strategy — no per-pair globs.
 """
 
-from __future__ import annotations
-
 from decimal import Decimal
 from pathlib import Path
 

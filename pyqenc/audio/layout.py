@@ -26,8 +26,6 @@ from the dotted notation.
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 from pydantic import BaseModel, ConfigDict
 
 from pyqenc.audio.matrices import Layout, layout_channels

@@ -1,8 +1,6 @@
 """Black border crop detection utility."""
 # CHerSun 2026
 
-from __future__ import annotations
-
 import logging
 import re
 

@@ -12,8 +12,6 @@ No ``__new__``, no private ``_recover``/``_execute_merge`` calls, no private-att
 poking.
 """
 
-from __future__ import annotations
-
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch

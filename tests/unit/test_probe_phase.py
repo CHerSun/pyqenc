@@ -20,8 +20,6 @@ Covered observable paths:
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 from fractions import Fraction
 from pathlib import Path
 from unittest.mock import patch

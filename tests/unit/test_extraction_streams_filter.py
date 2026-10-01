@@ -8,8 +8,6 @@ the still-existing extraction-phase behaviour, not the removed audio strategies.
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 from typing import ClassVar
 
 

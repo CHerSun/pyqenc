@@ -21,8 +21,6 @@ Spec: .kiro/specs/2026-09-09 phase-terminal-runner/
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path

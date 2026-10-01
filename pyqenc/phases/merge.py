@@ -11,8 +11,6 @@ manually or in a downstream step.
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 import json
 import logging
 import os

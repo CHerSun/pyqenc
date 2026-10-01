@@ -6,8 +6,6 @@ quality targets, including parallel execution and artifact-based resumption.
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 import asyncio
 import json
 import logging

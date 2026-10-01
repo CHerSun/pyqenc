@@ -5,8 +5,6 @@ crop resolution, resolution validation, duration parsing, screenshot
 timestamp generation, and screenshot filename formatting.
 """
 
-from __future__ import annotations
-
 import hashlib
 import logging
 import re

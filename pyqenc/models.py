@@ -7,8 +7,6 @@ All models use Pydantic BaseModel for validation and serialisation.
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 import logging
 from decimal import Decimal
 from enum import Enum, IntEnum

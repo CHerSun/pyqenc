@@ -21,8 +21,6 @@ Covers:
 - ``_extract_timestamps``: correct header and integer-ms values per line
 """
 
-from __future__ import annotations
-
 import os
 import subprocess as _subprocess
 from pathlib import Path

@@ -7,8 +7,6 @@ module is no longer imported anywhere in the codebase after cleanup.
 **Validates: Requirements 4.5, 7.4**
 """
 
-from __future__ import annotations
-
 import asyncio
 import re
 from pathlib import Path

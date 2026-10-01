@@ -7,7 +7,7 @@ name = "pyqenc"
 dynamic = ["version"]
 description = "PYthon Quality-based video ENCoding pipeline with scene-based chunking and iterative CRF optimization."
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
     "alive-progress>=3.3.0",
     "matplotlib>=3.10.0",
@@ -23,6 +23,9 @@ pyqenc = "pyqenc.cli:main"
 
 [tool.uv]
 package = true
+# Transitive (scenedetect): OpenCV 5 is a major API break — hold until the
+# deliberate major-upgrade review (TODO.md §77).
+constraint-dependencies = ["opencv-python-headless<5"]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -49,7 +52,7 @@ test = [
 ]
 
 [tool.ruff]
-target-version = "py313"
+target-version = "py314"
 # House style uses long vertically-aligned signatures (up to ~205 chars);
 # E501 stays unselected — this value only feeds future formatter decisions.
 line-length = 120

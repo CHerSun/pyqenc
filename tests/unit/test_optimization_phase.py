@@ -8,8 +8,6 @@ Covers requirement 7.7:
 - Tolerance of 100% selects all passing strategies.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from unittest.mock import MagicMock
 

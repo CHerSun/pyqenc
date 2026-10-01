@@ -14,8 +14,6 @@ Usage::
     collector.flush()
 """
 
-from __future__ import annotations
-
 __all__ = [
     # Pydantic models
     "AttemptStats",

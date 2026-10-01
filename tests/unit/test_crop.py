@@ -6,8 +6,6 @@ filter), with the runner-owned additions (progress flags, ``-y``,
 ``-map_chapters -1``, null output) applied.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from unittest.mock import patch
 

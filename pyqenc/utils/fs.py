@@ -7,8 +7,6 @@ every phase recovery calls) and the stat-with-fallback size probe.
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 import logging
 from pathlib import Path
 

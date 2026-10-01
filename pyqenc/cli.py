@@ -1,8 +1,6 @@
 """CLI interface for the quality-based encoding pipeline."""
 # CHerSun 2026
 
-from __future__ import annotations
-
 import argparse
 import logging
 import os

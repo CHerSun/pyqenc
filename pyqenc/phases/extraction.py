@@ -15,8 +15,6 @@ is present and its source identity matches the job's live ``File``.
 """
 # CHerSun 2026
 
-from __future__ import annotations
-
 import json
 import logging
 import os

@@ -8,8 +8,6 @@ All tests are skipped on non-Windows platforms.
 **Validates: Requirements 7.3**
 """
 
-from __future__ import annotations
-
 import sys
 
 import pytest

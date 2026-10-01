@@ -639,7 +639,28 @@ We should consider similar approach for encoding/optimization phases, where we u
 
 ---
 
-## Last known = 75
+## 76. Reevaluate Python 3.15.x (lazy imports) — needs thinking
+
+2026-10-02, after migrating to 3.14.7: 3.15 ships lazy imports (deferred module
+import) — should significantly cut CLI startup time; worth a dedicated
+evaluation+migration pass in a few months. Also worth watching in the same pass:
+free-threaded builds (PEP 779, officially supported since 3.14) for CPU-bound
+Python sections.
+
+---
+
+## 77. Major dependency upgrades review — needs thinking
+
+2026-10-02: routine `uv lock --upgrade` is deliberately confined to within-major
+bumps; taking a NEW major of any dependency must be a reviewed decision, not an
+upgrade side-effect. First candidate: OpenCV 5 (constraint
+`opencv-python-headless<5` in pyproject `[tool.uv]`; scenedetect transitive;
+major API break — lift only deliberately). Then a scan of pydantic / matplotlib
+/ pandas / pytest / alive-progress for new majors with relevant changelogs.
+
+---
+
+## Last known = 77
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

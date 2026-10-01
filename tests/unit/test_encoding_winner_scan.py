@@ -6,8 +6,6 @@ end-of-run winner-sidecar scan that feeds the frame-preservation invariant
 aggregate round-trip, and the fast-exit re-assertion.
 """
 
-from __future__ import annotations
-
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
