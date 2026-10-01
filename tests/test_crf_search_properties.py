@@ -34,7 +34,7 @@ _ACTUAL_RANGES: dict[MetricType, tuple[float, float]] = {
     MetricType.PSNR: (30.0, 70.0),
 }
 
-_STATISTICS = ["min", "median", "max", "p05", "p25", "p75", "p95"]
+_STATISTICS = ["min", "median", "max", "p05", "p10", "p25", "p75", "p90", "p95"]
 
 
 @st.composite

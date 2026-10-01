@@ -37,7 +37,7 @@ from pyqenc.utils.visualization import (
 # Shared strategies
 # ---------------------------------------------------------------------------
 
-_VALID_STATS   = ["min", "median", "max", "p05", "p25", "p75", "p95"]
+_VALID_STATS   = ["min", "median", "max", "p05", "p10", "p25", "p75", "p90", "p95"]
 _st_valid_stat = st.sampled_from(_VALID_STATS)
 _st_normalized = st.floats(min_value=0.0, max_value=100.0, allow_nan=False, allow_infinity=False)
 _st_unit       = st.floats(min_value=0.0, max_value=1.0,   allow_nan=False, allow_infinity=False)
@@ -229,7 +229,7 @@ def test_metric_pipeline_vif_normalized(frame_values: list[float]) -> None:
     artifacts = QualityLogs(vif_log=_write_vif(frame_values))
     result    = compute_metric_stats(normalize_metrics(parse_metrics(artifacts, 1)))
     assert MetricType.VIF in result
-    for stat_key in ("min", "p05", "p25", "median", "p75", "p95", "max"):
+    for stat_key in ("min", "p05", "p10", "p25", "median", "p75", "p90", "p95", "max"):
         val = result[MetricType.VIF][stat_key]  # type: ignore[literal-required]
         assert 0.0 <= val <= 100.0, f"VIF {stat_key}={val} outside [0, 100]"
 
@@ -449,16 +449,18 @@ def test_vif_target_evaluation_direction(actual: float, target_val: float) -> No
     vif_stats=st.fixed_dictionaries({
         "min":    _st_normalized,
         "p05":    _st_normalized,
+        "p10":    _st_normalized,
         "p25":    _st_normalized,
         "median": _st_normalized,
         "p75":    _st_normalized,
+        "p90":    _st_normalized,
         "p95":    _st_normalized,
         "max":    _st_normalized,
         "std":    st.floats(min_value=0.0, max_value=10.0, allow_nan=False, allow_infinity=False),
     }),
 )
 def test_sidecar_vif_keys(vif_stats: dict[str, float]) -> None:
-    """Property 14: Sidecar flattening produces all 8 vif_* keys with correct values.
+    """Property 14: Sidecar flattening produces all 10 vif_* keys with correct values.
 
     Validates: Requirements 9.1
     # Feature: vif-metric-support, Property 14: Sidecar YAML VIF key generation
@@ -471,7 +473,7 @@ def test_sidecar_vif_keys(vif_stats: dict[str, float]) -> None:
         for mt, ms in stats.items()
         for stat, value in ms.items()
     }
-    for s in ("min", "p05", "p25", "median", "p75", "p95", "max", "std"):
+    for s in ("min", "p05", "p10", "p25", "median", "p75", "p90", "p95", "max", "std"):
         key = f"{MetricType.VIF.value}_{s}"
         assert key in flat
         assert flat[key] == vif_stats[s]

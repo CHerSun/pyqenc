@@ -325,7 +325,7 @@ flowchart LR
 run_metrics(...)         → FFmpegRunResult (raw log files)
 parse_metrics(artifacts) → pd.DataFrame   (raw per-frame values)
 normalize_metrics(df)    → pd.DataFrame   (0–100 scale)
-compute_metric_stats(df) → ChunkQualityStats (min, p05, p25, med, p75, p95, max, std)
+compute_metric_stats(df) → ChunkQualityStats (min, p05, p10, p25, med, p75, p90, p95, max, std)
 create_unified_plot(df)  → PNG visualization
 ```
 

@@ -306,7 +306,7 @@ class MeasureSidecar(BaseModel):
 
     The ``metrics`` field uses the same flat ``{metric_stat: value}`` format
     as ``MetricsSidecar`` (e.g. ``vmaf_min``, ``ssim_median``), with all
-    eight statistics: min, p05, p25, median, p75, p95, max, std.
+    ten statistics: min, p05, p10, p25, median, p75, p90, p95, max, std.
     The YAML key for the sampling factor is ``sampling``.
     """
 

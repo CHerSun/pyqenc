@@ -1417,7 +1417,7 @@ class TestValidationErrorOnInvalidStrings:
         **Validates: Requirements 3.2, 3.5**
         """
         data = self._base_dict()
-        # "badstat" is not among the valid stats (min, med, median, max, p05, p25, p75, p95)
+        # "badstat" is not among the valid stats (min, med, median, max, p05, p10, p25, p75, p90, p95)
         data["encoding"]["targets"] = ["vmaf-badstat:95"]
 
         import pytest

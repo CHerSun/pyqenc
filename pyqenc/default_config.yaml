@@ -20,10 +20,10 @@ encoding:
     - "psnr-med:45.0"   # 44–46 = good; 50+ = near-lossless
     - "ssim-med:98.0"   # 98+ = good; non-linear scale, compressed near 100
     - "vif-med:93.0"    # grain/texture retention; 92–94 = good; higher = crisper but larger
-    - "vmaf-min:93.0"   # --- floor safeguards ---
-    - "psnr-min:43.0"
-    - "ssim-min:96.0"
-    - "vif-min:90.0"
+    - "vmaf-p10:93.0"   # --- floor safeguards ---
+    - "psnr-p10:43.0"
+    - "ssim-p10:96.0"
+    - "vif-p10:90.0"
   strategies:
     # Format: "profile[+preset]" — profile is required, preset is optional (omit = codec default).
     # Wildcards: "h265*" = all h265 profiles; "*" = all profiles; "*+*" = all profiles × all presets.

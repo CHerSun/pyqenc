@@ -68,17 +68,18 @@ Yet its minimum scores tell a different story - a VMAF min of 84 and a VIF min o
 
 `pyqenc` supports several statistics over the per-frame metric scores within a chunk:
 
-| Statistic    | Description              | Notes                                                                                         |
-| ------------ | ------------------------ | --------------------------------------------------------------------------------------------- |
-| `min`        | Worst single frame       | Fragile — a single bad frame (e.g. VMAF frame 0 bias) distorts it. Avoid as a primary target. |
-| `p05`        | 5th percentile           | Robust worst-case. Recommended over `min` for VMAF.                                           |
-| `p25`        | 25th percentile          | Useful for tighter floor control.                                                             |
-| `med`        | Median (50th percentile) | Good general target. Stable per-chunk. Recommended.                                           |
-| `p75`, `p95` | Upper percentiles        | Rarely needed for targeting; useful for analysis.                                             |
-| `max`        | Best single frame        | Not useful for targeting; useful for analysis.                                                |
+| Statistic           | Description              | Notes                                                                                                         |
+| ------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| `min`               | Worst single frame       | Fragile — a single bad frame (e.g. VMAF frame 0 bias) distorts it. Avoid as a primary target.                 |
+| `p05`               | 5th percentile           | Robust worst-case — but on the shortest chunk (24 frames) it covers a single frame.                           |
+| `p10`               | 10th percentile          | Robust worst-case. Recommended over `min`/`p05` for VMAF — spans >=2 frames on any chunk with default config. |
+| `p25`               | 25th percentile          | Useful for tighter floor control.                                                                             |
+| `med`               | Median (50th percentile) | Good general target. Stable per-chunk. Recommended.                                                           |
+| `p75`, `p90`, `p95` | Upper percentiles        | Rarely needed for targeting; useful for analysis.                                                             |
+| `max`               | Best single frame        | Not useful for targeting; useful for analysis.                                                                |
 
-Metrics are measured on per-chunk basis. So median values in general are quite stable, but a floor (min/p05) safeguard is recommended.
-For VMAF specifically, prefer `p05` over `min` due to the first-frame bias.
+Metrics are measured on per-chunk basis. So median values in general are quite stable, but a floor (p10) safeguard is recommended.
+For VMAF specifically, prefer `p10` over `min`/`p05` due to the first-frame bias.
 
 ---
 
@@ -94,15 +95,15 @@ encoding:
     - "ssim-med:98.0"   # 98+ = good; non-linear scale, compressed near 100
     - "vif-med:93.0"    # grain/texture retention; 92–94 = good; higher = crisper but larger
     # --- floor safeguards ---
-    - "vmaf-min:93.0"
+    - "vmaf-p10:93.0"
     - "psnr-min:43.0"
     - "ssim-min:96.0"
     - "vif-min:90.0"
 ```
 
-To increase quality (larger files): raise the most constraining passing target (marked `•` in logs) by 0.5–1.0.
+To increase quality (larger files): raise the most constraining passing target (marked `•` in logs and in winning-limiter distribution summary table of encoding phase, see below) by 0.5–1.0.
 
-To decrease quality (smaller files): lower the most constraining failing target (marked `✘` in logs) by 0.5–1.0.
+To decrease quality (smaller files): lower the most constraining failing target (marked `✘`) by 0.5–1.0.
 
 Tune on a representative sample clip first. Metrics do not linearly map to perceived quality, so small numeric changes can have larger visual effects than expected. As long as intermediate results have not been cleaned up, re-running with adjusted targets only re-encodes the affected chunks.
 

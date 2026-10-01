@@ -129,14 +129,16 @@ Config search order (first found wins):
 | Statistic       | Description                                                     |
 | --------------- | --------------------------------------------------------------- |
 | `min`           | Minimum across all frames — avoid, sensitive to outliers        |
-| `p05`           | 5th percentile — **recommended over `min`**                     |
+| `p05`           | 5th percentile                                                  |
+| `p10`           | 10th percentile — **recommended over `min`**                    |
 | `p25`           | 25th percentile                                                 |
 | `med`, `median` | Median (50th percentile)                                        |
 | `p75`           | 75th percentile                                                 |
+| `p90`           | 90th percentile                                                 |
 | `p95`           | 95th percentile                                                 |
 | `max`           | Maximum across all frames — avoid, often useless for measuring. |
 
-> NOTE: `vmaf-min` is unreliable due to a first-frame bias (VMAF lacks motion context on frame 0). Use `vmaf-p05` instead. See [quality-targeting.md](quality-targeting.md) for a detailed discussion.
+> NOTE: `vmaf-min` is unreliable due to a first-frame bias (VMAF lacks motion context on frame 0). Use `vmaf-p10` instead, it should be more stable. See [quality-targeting.md](quality-targeting.md) for a detailed discussion.
 
 ### Examples
 

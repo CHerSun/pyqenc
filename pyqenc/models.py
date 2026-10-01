@@ -216,7 +216,8 @@ class QualityTarget(BaseModel):
 
     Attributes:
         metric:    Metric type (vmaf, ssim, psnr).
-        statistic: Statistical measure (min, median, max, p05, p25, p75, p95).
+        statistic: Statistical measure (min, median, max, p05, p10, p25, p75,
+                   p90, p95).
         value:     Target value for the metric.
     """
 
@@ -248,7 +249,7 @@ class QualityTarget(BaseModel):
             if metric.lower() not in valid_metrics:
                 raise ValueError(f"Invalid metric '{metric}'. Must be one of: {sorted(valid_metrics)}")
 
-            valid_stats = {"min", "med", "median", "max", "p05", "p25", "p75", "p95"}
+            valid_stats = {"min", "med", "median", "max", "p05", "p10", "p25", "p75", "p90", "p95"}
             if statistic.lower() not in valid_stats:
                 raise ValueError(f"Invalid statistic '{statistic}'. Must be one of: {valid_stats}")
 
