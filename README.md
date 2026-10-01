@@ -63,7 +63,7 @@ For all options: `pyqenc auto --help` or [CLI Reference](docs/cli-reference.md).
 
 ### Scene-based encoding
 
-The video is split into scenes first. Each scene is short and visually uniform — a dark scene, a fast-action sequence, a title card — they all have very different encoding characteristics. pyqenc assigns an independent quality parameter to each scene, so every scene gets exactly what it needs. Dark scenes get their own value, fast-moving scenes get theirs. No wasted bits, no scenes that look worse than others (this differs from native 2-pass encoding, where static scenes are prioritized).
+The video is split into scenes first — detected directly from the source as timestamp windows, with no intermediate copy. Each scene is short and visually uniform — a dark scene, a fast-action sequence, a title card — they all have very different encoding characteristics. pyqenc assigns an independent quality parameter to each scene, so every scene gets exactly what it needs. Dark scenes get their own value, fast-moving scenes get theirs. No wasted bits, no scenes that look worse than others (this differs from native 2-pass encoding, where static scenes are prioritized).
 
 ### Quality targeting
 
@@ -71,7 +71,7 @@ You specify quality targets as metric thresholds (e.g. `vmaf-med:97`). pyqenc en
 
 Supported metrics: `vmaf`, `vif`, `ssim`, `psnr`. Supported statistics: `min`, `p05`, `p25`, `med`, `p75`, `p95`, `max`.
 
-For default targets - see `default_config.yaml`.
+For default targets - see `default_config.yaml`. Subject to change.
 
 See [Quality Targeting Guide](docs/quality-targeting.md) for guidance on choosing good targets.
 
@@ -97,15 +97,15 @@ Results are written under the working directory:
 
 ```log
 <work-dir>/
-├── 📁 merged/     ← ✅ your encoded video(s), one per selected strategy
-├── 📁 audio/      ← ✅ processed audio (one file per selected source track per chain)
-├── 📂 extracted/  ← ✨ extracted source streams (subtitles, chapters, covers)
-├── 📁 measure/    ← ✨ quality measurement outputs, if `measure` subcommand was run
-├── 📂 chunks/     ← scene-based video chunks (intermediate)
-├── 📂 encoding/   ← per-chunk encoding attempts with metrics (intermediate)
-├── 📂 encoded/    ← winning chunk attempts (intermediate)
-├── 📄 job.yaml    ← job parameters and source fingerprint
-└── 📄 *.yaml      ← phase parameters
+├── 📁 merged/       ← ✅ your encoded video(s), one per selected strategy
+├── 📁 audio/        ← ✅ processed audio (one file per selected source track per chain)
+├── 📂 extracted/    ← ✨ extracted source streams (subtitles, chapters, covers)
+├── 📁 measure/      ← ✨ quality measurement outputs, if `measure` subcommand was run
+├── 📂 encoding/     ← per-chunk encoding attempts with metrics (intermediate)
+├── 📂 encoded/      ← winning chunk attempts (intermediate)
+├── 📄 job.yaml      ← job parameters and source fingerprint
+├── 📄 metrics.yaml  ← app metrics - how long each action has taken
+└── 📄 *.yaml        ← per-phase parameters and state (probe, extraction, chunking, …)
 ```
 
 - `merged/` and `audio/` folders hold the results you should care about. Pick the video and audio streams you want, then mux them together with MKVmerge GUI (drag&drop streams, export).
@@ -113,7 +113,7 @@ Results are written under the working directory:
 - `measure/` holds results if you used `measure` subcommand directly.
 - Everything else is intermediate — preserved for inspection and resumption unless you use `--cleanup`.
 
-Audio outputs are produced by user-defined **chains** (ordered filter recipes) applied to **selected** tracks, configured under `audio:` in your config file. Each output is named `<source-stem> chain=<name>.<ext>`. See the [Audio Processing Guide](docs/audio-processing.md) for filters, chains, and track selection.
+Audio outputs are produced by user-defined **chains** (ordered filter recipes) applied to **selected** tracks, configured under `audio:` in your config file. Each output is named after its source audio stream: `<stream name> chain=<name>.<ext>`. See the [Audio Processing Guide](docs/audio-processing.md) for filters, chains, and track selection.
 
 ---
 
@@ -188,9 +188,10 @@ Config build order: built-in defaults → `~/.config/pyqenc/config.yaml` → `./
 
 **FFmpeg / MKVToolNix not found** — install them and ensure they're in your PATH (`ffmpeg -version`, `mkvmerge --version`).
 
-**Insufficient disk space** — with lossless chunking mode whole process needs ~7–10× source size (5× for FFV1 chunks + extraction + encoding + audio + merging). Use `--work-dir` to point to a larger disk, or `--remux-chunking` to reduce chunk size at the cost of frame-perfect splits (not recommended).
+**Insufficient disk space** — the whole process typically needs several times the source size (attempts for several strategies + audio + merged outputs). Before encoding, pyqenc logs a space estimate (required and recommended ranges) against the available space. Use `--work-dir` to point to a larger disk if required.
 
-**Slow encoding** — try a faster codec or faster codec preset (`fast`, `medium`). If CPU is not fully utilized - add `--max-parallel 2` or higher. OR switch to GPU-encoding. All options reduce resulting quality or increase output size, effective encoding is slow.
+**Slow encoding** — try a faster codec or faster codec preset (`fast`, `medium`). If CPU is not fully utilized - add `--concurrency 2` or higher. OR switch to GPU-encoding. All options reduce resulting quality or increase output size, effective encoding is only achievable on CPU with slow
+presets.
 
 **Strategy wildcard not expanding** — some shells require quoting: `"h265*"`. Use dry-run to verify expansion. Verify that the config does have the wanted profiles.
 

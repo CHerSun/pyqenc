@@ -38,12 +38,12 @@ flowchart LR
 
 ### External dependencies
 
-| Tool         | Used for                                                      |
-| ------------ | ------------------------------------------------------------- |
-| `ffmpeg`     | Encoding, chunking, metrics, audio processing, crop detection |
-| `ffprobe`    | Video metadata probing                                        |
-| `mkvextract` | Stream extraction from source MKV                             |
-| `mkvmerge`   | Final MKV assembly                                            |
+| Package    | Tools                                   | Used for                                                                                                                                                                           |
+| ---------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| FFmpeg     | `ffmpeg`, `ffprobe`                     | Encoding, metrics, audio processing, crop detection, stream materialization (`ffmpeg`); video metadata probing, timestamps fallback (`ffprobe`)                                    |
+| MKVToolNix | `mkvmerge`, `mkvextract`, `mkvpropedit` | Chunk concatenation and final MKV assembly (`mkvmerge`); per-frame timestamps extraction in timecodes_v2 format (`mkvextract`); post-merge frame-rate header patch (`mkvpropedit`) |
+
+Python-side dependencies are managed by `pyproject.toml` — notably `scenedetect-headless` for scene detection (which invokes `ffmpeg` internally to decode).
 
 ---
 
@@ -86,7 +86,7 @@ flowchart TD
 | **Audio**        | `Artifact[AudioOutput]` per (track × chain) + surplus rows             | `outputs`; derived `audio_files`                                                             | `audio.yaml`                                                             |
 | **Merge**        | `Artifact[MergedVideo]` per expected output + surplus rows             | `merged` (consumed by the runner as deliverables)                                            | `merge.yaml` + per-output `.yaml`                                        |
 
-> NOTE: Originally the intention was to merge both audio and video during Merge phase, but audio selection is an opinionated process, so I've decided to only merge the videos, leaving the final step for the end user and MKVmerge GUI.
+> NOTE: Merge produces video outputs only — the final mux with the chosen audio tracks is left to the end user (e.g. MKVmerge GUI).
 
 ### Phase object model
 
@@ -133,8 +133,8 @@ telescope to the source total by construction).
 
 ## Artifact-Based Recovery
 
-There is no central progress tracker or state file. Recovery is fully
-filesystem-driven, and every phase speaks the same artifact vocabulary.
+Recovery is fully filesystem-driven, and every phase speaks the same artifact
+vocabulary.
 
 ### The generic artifact
 
@@ -201,7 +201,7 @@ sidecar); per-attempt and per-output sidecars mark pair/output completeness.
 | `probe.yaml`         | Frame count, crop params                                                |
 | `chunking.yaml`      | Scene boundaries (frame index + timestamp)                              |
 | `optimization.yaml`  | Test chunk IDs, per-strategy results, tolerance, selection, targets     |
-| `encoding.yaml`      | Probe state (crop params + frame count) active during encoding          |
+| `encoding.yaml`      | Probe state (crop params + frame count) active during encoding + winning-limiter summary |
 | `audio.yaml`         | Per-chain signatures (resolved definitions)                             |
 | `merge.yaml`         | Targets/sampling/probe + per-strategy summary rows                      |
 | `<attempt>.yaml`     | Quality value, targets met, all measured metrics                        |
@@ -236,12 +236,15 @@ The search algorithm always moves toward `quality_range[0]` to improve quality a
 
 ### Search implementations
 
-Both implement `QualitySearchProtocol`:
+All implement the `QualitySearchBase` ABC:
 
 | Implementation    | Algorithm          | Notes                                                                        |
 | ----------------- | ------------------ | ---------------------------------------------------------------------------- |
-| `QualitySearch`   | Binary bracket     | Legacy; preserved for compatibility                                          |
-| `QualitySearchV2` | 3-point sweet-spot | Default; faster convergence. Supports non-monotonic curve sweet-spot search. |
+| `QualitySearch`   | Binary bracket     | Legacy V1; retained for the planned V4 rework, not wired into the pipeline   |
+| `QualitySearchV2` | 3-point sweet-spot | Non-monotonic curve sweet-spot search                                        |
+| `QualitySearchV3` | Linear extrapolation + mid-probe safety net | **Default** (what the encoding phase instantiates); fastest convergence so far |
+
+V3 extrapolates outward from the best measured point instead of binary-stepping, and when a direction is exhausted without a pass it steps a half-range back (mid-probe) to check for a missed sweet spot. See [Design Decisions](#design-decisions) below.
 
 The protocol:
 
@@ -340,15 +343,15 @@ Metrics are written to `metrics.yaml` and flushed periodically — they survive 
 
 ## Audio Processing
 
-Audio processing is explicit and config-driven — no combinatorial fan-out. It is defined by three pieces under `audio:` in config, and each **chain** applied to each **selected** track produces exactly one output file named `<source-stem> chain=<name>.<ext>`. See the [Audio Processing Guide](./audio-processing.md) for the full user-facing reference.
+Audio processing is explicit and config-driven, defined by three pieces under `audio:` in config — a **filter** palette, **chains**, and an optional **select** tree. Each **chain** applied to each **selected** track produces exactly one output file named `<stream name> chain=<name>.<ext>`. See the [Audio Processing Guide](./audio-processing.md) for the full user-facing reference.
 
 ### The three pieces
 
-| Piece | Role |
-|-------|------|
-| `filters` | A palette of named, reusable transformations. Each has a `type` (`peaknorm`, `loudnorm`, `dynaudnorm`, `downmix`, `encode`, `passthrough`) and its own parameters. Dict-merged across config layers. |
-| `chains` | Ordered lists of filter names. One chain applied to N selected tracks produces exactly N outputs. No `encode` filter → lossless FLAC; otherwise the last `encode` filter sets the codec/extension. List-replaced across layers. |
-| `select` | An ordered tree (`for`/`exclude`/`prefer`) deciding which extracted tracks are processed; empty (default) = all tracks. Matched against each track's conventional string `lang=<> ch=<> title=<>`. |
+| Piece     | Role                                                                                                                                                                                                                            |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `filters` | A palette of named, reusable transformations. Each has a `type` (`peaknorm`, `loudnorm`, `dynaudnorm`, `downmix`, `encode`, `passthrough`) and its own parameters. Dict-merged across config layers.                            |
+| `chains`  | Ordered lists of filter names. One chain applied to N selected tracks produces exactly N outputs. No `encode` filter → lossless FLAC; otherwise the last `encode` filter sets the codec/extension. List-replaced across layers. |
+| `select`  | An ordered tree (`for`/`exclude`/`prefer`) deciding which extracted tracks are processed; empty (default) = all tracks. Matched against each track's conventional string `lang=<> ch=<> title=<>`.                              |
 
 Filter types are an **open registry** — a new type is one registered class with no edits to the config model or executor. A chain runs as a single combined ffmpeg `-af` invocation, split into extra passes only where a filter needs measurement first (`peaknorm`, `loudnorm`).
 
@@ -449,7 +452,7 @@ Running VMAF, SSIM, PSNR, and VIF in separate ffmpeg passes is ~4× slower and r
 
 ### Automatic crop detection
 
-Crop is detected once during the Probe phase using ffmpeg's `cropdetect` filter across multiple sampled frames. The same crop parameters are stored in `probe.yaml` and applied consistently across all subsequent phases. Crop is applied during encoding only — chunks remain uncropped for remux compatibility.
+Crop is detected once during the Probe phase using ffmpeg's `cropdetect` filter across multiple sampled frames. The same crop parameters are stored in `probe.yaml` and applied consistently across all subsequent phases. Crop is applied as an encode-time filter when reading source segments — the source itself is never modified, and quality measurement crops the reference branch identically so the comparison is like-for-like.
 
 ### Pipeline parallelism default of 1
 
@@ -459,6 +462,11 @@ ffmpeg and modern codecs (x264, x265, SVT-AV1) already scale across all availabl
 
 All artifact and sidecar writes use `.tmp`-then-rename. A partial write (from a crash or kill signal) leaves a `.tmp` file that is ignored by artifact scanning — the artifact is treated as `ABSENT` and re-produced on the next run. No corruption, no manual cleanup needed.
 
-### QualitySearchV3 and mid-probe
+### Two-name doctrine (display_name / safe_name)
 
-A newer version of search algorithm, unifies many decisions, utilizes extrapolation instead of binary outwards search - this allows a bit faster convergence, but at the price of possible miss of curve sweet spot, so for all-fail attempts when direction search is exhausted - we do an extra check of the curve via stepping a half-range back.
+Every named element (stream, chunk, strategy, chain output, merged output) owns exactly one name pair: `display_name()` — the single verbatim generator — and `safe_name()` — the sanitized filesystem form derived from it. No third accessors, no independent on-disk name assemblies. The usage convention is fixed:
+
+- **Filesystem work always uses `safe_name()`** — building paths, comparing against on-disk names, anything that lands on or is read from disk.
+- **Everything else uses `display_name()`** — logging, yaml payloads, dict keys, user-facing tables.
+
+The name's owner is also its only composer: nothing outside the owning class may join name parts manually (e.g. `f"{preset}+{profile}"`); consumers take the composed name from the accessor.

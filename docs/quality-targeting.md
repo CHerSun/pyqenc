@@ -50,17 +50,17 @@ SSIM (Structural Similarity Index) measures luminance, contrast, and structure s
 
 ## Why target multiple metrics
 
-A single metric can be fooled. The table below shows a real example where `any_vulkan_hevc-10bit` looks excellent by median scores across all four metrics:
+A single metric can be fooled. The table below shows a real example where `vulkan-h265-10bit-qp+any` looks excellent by median scores across all four metrics:
 
-| Strategy                   | Size (MB) | PSNR med | SSIM med | VMAF med | VIF med |
-| -------------------------- | --------- | -------- | -------- | -------- | ------- |
-| any_vulkan_hevc-10bit      | 186.6     | 46.9     | 98.8     | 98.7     | 94.9    |
-| p7_nvenc-h265-10bit-qp     | 174.7     | 48.1     | 99.0     | 98.4     | 94.6    |
-| p7_nvenc-h265-10bit-vbr-cq | 136.3     | 47.5     | 98.8     | 98.2     | 93.8    |
-| slow_h265-anime            | 142.2     | 47.5     | 98.8     | 98.5     | 94.3    |
-| slow_h265-aq               | 149.9     | 47.6     | 98.8     | 98.6     | 94.4    |
-| slow_h265                  | 146.8     | 47.5     | 98.8     | 98.6     | 94.4    |
-| veryslow_h264              | 206.8     | 47.4     | 98.9     | 98.5     | 94.3    |
+| Strategy                     | Size (MB) | PSNR med | SSIM med | VMAF med | VIF med |
+| ---------------------------- | --------- | -------- | -------- | -------- | ------- |
+| vulkan-h265-10bit-qp+any     | 186.6     | 46.9     | 98.8     | 98.7     | 94.9    |
+| nvenc-h265-10bit-cq+p7       | 174.7     | 48.1     | 99.0     | 98.4     | 94.6    |
+| nvenc-h265-10bit-vbr+p7      | 136.3     | 47.5     | 98.8     | 98.2     | 93.8    |
+| h265-anime+slow              | 142.2     | 47.5     | 98.8     | 98.5     | 94.3    |
+| h265-aq+slow                 | 149.9     | 47.6     | 98.8     | 98.6     | 94.4    |
+| h265+slow                    | 146.8     | 47.5     | 98.8     | 98.6     | 94.4    |
+| h264+veryslow                | 206.8     | 47.4     | 98.9     | 98.5     | 94.3    |
 
 Yet its minimum scores tell a different story - a VMAF min of 84 and a VIF min of 84 (not in the table). Manual inspection confirmed visible quality problems. Median-only comparison missed them entirely.
 
@@ -84,19 +84,20 @@ For VMAF specifically, prefer `p05` over `min` due to the first-frame bias.
 
 ## Recommended target set
 
-The defaults shipped with `pyqenc` are a starting point, not a universal prescription. The right values depend on your content and how much quality vs size trade-off you want.
+The defaults shipped with `pyqenc` (in `default_config.yaml`) are a starting point, not a universal prescription. The right values depend on your content and how much quality vs size trade-off you want.
 
 ```yaml
 encoding:
   targets:
-    - "vif-med:92.0"    # grain retention; 92–94 is good; higher = crisper, larger file
-    - "vif-min:88.0"    # floor safeguard
-    - "vmaf-p05:95.0"   # p05 avoids VMAF first-frame bias; 95–97 = high quality
-    - "vmaf-min:92.0"   # floor safeguard
-    - "psnr-med:45.0"   # 44–46 = good retention; 50+ = near-lossless
-    - "psnr-min:42.0"   # floor safeguard
-    - "ssim-med:98.0"   # 98+ = good; 99+ = near-lossless
-    - "ssim-min:95.0"   # floor safeguard
+    - "vmaf-med:96.0"   # 95–97 = high quality. 98+ for visually lossless
+    - "psnr-med:45.0"   # 44–46 = good; 50+ = near-lossless
+    - "ssim-med:98.0"   # 98+ = good; non-linear scale, compressed near 100
+    - "vif-med:93.0"    # grain/texture retention; 92–94 = good; higher = crisper but larger
+    # --- floor safeguards ---
+    - "vmaf-min:93.0"
+    - "psnr-min:43.0"
+    - "ssim-min:96.0"
+    - "vif-min:90.0"
 ```
 
 To increase quality (larger files): raise the most constraining passing target (marked `•` in logs) by 0.5–1.0.
@@ -106,6 +107,50 @@ To decrease quality (smaller files): lower the most constraining failing target 
 Tune on a representative sample clip first. Metrics do not linearly map to perceived quality, so small numeric changes can have larger visual effects than expected. As long as intermediate results have not been cleaned up, re-running with adjusted targets only re-encodes the affected chunks.
 
 NOTE: If you have multiple encoding strategies - those targets will not only affect chunk quality search, but also optimal strategy selection.
+
+---
+
+## Winning-limiter distribution
+
+At the end of the encoding phase `pyqenc` prints a per-strategy summary that groups every chunk's winning attempt by its **limiter** — the target that decided the outcome for that chunk: the tightest satisfied target on a passing chunk, or the worst-missed target on a chunk whose search ended without a pass. The per-attempt `•`/`✘` markers aggregate into this table. It is also persisted in `encoding.yaml` and re-printed verbatim on fully-reused runs.
+
+```text
+Winning-limiter distribution
+----------
+｟h265-anime+ultrafast ｠ — 107 chunks
+  Limiter            pass •         miss ✘     share    med CRF
+  vmaf_median            40       6 (-0.2)     43.0%       10.0
+  vif_median             41              0     38.3%       13.0
+  vif_min                 7              0      6.5%        9.0
+  vmaf_min                6       1 (-4.7)      6.5%       10.5
+  psnr_median             4              0      3.7%       16.0
+  psnr_min                2              0      1.9%       13.0
+----------
+｟h265+ultrafast ｠ — 107 chunks
+  Limiter            pass •         miss ✘     share    med CRF
+  vmaf_median            39       6 (-0.2)     42.1%       10.0
+  vif_median             40              0     37.4%       13.0
+  vmaf_min                8       1 (-4.6)      8.4%       11.5
+  vif_min                 7              0      6.5%        9.0
+  psnr_median             4              0      3.7%       16.0
+  psnr_min                2              0      1.9%       13.0
+```
+
+Columns:
+
+| Column    | Meaning                                                                                                                                                                                     |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pass •`  | Passing chunks whose tightest target is this limiter.                                                                                                                                       |
+| `miss ✘` | Chunks that exhausted the search without passing, limited by this target. The parenthesized number is the **median deficit** — how far below the target the misses landed, in metric units. |
+| `share`   | Percentage of the strategy's chunks in this row.                                                                                                                                            |
+| `med CRF` | Median winning quality value (CRF/CQ/QP) of the row's chunks.                                                                                                                               |
+
+How to read it for tuning:
+
+- **Small deficits** (`-0.2` above) are near-misses: lowering that target by the deficit flips those chunks — the cheapest tuning lever visible in the table.
+- **Large deficits on `min` statistics while the medians pass** (the `vmaf_min` rows above: `-4.7`/`-4.6` with `vmaf_median` dominating the passes) mark content the metric structurally punishes — VMAF's grain and first-frame biases — not a tuning problem. This is also what later surfaces as the merged-output `vmaf-min` target-miss warning.
+- **Compare strategy groups**: the `med CRF` column shows where each strategy's quality values land under the same targets — a grain-preserving profile converging at lower CRF on `vif` rows while a plain profile binds on `vmaf` is the grain-retention trade-off made visible.
+- Most chunks are limited by vmaf and vif - those are the points to tune if you want to lower quality and resulting size.
 
 ---
 

@@ -84,7 +84,7 @@ def _extended_stream(path: Path, frame_count: int) -> ExtendedVideoStream:
 _APP_CONFIG = load_app_config(default_only=True)
 
 # The single strategy under test and its filesystem-safe form.
-_STRATEGY  = "slow+h265"
+_STRATEGY  = "h265+slow"
 _SAFE_NAME = _STRATEGY.replace(":", "_")
 
 
@@ -114,8 +114,8 @@ def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
         name="h265-10bit", default_quality=Decimal("20"), default_preset="slow",
         quality_range=(Decimal("0"), Decimal("51")), presets=["slow"],
     )
-    preset, _, profile = strategy_name.partition("+")
-    strategy = Strategy(preset=preset, profile=profile or "h265", codec=codec, profile_args=[])
+    profile, _, preset = strategy_name.partition("+")
+    strategy = Strategy(preset=preset or "slow", profile=profile or "h265", codec=codec, profile_args=[])
     return EncodedChunk(
         stream = ExtendedVideoStream(
             stream = VideoStream(
@@ -446,14 +446,14 @@ class TestTmpOutputPath:
     """
 
     def test_derivation_pinned(self) -> None:
-        output = Path("merged/movie slow_h265.mkv")
+        output = Path("merged/movie h265_slow.mkv")
 
-        assert MergePhase._tmp_output_path(output) == Path("merged/movie slow_h265.tmp")
+        assert MergePhase._tmp_output_path(output) == Path("merged/movie h265_slow.tmp")
 
     def test_long_path_type_preserved(self) -> None:
         """LongPath must survive the derivation — the twin participates in
         the same subprocess and file I/O as the final output."""
-        output = LongPath("merged/movie slow_h265.mkv")
+        output = LongPath("merged/movie h265_slow.mkv")
 
         assert isinstance(MergePhase._tmp_output_path(output), LongPath)
 
@@ -675,7 +675,7 @@ class TestStaleTmpTwinSwept:
     for — or block — the real output."""
 
     def test_sweep_removes_tmp_twin(self, tmp_path: Path) -> None:
-        twin = tmp_path / "movie slow_h265.tmp"
+        twin = tmp_path / "movie h265_slow.tmp"
         twin.write_bytes(b"\x00" * 16)
 
         remove_stale_tmp_files(tmp_path)
@@ -685,7 +685,7 @@ class TestStaleTmpTwinSwept:
     def test_sweep_keeps_real_outputs(self, tmp_path: Path) -> None:
         """Only temp spellings are removed — a real merged output (no
         ``.tmp``) must survive the sweep."""
-        output = tmp_path / "movie slow_h265.mkv"
+        output = tmp_path / "movie h265_slow.mkv"
         output.write_bytes(b"\x00" * 16)
 
         remove_stale_tmp_files(tmp_path)
@@ -880,12 +880,12 @@ class TestMissedTargetsWarning:
         metrics = {"vmaf_min": 88.3, "psnr_min": 43.5}   # vmaf missed, psnr met
 
         with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
-            _make_phase(targets)._log_missed_targets_warning("ultrafast+h265", metrics)
+            _make_phase(targets)._log_missed_targets_warning("h265+ultrafast", metrics)
 
         warnings = [r for r in caplog.records if r.levelno == _logging.WARNING]
         assert len(warnings) == 1, "exactly one warning expected"
         msg = warnings[0].getMessage()
-        assert "ultrafast+h265" in msg
+        assert "h265+ultrafast" in msg
         assert "vmaf-min" in msg and "88.3" in msg and "93.0" in msg
         assert "psnr-min" not in msg, "met metrics must not appear in the warning"
 
@@ -898,6 +898,6 @@ class TestMissedTargetsWarning:
         metrics = {"vmaf_min": 96.5}
 
         with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
-            _make_phase(targets)._log_missed_targets_warning("ultrafast+h265", metrics)
+            _make_phase(targets)._log_missed_targets_warning("h265+ultrafast", metrics)
 
         assert not [r for r in caplog.records if r.levelno == _logging.WARNING]

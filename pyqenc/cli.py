@@ -200,7 +200,8 @@ def _add_chunking_arguments(parser: argparse.ArgumentParser) -> None:
         "--scene-threshold",
         type=float,
         default=None,
-        help="Scene detection sensitivity 0.0-1.0 (default: from config)",
+        help="Scene detection sensitivity 0.0-255.0 (default: 27.0 from config). "
+             "Lower = more sensitive (more scene cuts); ~15-50 is the meaningful range.",
     )
     parser.add_argument(
         "--min-scene-length",

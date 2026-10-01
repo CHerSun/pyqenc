@@ -109,11 +109,11 @@ class Strategy(BaseModel):
         return v.replace(".", TIME_SEPARATOR_MS)
 
     def display_name(self) -> str:
-        """Display name — the composed identity, verbatim (``'slow+h265-aq'``).
+        """Display name — the composed identity, verbatim (``'h265-aq+slow'``).
 
         The single generator; the safe form is :meth:`safe_name`.
         """
-        return f"{self.preset}+{self.profile}"
+        return f"{self.profile}+{self.preset}"
 
     def safe_name(self) -> str:
         """Filesystem-safe name — passthrough sanitize (validated safe at load).

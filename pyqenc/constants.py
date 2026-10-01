@@ -129,7 +129,7 @@ scheme.  Named groups: ``chunk_id``, ``resolution`` (e.g. ``1920x800``),
 
 # Audio processing — filename conventions
 CHAIN_FILENAME_SUFFIX = " chain="
-"""Filename suffix marking a produced chain output: ``<source-stem> chain=<name>.<ext>``.
+"""Filename suffix marking a produced chain output: ``<stream name> chain=<name>.<ext>``.
 The chain name that follows is parsed back out for exact-name artifact invalidation."""
 
 # ffmpeg argument tokens (used when building audio chain commands)

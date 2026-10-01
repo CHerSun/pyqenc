@@ -117,7 +117,7 @@ def _merged_row(out_path: Path, state) -> Artifact:
     return Artifact(
         payload=MergedVideo(
             source_stem="source",
-            strategy=_make_strategy_by_name("slow+h265"),
+            strategy=_make_strategy_by_name("h265+slow"),
             output_path=out_path,
         ),
         state=state,
@@ -125,14 +125,14 @@ def _merged_row(out_path: Path, state) -> Artifact:
 
 
 def _make_strategy_by_name(name: str) -> Strategy:
-    """A minimal Strategy for a ``preset+profile`` display name."""
+    """A minimal Strategy for a ``profile+preset`` display name."""
     from decimal import Decimal
 
     from pyqenc.models import CodecConfig, Strategy
 
-    preset, _, profile = name.partition("+")
+    profile, _, preset = name.partition("+")
     return Strategy(
-        preset=preset, profile=profile,
+        preset=preset or "ultrafast", profile=profile,
         codec=CodecConfig(
             name="h265-10bit", default_quality=Decimal(20),
             default_preset="ultrafast",
@@ -1221,7 +1221,7 @@ class TestEncodingPhaseTiming:
         from pyqenc.phases.encoding import EncodingPhase
 
         stub_row = Artifact(
-            payload=_encoded_chunk(tmp_path / "chunk_0.mkv", "chunk_0", "slow+h265"),
+            payload=_encoded_chunk(tmp_path / "chunk_0.mkv", "chunk_0", "h265+slow"),
             state=ArtifactState.COMPLETE,
         )
 
@@ -1256,7 +1256,7 @@ class TestEncodingPhaseTiming:
         )
 
         stub_artifact = Artifact(
-            payload=_encoded_chunk(tmp_path / "chunk_0.mkv", "chunk_0", "slow+h265"),
+            payload=_encoded_chunk(tmp_path / "chunk_0.mkv", "chunk_0", "h265+slow"),
             state=ArtifactState.ABSENT,
         )
 
@@ -1303,7 +1303,7 @@ class TestEncodingPhaseTiming:
 
         successful_result = ChunkEncodingResult(
             chunk_id     = "chunk_0",
-            strategy     = "slow+h265",
+            strategy     = "h265+slow",
             success      = True,
             final_crf    = 28.0,
             attempts     = 3,
@@ -1359,7 +1359,7 @@ class TestEncodingPhaseTiming:
 
         reused_result = ChunkEncodingResult(
             chunk_id     = "chunk_0",
-            strategy     = "slow+h265",
+            strategy     = "h265+slow",
             success      = True,
             final_crf    = 28.0,
             attempts     = 1,
@@ -1398,7 +1398,7 @@ class TestEncodingPhaseTiming:
         phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
 
         stub_row = Artifact(
-            payload=_encoded_chunk(tmp_path / "chunk_0.mkv", "chunk_0", "slow+h265"),
+            payload=_encoded_chunk(tmp_path / "chunk_0.mkv", "chunk_0", "h265+slow"),
             state=ArtifactState.COMPLETE,
         )
 
@@ -1440,12 +1440,12 @@ class TestMergePhaseTiming:
         from pyqenc.models import PhaseOutcome
         from pyqenc.phases.encoding import EncodingPhaseResult
 
-        encoded_path = tmp_path / "work" / "encoded" / "slow+h265" / "chunk_0.mkv"
+        encoded_path = tmp_path / "work" / "encoded" / "h265+slow" / "chunk_0.mkv"
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
         encoded_path.write_bytes(b"\x00" * 128)
 
         winner = Artifact(
-            payload  = _encoded_chunk(encoded_path, "chunk_0", "slow+h265"),
+            payload  = _encoded_chunk(encoded_path, "chunk_0", "h265+slow"),
             state    = ArtifactState.COMPLETE,
         )
         return EncodingPhaseResult(
@@ -1563,7 +1563,7 @@ class TestMergePhaseTiming:
         from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
 
-        output_file = tmp_path / "work" / "merged" / "source slow+h265.mkv"
+        output_file = tmp_path / "work" / "merged" / "source h265+slow.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
         output_file.write_bytes(b"\x00" * 64)
 
@@ -1597,12 +1597,12 @@ class TestMergePhaseTiming:
         from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
 
-        output_file = tmp_path / "work" / "merged" / "source slow+h265.mkv"
+        output_file = tmp_path / "work" / "merged" / "source h265+slow.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
         stub_artifact = _merged_row(output_file, ArtifactState.ABSENT)
 
-        encoded_path = tmp_path / "work" / "encoded" / "slow+h265" / "chunk_0.mkv"
+        encoded_path = tmp_path / "work" / "encoded" / "h265+slow" / "chunk_0.mkv"
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
         encoded_path.write_bytes(b"\x00" * 128)
 
@@ -1613,7 +1613,7 @@ class TestMergePhaseTiming:
                 patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
                 patch("pyqenc.phases.merge.get_frame_count", return_value=100),
                 patch.object(MergePhase, "_collect_encoded_chunks", return_value={
-                    "chunk_0": {"slow+h265": _encoded_chunk(encoded_path, "chunk_0", "slow+h265")},
+                    "chunk_0": {"h265+slow": _encoded_chunk(encoded_path, "chunk_0", "h265+slow")},
                 }),
             ):
                 mock_subprocess.return_value = MagicMock(returncode=0, stderr="")
@@ -1645,12 +1645,12 @@ class TestMergePhaseTiming:
         from pyqenc.phases.merge import MergePhase
         from pyqenc.state import ArtifactState
 
-        output_file = tmp_path / "work" / "merged" / "source slow+h265.mkv"
+        output_file = tmp_path / "work" / "merged" / "source h265+slow.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
         stub_artifact = _merged_row(output_file, ArtifactState.ABSENT)
 
-        encoded_path = tmp_path / "work" / "encoded" / "slow+h265" / "chunk_0.mkv"
+        encoded_path = tmp_path / "work" / "encoded" / "h265+slow" / "chunk_0.mkv"
         encoded_path.parent.mkdir(parents=True, exist_ok=True)
         encoded_path.write_bytes(b"\x00" * 128)
 
@@ -1668,7 +1668,7 @@ class TestMergePhaseTiming:
                 patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
                 patch("pyqenc.phases.merge.get_frame_count", return_value=100),
                 patch.object(MergePhase, "_collect_encoded_chunks", return_value={
-                    "chunk_0": {"slow+h265": _encoded_chunk(encoded_path, "chunk_0", "slow+h265")},
+                    "chunk_0": {"h265+slow": _encoded_chunk(encoded_path, "chunk_0", "h265+slow")},
                 }),
                 patch("pyqenc.phases.merge.MergePhase._measure_quality", return_value=({}, False, None)),
             ):
@@ -1696,7 +1696,7 @@ class TestMergePhaseTiming:
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
 
-        output_file = tmp_path / "work" / "merged" / "source slow+h265.mkv"
+        output_file = tmp_path / "work" / "merged" / "source h265+slow.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)
         output_file.write_bytes(b"\x00" * 64)
 

@@ -820,12 +820,14 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         final  = stream.info.extracted_path
         assert final is not None, "expected location set by _normalize_extracted_paths"
         tmp     = final.parent / f"{final.stem}{TEMP_SUFFIX}"
+        # -dump_attachment is an INPUT-side per-stream option — it must precede
+        # -i; ffmpeg rejects it in the output stage.
         request = FFmpegRequest(
-            inputs = [FFmpegInput(path=source)],
-            output_args = (
-                f"-dump_attachment:{stream.info.track_id}", tmp,
-                "-t", "0",
-            ),
+            inputs = [FFmpegInput(
+                path           = source,
+                pre_input_args = (f"-dump_attachment:{stream.info.track_id}", tmp),
+            )],
+            output_args = ("-t", "0"),
         )
         logger.debug("Extracting attachment track %d: %s", stream.info.track_id, final.name)
         res = run_ffmpeg(request)

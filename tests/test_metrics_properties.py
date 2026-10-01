@@ -261,7 +261,7 @@ def test_convergence_stats_math(counts: list[int]) -> None:
     Validates: Requirements 4.2, 4.1a
     # Feature: app-metrics-report, Property 5: Convergence stats math
     """
-    strategy = "slow+h265-aq"
+    strategy = "h265-aq+slow"
     acc = _ConvergenceAccumulator()
     for c in counts:
         _update_accumulator(acc, c)
@@ -317,7 +317,7 @@ def test_convergence_stats_resume_from_yaml(counts: list[int]) -> None:
 
     Validates: Requirements 4.2, 4.1a
     """
-    strategy = "slow+h265-aq"
+    strategy = "h265-aq+slow"
 
     acc_fresh = _ConvergenceAccumulator()
     for c in counts:

@@ -168,25 +168,6 @@ threshold (with a log line)?
 
 ---
 
-## 🤔 17. QualitySearchV3: no worse-end tie-break; no saved best_failing / worst_passing
-
-**Status:** needs thinking (algorithm tweak)
-
-- `QualitySearchV3` has a BEST_SCORE point (`_best_score_point`,
-  `pyqenc/quality.py:1422`, update rule `:1491-1497`) and keeps all measured
-  points (`_attempted_points`, `:1421,1480`); it does 3-point dispatch
-  (`:1584-1603`) and derives the nearest opposite-side tested point on the
-  fly (`_extrapolate_outward`, `:1728-1733`) — the functional equivalent of
-  worst_passing/best_failing.
-- Missing: named best_failing/worst_passing attributes, and a tie-break
-  preferring the point closer to the *worse* end on equal score (comparisons
-  are strict `<`/`>` at `:1494-1495`).
-
-**Questions to think about:** add the tie-break (cheap) vs. full named-point
-rework?
-
----
-
 ## 🤔 18. BALANCED metrics mode (soft matching) does not exist
 
 **Status:** needs thinking (feature)
@@ -253,12 +234,10 @@ Something like:
 
 With some default profile being default (similarly to codec's default preset in config) - used if user told nothing. Probably `high`
 
-CRF above is when using H.265-anime at slow preset. One problem is how to estimate that. Pipeline runs on chunks - more granular quality assesment. 
+CRF above is when using H.265-anime at slow preset. One problem is how to estimate that. Pipeline runs on chunks - more granular quality assessment.
 But we can use built-in profile quality range limiting for running fixed-CRF encodes on chunks to get the quality measures.
 
-Another question is I want targets to favor retaining natural film grain, not favoring blurred results. h.265-anime is particularly tuned for this, so 
-probably we should run 2 encodes at fixed CRFs - with plain h.265 and with h.265-anime variant at same CRF. And compare measured metrics to better understand 
-the difference - where we could give more slack, where we should make things tighter (in favor of retention of original looks, but at sane quality levels).
+Another question is I want targets to favor retaining natural film grain, not favoring blurred results. h.265-anime is particularly tuned for this, so probably we should run 2 encodes at fixed CRFs - with plain h.265 and with h.265-anime variant at the same CRF values. And compare measured metrics to better understand the difference - where we could give more slack, where we should make things tighter (in favor of retention of original looks, but at sane quality levels).
 
 ---
 
@@ -383,14 +362,14 @@ Need to check footprints and adjust accordingly for explicitly required values (
 
 ## 39. 🤔 Forced wipe idempotency
 
-Currently forced run is a flag on Job phase result, which must be respected by each phase. Problem is, if we don't run till the end and exit in the middle, 
+Currently forced run is a flag on Job phase result, which must be respected by each phase. Problem is, if we don't run till the end and exit in the middle,
 but we've already written new job.yaml sidecar - on rerun we won't know there was a source mismatch. Later phases which didn't reach running on previous
 correctly flagged run - won't have this extra bit of info to invalidate artifacts and we will get inconsistent output.
 
 The right approach is probably something like `finalize` but reversed (finalize runs after succesfully finishing the job) - `invalidate` maybe or something like that.
 Explicitly triggered once in reversed order (from end). And only after that is triggered - the forced wipe flag becomes unneeded and we can write new job.yaml sidecar.
 
-Or... should we remove it completely? 
+Or... should we remove it completely?
 - The only true usecase is when crop changed between runs. And here it works as a safeguard against accidentally deleting a lot of work (all attempts become invalid; not detectable with current light invalidation checks; don't want per-attempt sidecar reading for heavy invalidation checks for this usecase as that will affect all runs).
 - If user wants another file - he can either use new dir or purge current dir. So this one isn't a true usecase.
 
@@ -405,8 +384,8 @@ Probably a composite score should be added and used for selection of the best (o
 for selection:
 - Min (current default and future default?) - negative score on any missing target and calculate only based on missing targets. Positive only if all targets matched - then score the positive delta.
 - Optimum - score all metrics (both missing and matching) for a single weighted score.
-- Should the score include the size? Size is basically a price for the score, where the score is the profit. Must reach some balance - smaller size is prefered, 
-  while too high score doesn't outweight the size (so that we don't blindly always pick largest size - quite the contrary, target is to reach smaller size while 
+- Should the score include the size? Size is basically a price for the score, where the score is the profit. Must reach some balance - smaller size is prefered,
+  while too high score doesn't outweight the size (so that we don't blindly always pick largest size - quite the contrary, target is to reach smaller size while
   keeping good enough quality).
 
 ---
@@ -589,16 +568,6 @@ Probably worth moving to the phase.
 
 ---
 
-## 63. CLI reference doc is outdated
-
-Needs updating to current state. cli-reference.md .
-README.md too. In particular - wrong chunking modes info, space requirements, quality targets.
-audio-processing.md - at minimum we switched to long arguments names. Matrixes explanations were reworded, and no need for historical mentions.
-  Multiple chains can independently target the same or different tracks; each produces its own output. - plain wrong about targetting - chains have no targetting, they consume what select filters selected.
-  Worked example (a): all Russian dubs - but the example has no prefer. needs rewording
-  naming is depicted incorrectly - audio stream name, not source stem name
----
-
 ## 64. Audio chain as flt
 
 Need to check if full audio chain is converted to flt or only on downmix filter. Probably always using flt is better for precise. But only downmix using custom weights should be capable of producing clipping?
@@ -633,7 +602,7 @@ Deferred as costly/structural:
 
 ## 66. CLI subcommands review
 
-Do we really need all current subcommands? From UX point of view for end-user. 
+Do we really need all current subcommands? From UX point of view for end-user.
 Current setup was mirroring the initial phases structure and allowed better testing for devs.
 But ordinary user likely doesn't need that.
 
@@ -645,9 +614,9 @@ What would ordinary user need? I'd guess it should be intent based. Something li
 
 anything else?
 
-I was thinking about a way to give user mechanics to extract (materialize) anything from source really. 
+I was thinking about a way to give user mechanics to extract (materialize) anything from source really.
 Maybe this should be the function of `extract` subcommand (a bit different from extract mechanics in auto/video/audio), if we moved to virtual streams in main phases.
-This is also a question specifically for audio - user might want source audio available as standalone files to use in external audio editors. 
+This is also a question specifically for audio - user might want source audio available as standalone files to use in external audio editors.
 I was thinking of maybe introducing a dump filter (like passthrough, but to a file). But direct extract command might be a better way.
 As another point for extract subcommand working like this - it was always a problem to just extract everything from mkv. Most CLI tools require explicit
 streams listing, which is quite painful when making commands manually. with `extract` subcommand it could be something like `pyqenc extract source.mkv --exclude "video-" -y` to dump everything.
@@ -709,24 +678,68 @@ follows the limiter-summary route — per-user 2026-10-01)
 
 ---
 
-## 70. Strategy name order is preset+profile — should be profile+preset everywhere
+## 71. dynaudnorm was switched to long argument names. loudnorm looks to be with short argument names
 
-**Status:** needs thinking (naming-convention flip left over from the
-`--strategies` rework)
+Short argument names are difficult for humans, not self-explanatory. We need to check all audio filter types.
+And make them use long ffmpeg filter arguments, if short are used (only where we directly map to ffmpeg arg names).
+Dynaudnorm is already good.
 
-- `Strategy.display_name()` composes `preset+profile` (`pyqenc/models.py:111`,
-  e.g. ``'ultrafast+h265'``) — the reverse of the CLI `--strategies`
-  `profile[+preset]` matcher convention (e.g. `h265*+ultrafast`).
-- Surfaces everywhere the strategy name appears: log lines (chunk prefixes,
-  optimization summary, winning-limiter groups), sidecar payloads
-  (`optimization.yaml` strategy_results/selected, `encoding.yaml`
-  limiter_summary), metrics dotted keys (`encoding.<strategy>`), and — via
-  `safe_name()` — on-disk `encoded/<strategy>/`/`encoding/<strategy>/`
-  directory names.
-- Ask: flip to `profile+preset` everywhere. `display_name()` and
-  `safe_name()` must flip together (single composition, two-name doctrine);
-  on-disk naming change is acceptable pre-alpha (workdirs are one-time).
-  Grep sweep for the `+`-joined name in logs/sidecars/metrics keys after
-  the flip.
+
+---
+
+## 72. audio naming - wrong fields order
+
+Currently docs state and code produce:
+
+> The stream name is the track's display identity — `#<track-id> (audio-<codec>) lang=<code> [title=<text>] ch=<layout>`
+
+Note that `title` is free form text from end-user. To be better parsable - free form field must come last. Parsing is often on the first-occurence base.
+
+---
+
+## 73. we need 10 and 90 percentiles targetting ability
+
+For vmaf the very first frame is unreliable. Considering default min scene length of 24 frames and that a single frame could be unreliable - we need a way to express
+at least 2 frames. 2/24 - ~10%. Currently we have a note - use `vmaf-p05` instead of `vmaf-min`, but that won't work if we have only 24 frames (i.e. shortest possible chunk).
+
+So we need to add p10 and p90 back to targetting capabilities and artifacts sidecars serialization (should be 1 class edit and transfer from full stats). Update the docs for this
+too - recommend `vmaf-p10`.
+
+This also closely related to adaptive metrics.sampling value if user wants >1, but we have too low frames for that - revert back to lower value (we must get at min 20 readings for p10>=2 frames setup).
+
+Need to check if can get those for all metrics (we do full parsing, right, so shouldn't be a problem?).
+
+---
+
+## 74. Attachment extraction via ffmpeg `-dump_attachment` produces no file
+
+**Status:** needs thinking (known problem, observed live 2026-10-01)
+
+- The option placement was fixed the same day (it sat in the output stage where
+  ffmpeg rejects it — "cannot be applied to output url"; now input-side via
+  `FFmpegInput.pre_input_args`, golden-pinned in `test_extraction_pts.py`).
+- Remaining problem, reproduced manually against a real source: with the
+  correctly-placed option ffmpeg exits 0 but the dump file is never written —
+  with `-t 0` (current call) the attachment stream is not read at all; even
+  with `-map 0:6 -c copy -f data` (stream processed, 117KiB) no dump file
+  appears. Currently masked by the common `attachment-` exclude filter.
+- **Questions to think about:** is `-dump_attachment` reliable on Windows /
+  this ffmpeg build at all? Alternative: materialize attachments via
+  mkvextract (cf. §53) or read via `ffprobe -show_attachments`?
+
+There are some caveats with ffmpeg attachments dumping. mkvextract should be easier as primary tool, keeping ffmpeg as fallback (on mkvextract failure - try the ffmpeg).
+It looks like attachments have own numbering from 1 (or from 0?)
+
+Googling up recommends this command template for ffpmeg attachment dump:
+	`ffmpeg -i input.mkv -dump_attachment:t "filename.ttf" -t 0 -f null "-"`
+---
+
+
+===
+
+## Last known = 74
+
+Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
+Keep this the last entry for easy human updates.
 
 ---

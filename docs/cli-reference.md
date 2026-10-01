@@ -11,7 +11,7 @@ pyqenc measure <source_video> [targets]   # Measure quality metrics
 pyqenc config  [target_dir]               # Copy active config for customization
 # advanced subcommands
 pyqenc extract <source_video> [options]   # Extract streams only
-pyqenc chunk   <source_video> [options]   # Chunk video into scenes only
+pyqenc chunk   <source_video> [options]   # Detect scene chunking only
 pyqenc encode  <source_video> [options]   # Encode chunks only
 pyqenc audio   <source_video> [options]   # Process audio only
 pyqenc merge   <source_video> [options]   # Merge final output only
@@ -25,15 +25,25 @@ It is NOT recommended to use phase-specific subcommands (`extract`, `chunk`, `en
 
 ---
 
-## Global Options
+## Base Options
 
 Applies to all subcommands.
 
 | Option              | Description                                           | Default |
 | ------------------- | ----------------------------------------------------- | ------- |
-| `--work-dir PATH`   | Working directory for intermediate files              | `.`     |
+| `--work-dir PATH`   | Working directory for intermediate files and state    | `.`     |
 | `--log-level LEVEL` | Logging level: `debug`, `info`, `warning`, `critical` | `info`  |
-| `-y, --execute`     | Actually execute commands (omit = dry-run preview)    | dry-run |
+
+## Execution Options
+
+Applies to all pipeline subcommands (`auto`, `extract`, `chunk`, `encode`, `audio`, `merge`).
+
+| Option          | Description                                                                                                                                       | Default |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `-y, --execute` | Actually execute phases (omit = dry-run preview)                                                                                                  | dry-run |
+| `--force`       | On source-file mismatch or unrecoverable config changes in execute mode: delete all intermediate artifacts and reset state to start anew          | off     |
+| `--cleanup`     | Delete workspace files per artifact after completion. `--cleanup all`: also remove remaining intermediate directories after full pipeline success | off     |
+| `--no-metrics`  | Suppress process metrics.yaml output (pipeline run stats). Does not affect quality metrics measurements.                                          | off     |
 
 ---
 
@@ -41,12 +51,14 @@ Applies to all subcommands.
 
 ### Quality & Strategy
 
-| Option                     | Description                                                                              | Default                                                  |
-| -------------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `--quality-target TARGETS` | Quality targets (see [Quality Target Format](#quality-target-format))                    | `vif-med:92.0,vmaf-p05:95.0,psnr-med:45.0,ssim-med:98.0` |
-| `--strategies STRATEGIES`  | Encoding strategies (see [Strategy Format](#strategy-format))                            | from config (`h264*,h265*`)                              |
-| `--no-optimize`            | Disable optimization — produce output for all strategies                                 | `False` (optimization enabled)                           |
-| `--concurrency N`          | Maximum concurrent encoding processes. Increase only if you see CPU cores underutilized. | `1`                                                      |
+| Option                    | Description                                                                                                                                                                    | Default                            |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
+| `--targets TARGETS`       | Quality targets (see [Quality Target Format](#quality-target-format))                                                                                                          | from config (8 targets, see below) |
+| `--strategies STRATEGIES` | Encoding strategies (see [Strategy Format](#strategy-format))                                                                                                                  | from config (`h264*,h265*`)        |
+| `--no-optimize`           | Disable optimization — produce output for all strategies                                                                                                                       | `False` (optimization enabled)     |
+| `--concurrency N`         | Maximum concurrent encoding processes. Increase only if you see CPU cores underutilized.                                                                                       | from config (`1`)                  |
+| `--sampling N`            | Frame sampling for quality measurement: every N-th frame. Lower = more precise but slower. Measurements precision directly affect encoding results. sampling=1 is recommended. | from config (`1`)                  |
+| `--no-visual-hash`        | Disable emoji visual-hash prefix on chunk log lines                                                                                                                            | off                                |
 
 ### Cropping
 
@@ -54,7 +66,7 @@ Applies to all subcommands.
 | ----------------- | -------------------------------------------------------------------------------------- | ----------- |
 | `--crop "VALUES"` | Manual crop: `"top,bottom"` or `"top,bottom,left,right"`. Use `"0,0"` for no cropping. | Auto-detect |
 
-Automatic crop detection uses ffmpeg's `cropdetect` filter. The same crop parameters are applied consistently across all phases. Crop is applied during encoding only — chunks stay uncropped for remux compatibility.
+Automatic crop detection uses ffmpeg's `cropdetect` filter. The same crop parameters are applied consistently across all phases. Source remains untouched.
 
 > NOTE: ⚠ Change of cropping value midway requires full re-encode.
 
@@ -62,26 +74,21 @@ Automatic crop detection uses ffmpeg's `cropdetect` filter. The same crop parame
 
 Applied during extraction phase, use dry-run to preview.
 
-| Option                  | Description                                                          | Example            | Default                            |
-| ----------------------- | -------------------------------------------------------------------- | ------------------ | ---------------------------------- |
-| `--include REGEX`       | Regex pattern to include streams                                     | `"\b(RUS\|ENG)\b"` | Include all                        |
-| `--exclude REGEX`       | Regex pattern to exclude streams                                     | `"comment"`        | Exclude none                       |
+| Option             | Description                  | Example            | Default      |
+| ------------------ | ---------------------------- | ------------------ | ------------ |
+| `--include REGEX`  | Regex pattern to include streams | `"\b(RUS\|ENG)\b"` | Include all  |
+| `--exclude REGEX`  | Regex pattern to exclude streams | `"comment"`     | Exclude none |
 
 > Audio processing (filters, chains, track selection) is configured under `audio:` in your config file, not via CLI flags. See the [Audio Processing Guide](./audio-processing.md).
 
 ### Chunking
 
-| Option             | Description                                                                 | Default       |
-| ------------------ | --------------------------------------------------------------------------- | ------------- |
-| `--remux-chunking` | Use stream-copy (`-c copy`) instead of FFV1 lossless re-encode for chunking | Lossless FFV1 |
+Chunks are timestamp windows computed directly from the source — no intermediate copy or lossless re-encode is produced.
 
-> NOTE: ⚠ Remux chunking is **NOT recommended**. It relies on source I-frames for scene boundaries, which can produce inaccurate splits and potential audio desync. Its main benefit is reduced disk usage (~1x source size vs ~5x for FFV1).
-
-### Cleanup
-
-| Option      | Description                                                                                         | Default |
-| ----------- | --------------------------------------------------------------------------------------------------- | ------- |
-| `--cleanup` | Remove intermediate files after successful step completion. Reduces ability to resume/adjust later. | Off     |
+| Option                    | Description                                                                 | Default              |
+| ------------------------- | --------------------------------------------------------------------------- | -------------------- |
+| `--scene-threshold VALUE` | Scene detection sensitivity, 0.0–255.0. Lower = more sensitive (more cuts). | from config (`27.0`) |
+| `--min-scene-length N`    | Minimum frames per chunk — merges short scenes into one chunk.              | from config (`24`)   |
 
 ---
 
@@ -119,14 +126,14 @@ Config search order (first found wins):
 
 ### Statistics
 
-| Statistic       | Description |
-| --------------- | ----------- |
-| `min`           | Minimum across all frames — avoid, sensitive to outliers |
-| `p05`           | 5th percentile — **recommended over `min`** |
-| `p25`           | 25th percentile |
-| `med`, `median` | Median (50th percentile) |
-| `p75`           | 75th percentile |
-| `p95`           | 95th percentile |
+| Statistic       | Description                                                     |
+| --------------- | --------------------------------------------------------------- |
+| `min`           | Minimum across all frames — avoid, sensitive to outliers        |
+| `p05`           | 5th percentile — **recommended over `min`**                     |
+| `p25`           | 25th percentile                                                 |
+| `med`, `median` | Median (50th percentile)                                        |
+| `p75`           | 75th percentile                                                 |
+| `p95`           | 95th percentile                                                 |
 | `max`           | Maximum across all frames — avoid, often useless for measuring. |
 
 > NOTE: `vmaf-min` is unreliable due to a first-frame bias (VMAF lacks motion context on frame 0). Use `vmaf-p05` instead. See [quality-targeting.md](quality-targeting.md) for a detailed discussion.
@@ -134,12 +141,17 @@ Config search order (first found wins):
 ### Examples
 
 ```sh
-# Recommended baseline (multiple metrics, stable statistics)
---quality-target vif-med:92,vmaf-p05:95,psnr-med:45,ssim-med:98
+# Override with a single metric
+--targets vmaf-p05:95
+
+# Multiple targets (any failing target forces higher quality)
+--targets vif-med:92,vmaf-p05:95,psnr-med:45,ssim-med:98
 
 # Higher quality targets for near-lossless archival
---quality-target vif-med:94,vmaf-p05:97,psnr-med:48,ssim-med:99
+--targets vif-med:94,vmaf-p05:97,psnr-med:48,ssim-med:99
 ```
+
+When omitted, the config defaults apply (`vmaf-med:96, psnr-med:45, ssim-med:98, vif-med:93` plus `min` floor safeguards at `vmaf-min:93, psnr-min:43, ssim-min:96, vif-min:90`).
 
 ---
 
@@ -148,6 +160,8 @@ Config search order (first found wins):
 **Format:** `profile[+preset][,profile[+preset],...]`
 
 A strategy combines a profile (the encoding configuration) with a preset (the encoder speed/quality tradeoff). The profile part is required; the preset part is optional — omit it to use each codec's configured `default_preset`.
+
+Strategy names in logs and on disk are composed in the same way - `profile+preset`.
 
 ### Profiles
 
@@ -217,16 +231,21 @@ Measure quality metrics between a source and one or more encoded videos.
 pyqenc measure <source_video> [<target_video> ...] [options]
 ```
 
+> NOTE: ORDER MATTERS — swapping source and target produces incorrect metrics (VMAF is not symmetric).
+
+With no target videos the command runs in screenshots-only mode (no metric computation).
+
 Outputs go under `<work-dir>/measure/`:
 
 - Per-target metrics YAML sidecar
 - Per-target quality plot
-- Screenshots from source and each target (default: 20, evenly distributed)
+- Screenshots from source and each target
 
-| Option             | Description                                                        | Default            |
-| ------------------ | ------------------------------------------------------------------ | ------------------ |
-| `--sampling N`     | For metrics measure every N-th frame (tradeoff: speed vs accuracy) | from config        |
-| `--screenshots N`  | Number of screenshots per video                                    | `20`               |
-| `--every INTERVAL` | Screenshot interval (e.g. `"30s"`, `"5m"`) instead of count mode   | —                  |
-| `--width W`        | Scale both videos to width W before metric computation             | no scaling         |
-| `--crop PARAMS`    | Crop parameters (same format as `auto`)                            | auto from probe.yaml |
+| Option             | Description                                                                  | Default              |
+| ------------------ | ---------------------------------------------------------------------------- | -------------------- |
+| `--sampling N`     | For metrics measure every N-th frame (tradeoff: speed vs accuracy)           | from config          |
+| `--screenshots N`  | Number of screenshots per video (caps the total in interval mode)            | `20`                 |
+| `--every INTERVAL` | Screenshot interval (e.g. `"30s"`, `"5m"`) instead of count mode             | —                    |
+| `--include-edges`  | Include frame 0 and the last frame in screenshot positions (count mode only) | off                  |
+| `--width W`        | Scale both videos to width W before metric computation                       | no scaling           |
+| `--crop PARAMS`    | Crop parameters (same format as `auto`)                                      | auto from probe.yaml |

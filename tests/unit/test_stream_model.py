@@ -483,7 +483,7 @@ class TestStrategyTwoNames:
             ),
             profile_args=[],
         )
-        assert strategy.display_name() == strategy.safe_name() == "slow+h265-aq"
+        assert strategy.display_name() == strategy.safe_name() == "h265-aq+slow"
         assert not hasattr(strategy, "name"), "no third accessor — exactly the pair"
 
 
@@ -570,11 +570,11 @@ class TestMergedVideoPayload:
 
         mv = MergedVideo(
             source_stem="source", strategy=_strategy(),
-            output_path=LongPath("D:/w/merged/source slow+h265-aq.mkv"),
+            output_path=LongPath("D:/w/merged/source h265-aq+slow.mkv"),
             frame_count=142_932,
             metrics={"vmaf_min": 95.9},
             targets_met=True,
-            plot_path=LongPath("D:/w/merged/source slow+h265-aq.png"),
+            plot_path=LongPath("D:/w/merged/source h265-aq+slow.png"),
         )
         assert MergedVideo.model_validate(mv.model_dump(exclude_none=True)) == mv
 
@@ -586,10 +586,10 @@ class TestMergedVideoPayload:
 
         mv = MergedVideo(
             source_stem="source", strategy=_strategy(),
-            output_path=LongPath("D:/w/merged/source slow+h265-aq.mkv"),
+            output_path=LongPath("D:/w/merged/source h265-aq+slow.mkv"),
         )
-        assert mv.display_name() == "source slow+h265-aq"
-        assert mv.safe_name() == "source slow+h265-aq"
+        assert mv.display_name() == "source h265-aq+slow"
+        assert mv.safe_name() == "source h265-aq+slow"
         assert mv.output_path.stem == mv.safe_name()
 
 

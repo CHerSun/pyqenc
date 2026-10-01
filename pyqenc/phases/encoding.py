@@ -305,7 +305,7 @@ def _pair_rows(
     """
     chunk_ids      = [c.safe_name() for c in chunks]
     strategy_names = [s.display_name() for s in strategies]
-    pair_recovery  = _recover_encoding_attempts(work_dir, chunk_ids, strategy_names)
+    pair_recovery  = _recover_encoding_attempts(work_dir, chunk_ids, strategies)
     chunk_by_id    = {c.safe_name(): c for c in chunks}
     strategy_by_name = {s.display_name(): s for s in strategies}
 
@@ -347,7 +347,7 @@ def _orphan_strategy_rows(work_dir: Path, strategies: list[Strategy]) -> list[Ar
     out_dir = work_dir / ENCODED_OUTPUT_DIR
     if not out_dir.exists():
         return []
-    expected = {s.display_name() for s in strategies}
+    expected = {s.safe_name() for s in strategies}
     rows: list[Artifact[StreamFile]] = []
     for strategy_dir in sorted(out_dir.iterdir()):
         if strategy_dir.is_dir() and strategy_dir.name not in expected:
@@ -387,7 +387,7 @@ class _PhaseRecovery:
 def _recover_encoding_attempts(
     work_dir:  Path,
     chunk_ids: list[str],
-    strategies: list[str],
+    strategies: list[Strategy],
 ) -> _PhaseRecovery:
     """Classify all ``(chunk_id, strategy)`` pairs from a single directory scan per strategy.
 
@@ -402,7 +402,7 @@ def _recover_encoding_attempts(
     Args:
         work_dir:   Pipeline working directory.
         chunk_ids:  Chunk identifiers to recover.
-        strategies: Strategy names to recover.
+        strategies: Strategies to recover (pairs keyed by display name).
 
     Returns:
         ``_PhaseRecovery`` with per-pair recovery state and pending list.
@@ -413,8 +413,9 @@ def _recover_encoding_attempts(
     complete_count = absent_count = 0
 
     for strategy in strategies:
-        # The finalized output directory for this strategy under encoded/ (':' sanitized).
-        encoded_dir = work_dir / ENCODED_OUTPUT_DIR / strategy.replace(":", "_")
+        name = strategy.display_name()
+        # The finalized output directory for this strategy under encoded/.
+        encoded_dir = _encoded_dir(work_dir, strategy)
 
         # Build index: chunk_id -> winning .mkv path, from a single directory listing.
         # Layout in encoded/<strategy>/:
@@ -448,21 +449,21 @@ def _recover_encoding_attempts(
 
         for chunk_id in chunk_ids:
             if chunk_id in complete_index:
-                pairs[(chunk_id, strategy)] = _EncodingRecovery(
+                pairs[(chunk_id, name)] = _EncodingRecovery(
                     chunk_id     = chunk_id,
-                    strategy     = strategy,
+                    strategy     = name,
                     state        = ArtifactState.COMPLETE,
                     winning_file = complete_index[chunk_id],
                 )
                 complete_count += 1
             else:
-                pairs[(chunk_id, strategy)] = _EncodingRecovery(
+                pairs[(chunk_id, name)] = _EncodingRecovery(
                     chunk_id = chunk_id,
-                    strategy = strategy,
+                    strategy = name,
                     state    = ArtifactState.ABSENT,
                 )
                 absent_count += 1
-                pending.append((chunk_id, strategy))
+                pending.append((chunk_id, name))
 
     logger.debug(
         "Attempts recovery: %d pair(s) total — %d COMPLETE, %d ABSENT",
@@ -1698,7 +1699,7 @@ def encode_all_chunks(
     # Artifact recovery: classify every (chunk, strategy) pair.
     chunk_ids      = [c.safe_name() for c in chunks]
     strategy_names = [s.display_name() for s in strategies]
-    phase_recovery = _recover_encoding_attempts(work_dir, chunk_ids, strategy_names)
+    phase_recovery = _recover_encoding_attempts(work_dir, chunk_ids, strategies)
 
     if dry_run:
         pending_count  = len(phase_recovery.pending)
@@ -1877,12 +1878,14 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         SHARE_WIDTH = 7
         CRF_WIDTH   = 8
 
+        logger.info("")
         logger.info("Winning-limiter distribution")
         header = (
             f"  {'Limiter':<{LIMIT_WIDTH}}   {f'pass {NEUTRAL_INDICATOR_SYMBOL}':>{PASS_WIDTH}}   "
             f"{f'miss {FAILURE_SYMBOL_MINOR}':>{MISS_WIDTH}}   {'share':>{SHARE_WIDTH}}   {'med CRF':>{CRF_WIDTH}}"
         )
         for summary in summaries:
+            logger.info("-"*10)
             logger.info("%s — %d chunks", f"{BRACKET_LEFT}{summary.strategy}{BRACKET_RIGHT}", summary.chunks)
             logger.info(header)
             for row in summary.rows:

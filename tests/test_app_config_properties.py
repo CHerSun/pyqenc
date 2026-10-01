@@ -1270,7 +1270,7 @@ class TestStrategyDeduplicationByPresetProfile:
 
         # Build the expected first-occurrence order: iterate through the
         # expanded pairs in the same order resolution would produce them
-        # (each concrete "preset+profile" pattern expands to exactly one pair),
+        # (each concrete "profile+preset" pattern expands to exactly one pair),
         # keeping only the first time each pair is seen.
         all_pairs_in_order: list[tuple[str, str]] = []
         for pat in patterns:
@@ -1301,10 +1301,10 @@ class TestStrategyDeduplicationByPresetProfile:
     def test_wildcard_overlap_does_not_produce_duplicates(self) -> None:
         """Overlapping wildcard patterns that expand to the same pair are deduplicated.
 
-        Specifically, "slow+h265*" (wildcard) and "slow+h265" (exact) both
+        Specifically, "h265*+slow" (wildcard) and "h265+slow" (exact) both
         expand to include the pair ("slow", "h265").  After resolution only
         one entry for ("slow", "h265") must appear, and it must be the one
-        from the first pattern ("slow+h265*").
+        from the first pattern ("h265*+slow").
 
         Bug condition: the deduplication key is wrong (e.g. only the preset,
         or only the profile, or the codec name) — the wildcard expansion and
@@ -1435,7 +1435,7 @@ class TestValidationErrorOnInvalidStrings:
         """AppConfig rejects a strategies entry that references an unknown profile name.
 
         Bug condition: if strategy resolution does not check profile names,
-        "slow+nonexistent-profile" would expand to an empty list (or raise an
+        "nonexistent-profile+slow" would expand to an empty list (or raise an
         unrelated AttributeError) instead of clearly identifying the missing
         profile at config load time. Encoding phases would then silently have
         fewer strategies than intended.
@@ -1466,7 +1466,7 @@ class TestValidationErrorOnInvalidStrings:
         """AppConfig rejects a strategies entry whose preset is not supported by the profile's codec.
 
         Bug condition: if _expand_strategy_pattern does not check preset membership
-        against the codec's preset list, "badpreset+h265" would silently produce
+        against the codec's preset list, "h265+badpreset" would silently produce
         a Strategy with an unsupported preset, causing ffmpeg to fail at encode time
         with a confusing message rather than a clear startup error.
 

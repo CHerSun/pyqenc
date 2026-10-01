@@ -398,7 +398,8 @@ class TestExtractionCommandGolden:
 
     def test_attachment_dump_golden(self, tmp_path: Path) -> None:
         """Attachments dump to a .tmp sibling (file-trust rule, Req 7.7) — the
-        phase renames only on verified success."""
+        phase renames only on verified success. -dump_attachment is an
+        input-side option: it must precede -i."""
         ffmpeg_cmds, _, work_dir, _ = _run_and_capture(
             tmp_path, _ffprobe_json(_video_json(), _attachment_json(track_id=4)),
             make_outputs=False,
@@ -408,8 +409,8 @@ class TestExtractionCommandGolden:
         tmp_target = work_dir / EXTRACTED_DIR / "#4 (attachment-ttf) filename=font.tmp"
         assert att_cmds[0] == [
             "ffmpeg", *_PROGRESS_FLAGS, "-y",
-            "-i", str(work_dir.parent / "source.mkv"),
             "-dump_attachment:4", str(tmp_target),
+            "-i", str(work_dir.parent / "source.mkv"),
             "-t", "0",
             "-map_chapters", "-1",
             "-f", "null", "-",

@@ -16,7 +16,7 @@ flowchart LR
     S -->|working track set| X["chains x tracks"]
     P["filters<br/>(named palette)"] --> C["chains<br/>(ordered filter recipes)"]
     C --> X
-    X --> O["outputs<br/>stem chain=name.ext"]
+    X --> O["outputs<br/>stream name chain=name.ext"]
 ```
 
 - **filters** — a palette of named, reusable transformations. Each filter has a `type` and its own parameters. Defined as a mapping, so you can add or tune one filter in a later config layer without redefining the whole palette (dict-merge).
@@ -73,26 +73,26 @@ loudnorm:
 
 Applies ffmpeg's `dynaudnorm` filter in one pass. Dynamic normalisation smooths level over time with a moving analysis window, rather than applying one fixed gain. Good for content with a wide dynamic range where you want a more consistent listening level.
 
+Parameter names are ffmpeg's **long** option names — run `ffmpeg -h filter=dynaudnorm` to inspect the full option set the filter accepts.
+
 #### Parameters
 
 | Param | Type | Meaning |
 |-------|------|---------|
-| `f` | int   | Frame length in milliseconds — the size of each analysis window. |
-| `g` | int   | Gaussian window size in frames. Larger values give smoother, slower gain changes. |
-| `p` | float | Target peak magnitude, `0`–`1`. |
-| `m` | float | Maximum gain factor. |
-| `r` | float | Target RMS. `0` disables RMS targeting (pure peak-based). |
-| `b` | int   | Channel-coupling / boundary mode. |
+| `framelen`  | int   | Analysis window length in milliseconds. |
+| `gausssize` | int   | Gaussian window size in frames. Larger values give smoother, slower gain changes. |
+| `peak`      | float | Target peak magnitude, `0`–`1`. |
+| `maxgain`   | float | Maximum gain factor. |
+| `targetrms` | float | Target RMS. `0` disables RMS targeting (pure peak-based). |
 
 ```yaml
 dynaudnorm:
   type: dynaudnorm
-  f: 150
-  g: 15
-  p: 0.95
-  m: 10.0
-  r: 0.0
-  b: 3
+  framelen: 500
+  gausssize: 31
+  peak: 0.95
+  maxgain: 3.0
+  targetrms: 0.0
 ```
 
 ### `downmix` — downmix-only channel fold
@@ -111,10 +111,11 @@ The matrices are **index-addressed** — they take channels by physical position
 The three fold matrices differ in more than just LFE handling:
 
 - `std` — the canonical ITU-R BS.775 / ATSC Lo/Ro fold; LFE is dropped.
-- `lfe` — the historical "night" fold; mixes centre, surrounds, and a share of the LFE into both channels.
-- `boosted` — the historical "nboost" dialog-forward fold; full centre, reduced surrounds, LFE dropped.
+- `lfe` — the "night" fold; mixes centre, surrounds, and a share of the LFE into both channels. Personally I prefer this over `std` always.
+- `boosted` — the dialog-boosting preset; full centre, reduced surrounds, LFE dropped. Should help when dialogs are too quiet.
 
-`lfe` and `boosted` are community-sourced formulas preserved verbatim, which is why they are distinct named matrices rather than one fold with a tunable LFE gain.
+LFE - low frequency effects channel. It preserves special effects, like explosions. Many people
+notice that LFE preservation gives sound more clarity.
 
 ```yaml
 down_std:
@@ -137,11 +138,11 @@ Sets the output codec, bitrate, and file extension for a chain. It contributes n
 
 #### Parameters
 
-| Param | Type | Meaning |
-|-------|------|---------|
-| `codec`               | string | ffmpeg audio codec (`-c:a` value), e.g. `aac`. |
+| Param                 | Type   | Meaning                                                                                                                                               |
+| --------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `codec`               | string | ffmpeg audio codec (`-c:a` value), e.g. `aac`.                                                                                                        |
 | `bitrate_per_channel` | string | Per-channel bitrate, e.g. `64k`. Scaled by the **output** channel count at run time — `64k` becomes `128k` for a 2.0 output, `384k` for a 5.1 output. |
-| `extension`           | string | Output file extension without the dot, e.g. `m4a`. |
+| `extension`           | string | Output file extension without the dot, e.g. `m4a`.                                                                                                    |
 
 ```yaml
 aac:
@@ -178,7 +179,7 @@ chains:
 
 Key rules:
 
-- **One output per track (deterministic).** A chain applied to N selected tracks produces exactly N outputs — one per track. There is never a combinatorial expansion. Multiple chains can independently target the same or different tracks; each produces its own output.
+- **One output per track (deterministic).** A chain applied to N selected tracks produces exactly N outputs — one per track. Chains have no track targeting of their own — every chain is applied to the full working track set that `select` produced; two configured chains therefore yield two outputs per selected track, each from its own recipe.
 - **Combined execution.** The filters in a chain run as a single combined ffmpeg `-af` invocation, split into extra passes only where a filter genuinely needs measurement first (`peaknorm`, `loudnorm`). A chain with K measuring filters uses K measurement passes plus one final pass. Sources are never converted to a FLAC intermediate as a separate step.
 - **Implicit-FLAC default.** A chain with no `encode` filter is written as lossless FLAC. FLAC is the default output format, not a filter you add — you never need to list it.
 - **Last-encode-wins.** If a chain contains one or more `encode` filters, the **last** one decides the output codec and extension; earlier `encode` filters are ignored.
@@ -235,28 +236,31 @@ flowchart TD
     COMB --> OUT[working track set]
 ```
 
-### Worked example (a): all Russian dubs
+### Example (a): Russian dubs, dropping commentaries
 
-Select every Russian track, but drop commentary tracks by title:
+Select tracks in Russian language, drop commentary tracks by title, and prefer tracks that look like dubs:
 
 ```yaml
 select:
   - for: "lang=rus"
-    exclude: "title=.*comment"
+    exclude: "title=.*(comment|коммент)"
+    prefer:
+      - "dub|дубляж"
+      # no second tier -> implicit fallback: all surviving Russian tracks
 ```
 
 Given a track set:
 
-| Track | Conventional string                      | Selected?              |
-| ----- | ---------------------------------------- | ---------------------- |
-| A     | `lang=rus ch=5.1 title=Dub`              | yes                    |
-| B     | `lang=rus ch=2.0 title=Director comment` | no (excluded by title) |
-| C     | `lang=eng ch=5.1 title=Original`         | no (fails `for`)       |
-| D     | `lang=rus ch=2.0`                        | yes                    |
+| Track | Conventional string                           | Selected?                  |
+| ----- | --------------------------------------------- | -------------------------- |
+| A     | `lang=rus ch=5.1 title=Дубляж`                | yes (tier 1 matched)       |
+| B     | `lang=rus ch=2.0 title=Комментарии режиссёра` | no (excluded by title)     |
+| C     | `lang=rus ch=2.0`                             | no (tier 1 won; not in it) |
+| D     | `lang=eng ch=5.1 title=Original`              | no (fails `for`)           |
 
-This entry has no `prefer`, so it contributes all surviving candidates — both Russian dubs (A and D). The English track and the Russian commentary are left out.
+The `prefer` tier `"dub|дубляж"` matches candidate A only, so the entry contributes exactly A. Track C survives `for`/`exclude` but is not in the winning tier — a winning tier contributes **only** its matches. Had no Russian track matched the tier, the implicit fallback would have contributed all surviving candidates (A, B, C). The English track and the Russian commentary are never candidates.
 
-### Worked example (b): English 7.1, then 5.1, else any
+### Example (b): English 7.1, then 5.1, else any
 
 Prefer a 7.1 English track; if none, take 5.1 English; if neither, take any English track:
 
@@ -264,19 +268,19 @@ Prefer a 7.1 English track; if none, take 5.1 English; if neither, take any Engl
 select:
   - for: "lang=eng"
     prefer:
-      - "ch=7\\.1"
-      - "ch=5\\.1"
+      - "ch=7.1"
+      - "ch=5.1"
       # no third tier -> implicit fallback: any English track
 ```
 
-Note the escaped dots (`7\.1`) — `.` is a regex wildcard, so escape it to match a literal dot.
+Note: Patterns are regex, so normally you'd need to escape the dot (`.` means any 1 character in regex), but considering we have `ch=` prefix - that's not really required here.
 
 What this selects for different track sets:
 
 | English tracks present       | Winning tier               | Selected                                                         |
 | ---------------------------- | -------------------------- | ---------------------------------------------------------------- |
-| `ch=7.1`, `ch=5.1`, `ch=2.0` | tier 1 (`ch=7\.1`)         | the 7.1 track only                                               |
-| `ch=5.1`, `ch=2.0`           | tier 2 (`ch=5\.1`)         | the 5.1 track only                                               |
+| `ch=7.1`, `ch=5.1`, `ch=2.0` | tier 1 (`ch=7.1`)          | the 7.1 track only                                               |
+| `ch=5.1`, `ch=2.0`           | tier 2 (`ch=5.1`)          | the 5.1 track only                                               |
 | `ch=2.0` only                | no tier matches → fallback | the 2.0 track (all English candidates)                           |
 | two `ch=7.1` tracks          | tier 1                     | **both** 7.1 tracks (a winning tier contributes all its matches) |
 
@@ -288,13 +292,13 @@ To also process all Russian dubs alongside the English preference, add the Russi
 
 ### Filename convention
 
-Each chain output is named:
+Each chain output is named after its source audio stream:
 
 ```text
-<source-stem> chain=<chain-name>.<ext>
+<stream name> chain=<chain-name>.<ext>
 ```
 
-The source stem is preserved unchanged, `<chain-name>` is the chain's configured `name`, and `<ext>` is `flac` when the chain has no `encode` filter, otherwise the effective (last) `encode` filter's extension. For example a source track `Show S01E01 track2` processed by the `aac` chain becomes `Show S01E01 track2 chain=aac.m4a`.
+The stream name is the track's display identity — `#<track-id> (audio-<codec>) lang=<code> [title=<text>] ch=<layout>`, sanitized for the filesystem — so outputs stay tied to the exact track they came from, even when several tracks share a language. `<chain-name>` is the chain's configured `name`, and `<ext>` is `flac` when the chain has no `encode` filter, otherwise the effective (last) `encode` filter's extension. For example a source track displayed as `#2 (audio-eac3) lang=eng title=Original ch=5.1(side)` processed by the `aac` chain becomes `#2 (audio-eac3) lang=eng title=Original ch=5.1(side) chain=aac.m4a`.
 
 All outputs are written atomically (a temporary file is renamed into place only on success), so a partial output never appears under its final name.
 

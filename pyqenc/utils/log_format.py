@@ -174,7 +174,7 @@ def visual_hash(strategy: str, chunk_id: str) -> str:
     distinguishable at a glance.
 
     Args:
-        strategy: Encoding strategy name (e.g. ``"veryslow+h264"``).
+        strategy: Encoding strategy name (e.g. ``"h264+veryslow"``).
         chunk_id: Chunk timestamp range identifier.
     """
     h = int.from_bytes(

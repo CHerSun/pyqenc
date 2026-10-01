@@ -465,7 +465,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
         registry[ProbePhase] = probe
 
         encoding = EncodingPhase(config, registry, collector=collector)
-        encoded_chunk = _merge_encoded_chunk(chunk, "chunk1", "slow+h265")
+        encoded_chunk = _merge_encoded_chunk(chunk, "chunk1", "h265+slow")
         from pyqenc.phase import Artifact as _Art
         from pyqenc.state import ArtifactState as _St
         encoding.result = EncodingPhaseResult(

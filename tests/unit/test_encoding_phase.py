@@ -13,6 +13,7 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 
+from pyqenc.app_config import load_app_config
 from pyqenc.phases.encoding import _recover_encoding_attempts
 from pyqenc.state import ArtifactState
 from pyqenc.utils.yaml_utils import write_yaml_atomic
@@ -21,9 +22,13 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
 
+_STRATEGY_OBJ = next(
+    s for s in load_app_config(default_only=True).encoding.resolved_strategies
+    if s.preset == "slow" and s.profile == "h265-aq"
+)
 _CHUNK_ID   = "00꞉00꞉00․000-00꞉01꞉30․000"
-_STRATEGY   = "slow+h265-aq"
-_SAFE_STRAT = "slow+h265-aq"
+_STRATEGY   = _STRATEGY_OBJ.display_name()
+_SAFE_STRAT = _STRATEGY_OBJ.safe_name()
 _RESOLUTION = "1920x800"
 _CRF        = Decimal("18.0")
 
@@ -57,7 +62,7 @@ class TestRecoverEncodingAttempts:
         recovery = _recover_encoding_attempts(
             work_dir  = tmp_path,
             chunk_ids = [_CHUNK_ID],
-            strategies = [_STRATEGY],
+            strategies = [_STRATEGY_OBJ],
         )
 
         pair = recovery.pairs[(_CHUNK_ID, _STRATEGY)]
@@ -70,7 +75,7 @@ class TestRecoverEncodingAttempts:
         recovery = _recover_encoding_attempts(
             work_dir  = tmp_path,
             chunk_ids = [_CHUNK_ID],
-            strategies = [_STRATEGY],
+            strategies = [_STRATEGY_OBJ],
         )
 
         pair = recovery.pairs[(_CHUNK_ID, _STRATEGY)]
@@ -88,7 +93,7 @@ class TestRecoverEncodingAttempts:
         recovery = _recover_encoding_attempts(
             work_dir  = tmp_path,
             chunk_ids = [_CHUNK_ID],
-            strategies = [_STRATEGY],
+            strategies = [_STRATEGY_OBJ],
         )
 
         pair = recovery.pairs[(_CHUNK_ID, _STRATEGY)]
@@ -105,7 +110,7 @@ class TestRecoverEncodingAttempts:
         recovery = _recover_encoding_attempts(
             work_dir  = tmp_path,
             chunk_ids = [chunk_a, chunk_b],
-            strategies = [_STRATEGY],
+            strategies = [_STRATEGY_OBJ],
         )
 
         assert recovery.pairs[(chunk_a, _STRATEGY)].state == ArtifactState.COMPLETE
@@ -121,7 +126,7 @@ class TestRecoverEncodingAttempts:
         recovery = _recover_encoding_attempts(
             work_dir  = tmp_path,
             chunk_ids = [_CHUNK_ID],
-            strategies = [_STRATEGY],
+            strategies = [_STRATEGY_OBJ],
         )
 
         pair = recovery.pairs[(_CHUNK_ID, _STRATEGY)]

@@ -79,7 +79,7 @@ audio:
       type: downmix
       to: "2.0"                   # target layout; 5.1/7.1 fold to 2.0, a 2.0/stereo source passes through untouched
       matrix: std
-    down_lfe:                     # custom downmix preserving LFE channel for better dialogs / effects balance
+    down_lfe:                     # custom downmix preserving LFE channel for better dialogs / effects balance; very close to STD.
       type: downmix
       to: "2.0"
       matrix: lfe
@@ -99,7 +99,7 @@ audio:
 
   chains:                         # recipes — list-replace across config layers
     # A chain applied to N matched tracks produces exactly N outputs, named
-    # "<source-stem> chain=<name>.<ext>". No encode filter -> FLAC (lossless);
+    # "<stream name> chain=<name>.<ext>". No encode filter -> FLAC (lossless);
     # otherwise the LAST encode filter in the chain sets the codec/extension.
     - name: stereo_std_normal     # custom downmix to stereo with LFE channel and peak-normalized to prevent clipping
       filters: [down_std, peaknorm, aac]

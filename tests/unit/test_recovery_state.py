@@ -17,13 +17,18 @@ from pathlib import Path
 import pytest
 import yaml
 
+from pyqenc.app_config import load_app_config
 from pyqenc.phases.encoding import _recover_encoding_attempts as recover_attempts
 from pyqenc.state import ArtifactState
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
+_STRATEGY_OBJ = next(
+    s for s in load_app_config(default_only=True).encoding.resolved_strategies
+    if s.preset == "slow" and s.profile == "h265-aq"
+)
 _CHUNK_ID   = "00꞉00꞉00․000-00꞉00꞉13․330"
-_STRATEGY   = "slow+h265-aq"
-_SAFE_STRAT = "slow+h265-aq"
+_STRATEGY   = _STRATEGY_OBJ.display_name()
+_SAFE_STRAT = _STRATEGY_OBJ.safe_name()
 _RESOLUTION = "1920x800"
 _CRF        = Decimal("20.5")
 
@@ -62,12 +67,12 @@ class TestRecoverAttemptsAbsent:
     """ABSENT: no winning mkv+yaml in encoded/."""
 
     def test_absent_when_no_encoded_dir(self, tmp_path: Path) -> None:
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
         assert pair.state == ArtifactState.ABSENT
 
     def test_absent_pair_is_in_pending(self, tmp_path: Path) -> None:
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
         assert (_CHUNK_ID, _STRATEGY) in result.pending
 
     def test_absent_when_mkv_present_but_no_sidecar(self, tmp_path: Path) -> None:
@@ -76,7 +81,7 @@ class TestRecoverAttemptsAbsent:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / f"{_CHUNK_ID}.{_RESOLUTION}.q{_CRF}.mkv").write_bytes(b"\x00" * 64)
 
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
         assert pair.state == ArtifactState.ABSENT
 
@@ -86,7 +91,7 @@ class TestRecoverAttemptsAbsent:
         enc_dir.mkdir(parents=True, exist_ok=True)
         (enc_dir / f"{_CHUNK_ID}.{_RESOLUTION}.q{_CRF}.mkv").write_bytes(b"\x00" * 64)
 
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
         assert pair.state == ArtifactState.ABSENT
 
@@ -98,7 +103,7 @@ class TestRecoverAttemptsComplete:
         out_dir = _encoded_dir(tmp_path)
         winning = _make_complete_pair(out_dir)
 
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
         assert pair.state        == ArtifactState.COMPLETE
         assert pair.winning_file == winning
@@ -107,14 +112,14 @@ class TestRecoverAttemptsComplete:
         out_dir = _encoded_dir(tmp_path)
         _make_complete_pair(out_dir)
 
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
         assert (_CHUNK_ID, _STRATEGY) not in result.pending
 
     def test_winning_file_exists(self, tmp_path: Path) -> None:
         out_dir = _encoded_dir(tmp_path)
         _make_complete_pair(out_dir)
 
-        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY])
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
         assert pair.winning_file is not None
         assert pair.winning_file.exists()
@@ -131,7 +136,7 @@ class TestRecoverAttemptsMultiplePairs:
         # chunk_b: nothing written
 
         result = recover_attempts(
-            tmp_path, [chunk_a, chunk_b], [_STRATEGY]
+            tmp_path, [chunk_a, chunk_b], [_STRATEGY_OBJ]
         )
         assert result.pairs[(chunk_a, _STRATEGY)].state == ArtifactState.COMPLETE
         assert result.pairs[(chunk_b, _STRATEGY)].state == ArtifactState.ABSENT

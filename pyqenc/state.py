@@ -142,7 +142,7 @@ class StrategyTestResult(BaseModel):
     """Per-strategy test result stored in ``optimization.yaml``.
 
     Attributes:
-        strategy:    Display name of the strategy that was tested (e.g. ``'slow+h265-aq'``).
+        strategy:    Display name of the strategy that was tested (e.g. ``'h265-aq+slow'``).
         total_size:  Total encoded size across all test chunks in bytes.
     """
 

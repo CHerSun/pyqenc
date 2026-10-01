@@ -28,6 +28,12 @@
 - Use `async` where it keeps the UI responsive or avoids blocking on I/O. There is NO goal to be 100% async.
 - The default config object is the single source of truth for all config defaults. Everywhere else (function signatures, constructors, internal calls) values must be required explicitly — no default parameter values that could silently diverge from the canonical defaults.
 
+## Naming (two-name doctrine)
+
+- Every named element owns exactly two method accessors: `display_name()` (the single verbatim generator) and `safe_name()` (the sanitized filesystem form derived from it). No third accessors, no exemptions.
+- **Filesystem work ALWAYS uses `safe_name()`** — building paths, comparing against on-disk names, anything that lands on or is read from disk. Everything else (printing, yaml payloads, dict keys) uses `display_name()`.
+- The owning class is the only place a name is composed — no manual joins of name parts outside the owner; consumers take the composed name from the accessor.
+
 ## Paths, Files & Subprocesses
 
 - `LongPath` from `pyqenc.utils.long_path` is mandatory for all project file I/O — it subclasses `Path` and transparently handles Windows extended-length paths (>260 chars). NO `str` for paths.

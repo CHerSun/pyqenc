@@ -101,7 +101,7 @@ class FFmpegInput:
     selector:         str | None          = None
     start_seconds:    float | None        = None
     duration_seconds: float | None        = None
-    pre_input_args:   tuple[str, ...]     = ()
+    pre_input_args:   tuple[str | os.PathLike, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -123,7 +123,7 @@ class FFmpegRequest:
     """
 
     inputs:         list[FFmpegInput]
-    output_args:    tuple[str, ...]
+    output_args:    tuple[str | os.PathLike, ...]
     filter_complex: str | None        = None
     output:         LongPath | None   = None
     output_format:  str | None        = None

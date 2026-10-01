@@ -438,13 +438,12 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         total_count        = len(test_chunks) * len(strategies_to_test)
 
         test_chunk_ids = [c.safe_name() for c in test_chunks]
-        strategy_names = [s.display_name() for s in strategies_to_test]
         from pyqenc.phases.encoding import (
             _encode_chunks_parallel,
             _recover_encoding_attempts,
         )  # deferred: circular import (encoding <-> optimization)
 
-        phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, strategy_names)
+        phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, strategies_to_test)
 
         with ProgressBar(total_seconds, title="Optimization", total_count=total_count) as advance:
             # Pre-advance bar for already-complete pairs

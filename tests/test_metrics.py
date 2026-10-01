@@ -69,7 +69,7 @@ def test_noop_collector_step_is_noop() -> None:
     collector.step(MetricKey.ENCODING)
     collector.step(
         MetricKey.ENCODING,
-        convergence_update=ConvergenceUpdate(strategy="slow+h265", attempt_count=3),
+        convergence_update=ConvergenceUpdate(strategy="h265+slow", attempt_count=3),
     )
 
 
@@ -161,7 +161,7 @@ def test_convergence_present_after_step(tmp_path: Path) -> None:
     collector = _make_collector(tmp_path)
     collector.step(
         MetricKey.ENCODING,
-        convergence_update=ConvergenceUpdate(strategy="slow+h265", attempt_count=3),
+        convergence_update=ConvergenceUpdate(strategy="h265+slow", attempt_count=3),
     )
     collector.flush()
 
@@ -169,7 +169,7 @@ def test_convergence_present_after_step(tmp_path: Path) -> None:
     assert raw["pipeline_metrics"]["convergence"] is not None
     strategies = raw["pipeline_metrics"]["convergence"]
     assert len(strategies) == 1
-    assert strategies[0]["strategy"] == "slow+h265"
+    assert strategies[0]["strategy"] == "h265+slow"
 
 
 def test_resume_restores_time_accum(tmp_path: Path) -> None:

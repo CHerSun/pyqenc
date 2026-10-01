@@ -483,10 +483,10 @@ class MergePhase(Phase[MergePhaseResult]):
                     # encoded chunks may not survive cleanup anyway).
                     logger.info("Re-measuring: %s", strategy_name)
                 elif not self._concat_and_promote(
-                    strategy_name  = strategy_name,
-                    output_file    = output_file,
-                    source_stream  = source_stream,
-                    encoded_chunks = encoded_chunks,
+                    strategy        = strategy,
+                    output_file     = output_file,
+                    source_stream   = source_stream,
+                    encoded_chunks  = encoded_chunks,
                 ):
                     failed_strategies.append(strategy_name)
                     continue
@@ -635,7 +635,7 @@ class MergePhase(Phase[MergePhaseResult]):
 
     def _concat_and_promote(
         self,
-        strategy_name:  str,
+        strategy:       Strategy,
         output_file:    Path,
         source_stream:  ExtendedVideoStream,
         encoded_chunks: dict[str, dict[str, EncodedChunk]],
@@ -649,7 +649,9 @@ class MergePhase(Phase[MergePhaseResult]):
         record the strategy as failed.
 
         Args:
-            strategy_name:  Display name; keys the ``encoded_chunks`` rows.
+            strategy:       The strategy being merged; keys the
+                            ``encoded_chunks`` rows by display name, owns the
+                            options-file name via safe name.
             output_file:    The final output location; the tmp twin derives.
             source_stream:  The source stream (its true fps feeds propedit).
             encoded_chunks: Encoding winners keyed by chunk id, then strategy.
@@ -657,6 +659,7 @@ class MergePhase(Phase[MergePhaseResult]):
         Returns:
             ``True`` when *output_file* is ready at its final name.
         """
+        strategy_name = strategy.display_name()
         logger.info("Merging: %s", strategy_name)
 
         # Collect and sort chunks for this strategy
@@ -691,7 +694,7 @@ class MergePhase(Phase[MergePhaseResult]):
         tmp_output = MergePhase._tmp_output_path(output_file)
 
         # Write mkvmerge options file
-        options_file = merged_dir / f"concat_{strategy_name}.json"
+        options_file = merged_dir / f"concat_{strategy.safe_name()}.json"
         args = MergePhase._build_mkvmerge_options(strategy_chunks, tmp_output, timestamps_path)
         MergePhase._write_mkvmerge_options_file(options_file, args)
 
