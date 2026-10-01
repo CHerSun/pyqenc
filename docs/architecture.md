@@ -121,6 +121,28 @@ The runner is a thin, phase-agnostic driver: it runs one *target* phase
 summary from cached results, and broadcasts `finalize`. Results are passed
 forward directly — no filesystem re-scanning between phases.
 
+### The Phase pending gate
+
+`Phase.run()` branches on exactly one bit: `Recovery.pending` — whether any
+wanted artifact is `ABSENT` or `PARTIAL` after `_recover()`.
+
+- **No pending work → fast exit.** The phase returns `_reused_result`:
+  a result built from the recovery ledger and the phase's params sidecar,
+  never from per-artifact reads.
+- **Pending work → processing path.** `_execute()` produces the missing
+  artifacts, then re-persists the phase's summary aggregates.
+
+The gate is load-bearing beyond skip logic. Summary aggregates replayed on
+the fast exit (encoding's winning-limiter table, merge's strategy summary
+rows) are shown verbatim from the params sidecar, and their freshness is
+guaranteed by the gate itself: anything that invalidates even one artifact
+flips `pending`, routes the run through the processing path, and the
+aggregate is rebuilt and re-saved before it can go stale. This makes
+"persist a compact aggregate on the processing path, replay it on the fast
+exit" a safe pattern for any phase — its one rule is that everything the
+aggregate reflects must itself be a ledger artifact, so invalidating that
+work reopens the gate.
+
 ### Chunking
 
 Chunks are timestamp windows over the source's extended video stream
@@ -201,11 +223,11 @@ sidecar); per-attempt and per-output sidecars mark pair/output completeness.
 | `probe.yaml`         | Frame count, crop params                                                |
 | `chunking.yaml`      | Scene boundaries (frame index + timestamp)                              |
 | `optimization.yaml`  | Test chunk IDs, per-strategy results, tolerance, selection, targets     |
-| `encoding.yaml`      | Probe state (crop params + frame count) active during encoding + winning-limiter summary |
+| `encoding.yaml`      | Probe state (crop params + frame count) active during encoding, winning-limiter summary, per-strategy winners frame totals |
 | `audio.yaml`         | Per-chain signatures (resolved definitions)                             |
 | `merge.yaml`         | Targets/sampling/probe + per-strategy summary rows                      |
-| `<attempt>.yaml`     | Quality value, targets met, all measured metrics                        |
-| `<chunk>.<res>.yaml` | Winning attempt name, quality value, targeted metrics                   |
+| `<attempt>.yaml`     | Quality value, targets met, measured metrics, frame count             |
+| `<chunk>.<res>.yaml` | Winning attempt name, quality value, targeted metrics, frame count    |
 | `metrics.yaml`       | Pipeline execution metrics (time/space distribution, convergence stats) |
 
 ### What this enables
