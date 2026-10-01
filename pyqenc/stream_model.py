@@ -518,17 +518,16 @@ class AttachmentStream(Stream[AttachmentStreamInfo]):
 
 
 def _display_tags(info: StreamInfo) -> list[str]:
-    """Shared identity tags for display names: language and the title verbatim.
+    """Structured identity tags for display names: the language token.
 
-    Display names carry identity fields as-is; the filesystem-safe
-    form is :meth:`Stream.safe_name`, never a pre-sanitized display name.
+    The free-form ``title`` is NOT included here — it is appended last by
+    :func:`_format_display_name` so user-authored text can never sit in the
+    middle of a name (first-occurrence parsing of ``ch=``/``res=`` tokens
+    stays reliable). Display names carry identity fields as-is; the
+    filesystem-safe form is :meth:`Stream.safe_name`, never a pre-sanitized
+    display name.
     """
-    tags: list[str] = []
-    if info.language:
-        tags.append(f"lang={info.language}")
-    if info.title:
-        tags.append(f"title={info.title}")
-    return tags
+    return [f"lang={info.language}"] if info.language else []
 
 
 def _format_display_name(
@@ -537,16 +536,18 @@ def _format_display_name(
     tags:        list[str],
     codec:       str | None = None,
 ) -> str:
-    """Assemble ``#N (type-codec) tag…`` — display names never touch the disk.
+    """Assemble ``#N (type-codec) tag… title…`` — display names never touch the disk.
 
     ``codec`` overrides the info's ``codec_name`` in the ``type-codec`` slot
     (an attachment without a codec name substitutes its MIME type's type
-    portion); a missing codec token omits the slot — ``#N (type)``.
+    portion); a missing codec token omits the slot — ``#N (type)``. The
+    free-form ``title=`` token always comes last, after all structured tags.
     """
     token = info.codec_name if codec is None else codec
     head = (f"#{info.track_id} ({stream_type}-{token})" if token
                       else f"#{info.track_id} ({stream_type})")
-    return " ".join(filter(None, [head, *tags]))
+    trailing = [f"title={info.title}"] if info.title else []
+    return " ".join(filter(None, [head, *tags, *trailing]))
 
 
 # ---------------------------------------------------------------------------

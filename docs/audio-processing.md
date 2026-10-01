@@ -298,7 +298,7 @@ Each chain output is named after its source audio stream:
 <stream name> chain=<chain-name>.<ext>
 ```
 
-The stream name is the track's display identity — `#<track-id> (audio-<codec>) lang=<code> [title=<text>] ch=<layout>`, sanitized for the filesystem — so outputs stay tied to the exact track they came from, even when several tracks share a language. `<chain-name>` is the chain's configured `name`, and `<ext>` is `flac` when the chain has no `encode` filter, otherwise the effective (last) `encode` filter's extension. For example a source track displayed as `#2 (audio-eac3) lang=eng title=Original ch=5.1(side)` processed by the `aac` chain becomes `#2 (audio-eac3) lang=eng title=Original ch=5.1(side) chain=aac.m4a`.
+The stream name is the track's display identity — `#<track-id> (audio-<codec>) lang=<code> ch=<layout> [title=<text>]` (the free-form title always comes last), sanitized for the filesystem — so outputs stay tied to the exact track they came from, even when several tracks share a language. `<chain-name>` is the chain's configured `name`, and `<ext>` is `flac` when the chain has no `encode` filter, otherwise the effective (last) `encode` filter's extension. For example a source track displayed as `#2 (audio-eac3) lang=eng ch=5.1(side) title=Original` processed by the `aac` chain becomes `#2 (audio-eac3) lang=eng ch=5.1(side) title=Original chain=aac.m4a`.
 
 All outputs are written atomically (a temporary file is renamed into place only on success), so a partial output never appears under its final name.
 

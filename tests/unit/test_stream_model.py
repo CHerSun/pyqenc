@@ -386,13 +386,13 @@ class TestStreamTwoNames:
         """Bug guarded: display names pre-sanitized their titles, hiding the real
         title (slashes, quotes) from logs and include/exclude matching."""
         assert self._audio().display_name() == \
-            '#1 (audio-ac3) lang=rus title=Дубляж: "часть 1/2"? ch=stereo'
+            '#1 (audio-ac3) lang=rus ch=stereo title=Дубляж: "часть 1/2"?'
 
     def test_safe_name_is_sanitized_display_name(self) -> None:
         """The safe name is the display name with forbidden chars replaced —
         same identity, disk-consumable form (audio chain outputs)."""
         assert self._audio().safe_name() == \
-            "#1 (audio-ac3) lang=rus title=Дубляж_ _часть 1_2__ ch=stereo"
+            "#1 (audio-ac3) lang=rus ch=stereo title=Дубляж_ _часть 1_2__"
 
     def test_subtitle_disk_form_is_safe_name_plus_extension(self) -> None:
         """Bug guarded: the subtitle disk name was a SECOND generator with its

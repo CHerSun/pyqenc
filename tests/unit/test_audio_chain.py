@@ -487,7 +487,7 @@ class TestChainOutputPath:
         stream = self._stream(tmp_path, title="Surround", layout=ChannelLayout.parse("stereo"))
         output_dir = LongPath(tmp_path) / "audio"
         out = chain_output_path(stream, "night", "flac", output_dir)
-        assert out.name == "#1 (audio-flac) lang=eng title=Surround ch=stereo chain=night.flac"
+        assert out.name == "#1 (audio-flac) lang=eng ch=stereo title=Surround chain=night.flac"
         # The output lives in the supplied dedicated dir, NOT next to the source.
         assert out.parent == output_dir
 
