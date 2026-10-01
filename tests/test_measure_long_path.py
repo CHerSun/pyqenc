@@ -22,7 +22,7 @@ from pyqenc.utils.long_path import LongPath
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_long_output_path(tmp_path: Path, suffix: str = ".png") -> LongPath:
+def _make_long_output_path(tmp_path: Path, suffix: str = ".png") -> Path:
     """Return a LongPath at a path guaranteed to exceed 260 characters.
 
     Uses ``tmp_path / ("a" * 240) / "frame.png"`` so that the total absolute

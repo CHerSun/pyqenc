@@ -45,7 +45,6 @@ from pyqenc.constants import (
     STDERR_TAIL_LINES,
     TEMP_SUFFIX,
 )
-from pyqenc.utils.long_path import LongPath
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +96,7 @@ class FFmpegInput:
                           (e.g. ``-hwaccel`` / ``-init_hw_device`` setup).
     """
 
-    path:             LongPath
+    path:             Path
     selector:         str | None          = None
     start_seconds:    float | None        = None
     duration_seconds: float | None        = None
@@ -125,7 +124,7 @@ class FFmpegRequest:
     inputs:         list[FFmpegInput]
     output_args:    tuple[str | os.PathLike, ...]
     filter_complex: str | None        = None
-    output:         LongPath | None   = None
+    output:         Path | None   = None
     output_format:  str | None        = None
 
 

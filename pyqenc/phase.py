@@ -43,7 +43,6 @@ from pyqenc.metrics import MetricKey
 from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, Strategy
 from pyqenc.state import ArtifactState
 from pyqenc.utils.log_format import emit_phase_banner, emit_phase_start, log_recovery_line
-from pyqenc.utils.long_path import LongPath
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -689,7 +688,7 @@ phase (fetched from at run time — see ``Phase.DEPENDS_ON``). Keys are plain
 
 def _build_registry(
     config:         AppConfig,
-    source:         LongPath,
+    source:         Path,
     work_dir:       Path,
     force:          bool,
     cleanup:        CleanupLevel,

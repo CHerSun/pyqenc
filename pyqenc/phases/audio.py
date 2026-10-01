@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,6 @@ from pyqenc.state import ArtifactState, AudioSidecar
 from pyqenc.stream_model import AudioOutput, AudioStream, File
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
-from pyqenc.utils.long_path import LongPath
 
 
 @dataclass
@@ -146,7 +146,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
             surplus files).
         """
         job_result = self._dep_result(JobPhase)
-        work_dir    = LongPath(job_result.work_dir)
+        work_dir    = job_result.work_dir
         sidecar_path = work_dir / AudioPhase.SIDECAR_NAME
         audio_cfg   = job_result.config.audio
         force_wipe  = job_result.force_wipe
@@ -174,7 +174,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
         # Step 6 — classify expected outputs (completion from disk only).
         return Recovery.from_artifacts(self._classify(audio_dir, tracks, resolved))
 
-    def _output_dir(self, tracks: list[AudioStream], work_dir: LongPath) -> LongPath:
+    def _output_dir(self, tracks: list[AudioStream], work_dir: Path) -> Path:
         """Return the phase's dedicated audio output directory (``work_dir/audio``).
 
         All chain outputs, deletion, ``.tmp``-cleanup, surplus-scanning, and
@@ -192,8 +192,8 @@ class AudioPhase(Phase[AudioPhaseResult]):
 
     def _force_wipe(
         self,
-        audio_dir:    LongPath,
-        sidecar_path: LongPath,
+        audio_dir:    Path,
+        sidecar_path: Path,
         resolved:     dict[str, ResolvedChain],
     ) -> None:
         """Delete every chain output and the sidecar.
@@ -227,8 +227,8 @@ class AudioPhase(Phase[AudioPhaseResult]):
 
     def _invalidate_and_commit(
         self,
-        audio_dir:    LongPath,
-        sidecar_path: LongPath,
+        audio_dir:    Path,
+        sidecar_path: Path,
         resolved:     dict[str, ResolvedChain],
     ) -> None:
         """Delete outputs of differing/removed chains, then commit the sidecar.
@@ -273,7 +273,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
             current.save(sidecar_path)
             logger.debug("Committed audio sidecar (%d chain(s)) before producing", len(resolved))
 
-    def _delete_chain_outputs(self, audio_dir: LongPath, chain_name: str) -> None:
+    def _delete_chain_outputs(self, audio_dir: Path, chain_name: str) -> None:
         """Delete on-disk outputs of ``chain_name`` by EXACT chain-name.
 
         Output files are ``<stream safe name> chain=<name>.<ext>``. The trailing
@@ -299,7 +299,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
 
     def _classify(
         self,
-        audio_dir: LongPath,
+        audio_dir: Path,
         tracks:    list[AudioStream],
         resolved:  dict[str, ResolvedChain],
     ) -> list[Artifact]:
@@ -347,7 +347,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
                     and path.name not in expected_names
                 ):
                     rows.append(Artifact(
-                        payload = File(path=LongPath(path), file_size_bytes=safe_stat_size(path)),
+                        payload = File(path=path, file_size_bytes=safe_stat_size(path)),
                         state   = ArtifactState.COMPLETE,
                         wanted  = False,
                     ))
@@ -384,7 +384,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
         job_result = self._dep_result(JobPhase)
         audio_cfg  = job_result.config.audio
         resolved   = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
-        audio_dir  = LongPath(job_result.work_dir) / AUDIO_OUTPUT_DIR
+        audio_dir  = job_result.work_dir / AUDIO_OUTPUT_DIR
 
         if pending:
             logger.info("Sources: %d (track, chain) output(s) to produce", len(pending))
@@ -430,7 +430,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
             f"produced {produced}, reused {max(reused, 0)}, failed {failed}",
         )
 
-    def _produce_one(self, output: AudioOutput, chain: ResolvedChain, output_dir: LongPath) -> None:
+    def _produce_one(self, output: AudioOutput, chain: ResolvedChain, output_dir: Path) -> None:
         """Execute one (track, chain) job, writing the output's delivery file.
 
         Runs the async chain executor to completion. The executor enforces the

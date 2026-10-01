@@ -22,6 +22,7 @@ Bugs guarded:
 # CHerSun 2026
 
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, ConfigDict
@@ -158,7 +159,7 @@ def source_stereo(tmp_path) -> AudioStream:
 
 
 @pytest.fixture
-def out_dir(tmp_path) -> LongPath:
+def out_dir(tmp_path) -> Path:
     """The dedicated audio output directory the executor writes into."""
     return LongPath(tmp_path) / "audio"
 
@@ -167,7 +168,7 @@ class TestInvocationCount:
     """K measuring filters ⇒ exactly K+1 ffmpeg invocations (Req 6.2, 6.4)."""
 
     @pytest.mark.asyncio
-    async def test_k0_single_application_pass(self, source: AudioStream, out_dir: LongPath) -> None:
+    async def test_k0_single_application_pass(self, source: AudioStream, out_dir: Path) -> None:
         """No measuring filter ⇒ one application invocation (bug: needless passes)."""
         palette = {"dyn": _fi("dynaudnorm", framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0)}
         resolved = _resolved("normal", palette, ["dyn"])
@@ -178,7 +179,7 @@ class TestInvocationCount:
         assert len(spy.calls) == 1
 
     @pytest.mark.asyncio
-    async def test_k1_two_invocations(self, source: AudioStream, out_dir: LongPath) -> None:
+    async def test_k1_two_invocations(self, source: AudioStream, out_dir: Path) -> None:
         """One two-pass filter ⇒ 1 measurement + 1 application (bug: wrong count)."""
         palette = {"peak": _fi("peaknorm", target_dbfs=-1.0)}
         resolved = _resolved("peak", palette, ["peak"])
@@ -192,7 +193,7 @@ class TestInvocationCount:
         assert spy.calls[1].output is not None
 
     @pytest.mark.asyncio
-    async def test_k2_three_invocations(self, source: AudioStream, out_dir: LongPath) -> None:
+    async def test_k2_three_invocations(self, source: AudioStream, out_dir: Path) -> None:
         """Two two-pass filters ⇒ K+1 = 3 invocations (bug: wrong count on stacking)."""
         palette = {
             "peak": _fi("peaknorm", target_dbfs=-1.0),
@@ -211,7 +212,7 @@ class TestMeasurementAfIncludesFrozenFragments:
     """Each measurement pass carries all already-finalized fragments (Req 6.2)."""
 
     @pytest.mark.asyncio
-    async def test_second_filters_measurement_includes_first(self, source: AudioStream, out_dir: LongPath) -> None:
+    async def test_second_filters_measurement_includes_first(self, source: AudioStream, out_dir: Path) -> None:
         """peaknorm frozen fragment must precede loudnorm's analysis in the 2nd measure.
 
         Bug: measuring loudnorm on the raw signal instead of on the already-peak-
@@ -236,7 +237,7 @@ class TestMeasurementAfIncludesFrozenFragments:
         assert "print_format=json" in loud_measure_af
 
     @pytest.mark.asyncio
-    async def test_last_output_cleared_between_filters(self, source: AudioStream, out_dir: LongPath) -> None:
+    async def test_last_output_cleared_between_filters(self, source: AudioStream, out_dir: Path) -> None:
         """A finished filter's measurement must not drive the next filter.
 
         loudnorm's pass-1 ``resolve`` gets ``last_output=None`` (fresh), not
@@ -272,7 +273,7 @@ class TestExtensionCorrectness:
     """Output extension: FLAC default, else last encode's extension (Req 8.3)."""
 
     @pytest.mark.asyncio
-    async def test_flac_default_when_no_encode(self, source: AudioStream, out_dir: LongPath) -> None:
+    async def test_flac_default_when_no_encode(self, source: AudioStream, out_dir: Path) -> None:
         """No encode filter ⇒ .flac and no -b:a (bug: wrong ext / bitrate on FLAC)."""
         palette = {"dyn": _fi("dynaudnorm", framelen=150, gausssize=15, peak=0.9, maxgain=9.0, targetrms=0.0)}
         resolved = _resolved("normal", palette, ["dyn"])
@@ -289,7 +290,7 @@ class TestExtensionCorrectness:
         assert "-c:a" in spy.argv_of(0)
 
     @pytest.mark.asyncio
-    async def test_application_cmd_maps_single_stream(self, source: AudioStream, out_dir: LongPath) -> None:
+    async def test_application_cmd_maps_single_stream(self, source: AudioStream, out_dir: Path) -> None:
         """The application cmd maps exactly the one audio stream (bug: stray
         data streams carried through by the muxer).
 
@@ -307,7 +308,7 @@ class TestExtensionCorrectness:
         assert maps == ["0:2"], f"Expected the single track selector, got: {maps}"
 
     @pytest.mark.asyncio
-    async def test_last_encode_wins(self, source_51: AudioStream, out_dir: LongPath) -> None:
+    async def test_last_encode_wins(self, source_51: AudioStream, out_dir: Path) -> None:
         """Two encode filters ⇒ the last one's extension/codec wins (bug: first wins)."""
         palette = {
             "flac_enc": _fi("encode", codec="flac", bitrate_per_channel="0k", extension="flac"),
@@ -331,7 +332,7 @@ class TestAfJoining:
     """The -af argument is a clean comma-join; all-empty chains omit it (Req 6.1, 6.6)."""
 
     @pytest.mark.asyncio
-    async def test_downmix_noop_contributes_no_stray_comma(self, source: AudioStream, out_dir: LongPath) -> None:
+    async def test_downmix_noop_contributes_no_stray_comma(self, source: AudioStream, out_dir: Path) -> None:
         """A no-op downmix (source ≤ target) must not add a comma or empty fragment.
 
         Bug: a downmix no-op contributing ``""`` produces a leading/doubled comma
@@ -353,7 +354,7 @@ class TestAfJoining:
         assert not af.endswith(",")
 
     @pytest.mark.asyncio
-    async def test_all_empty_chain_omits_af(self, source: AudioStream, out_dir: LongPath) -> None:
+    async def test_all_empty_chain_omits_af(self, source: AudioStream, out_dir: Path) -> None:
         """A chain whose only filter is an encode (af="") must omit -af entirely.
 
         Bug: emitting ``-af ""`` (empty filter chain) which ffmpeg rejects.
@@ -368,7 +369,7 @@ class TestAfJoining:
         assert "-af" not in spy.argv_of(0)
 
     @pytest.mark.asyncio
-    async def test_downmix_active_then_dyn_joined_with_single_comma(self, source_51: AudioStream, out_dir: LongPath) -> None:
+    async def test_downmix_active_then_dyn_joined_with_single_comma(self, source_51: AudioStream, out_dir: Path) -> None:
         """An active downmix (5.1→2.0) then dynaudnorm join with exactly one comma."""
         palette = {
             "down": _fi("downmix", to="2.0", matrix="std"),
@@ -416,7 +417,7 @@ class TestExecutorHasNoFilterTypeBranch:
             _FILTER_REGISTRY.pop(test_id, None)
 
     @pytest.mark.asyncio
-    async def test_custom_two_pass_drives_kplus1(self, source: LongPath, out_dir: LongPath, two_pass_type: str) -> None:
+    async def test_custom_two_pass_drives_kplus1(self, source: Path, out_dir: Path, two_pass_type: str) -> None:
         """A brand-new two-pass type gets its measurement + application with no loop edit.
 
         Bug: the executor special-casing known filter types instead of driving
@@ -530,7 +531,7 @@ class TestChainCommandGolden:
     """
 
     @pytest.mark.asyncio
-    async def test_measurement_pass_golden_argv(self, source: AudioStream, out_dir: LongPath) -> None:
+    async def test_measurement_pass_golden_argv(self, source: AudioStream, out_dir: Path) -> None:
         palette = {"peak": _fi("peaknorm", target_dbfs=-1.0)}
         resolved = _resolved("peak", palette, ["peak"])
         spy = _SpyRunner(stderr_per_call=[["[Parsed_astats_0 @ 0x1] Peak level dB: -6.0"]])
@@ -547,7 +548,7 @@ class TestChainCommandGolden:
         ]
 
     @pytest.mark.asyncio
-    async def test_application_pass_golden_argv(self, source: AudioStream, out_dir: LongPath) -> None:
+    async def test_application_pass_golden_argv(self, source: AudioStream, out_dir: Path) -> None:
         palette = {"aac": _fi("encode", codec="aac", bitrate_per_channel="64k", extension="m4a")}
         resolved = _resolved("enc_only", palette, ["aac"])
         spy = _SpyRunner()

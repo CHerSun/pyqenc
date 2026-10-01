@@ -41,14 +41,12 @@ from pyqenc.phase import (
 )
 from pyqenc.stream_model import File, JobSidecar
 from pyqenc.utils.fs import remove_stale_tmp_file, safe_stat_size
-from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
-
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +123,7 @@ class JobPhase(Phase[JobPhaseResult]):
         config:     AppConfig,
         phases:     PhaseRegistry,
         *,
-        source:      LongPath,
+        source:      Path,
         work_dir:    Path,
         force:       bool,
         cleanup:     CleanupLevel,
@@ -134,7 +132,7 @@ class JobPhase(Phase[JobPhaseResult]):
     ) -> None:
         super().__init__(config, phases, collector=collector)
 
-        self._source:      LongPath         = source
+        self._source:      Path         = source
         self._work_dir:    Path             = work_dir
         self._force:       bool             = force
         self._cleanup:     CleanupLevel     = cleanup

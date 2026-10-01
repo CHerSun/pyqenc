@@ -34,7 +34,6 @@ from pyqenc.stream_model import File, JobSidecar, VideoStream, VideoStreamInfo
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg_async
 from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.log_format import fmt_key_value_table, fmt_metric_value, fmt_size_mb
-from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.visualization import QualityEvaluator
 from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 
@@ -287,7 +286,7 @@ def _resolve_crop(
     return CropParams()
 
 
-def _load_job_source_path(job_yaml: Path) -> LongPath | None:
+def _load_job_source_path(job_yaml: Path) -> Path | None:
     """Read the source path recorded in ``job.yaml`` (the File dump).
 
     Serves the crop fallback's source-identity check.

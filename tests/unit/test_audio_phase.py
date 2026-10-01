@@ -40,7 +40,7 @@ from pyqenc.utils.long_path import LongPath
 _AUDIO_YAML = "audio.yaml"
 
 
-def _chain_out(tmp_path: Path, track: AudioStream, chain: str, ext: str = "flac") -> LongPath:
+def _chain_out(tmp_path: Path, track: AudioStream, chain: str, ext: str = "flac") -> Path:
     """Expected chain-output path for *track* — the phase's deterministic name."""
     return chain_output_path(track, chain, ext, LongPath(tmp_path) / AUDIO_OUTPUT_DIR)
 
@@ -143,9 +143,9 @@ def _fake_execute_chain_factory(record: list[tuple[str, str]]):
     async def _fake(
         resolved:   ResolvedChain,
         stream:     AudioStream,
-        output_dir: LongPath,
+        output_dir: Path,
         **_kw,
-    ) -> LongPath:
+    ) -> Path:
         out = chain_output_path(stream, resolved.name, resolved.encode.extension, output_dir)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(b"\x00")

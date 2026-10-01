@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
@@ -65,7 +66,6 @@ from pyqenc.utils.ffmpeg_runner import (
     FFmpegRunResult,
     run_ffmpeg_async,
 )
-from pyqenc.utils.long_path import LongPath
 
 logger = logging.getLogger(__name__)
 
@@ -231,8 +231,8 @@ def chain_output_path(
     stream:     AudioStream,
     chain_name: str,
     extension:  str,
-    output_dir: LongPath,
-) -> LongPath:
+    output_dir: Path,
+) -> Path:
     """Build the output path for a (track, chain) job.
 
     The name is ``<stream safe name> chain=<chain-name>.<ext>`` — the
@@ -285,7 +285,7 @@ def _build_measurement_request(stream: AudioStream, af: str) -> FFmpegRequest:
 
 def _build_application_request(
     stream:  AudioStream,
-    output:  LongPath,
+    output:  Path,
     af:      str,
     encode:  EncodeParams,
     channels: int,
@@ -337,9 +337,9 @@ class ChainExecutionError(RuntimeError):
 async def execute_chain(
     resolved:   ResolvedChain,
     stream:     AudioStream,
-    output_dir: LongPath,
+    output_dir: Path,
     runner:     FFmpegRunner = run_ffmpeg_async,
-) -> LongPath:
+) -> Path:
     """Execute one (track, chain) job as a combined ``-af`` chain, split at passes.
 
     The loop is fully generic: it drives each filter through
