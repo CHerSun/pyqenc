@@ -107,6 +107,7 @@ def emit_phase_banner(name: str, log: logging.Logger) -> None:
 def log_recovery_line(
     log:       logging.Logger,
     artifacts: list[Artifact],
+    phase:     str,
     unit:      str = "artifact",
 ) -> str:
     """Log the recovery summary and return the same human-readable message.
@@ -114,6 +115,11 @@ def log_recovery_line(
     Takes the phase's INTERNAL artifact ledger (pre-filter, including
     ``wanted=False`` entries) — NOT ``PhaseResult.artifacts``.  Derives all
     counts itself; callers never compute recovery counts locally.
+
+    The line is prefixed with the phase name (``<phase>: Recovery: …``): the
+    summary must stay attributable when the phase emits no banner of its own
+    (job, probe) — an unattributed line reads as a duplicate of the previous
+    phase's output.
 
     The counts are: ``total`` (every internal row — internal artifacts and
     ``wanted=False`` rows included), ``wanted`` (the selected rows), and
@@ -136,6 +142,7 @@ def log_recovery_line(
         log:       Logger instance belonging to the calling phase module.
         artifacts: The phase's internal artifact list (including ``wanted=False``
                    entries).
+        phase:     The emitting phase's name (``Phase.name``) — the line prefix.
         unit:      Singular noun for the artifact type (e.g. ``"chunk"``,
                    ``"pair"``, ``"attempt"``). Reserved for callers that
                    want a noun other than the default; it does not affect the
@@ -157,7 +164,7 @@ def log_recovery_line(
     else:
         suffix = "nothing to reuse"
     message = (
-        f"Recovery: {total} total, {wanted} wanted"
+        f"{phase}: Recovery: {total} total, {wanted} wanted"
         f" ({complete} complete, {partial} partial, {absent} absent)"
         f" — {suffix}"
     )

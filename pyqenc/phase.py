@@ -447,10 +447,12 @@ class Phase[ResultT: PhaseResult](ABC):
             return self.result
 
         # 7. Recovery summary over the unfiltered internal list; wanted
-        #    artifacts are selected exactly once, here.
+        #    artifacts are selected exactly once, here. The line carries the
+        #    phase name — banner-less phases would otherwise read as a
+        #    duplicate of the previous phase's summary.
         wanted = [a for a in recovery.artifacts if a.wanted]
         message = (
-            log_recovery_line(self._logger, recovery.artifacts, unit=self._recovery_unit())
+            log_recovery_line(self._logger, recovery.artifacts, self.name, unit=self._recovery_unit())
             if recovery.artifacts
             else ""
         )
