@@ -110,7 +110,7 @@ def _make_phase(
     config = job._config  # already resolved AppConfig
     phases: PhaseRegistry = {_JP: job}
 
-    probe = _PP(config, phases, collector=MagicMock(), crop_params=None)  # type: ignore[arg-type]
+    probe = _PP(config, phases, collector=MagicMock(), crop_params=None)
     probe.result = ProbePhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
         message   = "probe complete",
@@ -118,7 +118,7 @@ def _make_phase(
     )
     phases[_PP] = probe
 
-    chunking = _CP(config, phases, collector=MagicMock())  # type: ignore[arg-type]
+    chunking = _CP(config, phases, collector=MagicMock())
     chunking.result = ChunkingPhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
         message   = "chunking complete",
@@ -126,7 +126,7 @@ def _make_phase(
     )
     phases[_CP] = chunking
 
-    phase = OptimizationPhase(config, phases=phases, collector=MagicMock())  # type: ignore[arg-type]
+    phase = OptimizationPhase(config, phases=phases, collector=MagicMock())
     return phase, work_dir
 
 

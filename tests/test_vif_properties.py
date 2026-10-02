@@ -229,7 +229,7 @@ def test_metric_pipeline_vif_normalized(frame_values: list[float]) -> None:
     result    = compute_metric_stats(normalize_metrics(parse_metrics(artifacts, 1)))
     assert MetricType.VIF in result
     for stat_key in ("min", "p05", "p10", "p25", "median", "p75", "p90", "p95", "max"):
-        val = result[MetricType.VIF][stat_key]  # type: ignore[literal-required]
+        val = result[MetricType.VIF][stat_key]
         assert 0.0 <= val <= 100.0, f"VIF {stat_key}={val} outside [0, 100]"
 
 

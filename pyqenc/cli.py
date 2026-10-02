@@ -728,7 +728,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
             target = target_dir / CONFIG_FILENAME_HOME
 
     _config = load_app_config()
-    source  = _config._source_paths[-1].resolve()  # type: ignore[attr-defined]
+    source  = _config._source_paths[-1].resolve()
     target  = target.resolve()
 
     logger.debug("Config source resolved to: %s", source)

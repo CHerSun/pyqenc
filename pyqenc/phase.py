@@ -797,7 +797,7 @@ def _build_registry(
             EncodingPhase,
             MergePhase,
         ]:
-            registry[cls] = cls(config, registry, collector=collector)  # type: ignore[call-arg]
+            registry[cls] = cls(config, registry, collector=collector)
     else:
         # Audio-only path: only AudioPhase is needed after Extraction.
         registry[AudioPhase] = AudioPhase(config, registry, collector=collector)

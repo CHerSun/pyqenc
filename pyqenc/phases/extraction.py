@@ -113,7 +113,7 @@ def _probe_streams_json(source: Path) -> dict:
     ]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return json.loads(result.stdout)  # type: ignore[no-any-return]
+        return json.loads(result.stdout)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"FFprobe error: {exc}") from exc
     except json.JSONDecodeError as exc:

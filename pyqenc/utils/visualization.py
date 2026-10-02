@@ -323,7 +323,7 @@ def parse_vif_file(file_path: Path, factor: int = 1) -> pd.DataFrame:
                 f"VIF scale data missing from frame {frame.get('frameNum')} in {file_path}. "
                 f"Ensure libvmaf was run with feature=name=vif."
             )
-        combined = sum(scales) / len(scales)  # type: ignore[arg-type]
+        combined = sum(scales) / len(scales)
         data.append({
             _KEY_FRAME_NUM:       frame["frameNum"],
             MetricType.VIF.value: combined,

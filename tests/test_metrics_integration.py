@@ -390,7 +390,7 @@ class TestExtractionPhaseTiming:
             work_dir   = source.parent / "work",
             config     = _make_config(source.parent),
         )
-        result.file     = Artifact(                       # type: ignore[attr-defined]
+        result.file     = Artifact(
             payload=File(path=source, file_size_bytes=source.stat().st_size),
             state=ArtifactState.COMPLETE,
         )
@@ -410,8 +410,8 @@ class TestExtractionPhaseTiming:
         job_mock.result = self._make_job_result(tmp_path)
 
         registry: PhaseRegistry = {}
-        phase = ExtractionPhase(config, registry, collector=collector)  # type: ignore[arg-type]
-        registry[JobPhase] = job_mock  # type: ignore[index]
+        phase = ExtractionPhase(config, registry, collector=collector)
+        registry[JobPhase] = job_mock
         return phase
 
     def test_reused_run_reports_recovery_without_extraction(self, tmp_path: Path) -> None:
@@ -536,7 +536,7 @@ class TestExtractionPhaseTiming:
         )
 
         collector = NoOpMetricsCollector()
-        phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
+        phase     = self._make_phase(tmp_path, collector)
 
         stub_artifact = Artifact(
             payload = SubtitleStream(
@@ -620,10 +620,10 @@ class TestChunkingPhaseTiming:
 
         from pyqenc.phases.chunking import ChunkingPhase
         registry: PhaseRegistry = {}
-        phase = ChunkingPhase(config, registry, collector=collector)  # type: ignore[arg-type]
-        registry[JobPhase]        = job_mock         # type: ignore[index]
-        registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
-        registry[ProbePhase]      = probe_mock       # type: ignore[index]
+        phase = ChunkingPhase(config, registry, collector=collector)
+        registry[JobPhase]        = job_mock
+        registry[ExtractionPhase] = extraction_mock
+        registry[ProbePhase]      = probe_mock
         return phase
 
     def test_reused_run_reports_recovery_without_chunking(self, tmp_path: Path) -> None:
@@ -732,7 +732,7 @@ class TestChunkingPhaseTiming:
         from pyqenc.models import SceneBoundary
 
         collector = NoOpMetricsCollector()
-        phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
+        phase     = self._make_phase(tmp_path, collector)
 
         with patch("pyqenc.phases.chunking.detect_scenes",
                    return_value=[SceneBoundary(frame=0, timestamp_seconds=0.0)]):
@@ -788,9 +788,9 @@ class TestAudioPhaseTiming:
         extraction_mock.result = extraction_result
 
         registry: PhaseRegistry = {}
-        phase = AudioPhase(config, registry, collector=collector)  # type: ignore[arg-type]
-        registry[JobPhase]        = job_mock         # type: ignore[index]
-        registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
+        phase = AudioPhase(config, registry, collector=collector)
+        registry[JobPhase]        = job_mock
+        registry[ExtractionPhase] = extraction_mock
         return phase
 
     def test_reused_run_reports_recovery_without_audio(self, tmp_path: Path) -> None:
@@ -869,7 +869,7 @@ class TestAudioPhaseTiming:
         from pyqenc.phases.audio import AudioPhase
 
         collector = NoOpMetricsCollector()
-        phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
+        phase     = self._make_phase(tmp_path, collector)
 
         stub_row = Artifact(
             payload=_audio_output(tmp_path / "work" / "audio" / "track.aac"),
@@ -968,10 +968,10 @@ class TestOptimizationPhaseTiming:
         chunking_mock.result = self._make_chunking_result(tmp_path)
 
         registry: PhaseRegistry = {}
-        phase = OptimizationPhase(config, registry, collector=collector)  # type: ignore[arg-type]
-        registry[JobPhase]      = job_mock       # type: ignore[index]
-        registry[ProbePhase]    = probe_mock     # type: ignore[index]
-        registry[ChunkingPhase] = chunking_mock  # type: ignore[index]
+        phase = OptimizationPhase(config, registry, collector=collector)
+        registry[JobPhase]      = job_mock
+        registry[ProbePhase]    = probe_mock
+        registry[ChunkingPhase] = chunking_mock
         return phase
 
     def test_recovery_recorded_with_cached_optimization_params(self, tmp_path: Path) -> None:
@@ -1096,7 +1096,7 @@ class TestOptimizationPhaseTiming:
         from pyqenc.state import OptimizationParams, ProbeState, StrategyTestResult
 
         collector = NoOpMetricsCollector()
-        phase     = self._make_phase(tmp_path, collector, optimize=True)  # type: ignore[arg-type]
+        phase     = self._make_phase(tmp_path, collector, optimize=True)
 
         strategy = _STRATEGY_SLOW_H265
         persisted = OptimizationParams(
@@ -1203,11 +1203,11 @@ class TestEncodingPhaseTiming:
         optimization_mock.result = self._make_optimization_result(tmp_path)
 
         registry: PhaseRegistry = {}
-        phase = EncodingPhase(config, registry, collector=collector)  # type: ignore[arg-type]
-        registry[JobPhase]          = job_mock           # type: ignore[index]
-        registry[ProbePhase]        = probe_mock         # type: ignore[index]
-        registry[ChunkingPhase]     = chunking_mock      # type: ignore[index]
-        registry[OptimizationPhase] = optimization_mock  # type: ignore[index]
+        phase = EncodingPhase(config, registry, collector=collector)
+        registry[JobPhase]          = job_mock
+        registry[ProbePhase]        = probe_mock
+        registry[ChunkingPhase]     = chunking_mock
+        registry[OptimizationPhase] = optimization_mock
         return phase
 
     def test_reused_run_reports_recovery_without_encoding(self, tmp_path: Path) -> None:
@@ -1395,7 +1395,7 @@ class TestEncodingPhaseTiming:
         from pyqenc.phases.encoding import EncodingPhase
 
         collector = NoOpMetricsCollector()
-        phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
+        phase     = self._make_phase(tmp_path, collector)
 
         stub_row = Artifact(
             payload=_encoded_chunk(tmp_path / "chunk_0.mkv", "chunk_0", "h265+slow"),
@@ -1544,12 +1544,12 @@ class TestMergePhaseTiming:
         )
 
         registry: PhaseRegistry = {}
-        phase = MergePhase(config, registry, collector=collector)  # type: ignore[arg-type]
-        registry[JobPhase]        = job_mock         # type: ignore[index]
-        registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
-        registry[ProbePhase]      = probe_mock       # type: ignore[index]
-        registry[EncodingPhase]   = encoding_mock    # type: ignore[index]
-        registry[AudioPhase]      = audio_mock       # type: ignore[index]
+        phase = MergePhase(config, registry, collector=collector)
+        registry[JobPhase]        = job_mock
+        registry[ExtractionPhase] = extraction_mock
+        registry[ProbePhase]      = probe_mock
+        registry[EncodingPhase]   = encoding_mock
+        registry[AudioPhase]      = audio_mock
         return phase
 
     def test_reused_run_reports_recovery_without_merge(self, tmp_path: Path) -> None:
@@ -1694,7 +1694,7 @@ class TestMergePhaseTiming:
         from pyqenc.state import ArtifactState
 
         collector = NoOpMetricsCollector()
-        phase     = self._make_phase(tmp_path, collector)  # type: ignore[arg-type]
+        phase     = self._make_phase(tmp_path, collector)
 
         output_file = tmp_path / "work" / "merged" / "source h265+slow.mkv"
         output_file.parent.mkdir(parents=True, exist_ok=True)

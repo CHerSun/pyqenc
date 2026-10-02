@@ -21,7 +21,7 @@ class _FakeStream:
         return self._name
 
 
-def _fake_tracks(names: list[str]) -> list[_FakeStream]:  # type: ignore[return]
+def _fake_tracks(names: list[str]) -> list[_FakeStream]:
     return [_FakeStream(n) for n in names]
 
 
@@ -41,7 +41,7 @@ class TestStreamsFilterPlainRegex:
     ) -> list[str]:
         from pyqenc.phases.extraction import streams_filter_plain_regex as _f
         tracks = _fake_tracks(self._TRACKS)
-        result = _f(tracks, include_pattern=include, exclude_pattern=exclude)  # type: ignore[arg-type]
+        result = _f(tracks, include_pattern=include, exclude_pattern=exclude)
         return [t.display_name() for t in result]
 
     def test_no_filters_returns_all(self) -> None:

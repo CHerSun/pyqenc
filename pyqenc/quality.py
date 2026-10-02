@@ -1316,7 +1316,7 @@ class QualitySearchV2(QualitySearchBase):
 
         # Find adjacent points to the best scoring point.
         best_p       = self._best_score_point
-        best_q_index = sorted_q.index(best_p.q)  # type: ignore[union-attr]
+        best_q_index = sorted_q.index(best_p.q)
 
         # Still doing outward search — binary only: proportional steps often
         # lose the sweet-point curve shape and never reach 3-point mode.

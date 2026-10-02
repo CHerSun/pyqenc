@@ -113,8 +113,8 @@ def _make_probe_phase(
 
     job = JobPhase(
         _APP_CONFIG, {},
-        source     = job_result.source,      # type: ignore[arg-type]
-        work_dir   = job_result.work_dir,    # type: ignore[arg-type]
+        source     = job_result.source,
+        work_dir   = job_result.work_dir,
         force      = False,
         cleanup    = CleanupLevel.NONE,
         no_metrics = True,

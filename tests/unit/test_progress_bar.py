@@ -41,7 +41,7 @@ def _collect(total: float, calls: list[tuple[float, AdvanceState]], show_counter
                 advance(increment, state)
                 texts.append(fake.text)
     finally:
-        alive_mod.alive_bar = original  # type: ignore[assignment]
+        alive_mod.alive_bar = original
 
     return fractions, texts
 

@@ -1163,7 +1163,7 @@ class TestQualitySearchV3:
         """Drive a search to exhaustion using a callable metrics function."""
         current_q = start_q
         for _ in range(max_iters):
-            metrics = metrics_fn(float(current_q))  # type: ignore[operator]
+            metrics = metrics_fn(float(current_q))
             result  = s.record(current_q, metrics)
             if result is None:
                 return

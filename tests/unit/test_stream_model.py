@@ -113,7 +113,7 @@ class TestStaticConcretization:
         """The TypeVar bound holds structurally: an info that is not a
         StreamInfo cannot compose into any stream."""
         with pytest.raises(ValidationError):
-            VideoStream(file=_file(), info={"not": "an info"})  # type: ignore[arg-type]
+            VideoStream(file=_file(), info={"not": "an info"})
 
     def test_audio_layout_round_trip(self) -> None:
         stream = AudioStream(

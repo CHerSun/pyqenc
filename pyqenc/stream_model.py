@@ -169,7 +169,7 @@ class StreamInfo(BaseModel):
         if value is None:
             return None
         try:
-            return float(str(value))  # type: ignore[arg-type]
+            return float(str(value))
         except ValueError, TypeError:
             return None
 

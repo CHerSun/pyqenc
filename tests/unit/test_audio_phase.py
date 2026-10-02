@@ -50,7 +50,7 @@ def _chain_out(tmp_path: Path, track: AudioStream, chain: str, ext: str = "flac"
 
 def _fi(type_id: str, **params) -> FilterInstance:
     """Build a validated config-side ``FilterInstance``."""
-    return FilterInstance(type=type_id, **params)  # type: ignore[arg-type]
+    return FilterInstance(type=type_id, **params)
 
 
 def _audio_config(chains: list[ChainSpec], select: list[SelectEntry] | None = None) -> AudioConfig:

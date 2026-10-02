@@ -24,7 +24,7 @@ from pyqenc.state import AudioSidecar
 
 def _fi(type_id: str, **params) -> FilterInstance:
     """Build a validated config-side ``FilterInstance`` from raw params."""
-    return FilterInstance(type=type_id, **params)  # type: ignore[arg-type]
+    return FilterInstance(type=type_id, **params)
 
 
 def _palette() -> dict[str, FilterInstance]:

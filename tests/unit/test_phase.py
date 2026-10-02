@@ -108,7 +108,7 @@ class _DepStubPhase(_StubPhase):
     """Stub declaring a dependency on another stub phase."""
 
     name = "depstub"
-    DEPENDS_ON = (_StubPhase,)  # type: ignore[assignment]
+    DEPENDS_ON = (_StubPhase,)
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +126,7 @@ class TestDeclaredDependencies:
         construction is enough for the run to succeed.
         """
         registry: PhaseRegistry = {}
-        target = _DepStubPhase(NoOpMetricsCollector(), Recovery(pending=False), registry=registry)  # type: ignore[call-arg]
+        target = _DepStubPhase(NoOpMetricsCollector(), Recovery(pending=False), registry=registry)
 
         dep = _StubPhase(NoOpMetricsCollector(), Recovery(pending=False))
         dep.result = dep._make_result(PhaseOutcome.REUSED, [], "already run")
@@ -139,7 +139,7 @@ class TestDeclaredDependencies:
     def test_missing_declared_dependency_raises_loudly(self) -> None:
         """A declared dependency absent from the registry is never dropped."""
         registry: PhaseRegistry = {}
-        target = _DepStubPhase(NoOpMetricsCollector(), Recovery(pending=False), registry=registry)  # type: ignore[call-arg]
+        target = _DepStubPhase(NoOpMetricsCollector(), Recovery(pending=False), registry=registry)
         # registry stays empty — the declared dep is absent
 
         with pytest.raises(AssertionError, match="requires _StubPhase"):

@@ -289,7 +289,7 @@ class TestEncodingParamsTotals:
 
 def _make_encoding_phase(tmp_path: Path, probe_frames: int) -> EncodingPhase:
     """An EncodingPhase wired to a completed ProbePhase with a known frame count."""
-    probe = ProbePhase(_APP_CONFIG, {}, collector=MagicMock(), crop_params=None)  # type: ignore[arg-type]
+    probe = ProbePhase(_APP_CONFIG, {}, collector=MagicMock(), crop_params=None)
     probe.result = ProbePhaseResult(
         outcome = PhaseOutcome.COMPLETED,
         message = "probe complete",
@@ -309,7 +309,7 @@ def _make_encoding_phase(tmp_path: Path, probe_frames: int) -> EncodingPhase:
         ),
     )
     phases: PhaseRegistry = {ProbePhase: probe}
-    return EncodingPhase(_APP_CONFIG, phases, collector=MagicMock())  # type: ignore[arg-type]
+    return EncodingPhase(_APP_CONFIG, phases, collector=MagicMock())
 
 
 class TestReassertFramePreservation:
