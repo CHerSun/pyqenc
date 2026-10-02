@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 import yaml
 
@@ -57,6 +57,7 @@ from pyqenc.phases.encoding import EncodingPhase
 from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
+from pyqenc.quality import flatten_metric_stats
 from pyqenc.state import MergeParams, MergeStrategySummary, ProbeState
 from pyqenc.stream_model import EncodedChunk, ExtendedVideoStream, File, MergedVideo
 from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
@@ -907,10 +908,7 @@ class MergePhase(Phase[MergePhaseResult]):
             plot_path          = plot_path,
         )
 
-        metrics_dict: dict[str, float] = {}
-        for metric_name, metric_stats in evaluation.metrics.items():
-            for stat_name, stat_value in cast(dict[str, float], metric_stats).items():
-                metrics_dict[f"{metric_name.value}_{stat_name}"] = stat_value
+        metrics_dict = flatten_metric_stats(evaluation.metrics)
 
         plot_path = evaluation.logs.plot if evaluation.logs.plot else None
         return metrics_dict, evaluation.targets_met, plot_path

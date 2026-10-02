@@ -12,7 +12,6 @@ import shutil
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import cast
 
 import yaml
 
@@ -27,7 +26,7 @@ from pyqenc.constants import (
 )
 from pyqenc.models import CropParams
 from pyqenc.phases.extraction import _probe_streams_json
-from pyqenc.quality import ChunkQualityStats, MetricType
+from pyqenc.quality import ChunkQualityStats, MetricType, flatten_metric_stats
 from pyqenc.state import MeasureSidecar, ProbeState
 from pyqenc.stream_model import File, JobSidecar, VideoStream, VideoStreamInfo
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg_async
@@ -575,12 +574,7 @@ def _write_sidecar(
         "right":  crop_params.right,
     }
 
-    # Flatten ChunkQualityStats → {metric_stat: value}, e.g. vmaf_min, ssim_median
-    flat_metrics: dict[str, float] = {
-        f"{metric_type.value}_{stat}": value
-        for metric_type, stats in metrics.items()
-        for stat, value in cast(dict[str, float], stats).items()
-    }
+    flat_metrics = flatten_metric_stats(metrics)
 
     sidecar = MeasureSidecar(
         source_video               = source_video,

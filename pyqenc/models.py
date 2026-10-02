@@ -11,6 +11,7 @@ import logging
 from decimal import Decimal
 from enum import Enum, IntEnum
 from pathlib import Path
+from typing import Self
 
 from pydantic import (
     BaseModel,
@@ -225,8 +226,8 @@ class QualityTarget(BaseModel):
     statistic: str
     value:     float
 
-    @staticmethod
-    def parse(target_str: str) -> QualityTarget:
+    @classmethod
+    def parse(cls, target_str: str) -> Self:
         """Parse quality target from string format.
 
         Args:
@@ -256,7 +257,7 @@ class QualityTarget(BaseModel):
             if statistic.lower() == "med":
                 statistic = "median"
 
-            return QualityTarget(
+            return cls(
                 metric=metric.lower(),
                 statistic=statistic.lower(),
                 value=value,
@@ -356,7 +357,7 @@ class CodecConfig(BaseModel):
     presets:             list[str]      = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _validate_default_preset(self) -> CodecConfig:
+    def _validate_default_preset(self) -> Self:
         """Ensure ``default_preset`` is a member of ``presets``.
 
         Raises:
@@ -477,8 +478,8 @@ class CropParams(BaseModel):
         """String representation for display."""
         return f"{UP_ARROW}{self.top} {DOWN_ARROW}{self.bottom} {LEFT_ARROW}{self.left} {RIGHT_ARROW}{self.right}"
 
-    @staticmethod
-    def parse(crop_str: str) -> CropParams:
+    @classmethod
+    def parse(cls, crop_str: str) -> Self:
         """Parse from comma-separated string format.
 
         Accepts 2 or 4 comma-separated values:
@@ -503,9 +504,9 @@ class CropParams(BaseModel):
         """
         parts = crop_str.split(",")
         if len(parts) == 2:
-            return CropParams(top=int(parts[0]), bottom=int(parts[1]), left=0, right=0)
+            return cls(top=int(parts[0]), bottom=int(parts[1]), left=0, right=0)
         elif len(parts) == 4:
-            return CropParams(
+            return cls(
                 top=int(parts[0]),
                 bottom=int(parts[1]),
                 left=int(parts[2]),

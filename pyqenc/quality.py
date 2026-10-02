@@ -15,6 +15,7 @@ from enum import Enum
 from pathlib import Path
 from typing import (
     TypedDict,
+    cast,
 )
 
 import pandas as pd
@@ -270,6 +271,20 @@ class MetricStats(TypedDict):
     std:    float
 
 ChunkQualityStats = dict[MetricType, MetricStats]
+
+
+def flatten_metric_stats(metrics: ChunkQualityStats) -> dict[str, float]:
+    """Flatten per-metric statistics into ``{metric_stat: value}`` keys.
+
+    Owns the single cast over the ``MetricStats`` TypedDict (its ``.items()``
+    values type as object to ty) and the single definition of the
+    ``{metric}_{stat}`` key format shared by sidecars and target lookups.
+    """
+    return {
+        f"{metric.value}_{stat}": value
+        for metric, stats in metrics.items()
+        for stat, value in cast(dict[str, float], stats).items()
+    }
 """Quality statistics for a video chunk across all metrics."""
 
 

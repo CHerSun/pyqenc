@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from dataclasses import replace as _dc_replace
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 import yaml
 
@@ -57,7 +57,7 @@ from pyqenc.phases.chunking import ChunkingPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.optimization import OptimizationPhase
 from pyqenc.phases.probe import ProbePhase
-from pyqenc.quality import QualitySearchBase, QualitySearchV3
+from pyqenc.quality import QualitySearchBase, QualitySearchV3, flatten_metric_stats
 from pyqenc.state import (
     ArtifactState,
     EncodingParams,
@@ -1128,11 +1128,7 @@ class ChunkEncoder:
 
             # Collect ALL measured metrics (not filtered to current targets) for the sidecar
             # so the quality history is reusable when quality targets change.
-            all_metrics: dict[str, float] = {
-                f"{metric.value}_{stat}": float(value)
-                for metric, stats in evaluation.metrics.items()
-                for stat, value in cast(dict[str, float], stats).items()
-            }
+            all_metrics = flatten_metric_stats(evaluation.metrics)
 
             # Targeted metrics subset (for search and convergence decisions).
             targets_set  = {f"{t.metric}_{t.statistic}" for t in quality_targets}

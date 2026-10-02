@@ -11,6 +11,7 @@ import fnmatch
 import logging
 from decimal import Decimal
 from pathlib import Path
+from typing import Self
 
 import yaml
 from pydantic import (
@@ -202,7 +203,7 @@ class EncodingConfig(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
     @model_validator(mode="after")
-    def _invalidate_resolved_cache_on_mutation(self) -> EncodingConfig:
+    def _invalidate_resolved_cache_on_mutation(self) -> Self:
         """Invalidate the resolved caches whenever a field is assigned.
 
         ``AppConfig`` resolves eagerly at validation time and ``resolve()`` is
@@ -422,7 +423,7 @@ class AudioConfig(BaseModel):
     select:  list[SelectEntry]         = []
 
     @model_validator(mode="after")
-    def _validate_chains(self) -> AudioConfig:
+    def _validate_chains(self) -> Self:
         """Enforce chain integrity: references, uniqueness, passthrough-alone, safe names.
 
         Returns:
@@ -618,7 +619,7 @@ class AppConfig(BaseModel):
         return data
 
     @model_validator(mode="after")
-    def _resolve_encoding(self) -> AppConfig:
+    def _resolve_encoding(self) -> Self:
         """Validate profile quality ranges and trigger strategy/target resolution.
 
         Called automatically by Pydantic once the entire model tree has been

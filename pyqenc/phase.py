@@ -35,7 +35,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Self
 
 from pyqenc.metrics import MetricKey
 from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, Strategy
@@ -225,7 +225,7 @@ class Recovery:
     pending:   bool           = False
 
     @classmethod
-    def from_artifacts(cls, artifacts: list[Artifact]) -> Recovery:
+    def from_artifacts(cls, artifacts: list[Artifact]) -> Self:
         """Derive ``pending`` from a full internal artifact list.
 
         Args:
