@@ -1,0 +1,16 @@
+# Line endings: LF everywhere (the "linux way") — enforced here so editor,
+# OS, and script defaults cannot reintroduce a CRLF/LF split. Attributes
+# override core.autocrlf for this repo only.
+* text=auto eol=lf
+
+# Windows-native file types get their required endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binaries — never normalize.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.zip binary
