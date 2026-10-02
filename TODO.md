@@ -724,7 +724,87 @@ Central name ownership (both serializing and deserializing) should also be consi
 
 ---
 
-## Last known = 81
+## 82. Research: multi-metric quality scoring/evaluation — joint paper review for possible improvements
+
+Born from the fixed-quality mode design discussion (2026-10-02). In fixed mode the
+optimization phase loses its "targets met -> compare sizes" assumption (knob pinned,
+strategies sit at different actual quality levels), so cross-strategy judging needs a
+defensible multi-metric story. Current working direction: anchor-relative deltas
+(size-winner strategy as reference) + Pareto dominance pruning, no composite scalar.
+This item collects sources for a dedicated joint research pass over the papers.
+
+Articles:
+
+- Multi-objective Pareto vs scalar selection (Univ. of Oviedo, PDF):
+  https://digibuo.uniovi.es/dspace/bitstream/handle/10651/85820/1-s2.0-S0167865526002977-main.pdf
+  — empirical: Pareto advantage over scalarization is real but partial and
+  metric-specific.
+- Zwei: self-play RL for perceptual video coding (IEEE TMM 2021, PDF):
+  https://godka.github.io/tmm21-zwei.pdf
+  — VMAF used as THE perceptual scalar objective; canonical example of
+  VMAF-as-trained-fusion being the industry's composite.
+- Zhang et al., "Enhancing VMAF through New Feature Integration" (arXiv, 2021) —
+  integrates new video features / alternative metrics into VMAF; documents
+  base-metric gaps.
+- "Gain of Grain: A Film Grain Handling Toolchain for VVC" (2024, ResearchGate) —
+  conventional metrics don't model grain perception; FGS-aware evaluation.
+  Directly matches our av1 observation (VMAF rewards grain removal/smoothing).
+- Cloudinary, "Using VMAF with other metrics" (blog) — practical multi-metric
+  pairing (VMAF primary + PSNR/SSIM as checks).
+- AWS Elemental MediaConvert — per-frame quality metrics docs (PSNR/SSIM/VMAF/QVBR
+  interpretation thresholds; production practice).
+
+Known context going in: VMAF is spatial-only (no temporal effects) and treats grain
+as distortion, so it rewards denoise/smoothing — our av1-at-same-CRF trap; VIF is
+the texture-retention guard (already in our measured set; all metrics normalized
+0-100). Open questions for the research pass: principled scalar fusion vs
+per-metric constraints; grain-aware / temporal metrics worth adopting; BD-rate
+applicability at single operating points.
+
+---
+
+## 83. Metrics-absence tolerance across consumers — prerequisite for measurement-skip
+
+Born from the fixed-quality spec design (2026-10-02). Decision there: the
+measure_attempts control ships with default = measure (current behavior kept).
+Flipping the default — or skipping per-chunk measurements in fixed encoding runs —
+additionally requires every consumer of attempt/winner metrics to tolerate their
+absence: ChunkEncodingResult fields, winner sidecars, the winner-scan limiter
+tallies (those self-extinguish — empty metrics -> find_worst_target returns None),
+summary/log formatting, optimization's reads of encoding results, metrics-collector
+keys / dashboards. A deliberate sweep, not just the flag. Reference: fixed-quality
+spec (2026-10-02) defers this here; adjacent: §82 scoring research.
+
+---
+
+## 84. Re-home quality ranges: codec = actual codec range, profile = reasonable working band
+
+Background: profiles originally had no `quality_range` override, so the practical
+working band had to be defined on the codec itself — default_config.yaml comments
+say it outright ("full codec range is 0–51; 6–30 is the practical working band").
+Now that profiles narrow ranges (and the fixed-quality CLI override layers on top),
+each value should live in its right layer:
+
+- codec `quality_range` — the codec's ACTUAL domain (x264/x265/NVENC-CQ/QP: [0,51];
+  AV1: [0,63]; NVENC-VBR: needs thinking — the 99.5 Mbit/s cap is already a
+  practical cap, not a factual bound; vulkan QP: real range is −1–255, but values
+  above ~50 produce visible artefacts — even "actual" needs a sanity discussion
+  there)
+- profile `quality_range` — the reasonable working band (today's [6,30]-style
+  values move here; bundled profiles should all carry one, otherwise
+  profile-less searches roam the full codec range)
+
+Follow-ons to consider while at it: `default_quality` must stay inside the moved
+bands (the fixed-quality spec's starting-point auto-adjust already covers
+exclusion); `quality_log_padding` derives from range width (cosmetic); search
+convergence from wider codec bounds (phase-0 half-range steps get coarser —
+probably fine, verify); the fixed-quality `-q` override is bounded by the codec
+range, so it gains the wider freedom too (consistent — CLI replaces the profile
+band).
+
+---
+
+## Last known = 84
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
