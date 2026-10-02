@@ -695,20 +695,36 @@ is the sanctioned interim.
 
 ---
 
-## 80. Pylance/pyright cross-checker evaluation — needs thinking
+## 80. LongPathYaml redefinition — cleaner editor experience + pyright-gate enabler — needs thinking
 
-2026-10-02: the ty campaign closed at zero; VS Code Pylance (pyright engine)
-still needs its own pass — cross-checkers disagree (e.g. pyright types
-homogeneous-TypedDict .items() values, ty does not; pyright flagged the
-Self-return idiom ty ignored). Session plan: run `uvx pyright` on the real
-source (first run bootstraps node — slow), triage its distinct findings,
-then decide: adopt as a 4th gate, or editor-only aid. Note: the initial
-Pylance scare (2026-10-02) was entirely a stale `build/lib` artifact copy —
-build/ is now deleted and excluded in pyproject (ty, ruff) + .vscode.
+2026-10-02, pyright cross-check evaluation DONE and stance DECIDED (recorded in
+agent-commands.md): ruff + ty are the static gates; pyright/Pylance stays an
+editor aid + occasional probe (`uvx pyright --pythonpath .venv/Scripts/python.exe`).
+Its real findings were fixed (LongPath operator params widened to StrPath,
+dead Strategy.raw branch, Artifact wrap, Decimal literals in tests); the known
+non-actionable families are documented in steering.
+
+The one open idea from the probe: redefine `LongPathYaml` as
+`Annotated[Path, AfterValidator(... -> LongPath)]` — the field then honestly
+accepts `Path`, runtime still yields `LongPath`, both checkers satisfied, zero
+call-site churn. It deletes the 51-squiggle `Path -> LongPath` family from the
+VS Code experience outright (editor value today), and is the prerequisite step
+if a pyright gate is ever wanted (recipe: this, then widen done, test Decimals
+done, config `reportPrivateImportUsage: none`, a handful of per-checker ignores
+for negative tests + lib gaps).
+---
+
+## 81. Quality targets should accept any separator, but use single stable form when serialized from our code
+
+User should be able to use any standard separator for quality targets between metric and statistic, i.e. `vmaf_min` or `vmaf-min` or `vmaf.min` - all should be acceptable deser variants
+probably `-_.` are enough. For the actual value separator `vmaf_min:97` or `vmaf_min=97` or `vmaf_min>97` probably also should be ok with no extra added meaning. Just a convenience.
+But when we serialize to str - we should use one stable across all code form - which exactly? Not sure. Maybe `-` or `.`. Don't like the underscore `_` - it is usually used as a word separator inside single name, rather then between names.
+
+Central name ownership (both serializing and deserializing) should also be considered per DRY rule.
 
 ---
 
-## Last known = 80
+## Last known = 81
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

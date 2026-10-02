@@ -778,7 +778,7 @@ class TestAudioPhaseTiming:
         extraction_result = ExtractionPhaseResult(
             outcome      = PhaseOutcome.COMPLETED,
             message      = "ok",
-            video_stream = _make_video_stream_fixture(source),
+            video_stream = Artifact(payload=_make_video_stream_fixture(source), state=ArtifactState.COMPLETE),
         )
 
         job_mock = MagicMock(spec=JobPhase)
@@ -941,7 +941,7 @@ class TestOptimizationPhaseTiming:
         work_dir.mkdir(parents=True, exist_ok=True)
         config.encoding.optimize   = optimize
         config.encoding.strategies = [
-            str(s.raw) if hasattr(s, "raw") else f"{s.profile}+{s.preset}"
+            f"{s.profile}+{s.preset}"
             for s in [_STRATEGY_SLOW_H265, _STRATEGY_H265_AQ]
         ]
         # Reset resolved caches so they re-resolve from the updated strategy strings.

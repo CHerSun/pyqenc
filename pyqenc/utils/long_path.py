@@ -106,7 +106,7 @@ class LongPath(type(Path())):  # ty: ignore[unsupported-base] — dynamic platfo
         path_schema = handler(Path)
         return core_schema.no_info_after_validator_function(_coerce_long_path, path_schema)
 
-    def __truediv__(self, key: str | Path) -> LongPath:
+    def __truediv__(self, key: str | os.PathLike[str]) -> LongPath:
         """Extend path with ``/`` operator, preserving ``LongPath`` type.
 
         Args:
@@ -117,7 +117,7 @@ class LongPath(type(Path())):  # ty: ignore[unsupported-base] — dynamic platfo
         """
         return LongPath(super().__truediv__(key))
 
-    def __rtruediv__(self, key: str | Path) -> LongPath:
+    def __rtruediv__(self, key: str | os.PathLike[str]) -> LongPath:
         """Support ``str / LongPath`` composition, preserving ``LongPath`` type.
 
         Args:

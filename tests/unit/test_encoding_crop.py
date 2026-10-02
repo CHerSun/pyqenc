@@ -41,9 +41,9 @@ def _make_encoder(crop_params: CropParams | None = None) -> ChunkEncoder:
 def _make_strategy() -> Strategy:
     codec = CodecConfig(
         name            = "h265-8bit",
-        default_quality = 28.0,
+        default_quality = Decimal("28"),
         default_preset  = "fast",
-        quality_range   = (0.0, 51.0),
+        quality_range   = (Decimal("0"), Decimal("51")),
         pre_input_args  = [],
         encoder_args    = [
             "-c:v", "libx265",

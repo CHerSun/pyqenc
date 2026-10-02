@@ -16,6 +16,7 @@
 - To run tests use `uv run python -m pytest ...`.
 - To run the project use `uv run pyqenc` with required arguments.
 - A `.githooks/pre-commit` hook mechanically blocks commits on ruff/ty failures (enable per-clone: `git config core.hooksPath .githooks`; pytest is deliberately NOT in the hook — minutes-long, wrong timescale).
+- Pylance/pyright is NOT a gate — ruff + ty are the static gates (plus pytest). Run pyright occasionally as a cross-check probe: `uvx pyright --pythonpath .venv/Scripts/python.exe` (the venv flag matters). Expect known non-actionable families: ~51 Path->LongPath pydantic-field strictness (pyright has no plugin API, ignores `__get_pydantic_core_schema__` coercion — conflicts with the models-coerce doctrine), pandas/numpy stub unions, `reportPrivateImportUsage` on matplotlib re-exports, negative-pydantic tests needing per-checker ignores, and a guard-correlated `total_frames_for_summary` in visualization (correct code, long-range correlation). Full gate-adoption recipe (LongPathYaml redefinition first) lives in TODO §80.
 - **Green status requires ALL THREE gates passing:** `uvx ruff check` clean, `uvx ty check` clean, and pytest green. A ruff+pytest-only "green" is not green.
 - Don't use pipes when running pipeline - this ruins alive_progress bar display for the end-user.
 - Use `steering/environment.md` for local environment details, like workdir, sample target, etc.

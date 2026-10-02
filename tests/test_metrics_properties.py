@@ -8,6 +8,7 @@ Run with: uv run python -m pytest tests/test_metrics_properties.py
 
 import math
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 
 import yaml
@@ -668,9 +669,9 @@ _ASCII_DOT = "."
 # Minimal CodecConfig used to construct Strategy instances in property tests.
 _MINIMAL_CODEC = CodecConfig(
     name            = "test-codec",
-    default_quality = "18",
+    default_quality = Decimal("18"),
     default_preset  = "slow",
-    quality_range   = ("0", "51"),
+    quality_range   = (Decimal("0"), Decimal("51")),
     encoder_args    = ["-i", "{input}", "-crf", "{quality}", "-preset", "{preset}", "{output}"],
     presets         = ["slow"],
 )

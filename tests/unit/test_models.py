@@ -114,9 +114,9 @@ class TestStrategy:
         """Test FFmpeg argument generation via encoder_args template."""
         codec = CodecConfig(
             name            = "h265-10bit",
-            default_quality = 20.0,
+            default_quality = Decimal("20"),
             default_preset  = "slow",
-            quality_range   = (0.0, 51.0),
+            quality_range   = (Decimal("0"), Decimal("51")),
             pre_input_args  = [],
             encoder_args    = [
                 "-c:v", "libx265",
@@ -161,9 +161,9 @@ class TestStrategy:
         """Test {vf} embedded inside a larger filter chain (nvenc-style)."""
         codec = CodecConfig(
             name            = "hevc-nvenc-10bit",
-            default_quality = 28.0,
+            default_quality = Decimal("28"),
             default_preset  = "p7",
-            quality_range   = (1.0, 51.0),
+            quality_range   = (Decimal("1"), Decimal("51")),
             quality_label   = "CQ",
             pre_input_args  = ["-hwaccel", "cuda"],
             encoder_args    = [
