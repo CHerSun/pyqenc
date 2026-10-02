@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import matplotlib
 
@@ -372,7 +372,8 @@ def compute_statistics(
         std_values = std_values[std_values >= std_cutoff_min]
     stats.append(float(std_values.std()))
 
-    return dict(zip(keys, stats))  # type: ignore[return-value]
+    # keys/stats are parallel constants covering exactly FullMetricStatistics
+    return cast(FullMetricStatistics, dict(zip(keys, stats)))
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +448,7 @@ def create_unified_plot(
     output_path:         Path,
     title:               str                                  = "Video Quality Metrics Analysis",
     styles:              dict[MetricType, MetricVisualStyle] | None = None,
-    fps:                 float | None                         = None,
+    fps:                 Fraction | None                      = None,
     chunk_start_seconds: float                               = 0.0,
 ) -> dict[MetricType, FullMetricStatistics]:
     """Create a unified quality-metrics plot and save it to disk.
@@ -484,8 +485,7 @@ def create_unified_plot(
     # Callers pass the exact rational ``fps_fraction`` — coerce to float here
     # so every x-axis arithmetic stays float (Fraction + float index would
     # produce object-dtype arrays matplotlib cannot plot).
-    if fps is not None:
-        fps = float(fps)
+    fps_val: float | None = float(fps) if fps is not None else None
 
     # Derive per-metric Series from DataFrame columns
     metrics: dict[MetricType, pd.Series] = {}
@@ -571,7 +571,7 @@ def create_unified_plot(
     ax_main.tick_params(axis="x", labelsize=_FONT_AXIS_TICKS_X)
 
     # Compute frame offset from chunk start so x-axis reflects source timestamps
-    frame_offset: float = chunk_start_seconds * fps if (fps is not None and fps > 0) else 0.0
+    frame_offset: float = chunk_start_seconds * fps_val if (fps_val is not None and fps_val > 0) else 0.0
 
     # Values are already normalized (df_norm); build index map per metric.
     scaled_values: dict[MetricType, pd.Series] = {}
@@ -580,15 +580,15 @@ def create_unified_plot(
         scaled_values[metric_type] = series
         frame_index[metric_type]   = series.index
 
-    if fps is not None and fps > 0:
+    if fps_val is not None and fps_val > 0:
         # Capture total_frames before converting index to seconds
         total_frames_for_summary: int = int(max(idx.max() for idx in frame_index.values()) + frame_offset) + 1
 
         # Convert x-axis to seconds so tick positions align with the CRF plot.
         # frame_index values are frame numbers; divide by fps to get seconds.
         for mt in list(frame_index.keys()):
-            frame_index[mt] = frame_index[mt] / fps
-        frame_offset = frame_offset / fps  # already seconds/fps, now pure seconds
+            frame_index[mt] = frame_index[mt] / fps_val
+        frame_offset = frame_offset / fps_val  # already seconds/fps, now pure seconds
 
         max_seconds = max(idx.max() for idx in frame_index.values()) + frame_offset
         min_seconds = min(idx.min() for idx in frame_index.values()) + frame_offset
@@ -604,7 +604,7 @@ def create_unified_plot(
             hours   = total_s // 3600
             minutes = (total_s % 3600) // 60
             secs    = total_s % 60
-            frame_n = int(seconds * fps)
+            frame_n = int(seconds * fps_val)
             return f"{hours:02d}:{minutes:02d}:{secs:02d}\n{frame_n}"
 
         ax_main.xaxis.set_major_formatter(ticker.FuncFormatter(_dual_label_formatter))
@@ -667,7 +667,7 @@ def create_unified_plot(
     # to run; a fixed advance step overlaps on wide boxes).
     _summary_boxes: list[tuple[str, dict]] = []
 
-    total_frames   = total_frames_for_summary if fps is not None and fps > 0 \
+    total_frames   = total_frames_for_summary if fps_val is not None and fps_val > 0 \
                      else int(max(idx.max() for idx in frame_index.values()) + 1)
     frames_checked = max(len(v) for v in scaled_values.values())
 
@@ -685,15 +685,15 @@ def create_unified_plot(
 
         lossless_count = int((vals >= 100.0).sum())
 
-        display_stats: dict[str, float] = dict(metric_stats)
+        display_stats: dict[str, float] = cast(dict[str, float], metric_stats)
 
         max_label: str   = "Max"
         max_value: float = display_stats["max"]
         if metric_type == MetricType.PSNR and np.isinf(max_value):
             for pkey, plabel in [("p95", "95%"), ("p90", "90%"), ("p75", "75%"), ("p50", "50%")]:
-                if not np.isinf(metric_stats[pkey]):
+                if not np.isinf(display_stats[pkey]):
                     max_label = plabel
-                    max_value = metric_stats[pkey]
+                    max_value = display_stats[pkey]
                     break
 
         summary_text = (
@@ -724,7 +724,8 @@ def create_unified_plot(
         ax_stats     = fig.add_subplot(gs[1, subplot_idx])
         subplot_idx += 1
 
-        stat_values = [metric_stats[k] for k in stat_keys]
+        stat_view   = cast(dict[str, float], metric_stats)
+        stat_values = [stat_view[k] for k in stat_keys]
 
         y_positions: np.ndarray                  = np.arange(len(bar_labels))
         base_rgb:    tuple[float, float, float]  = mcolors.to_rgb(style.color)
@@ -765,7 +766,7 @@ def create_unified_plot(
     # how wide the run's values make the text, while staying clear of the
     # lower-right legend.
     fig.canvas.draw()
-    renderer  = fig.canvas.get_renderer()
+    renderer  = fig.canvas.get_renderer()  # ty: ignore[unresolved-attribute] — Agg canvas; base stub lacks it
     axes_to_fig = ax_main.transAxes + fig.transFigure.inverted()
     fx, fy    = axes_to_fig.transform((_SUMMARY_BOX_START_X, _SUMMARY_BOX_Y_POS))
     fig_width = fig.bbox.width
@@ -865,7 +866,7 @@ def parse_metrics(artifacts: QualityLogs, factor: int = 1) -> pd.DataFrame:
         ValueError: If no metric files could be parsed.
     """
     # Map each metric to its parser and the relevant artifact path.
-    _parsers: list[tuple[MetricType, Path | None, object]] = [
+    _parsers: list[tuple[MetricType, Path | None, Callable[[Path, int], pd.DataFrame]]] = [
         (MetricType.PSNR, artifacts.psnr_log,  parse_psnr_file),
         (MetricType.SSIM, artifacts.ssim_log,  parse_ssim_file),
         (MetricType.VMAF, artifacts.vmaf_json, parse_vmaf_file),
@@ -877,7 +878,7 @@ def parse_metrics(artifacts: QualityLogs, factor: int = 1) -> pd.DataFrame:
         if path is None or not path.exists():
             continue
         try:
-            df = parser(path, factor)  # type: ignore[operator]
+            df = parser(path, factor)
             frames.append(df)
             logger.debug("parse_metrics: parsed %s (%d frames)", metric_type.value, len(df))
         except (OSError, ValueError, TypeError) as exc:
@@ -1054,7 +1055,8 @@ def create_crf_plot(
 
     bar_labels  = ["Min", "5%", "25%", "50%", "75%", "95%", "Max"]
     stat_keys   = ["min", "p5", "p25", "p50", "p75", "p95", "max"]
-    stat_values = [crf_stats[k] for k in stat_keys]
+    stat_view   = cast(dict[str, float], crf_stats)
+    stat_values = [stat_view[k] for k in stat_keys]
 
     ax_stats    = fig.add_subplot(gs[1, :])
     y_positions: np.ndarray                 = np.arange(len(bar_labels))
@@ -1134,7 +1136,7 @@ class QualityEvaluator:
         ref_crop:         CropParams,
         output_prefix:    str,
         metrics_sampling: int                            = 3,
-        bar_advance:      Callable[[float], None] | None = None,
+        bar_advance:      Callable[[float, AdvanceState], None] | None = None,
         duration_seconds: float                          = 0.0,
         width:            int                            = 0,
         cwd:              Path | None                    = None,
@@ -1186,7 +1188,7 @@ class QualityEvaluator:
             delta = max(0.0, out_time_s - _last_time)
             delta = min(delta, duration_seconds - _last_time)
             if delta > 0:
-                bar_advance(delta * _weight)
+                bar_advance(delta * _weight, AdvanceState.SUCCESS)
                 _last_time = out_time_s
 
         _last_time: float = 0.0

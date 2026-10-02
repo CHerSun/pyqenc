@@ -13,6 +13,7 @@ at ``info`` level and the pattern is too mechanical to benefit from separation.
 import decimal
 import hashlib
 import logging
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from pyqenc.constants import (
@@ -213,15 +214,15 @@ def fmt_chunk_final(strategy: str, chunk_id: str, quality: Decimal, attempts: in
     limit_note = f" — limited by {limited_by}" if limited_by is not None else ""
     return fmt_chunk(strategy, chunk_id, f"success {SUCCESS_SYMBOL_MAJOR} with {quality_label} {str(quality).rjust(quality_padding)} after {attempts} attempts{limit_note}", use_visual_hash)
 
-def fmt_key_value_table(kv_to_show: dict[str, str | list | object]) -> None:
+def fmt_key_value_table(kv_to_show: Mapping[str, object]) -> None:
     """Log a key-value table at INFO level with aligned columns.
 
     Value dispatch (checked in this order):
-    1. ``isinstance(value, str)`` → single line, formatted as-is.
-    2. ``isinstance(value, list)`` → multi-line: first item on the key line,
+    1. ``str`` → single line, formatted as-is.
+    2. ``list`` → multi-line: first item on the key line,
        subsequent items on continuation lines aligned to the value column
        (key column is blank).
-    3. Anything else → single line via ``f"{value}"``.
+    3. Anything else → single line via str().
 
     ``str`` is checked before ``list`` because ``str`` is iterable and would
     otherwise incorrectly satisfy a bare ``isinstance(v, list)`` check.

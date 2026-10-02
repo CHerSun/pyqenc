@@ -637,6 +637,8 @@ We should consider similar approach for encoding/optimization phases, where we u
 
 2026-10-01: failed once mid-suite (4-file batch: probe + merge_mkvmerge + pts_preservation + metrics_integration), then passed on immediate re-run of the same batch and in isolation. Suspect timing/IO-load sensitivity or shared-state assumption. Not reproducible on demand.
 
+2026-10-02: second same-shaped flake in a targeted 3-file run (quality + vif + metrics; 1 failed of 129, name not captured) that passed on two immediate re-runs AND in the full suite. Pattern so far: ~1 flake per full-suite-scale run under load — worth a session with `-p xdist`-style repetition or last-failed + load when it recurs.
+
 ---
 
 ## 76. Reevaluate Python 3.15.x (lazy imports) — needs thinking
@@ -660,7 +662,38 @@ major API break — lift only deliberately). Then a scan of pydantic / matplotli
 
 ---
 
-## Last known = 77
+## 78. QualityPoint sentinel/measured split — refactor with the V4 spec — needs thinking
+
+2026-10-02: QualityPoint overloads one class for two concepts — a measured
+attempt (metrics dict) and an untested boundary marker (metrics=None,
+is_sentinel, fake score=0 that also means "winner"). Split into
+`QualityBoundary(q)` (sentinel) and a measured `QualityPoint(q, score,
+metrics: dict)` with metrics REQUIRED. Kills: metrics | None, is_sentinel,
+the `not self.is_sentinel` clauses in is_pass/is_fail/is_winner, the score=0
+overload, and the narrowing asserts. Blast radius is quality.py only
+(17 is_sentinel checks + 8 sentinel constructions; no direct test usage).
+Do it as part of the QualitySearch V4 spec so the new algorithm builds on
+the clean record type.
+
+---
+
+## 79. FilterInstance discriminated union — replace the registry cast — needs thinking
+
+2026-10-02: `FilterInstance` (app_config) is an open registry model — `type: str`
++ `params: SerializeAsAny[BaseModel]` — so chain.py needs a
+`cast(EncodeFilterParams, inst.params)` at the encode-conversion site. Proper
+fix: per-filter Instance models (`type: Literal["<id>"]`, concrete params) +
+pydantic discriminated union on `type`, defined in `audio/filters.py` (import
+direction allows it: app_config already imports filters). Kills the cast
+(isinstance/match narrows natively), mostly collapses the hand-rolled
+`_resolve_and_validate` dispatch (keep error wording if needed). Openness stays
+single-file: Params + Filter + Instance + union member. Blast radius:
+app_config, chain, 3 test files. Until then the cast (or an assert-isinstance)
+is the sanctioned interim.
+
+---
+
+## Last known = 79
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

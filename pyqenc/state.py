@@ -380,7 +380,7 @@ class AudioSidecar(BaseModel):
     chains: dict[str, str]
 
     @classmethod
-    def from_resolved(cls, resolved: dict[str, ResolvedChain]) -> AudioSidecar:
+    def from_resolved(cls, resolved: dict[str, ResolvedChain]) -> Self:
         """Build an ``AudioSidecar`` from resolved chains, computing each signature.
 
         Each signature is the canonical :func:`~pyqenc.audio.chain.chain_signature`
@@ -472,7 +472,7 @@ class MergeParams(BaseModel):
     strategy_summaries: list[MergeStrategySummary] = Field(default_factory=list)
 
     @classmethod
-    def load(cls, path: Path) -> MergeParams | None:
+    def load(cls, path: Path) -> Self | None:
         """Load ``MergeParams`` from *path*.
 
         Returns:

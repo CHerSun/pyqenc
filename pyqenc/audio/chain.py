@@ -37,12 +37,14 @@ import logging
 from collections import deque
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import cast
 
 from pydantic import BaseModel, ConfigDict
 
 from pyqenc.app_config import ChainSpec, FilterInstance
 from pyqenc.audio.filters import (
     EncodeFilter,
+    EncodeFilterParams,
     EncodeParams,
     FilterType,
     get_filter_class,
@@ -183,11 +185,13 @@ def _encode_params_from(inst: FilterInstance) -> EncodeParams:
     Returns:
         The equivalent :class:`EncodeParams` terminal target.
     """
-    params = inst.params
+    # The type_id -> params-model correlation lives in the filter registry,
+    # not the type system; inst.params is an EncodeFilterParams here.
+    params = cast(EncodeFilterParams, inst.params)
     return EncodeParams(
-        codec               = params.codec,        # type: ignore[attr-defined]
-        bitrate_per_channel = params.bitrate_per_channel,  # type: ignore[attr-defined]
-        extension           = params.extension,    # type: ignore[attr-defined]
+        codec               = params.codec,
+        bitrate_per_channel = params.bitrate_per_channel,
+        extension           = params.extension,
     )
 
 

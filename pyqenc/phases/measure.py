@@ -12,6 +12,7 @@ import shutil
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
 import yaml
 
@@ -578,7 +579,7 @@ def _write_sidecar(
     flat_metrics: dict[str, float] = {
         f"{metric_type.value}_{stat}": value
         for metric_type, stats in metrics.items()
-        for stat, value in stats.items()
+        for stat, value in cast(dict[str, float], stats).items()
     }
 
     sidecar = MeasureSidecar(

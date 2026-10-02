@@ -154,7 +154,7 @@ def _enumerate_streams(
                 # mkvextract/mkvmerge key attachments by their own 1-based
                 # positional IDs; ffprobe preserves the file order, so the
                 # append position is that ID.
-                info = AttachmentStreamInfo.from_ffprobe(raw, len(attachments) + 1),
+                info = AttachmentStreamInfo.from_ffprobe_attachment(raw, len(attachments) + 1),
             ))
         elif codec_type == "video":
             video.append(VideoStream(file=source_file, info=VideoStreamInfo.from_ffprobe(raw)))
@@ -854,7 +854,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
         mkvextract is the primary: one call dumps every pair
         ``attachment_id:<tmp>`` (the mkv numbering space — see
-        :meth:`AttachmentStreamInfo.from_ffprobe`). Exit 0 means every pair
+        :meth:`AttachmentStreamInfo.from_ffprobe_attachment`). Exit 0 means every pair
         was written, so each ``.tmp`` sibling is renamed straight to its
         final name — a pair that never materialized surfaces as ``OSError``
         at the rename. On any failure the tmps are wiped (mkvextract writes

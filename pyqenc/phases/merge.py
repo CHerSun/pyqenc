@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import yaml
 
@@ -447,7 +447,7 @@ class MergePhase(Phase[MergePhaseResult]):
 
         job_result = self._dep_result(JobPhase)
         probe_result = self._dep_result(ProbePhase)
-        crop: CropParams | None = probe_result.crop
+        crop: CropParams = probe_result.crop
         # The dependency walk guarantees a completed probe with a resolved stream.
         assert probe_result.stream is not None, "probe guaranteed complete by the dependency walk"
         source_stream: ExtendedVideoStream = probe_result.stream.payload
@@ -724,8 +724,10 @@ class MergePhase(Phase[MergePhaseResult]):
 
         # Restore the true frame rate in the track header —
         # see _build_mkvpropedit_args for why mkvmerge cannot do it.
+        fps = source_stream.stream.info.fps_fraction
+        assert fps is not None, "a probed video stream reaching merge carries fps"
         propedit_cmd: list[str | os.PathLike] = MergePhase._build_mkvpropedit_args(
-            tmp_output, source_stream.stream.info.fps_fraction,
+            tmp_output, fps,
         )
         propedit_result = subprocess.run(propedit_cmd, capture_output=True, text=True, check=False)
         if propedit_result.returncode != 0:
@@ -876,7 +878,7 @@ class MergePhase(Phase[MergePhaseResult]):
         self,
         final_result:  Path,
         source_stream: ExtendedVideoStream,
-        ref_crop:      CropParams | None,
+        ref_crop:      CropParams,
         output_dir:    Path,
     ) -> tuple[dict[str, float], bool, Path | None]:
         """Measure final quality metrics for *final_result* against *source_stream*.
@@ -907,7 +909,7 @@ class MergePhase(Phase[MergePhaseResult]):
 
         metrics_dict: dict[str, float] = {}
         for metric_name, metric_stats in evaluation.metrics.items():
-            for stat_name, stat_value in metric_stats.items():
+            for stat_name, stat_value in cast(dict[str, float], metric_stats).items():
                 metrics_dict[f"{metric_name.value}_{stat_name}"] = stat_value
 
         plot_path = evaluation.logs.plot if evaluation.logs.plot else None

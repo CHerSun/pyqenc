@@ -654,13 +654,17 @@ def _compute_proportional_candidate(
     When ``clamp_range=False``, returns ``t`` as-is (allows extrapolation).
     """
     # No metrics? Fallback via None for other options - externally managed.
-    if target is None or pass_point.is_sentinel or fail_point.is_sentinel:
+    if target is None:
         return None
+    pass_metrics = pass_point.metrics
+    fail_metrics = fail_point.metrics
+    if pass_metrics is None or fail_metrics is None:
+        return None    # sentinel boundary — an untested side
 
     # Get actual metric values.
     key      = f"{target.metric}_{target.statistic}"
-    pass_val = pass_point.metrics.get(key)  # type: ignore[union-attr]
-    fail_val = fail_point.metrics.get(key)  # type: ignore[union-attr]
+    pass_val = pass_metrics.get(key)
+    fail_val = fail_metrics.get(key)
     if pass_val is None or fail_val is None:
         logger.warning(
             "QualitySearch: missing metric %s for pass=%s fail=%s.",
@@ -935,7 +939,8 @@ class QualitySearchBase(ABC):
         opp_worst        = self.find_worst_target(opposite_metrics, self._quality_targets) if opposite_metrics else None
         opp_target       = opp_worst[0] if opp_worst is not None else None
 
-        found_worst  = self.find_worst_target(new_point.metrics, self._quality_targets)  # type: ignore[arg-type]
+        assert new_point.metrics is not None, "attempted points carry measured metrics"
+        found_worst  = self.find_worst_target(new_point.metrics, self._quality_targets)
         worst_target = found_worst[0] if found_worst is not None else None
 
         # Build candidates list: primary proportional, reverse proportional, binary.
@@ -1707,7 +1712,8 @@ class QualitySearchV3(QualitySearchBase):
             outward_clamp = min(pass_points, key=lambda pt: abs(pt.score)) if pass_points else QualityPoint(self._quality_better, 0, None)
 
         # Find the worst target from further_p's metrics for the proportional candidate.
-        found_worst  = self.find_worst_target(further_p.metrics, self._quality_targets)  # type: ignore[arg-type]
+        assert further_p.metrics is not None, "attempted points carry measured metrics"
+        found_worst  = self.find_worst_target(further_p.metrics, self._quality_targets)
         worst_target = found_worst[0] if found_worst is not None else None
 
         # Compute t: extrapolate using the two real tested points.

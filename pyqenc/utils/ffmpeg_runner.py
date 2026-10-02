@@ -410,9 +410,10 @@ async def run_ffmpeg_async(
     with _procs_lock:
         _live_procs.add(proc)
     try:
+        assert proc.stdout is not None and proc.stderr is not None, "PIPE streams exist after create_subprocess_exec"
         frame_count, stderr_lines = await asyncio.gather(
-            _read_stdout(proc.stdout, progress_callback),  # type: ignore[arg-type]
-            _read_stderr(proc.stderr),                     # type: ignore[arg-type]
+            _read_stdout(proc.stdout, progress_callback),
+            _read_stderr(proc.stderr),
         )
         await proc.wait()
     finally:
@@ -424,8 +425,9 @@ async def run_ffmpeg_async(
         tmp_to_final[0].exists() and tmp_to_final[0].stat().st_size > 0
     ) if tmp_to_final is not None else True
 
+    assert proc.returncode is not None, "returncode is set after wait()"
     result = FFmpegRunResult(
-        returncode   = proc.returncode,  # type: ignore[arg-type]
+        returncode   = proc.returncode,
         success      = proc.returncode == 0 and output_ok,
         stderr_lines = stderr_lines,
         frame_count  = frame_count,

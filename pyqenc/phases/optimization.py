@@ -363,6 +363,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         opt_yaml   = work_dir / OptimizationPhase.SIDECAR_NAME
         tolerance  = self._config.encoding.optimize_tolerance
         persisted  = self._persisted
+        assert self._current_probe is not None, "_recover populates the probe state before execution"
         crop       = self._current_probe.crop
 
         current_targets  = targets_as_strings(self._config.encoding.resolved_targets)

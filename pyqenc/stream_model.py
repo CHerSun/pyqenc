@@ -357,7 +357,7 @@ class AttachmentStreamInfo(StreamInfo):
     extracted_path: LongPathYaml | None = None
 
     @classmethod
-    def from_ffprobe(cls, raw: dict, attachment_id: int) -> Self:
+    def from_ffprobe_attachment(cls, raw: dict, attachment_id: int) -> Self:
         """Build from one ffprobe attachment dict at its positional mkv ID.
 
         ``attachment_id`` is the 1-based position among the source's
@@ -659,7 +659,7 @@ class VideoStreamChunk(BaseModel):
         chunk_id:    str,
         stream:      ExtendedVideoStream,
         frame_count: int = 0,
-    ) -> VideoStreamChunk:
+    ) -> Self:
         """Reconstruct the chunk from its id; the caller supplies the stream.
 
         The parsing half of the inverse pair trusted by presence-based
