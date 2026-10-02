@@ -8,7 +8,7 @@ Thank you for your interest in contributing to pyqenc! This document provides gu
 
 ### Prerequisites
 
-1. **Python 3.13+**: This project targets Python 3.13 syntax and features.
+1. **Python 3.14+**: This project targets Python 3.14 syntax and features. The exact minor line is pinned in `.python-version` (uv reads it automatically).
 2. **uv**: Package manager for dependencies and virtual environments.
 3. **External tools**: FFmpeg and mkvtoolnix must be installed and available on PATH.
 
@@ -19,14 +19,12 @@ Thank you for your interest in contributing to pyqenc! This document provides gu
 git clone https://github.com/CHerSun/pyqenc.git
 cd pyqenc
 
-# Create virtual environment and install dependencies
-uv venv
-uv pip install -e ".[dev]"
-# OPTIONAL if using uv: activate venv
-## On Windows:
-# .venv\Scripts\activate
-## On Linux:
-# source .venv/bin/activate
+# Install everything (interpreter per .python-version, .venv, all dependency groups)
+uv sync --all-groups
+# No manual venv activation needed — prefix everything with `uv run`
+
+# Enable the pre-commit gate hook (ruff + ty block bad commits)
+git config core.hooksPath .githooks
 
 # Install external dependencies
 ## On Windows:
@@ -37,87 +35,96 @@ sudo apt-get install ffmpeg mkvtoolnix
 brew install ffmpeg mkvtoolnix
 ```
 
+Line endings are **LF everywhere**, enforced by `.gitattributes` (`eol=lf`) — it overrides any platform/editor defaults, so you never need to think about CRLF. New files default to LF in VS Code via the project settings.
+
 ### Project Structure
 
 ```log
 pyqenc/
 ├── pyqenc/                      # Main package
-│   ├── __init__.py
 │   ├── api.py                  # Public API
 │   ├── cli.py                  # CLI interface
-│   ├── config.py               # Configuration management
+│   ├── app_config.py           # Configuration models + default config loading
+│   ├── default_config.yaml     # Built-in default config
 │   ├── constants.py            # Global constants
 │   ├── models.py               # Data models
-│   ├── orchestrator.py         # Pipeline orchestration
-│   ├── progress.py             # Progress tracking
-│   ├── quality.py              # Quality evaluation
-│   ├── default_config.yaml     # Built-in default config
-│   ├── phases/                 # Phase implementations
-│   │   ├── audio.py                # Phase 2 - audio processing
-│   │   ├── chunking.py             # Phase 3 - scene detection & chunking
-│   │   ├── encoding.py             # Phase 5 - encoding of chunks
-│   │   ├── extraction.py           # Phase 1 - extraction
-│   │   ├── merge.py                # Phase 6 - merging back videos
-│   │   └── optimization.py         # Phase 4 - optimization [optional] - best strategy search
-│   └── utils/                  # Utility modules
-│       ├── cleanup.py              # Automatic cleanup routines
-│       ├── disk_space.py           # Required disk space estimations
-│       ├── ffmpeg.py
-│       ├── ffmpeg_wrapper.py
-│       ├── log_format.py           # Unified formatting of events
-│       ├── logging.py
-│       ├── performance.py
-│       ├── progress_reporter.py    # Progress tracking & persistence
-│       ├── validation.py
-│       └── visualization.py        # Metrics graph plotting
+│   ├── phase.py                # Phase base class, Artifact, registry
+│   ├── runner.py               # Phase-sequence runner
+│   ├── state.py                # Pydantic sidecar models (phase persistence)
+│   ├── stream_model.py         # Typed stream/file composition family
+│   ├── quality.py              # Quality search + metrics plumbing
+│   ├── metrics.py              # Metrics collector (timing instrumentation)
+│   ├── audio/                  # Audio filter chains, layouts, selection
+│   ├── phases/                 # Phase implementations (job, extraction, probe,
+│   │                           # audio, chunking, optimization, encoding, merge,
+│   │                           # plus standalone measure)
+│   └── utils/                  # ffmpeg_runner, alive (progress bars), long_path,
+│                               # visualization, naming, fs, yaml_utils, ...
 ├── tests/                      # Test suite
 │   ├── unit/
 │   ├── integration/
-│   └── e2e/
-├── docs/                       # Documentation
-├── samples/                    # Sample files for testing
+│   ├── e2e/
+│   └── fixtures/
+├── docs/                       # Documentation (architecture.md is canonical)
+├── .kiro/                      # steering/ (living project rules) + specs/ (design history)
+├── samples/                    # Sample video links (SAMPLES.md) — not committed
 └── pyproject.toml             # Project configuration
 ```
 
 ## Coding Standards
 
+The complete, living standard is [`.kiro/steering/coding-standards.md`](.kiro/steering/coding-standards.md); the essentials:
+
 ### Python Style
 
-- **Python Version**: Target Python 3.13+ syntax.
-- **Type Hints**: All functions, classes, and class members MUST be type-hinted. Avoid `Any` and untyped generics.
+- **Python Version**: Target Python 3.14+ syntax.
+- **Type Hints**: All functions, classes, and class members MUST be type-hinted. The `ty` type checker is a standing gate — code that does not type-check does not commit.
+- **Annotations**: Rely on PEP 649 lazy evaluation (3.14 default). NEVER write `from __future__ import annotations` (deprecated no-op) and NEVER quote annotations (`"AppConfig"`).
 - **Modern Syntax**: Use `int | None` instead of `Optional[int]`.
-- **Path Handling**: Use `pathlib.Path` for all file paths (no strings).
-- **Constants**: NO MAGIC NUMBERS - use named constants or enums.
+- **Paths**: `pathlib.Path` for all file paths (no strings). `LongPath` is constructed at system boundaries (CLI args, sidecar loads) and travels through code as `Path` — signatures declare `Path`, composition via `/` preserves the runtime subtype.
+- **Optionality**: Prefer non-Optional types when construction guarantees presence; empty containers are checked Python-style (`if not xs:`); programmatic contracts are enforced with `assert` at the consuming site, not by widening footprints to `| None`.
+- **Constants**: NO MAGIC NUMBERS or MAGIC STRINGS — use named constants or enums.
+- **Naming**: named elements own exactly `display_name()` and `safe_name()`; filesystem work always uses `safe_name()`.
 - **Async**: Use async where required for responsiveness, but we do not have to use it where it's useless.
 - **Docstrings**: Public API and functions must have explanatory docstrings.
 
 ### Code Organization
 
 - **KISS**: Keep it as simple as possible.
-- **DRY**: If code is repeated 2+ times - make it reusable.
+- **DRY**: If code is repeated 2-3+ times - make it reusable.
 - **Rule of Three**: If 3+ similar entities exist, create a common interface.
 - **Clean Code**: Self-explanatory, simple code is preferable over "patterns" over-engineering.
 - **Vertical Alignment**: Use vertical alignment for arguments/parameters when sensible.
 - **Single source of truth**: Where possible - prefer single source of truth / ownership.
+- **No backwards compatibility**: Pre-alpha project, no public API stability yet. Clean code over legacy shims and migrations.
 
 ### Logging
 
 - **Debug**: Hidden by default, detailed operation information.
 - **Info**: End-user notifying, phase transitions, progress. Must be concise to avoid walls of text for the end-user.
 - **Warning**: Non-critical errors allowing continuation.
+- **Error**: Failures preventing a specific operation but not the whole run.
 - **Critical**: Problems preventing actual work.
 
 ### Error Handling
 
 - **EAFP (Easier to Ask for Forgiveness than Permission)**: Use try/except for volatile operations (not LBYL - Look Before You Leap), I/O operations in particular.
 - **Specific Exceptions**: Catch specific exceptions. Avoid bare `except:` if possible.
-- **Error Categories**:
-  - `CriticalError`: Halts execution
-  - `RecoverableError`: Allows continuation
-  - `ValidationError`: Early detection of invalid input
 - **Use .tmp-then-rename protocol**: to ensure any produced artifacts get final name only after they are fully complete.
 
 ## Development Workflow
+
+### The Three Gates
+
+A change is green only when ALL THREE pass:
+
+```sh
+uvx ruff check .              # lint (check only — ruff format is NOT used)
+uvx ty check                  # type check
+uv run python -m pytest       # test suite
+```
+
+The pre-commit hook runs the two static gates automatically on every commit (after `git config core.hooksPath .githooks`). pytest is deliberately not in the hook — minutes-long, the wrong timescale for a commit.
 
 ### Making Changes
 
@@ -125,11 +132,14 @@ pyqenc/
 2. **Create a branch** in your forked repo for your commits and check it out.
    - **Write tests** for new functionality. Tests are not concrete: if code changes are required - update existing tests.
    - **Follow coding standards** outlined above.
-   - **Run linting**: `ruff check .` if outside of IDE.
-   - **Ensure tests are passing**: `uv run pytest ...`
-   - **Update documentation** if needed
+   - **Run the three gates** (above).
+   - **Update documentation** if needed.
    - **Commit** changes to your branch.
 3. **Create a pull request** to origin repository, add explanation of changes.
+
+### Commit Messages
+
+Conventional commits with a semver bump in the same commit (e.g. `feat(encoding): persist frame counts (0.16.1)`), version lives in `pyqenc/__init__.py`. The body lists actual changes only — no test results or verification notes.
 
 ### Testing
 
@@ -137,52 +147,43 @@ See [tests/README.md](tests/README.md).
 
 ```sh
 # Run all tests
-pytest
+uv run python -m pytest
 
 # Run specific test file
-pytest tests/unit/test_config.py
+uv run python -m pytest tests/unit/test_models.py
 
-# Run with coverage
-pytest --cov=pyqenc --cov-report=html
-
-# Run only unit tests
-pytest tests/unit/
-
-# Run only integration tests
-pytest tests/integration/
+# Run only unit / integration tests
+uv run python -m pytest tests/unit/
+uv run python -m pytest tests/integration/
 ```
 
-### Linting
-
-```sh
-# Check code style
-ruff check .
-
-# Auto-fix issues
-ruff check --fix .
-```
+For any e2e run that includes encoding, always pass `--strategies "h265*+ultrafast"` — slow presets turn a CRF search on a minutes-long clip into hours.
 
 ## Architecture Overview
+
+Canonical documentation lives in [docs/architecture.md](docs/architecture.md); the summary:
 
 ### Pipeline Phases
 
 The pipeline follows a phased architecture where each phase:
 
-- Has clear inputs and outputs.
+- Extends the `Phase` base class (`pyqenc/phase.py`), declares dependencies via `DEPENDS_ON`, and is wired by the phase registry.
 - Can be executed independently via CLI subcommands.
-- Recovers its state from own sidecar and on-disk artifacts.
+- Recovers its state from its own sidecar and on-disk artifacts (recovery is presence-based: a present non-`.tmp` file is complete).
 - Produces artifacts in the working directory.
 
 #### Phase Order:
 
-0. **Job**: starting point for all runs, ensures we are working with expected source and detects black borders.
-1. **Extraction**: Extract video/audio streams.
-2. **Audio**: Process audio with day/night normalization and different downmixing strategies.
-3. **Chunking**: Split video stream into scene-based chunks.
-4. **Optimization** (optional): Test strategies to find the optimal one.
-5. **Encoding**: Encode chunks with CRF adjustment to meet quality targets per scene.
-6. **Merge**: Concatenate winning encoded chunks into the final video streams.
-7. To merge video and audio streams is on the end-user, as we don't know what exactly he wants. Current include/exclude/keep patterns are not clear enough to make the decision.
+0. **Job**: starting point for all runs — source identity, work dir, config hand-off.
+1. **Extraction**: enumerate source streams, extract container artifacts (subtitles, chapters, attachments, timestamps).
+2. **Probe**: resolve the slow video facet (frame count, crop detection).
+3. **Audio**: process audio through configurable filter chains (normalization, downmixing).
+4. **Chunking**: split the video stream into scene-based chunks.
+5. **Optimization** (optional): test strategies to find the optimal one.
+6. **Encoding**: encode chunks with quality-targeted CRF search per chunk.
+7. **Merge**: concatenate winning encoded chunks; final container assembly.
+   - Merging video and audio streams is left to the end-user, as we don't know what exactly they want.
+- **Measure**: a standalone subcommand for quality measurement outside the pipeline.
 
 ### Key Design Principles
 
@@ -241,20 +242,19 @@ This approach supports:
 ### Adding a New Quality Metric
 
 1. Update `pyqenc/quality.py` to support the new metric via MetricInfo. Mind the normalization
-2. Add metric calculation in quality evaluator. This is currently head-ache, especially for the graph.
+2. Add metric calculation in the quality evaluator (`pyqenc/utils/visualization.py`). This is currently head-ache, especially for the graph.
 3. Add tests for the new metric
 
 ### Adding a New Phase
 
 Shouldn't be required, but just in case:
 
-1. Create phase module in `pyqenc/phases/`
-2. Implement phase function with standard signature
-3. Add phase to `Phase` enum in `orchestrator.py`
-4. Add phase execution method in `PipelineOrchestrator`
-5. Add CLI subcommand in `cli.py`
-6. Add API function in `api.py`
-7. Write tests for the phase
+1. Create the phase module in `pyqenc/phases/`, subclassing `Phase[YourPhaseResult]`
+2. Implement the contract hooks: `_recover()`, `_execute()`, `_make_result()` (see `pyqenc/phase.py` docstrings; optional hooks as needed)
+3. Wire it in `_build_registry()` (`pyqenc/phase.py`): construction order + `DEPENDS_ON` declarations
+4. Add CLI subcommand in `cli.py`
+5. Add API function in `api.py`
+6. Write tests for the phase
 
 ## Testing Guidelines
 
@@ -262,7 +262,7 @@ Shouldn't be required, but just in case:
 
 - Test individual functions and classes in isolation
 - Mock external dependencies (FFmpeg, file I/O)
-- Focus on logic and edge cases
+- Focus on observable behavior, not internal state; each test guards a specific bug condition
 - Fast execution (< 1 second per test)
 - Explicitly mark long tests with `slow`
 
@@ -282,7 +282,7 @@ Shouldn't be required, but just in case:
 
 ### Test Fixtures
 
-- Use sample videos in `samples/` directory (post links of videos for other devs reuse; videos are not to be included into the repo)
+- Sample video links live in `samples/SAMPLES.md` (videos are not to be included into the repo)
 - Create reusable fixtures in `tests/fixtures/`
 - Keep test data small (< 10 MB)
 
@@ -299,12 +299,13 @@ Shouldn't be required, but just in case:
 
 - `README.md`: User-facing documentation.
 - `CONTRIBUTING.md`: Developer documentation (this file).
-- `docs/**`: Architecture diagrams and design decisions.
-- `.kiro/**`: Specs that were used to work with AWS Kiro IDE.
+- `docs/**`: Architecture diagrams and design decisions. `docs/architecture.md` is the canonical architecture description.
+- `.kiro/steering/**`: Living project rules (coding standards, commands, environment notes).
+- `.kiro/specs/**`: Design specs and historical decision records.
 
 ### Architecture Documentation
 
-See `docs/architecture.md` for:
+See [docs/architecture.md](docs/architecture.md) for:
 
 - System architecture diagrams
 - Component interactions
@@ -322,6 +323,8 @@ Before adding a new dependency:
 3. **Consider alternatives**: Are there lighter alternatives?
 4. **Document**: Add to this file with justification
 
+Routine `uv lock --upgrade` stays within current majors; taking a NEW major of any dependency is a deliberately reviewed pass (see TODO.md).
+
 ### Approved Dependencies
 
 #### Core:
@@ -329,15 +332,18 @@ Before adding a new dependency:
 - `alive-progress`: Progress bars (chosen for aesthetics and printing support over more functional `tqdm`).
 - `matplotlib`: Plotting for quality metrics
 - `pandas`: Data analysis for metrics
-- `pydantic`: Configuration validation
+- `pydantic`: Configuration validation and sidecar models
 - `psutil`: Process management and priority control
 - `pyyaml`: YAML configuration parsing
+- `scenedetect-headless`: Scene detection for chunking
 
 #### Development:
 
 - `pytest`: Testing framework
 - `pytest-asyncio`: Async test support
-- `ruff`: Linting and formatting
+- `hypothesis`: Property-based tests
+- `debugpy`: Debugger support
+- `ruff`: Linting (check only — `ruff format` is not used; the house style has intentional vertical alignment)
 - `uv`: Project and package management
 - `ty`: Type checking (`mypy` replacement)
 
@@ -349,7 +355,7 @@ Before adding a new dependency:
 ## Release Process
 
 1. **Update version** in `pyqenc/__init__.py`
-2. **Run full test suite**: `pytest`
+2. **Run the three gates** (ruff, ty, pytest — all must pass)
 3. **Build package**: `uv build`
 4. **Test installation**: `uv pip install dist/*.whl`
 5. **Create GitHub release**
