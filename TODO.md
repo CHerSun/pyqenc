@@ -804,7 +804,18 @@ band).
 
 ---
 
-## Last known = 84
+## 85. Exhausted-search log message is missing the limiter annotation
+
+The success path logs the limiter: "success ✅ with CRF 11.5 after 3 attempts —
+limited by vmaf_median". The exhaustion path ("CRF search space exhausted for
+chunk ... after N attempts — accepting best attempt (CRF=...)") has no such
+annotation. Add the same "limited by {metric_stat}" there — the worst /
+constraining metric of the accepted best attempt (find_worst_target over the
+best attempt's metrics, exactly like the success path computes it).
+
+---
+
+## Last known = 85
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

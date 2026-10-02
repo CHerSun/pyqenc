@@ -7,6 +7,7 @@ import os
 import shutil
 import signal
 import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -92,6 +93,59 @@ def _parse_cleanup_level(cleanup_value: str | None) -> CleanupLevel:
         return CleanupLevel.ALL
     raise argparse.ArgumentTypeError(
         f"Invalid --cleanup value '{cleanup_value}'. Expected no argument or 'all'."
+    )
+
+
+_QUALITY_PAIR_SEPARATORS: tuple[str, ...] = (":", "..", "-")
+
+
+def _parse_quality_override(quality_str: str | None) -> tuple[Decimal, Decimal] | None:
+    """Parse the ``-q/--quality`` value into canonical ``(lower, upper)`` bounds.
+
+    Accepts a single decimal value (``"18"`` → the fixed point ``[18, 18]``)
+    or a pair separated by ``':'``, ``'-'`` or ``'..'`` (``"18:24"``,
+    ``"18-24"``, ``"18..24"``).  Input order is free — the pair is normalised
+    to ``(min, max)`` here; the codec's own direction convention decides
+    meaning later, at :func:`pyqenc.app_config._effective_codec`.
+
+    Args:
+        quality_str: Raw CLI value, or ``None`` when the flag was not given.
+
+    Returns:
+        The canonical ``(lower, upper)`` bounds, or ``None`` when the flag
+        was not given.
+
+    Raises:
+        ValueError: If the value is empty or not a decimal value / pair.
+    """
+    if quality_str is None:
+        return None
+    text = quality_str.strip()
+    if not text:
+        raise ValueError(
+            "Empty --quality value is not allowed. "
+            "Use a single value ('18') or a pair ('18:24')."
+        )
+    try:
+        value = Decimal(text)
+        return (value, value)
+    except InvalidOperation:
+        pass
+    for separator in _QUALITY_PAIR_SEPARATORS:
+        if separator not in text:
+            continue
+        left, right = (part.strip() for part in text.split(separator, 1))
+        try:
+            lower, upper = Decimal(left), Decimal(right)
+        except InvalidOperation:
+            break
+        if lower > upper:
+            lower, upper = upper, lower
+        return (lower, upper)
+    raise ValueError(
+        f"Invalid --quality value '{quality_str}'. "
+        f"Expected a single decimal value ('18') or a pair separated by "
+        f"':', '-' or '..' ('18:24')."
     )
 
 
@@ -247,6 +301,21 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "-q", "--quality",
+        type=str,
+        default=None,
+        metavar="V",
+        dest="quality",
+        help=(
+            "Quality knob override applied to every matched strategy. "
+            "A single value ('18') pins the knob — a fixed-quality run with the "
+            "per-chunk search disabled. A pair ('18:24', '18-24', '18..24') "
+            "constrains the search band; input order is free, each codec's own "
+            "direction convention decides meaning. Replaces profile-level "
+            "quality_range (precedence: CLI > profile > codec bounds)."
+        ),
+    )
+    parser.add_argument(
         "--no-optimize",
         action="store_true",
         dest="no_optimize",
@@ -282,6 +351,62 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
 # Config assembly helper
 # ---------------------------------------------------------------------------
 
+def _validate_resolved_strategies(
+    config:           AppConfig,
+    quality_override: tuple[Decimal, Decimal] | None,
+) -> None:
+    """Loud post-resolution exits over the resolved strategy set.
+
+    Two structural rules, both checked before any phase executes:
+
+    - **Uniform labels under -q** — one shared number must never be silently
+      reinterpreted per codec; without ``-q`` mixed labels stay legal (each
+      search runs per strategy over its own range).
+    - **No mixed fixed/searched sets** — a collapsed (single-point) range
+      among ranged strategies voids the size-comparison assumptions of
+      optimization; all strategies must be fixed or all searched.
+
+    Args:
+        config:           Assembled config with strategies already resolved.
+        quality_override: The parsed ``-q`` bounds, or ``None``.
+
+    Raises:
+        ValueError: On a label mix under ``-q``, or a mixed fixed/searched set.
+    """
+    strategies = config.encoding.resolved_strategies
+
+    if quality_override is not None:
+        labels = {s.codec.quality_label for s in strategies}
+        if len(labels) > 1:
+            listing = ", ".join(
+                f"{s.display_name()}={s.codec.quality_label}" for s in strategies
+            )
+            raise ValueError(
+                f"--quality shares one value across strategies, but the matched "
+                f"strategies use different quality labels: {listing}. "
+                f"A shared number would be silently reinterpreted per codec; "
+                f"use --strategies to select a single label family."
+            )
+
+    collapsed = [
+        s.display_name() for s in strategies
+        if s.codec.quality_better == s.codec.quality_worse
+    ]
+    ranged = [
+        s.display_name() for s in strategies
+        if s.codec.quality_better != s.codec.quality_worse
+    ]
+    if collapsed and ranged:
+        raise ValueError(
+            f"Mixed fixed and searched strategies: fixed (single-point range) "
+            f"[{', '.join(collapsed)}], searched (ranged) "
+            f"[{', '.join(ranged)}]. All strategies must be fixed (every range "
+            f"collapsed, e.g. via -q <value>) or all searched — mixed sets void "
+            f"the size-comparison assumptions of optimization. Adjust "
+            f"--strategies or the profile quality_range settings."
+        )
+
+
 def _build_config(args: argparse.Namespace) -> AppConfig:
     """Load app config and apply all CLI overrides present in *args*.
 
@@ -292,6 +417,12 @@ def _build_config(args: argparse.Namespace) -> AppConfig:
     Returns:
         Fully assembled ``AppConfig`` with CLI overrides applied and strategies
         resolved.
+
+    Raises:
+        ValueError: If any override value is invalid (unknown profile, quality
+            override outside a codec's range or off its granularity grid,
+            mixed quality labels under ``-q``, or a mixed fixed/searched
+            strategy set).
     """
     config = load_app_config()
 
@@ -316,6 +447,10 @@ def _build_config(args: argparse.Namespace) -> AppConfig:
     if strategies is not None:
         config.encoding.strategies = strategies
 
+    quality_override = _parse_quality_override(getattr(args, "quality", None))
+    if quality_override is not None:
+        config.encoding.quality_range_override = quality_override
+
     if getattr(args, "no_optimize", False):
         config.encoding.optimize = False
 
@@ -332,6 +467,8 @@ def _build_config(args: argparse.Namespace) -> AppConfig:
 
     # Re-resolve strategies so resolved_strategies reflects all overrides.
     config.encoding.resolve(config.codecs, config.profiles)
+
+    _validate_resolved_strategies(config, quality_override)
 
     return config
 
@@ -446,7 +583,11 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         logger.critical(f"Invalid crop parameters: {e}")
         return 1
 
-    config  = _build_config(args)
+    try:
+        config = _build_config(args)
+    except ValueError as e:
+        logger.critical(f"Invalid configuration: {e}")
+        return 1
     execute = args.execute
     cleanup = _parse_cleanup_level(args.cleanup)
 
@@ -501,7 +642,11 @@ def _cmd_extract(args: argparse.Namespace) -> int:
         logger.critical(f"Invalid crop parameters: {e}")
         return 1
 
-    config  = _build_config(args)
+    try:
+        config = _build_config(args)
+    except ValueError as e:
+        logger.critical(f"Invalid configuration: {e}")
+        return 1
     cleanup = _parse_cleanup_level(args.cleanup)
 
     try:
@@ -537,7 +682,11 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
         logger.critical(f"Invalid crop parameters: {e}")
         return 1
 
-    config  = _build_config(args)
+    try:
+        config = _build_config(args)
+    except ValueError as e:
+        logger.critical(f"Invalid configuration: {e}")
+        return 1
     cleanup = _parse_cleanup_level(args.cleanup)
 
     try:
@@ -573,7 +722,11 @@ def _cmd_encode(args: argparse.Namespace) -> int:
         logger.critical(f"Invalid crop parameters: {e}")
         return 1
 
-    config  = _build_config(args)
+    try:
+        config = _build_config(args)
+    except ValueError as e:
+        logger.critical(f"Invalid configuration: {e}")
+        return 1
     cleanup = _parse_cleanup_level(args.cleanup)
 
     try:
@@ -603,7 +756,11 @@ def _cmd_audio(args: argparse.Namespace) -> int:
     logger.info("Starting audio processing")
     logger.info(f"Source: {args.source}")
 
-    config  = _build_config(args)
+    try:
+        config = _build_config(args)
+    except ValueError as e:
+        logger.critical(f"Invalid configuration: {e}")
+        return 1
     cleanup = _parse_cleanup_level(args.cleanup)
 
     try:
@@ -638,7 +795,11 @@ def _cmd_merge(args: argparse.Namespace) -> int:
         logger.critical(f"Invalid crop parameters: {e}")
         return 1
 
-    config  = _build_config(args)
+    try:
+        config = _build_config(args)
+    except ValueError as e:
+        logger.critical(f"Invalid configuration: {e}")
+        return 1
     cleanup = _parse_cleanup_level(args.cleanup)
 
     try:

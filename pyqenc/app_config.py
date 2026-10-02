@@ -41,6 +41,7 @@ from pyqenc.models import (
     QualityTarget,
     Strategy,
     _coerce_decimal_pair,
+    quality_alignment_error,
 )
 from pyqenc.utils.naming import is_filesystem_safe_name
 
@@ -187,6 +188,12 @@ class EncodingConfig(BaseModel):
         concurrency:        Maximum concurrent encoding processes.
         optimize_tolerance: Tolerance percentage for strategy selection.
         visual_hash:        Whether to display emoji visual hash in chunk logs.
+        quality_range_override: CLI-only quality-range override (``-q/--quality``)
+                            as canonical ``(lower, upper)`` bounds — never part
+                            of the YAML config schema; applied by ``_build_config``
+                            before the strategy re-resolve. Replaces any
+                            profile-level ``quality_range`` (precedence CLI >
+                            profile > codec bounds). ``None`` = no override.
     """
 
     targets:            list[str]
@@ -195,6 +202,22 @@ class EncodingConfig(BaseModel):
     concurrency:        int
     optimize_tolerance: float
     visual_hash:        bool
+    quality_range_override: tuple[Decimal, Decimal] | None = None
+
+    @field_validator("quality_range_override", mode="before")
+    @classmethod
+    def _coerce_quality_range_override(
+        cls, v: tuple | list | None,
+    ) -> tuple[Decimal, Decimal] | None:
+        """Coerce the override bounds to ``Decimal``, normalised to (lower, upper).
+
+        Direction-agnostic storage: each codec's own convention (reversed for
+        VBR-style codecs) is applied later, at ``_effective_codec``.
+        """
+        if v is None:
+            return None
+        first, second = _coerce_decimal_pair(v)
+        return (first, second) if first <= second else (second, first)
 
     # Private resolved caches — not persisted, populated by resolve().
     _resolved_targets:    list[QualityTarget] | None = PrivateAttr(default=None)
@@ -249,7 +272,9 @@ class EncodingConfig(BaseModel):
         all_strategies: list[Strategy] = []
         for pattern in self.strategies:
             all_strategies.extend(
-                _expand_strategy_pattern(pattern, codecs, profiles)
+                _expand_strategy_pattern(
+                    pattern, codecs, profiles, self.quality_range_override,
+                )
             )
 
         # Deduplicate by (preset, profile), retaining first occurrence.
@@ -288,6 +313,25 @@ class EncodingConfig(BaseModel):
             "resolved_strategies"
         )
         return self._resolved_strategies
+
+    @property
+    def fixed_quality(self) -> bool:
+        """Whether the run pins the quality knob: every resolved strategy's
+        effective range is a single point (``quality_better == quality_worse``).
+
+        Derived, never declared or persisted — a collapsed config profile and
+        the ``-q`` override produce the same value here. Re-derived on every
+        read from the resolved strategies.
+
+        Raises:
+            AssertionError: If :meth:`resolve` has not been called yet.
+        """
+        strategies = self.resolved_strategies
+        if not strategies:
+            return False
+        return all(
+            s.codec.quality_better == s.codec.quality_worse for s in strategies
+        )
 
 
 class FilterInstance(BaseModel):
@@ -662,6 +706,7 @@ def _expand_strategy_pattern(
     pattern:  str,
     codecs:   dict[str, CodecConfig],
     profiles: dict[str, ProfileConfig],
+    quality_range_override: tuple[Decimal, Decimal] | None = None,
 ) -> list[Strategy]:
     """Expand a single strategy pattern string into a list of ``Strategy`` objects.
 
@@ -674,10 +719,10 @@ def _expand_strategy_pattern(
     Supported formats:
 
     - ``"h265-aq"``     — specific profile, codec's ``default_preset``
-    - ``"h265*"``       — profile wildcard, each matching codec's ``default_preset``
+    - ``"h265*"``       — profile wildcard, each codec's ``default_preset``
     - ``"h265-aq+slow"``— specific profile, specific preset
     - ``"h265*+slow"``  — profile wildcard, specific preset
-    - ``"h265*+*"``     — profile wildcard, all presets for each codec
+    - ``"h265*+*"``     — profile wildcard, all presets
     - ``"*"``           — all profiles, each codec's ``default_preset``
     - ``"*+*"``         — all profiles, all presets
 
@@ -687,13 +732,17 @@ def _expand_strategy_pattern(
         pattern:  Raw strategy pattern string.
         codecs:   Codec config map.
         profiles: Profile config map (``ProfileConfig`` instances).
+        quality_range_override: Optional CLI ``-q`` override as canonical
+                      ``(lower, upper)`` bounds; validated per matched codec
+                      here, applied by :func:`_effective_codec`.
 
     Returns:
         Expanded list of :class:`~pyqenc.models.Strategy` instances.
 
     Raises:
-        ValueError: If the profile part is empty, no profiles match, or the
-            requested preset is not supported by the codec.
+        ValueError: If the profile part is empty, no profiles match, the
+            requested preset is not supported by the codec, or the override
+            violates the subset / granularity rules of a matched codec.
     """
     # Split on first '+' to get (profile_part, preset_part | None).
     if "+" in pattern:
@@ -730,7 +779,10 @@ def _expand_strategy_pattern(
     result: list[Strategy] = []
     for profile_name in matching_profiles:
         profile_cfg = profiles[profile_name]
-        codec       = _effective_codec(profile_name, profile_cfg, _get_codec(profile_cfg.codec, codecs))
+        codec       = _get_codec(profile_cfg.codec, codecs)
+        if quality_range_override is not None:
+            _validate_override_quality_range(quality_range_override, profile_name, codec)
+        codec = _effective_codec(profile_name, profile_cfg, codec, quality_range_override)
 
         if preset_part is None:
             # No preset specified — use the codec's default_preset.
@@ -763,12 +815,19 @@ def _validate_profile_quality_range(
     profile_range: tuple[Decimal, Decimal],
     codec:         CodecConfig,
 ) -> None:
-    """Raise ``ValueError`` if *profile_range* is not a subset of the codec's range.
+    """Raise ``ValueError`` if *profile_range* is invalid for *codec*.
 
-    Only narrowing is permitted — a profile may restrict the search band but
-    must never extend it beyond the codec's declared bounds.  Direction is
-    inferred from the codec: for CRF/CQ/QP codecs ``better < worse`` (lower
-    is better); for VBR codecs ``better > worse`` (higher is better).
+    Two rules:
+
+    - **Subset**: only narrowing is permitted — a profile may restrict the
+      search band but must never extend it beyond the codec's declared bounds.
+      Direction is inferred from the codec: for CRF/CQ/QP codecs
+      ``better < worse`` (lower is better); for VBR codecs ``better > worse``
+      (higher is better).
+    - **Endpoint alignment**: both endpoints must be exact multiples of the
+      codec's ``quality_granularity`` — the search can attempt an endpoint
+      verbatim, so a misaligned value would violate the encoder-args
+      "already quantized" contract.
 
     Args:
         profile_name:  Profile key, used in the error message.
@@ -776,7 +835,8 @@ def _validate_profile_quality_range(
         codec:         The resolved ``CodecConfig`` the profile references.
 
     Raises:
-        ValueError: If ``profile_range`` exceeds the codec's range in either direction.
+        ValueError: If ``profile_range`` exceeds the codec's range in either
+            direction, or an endpoint is off the granularity grid.
     """
     p_better, p_worse = profile_range
     c_better, c_worse = codec.quality_better, codec.quality_worse
@@ -797,34 +857,123 @@ def _validate_profile_quality_range(
             f"Profile quality_range must be a subset of the codec range (only narrowing is allowed)."
         )
 
+    for endpoint in profile_range:
+        error = quality_alignment_error(
+            endpoint, codec.quality_granularity,
+            f"Profile '{profile_name}' quality_range (codec '{codec.name}')",
+        )
+        if error is not None:
+            raise ValueError(error)
+
+
+def _validate_override_quality_range(
+    override:     tuple[Decimal, Decimal],
+    profile_name: str,
+    codec:        CodecConfig,
+) -> None:
+    """Raise ``ValueError`` if the CLI ``-q`` override is invalid for *codec*.
+
+    The CLI-override sibling of :func:`_validate_profile_quality_range` — the
+    same two rules (subset of the codec range, endpoints on the granularity
+    grid), evaluated per matched profile so a shared ``-q`` value must satisfy
+    every matched codec (across codecs the granularity intersection applies:
+    the coarsest step wins).
+
+    Args:
+        override:     The override as canonical ``(lower, upper)`` bounds.
+        profile_name: Profile key, used in the error message.
+        codec:        The resolved ``CodecConfig`` the profile references.
+
+    Raises:
+        ValueError: If the override exceeds the codec's range in either
+            direction, or an endpoint is off the granularity grid.
+    """
+    o_lower, o_upper = override
+    c_better, c_worse = codec.quality_better, codec.quality_worse
+    c_lower, c_upper = (
+        (c_worse, c_better) if c_better > c_worse else (c_better, c_worse)
+    )
+
+    if o_lower < c_lower or o_upper > c_upper:
+        raise ValueError(
+            f"Quality override [{o_lower}, {o_upper}] for profile '{profile_name}' "
+            f"extends beyond codec '{codec.name}' range [{c_better}, {c_worse}]. "
+            f"The -q override must be a subset of every matched codec's range "
+            f"(only narrowing is allowed)."
+        )
+
+    for endpoint in override:
+        error = quality_alignment_error(
+            endpoint, codec.quality_granularity,
+            f"Quality override (profile '{profile_name}', codec '{codec.name}')",
+        )
+        if error is not None:
+            raise ValueError(error)
+
 
 def _effective_codec(
     profile_name: str,
     profile_cfg:  ProfileConfig,
     codec:        CodecConfig,
+    quality_range_override: tuple[Decimal, Decimal] | None = None,
 ) -> CodecConfig:
-    """Return a ``CodecConfig`` with the profile's quality range applied, if set.
+    """Return a ``CodecConfig`` with the effective quality settings applied.
 
-    When the profile declares no ``quality_range`` the original *codec* is
-    returned unchanged.  When it does, a shallow copy of *codec* is returned
-    with ``quality_range`` replaced by the profile's narrowed range.
+    Range precedence: CLI override (``quality_range_override``, canonical
+    ``(lower, upper)`` bounds re-ordered per the codec's own direction
+    convention) > profile ``quality_range`` (config order, already
+    directional) > codec bounds (returned unchanged, identity).
 
-    Validation is **not** repeated here — it is the caller's responsibility
-    to ensure ``_validate_profile_quality_range`` was already called (which
-    ``AppConfig._resolve_encoding`` guarantees for every profile at load time).
+    Whenever the resulting effective range excludes ``default_quality`` (the
+    search's starting point — nothing else clamps it into the band), the
+    effective codec auto-adjusts it to the nearest range bound and logs the
+    adjustment.  Auto-adjust over a loud exit: the starting point is a hint
+    the search refines; in fixed runs it makes the effective settings object
+    self-consistent with the pinned value.
+
+    Range validation is **not** performed here — it is the caller's
+    responsibility to ensure ``_validate_profile_quality_range`` /
+    ``_validate_override_quality_range`` already ran (which
+    ``AppConfig._resolve_encoding`` and ``_expand_strategy_pattern``
+    guarantee).
 
     Args:
         profile_name: Profile key (unused at runtime; kept for symmetry with validators).
         profile_cfg:  Profile configuration — may carry an optional quality_range.
         codec:        Resolved codec configuration to use as the base.
+        quality_range_override: Optional CLI override as canonical
+                      ``(lower, upper)`` bounds.
 
     Returns:
-        The original *codec* when ``profile_cfg.quality_range`` is ``None``,
-        or a copy with the overridden ``quality_range`` otherwise.
+        The original *codec* when neither override nor profile narrows the
+        range, or a copy with the effective ``quality_range`` (and, when
+        excluded, the adjusted ``default_quality``) otherwise.
     """
-    if profile_cfg.quality_range is None:
+    if quality_range_override is not None:
+        o_lower, o_upper = quality_range_override
+        effective_range = (
+            (o_upper, o_lower) if codec.quality_better > codec.quality_worse
+            else (o_lower, o_upper)
+        )
+    elif profile_cfg.quality_range is not None:
+        effective_range = profile_cfg.quality_range
+    else:
         return codec
-    return codec.model_copy(update={"quality_range": profile_cfg.quality_range})
+
+    updates: dict[str, Decimal | tuple[Decimal, Decimal]] = {
+        "quality_range": effective_range,
+    }
+    lower, upper = min(effective_range), max(effective_range)
+    default_quality = codec.default_quality
+    if default_quality < lower or default_quality > upper:
+        clamped = lower if default_quality < lower else upper
+        updates["default_quality"] = clamped
+        _logger.info(
+            "Codec '%s': default_quality %s lies outside the effective range "
+            "[%s, %s] — adjusted to %s",
+            codec.name, default_quality, effective_range[0], effective_range[1], clamped,
+        )
+    return codec.model_copy(update=updates)
 
 
 def _get_codec(name: str, codecs: dict[str, CodecConfig]) -> CodecConfig:
