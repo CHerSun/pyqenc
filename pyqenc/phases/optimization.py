@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, ClassVar
 from pyqenc.constants import (
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
+    WARNING_SYMBOL,
 )
 from pyqenc.metrics import MetricKey
 from pyqenc.models import (
@@ -150,26 +151,37 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
     # ------------------------------------------------------------------
 
     def _skip_check(self, dry_run: bool) -> OptimizationPhaseResult | None:
-        """All-strategies mode: skip test encodes entirely (no banner).
+        """Skip decision plus the fixed-mode entry (guard, wipe, banner).
 
         The mode decision reads constructor state (config) only. The skip
         path itself needs dependency state for its ``optimization.yaml``
         bookkeeping, so it resolves dependencies itself (memoized — when the
         phase is reached through a dependency chain they have already run).
 
+        The fixed-mode entry is here because ``_skip_check`` is the single
+        always-executed point the template's ``run()`` crosses on BOTH the
+        optimize path and the all-strategies path — the wipe, guard, and
+        banner must fire on every fixed start regardless of mode.
+
         Args:
-            dry_run: When ``True``, skip the ``optimization.yaml`` write.
+            dry_run: When ``True``, skip the ``optimization.yaml`` write and
+                the winner-layer wipe (a dry run changes nothing).
 
         Returns:
             The all-strategies result, a FAILED result when no strategies are
-            configured or a dependency short-circuits, or ``None`` in
-            optimization mode (proceed with the template).
+            configured, a dependency short-circuits, or the cleanup guard
+            stops the run — or ``None`` to proceed with the template.
         """
         strategies = self._config.encoding.resolved_strategies
         if not strategies:
             err = "No strategies configured"
             logger.error(err)
             return self._make_result(PhaseOutcome.FAILED, [], err)
+
+        if self._config.encoding.fixed_quality:
+            entry = self._fixed_mode_entry(dry_run, strategies)
+            if entry is not None:
+                return entry
 
         # All-strategies mode: triggered by the optimize flag being off or a
         # single strategy given (nothing to optimize against).
@@ -180,6 +192,98 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         if dep_result is not None:
             return dep_result
         return self._all_strategies(dry_run)
+
+    def _fixed_mode_entry(
+        self,
+        dry_run:    bool,
+        strategies: list[Strategy],
+    ) -> OptimizationPhaseResult | None:
+        """Every fixed-mode start: cleanup guard, winner wipe, banner (Req 5–7).
+
+        Order matters: the guard hard-stops before any destructive or
+        expensive work; the wipe deletes the winner layer unconditionally
+        (winners re-derive from the attempt workspace during execution);
+        the banner announces what a fixed run does and does not guarantee.
+
+        Args:
+            dry_run:    When ``True``, skip the wipe (a dry run changes nothing).
+            strategies: The resolved strategies (wipe scope, banner content).
+
+        Returns:
+            A FAILED result when a dependency short-circuits or the cleanup
+            guard stops the run; otherwise ``None`` to continue into the
+            mode branch exactly as a searched run would.
+        """
+        dep_result = self._ensure_dependencies(dry_run=dry_run)
+        if dep_result is not None:
+            return dep_result
+        job_result = self._dep_result(JobPhase)
+
+        if job_result.cleanup >= CleanupLevel.INTERMEDIATE:
+            err = (
+                f"Fixed-quality run refuses cleanup level {job_result.cleanup.name} "
+                f"(>= INTERMEDIATE): attempts in encoding/ are the re-derivation "
+                f"substrate for fixed re-runs — cleanup deletes them, and winners "
+                f"alone cannot re-derive after a value change or interruption, so "
+                f"an interrupted run resumed under cleanup would re-encode "
+                f"completed chunks. Re-run without --cleanup."
+            )
+            logger.critical(err)
+            return self._make_result(PhaseOutcome.FAILED, [], err)
+
+        if not dry_run:
+            # Unconditional winner-layer invalidation: no q-value or mode is
+            # persisted for comparison — winners re-derive from attempts.
+            _wipe_encoded_dir(job_result.work_dir, strategies)
+
+        self._log_fixed_quality_banner(strategies)
+        return None
+
+    def _log_fixed_quality_banner(self, strategies: list[Strategy]) -> None:
+        """The fixed-mode WARNING banner (Req 5).
+
+        One prominent block per fixed run on both optimization paths,
+        stating the guarantees: search disabled, sizes compared at
+        *nominally* equal knob (scales not comparable across encoder
+        families), merged-output measurement as the final check.
+        """
+        logger.warning("")
+        logger.warning(
+            "%s FIXED QUALITY MODE — knob pinned (%s)",
+            WARNING_SYMBOL, self._pinned_knob_description(strategies),
+        )
+        logger.warning(
+            "  - per-chunk quality search disabled: every chunk encodes once at the pinned value"
+        )
+        logger.warning(
+            "  - strategy sizes are compared at *nominally* equal knob; knob scales "
+            "are NOT comparable across encoder families (h264 CRF ≠ h265 CRF ≠ AV1 CRF)"
+        )
+        if len(strategies) > 1:
+            logger.warning(
+                "  - every surviving strategy will fully encode the video"
+            )
+        logger.warning(
+            "  - merged-output measurement remains the final quality check"
+        )
+        logger.warning("")
+
+    @staticmethod
+    def _pinned_knob_description(strategies: list[Strategy]) -> str:
+        """The pinned knob as ``"CRF=18"``, or a per-strategy listing.
+
+        Uniform label and value collapse to the compact form; anything else
+        (possible without ``-q`` via collapsed config profiles of different
+        codec families) lists each strategy's own pinned knob.
+        """
+        labels = {s.codec.quality_label for s in strategies}
+        values = {s.codec.quality_better for s in strategies}
+        if len(labels) == 1 and len(values) == 1:
+            return f"{labels.pop()}={values.pop()}"
+        return ", ".join(
+            f"{s.display_name()}: {s.codec.quality_label}={s.codec.quality_better}"
+            for s in strategies
+        )
 
     def _log_key_params(self) -> None:
         """Log the strategy list and tolerance (key parameters)."""

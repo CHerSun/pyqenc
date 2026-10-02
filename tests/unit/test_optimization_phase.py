@@ -8,10 +8,13 @@ Covers requirement 7.7:
 - Tolerance of 100% selects all passing strategies.
 """
 
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from pyqenc.app_config import load_app_config
+import pytest
+
+from pyqenc.app_config import AppConfig, load_app_config
 from pyqenc.models import (
     CleanupLevel,
     CropParams,
@@ -53,6 +56,7 @@ def _make_job_phase(
     optimize: bool = True,
     tolerance: float = 5.0,
     force: bool = False,
+    cleanup: CleanupLevel = CleanupLevel.NONE,
 ) -> tuple[JobPhase, Path]:
     """Create and run a JobPhase so that result is populated for downstream phases."""
     src = tmp_path / "source.mkv"
@@ -76,7 +80,7 @@ def _make_job_phase(
         source     = src,
         work_dir   = work_dir,
         force      = force,
-        cleanup    = CleanupLevel.NONE,
+        cleanup    = cleanup,
         no_metrics = True,
         collector  = MagicMock(),
     )
@@ -90,6 +94,7 @@ def _make_phase(
     optimize: bool = True,
     tolerance: float = 5.0,
     force: bool = False,
+    cleanup: CleanupLevel = CleanupLevel.NONE,
 ) -> tuple[OptimizationPhase, Path]:
     """Create an OptimizationPhase with pre-run Job/Probe/Chunking deps wired in.
 
@@ -106,7 +111,10 @@ def _make_phase(
     from pyqenc.phases.probe import ProbePhase as _PP
     from pyqenc.phases.probe import ProbePhaseResult
 
-    job, work_dir = _make_job_phase(tmp_path, strategies, optimize=optimize, tolerance=tolerance, force=force)
+    job, work_dir = _make_job_phase(
+        tmp_path, strategies, optimize=optimize, tolerance=tolerance,
+        force=force, cleanup=cleanup,
+    )
     config = job._config  # already resolved AppConfig
     phases: PhaseRegistry = {_JP: job}
 
@@ -505,4 +513,239 @@ class TestPairLedger:
         assert [a.state for a in recovery2.artifacts] == [ArtifactState.COMPLETE]
         assert recovery2.pending is False
         assert recovery2.artifacts[0].payload.crf == Decimal(20)
+
+
+
+# ---------------------------------------------------------------------------
+# Fixed-mode entry: cleanup guard, winner wipe, banner (Req 5-7)
+# ---------------------------------------------------------------------------
+
+from decimal import Decimal
+
+from pyqenc.constants import ENCODED_OUTPUT_DIR
+
+
+def _make_fixed_phase(
+    tmp_path: Path,
+    *,
+    strategy_names: list[str],
+    cleanup: CleanupLevel = CleanupLevel.NONE,
+    optimize: bool = True,
+) -> tuple[OptimizationPhase, Path, AppConfig]:
+    """An OptimizationPhase harness whose config pins the knob via -q semantics.
+
+    The override is applied exactly as ``_build_config`` applies it: assigned
+    on the config, then strategies re-resolved — ``fixed_quality`` derives
+    True for every matched strategy.
+    """
+    from pyqenc.phases.chunking import ChunkingPhase as _CP
+    from pyqenc.phases.chunking import ChunkingPhaseResult
+    from pyqenc.phases.job import JobPhase as _JP
+    from pyqenc.phases.probe import ProbePhase as _PP
+    from pyqenc.phases.probe import ProbePhaseResult
+
+    config = _APP_CONFIG.model_copy(deep=True)
+    config.encoding.strategies = strategy_names
+    config.encoding.quality_range_override = (Decimal("18"), Decimal("18"))
+    config.encoding.optimize = optimize
+    config.encoding.resolve(config.codecs, config.profiles)
+    assert config.encoding.fixed_quality, "harness must derive a fixed run"
+
+    src = tmp_path / "source.mkv"
+    src.write_bytes(b"\x00" * 1024)
+    work_dir = tmp_path / "work"
+
+    job = JobPhase(
+        config, {},
+        source     = src,
+        work_dir   = work_dir,
+        force      = False,
+        cleanup    = cleanup,
+        no_metrics = True,
+        collector  = MagicMock(),
+    )
+    job.run(dry_run=False)
+    phases: PhaseRegistry = {_JP: job}
+
+    probe = _PP(config, phases, collector=MagicMock(), crop_params=None)
+    probe.result = ProbePhaseResult(outcome=PhaseOutcome.COMPLETED, message="stub", stream=None)
+    phases[_PP] = probe
+
+    chunking = _CP(config, phases, collector=MagicMock())
+    chunking.result = ChunkingPhaseResult(outcome=PhaseOutcome.COMPLETED, message="stub", chunks=[])
+    phases[_CP] = chunking
+
+    phase = OptimizationPhase(config, phases=phases, collector=MagicMock())
+    return phase, work_dir, config
+
+
+def _seed_encoded_winner(work_dir: Path, strategy: Strategy) -> Path:
+    """Create an ``encoded/<strategy>/`` winner (file + sidecar) to observe wipes."""
+    strategy_dir = work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
+    strategy_dir.mkdir(parents=True, exist_ok=True)
+    winner = strategy_dir / "chunk-001.1920x1080.q18.mkv"
+    winner.write_bytes(b"x" * 32)
+    (strategy_dir / "chunk-001.1920x1080.yaml").write_text("crf: 18\n", encoding="utf-8")
+    return strategy_dir
+
+
+class TestCleanupGuard:
+    """Fixed + cleanup >= INTERMEDIATE hard-stops before any wipe/encode work."""
+
+    @pytest.mark.parametrize("level", [CleanupLevel.INTERMEDIATE, CleanupLevel.ALL])
+    def test_guard_stops_fixed_run(self, tmp_path: Path, level: CleanupLevel) -> None:
+        phase, work_dir, _ = _make_fixed_phase(
+            tmp_path, strategy_names=["h265-aq+slow"], cleanup=level,
+        )
+        seeded = _seed_encoded_winner(work_dir, phase._config.encoding.resolved_strategies[0])
+        result = phase.run(dry_run=False)
+        assert result.outcome is PhaseOutcome.FAILED
+        assert "cleanup" in result.message and "re-derivation substrate" in result.message
+        # The guard fires BEFORE the wipe — the winner layer stays intact.
+        assert seeded.exists()
+
+    def test_guard_passes_fixed_none(self, tmp_path: Path) -> None:
+        phase, work_dir, _ = _make_fixed_phase(
+            tmp_path, strategy_names=["h265-aq+slow"], cleanup=CleanupLevel.NONE,
+        )
+        seeded = _seed_encoded_winner(work_dir, phase._config.encoding.resolved_strategies[0])
+        phase.run(dry_run=False)
+        # No guard failure — the wipe ran instead.
+        assert not seeded.exists()
+
+    def test_guard_never_applies_to_searched_runs(self, tmp_path: Path) -> None:
+        phase, work_dir = _make_phase(
+            tmp_path, [_S1, _S2], optimize=False, force=False,
+            cleanup=CleanupLevel.ALL,
+        )
+        # Search mode with ALL cleanup: no fixed-quality guard may fire (the
+        # phase proceeds to its normal outcome instead of a guard stop).
+        seeded = _seed_encoded_winner(work_dir, _S1)
+        result = phase.run(dry_run=False)
+        assert "cleanup" not in result.message
+        assert seeded.exists()
+
+
+class TestFixedWinnerWipe:
+    """The winner layer is wiped unconditionally on every fixed start (Req 6)."""
+
+    def test_wipe_on_all_strategies_path(self, tmp_path: Path) -> None:
+        # Single fixed strategy + optimize on → all-strategies skip path.
+        phase, work_dir, _ = _make_fixed_phase(
+            tmp_path, strategy_names=["h265-aq+slow"], optimize=True,
+        )
+        seeded = _seed_encoded_winner(work_dir, phase._config.encoding.resolved_strategies[0])
+        result = phase.run(dry_run=False)
+        assert result.outcome is PhaseOutcome.REUSED  # all-strategies skip result
+        assert not seeded.exists()
+
+    def test_wipe_on_optimize_path(self, tmp_path: Path) -> None:
+        # Two fixed strategies + optimize on → the test-encode path. The
+        # stubbed chunking has no chunks, so recovery fails AFTER the entry
+        # block already ran — the wipe and banner are what must have fired.
+        phase, work_dir, _ = _make_fixed_phase(
+            tmp_path, strategy_names=["h265-aq+slow", "h264+slow"], optimize=True,
+        )
+        strategies = phase._config.encoding.resolved_strategies
+        seeded = [_seed_encoded_winner(work_dir, s) for s in strategies]
+        result = phase.run(dry_run=False)
+        assert result.outcome is PhaseOutcome.FAILED
+        assert "No chunks" in result.message
+        assert not any(d.exists() for d in seeded)
+
+    def test_wipe_never_on_searched_runs(self, tmp_path: Path) -> None:
+        phase, work_dir = _make_phase(tmp_path, [_S1], optimize=False, force=False)
+        seeded = _seed_encoded_winner(work_dir, _S1)
+        phase.run(dry_run=False)
+        assert seeded.exists()
+
+    def test_wipe_skipped_on_dry_run(self, tmp_path: Path) -> None:
+        phase, work_dir, _ = _make_fixed_phase(
+            tmp_path, strategy_names=["h265-aq+slow"], optimize=False,
+        )
+        seeded = _seed_encoded_winner(work_dir, phase._config.encoding.resolved_strategies[0])
+        phase.run(dry_run=True)
+        # A dry run changes nothing — the wipe waits for the executing run.
+        assert seeded.exists()
+
+
+class TestFixedQualityBanner:
+    """One prominent WARNING banner per fixed run; never on searched runs (Req 5)."""
+
+    def _banner_count(self, caplog: pytest.LogCaptureFixture) -> int:
+        return caplog.text.count("FIXED QUALITY MODE")
+
+    def test_banner_single_strategy(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.WARNING, logger="pyqenc.phases.optimization"):
+            phase, _, _ = _make_fixed_phase(tmp_path, strategy_names=["h265-aq+slow"])
+            phase.run(dry_run=False)
+        assert self._banner_count(caplog) == 1
+        assert "CRF=18" in caplog.text
+        assert "per-chunk quality search disabled" in caplog.text
+        assert "NOT comparable across encoder families" in caplog.text
+        # Single strategy: no every-survivor-encodes line.
+        assert "fully encode the video" not in caplog.text
+
+    def test_banner_multi_strategy_heads_up(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="pyqenc.phases.optimization"):
+            phase, _, _ = _make_fixed_phase(
+                tmp_path, strategy_names=["h265-aq+slow", "h264+slow"],
+            )
+            phase.run(dry_run=True)
+        assert self._banner_count(caplog) == 1
+        assert "every surviving strategy will fully encode the video" in caplog.text
+
+    def test_banner_emitted_at_warning_level(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        phase, _, _ = _make_fixed_phase(tmp_path, strategy_names=["h265-aq+slow"])
+        phase.run(dry_run=False)
+        banner_records = [r for r in caplog.records if "FIXED QUALITY MODE" in r.getMessage()]
+        assert banner_records and all(r.levelno == logging.WARNING for r in banner_records)
+
+    def test_no_banner_on_searched_runs(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        phase, _ = _make_phase(tmp_path, [_S1, _S2], optimize=False, force=False)
+        phase.run(dry_run=False)
+        assert self._banner_count(caplog) == 0
+
+    def test_banner_lists_per_strategy_knobs_when_not_uniform(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Collapsed config profiles of different values (no -q): the banner
+        # falls back to a per-strategy pinned-knob listing.
+        from pyqenc.phases.chunking import ChunkingPhase as _CP
+        from pyqenc.phases.chunking import ChunkingPhaseResult
+        from pyqenc.phases.probe import ProbePhase as _PP
+        from pyqenc.phases.probe import ProbePhaseResult
+
+        config_dict = _APP_CONFIG.model_dump()
+        config_dict["profiles"]["h265-aq"]["quality_range"] = [18.0, 18.0]
+        config_dict["profiles"]["h264"]["quality_range"] = [20.0, 20.0]
+        config_dict["encoding"]["strategies"] = ["h265-aq", "h264"]
+        config = AppConfig.model_validate(config_dict)
+        assert config.encoding.fixed_quality
+
+        src = tmp_path / "source.mkv"
+        src.write_bytes(b"\x00" * 1024)
+        job = JobPhase(
+            config, {}, source=src, work_dir=tmp_path / "work", force=False,
+            cleanup=CleanupLevel.NONE, no_metrics=True, collector=MagicMock(),
+        )
+        job.run(dry_run=False)
+        phases: PhaseRegistry = {JobPhase: job}
+        probe = _PP(config, phases, collector=MagicMock(), crop_params=None)
+        probe.result = ProbePhaseResult(outcome=PhaseOutcome.COMPLETED, message="stub", stream=None)
+        phases[_PP] = probe
+        chunking = _CP(config, phases, collector=MagicMock())
+        chunking.result = ChunkingPhaseResult(outcome=PhaseOutcome.COMPLETED, message="stub", chunks=[])
+        phases[_CP] = chunking
+
+        phase = OptimizationPhase(config, phases=phases, collector=MagicMock())
+        with caplog.at_level(logging.WARNING, logger="pyqenc.phases.optimization"):
+            phase.run(dry_run=False)
+        assert "knob pinned (h265-aq+slow: CRF=18.0, h264+veryslow: CRF=20.0)" in caplog.text
 

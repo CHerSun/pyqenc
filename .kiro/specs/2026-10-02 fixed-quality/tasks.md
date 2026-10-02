@@ -34,7 +34,7 @@ three gates green and searched runs byte-identical. Requirement ids reference
 
 ## Tasks
 
-- [ ] 1. Config layer: `-q` override, validation, derived mode (Req 1, 2, 3, 4)
+- [x] 1. Config layer: `-q` override, validation, derived mode (Req 1, 2, 3, 4)
   - `EncodingConfig`: add `quality_range_override: tuple[Decimal, Decimal] | None
     = None` (CLI-only field, never in YAML; assignment triggers the existing
     resolved-cache invalidation) and a derived `fixed_quality: bool` property —
