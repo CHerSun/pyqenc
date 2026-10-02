@@ -84,7 +84,7 @@ three gates green and searched runs byte-identical. Requirement ids reference
     never on searched runs; banner emitted once per fixed run with both
     strategy-count variants; no banner on searched runs
 
-- [ ] 3. `measure_attempts` seam on the shared encoder (Req 9.2, 9.3)
+- [x] 3. `measure_attempts` seam on the shared encoder (Req 9.2, 9.3)
   - `ChunkEncoder`: add keyword-only `measure_attempts: bool = True` alongside
     the existing construction params; thread from `_make_encoder` call sites —
     optimization passes `measure_attempts=True` explicitly (Req 8.1), encoding

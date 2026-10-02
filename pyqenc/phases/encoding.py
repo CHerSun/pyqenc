@@ -930,6 +930,11 @@ class ChunkEncoder:
         encode run, or carried from the attempt sidecar on a cache hit /
         re-measure; 0 = could not be determined).  Feeds the winner sidecar
         and the result's frame_count."""
+        all_metrics_by_path: dict[Path, dict[str, float]] = {}
+        """Attempt file path → its full measured metrics (every metric, not
+        target-filtered) — same data the attempt sidecar persists.  Feeds the
+        winner result sidecar, whose metrics contract is "all measured
+        metric values of the winning attempt"."""
         _any_real_work: bool                       = False
 
         while True:
@@ -992,6 +997,7 @@ class ChunkEncoder:
                         all_sidecar_metrics: dict[str, float] = {
                             k: float(v) for k, v in sidecar.get("metrics", {}).items()
                         }
+                        all_metrics_by_path[existing.path] = all_sidecar_metrics
                         targets_set_reused = {f"{t.metric}_{t.statistic}" for t in quality_targets}
                         metrics_dict: dict[str, float] = {
                             k: v for k, v in all_sidecar_metrics.items() if k in targets_set_reused
@@ -1153,6 +1159,7 @@ class ChunkEncoder:
             # Record the final path's count (post resolution-correction rename)
             # and write the per-attempt metrics sidecar atomically.
             frame_counts[output_file] = attempt_frames
+            all_metrics_by_path[output_file] = all_metrics
             _write_metrics_sidecar(
                 output_file, attempt_targets_met, current_q, all_metrics,
                 self._metrics_sampling, attempt_frames,
@@ -1221,7 +1228,7 @@ class ChunkEncoder:
                 resolution      = final_attempt.resolution,
                 winning_attempt = final_attempt.path,
                 crf             = search.best_quality,
-                metrics         = search.best_metrics or {},
+                metrics         = all_metrics_by_path.get(final_attempt.path, {}),
                 frame_count     = frame_counts.get(final_attempt.path, 0),
                 targets_met     = True,
             )
@@ -1241,7 +1248,7 @@ class ChunkEncoder:
                 resolution      = best_fail_attempt.resolution,
                 winning_attempt = best_fail_attempt.path,
                 crf             = search.best_quality,
-                metrics         = search.best_metrics or {},
+                metrics         = all_metrics_by_path.get(best_fail_attempt.path, {}),
                 frame_count     = frame_counts.get(best_fail_attempt.path, 0),
                 targets_met     = False,
             )

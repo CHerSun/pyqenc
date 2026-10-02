@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, model_serializer
 from pyqenc.audio.chain import ResolvedChain, chain_signature
 from pyqenc.models import (
     CropParams,
+    QualityTarget,
 )
 from pyqenc.stream_model import DecimalYaml, LongPathYaml
 from pyqenc.utils.yaml_utils import load_model, save_model
@@ -142,10 +143,15 @@ class StrategyTestResult(BaseModel):
     Attributes:
         strategy:    Display name of the strategy that was tested (e.g. ``'h265-aq+slow'``).
         total_size:  Total encoded size across all test chunks in bytes.
+        metrics:     Min-across-test-chunks value for every measured
+                     ``(metric, statistic)`` key — the fixed-mode dominance and
+                     anchor inputs. Empty when nothing was measured (failed
+                     strategies, or files written before this field existed).
     """
 
     strategy:   str
     total_size: int
+    metrics:    dict[str, float] = Field(default_factory=dict)
 
 
 class OptimizationParams(BaseModel):
@@ -155,6 +161,11 @@ class OptimizationParams(BaseModel):
     per-strategy test results, the tolerance used, the selected strategies,
     the quality targets, and the metrics sampling factor active when the last
     run wrote this file.
+
+    Fixed-quality compared runs additionally persist the anchor identity and
+    the synthetic target set (the anchor's min-aggregated metrics) alongside
+    the survivor list in ``selected``; searched runs leave them at their
+    defaults.
 
     Attributes:
         probe:            Probe state (crop + frame count) active when optimization ran.
@@ -170,6 +181,11 @@ class OptimizationParams(BaseModel):
         sampling:          Frame subsampling factor used when test encodes ran.
                           ``None`` for files written before this field was added
                           (treated as unknown — no mismatch triggered).
+        anchor:           The fixed-mode measurement anchor (survivor with the
+                          smallest total test size); ``None`` in searched runs.
+        synthetic_targets: The anchor's min-aggregated metrics as quality
+                          targets — presentation ruler only, never search
+                          goals. Sorted for deterministic serialisation.
     """
 
     probe:            ProbeState | None       = None
@@ -179,6 +195,8 @@ class OptimizationParams(BaseModel):
     selected:         list[str]                = Field(default_factory=list)
     quality_targets:  list[str]                = Field(default_factory=list)
     sampling:         int | None               = None
+    anchor:           str | None               = None
+    synthetic_targets: list[QualityTarget]     = Field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path) -> Self | None:

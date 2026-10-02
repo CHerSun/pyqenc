@@ -35,6 +35,7 @@ from pyqenc.models import (
     CleanupLevel,
     CropParams,
     PhaseOutcome,
+    QualityTarget,
     Strategy,
     targets_as_strings,
 )
@@ -89,10 +90,15 @@ class OptimizationPhaseResult(PhaseResult):
         selected_strategies: The settings subset — strategies selected as
                              optimal (or all strategies in all-strategies
                              mode); consumed by Encoding and Merge.
+        synthetic_targets: The fixed-mode presentation ruler — the anchor's
+                           min-aggregated metrics as quality targets. Empty
+                           in searched runs and uncompared fixed runs;
+                           presentation data only, never selection data.
     """
 
-    winners:            list[Artifact[EncodedChunk]] = field(default_factory=list)
+    winners:             list[Artifact[EncodedChunk]] = field(default_factory=list)
     selected_strategies: list[Strategy]              = field(default_factory=list)
+    synthetic_targets:   list[QualityTarget]         = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +151,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         self._selected_names:    list[str]                         = []
         self._strategy_results:  list[StrategyTestResult]          = []
         self._current_probe:     ProbeState | None                 = None
+        self._anchor_name:       str | None                        = None
+        """The fixed-mode measurement anchor's display name (fixed compared
+        runs only; ``None`` in searched and uncompared runs)."""
+        self._synthetic_targets: list[QualityTarget]               = []
+        """The anchor-derived presentation ruler (fixed compared runs only)."""
 
     # ------------------------------------------------------------------
     # Phase hooks
@@ -305,10 +316,12 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
            ``--force`` (handled in step 1 when forced).
         3. Quality-target / metrics-sampling change → wipe ``encoded/``
            result dirs and treat all cached strategy results as stale.
-        4. All results cached with a differing tolerance → cheap pending work
-           (re-select without re-encoding).
-        5. Build one artifact per strategy result: cached → COMPLETE,
-           still-to-test → ABSENT.
+        4. The per-pair ledger (one ``Artifact[EncodedChunk]`` row per
+           (test chunk, strategy) winning attempt, presence-based) plus the
+           to-test decision: searched mode keys on cached results; fixed
+           mode keys on pair presence (the fixed start wiped the winners —
+           re-promotion via attempt cache-hits is near-free on unchanged q).
+        5. Cached tolerance mismatch → cheap pending re-select (searched only).
 
         Returns:
             The :class:`Recovery` single source of truth.
@@ -377,36 +390,72 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             )
         self._persisted = persisted
 
-        # Step 4 — cached results per strategy + the re-select decision.
+        # Step 4 — the per-pair ledger first (fixed mode derives its to-test
+        # set from pair presence), then the cached-results / to-test decision.
         cached_results: dict[str, StrategyTestResult] = {}
         if persisted is not None:
             for r in persisted.strategy_results:
                 cached_results[r.strategy] = r
         self._cached_results = cached_results
 
-        self._strategies_to_test = [s for s in strategies if s.display_name() not in cached_results]
+        self._test_chunks = self._resolve_test_chunks(persisted)
+        rows = self._pair_ledger(work_dir, strategies)
+        fixed = self._config.encoding.fixed_quality
+
+        if fixed:
+            # Presence-based re-test decision: the fixed start wiped encoded/,
+            # so any strategy with an incomplete test pair re-tests. Attempt
+            # cache-hits (crf-embedded filenames) make an unchanged-q re-test
+            # near-free re-promotion; a q change encodes only the new value —
+            # no q is persisted for comparison (attempts are the substrate).
+            incomplete: set[str] = set()
+            for row in rows:
+                if isinstance(row.payload, EncodedChunk) and row.state != ArtifactState.COMPLETE:
+                    incomplete.add(row.payload.strategy.display_name())
+            self._strategies_to_test = [
+                s for s in strategies if s.display_name() in incomplete
+            ]
+        else:
+            self._strategies_to_test = [
+                s for s in strategies if s.display_name() not in cached_results
+            ]
+
         if (
-            not self._strategies_to_test
+            not fixed
+            and not self._strategies_to_test
             and cached_results
             and persisted is not None
             and persisted.tolerance_pct != tolerance
         ):
             self._tolerance_reapply = True
 
-        # All cached with matching tolerance → current; seed the reused payload.
+        # All cached with nothing to test → current; seed the reused payload.
         if not self._strategies_to_test and cached_results and persisted is not None:
             self._strategy_results = persisted.strategy_results
-            self._selected_names   = persisted.selected or self._apply_tolerance(
-                persisted.strategy_results, tolerance,
-            )
+            if fixed:
+                # Re-select by pruning (tolerance is void in fixed mode) and
+                # re-derive the anchor ruler from the persisted measurements.
+                resolved_names = [s.display_name() for s in strategies]
+                self._selected_names = self._dominance_survivors(persisted.strategy_results)
+                self._anchor_name = self._select_anchor(
+                    persisted.strategy_results, resolved_names, self._selected_names,
+                )
+                anchor_result = next(
+                    (r for r in persisted.strategy_results if r.strategy == self._anchor_name),
+                    None,
+                )
+                self._synthetic_targets = self._synthetic_targets_from(anchor_result)
+            else:
+                self._selected_names = persisted.selected or self._apply_tolerance(
+                    persisted.strategy_results, tolerance,
+                )
 
-        # Step 5 — the per-pair ledger: one Artifact[EncodedChunk] row per
-        # (test chunk, strategy) winning attempt, presence-based via the
-        # shared attempt-recovery machinery.
-        self._test_chunks = self._resolve_test_chunks(persisted)
-        if self._strategies_to_test and not self._test_chunks:
+        # Searched: fatal only when work is actually pending. Fixed:
+        # _recover only runs for compared runs (single-strategy and
+        # optimize-off take the all-strategies skip path) — a compared run
+        # without test chunks cannot prune and always fails loudly.
+        if not self._test_chunks and (self._strategies_to_test or fixed):
             raise RecoveryError("No chunks available from ChunkingPhase")
-        rows = self._pair_ledger(work_dir, strategies)
         if self._tolerance_reapply:
             # Every pair is COMPLETE but the tolerance is stale — cheap
             # re-select work. Settings staleness, not artifact presence:
@@ -467,6 +516,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         opt_yaml   = work_dir / OptimizationPhase.SIDECAR_NAME
         tolerance  = self._config.encoding.optimize_tolerance
         persisted  = self._persisted
+        fixed      = self._config.encoding.fixed_quality
         assert self._current_probe is not None, "_recover populates the probe state before execution"
         crop       = self._current_probe.crop
 
@@ -557,7 +607,10 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                     encoder           = encoder,
                     chunks            = test_chunks,
                     strategies        = strategies_to_test,
-                    quality_targets   = self._config.encoding.resolved_targets,
+                    # Fixed mode presents the test encodes no ruler: config
+                    # targets drive no verdict there, and the anchor's
+                    # synthetic set does not exist until these results do.
+                    quality_targets   = [] if fixed else self._config.encoding.resolved_targets,
                     max_parallel      = self._config.encoding.concurrency,
                     force             = False,
                     collector         = self._collector,
@@ -568,9 +621,15 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             )
             advance(0, AdvanceState.COMPLETE)
 
-        # Derive per-strategy results from encoded output
+        # Derive per-strategy results from encoded output. Fixed mode derives
+        # every strategy fresh from the current disk state (the winners'
+        # result sidecars) — persisted results are never trusted there,
+        # because no q value is recorded to prove them current.
+        result_strategies = (
+            self._config.encoding.resolved_strategies if fixed else strategies_to_test
+        )
         new_results: list[StrategyTestResult] = []
-        for strategy in strategies_to_test:
+        for strategy in result_strategies:
             file_sizes: list[float] = []
             for chunk in test_chunks:
                 encoded = enc_result.encoded_chunks.get(chunk.safe_name(), {}).get(strategy.display_name())
@@ -579,7 +638,48 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             new_results.append(StrategyTestResult(
                 strategy     = strategy.display_name(),
                 total_size    = int(sum(file_sizes)),
+                metrics      = self._aggregate_strategy_metrics(
+                    work_dir, test_chunks, strategy, enc_result.encoded_chunks,
+                ) if fixed else {},
             ))
+
+        resolved_names = [s.display_name() for s in self._config.encoding.resolved_strategies]
+
+        if fixed:
+            # Selection = dominance pruning; anchor = smallest survivor (the
+            # only front member selectable without a quality opinion);
+            # synthetic set = the anchor's min-aggregated metrics.
+            final_results = new_results
+            selected      = self._dominance_survivors(final_results)
+            self._anchor_name = self._select_anchor(final_results, resolved_names, selected)
+            anchor_result = next(
+                (r for r in final_results if r.strategy == self._anchor_name), None,
+            )
+            self._synthetic_targets = self._synthetic_targets_from(anchor_result)
+
+            OptimizationParams(
+                probe             = self._current_probe,
+                test_chunks       = [c.safe_name() for c in test_chunks],
+                strategy_results  = final_results,
+                tolerance_pct     = tolerance,
+                selected          = selected,
+                quality_targets   = current_targets,
+                sampling          = current_sampling,
+                anchor            = self._anchor_name,
+                synthetic_targets = self._synthetic_targets,
+            ).save(opt_yaml)
+
+            self._selected_names   = selected
+            self._strategy_results = final_results
+
+            self._log_fixed_comparison(final_results, selected, self._anchor_name, resolved_names)
+
+            rows = self._pair_ledger(work_dir, self._config.encoding.resolved_strategies)
+            return self._make_result(
+                PhaseOutcome.COMPLETED,
+                [r for r in rows if r.wanted],
+                f"{len(selected)} survivor(s) selected",
+            )
 
         all_results: list[StrategyTestResult] = list(cached_results.values()) + new_results
 
@@ -612,7 +712,13 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> OptimizationPhaseResult:
         """Build the reused result from the cached strategy results stash."""
-        self._log_optimization_summary(self._strategy_results, self._selected_names)
+        if self._config.encoding.fixed_quality:
+            resolved_names = [s.display_name() for s in self._config.encoding.resolved_strategies]
+            self._log_fixed_comparison(
+                self._strategy_results, self._selected_names, self._anchor_name, resolved_names,
+            )
+        else:
+            self._log_optimization_summary(self._strategy_results, self._selected_names)
         return self._make_result(
             PhaseOutcome.REUSED, wanted, "all strategy results reused",
         )
@@ -646,6 +752,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 if isinstance(r.payload, EncodedChunk) and r.state == ArtifactState.COMPLETE
             ],
             selected_strategies = [by_name[n] for n in self._selected_names if n in by_name],
+            synthetic_targets   = list(self._synthetic_targets),
         )
 
     # ------------------------------------------------------------------
@@ -757,6 +864,159 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         return [r.strategy for r in successful if r.total_size <= threshold]
 
+    @staticmethod
+    def _dominates(a: StrategyTestResult, b: StrategyTestResult) -> bool:
+        """Whether *a* Pareto-dominates *b* (the pruning predicate).
+
+        Requires ``size(a) ≤ size(b)``, ``a ≥ b`` on every measured
+        metric-statistic, at least one strict inequality (exact duplicates
+        coexist), and identical non-empty measured key sets on both sides —
+        strategies with missing or partial measurements are never honestly
+        comparable.
+        """
+        if not a.metrics or set(a.metrics) != set(b.metrics):
+            return False
+        if a.total_size > b.total_size:
+            return False
+        if any(a.metrics[k] < b.metrics[k] for k in a.metrics):
+            return False
+        return (
+            a.total_size < b.total_size
+            or any(a.metrics[k] > b.metrics[k] for k in a.metrics)
+        )
+
+    @staticmethod
+    def _dominance_survivors(results: list[StrategyTestResult]) -> list[str]:
+        """Survivor names after Pareto dominance pruning (fixed compared runs).
+
+        Dominated strategies are excluded; every survivor is selected and
+        encoded. Strategies with ``total_size <= 0`` (failed test encodes)
+        are not candidates and are never selected.
+
+        Args:
+            results: Per-strategy test results (any order; survivors return
+                     in input order).
+
+        Returns:
+            Survivor strategy names — the Pareto front.
+        """
+        candidates = [r for r in results if r.total_size > 0]
+        return [
+            r.strategy for r in candidates
+            if not any(
+                OptimizationPhase._dominates(other, r)
+                for other in candidates if other is not r
+            )
+        ]
+
+    @staticmethod
+    def _select_anchor(
+        results:        list[StrategyTestResult],
+        resolved_names: list[str],
+        survivors:      list[str],
+    ) -> str | None:
+        """The measurement anchor: smallest-size survivor with metrics.
+
+        Chosen strictly AFTER pruning — the ruler must never be a dominated
+        (or about-to-be-pruned) size-tied duplicate. The anchor is the only
+        front member selectable without a quality opinion; ties break
+        deterministically by resolved-strategy order. Survivors without
+        measured metrics cannot anchor (the ruler would be empty).
+
+        Args:
+            results:        Per-strategy test results.
+            resolved_names: Strategy names in resolved order (tie-break).
+            survivors:      Pruning survivor names.
+
+        Returns:
+            The anchor's strategy name, or ``None`` when no survivor carries
+            measurements.
+        """
+        order = {name: i for i, name in enumerate(resolved_names)}
+        eligible = [
+            r for r in results
+            if r.strategy in survivors and r.metrics
+        ]
+        if not eligible:
+            return None
+        return min(
+            eligible,
+            key=lambda r: (r.total_size, order.get(r.strategy, len(order))),
+        ).strategy
+
+    @staticmethod
+    def _synthetic_targets_from(anchor: StrategyTestResult | None) -> list[QualityTarget]:
+        """The anchor's aggregated metrics as the synthetic target set.
+
+        Covers every measured ``(metric, statistic)`` — the ruler's breadth is
+        the measurement's breadth, independent of any configured target set.
+        Min-across-test-chunks values match search-mode per-chunk strictness.
+        Presentation data only — never search goals, pass/fail gates, or
+        selection thresholds.
+
+        Args:
+            anchor: The anchor's test result, or ``None`` (empty set).
+
+        Returns:
+            Sorted quality targets mirroring the anchor's metrics.
+        """
+        if anchor is None:
+            return []
+        targets: list[QualityTarget] = []
+        for key, value in sorted(anchor.metrics.items()):
+            metric, statistic = key.rsplit("_", 1)
+            targets.append(QualityTarget(
+                metric=metric, statistic=statistic, value=float(value),
+            ))
+        return targets
+
+    def _aggregate_strategy_metrics(
+        self,
+        work_dir:        Path,
+        test_chunks:     list[VideoStreamChunk],
+        strategy:        Strategy,
+        encoded_chunks:  dict[str, dict[str, EncodedChunk]],
+    ) -> dict[str, float]:
+        """Min-aggregate a strategy's measured metrics across its test winners.
+
+        Reads each winner's result sidecar in ``encoded/<strategy>/`` — the
+        same data the sidecars persist for the winning attempts (all measured
+        metrics, not target-filtered). Missing winners or sidecars simply
+        contribute nothing; a key present on some chunks still aggregates
+        over those chunks.
+
+        Args:
+            work_dir:       Pipeline working directory.
+            test_chunks:    The test-chunk set.
+            strategy:       The strategy being aggregated.
+            encoded_chunks: The encode result map (chunk id -> strategy
+                            display name -> winner payload).
+
+        Returns:
+            ``{metric_statistic: min_across_chunks}``.
+        """
+        from pyqenc.constants import ENCODED_ATTEMPT_NAME_PATTERN
+        from pyqenc.phases.encoding import _encoded_dir, _read_sidecar_yaml
+
+        mins: dict[str, float] = {}
+        for chunk in test_chunks:
+            winner = encoded_chunks.get(chunk.safe_name(), {}).get(strategy.display_name())
+            if winner is None:
+                continue
+            name_match = ENCODED_ATTEMPT_NAME_PATTERN.match(winner.stream.stream.file.path.name)
+            if name_match is None:
+                continue
+            sidecar = _read_sidecar_yaml(
+                _encoded_dir(work_dir, strategy)
+                / f"{name_match.group('chunk_id')}.{name_match.group('resolution')}.yaml"
+            )
+            if sidecar is None:
+                continue
+            for key, value in sidecar.get("metrics", {}).items():
+                measured = float(value)
+                mins[key] = min(mins[key], measured) if key in mins else measured
+        return mins
+
     def _log_optimization_summary(
         self,
         results:  list[StrategyTestResult],
@@ -796,6 +1056,119 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             logger.critical("NO strategies selected (all failed).")
 
         logger.info("")
+
+    def _log_fixed_comparison(
+        self,
+        results:        list[StrategyTestResult],
+        selected:       list[str],
+        anchor_name:    str | None,
+        resolved_names: list[str],
+    ) -> None:
+        """The fixed-mode comparison table: sizes and metric deltas vs the anchor.
+
+        Rows sort by total size ascending; the anchor row shows absolute
+        headline values (the baseline), other rows show signed deltas vs the
+        anchor. Pruned rows name one dominator. The headline set is one
+        statistic per measured metric (median preferred) — full stats live in
+        ``optimization.yaml``.
+
+        Args:
+            results:        Per-strategy test results.
+            selected:       Survivor names (the Pareto front).
+            anchor_name:    The anchor's name, or ``None`` (no measurements).
+            resolved_names: Strategy names in resolved order (dominator pick).
+        """
+        anchor_result = next((r for r in results if r.strategy == anchor_name), None)
+        anchor_size   = anchor_result.total_size if anchor_result is not None else 0
+
+        logger.info("")
+        ruler = (
+            f"{anchor_name} (smallest test size)" if anchor_name is not None
+            else "none — no strategy carried measurements"
+        )
+        logger.info("Fixed-quality comparison — ruler: %s", ruler)
+
+        headline_keys = _headline_metric_keys(
+            [r.metrics for r in results if r.metrics]
+        )
+        name_width  = max((len(r.strategy) for r in results), default=30) + 2
+        header_cells = [
+            f"{'Strategy':<{name_width}}",
+            f"{'Size (MB)':>10}",
+            f"{'vs anchor':>9}",
+        ]
+        if anchor_result is not None:
+            header_cells += [f"{k.replace('_', '-'):>13}" for k in headline_keys]
+        logger.info("  " + "  ".join(header_cells))
+        logger.info("  " + "  ".join([
+            "-" * name_width, "-" * 10, "-" * 9,
+        ] + (["-" * 13] * len(headline_keys) if anchor_result is not None else [])))
+
+        selected_set  = set(selected)
+        dominator_for = self._dominator_map(results, resolved_names)
+
+        for res in sorted(results, key=lambda r: (r.total_size, r.strategy)):
+            size_str = fmt_size_mb(res.total_size)
+            ratio = f"{res.total_size / anchor_size:.2f}×" if anchor_size > 0 else "  N/A"
+            cells = [
+                f"{res.strategy[:name_width - 2]:<{name_width}}",
+                f"{size_str:>10}",
+                f"{ratio:>9}",
+            ]
+            if anchor_result is not None:
+                for key in headline_keys:
+                    value = res.metrics.get(key)
+                    if res.strategy == anchor_name:
+                        cell = f"{value:.1f}" if value is not None else "-"
+                    elif value is not None and key in anchor_result.metrics:
+                        delta = value - anchor_result.metrics[key]
+                        cell = f"{delta:+.1f}"
+                    else:
+                        cell = "-"
+                    cells.append(f"{cell:>13}")
+            if res.strategy not in selected_set:
+                dominator = dominator_for.get(res.strategy)
+                cells.append(
+                    f"  ← dominated by {dominator} → pruned" if dominator
+                    else "  ← not selected"
+                )
+            logger.info("  " + "  ".join(cells))
+
+        if selected:
+            logger.info("")
+            logger.info(
+                "Survivors (Pareto front): %s — all will be encoded",
+                ", ".join(selected),
+            )
+        else:
+            logger.critical("NO survivors selected (all failed).")
+        logger.info("")
+
+    @staticmethod
+    def _dominator_map(
+        results:        list[StrategyTestResult],
+        resolved_names: list[str],
+    ) -> dict[str, str]:
+        """Map each pruned strategy to one dominating strategy (first in resolved order).
+
+        Args:
+            results:        Per-strategy test results.
+            resolved_names: Strategy names in resolved order (dominator pick).
+
+        Returns:
+            ``{pruned strategy: a strategy that dominated it}``.
+        """
+        order = {name: i for i, name in enumerate(resolved_names)}
+        by_order = sorted(results, key=lambda r: order.get(r.strategy, len(order)))
+        dominators: dict[str, str] = {}
+        for beaten in by_order:
+            if beaten.total_size <= 0:
+                continue
+            for dominator in by_order:
+                if dominator is not beaten and OptimizationPhase._dominates(dominator, beaten):
+                    dominators[beaten.strategy] = dominator.strategy
+                    break
+        return dominators
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
@@ -850,6 +1223,31 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
             logger.debug("Wiped stale encoded dir: %s", strategy_dir)
         except OSError as exc:
             logger.warning("Could not wipe encoded dir %s: %s", strategy_dir, exc)
+
+
+def _headline_metric_keys(metric_maps: list[dict[str, float]]) -> list[str]:
+    """One headline statistic per measured metric (median preferred).
+
+    The fixed-mode comparison table shows a compact column set: for every
+    distinct metric, its ``median`` statistic when measured, else its
+    alphabetically-first one. Full statistics live in ``optimization.yaml``.
+
+    Args:
+        metric_maps: The measured metric maps to derive the headline set from.
+
+    Returns:
+        Headline keys as ``"{metric}_{statistic}"``, sorted by metric.
+    """
+    stats_by_metric: dict[str, set[str]] = {}
+    for metrics in metric_maps:
+        for key in metrics:
+            metric, statistic = key.rsplit("_", 1)
+            stats_by_metric.setdefault(metric, set()).add(statistic)
+    return [
+        f"{metric}_median" if "median" in stats
+        else f"{metric}_{min(stats)}"
+        for metric, stats in sorted(stats_by_metric.items())
+    ]
 
 
 def _select_test_chunks(
