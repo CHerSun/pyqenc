@@ -72,7 +72,7 @@ class TestForAndExclude:
             _track("rus_20",  "rus", "2.0"),
             _track("eng_51",  "eng", "5.1"),
         ]
-        entry = SelectEntry(**{"for": "lang=rus"})
+        entry = SelectEntry.model_validate({"for": "lang=rus"})
         result = resolve_selection(tracks, [entry])
         assert _names(result) == ["rus_51", "rus_20"]
 
@@ -83,7 +83,7 @@ class TestForAndExclude:
             _track("main",    "eng", "5.1", title="Surround"),
             _track("comment", "eng", "2.0", title="Director Commentary"),
         ]
-        entry = SelectEntry(**{"for": "lang=eng", "exclude": "comment"})
+        entry = SelectEntry.model_validate({"for": "lang=eng", "exclude": "comment"})
         result = resolve_selection(tracks, [entry])
         assert _names(result) == ["main"]
 
@@ -92,7 +92,7 @@ class TestForAndExclude:
         # different case than the source tag (extraction filtering is
         # case-insensitive, so selection must be too).
         tracks = [_track("eng_51", "eng", "5.1")]
-        entry = SelectEntry(**{"for": "LANG=ENG"})
+        entry = SelectEntry.model_validate({"for": "LANG=ENG"})
         result = resolve_selection(tracks, [entry])
         assert _names(result) == ["eng_51"]
 
@@ -108,7 +108,7 @@ class TestPreferTiers:
             _track("eng_71", "eng", "7.1"),
             _track("eng_20", "eng", "2.0"),
         ]
-        entry = SelectEntry(**{
+        entry = SelectEntry.model_validate({
             "for":    "lang=eng",
             "prefer": [r"ch=7\.1", r"ch=5\.1", "ch="],
         })
@@ -122,7 +122,7 @@ class TestPreferTiers:
             _track("eng_51", "eng", "5.1"),
             _track("eng_20", "eng", "2.0"),
         ]
-        entry = SelectEntry(**{
+        entry = SelectEntry.model_validate({
             "for":    "lang=eng",
             "prefer": [r"ch=7\.1", r"ch=5\.1", "ch="],
         })
@@ -136,7 +136,7 @@ class TestPreferTiers:
             _track("eng_20", "eng", "2.0"),
             _track("eng_10", "eng", "1.0"),
         ]
-        entry = SelectEntry(**{
+        entry = SelectEntry.model_validate({
             "for":    "lang=eng",
             "prefer": [r"ch=7\.1", r"ch=5\.1", "ch="],
         })
@@ -150,7 +150,7 @@ class TestPreferTiers:
             _track("eng_20", "eng", "2.0"),
             _track("eng_10", "eng", "1.0"),
         ]
-        entry = SelectEntry(**{
+        entry = SelectEntry.model_validate({
             "for":    "lang=eng",
             "prefer": [r"ch=7\.1", r"ch=5\.1"],  # neither matches
         })
@@ -169,9 +169,9 @@ class TestAdditiveEntries:
         eng = _track("eng_71", "eng", "7.1")
         tracks = [rus, eng]
         entries = [
-            SelectEntry(**{"for": "lang=rus"}),
-            SelectEntry(**{"for": "lang=eng"}),
-            SelectEntry(**{"for": "ch="}),  # overlaps both — must not duplicate
+            SelectEntry.model_validate({"for": "lang=rus"}),
+            SelectEntry.model_validate({"for": "lang=eng"}),
+            SelectEntry.model_validate({"for": "ch="}),  # overlaps both — must not duplicate
         ]
         result = resolve_selection(tracks, entries)
         assert _names(result) == ["rus_51", "eng_71"]
@@ -184,8 +184,8 @@ class TestAdditiveEntries:
         c = _track("c", "eng", "2.0")
         tracks = [a, b, c]
         entries = [
-            SelectEntry(**{"for": "lang=eng"}),  # picks a, c
-            SelectEntry(**{"for": r"ch=7\.1"}),  # picks a again
+            SelectEntry.model_validate({"for": "lang=eng"}),  # picks a, c
+            SelectEntry.model_validate({"for": r"ch=7\.1"}),  # picks a again
         ]
         result = resolve_selection(tracks, entries)
         assert _names(result) == ["a", "c"]

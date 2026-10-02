@@ -4,10 +4,13 @@
 **Validates: Requirements 2.2, 2.5**
 """
 
+from typing import cast
+
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from pyqenc.app_config import _deep_merge
+from pyqenc.audio.filters import PeakNormParams
 
 # ---------------------------------------------------------------------------
 # Shared strategies
@@ -1730,7 +1733,7 @@ class TestAudioConfigLayeredMerge:
         # Untouched base filters survive (dict-merge, not replace).
         assert {"peaknorm", "down_lfe", "aac", "passthrough", "loudnorm"} <= set(audio.filters)
         # Overridden param won.
-        assert audio.filters["peaknorm"].params.target_dbfs == -2.0
+        assert cast(PeakNormParams, audio.filters["peaknorm"].params).target_dbfs == -2.0
         # Added filter present.
         assert audio.filters["loudnorm"].type == "loudnorm"
 

@@ -16,6 +16,7 @@ Tests live here per the spec: tests/test_metrics_integration.py
 
 import contextlib
 from collections.abc import Callable
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -33,7 +34,7 @@ from pyqenc.models import (
     PhaseOutcome,
     Strategy,
 )
-from pyqenc.phase import Artifact, Recovery
+from pyqenc.phase import Artifact, PhaseRegistry, Recovery
 from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
 from pyqenc.phases.chunking import ChunkingPhase, ChunkingPhaseResult
 from pyqenc.phases.encoding import EncodingPhase, EncodingPhaseResult
@@ -389,8 +390,9 @@ class TestExtractionPhaseTiming:
             work_dir   = source.parent / "work",
             config     = _make_config(source.parent),
         )
-        result.file     = File(                           # type: ignore[attr-defined]
-            path=source, file_size_bytes=source.stat().st_size,
+        result.file     = Artifact(                       # type: ignore[attr-defined]
+            payload=File(path=source, file_size_bytes=source.stat().st_size),
+            state=ArtifactState.COMPLETE,
         )
         return result
 
@@ -407,7 +409,7 @@ class TestExtractionPhaseTiming:
         job_mock = MagicMock(spec=JobPhase)
         job_mock.result = self._make_job_result(tmp_path)
 
-        registry: dict[type, object] = {}
+        registry: PhaseRegistry = {}
         phase = ExtractionPhase(config, registry, collector=collector)  # type: ignore[arg-type]
         registry[JobPhase] = job_mock  # type: ignore[index]
         return phase
@@ -607,7 +609,7 @@ class TestChunkingPhaseTiming:
         extraction_mock = MagicMock(spec=ExtractionPhase)
         extraction_mock.result = ExtractionPhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="ok",
-            video_stream=stream.stream,
+            video_stream=Artifact(payload=stream.stream, state=ArtifactState.COMPLETE),
         )
 
         probe_mock = MagicMock(spec=ProbePhase)
@@ -617,7 +619,7 @@ class TestChunkingPhaseTiming:
         )
 
         from pyqenc.phases.chunking import ChunkingPhase
-        registry: dict[type, object] = {}
+        registry: PhaseRegistry = {}
         phase = ChunkingPhase(config, registry, collector=collector)  # type: ignore[arg-type]
         registry[JobPhase]        = job_mock         # type: ignore[index]
         registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
@@ -785,7 +787,7 @@ class TestAudioPhaseTiming:
         extraction_mock = MagicMock(spec=ExtractionPhase)
         extraction_mock.result = extraction_result
 
-        registry: dict[type, object] = {}
+        registry: PhaseRegistry = {}
         phase = AudioPhase(config, registry, collector=collector)  # type: ignore[arg-type]
         registry[JobPhase]        = job_mock         # type: ignore[index]
         registry[ExtractionPhase] = extraction_mock  # type: ignore[index]
@@ -939,7 +941,7 @@ class TestOptimizationPhaseTiming:
         work_dir.mkdir(parents=True, exist_ok=True)
         config.encoding.optimize   = optimize
         config.encoding.strategies = [
-            s.raw if hasattr(s, "raw") else f"{s.profile}+{s.preset}"
+            str(s.raw) if hasattr(s, "raw") else f"{s.profile}+{s.preset}"
             for s in [_STRATEGY_SLOW_H265, _STRATEGY_H265_AQ]
         ]
         # Reset resolved caches so they re-resolve from the updated strategy strings.
@@ -965,7 +967,7 @@ class TestOptimizationPhaseTiming:
         chunking_mock = MagicMock(spec=ChunkingPhase)
         chunking_mock.result = self._make_chunking_result(tmp_path)
 
-        registry: dict[type, object] = {}
+        registry: PhaseRegistry = {}
         phase = OptimizationPhase(config, registry, collector=collector)  # type: ignore[arg-type]
         registry[JobPhase]      = job_mock       # type: ignore[index]
         registry[ProbePhase]    = probe_mock     # type: ignore[index]
@@ -1049,7 +1051,7 @@ class TestOptimizationPhaseTiming:
             chunk_id     = "chunk_0",
             strategy     = strategy.display_name(),
             success      = True,
-            final_crf    = 28.0,
+            final_crf    = Decimal("28.0"),
             attempts     = 2,
             encoded_file = MagicMock(path=encoded_path, resolution="1920x1080"),
             reused       = False,
@@ -1200,7 +1202,7 @@ class TestEncodingPhaseTiming:
         optimization_mock = MagicMock(spec=OptimizationPhase)
         optimization_mock.result = self._make_optimization_result(tmp_path)
 
-        registry: dict[type, object] = {}
+        registry: PhaseRegistry = {}
         phase = EncodingPhase(config, registry, collector=collector)  # type: ignore[arg-type]
         registry[JobPhase]          = job_mock           # type: ignore[index]
         registry[ProbePhase]        = probe_mock         # type: ignore[index]
@@ -1303,7 +1305,7 @@ class TestEncodingPhaseTiming:
             chunk_id     = "chunk_0",
             strategy     = "h265+slow",
             success      = True,
-            final_crf    = 28.0,
+            final_crf    = Decimal("28.0"),
             attempts     = 3,
             encoded_file = MagicMock(path=encoded_path, resolution="1920x1080"),
             reused       = False,
@@ -1359,7 +1361,7 @@ class TestEncodingPhaseTiming:
             chunk_id     = "chunk_0",
             strategy     = "h265+slow",
             success      = True,
-            final_crf    = 28.0,
+            final_crf    = Decimal("28.0"),
             attempts     = 1,
             encoded_file = MagicMock(path=encoded_path, resolution="1920x1080"),
             reused       = True,
@@ -1541,7 +1543,7 @@ class TestMergePhaseTiming:
             stream    = Artifact(payload=probe_stream, state=ArtifactState.COMPLETE),
         )
 
-        registry: dict[type, object] = {}
+        registry: PhaseRegistry = {}
         phase = MergePhase(config, registry, collector=collector)  # type: ignore[arg-type]
         registry[JobPhase]        = job_mock         # type: ignore[index]
         registry[ExtractionPhase] = extraction_mock  # type: ignore[index]

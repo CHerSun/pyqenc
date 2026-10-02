@@ -23,6 +23,7 @@ Covers:
 
 import os
 import subprocess as _subprocess
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -312,7 +313,7 @@ def _run_and_capture(
     tmp_path:  Path,
     ffprobe_data: dict,
     *,
-    subprocess_side_effect: object | None = None,
+    subprocess_side_effect: Callable[..., object] | None = None,
     make_outputs: bool = True,
 ):
     """Drive a REAL ExtractionPhase.run(dry_run=False) with canned ffprobe JSON.
@@ -362,9 +363,11 @@ def _run_and_capture(
         result.stderr     = ""
         return result
 
-    def recording_subprocess(cmd: list, **kwargs: object) -> MagicMock:
+    def recording_subprocess(cmd: list, **kwargs: object) -> object:
+        effect = subprocess_side_effect
+        assert effect is not None  # sp_effect chose the recording wrapper only when set
         subprocess_cmds.append(list(cmd))
-        return subprocess_side_effect(cmd, **kwargs)  # type: ignore[operator]
+        return effect(cmd, **kwargs)
 
     sp_effect = recording_subprocess if subprocess_side_effect is not None else default_subprocess
 

@@ -1,5 +1,6 @@
 """Unit tests for quality evaluation and CRF adjustment."""
 
+from collections.abc import Callable
 from decimal import Decimal
 from typing import ClassVar
 
@@ -57,12 +58,19 @@ class TestQualitySearch:
         QualityTarget(metric="vmaf", statistic="min", value=95.0)
     ]
 
-    def _make(self, **kw: object) -> QualitySearch:
+    def _make(
+        self,
+        *,
+        better:  Decimal | None = None,
+        worse:   Decimal | None = None,
+        targets: list[QualityTarget] | None = None,
+        gran:    Decimal | None = None,
+    ) -> QualitySearch:
         return QualitySearch(
-            quality_better  = kw.get("better", self._BETTER),  # type: ignore[arg-type]
-            quality_worse   = kw.get("worse",  self._WORSE),   # type: ignore[arg-type]
-            quality_targets = kw.get("targets", self._TARGET),  # type: ignore[arg-type]
-            granularity     = kw.get("gran",   self._GRAN),    # type: ignore[arg-type]
+            quality_better  = better  if better  is not None else self._BETTER,
+            quality_worse   = worse   if worse   is not None else self._WORSE,
+            quality_targets = targets if targets is not None else self._TARGET,
+            granularity     = gran    if gran    is not None else self._GRAN,
         )
 
     def test_initial_state(self) -> None:
@@ -1147,8 +1155,8 @@ class TestQualitySearchV3:
 
     @staticmethod
     def _drive_to_exhaustion(
-        s:         QualitySearchV3,
-        metrics_fn: object,
+        s:          QualitySearchV3,
+        metrics_fn:  Callable[[float], dict[str, float]],
         start_q:   Decimal,
         max_iters: int = 200,
     ) -> None:

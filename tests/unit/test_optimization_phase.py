@@ -19,7 +19,7 @@ from pyqenc.models import (
     QualityTarget,
     Strategy,
 )
-from pyqenc.phase import Artifact
+from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.optimization import OptimizationPhase
 from pyqenc.state import (
@@ -108,7 +108,7 @@ def _make_phase(
 
     job, work_dir = _make_job_phase(tmp_path, strategies, optimize=optimize, tolerance=tolerance, force=force)
     config = job._config  # already resolved AppConfig
-    phases: dict[type, object] = {_JP: job}
+    phases: PhaseRegistry = {_JP: job}
 
     probe = _PP(config, phases, collector=MagicMock(), crop_params=None)  # type: ignore[arg-type]
     probe.result = ProbePhaseResult(
@@ -195,7 +195,7 @@ class TestApplyTolerance:
     def test_zero_size_results_excluded(self) -> None:
         """Strategies with total_size=0 (failed) are excluded."""
         results = [
-            StrategyTestResult(strategy=_S1.display_name(), total_size=0,   avg_crf=0.0),
+            StrategyTestResult(strategy=_S1.display_name(), total_size=0),
             StrategyTestResult(strategy=_S2.display_name(), total_size=100),
         ]
         selected = OptimizationPhase._apply_tolerance(results, 5.0)
@@ -340,7 +340,7 @@ class TestToleranceReapplication:
         )
 
         result = phase.run(dry_run=False)
-        assert result.outcome != PhaseOutcome.REUSED or len(result.strategy_results) == 3
+        assert result.outcome != PhaseOutcome.REUSED
 
 
 # ---------------------------------------------------------------------------

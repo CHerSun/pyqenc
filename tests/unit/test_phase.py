@@ -15,7 +15,6 @@ and ``finalize`` being called or not. No template internals are inspected.
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -63,14 +62,12 @@ class _StubPhase(Phase):
         collector,
         recovery: Recovery,
         execute_result: PhaseResult | None = None,
-        registry: dict | None = None,
+        registry: PhaseRegistry | None = None,
         *,
         banner: bool = True,
         recover_error: RecoveryError | None = None,
     ) -> None:
-        super().__init__(
-            cast("AppConfig", _APP_CONFIG), registry, collector=collector
-        )
+        super().__init__(_APP_CONFIG, registry if registry is not None else {}, collector=collector)
         self.BANNER = banner
         self._recovery = recovery
         self._execute_result = execute_result

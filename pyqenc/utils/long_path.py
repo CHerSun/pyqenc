@@ -17,7 +17,7 @@ def _coerce_long_path(value: Path) -> LongPath:
     return value if isinstance(value, LongPath) else LongPath(os.fspath(value))
 
 
-class LongPath(type(Path())): # Platform-specific path type
+class LongPath(type(Path())):  # ty: ignore[unsupported-base] — dynamic platform base is the long-path mechanism
     """A pathlib.Path subclass that transparently enables Windows extended-length paths.
 
     On Windows, ``os.fspath(long_path)`` (and therefore all Python file I/O,

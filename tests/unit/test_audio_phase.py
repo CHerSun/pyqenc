@@ -31,6 +31,7 @@ from pyqenc.audio.chain import ResolvedChain, chain_output_path
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import AUDIO_OUTPUT_DIR
 from pyqenc.models import PhaseOutcome
+from pyqenc.phases.audio import AudioPhase
 from pyqenc.state import AudioSidecar
 from pyqenc.stream_model import AudioStream, AudioStreamInfo, File
 from pyqenc.utils.long_path import LongPath
@@ -87,14 +88,13 @@ def _track(tmp_path: Path, stem: str, *, track_id: int = 1, language: str = "eng
 # Phase builder with mocked Job + Extraction dependencies
 # ---------------------------------------------------------------------------
 
-def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioStream]) -> object:
+def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioStream]) -> AudioPhase:
     """Return an ``AudioPhase`` wired to mock Job + Extraction results.
 
     ``work_dir`` is ``tmp_path`` so chain outputs land in the phase's dedicated
     ``tmp_path/audio`` directory (Phase Contract: the phase owns its folder).
     """
     from pyqenc.metrics import NoOpMetricsCollector
-    from pyqenc.phases.audio import AudioPhase
 
     app_config = MagicMock()
     app_config.audio = config
@@ -107,7 +107,7 @@ def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioStream]) 
     job_mock = MagicMock()
     job_mock.result = job_result
 
-    from pyqenc.phase import Artifact
+    from pyqenc.phase import Artifact, PhaseRegistry
     from pyqenc.state import ArtifactState
 
     extraction_result = MagicMock()
@@ -121,8 +121,8 @@ def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioStream]) 
     from pyqenc.phases.extraction import ExtractionPhase
     from pyqenc.phases.job import JobPhase
 
-    registry: dict[type, object] = {}
-    phase = AudioPhase(app_config, registry, collector=NoOpMetricsCollector())  # type: ignore[arg-type]
+    registry: PhaseRegistry = {}
+    phase = AudioPhase(app_config, registry, collector=NoOpMetricsCollector())
     registry[JobPhase]        = job_mock
     registry[ExtractionPhase] = extraction_mock
     return phase

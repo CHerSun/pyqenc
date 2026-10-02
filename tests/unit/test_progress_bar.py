@@ -34,7 +34,7 @@ def _collect(total: float, calls: list[tuple[float, AdvanceState]], show_counter
         yield fake
 
     original = alive_mod.alive_bar
-    alive_mod.alive_bar = _mock_alive_bar  # type: ignore[assignment]
+    alive_mod.alive_bar = _mock_alive_bar  # ty: ignore[invalid-assignment] — patching the library entry point for the test
     try:
         with ProgressBar(total, title="Test", show_counters=show_counters) as advance:
             for increment, state in calls:

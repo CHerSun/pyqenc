@@ -107,7 +107,7 @@ class TestStaticConcretization:
         """Bug prevented: a subclass silently accepting a foreign info slice
         (which would force casts at every consumer)."""
         with pytest.raises(ValidationError):
-            AudioStream(file=_file(), info=VideoStreamInfo(track_id=1))
+            AudioStream(file=_file(), info=VideoStreamInfo(track_id=1))  # ty: ignore[invalid-argument-type] — rejection is the test's subject
 
     def test_info_slice_outside_bound_is_rejected(self) -> None:
         """The TypeVar bound holds structurally: an info that is not a
@@ -122,6 +122,7 @@ class TestStaticConcretization:
         )
         loaded = AudioStream.model_validate(stream.model_dump(exclude_none=True))
         assert loaded == stream
+        assert loaded.info.layout is not None
         assert loaded.info.layout.normalized == "5.1"
 
 
@@ -162,7 +163,7 @@ class TestExtendedVideoStream:
         """Bug prevented: a ``None`` crop sneaking past ProbePhase — the model
         itself must refuse it ("auto" exists only at config/CLI level)."""
         with pytest.raises(ValidationError):
-            ExtendedVideoStream(stream=_video_stream(), frame_count=10)
+            ExtendedVideoStream(stream=_video_stream(), frame_count=10)  # ty: ignore[missing-argument] — rejection is the test's subject
 
     def test_empty_crop_means_no_crop(self) -> None:
         ext = _extended()
@@ -264,7 +265,6 @@ def _extraction_sidecar() -> ExtractionSidecar:
             )],
         },
         chapters = True,
-        timestamps_path = LongPath("extracted/timestamps.txt"),
     )
 
 

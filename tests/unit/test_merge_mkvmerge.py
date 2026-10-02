@@ -34,9 +34,10 @@ import os
 import tempfile
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, patch
 
-from pyqenc.app_config import load_app_config
+from pyqenc.app_config import AppConfig, load_app_config
 from pyqenc.constants import EXTRACTED_DIR, MERGED_OUTPUT_DIR, TIMESTAMPS_FILENAME
 from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import (
@@ -854,7 +855,7 @@ def _make_phase(targets: list) -> MergePhase:
         encoding  = SimpleNamespace(resolved_targets=targets),
         measurement = SimpleNamespace(sampling=3),
     )
-    return MergePhase(config, {}, collector=NoOpMetricsCollector())  # type: ignore[arg-type]
+    return MergePhase(cast(AppConfig, config), {}, collector=NoOpMetricsCollector())  # stand-in carrying the two read fields
 
 
 class TestMissedTargetsWarning:

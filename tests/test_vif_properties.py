@@ -12,6 +12,7 @@ import math
 import os as _os
 import tempfile as _tempfile
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -342,7 +343,7 @@ def test_normalize_formula_correctness(
         acceptance_delta  = 0.2,
         subsample_via_filter = False,
     )
-    result   = test_info.normalize(raw)
+    result   = cast(float, test_info.normalize(raw))  # scalar input -> scalar result (Series stubs lack SupportsFloat)
     expected = offset + raw * scale
     if clip_lower is not None:
         expected = max(expected, clip_lower)
@@ -465,11 +466,12 @@ def test_sidecar_vif_keys(vif_stats: dict[str, float]) -> None:
     """
     from pyqenc.quality import ChunkQualityStats, MetricStats
 
-    stats: ChunkQualityStats = {MetricType.VIF: MetricStats(**vif_stats)}  # type: ignore[misc]
+    # hypothesis-generated dict — runtime shape is the test's own strategy
+    stats: ChunkQualityStats = {MetricType.VIF: cast(MetricStats, vif_stats)}
     flat: dict[str, float] = {
         f"{mt.value}_{stat}": value
         for mt, ms in stats.items()
-        for stat, value in ms.items()
+        for stat, value in cast(dict[str, float], ms).items()
     }
     for s in ("min", "p05", "p10", "p25", "median", "p75", "p90", "p95", "max", "std"):
         key = f"{MetricType.VIF.value}_{s}"

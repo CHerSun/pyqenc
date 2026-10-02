@@ -287,7 +287,8 @@ class TestChunkingPhaseLifecycle:
         # Rebuild the registry with force_wipe set on the job result.
         registry = _make_registry(work_dir, _stream())
         job = registry[JobPhase]
-        job.result.force_wipe = True  # type: ignore[union-attr]
+        assert job.result is not None
+        job.result.force_wipe = True
         collector = NoOpMetricsCollector()
         config = _APP_CONFIG.model_copy(deep=True)
         phase2 = ChunkingPhase(config, registry, collector=collector)

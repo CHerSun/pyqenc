@@ -1,6 +1,8 @@
 """Unit tests for core data models."""
 
 
+from decimal import Decimal
+
 import pytest
 
 from pyqenc.models import (
@@ -135,7 +137,7 @@ class TestStrategy:
         )
 
         # Without crop — -vf and {vf} both dropped
-        args = strategy.to_output_args(18.5)
+        args = strategy.to_output_args(Decimal("18.5"))
         assert args == [
             "-c:v", "libx265",
             "-preset", "slow",
@@ -145,7 +147,7 @@ class TestStrategy:
         ]
 
         # With crop — -vf kept, {vf} replaced with filter
-        args_crop = strategy.to_output_args(18.5, vf_filter="crop=1920:800:0:140")
+        args_crop = strategy.to_output_args(Decimal("18.5"), vf_filter="crop=1920:800:0:140")
         assert args_crop == [
             "-c:v", "libx265",
             "-preset", "slow",
@@ -176,11 +178,11 @@ class TestStrategy:
         strategy = Strategy(preset="p7", profile="hevc-nvenc-hq", codec=codec, profile_args=["-tune:v", "hq"])
 
         # Without crop — trailing : left in place (ffmpeg tolerates it)
-        args = strategy.to_output_args(28.0)
+        args = strategy.to_output_args(Decimal("28.0"))
         vf_idx = args.index("-vf")
         assert args[vf_idx + 1] == "scale_cuda=format=p010le:"
 
         # With crop — filter appended after the colon
-        args_crop = strategy.to_output_args(28.0, vf_filter="crop=1920:800:0:140")
+        args_crop = strategy.to_output_args(Decimal("28.0"), vf_filter="crop=1920:800:0:140")
         vf_idx = args_crop.index("-vf")
         assert args_crop[vf_idx + 1] == "scale_cuda=format=p010le:crop=1920:800:0:140"

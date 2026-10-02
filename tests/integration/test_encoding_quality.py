@@ -1,11 +1,13 @@
 """Integration tests for encoding → quality evaluation pipeline."""
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from pyqenc.metrics import MetricsCollector
-from pyqenc.models import QualityTarget
+from pyqenc.models import QualityTarget, Strategy
+from pyqenc.stream_model import VideoStreamChunk
 from pyqenc.utils.visualization import QualityEvaluator
 from tests.fixtures.metric_fixtures import (
     create_mock_psnr_file,
@@ -132,7 +134,7 @@ class TestEncodeChunkQualitySearchV2Integration:
     Validates: Requirements 6.1–6.5, 7.5–7.6, 8.1–8.3
     """
 
-    def _make_strategy(self) -> object:
+    def _make_strategy(self) -> Strategy:
         """Build a minimal Strategy-like mock for testing."""
         from decimal import Decimal
         from unittest.mock import MagicMock
@@ -150,9 +152,9 @@ class TestEncodeChunkQualitySearchV2Integration:
         strategy.safe_name.return_value    = "test_strategy"
         strategy.codec      = codec
         strategy.to_ffmpeg_args.return_value = ["-i", "{input}", "-crf", "18"]
-        return strategy
+        return cast(Strategy, strategy)
 
-    def _make_chunk(self, tmp_path: Path) -> object:
+    def _make_chunk(self, tmp_path: Path) -> VideoStreamChunk:
         """Build a minimal ChunkMetadata-like mock."""
         from unittest.mock import MagicMock
 
@@ -166,7 +168,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         chunk.resolution      = "1920x1080"
         chunk.start_timestamp = 0.0
         chunk.end_timestamp   = 5.0
-        return chunk
+        return cast(VideoStreamChunk, chunk)
 
     def test_encode_chunk_uses_qualitysearchv2(self, tmp_path: Path) -> None:
         """encode_chunk instantiates QualitySearchV3 (verified via source inspection)."""
@@ -233,7 +235,6 @@ class TestEncodeChunkQualitySearchV2Integration:
         ):
             result = encoder.encode_chunk(
                 chunk           = chunk,
-                reference       = reference,
                 strategy        = strategy,
                 quality_targets = [target],
                 initial_crf     = Decimal("18.0"),
@@ -278,6 +279,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         encoder = ChunkEncoder(
             quality_evaluator = evaluator,
             work_dir          = tmp_path,
+            collector         = MagicMock(spec=MetricsCollector),
         )
 
         reference = MagicMock()
@@ -297,7 +299,6 @@ class TestEncodeChunkQualitySearchV2Integration:
         ):
             result = encoder.encode_chunk(
                 chunk           = chunk,
-                reference       = reference,
                 strategy        = strategy,
                 quality_targets = [target],
                 initial_crf     = Decimal("18.0"),

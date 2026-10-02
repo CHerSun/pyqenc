@@ -88,7 +88,7 @@ class TestRegistryOpenness:
     ) -> None:
         # Bug: extension requiring executor edits. A registered type must produce
         # a usable FilterStep purely through the resolve contract.
-        instance = temp_type(temp_type.params_model(gain=1.0))
+        instance = temp_type(temp_type.params_model.model_validate({"gain": 1.0}))
         step = instance.resolve(_STEREO, None)
         assert step.af == "anull"
         assert step.needs_pass is False
@@ -131,19 +131,19 @@ class TestParamValidation:
         # Bug: silently accepting a typo'd param (e.g. `target_db`) would apply
         # default behaviour instead of the user's intent.
         with pytest.raises(ValidationError):
-            PeakNormParams(target_dbfs=-1.0, bogus=1)  # type: ignore[call-arg]
+            PeakNormParams(target_dbfs=-1.0, bogus=1)  # ty: ignore[unknown-argument] — rejection is the test's subject
 
     def test_loudnorm_requires_all_targets(self) -> None:
         # Bug: a missing target silently applying a default deviates from the
         # user's configured loudness target.
         with pytest.raises(ValidationError):
-            LoudNormParams(i=-23.0, tp=-1.0)  # type: ignore[call-arg]
+            LoudNormParams(i=-23.0, tp=-1.0)  # ty: ignore[missing-argument] — rejection is the test's subject
 
     def test_passthrough_rejects_any_param(self) -> None:
         # Bug: passthrough accepting transformation params would imply behaviour
         # it does not have.
         with pytest.raises(ValidationError):
-            PassthroughParams(target_dbfs=-1.0)  # type: ignore[call-arg]
+            PassthroughParams(target_dbfs=-1.0)  # ty: ignore[unknown-argument] — rejection is the test's subject
 
 
 class TestDownmixNoOp:

@@ -417,7 +417,7 @@ class TestExecutorHasNoFilterTypeBranch:
             _FILTER_REGISTRY.pop(test_id, None)
 
     @pytest.mark.asyncio
-    async def test_custom_two_pass_drives_kplus1(self, source: Path, out_dir: Path, two_pass_type: str) -> None:
+    async def test_custom_two_pass_drives_kplus1(self, source: AudioStream, out_dir: Path, two_pass_type: str) -> None:
         """A brand-new two-pass type gets its measurement + application with no loop edit.
 
         Bug: the executor special-casing known filter types instead of driving

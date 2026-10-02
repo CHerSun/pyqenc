@@ -15,7 +15,7 @@ import yaml
 
 from pyqenc.app_config import load_app_config
 from pyqenc.models import CropParams, PhaseOutcome, QualityTarget
-from pyqenc.phase import Artifact, ArtifactState
+from pyqenc.phase import Artifact, ArtifactState, PhaseRegistry
 from pyqenc.phases.encoding import (
     EncodingPhase,
     _scan_winner_sidecars,
@@ -308,7 +308,7 @@ def _make_encoding_phase(tmp_path: Path, probe_frames: int) -> EncodingPhase:
             state = ArtifactState.COMPLETE,
         ),
     )
-    phases: dict[type, object] = {ProbePhase: probe}
+    phases: PhaseRegistry = {ProbePhase: probe}
     return EncodingPhase(_APP_CONFIG, phases, collector=MagicMock())  # type: ignore[arg-type]
 
 
