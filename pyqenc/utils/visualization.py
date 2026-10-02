@@ -144,7 +144,7 @@ def _parse_psnr_line(line: str) -> dict[str, float] | None:
         if "n" in parsed and "psnr_avg" in parsed:
             return {"n": parsed["n"], MetricType.PSNR.value: parsed["psnr_avg"]}
         return None
-    except (ValueError, IndexError):
+    except ValueError, IndexError:
         return None
 
 
@@ -160,7 +160,7 @@ def _parse_ssim_line(line: str) -> dict[str, float] | None:
         if "n" in parsed and "All" in parsed:
             return {"n": parsed["n"], MetricType.SSIM.value: parsed["All"]}
         return None
-    except (ValueError, IndexError):
+    except ValueError, IndexError:
         return None
 
 

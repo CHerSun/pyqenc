@@ -574,7 +574,7 @@ class YamlMetricsCollector(MetricsCollector):
         for entry in pm.time_distribution.top_level:
             try:
                 self._store[entry.key] = float(entry.seconds)
-            except (KeyError, ValueError):
+            except KeyError, ValueError:
                 logger.debug("Metrics: unknown key %r in persisted file, skipping", entry.key)
 
         # Restore dotted time accumulators
@@ -582,7 +582,7 @@ class YamlMetricsCollector(MetricsCollector):
             for entry in group.breakdown:
                 try:
                     self._store[entry.key] = float(entry.seconds)
-                except (KeyError, ValueError):
+                except KeyError, ValueError:
                     logger.debug("Metrics: unknown key %r in persisted file, skipping", entry.key)
 
         # Restore convergence accumulators (resume Welford from stddev² * n)

@@ -262,12 +262,12 @@ async def _read_stdout(
 
             try:
                 frame = int(frame_str)
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 pass
 
             try:
                 out_time_s = int(out_time_str) / 1_000_000.0
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 pass
 
             if value == "end":

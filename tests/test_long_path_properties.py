@@ -84,7 +84,7 @@ class TestFspathInjectsPrefixIffWindowsAndLong:
                 assert not result.startswith(_EXT_PREFIX), (
                     f"Expected no prefix on non-Windows for {path_str!r}, got: {result!r}"
                 )
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 # Invalid paths on certain platforms — skip
                 pass
 
@@ -116,7 +116,7 @@ class TestStrNeverContainsPrefix:
                     f"str(LongPath({path_str!r})) must never contain {_EXT_PREFIX!r}, "
                     f"got: {result!r}"
                 )
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 # Invalid path for the platform — skip
                 pass
 
@@ -135,7 +135,7 @@ class TestStrNeverContainsPrefix:
                 assert result == expected, (
                     f"str(LongPath({path_str!r})) == {result!r} != str(Path) == {expected!r}"
                 )
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 pass
 
 
@@ -164,7 +164,7 @@ class TestCompositionPreservesLongPathType:
                 f"LongPath({base!r}) / {child!r} returned {type(result).__name__}, "
                 f"expected LongPath"
             )
-        except (ValueError, OSError):
+        except ValueError, OSError:
             pass
 
     @given(base=_path_str, child=_child_str, grandchild=_child_str)
@@ -185,7 +185,7 @@ class TestCompositionPreservesLongPathType:
             assert isinstance(result, LongPath), (
                 f"Chained composition returned {type(result).__name__}, expected LongPath"
             )
-        except (ValueError, OSError):
+        except ValueError, OSError:
             pass
 
 
@@ -241,7 +241,7 @@ class TestIdempotence:
                     f"__fspath__() not idempotent for {path_str!r}: "
                     f"first={first!r}, second={second!r}"
                 )
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 pass
 
 
@@ -272,7 +272,7 @@ class TestNonWindowsIdentity:
                     f"Non-Windows __fspath__({path_str!r}) == {result!r}, "
                     f"expected {expected!r} (same as str(Path(...)))"
                 )
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 pass
 
     @given(path_str=_path_str)
@@ -289,5 +289,5 @@ class TestNonWindowsIdentity:
                 assert _EXT_PREFIX not in result, (
                     f"Non-Windows __fspath__ contains prefix: {result!r}"
                 )
-            except (ValueError, OSError):
+            except ValueError, OSError:
                 pass

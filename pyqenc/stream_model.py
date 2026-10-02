@@ -170,7 +170,7 @@ class StreamInfo(BaseModel):
             return None
         try:
             return float(str(value))  # type: ignore[arg-type]
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return None
 
     @staticmethod
@@ -245,7 +245,7 @@ class VideoStreamInfo(StreamInfo):
         try:
             w, h = resolution.split("x")
             return int(w), int(h)
-        except (ValueError, AttributeError):
+        except ValueError, AttributeError:
             return None
 
     @property
