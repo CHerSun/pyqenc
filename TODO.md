@@ -695,7 +695,20 @@ is the sanctioned interim.
 
 ---
 
-## Last known = 79
+## 80. Pylance/pyright cross-checker evaluation — needs thinking
+
+2026-10-02: the ty campaign closed at zero; VS Code Pylance (pyright engine)
+still needs its own pass — cross-checkers disagree (e.g. pyright types
+homogeneous-TypedDict .items() values, ty does not; pyright flagged the
+Self-return idiom ty ignored). Session plan: run `uvx pyright` on the real
+source (first run bootstraps node — slow), triage its distinct findings,
+then decide: adopt as a 4th gate, or editor-only aid. Note: the initial
+Pylance scare (2026-10-02) was entirely a stale `build/lib` artifact copy —
+build/ is now deleted and excluded in pyproject (ty, ruff) + .vscode.
+
+---
+
+## Last known = 80
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

@@ -15,6 +15,7 @@
 - Static-check gates run via `uvx` (always the newest release — for static analysis newer means better rules and fixed bugs): `uvx ruff check` and `uvx ty check`. The locked dev deps exist for editor/MCP integration; refresh them occasionally with `uv lock --upgrade-package ruff ty` so `uv run` doesn't rot.
 - To run tests use `uv run python -m pytest ...`.
 - To run the project use `uv run pyqenc` with required arguments.
+- A `.githooks/pre-commit` hook mechanically blocks commits on ruff/ty failures (enable per-clone: `git config core.hooksPath .githooks`; pytest is deliberately NOT in the hook — minutes-long, wrong timescale).
 - **Green status requires ALL THREE gates passing:** `uvx ruff check` clean, `uvx ty check` clean, and pytest green. A ruff+pytest-only "green" is not green.
 - Don't use pipes when running pipeline - this ruins alive_progress bar display for the end-user.
 - Use `steering/environment.md` for local environment details, like workdir, sample target, etc.

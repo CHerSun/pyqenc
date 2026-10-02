@@ -1,0 +1,16 @@
+#!/bin/sh
+# Mechanical backstop for the static gates — see .kiro/steering/agent-commands.md.
+# pytest stays session/CI-driven: minutes-long, the wrong timescale for a commit.
+# Enabled per-clone with: git config core.hooksPath .githooks
+
+echo "pre-commit: uvx ruff check"
+if ! uvx ruff check .; then
+    echo "pre-commit: ruff failed — fix before committing"
+    exit 1
+fi
+
+echo "pre-commit: uvx ty check"
+if ! uvx ty check; then
+    echo "pre-commit: ty failed — fix before committing"
+    exit 1
+fi

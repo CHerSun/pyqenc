@@ -57,7 +57,7 @@ target-version = "py314"
 # E501 stays unselected — this value only feeds future formatter decisions.
 line-length = 120
 # Archived spec material under .kiro/specs is kept verbatim, not linted.
-extend-exclude = [".kiro"]
+extend-exclude = [".kiro", "build"]
 
 [tool.ruff.lint]
 ignore = [
@@ -71,5 +71,6 @@ ignore = [
 ]
 
 [tool.ty.src]
-# Archived spec material under .kiro/specs is kept verbatim (same as ruff).
-exclude = [".kiro"]
+# Archived spec material (.kiro/specs, kept verbatim) and the setuptools
+# build artifact tree (stale package copies) are never type-checked.
+exclude = [".kiro", "build"]
