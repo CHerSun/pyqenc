@@ -62,7 +62,7 @@ three gates green and searched runs byte-identical. Requirement ids reference
     auto-adjust for both profile narrowing and CLI override; `fixed_quality`
     derivation; searched configs unchanged
 
-- [ ] 2. Fixed-run phase entry: wipe, banner, cleanup guard (Req 5, 6, 7)
+- [x] 2. Fixed-run phase entry: wipe, banner, cleanup guard (Req 5, 6, 7)
   - Identify the single always-executed point on OptimizationPhase that both the
     optimize path and the `_skip_check` all-strategies path pass through (the
     phase runs on every `auto`/`encode` invocation as encoding's mandatory dep);

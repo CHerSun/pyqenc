@@ -907,7 +907,9 @@ def _make_encoder(
     subset: dotted timing keys are prefixed by ``metric_prefix``
     (``optimization.<strategy>``, ``optimization.quality_measure``) and the
     run's ``cleanup_level`` enables rolling attempt cleanup after each pair
-    converges.
+    converges. Test encodes are always measured — the anchor's synthetic
+    target set is derived from them (fixed-quality spec Req 8.1), regardless
+    of the encoding phase's measurement control.
 
     Args:
         work_dir:         Pipeline working directory.
@@ -930,6 +932,7 @@ def _make_encoder(
         visual_hash       = visual_hash,
         metrics_sampling  = metrics_sampling,
         metric_prefix     = metric_prefix,
+        measure_attempts  = True,
     )
 
 

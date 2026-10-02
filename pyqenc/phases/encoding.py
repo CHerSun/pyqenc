@@ -578,6 +578,7 @@ class ChunkEncoder:
         visual_hash:       bool              = True,
         metrics_sampling:  int               = 3,
         metric_prefix:     MetricKey         = MetricKey.ENCODING,
+        measure_attempts:  bool              = True,
     ):
         """Initialize chunk encoder.
 
@@ -597,6 +598,13 @@ class ChunkEncoder:
                                EncodingPhase uses the default (``encoding``);
                                OptimizationPhase passes ``optimization`` so its test
                                encodes are attributed to the owning phase.
+            measure_attempts:  When ``True`` (default) every encoded attempt gets a
+                               quality evaluation. When ``False``, attempts are
+                               encoded and promoted without measurement — the seam
+                               exists for measurement cost control (TODO §83 owns
+                               default-flipping and the metrics-absence tolerance);
+                               callers exercising it must run a single-point quality
+                               domain where the search never consumes metrics.
         """
         self.quality_evaluator = quality_evaluator
         self.work_dir          = work_dir
@@ -606,6 +614,7 @@ class ChunkEncoder:
         self._visual_hash      = visual_hash
         self._metrics_sampling = metrics_sampling
         self._metric_prefix    = metric_prefix
+        self._measure_attempts = measure_attempts
 
     def _get_output_dir(self, strategy: Strategy) -> Path:
         """Get the CRF search workspace directory for *strategy*.
@@ -1012,10 +1021,11 @@ class ChunkEncoder:
                         elif not search.best_targets_met and search.best_quality == existing.crf:
                             best_fail_attempt = existing
 
+                        summary_suffix = f" ({metric_summary})" if metric_summary else ""
                         logger.info(
                             fmt_chunk_attempt_result(
                                 strategy.display_name(), chunk.safe_name(), attempt_number,
-                                f"{pass_fail} with {strategy.codec.quality_label} {str(existing.crf).rjust(strategy.codec.quality_log_padding)} ({metric_summary}){best_string} [reused]",
+                                f"{pass_fail} with {strategy.codec.quality_label} {str(existing.crf).rjust(strategy.codec.quality_log_padding)}{summary_suffix}{best_string} [reused]",
                                 self._visual_hash,
                             )
                         )
@@ -1111,25 +1121,31 @@ class ChunkEncoder:
             assert output_file is not None
 
             # Evaluate quality — raw metric logs/stats go into a per-attempt subfolder;
-            # the plot and YAML sidecar stay next to the .mkv.
-            with self._collector.time(self._metric_prefix, METRIC_KEY_QUALITY_MEASURE):
-                evaluation = self.quality_evaluator.evaluate_chunk(
-                    encoded              = output_file,
-                    reference            = chunk.as_input(),
-                    ref_crop             = self._crop_params or CropParams(),
-                    targets              = quality_targets,
-                    output_dir           = output_file.parent,
-                    duration_seconds     = chunk.duration_seconds,
-                    fps_value            = chunk.stream.stream.info.fps_fraction,
-                    subsample_factor     = self._metrics_sampling,
-                    plot_path            = output_file.parent / f"{output_file.stem}.png",
-                    chunk_start_seconds  = chunk.start_timestamp,
-                )
+            # the plot and YAML sidecar stay next to the .mkv. The measure_attempts
+            # seam off-path (TODO §83) skips evaluation entirely: no metrics, no
+            # verdict — single-point domains accept the attempt unconditionally.
+            if self._measure_attempts:
+                with self._collector.time(self._metric_prefix, METRIC_KEY_QUALITY_MEASURE):
+                    evaluation = self.quality_evaluator.evaluate_chunk(
+                        encoded              = output_file,
+                        reference            = chunk.as_input(),
+                        ref_crop             = self._crop_params or CropParams(),
+                        targets              = quality_targets,
+                        output_dir           = output_file.parent,
+                        duration_seconds     = chunk.duration_seconds,
+                        fps_value            = chunk.stream.stream.info.fps_fraction,
+                        subsample_factor     = self._metrics_sampling,
+                        plot_path            = output_file.parent / f"{output_file.stem}.png",
+                        chunk_start_seconds  = chunk.start_timestamp,
+                    )
+                all_metrics         = flatten_metric_stats(evaluation.metrics)
+                attempt_targets_met = evaluation.targets_met
+            else:
+                all_metrics         = {}
+                attempt_targets_met = True
 
             # Collect ALL measured metrics (not filtered to current targets) for the sidecar
             # so the quality history is reusable when quality targets change.
-            all_metrics = flatten_metric_stats(evaluation.metrics)
-
             # Targeted metrics subset (for search and convergence decisions).
             targets_set  = {f"{t.metric}_{t.statistic}" for t in quality_targets}
             metrics_dict = {k: v for k, v in all_metrics.items() if k in targets_set}
@@ -1138,7 +1154,7 @@ class ChunkEncoder:
             # and write the per-attempt metrics sidecar atomically.
             frame_counts[output_file] = attempt_frames
             _write_metrics_sidecar(
-                output_file, evaluation.targets_met, current_q, all_metrics,
+                output_file, attempt_targets_met, current_q, all_metrics,
                 self._metrics_sampling, attempt_frames,
             )
 
@@ -1170,13 +1186,14 @@ class ChunkEncoder:
             )
             pass_fail      = (
                 f"{SUCCESS_SYMBOL_MINOR} pass"
-                if evaluation.targets_met
+                if attempt_targets_met
                 else f"{FAILURE_SYMBOL_MINOR} miss"
             )
+            summary_suffix = f" ({metric_summary})" if metric_summary else ""
             logger.info(
                 fmt_chunk_attempt_result(
                     strategy.display_name(), chunk.safe_name(), attempt_number,
-                    f"{pass_fail} with {strategy.codec.quality_label} {str(current_q).rjust(strategy.codec.quality_log_padding)} ({metric_summary}){best_string}",
+                    f"{pass_fail} with {strategy.codec.quality_label} {str(current_q).rjust(strategy.codec.quality_log_padding)}{summary_suffix}{best_string}",
                     self._visual_hash,
                 )
             )
@@ -1210,11 +1227,14 @@ class ChunkEncoder:
             )
         elif not search.best_targets_met and best_fail_attempt is not None:
             assert search.best_quality is not None, "a surviving attempt implies a measured quality"
-            logger.warning(
-                "%s search space exhausted for chunk %s strategy %s after %d attempts — accepting best attempt (%s=%s)",
-                strategy.codec.quality_label, chunk.safe_name(), strategy.display_name(), attempt_number,
-                strategy.codec.quality_label, search.best_quality,
-            )
+            # The exhaustion warning is a search-mode statement: a single-point
+            # (fixed) domain never searched — acceptance is unconditional there.
+            if strategy.codec.quality_better != strategy.codec.quality_worse:
+                logger.warning(
+                    "%s search space exhausted for chunk %s strategy %s after %d attempts — accepting best attempt (%s=%s)",
+                    strategy.codec.quality_label, chunk.safe_name(), strategy.display_name(), attempt_number,
+                    strategy.codec.quality_label, search.best_quality,
+                )
             self._finalize_winning_attempt(
                 strategy        = strategy,
                 chunk_id        = chunk.safe_name(),
@@ -1729,6 +1749,7 @@ def encode_all_chunks(
     visual_hash:     bool              = True,
     metrics_sampling: int              = 10,
     metric_prefix:   MetricKey         = MetricKey.ENCODING,
+    measure_attempts: bool             = True,
 ) -> EncodingResult:
     """Encode all chunks with quality-targeted CRF adjustment.
 
@@ -1759,6 +1780,8 @@ def encode_all_chunks(
         metrics_sampling:  Frame subsampling factor for quality metric generation.
                            Passed through to ``ChunkEncoder`` and then to
                            ``QualityEvaluator.evaluate_chunk``.
+        measure_attempts:  Whether encoded attempts get quality evaluations
+                           (the ``ChunkEncoder`` seam; default = measure).
 
     Returns:
         EncodingResult with paths to encoded chunks and statistics
@@ -1801,6 +1824,7 @@ def encode_all_chunks(
         visual_hash       = visual_hash,
         metrics_sampling  = metrics_sampling,
         metric_prefix     = metric_prefix,
+        measure_attempts  = measure_attempts,
     )
 
     # Run parallel encoding — COMPLETE pairs are skipped inside _encode_chunks_parallel
@@ -2228,6 +2252,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             cleanup_level    = self._dep_result(JobPhase).cleanup,
             visual_hash      = self._config.encoding.visual_hash,
             metrics_sampling = self._config.measurement.sampling,
+            measure_attempts = True,  # default-flipping is TODO §83's decision
         )
 
         if enc_result.outcome == PhaseOutcome.FAILED:
