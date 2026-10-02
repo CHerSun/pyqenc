@@ -23,7 +23,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeIs, assert_never
 
 from pyqenc.constants import (
     CHAPTERS_FILENAME,
@@ -320,10 +320,34 @@ def _extract_timestamps(
 # Result — typed artifact fields as the external contract
 # ---------------------------------------------------------------------------
 
-type _ExtractionRow = Artifact[
-    VideoStream | AudioStream | SubtitleStream | AttachmentStream | Chapters
-]
-"""One ledger row of the extraction phase."""
+type _ExtractionRow = (
+    Artifact[VideoStream] | Artifact[AudioStream] | Artifact[SubtitleStream]
+    | Artifact[AttachmentStream] | Artifact[Chapters]
+)
+"""One ledger row of the extraction phase — a union of the concrete artifact
+instantiations (rows are always built per-kind, with a concrete payload)."""
+
+
+# Payload-driven row narrowing. A row's runtime kind lives on its payload,
+# and only a monomorphic TypeIs signature can carry that correlation: an
+# inline isinstance on the payload narrows nothing, and a generic
+# ``TypeIs[Artifact[R]]`` is rejected under Artifact's invariance.
+# Each predicate has 2-3 consumers (result assembly + the dispatch loop).
+
+def _is_video_row(row: _ExtractionRow) -> TypeIs[Artifact[VideoStream]]:
+    return isinstance(row.payload, VideoStream)
+
+def _is_audio_row(row: _ExtractionRow) -> TypeIs[Artifact[AudioStream]]:
+    return isinstance(row.payload, AudioStream)
+
+def _is_subtitle_row(row: _ExtractionRow) -> TypeIs[Artifact[SubtitleStream]]:
+    return isinstance(row.payload, SubtitleStream)
+
+def _is_attachment_row(row: _ExtractionRow) -> TypeIs[Artifact[AttachmentStream]]:
+    return isinstance(row.payload, AttachmentStream)
+
+def _is_chapters_row(row: _ExtractionRow) -> TypeIs[Artifact[Chapters]]:
+    return isinstance(row.payload, Chapters)
 
 
 @dataclass
@@ -399,7 +423,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         self._video_required: bool = video_required
 
         # Recovery stash — the run's stream inventory and sidecar currency.
-        self._source_file: File                    = None  # type: ignore[assignment]
+        self._source_file: File | None             = None
         self._video:       VideoStream | None      = None
         self._audio:       list[AudioStream]       = []
         self._subtitles:   list[SubtitleStream]    = []
@@ -463,7 +487,6 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         remove_stale_tmp_files(extracted_dir)
 
         # Step 3: resolve the stream inventory (sidecar first, no re-probe).
-        assert job_result.file is not None, "File guaranteed by JobPhase"
         self._source_file = job_result.file.payload
         self._load_or_enumerate(job_result.file.payload, sidecar_path)
         self._normalize_extracted_paths(work_dir)
@@ -537,6 +560,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             ))
 
         if self._has_chapters:
+            assert self._source_file is not None, "inventory resolution sets the File before rows are built"
             rows.append(Artifact(
                 payload = Chapters(file=self._source_file),
                 state   = (
@@ -666,13 +690,11 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         return ExtractionPhaseResult(
             outcome            = outcome,
             message            = message,
-            video_stream       = next(
-                (r for r in artifacts if isinstance(r.payload, VideoStream)), None),
-            audio_streams      = [r for r in artifacts if isinstance(r.payload, AudioStream)],
-            subtitle_streams   = [r for r in artifacts if isinstance(r.payload, SubtitleStream)],
-            attachment_streams = [r for r in artifacts if isinstance(r.payload, AttachmentStream)],
-            chapters           = next(
-                (r for r in artifacts if isinstance(r.payload, Chapters)), None),
+            video_stream       = next((r for r in artifacts if _is_video_row(r)), None),
+            audio_streams      = [r for r in artifacts if _is_audio_row(r)],
+            subtitle_streams   = [r for r in artifacts if _is_subtitle_row(r)],
+            attachment_streams = [r for r in artifacts if _is_attachment_row(r)],
+            chapters           = next((r for r in artifacts if _is_chapters_row(r)), None),
             work_dir           = self._dep_result(JobPhase).work_dir,
         )
 
@@ -729,7 +751,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         # space, one call for every pair) before the per-row loop.
         attachment_rows = [
             a for a in artifacts
-            if a.state == ArtifactState.ABSENT and isinstance(a.payload, AttachmentStream)
+            if a.state == ArtifactState.ABSENT and _is_attachment_row(a)
         ]
         if attachment_rows:
             self._extract_attachments(attachment_rows, source, errors)
@@ -737,15 +759,18 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         for artifact in artifacts:
             if artifact.state != ArtifactState.ABSENT:
                 continue
-            match artifact.payload:
-                case VideoStream():
-                    self._extract_index(artifact, work_dir, errors)
-                case SubtitleStream():
-                    self._extract_subtitle(artifact, source, errors)
-                case Chapters():
-                    self._extract_chapters(artifact, work_dir, source, errors)
-                case AudioStream():
-                    pass  # virtual — exists in the source, nothing to extract
+            if _is_video_row(artifact):
+                self._extract_index(artifact, work_dir, errors)
+            elif _is_subtitle_row(artifact):
+                self._extract_subtitle(artifact, source, errors)
+            elif _is_chapters_row(artifact):
+                self._extract_chapters(artifact, work_dir, source, errors)
+            elif _is_audio_row(artifact):
+                pass  # virtual — exists in the source, nothing to extract
+            elif _is_attachment_row(artifact):
+                pass  # extracted as one batch before this loop
+            else:
+                assert_never(artifact)
 
         if errors:
             failed_count = sum(1 for a in artifacts if a.state == ArtifactState.ABSENT)

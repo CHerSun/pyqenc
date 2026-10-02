@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from dataclasses import replace as _dc_replace
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import yaml
 
@@ -1131,7 +1131,7 @@ class ChunkEncoder:
             all_metrics: dict[str, float] = {
                 f"{metric.value}_{stat}": float(value)
                 for metric, stats in evaluation.metrics.items()
-                for stat, value in stats.items()
+                for stat, value in cast(dict[str, float], stats).items()
             }
 
             # Targeted metrics subset (for search and convergence decisions).
@@ -1194,6 +1194,7 @@ class ChunkEncoder:
         # --- Post-loop: finalize ---
 
         if search.best_targets_met and final_attempt is not None:
+            assert search.best_quality is not None, "a passing attempt implies a measured quality"
             worst      = QualitySearchBase.find_worst_target(search.best_metrics, quality_targets) if search.best_metrics else None
             limited_by = f"{worst[0].metric}_{worst[0].statistic}" if worst is not None else None
             logger.info(fmt_chunk_final(
@@ -1206,12 +1207,13 @@ class ChunkEncoder:
                 chunk_id        = chunk.safe_name(),
                 resolution      = final_attempt.resolution,
                 winning_attempt = final_attempt.path,
-                crf             = search.best_quality,  # type: ignore[arg-type]
+                crf             = search.best_quality,
                 metrics         = search.best_metrics or {},
-                frame_count     = frame_counts.get(final_attempt.path),
+                frame_count     = frame_counts.get(final_attempt.path, 0),
                 targets_met     = True,
             )
         elif not search.best_targets_met and best_fail_attempt is not None:
+            assert search.best_quality is not None, "a surviving attempt implies a measured quality"
             logger.warning(
                 "%s search space exhausted for chunk %s strategy %s after %d attempts — accepting best attempt (%s=%s)",
                 strategy.codec.quality_label, chunk.safe_name(), strategy.display_name(), attempt_number,
@@ -1222,9 +1224,9 @@ class ChunkEncoder:
                 chunk_id        = chunk.safe_name(),
                 resolution      = best_fail_attempt.resolution,
                 winning_attempt = best_fail_attempt.path,
-                crf             = search.best_quality,  # type: ignore[arg-type]
+                crf             = search.best_quality,
                 metrics         = search.best_metrics or {},
-                frame_count     = frame_counts.get(best_fail_attempt.path),
+                frame_count     = frame_counts.get(best_fail_attempt.path, 0),
                 targets_met     = False,
             )
             final_attempt = best_fail_attempt
@@ -1254,6 +1256,7 @@ class ChunkEncoder:
 
         if final_attempt is not None or best_fail_attempt is not None:
             winning = final_attempt if final_attempt is not None else best_fail_attempt
+            assert winning is not None, "the branch condition guarantees a winner"
             return ChunkEncodingResult(
                 chunk_id     = chunk.safe_name(),
                 strategy     = strategy.display_name(),
@@ -1561,7 +1564,7 @@ async def _encode_chunks_parallel(
                     else:
                         result.encoded_count += 1
                         if advance is not None:
-                            advance(chunk.end_timestamp - chunk.start_timestamp)
+                            advance(chunk.end_timestamp - chunk.start_timestamp, AdvanceState.SUCCESS)
                         # Record convergence for this chunk/strategy pair
                         collector.step(
                             metric_prefix,
