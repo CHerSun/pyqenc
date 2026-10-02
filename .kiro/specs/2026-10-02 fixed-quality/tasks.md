@@ -96,7 +96,7 @@ three gates green and searched runs byte-identical. Requirement ids reference
     `measure_attempts=False` unit test documenting the seam (sidecar metric-keys
     requirement lifted — Req 2 of §83's future work stays out of scope)
 
-- [ ] 4. Compared-run optimization: pruning, anchor, synthetic set, table
+- [x] 4. Compared-run optimization: pruning, anchor, synthetic set, table
   (Req 8)
   - Aggregation: per strategy, min-across-test-chunks for every measured
     `(metric, statistic)` + total size, derived from the test-encode results

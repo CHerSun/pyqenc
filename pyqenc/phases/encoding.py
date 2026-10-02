@@ -2237,6 +2237,17 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # Cache quality labels for downstream phases (e.g. MergePhase CRF plot)
         self.quality_labels = {s.display_name(): s.codec.quality_label for s in strategies}
 
+        # Presentation targets — what winner sidecars and the limiter-style
+        # output are judged against. Fixed compared runs use the anchor's
+        # synthetic set (config targets are search-tuned vocabulary and would
+        # read as all-miss noise); uncompared fixed runs have no ruler
+        # (absolute values, no verdicts — the limiter table self-extinguishes
+        # on empty targets); searched runs use the config targets, unchanged.
+        if self._config.encoding.fixed_quality:
+            presentation_targets = optimization_result.synthetic_targets
+        else:
+            presentation_targets = self._config.encoding.resolved_targets
+
         # Persist encoding.yaml with current probe state
         encoding_yaml = work_dir / EncodingPhase.SIDECAR_NAME
         if self.params is None:
@@ -2248,7 +2259,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         enc_result = encode_all_chunks(
             chunks           = chunks,
             strategies       = strategies,
-            quality_targets  = self._config.encoding.resolved_targets,
+            quality_targets  = presentation_targets,
             work_dir         = work_dir,
             collector        = self._collector,
             max_parallel     = self._config.encoding.concurrency,

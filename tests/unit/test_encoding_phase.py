@@ -306,3 +306,250 @@ class TestMeasureAttemptsSeam:
 
         assert "measure_attempts  = True" in inspect.getsource(_make_encoder)
         assert "measure_attempts = True" in inspect.getsource(EncodingPhase._execute)
+
+
+# ---------------------------------------------------------------------------
+# Fixed-mode encoding: degenerate single-point path + presentation ruler
+# (fixed-quality spec Req 9.1, 9.4, 9.5, 9.7)
+# ---------------------------------------------------------------------------
+
+from pyqenc.metrics import NoOpMetricsCollector
+from pyqenc.models import CleanupLevel, CropParams, PhaseOutcome, QualityTarget
+from pyqenc.phase import Artifact as _PAArtifact
+from pyqenc.phase import PhaseRegistry
+from pyqenc.phases.chunking import ChunkingPhase as _CCP
+from pyqenc.phases.chunking import ChunkingPhaseResult
+from pyqenc.phases.encoding import (
+    EncodingPhase,
+    EncodingResult,
+    build_encoded_chunk,
+)
+from pyqenc.phases.job import JobPhase
+from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
+from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
+from pyqenc.state import ArtifactState as _PAState
+from pyqenc.stream_model import ExtendedVideoStream
+
+
+class TestFixedDegenerateSinglePoint:
+    """Exactly one accepted attempt per pair via the existing degenerate path (Req 9.1)."""
+
+    def test_single_attempt_accepted_with_measurement(self, tmp_path: Path) -> None:
+        """Uncompared ruler (empty targets): one measured attempt, vacuous
+        pass, winner promoted at the pinned value."""
+        result, evaluator = _run_encode_with_targets(
+            tmp_path, targets=[], measure_attempts=True,
+        )
+        evaluator.evaluate_chunk.assert_called_once()
+        assert result.success is True
+        assert result.targets_met is True
+        assert result.attempts == 1
+        assert result.final_crf == _D("18.0")
+
+    def test_single_attempt_accepted_when_ruler_misses(self, tmp_path: Path) -> None:
+        """Compared-run ruler miss: the single-point domain cannot produce a
+        second candidate — the attempt is accepted unconditionally with a
+        presentation-only targets_met=False verdict (Req 9.7)."""
+        unreachable = [QualityTarget(metric="vmaf", statistic="min", value=99.0)]
+        result, _ = _run_encode_with_targets(
+            tmp_path, targets=unreachable, measure_attempts=True,
+        )
+        assert result.success is True
+        assert result.targets_met is False
+        assert result.attempts == 1
+        assert result.final_crf == _D("18.0")
+        # The winner is still promoted.
+        assert (tmp_path / "encoded" / "test_strategy" / "chunk_001.1920x1080.yaml").exists()
+
+
+def _run_encode_with_targets(
+    tmp_path: Path,
+    *,
+    targets: list[QualityTarget],
+    measure_attempts: bool,
+):
+    """encode_chunk over a fixed single-point domain with explicit targets."""
+    strategy = _fixed_strategy()
+    chunk = _chunk_mock(tmp_path)
+
+    fake_eval = _MM(spec=_QE)
+    fake_eval.targets_met = all(
+        95.0 >= t.value for t in targets
+    )
+    fake_eval.logs = _QL()
+    fake_eval.metrics = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
+
+    evaluator = _MM(spec=_QEvaluator)
+    evaluator.work_dir = tmp_path
+    evaluator.evaluate_chunk.return_value = fake_eval
+
+    encoder = _ChunkEncoder(
+        quality_evaluator = evaluator,
+        work_dir          = tmp_path,
+        collector         = _MM(spec=_MetricsCollector),
+        metrics_sampling  = 10,
+        measure_attempts  = measure_attempts,
+    )
+
+    attempt = tmp_path / "encoding" / "test_strategy" / "chunk_001.1920x1080.q18.0.mkv"
+    attempt.parent.mkdir(parents=True, exist_ok=True)
+    attempt.write_bytes(b"fake mkv")
+
+    run_result = _FFR(returncode=0, success=True, stderr_lines=[], frame_count=120)
+    with (
+        _patch.object(encoder, "_check_existing_encoding", return_value=None),
+        _patch.object(encoder, "_encode_with_ffmpeg", return_value=run_result),
+        _patch("pyqenc.phases.encoding._probe_resolution", return_value="1920x1080"),
+    ):
+        result = encoder.encode_chunk(
+            chunk=chunk, strategy=strategy, quality_targets=targets,
+            initial_crf=_D("18.0"), force=False,
+        )
+    return result, evaluator
+
+
+class TestEncodingPresentationTargets:
+    """What the encoding phase judges winner presentation against (Req 9.4, 9.5)."""
+
+    def _run_phase(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        *,
+        quality_range_override: tuple[_D, _D] | None,
+        synthetic_targets: list[QualityTarget],
+    ) -> list[QualityTarget]:
+        """Run EncodingPhase through run() with a stubbed encode pool.
+
+        Returns the ``quality_targets`` the pool received.
+        """
+        from pyqenc.app_config import load_app_config
+
+        config = load_app_config(default_only=True).model_copy(deep=True)
+        config.encoding.strategies = ["h265-aq+slow"]
+        config.encoding.targets = ["vmaf-min:93.0"]
+        if quality_range_override is not None:
+            config.encoding.quality_range_override = quality_range_override
+        config.encoding.resolve(config.codecs, config.profiles)
+
+        src = tmp_path / "source.mkv"
+        src.write_bytes(b"\x00" * 64)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        job = JobPhase(
+            config, {}, source=src, work_dir=work_dir, force=False,
+            cleanup=CleanupLevel.NONE, no_metrics=True,
+            collector=NoOpMetricsCollector(),
+        )
+        job.run(dry_run=False)
+
+        from fractions import Fraction
+
+        from pyqenc.stream_model import (
+            File as _File,
+        )
+        from pyqenc.stream_model import (
+            VideoStream,
+            VideoStreamChunk,
+            VideoStreamInfo,
+        )
+
+        info = VideoStreamInfo(
+            track_id=0, codec_name="hevc", fps=24.0,
+            fps_fraction=Fraction(24, 1), resolution="1920x1080",
+            duration_seconds=10.0,
+        )
+        extended = ExtendedVideoStream(
+            stream=VideoStream(
+                file=_File(path=src, file_size_bytes=64), info=info,
+            ),
+            frame_count=240, crop=CropParams(),
+        )
+        probe = ProbePhase(config, {}, collector=NoOpMetricsCollector(), crop_params=None)
+        probe.result = ProbePhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="stub",
+            stream=_PAArtifact(payload=extended, state=_PAState.COMPLETE),
+        )
+
+        chunk = VideoStreamChunk(stream=extended, start_timestamp=0.0,
+                                 end_timestamp=10.0, frame_count=240)
+        chunking = _CCP(config, {}, collector=NoOpMetricsCollector())
+        chunking.result = ChunkingPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="stub",
+            chunks=[_PAArtifact(payload=chunk, state=_PAState.COMPLETE)],
+        )
+
+        strategy = config.encoding.resolved_strategies[0]
+        optimization = OptimizationPhase(config, {}, collector=NoOpMetricsCollector())
+        optimization.result = OptimizationPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="stub",
+            selected_strategies=[strategy],
+            synthetic_targets=synthetic_targets,
+        )
+
+        registry: PhaseRegistry = {
+            JobPhase: job, ProbePhase: probe,
+            _CCP: chunking, OptimizationPhase: optimization,
+        }
+        phase = EncodingPhase(config, registry, collector=NoOpMetricsCollector())
+
+        # The encoded winner the stubbed pool reports back.
+        winner_dir = work_dir / "encoded" / strategy.safe_name()
+        winner_dir.mkdir(parents=True, exist_ok=True)
+        winner_path = winner_dir / f"{chunk.safe_name()}.1920x1080.q18.0.mkv"
+        winner_path.write_bytes(b"x" * 32)
+        winner = build_encoded_chunk(
+            chunk=chunk, strategy=strategy, crf=_D("18.0"),
+            path=winner_path, resolution="1920x1080", frame_count=240,
+        )
+
+        captured: dict[str, object] = {}
+
+        def _fake_encode_all(**kwargs: object) -> EncodingResult:
+            captured.update(kwargs)
+            result = EncodingResult()
+            result.encoded_chunks = {chunk.safe_name(): {strategy.display_name(): winner}}
+            result.encoded_count = 1
+            return result
+
+        monkeypatch.setattr(
+            "pyqenc.phases.encoding.encode_all_chunks", _fake_encode_all,
+        )
+        outcome = phase.run(dry_run=False)
+        assert outcome.outcome is PhaseOutcome.COMPLETED
+        received = _cast(list[QualityTarget], captured["quality_targets"])
+        return received
+
+    def test_fixed_compared_uses_synthetic_set(self, tmp_path: Path, monkeypatch) -> None:
+        synthetic = [
+            QualityTarget(metric="vmaf", statistic="median", value=91.0),
+            QualityTarget(metric="vif", statistic="median", value=84.0),
+        ]
+        received = self._run_phase(
+            tmp_path, monkeypatch,
+            quality_range_override=(_D("18"), _D("18")),
+            synthetic_targets=synthetic,
+        )
+        assert received == synthetic
+
+    def test_fixed_uncompared_uses_no_ruler(self, tmp_path: Path, monkeypatch) -> None:
+        received = self._run_phase(
+            tmp_path, monkeypatch,
+            quality_range_override=(_D("18"), _D("18")),
+            synthetic_targets=[],
+        )
+        assert received == []
+
+    def test_searched_uses_config_targets_unchanged(self, tmp_path: Path, monkeypatch) -> None:
+        received = self._run_phase(
+            tmp_path, monkeypatch,
+            quality_range_override=None,
+            synthetic_targets=[],
+        )
+        # The config targets flow through verbatim — searched behavior is
+        # byte-identical to before the spec.
+        from pyqenc.models import QualityTarget as _QT
+        assert received == [
+            _QT(metric="vmaf", statistic="min", value=93.0),
+        ]

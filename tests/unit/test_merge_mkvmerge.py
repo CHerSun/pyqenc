@@ -845,17 +845,17 @@ class TestMergeFailsWithoutTimestamps:
 # Missed-targets warning (completion-line escalation)
 # ---------------------------------------------------------------------------
 
-def _make_phase(targets: list) -> MergePhase:
+def _make_phase(targets: list, *, fixed_quality: bool = False) -> MergePhase:
     """A minimal MergePhase whose config carries exactly *targets*."""
     from types import SimpleNamespace
 
     from pyqenc.metrics import NoOpMetricsCollector
 
     config = SimpleNamespace(
-        encoding  = SimpleNamespace(resolved_targets=targets),
+        encoding  = SimpleNamespace(resolved_targets=targets, fixed_quality=fixed_quality),
         measurement = SimpleNamespace(sampling=3),
     )
-    return MergePhase(cast(AppConfig, config), {}, collector=NoOpMetricsCollector())  # stand-in carrying the two read fields
+    return MergePhase(cast(AppConfig, config), {}, collector=NoOpMetricsCollector())  # stand-in carrying the read fields
 
 
 class TestMissedTargetsWarning:
@@ -901,3 +901,36 @@ class TestMissedTargetsWarning:
             _make_phase(targets)._log_missed_targets_warning("h265+ultrafast", metrics)
 
         assert not [r for r in caplog.records if r.levelno == _logging.WARNING]
+
+    def test_warning_suppressed_on_fixed_quality_runs(self, caplog) -> None:
+        """Config targets are search-tuned vocabulary — at a pinned knob they
+        would read as all-miss noise, so the warning stays silent (Req 9.6)."""
+        import logging as _logging
+
+        from pyqenc.models import QualityTarget
+
+        targets = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
+        metrics = {"vmaf_min": 88.3}  # missed — but no warning on a fixed run
+
+        with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
+            _make_phase(targets, fixed_quality=True)._log_missed_targets_warning(
+                "h265+ultrafast", metrics,
+            )
+
+        assert not [r for r in caplog.records if r.levelno == _logging.WARNING]
+
+    def test_warning_present_on_searched_runs(self, caplog) -> None:
+        """The searched-mode behavior is unchanged: a miss still escalates."""
+        import logging as _logging
+
+        from pyqenc.models import QualityTarget
+
+        targets = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
+        metrics = {"vmaf_min": 88.3}
+
+        with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
+            _make_phase(targets, fixed_quality=False)._log_missed_targets_warning(
+                "h265+ultrafast", metrics,
+            )
+
+        assert [r for r in caplog.records if r.levelno == _logging.WARNING]

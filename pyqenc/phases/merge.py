@@ -949,11 +949,16 @@ class MergePhase(Phase[MergePhaseResult]):
         place a missed target is escalated to warning level so the reason is
         immediately visible where the merge happened.
 
+        Suppressed on fixed-quality runs: the config targets are search-tuned
+        vocabulary and would read as all-miss noise at a pinned knob — the
+        merged-output measurement itself remains the final check.
+
         Args:
             strategy_name:   The merged strategy.
             metrics_dict:    Measured metrics keyed by ``"{metric}_{statistic}"``.
-            quality_targets: The targets that were checked.
         """
+        if self._config.encoding.fixed_quality:
+            return
         missed: list[str] = []
         for target in self._config.encoding.resolved_targets:
             value = metrics_dict.get(f"{target.metric}_{target.statistic}")
