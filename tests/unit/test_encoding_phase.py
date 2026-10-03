@@ -349,17 +349,25 @@ class TestFixedDegenerateSinglePoint:
     def test_single_attempt_accepted_when_ruler_misses(self, tmp_path: Path) -> None:
         """Compared-run ruler miss: the single-point domain cannot produce a
         second candidate — the attempt is accepted unconditionally with a
-        presentation-only targets_met=False verdict (Req 9.7)."""
+        presentation-only targets_met=False verdict (Req 9.7), and the
+        acceptance line still logs (same shape as a searched exhaustion)."""
         unreachable = [QualityTarget(metric="vmaf", statistic="min", value=99.0)]
-        result, _ = _run_encode_with_targets(
-            tmp_path, targets=unreachable, measure_attempts=True,
-        )
+        with _patch("pyqenc.phases.encoding.logger") as captured:
+            result, _ = _run_encode_with_targets(
+                tmp_path, targets=unreachable, measure_attempts=True,
+            )
         assert result.success is True
         assert result.targets_met is False
         assert result.attempts == 1
         assert result.final_crf == _D("18.0")
         # The winner is still promoted.
         assert (tmp_path / "encoded" / "test_strategy" / "chunk_001.1920x1080.yaml").exists()
+        # Every accepted winner logs its acceptance — the exhausted path
+        # included; single-point acceptance must not silence it.
+        assert any(
+            "accepting best attempt" in str(call)
+            for call in captured.warning.call_args_list
+        )
 
 
 def _run_encode_with_targets(

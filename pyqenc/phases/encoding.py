@@ -1234,14 +1234,11 @@ class ChunkEncoder:
             )
         elif not search.best_targets_met and best_fail_attempt is not None:
             assert search.best_quality is not None, "a surviving attempt implies a measured quality"
-            # The exhaustion warning is a search-mode statement: a single-point
-            # (fixed) domain never searched — acceptance is unconditional there.
-            if strategy.codec.quality_better != strategy.codec.quality_worse:
-                logger.warning(
-                    "%s search space exhausted for chunk %s strategy %s after %d attempts — accepting best attempt (%s=%s)",
-                    strategy.codec.quality_label, chunk.safe_name(), strategy.display_name(), attempt_number,
-                    strategy.codec.quality_label, search.best_quality,
-                )
+            logger.warning(
+                "%s search space exhausted for chunk %s strategy %s after %d attempts — accepting best attempt (%s=%s)",
+                strategy.codec.quality_label, chunk.safe_name(), strategy.display_name(), attempt_number,
+                strategy.codec.quality_label, search.best_quality,
+            )
             self._finalize_winning_attempt(
                 strategy        = strategy,
                 chunk_id        = chunk.safe_name(),
