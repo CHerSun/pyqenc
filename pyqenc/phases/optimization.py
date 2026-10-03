@@ -1104,11 +1104,12 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
     ) -> None:
         """The fixed-mode comparison table: sizes and metric deltas vs the anchor.
 
-        Rows sort by total size ascending; the anchor row shows absolute
-        headline values (the baseline), other rows show signed deltas vs the
-        anchor. Pruned rows name one dominator. The headline set is one
-        statistic per measured metric (median preferred) — full stats live in
-        ``optimization.yaml``.
+        Compact layout: one Size column (MB, with the ×ratio vs the anchor
+        folded in — the anchor row omits it, marking the baseline), one
+        column per metric carrying both comparison statistics (anchor:
+        ``p10..median`` range; others: ``Δp10/Δmedian``). The stat convention
+        is stated once below the ruler, not in every column. Pruned rows name
+        one dominator. Full stats live in ``optimization.yaml``.
 
         Args:
             results:        Per-strategy test results.
@@ -1125,45 +1126,62 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             else "none — no strategy carried measurements"
         )
         logger.info("Fixed-quality comparison — ruler: %s", ruler)
-
-        headline_keys = _headline_metric_keys(
-            [r.metrics for r in results if r.metrics]
+        logger.info(
+            "  size: MB (× = vs anchor) · metrics: anchor p10..median, others Δp10/Δmedian vs anchor"
         )
+
+        # Column keys per metric in comparison order (p10, median — present
+        # ones only), metric-major.
+        keys_by_metric: dict[str, list[str]] = {}
+        for key in _headline_metric_keys([r.metrics for r in results if r.metrics]):
+            keys_by_metric.setdefault(key.rsplit("_", 1)[0], []).append(key)
+
         name_width  = max((len(r.strategy) for r in results), default=30) + 2
+        metric_cols = len(keys_by_metric) if anchor_result is not None else 0
         header_cells = [
             f"{'Strategy':<{name_width}}",
-            f"{'Size (MB)':>10}",
-            f"{'vs anchor':>9}",
+            f"{'Size (MB)':>12}",
         ]
         if anchor_result is not None:
-            header_cells += [f"{k.replace('_', '-'):>13}" for k in headline_keys]
+            header_cells += [f"{metric:>11}" for metric in keys_by_metric]
         logger.info("  " + "  ".join(header_cells))
-        logger.info("  " + "  ".join([
-            "-" * name_width, "-" * 10, "-" * 9,
-        ] + (["-" * 13] * len(headline_keys) if anchor_result is not None else [])))
+        logger.info("  " + "  ".join(
+            ["-" * name_width, "-" * 12]
+            + (["-" * 11] * metric_cols if anchor_result is not None else [])
+        ))
 
         selected_set  = set(selected)
         dominator_for = self._dominator_map(results, resolved_names)
 
         for res in sorted(results, key=lambda r: (r.total_size, r.strategy)):
             size_str = fmt_size_mb(res.total_size)
-            ratio = f"{res.total_size / anchor_size:.2f}×" if anchor_size > 0 else "  N/A"
+            if res.strategy == anchor_name:
+                size_cell = size_str  # baseline: no ratio against itself
+            elif anchor_size > 0:
+                size_cell = f"{size_str} ({res.total_size / anchor_size:.2f}×)"
+            else:
+                size_cell = f"{size_str} (N/A)"
             cells = [
                 f"{res.strategy[:name_width - 2]:<{name_width}}",
-                f"{size_str:>10}",
-                f"{ratio:>9}",
+                f"{size_cell:>12}",
             ]
             if anchor_result is not None:
-                for key in headline_keys:
-                    value = res.metrics.get(key)
+                for keys in keys_by_metric.values():
                     if res.strategy == anchor_name:
-                        cell = f"{value:.1f}" if value is not None else "-"
-                    elif value is not None and key in anchor_result.metrics:
-                        delta = value - anchor_result.metrics[key]
-                        cell = f"{delta:+.1f}"
+                        values = [anchor_result.metrics.get(key) for key in keys]
+                        cell = "..".join(f"{v:.1f}" for v in values if v is not None) or "-"
                     else:
-                        cell = "-"
-                    cells.append(f"{cell:>13}")
+                        parts: list[str] = []
+                        for key in keys:
+                            value = res.metrics.get(key)
+                            anchor_value = anchor_result.metrics.get(key)
+                            parts.append(
+                                f"{value - anchor_value:+.1f}"
+                                if value is not None and anchor_value is not None
+                                else "-"
+                            )
+                        cell = "/".join(parts)
+                    cells.append(f"{cell:>11}")
             if res.strategy not in selected_set:
                 dominator = dominator_for.get(res.strategy)
                 cells.append(

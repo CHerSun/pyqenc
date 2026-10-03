@@ -1171,8 +1171,13 @@ class TestFixedComparedExecute:
             )
         text = caplog.text
         assert "Fixed-quality comparison — ruler: h265-aq+slow (smallest test size)" in text
-        # Anchor row shows absolute headline values; others show signed deltas.
-        assert "vmaf-median" in text and "vif-median" in text
+        # The stat convention is stated once; metric columns are one per metric.
+        assert "anchor p10..median, others Δp10/Δmedian vs anchor" in text
+        # Anchor row: bare size (baseline) + p10..median ranges.
+        assert "87.0..91.0" in text and "81.0..84.0" in text
+        # Non-anchor rows: size with folded ratio + paired deltas.
+        assert "(1.40×)" in text
+        assert "+2.5/+2.1" in text  # h265 vmaf Δp10/Δmedian vs anchor
         assert "dominated by h265+slow" in text
         assert "Survivors (Pareto front): h265-aq+slow, h265+slow — all will be encoded" in text
 
