@@ -193,12 +193,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
     def _skip_check(self, dry_run: bool) -> OptimizationPhaseResult | None:
         """Skip decision plus the fixed-mode entry (guard, wipe, banner).
 
-        The mode decision reads constructor state (config) only. The skip
-        path itself needs dependency state for its ``optimization.yaml``
-        bookkeeping, so it resolves dependencies itself (memoized — when the
-        phase is reached through a dependency chain they have already run).
+        Dependencies are already resolved when this runs (the template
+        resolves them before the skip check), so both the fixed-mode entry
+        and the all-strategies path read dependency results directly.
 
-        The fixed-mode entry is here because ``_skip_check`` is the single
+        The fixed-mode entry lives here because ``_skip_check`` is the single
         always-executed point the template's ``run()`` crosses on BOTH the
         optimize path and the all-strategies path — the wipe, guard, and
         banner must fire on every fixed start regardless of mode.
@@ -209,8 +208,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         Returns:
             The all-strategies result, a FAILED result when no strategies are
-            configured, a dependency short-circuits, or the cleanup guard
-            stops the run — or ``None`` to proceed with the template.
+            configured or the cleanup guard stops the run — or ``None`` to
+            proceed with the template.
         """
         strategies = self._config.encoding.resolved_strategies
         if not strategies:
@@ -228,9 +227,6 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         if self._config.encoding.optimize and len(strategies) > 1:
             return None
 
-        dep_result = self._ensure_dependencies(dry_run=dry_run)
-        if dep_result is not None:
-            return dep_result
         return self._all_strategies(dry_run)
 
     def _fixed_mode_entry(
@@ -250,13 +246,10 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             strategies: The resolved strategies (wipe scope, banner content).
 
         Returns:
-            A FAILED result when a dependency short-circuits or the cleanup
-            guard stops the run; otherwise ``None`` to continue into the
-            mode branch exactly as a searched run would.
+            A FAILED result when the cleanup guard stops the run; otherwise
+            ``None`` to continue into the mode branch exactly as a searched
+            run would.
         """
-        dep_result = self._ensure_dependencies(dry_run=dry_run)
-        if dep_result is not None:
-            return dep_result
         job_result = self._dep_result(JobPhase)
 
         if job_result.cleanup >= CleanupLevel.INTERMEDIATE:
