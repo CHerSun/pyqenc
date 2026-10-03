@@ -901,6 +901,13 @@ Design sketch:
   (`_validate_profile_quality_range`, `_validate_override_quality_range`,
   `_effective_codec`, `_expand_strategy_pattern`, `_get_codec`) as
   `AppConfig` methods in the same motion (disowned-functions rule).
+- Re-home `_validate_resolved_strategies` out of cli.py (2026-10-03 review):
+  the uniform-label-under-override and no-mixed-fixed/searched rules are
+  invariants of the resolved set (pure config facts — "was -q given?" is
+  `quality_range_override is not None`), not CLI policy. They become the
+  post-resolve validation owned by the same sanctioned method/load
+  validator; the CLI keeps only the try/except that surfaces the error.
+  Still checked before any phase runs — just from the right layer.
 - CLI `_build_config` + ~a dozen test helpers drop the assign-then-resolve
   dance.
 
@@ -910,7 +917,18 @@ implementation as the spec-window mechanical-debt sweep.
 
 ---
 
-## Last known = 88
+## 89. Check the code for `str` usages
+
+Old code used `str` directly in many places. Instead of Paths, instead of strategies, profiles, etc.
+We've moved to objects & classes since then. Single instanciacion where possible.
+strings instead of objects could be used for serialization/deserialization, but only to directly recover to objects.
+
+Legitimate usages for `str` do exist, like messages. But if it masks object usage - this must not happen.
+
+---
+
+
+## Last known = 89
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
