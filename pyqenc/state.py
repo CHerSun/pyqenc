@@ -458,33 +458,39 @@ class MergeStrategySummary(BaseModel):
 class MergeParams(BaseModel):
     """Phase parameter file model for merging (``merge.yaml``).
 
-    Stores the quality targets and metrics sampling factor active when the
-    last merge run wrote this file.  Used to detect changes on subsequent
-    runs and delete stale merge artifacts (sidecar + output) so the merge
-    phase re-runs with the new parameters.
+    Stores the run's merge invalidation keys plus the per-strategy summary
+    rows so the merge summary table can be replayed on rerun without
+    re-reading every per-output sidecar. Keys are mode-honest: search runs
+    key on the configured quality targets; fixed runs key on the ruler basis
+    (anchor identity) — config targets drive nothing in fixed mode, so a
+    fixed merge is neither invalidated nor re-measured by their change.
 
-    Also stores per-strategy summary rows so the merge summary table can be
-    replayed on rerun without re-reading every per-output sidecar.
+    Replay-only facts (source stem/size) are deliberately NOT persisted:
+    they render live from the JobPhase result on the fast-exit path, and
+    persisting them beside the keys would break whole-model comparisons.
 
     Attributes:
-        quality_targets:    Quality targets serialised as ``"metric-statistic:value"``
-                            strings.  ``None`` / empty means no targets were configured.
-        sampling:           Frame subsampling factor used during quality measurement.
-                            ``None`` for files written before this field was added
-                            (treated as unknown — no mismatch triggered).
-        probe:              Probe state (crop + frame count) active when merge ran.
-                            ``None`` for files written before this field was added
-                            (treated as unknown — no mismatch triggered).
-        source_stem:        Source video filename stem (without extension).
-        source_size_bytes:  Size of the source video file in bytes; ``0`` if unknown.
-        strategy_summaries: Per-strategy summary rows for summary replay on rerun.
+        quality_targets:    Search-run key: quality targets serialised as
+                            ``"metric-statistic:value"`` strings. Empty in
+                            fixed runs (not a key there).
+        sampling:           Frame subsampling factor used during quality
+                            measurement. ``None`` for files written before
+                            this field was added (treated as unknown — no
+                            mismatch triggered).
+        probe:              Probe state (crop + frame count) active when
+                            merge ran. ``None`` for files written before this
+                            field was added (treated as unknown — no mismatch
+                            triggered).
+        anchor:             Fixed-run key: the optimization anchor's display
+                            name — the ruler basis. ``None`` in search runs.
+        strategy_summaries: Per-strategy summary rows for summary replay on
+                            rerun. Only the stats the summary table renders.
     """
 
     quality_targets:    list[str]                  = Field(default_factory=list)
     sampling:           int | None                 = None
     probe:              ProbeState | None          = None
-    source_stem:        str                        = ""
-    source_size_bytes:  int                        = 0
+    anchor:             str | None                 = None
     strategy_summaries: list[MergeStrategySummary] = Field(default_factory=list)
 
     @classmethod

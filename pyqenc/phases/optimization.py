@@ -123,11 +123,15 @@ class OptimizationPhaseResult(PhaseResult):
                            min-aggregated metrics as quality targets. Empty
                            in searched runs and uncompared fixed runs;
                            presentation data only, never selection data.
+        anchor:           The fixed-mode anchor's display name (empty in
+                           searched and uncompared runs). Consumed by merge
+                           as the fixed-run invalidation-key basis.
     """
 
     winners:             list[Artifact[EncodedChunk]] = field(default_factory=list)
     selected_strategies: list[Strategy]              = field(default_factory=list)
     synthetic_targets:   list[QualityTarget]         = field(default_factory=list)
+    anchor:              str | None                  = None
 
 
 # ---------------------------------------------------------------------------
@@ -777,6 +781,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             ],
             selected_strategies = [by_name[n] for n in self._selected_names if n in by_name],
             synthetic_targets   = list(self._synthetic_targets),
+            anchor              = self._anchor_name,
         )
 
     # ------------------------------------------------------------------
