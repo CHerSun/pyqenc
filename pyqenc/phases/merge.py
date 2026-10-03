@@ -148,8 +148,11 @@ class MergePhase(Phase[MergePhaseResult]):
     _NS_PER_SECOND       = 1_000_000_000
     _MKVPROPEDIT_VIDEO_TRACK = "track:v1"
     _OUTPUT_SUFFIX       = ".mkv"
+    # Declaration order is the dependency-walk order: audio runs as early as
+    # its own dependencies allow (right after extraction, before the probe)
+    # so the fast audio result is available long before the slow encode work.
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (
-        JobPhase, ExtractionPhase, ProbePhase, EncodingPhase, AudioPhase,
+        JobPhase, ExtractionPhase, AudioPhase, ProbePhase, EncodingPhase,
     )
     _METRIC_KEY: MetricKey = MetricKey.MERGE
 
