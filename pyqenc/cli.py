@@ -100,32 +100,29 @@ _QUALITY_PAIR_SEPARATORS: tuple[str, ...] = (":", "..", "-")
 
 
 def _parse_quality_override(quality_str: str | None) -> tuple[Decimal, Decimal] | None:
-    """Parse the ``-q/--quality`` value into canonical ``(lower, upper)`` bounds.
+    """Parse the ``-q/--quality`` value into raw pair bounds.
 
     Accepts a single decimal value (``"18"`` → the fixed point ``[18, 18]``)
-    or a pair separated by ``':'``, ``'-'`` or ``'..'`` (``"18:24"``,
-    ``"18-24"``, ``"18..24"``).  Input order is free — the pair is normalised
-    to ``(min, max)`` here; the codec's own direction convention decides
-    meaning later, at :func:`pyqenc.app_config._effective_codec`.
+    or a pair separated by any of :data:`_QUALITY_PAIR_SEPARATORS`
+    (``"18:24"``, ``"18-24"``, ``"18..24"``).  The pair is returned in input
+    order — canonical ``(lower, upper)`` normalization is owned solely by
+    the ``EncodingConfig.quality_range_override`` field validator, and the
+    codec's direction convention is applied later, at
+    :func:`pyqenc.app_config._effective_codec`.
 
     Args:
         quality_str: Raw CLI value, or ``None`` when the flag was not given.
 
     Returns:
-        The canonical ``(lower, upper)`` bounds, or ``None`` when the flag
-        was not given.
+        The pair bounds in input order, or ``None`` when the flag was not
+        given.
 
     Raises:
-        ValueError: If the value is empty or not a decimal value / pair.
+        ValueError: If the value is not a decimal value / pair.
     """
     if quality_str is None:
         return None
     text = quality_str.strip()
-    if not text:
-        raise ValueError(
-            "Empty --quality value is not allowed. "
-            "Use a single value ('18') or a pair ('18:24')."
-        )
     try:
         value = Decimal(text)
         return (value, value)
@@ -136,16 +133,13 @@ def _parse_quality_override(quality_str: str | None) -> tuple[Decimal, Decimal] 
             continue
         left, right = (part.strip() for part in text.split(separator, 1))
         try:
-            lower, upper = Decimal(left), Decimal(right)
+            return Decimal(left), Decimal(right)
         except InvalidOperation:
             break
-        if lower > upper:
-            lower, upper = upper, lower
-        return (lower, upper)
     raise ValueError(
         f"Invalid --quality value '{quality_str}'. "
         f"Expected a single decimal value ('18') or a pair separated by "
-        f"':', '-' or '..' ('18:24')."
+        f"one of {', '.join(_QUALITY_PAIR_SEPARATORS)} ('18:24')."
     )
 
 

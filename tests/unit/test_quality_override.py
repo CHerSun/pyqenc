@@ -80,8 +80,10 @@ class TestParseQualityOverride:
     def test_dotdot_pair(self) -> None:
         assert _parse_quality_override("18..24") == (Decimal("18"), Decimal("24"))
 
-    def test_unordered_pair_normalized(self) -> None:
-        assert _parse_quality_override("24:18") == (Decimal("18"), Decimal("24"))
+    def test_pair_returned_in_input_order(self) -> None:
+        """The parser does not canonicalize — order normalization is owned
+        solely by the EncodingConfig field validator (pinned there)."""
+        assert _parse_quality_override("24:18") == (Decimal("24"), Decimal("18"))
 
     def test_whitespace_tolerated(self) -> None:
         assert _parse_quality_override(" 18 : 24 ") == (Decimal("18"), Decimal("24"))
