@@ -244,8 +244,9 @@ codec such as AV1 fails at startup naming the nearest aligned values).
 "Try CRF 18, look, adjust, re-run on the same work dir" costs only the new
 encodes. Every fixed start wipes the winner layer (`encoded/`) wholesale and
 re-derives it from the attempt workspace — nothing about the fixed value is
-persisted. Merged outputs carry the value in their name
-(`<movie> <strategy> q18.mkv`), so switching to `-q 20` merges fresh outputs
+persisted. Merged outputs carry the knob in their name
+(`<movie> <strategy> CRF=18.0.mkv` — label + value quantized to the
+strategy's granularity), so switching to `-q 20` merges fresh outputs
 while your q18 results stay on disk untouched:
 
 ```sh

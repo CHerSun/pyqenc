@@ -68,6 +68,7 @@ from pyqenc.utils.log_format import (
     fmt_size_mb,
 )
 from pyqenc.utils.long_path import LongPath
+from pyqenc.utils.naming import sanitize_filesystem_text
 from pyqenc.utils.visualization import QualityEvaluator, create_crf_plot
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
@@ -301,13 +302,14 @@ class MergePhase(Phase[MergePhaseResult]):
             return Recovery()
 
         source_stem = job_result.source.stem
-        q_suffix = MergePhase._fixed_output_suffix(strategies)
+        pinned = MergePhase._uniform_pinned_quality(strategies)
 
         # Step 5: classify each expected output — the output name derives at
         # the single site from File.path.stem + the strategy's safe name.
         rows: list[Artifact] = []
         expected_names: set[str] = set()
         for strategy in strategies:
+            q_suffix = MergePhase._q_suffix(strategy, pinned) if pinned is not None else ""
             output_file = MergePhase._expected_output_path(merged_dir, source_stem, strategy, q_suffix)
             expected_names.add(output_file.name)
             sidecar = MergePhase._load_merge_sidecar(output_file)
@@ -459,7 +461,7 @@ class MergePhase(Phase[MergePhaseResult]):
         # Build encoded_chunks dict from EncodingPhase result
         encoded_chunks = self._collect_encoded_chunks()
 
-        q_suffix = MergePhase._fixed_output_suffix(
+        pinned = MergePhase._uniform_pinned_quality(
             [a.payload.strategy for a in rows],
         )
 
@@ -476,6 +478,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 continue
 
             # The merge output name derives at the single site.
+            q_suffix = MergePhase._q_suffix(strategy, pinned) if pinned is not None else ""
             output_file = MergePhase._expected_output_path(merged_dir, source_stem, strategy, q_suffix)
             assert output_file == payload.output_path, "recovery derived the same location"
 
@@ -778,23 +781,23 @@ class MergePhase(Phase[MergePhaseResult]):
     ) -> Path:
         """The merged output location — the single derivation site.
 
-        ``<file stem> <strategy.safe_name()>[ q<value>].mkv`` below
+        ``<file stem> <strategy.safe_name()>[ <label>=<value>].mkv`` below
         ``merged/``; names are safe by construction. *q_suffix* carries the
-        fixed-run pinned-value suffix (see :meth:`_fixed_output_suffix`) —
+        fixed-run pinned-value suffix (see :meth:`_q_suffix`) —
         identity-based invalidation so a pinned-q output never collides with
         a search-mode output or another q value.
         """
         return merged_dir / f"{source_stem} {strategy.safe_name()}{q_suffix}{MergePhase._OUTPUT_SUFFIX}"
 
     @staticmethod
-    def _fixed_output_suffix(strategies: list[Strategy]) -> str:
-        """The merged-output name suffix for fixed runs: ``" q18.0"``, or ``""``.
+    def _uniform_pinned_quality(strategies: list[Strategy]) -> Decimal | None:
+        """The run's pinned quality value when every strategy pins the same one.
 
-        A uniform pinned value (the ``-q`` case) gets ``" q<value>"`` —
-        switching q or mode then produces a different output name, so the
-        stale merge is never reused and same-q reruns keep theirs (no blind
-        wipes; measurements survive). Searched runs and mixed-value fixed
-        runs (collapsed profiles of different codecs) keep the plain name —
+        A uniform pinned value (the ``-q`` case) enables the suffixed output
+        naming — switching q or mode then produces a different output name,
+        so the stale merge is never reused and same-q reruns keep theirs (no
+        blind wipes; measurements survive). Searched runs and mixed-value
+        fixed runs (collapsed profiles of different values) get ``None`` —
         their general invalidation is TODO §86.
         """
         collapsed = [
@@ -802,19 +805,28 @@ class MergePhase(Phase[MergePhaseResult]):
             if s.codec.quality_better == s.codec.quality_worse
         ]
         if not collapsed or len(collapsed) != len(strategies):
-            return ""
+            return None
         values = {s.codec.quality_better for s in collapsed}
         if len(values) != 1:
-            return ""
-        pinned = values.pop()
-        # Minimal fixed-point form ("18", not "18.0"): the value is the
-        # validated effective-range endpoint — identical runs must produce
-        # identical names regardless of which layer's Decimal spelling
-        # declared it (CLI "18" vs profile "18.0").
-        normalized = pinned.normalize()
-        if normalized == normalized.to_integral_value():
-            normalized = normalized.quantize(Decimal(1))
-        return f" q{normalized}"
+            return None
+        return values.pop()
+
+    @staticmethod
+    def _q_suffix(strategy: Strategy, pinned: Decimal) -> str:
+        """The per-strategy pinned-knob suffix: ``" CRF=18.0"``.
+
+        The label is the strategy's own (sanitized — labels like ``Mbit/s``
+        must land filesystem-safe), and the value is quantized to the
+        strategy's granularity: each output belongs to exactly one strategy,
+        so its name carries that strategy's rendering — and the quantized
+        form keeps the spelling uniform across runs (``-q 18`` and ``-q 17.5``
+        at 0.5 granularity become ``CRF=18.0`` and ``CRF=17.5``, never
+        ``CRF=18`` vs ``CRF=17.5``). Identical settings always produce
+        identical names, whatever Decimal spelling declared them.
+        """
+        label = sanitize_filesystem_text(strategy.codec.quality_label)
+        quantized = pinned.quantize(strategy.codec.quality_granularity)
+        return f" {label}={quantized}"
 
     @staticmethod
     def _tmp_output_path(output_file: Path) -> Path:

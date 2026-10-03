@@ -826,7 +826,8 @@ band).
 
 Found by the 2026-10-03 fixed-quality smoke test on real data. The quick fix for
 the common case LANDED the same day: uniform pinned-value fixed runs (the `-q`
-workflow) name their outputs `<stem> <strategy> q<value>.mkv`, so q changes and
+workflow) name their outputs `<stem> <strategy> <label>=<value>.mkv` (label
+sanitized, value quantized to the strategy's granularity), so q changes and
 search↔fixed mode switches produce a different output name — stale merges are
 never reused as current, no blind wipes, and same-q reruns keep their
 measurements.

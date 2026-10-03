@@ -941,7 +941,7 @@ class TestMissedTargetsWarning:
 # Fixed-run merged-output naming (TODO §86 quick fix)
 # ---------------------------------------------------------------------------
 
-def _fixed_strategy_fixture(pinned: str) -> Strategy:
+def _fixed_strategy_fixture(pinned: str, granularity: str = "0.5", label: str = "CRF") -> Strategy:
     """A strategy whose codec range is collapsed at *pinned*."""
     from decimal import Decimal
 
@@ -949,33 +949,31 @@ def _fixed_strategy_fixture(pinned: str) -> Strategy:
 
     codec = CodecConfig(
         name="h265-10bit", default_quality=Decimal(pinned), default_preset="slow",
-        quality_range=(Decimal(pinned), Decimal(pinned)), presets=["slow"],
+        quality_range=(Decimal(pinned), Decimal(pinned)),
+        quality_granularity=Decimal(granularity),
+        quality_label=label, presets=["slow"],
     )
     return Strategy(preset="slow", profile="h265-aq", codec=codec, profile_args=[])
 
 
-class TestFixedOutputSuffix:
-    """The q suffix exists only for uniform pinned-value fixed runs."""
+class TestUniformPinnedQuality:
+    """The suffix exists only for uniform pinned-value fixed runs."""
 
-    def test_uniform_fixed_run_gets_q_suffix(self) -> None:
+    def test_uniform_fixed_run_returns_value(self) -> None:
+        from decimal import Decimal
+
         strategies = [_fixed_strategy_fixture("18"), _fixed_strategy_fixture("18")]
-        assert MergePhase._fixed_output_suffix(strategies) == " q18"
+        assert MergePhase._uniform_pinned_quality(strategies) == Decimal(18)
 
-    def test_decimal_form_preserved(self) -> None:
-        strategies = [_fixed_strategy_fixture("18.5")]
-        assert MergePhase._fixed_output_suffix(strategies) == " q18.5"
+    def test_decimal_spellings_are_one_value(self) -> None:
+        """Decimal("18") == Decimal("18.0") numerically — mixed spellings
+        count as one uniform pinned value."""
+        from decimal import Decimal
 
-    def test_spelling_normalized_to_minimal_form(self) -> None:
-        """The same logical value yields the same name regardless of which
-        layer's Decimal spelling declared it: CLI ``-q 18`` (Decimal "18")
-        and a collapsed profile ``[18.0, 18.0]`` both name the output q18."""
-        assert MergePhase._fixed_output_suffix([_fixed_strategy_fixture("18.0")]) == " q18"
-        assert MergePhase._fixed_output_suffix([_fixed_strategy_fixture("18.50")]) == " q18.5"
-        # Mixed spellings of one value count as uniform and render minimally.
         mixed = [_fixed_strategy_fixture("18"), _fixed_strategy_fixture("18.0")]
-        assert MergePhase._fixed_output_suffix(mixed) == " q18"
+        assert MergePhase._uniform_pinned_quality(mixed) == Decimal(18)
 
-    def test_searched_run_no_suffix(self) -> None:
+    def test_searched_run_none(self) -> None:
         from decimal import Decimal
 
         from pyqenc.models import CodecConfig
@@ -985,16 +983,53 @@ class TestFixedOutputSuffix:
             quality_range=(Decimal("6"), Decimal("30")), presets=["slow"],
         )
         strategy = Strategy(preset="slow", profile="h265-aq", codec=codec, profile_args=[])
-        assert MergePhase._fixed_output_suffix([strategy]) == ""
+        assert MergePhase._uniform_pinned_quality([strategy]) is None
 
-    def test_mixed_pinned_values_no_suffix(self) -> None:
+    def test_mixed_pinned_values_none(self) -> None:
         strategies = [_fixed_strategy_fixture("18"), _fixed_strategy_fixture("20")]
-        assert MergePhase._fixed_output_suffix(strategies) == ""
+        assert MergePhase._uniform_pinned_quality(strategies) is None
+
+
+class TestQSuffix:
+    """The per-strategy rendering: sanitized label + granularity-quantized value."""
+
+    def test_quantized_to_strategy_granularity(self) -> None:
+        """-q 18 at 0.5 granularity renders 18.0 — uniform with 17.5-style
+        siblings, never 'CRF=18' next to 'CRF=17.5'."""
+        from decimal import Decimal
+
+        assert MergePhase._q_suffix(_fixed_strategy_fixture("18"), Decimal(18)) == " CRF=18.0"
+        assert MergePhase._q_suffix(_fixed_strategy_fixture("17.5"), Decimal("17.5")) == " CRF=17.5"
+
+    def test_integer_granularity_stays_integral(self) -> None:
+        from decimal import Decimal
+
+        strategy = _fixed_strategy_fixture("18", granularity="1", label="QP")
+        assert MergePhase._q_suffix(strategy, Decimal(18)) == " QP=18"
+
+    def test_spelling_independent(self) -> None:
+        """CLI '18' and profile '18.0' quantize to the identical name form."""
+        from decimal import Decimal
+
+        assert MergePhase._q_suffix(_fixed_strategy_fixture("18"), Decimal("18")) == " CRF=18.0"
+        assert MergePhase._q_suffix(_fixed_strategy_fixture("18.0"), Decimal("18.0")) == " CRF=18.0"
+
+    def test_label_sanitized_filesystem_safe(self) -> None:
+        """VBR labels like Mbit/s land filesystem-safe in the name."""
+        from decimal import Decimal
+
+        strategy = _fixed_strategy_fixture("20", granularity="0.5", label="Mbit/s")
+        assert MergePhase._q_suffix(strategy, Decimal(20)) == " Mbit_s=20.0"
 
     def test_expected_path_carries_suffix(self, tmp_path: Path) -> None:
+        from decimal import Decimal
+
         strategy = _fixed_strategy_fixture("18.0")
-        path = MergePhase._expected_output_path(tmp_path, "test", strategy, " q18.0")
-        assert path.name == "test h265-aq+slow q18.0.mkv"
+        path = MergePhase._expected_output_path(
+            tmp_path, "test", strategy,
+            MergePhase._q_suffix(strategy, Decimal("18.0")),
+        )
+        assert path.name == "test h265-aq+slow CRF=18.0.mkv"
 
 
 class TestFixedMergeRecoveryNaming:
@@ -1049,9 +1084,9 @@ class TestFixedMergeRecoveryNaming:
         recovery = phase._recover()
         wanted_rows = [r for r in recovery.artifacts if r.wanted]
         assert [r.payload.output_path.name for r in wanted_rows] == [
-            "test h265-aq+slow q18.mkv",
+            "test h265-aq+slow CRF=18.0.mkv",
         ]
-        assert wanted_rows[0].state is ArtifactState.ABSENT  # q18 output not yet produced
+        assert wanted_rows[0].state is ArtifactState.ABSENT  # suffixed output not yet produced
         surplus = [r for r in recovery.artifacts if not r.wanted]
         assert [r.payload.path.name for r in surplus] == ["test h265-aq+slow.mkv"]
         assert stale.exists()  # kept in place — no blind deletion
