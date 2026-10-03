@@ -1234,11 +1234,31 @@ class ChunkEncoder:
             )
         elif not search.best_targets_met and best_fail_attempt is not None:
             assert search.best_quality is not None, "a surviving attempt implies a measured quality"
-            logger.warning(
-                "%s search space exhausted for chunk %s strategy %s after %d attempts — accepting best attempt (%s=%s)",
-                strategy.codec.quality_label, chunk.safe_name(), strategy.display_name(), attempt_number,
-                strategy.codec.quality_label, search.best_quality,
+            # Every accepted winner logs an acceptance line in the uniform
+            # success shape. A single-point (fixed) domain misses the ruler by
+            # construction — informational, not a search failure. A ranged
+            # domain that exhausted without passing is a warning: the search
+            # normally converges.
+            worst = (
+                QualitySearchBase.find_worst_target(search.best_metrics, quality_targets)
+                if search.best_metrics else None
             )
+            limited_by = f"{worst[0].metric}_{worst[0].statistic}" if worst is not None else None
+            if strategy.codec.quality_better == strategy.codec.quality_worse:
+                status, label, emit = f"miss {FAILURE_SYMBOL_MINOR}", strategy.codec.quality_label, logger.info
+            else:
+                status, label, emit = (
+                    f"exhausted {FAILURE_SYMBOL_MINOR}",
+                    f"best {strategy.codec.quality_label}", logger.warning,
+                )
+            emit(fmt_chunk_final(
+                strategy.display_name(), chunk.safe_name(), search.best_quality, attempt_number,
+                quality_label    = label,
+                use_visual_hash  = self._visual_hash,
+                quality_padding  = strategy.codec.quality_log_padding,
+                limited_by       = limited_by,
+                status           = status,
+            ))
             self._finalize_winning_attempt(
                 strategy        = strategy,
                 chunk_id        = chunk.safe_name(),
@@ -1621,14 +1641,17 @@ async def _encode_chunks_parallel(
 class _LimiterTally:
     """Accumulation over winning attempts sharing one limiter metric.
 
-    Deficits are collected for misses only (how far the unreachable target
-    was); CRFs over every winner in the row feed the med CRF column.
+    Misses collect deficits (how far the unreachable target was); passes
+    collect surpluses (how far above the bar the worst target sits — the
+    fixed-mode anchor ruler makes this meaningful, search mode gets
+    uniformity); CRFs over every winner in the row feed the med CRF column.
     """
 
-    passed:   int           = 0
-    missed:   int           = 0
-    deficits: list[float]   = field(default_factory=list)
-    crfs:     list[Decimal] = field(default_factory=list)
+    passed:    int           = 0
+    missed:    int           = 0
+    deficits:  list[float]   = field(default_factory=list)
+    surpluses: list[float]   = field(default_factory=list)
+    crfs:      list[Decimal] = field(default_factory=list)
 
 
 def _scan_winner_sidecars(
@@ -1708,6 +1731,7 @@ def _scan_winner_sidecars(
             tally.crfs.append(winner.crf)
             if targets_met:
                 tally.passed += 1
+                tally.surpluses.append(worst[1])
             else:
                 tally.missed += 1
                 tally.deficits.append(worst[1])
@@ -1730,6 +1754,7 @@ def _scan_winner_sidecars(
                             passed      = t.passed,
                             missed      = t.missed,
                             med_deficit = statistics.median(t.deficits) if t.deficits else None,
+                            med_surplus = statistics.median(t.surpluses) if t.surpluses else None,
                             med_crf     = statistics.median(t.crfs),
                         )
                         for key, t in sorted(rows_map.items(), key=lambda kv: (-kv[1].passed - kv[1].missed, kv[0]))
@@ -1979,7 +2004,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         """
         # Column widths
         LIMIT_WIDTH = 14
-        PASS_WIDTH  = 8
+        PASS_WIDTH  = 13
         MISS_WIDTH  = 12
         SHARE_WIDTH = 7
         CRF_WIDTH   = 8
@@ -1995,11 +2020,22 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             logger.info("%s — %d chunks", f"{BRACKET_LEFT}{summary.strategy}{BRACKET_RIGHT}", summary.chunks)
             logger.info(header)
             for row in summary.rows:
+                pass_cell = (
+                    f"{row.passed} (+{row.med_surplus:.1f})"
+                    if row.passed and row.med_surplus is not None
+                    else f"{row.passed}"
+                )
                 miss_cell = f"{row.missed} ({row.med_deficit:.1f})" if row.missed else "0"
                 share     = 100.0 * (row.passed + row.missed) / summary.chunks if summary.chunks else 0.0
                 logger.info(
-                    f"  {row.limiter:<{LIMIT_WIDTH}}   {row.passed:>{PASS_WIDTH}}   {miss_cell:>{MISS_WIDTH}}   "
+                    f"  {row.limiter:<{LIMIT_WIDTH}}   {pass_cell:>{PASS_WIDTH}}   {miss_cell:>{MISS_WIDTH}}   "
                     f"{share:>{SHARE_WIDTH - 1}.1f}%   {row.med_crf:{CRF_WIDTH}.1f}"
+                )
+            passed_total = sum(r.passed for r in summary.rows)
+            missed_total = sum(r.missed for r in summary.rows)
+            if summary.chunks:
+                logger.info(
+                    f"  Passed {100.0 * passed_total / summary.chunks:.1f}% · missed {100.0 * missed_total / summary.chunks:.1f}%"
                 )
 
     def finalize(self, ctx: FinalizeContext) -> None:

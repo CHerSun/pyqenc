@@ -245,6 +245,45 @@ class TestScanWinnerSidecars:
         assert group.chunks == 1
         assert group.rows[0].limiter == "vmaf_min"
         assert group.rows[0].passed == 1
+        # Passing rows record the worst-target surplus (94.5 vs target 93.0).
+        assert group.rows[0].med_surplus == 1.5
+
+    def test_limiter_table_renders_surplus_and_percentages(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """The limiter table shows the pass surplus beside the count (mirroring
+        the miss deficit) and a per-strategy Passed/missed percentage row."""
+        import logging as _logging
+        from decimal import Decimal as _Decimal
+
+        from pyqenc.metrics import NoOpMetricsCollector
+        from pyqenc.phases.encoding import EncodingPhase
+        from pyqenc.state import LimiterSummary, LimiterSummaryRow
+
+        phase = EncodingPhase(
+            load_app_config(default_only=True), {}, collector=NoOpMetricsCollector(),
+        )
+        summaries = [LimiterSummary(
+            strategy = "h265-aq+slow",
+            chunks   = 107,
+            rows     = [
+                LimiterSummaryRow(
+                    limiter="ssim_median", passed=97, missed=2,
+                    med_deficit=-0.1, med_surplus=1.4, med_crf=_Decimal("18.0"),
+                ),
+                LimiterSummaryRow(
+                    limiter="ssim_p10", passed=3, missed=5,
+                    med_deficit=-0.2, med_surplus=0.9, med_crf=_Decimal("18.0"),
+                ),
+            ],
+        )]
+        with caplog.at_level(_logging.INFO, logger="pyqenc.phases.encoding"):
+            phase._log_limiter_summary(summaries)
+
+        text = caplog.text
+        assert "97 (+1.4)" in text          # pass count with median surplus
+        assert "2 (-0.1)" in text           # miss count with median deficit
+        assert "Passed 93.5% · missed 6.5%" in text
 
     def test_empty_winners_is_known_empty(self, tmp_path: Path) -> None:
         """No winners at all → nothing pending, nothing unknown."""

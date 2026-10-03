@@ -350,7 +350,8 @@ class TestFixedDegenerateSinglePoint:
         """Compared-run ruler miss: the single-point domain cannot produce a
         second candidate — the attempt is accepted unconditionally with a
         presentation-only targets_met=False verdict (Req 9.7), and the
-        acceptance line still logs (same shape as a searched exhaustion)."""
+        acceptance line still logs in the uniform success shape (INFO for a
+        fixed-mode miss — expected behavior, not a search failure)."""
         unreachable = [QualityTarget(metric="vmaf", statistic="min", value=99.0)]
         with _patch("pyqenc.phases.encoding.logger") as captured:
             result, _ = _run_encode_with_targets(
@@ -362,12 +363,14 @@ class TestFixedDegenerateSinglePoint:
         assert result.final_crf == _D("18.0")
         # The winner is still promoted.
         assert (tmp_path / "encoded" / "test_strategy" / "chunk_001.1920x1080.yaml").exists()
-        # Every accepted winner logs its acceptance — the exhausted path
-        # included; single-point acceptance must not silence it.
+        # Every accepted winner logs its acceptance, uniform with the success
+        # line: visual hash + strategy + chunk + miss status + limiter.
         assert any(
-            "accepting best attempt" in str(call)
-            for call in captured.warning.call_args_list
+            "miss ✘ with CRF" in str(call) and "limited by" in str(call)
+            for call in captured.info.call_args_list
         )
+        # The fixed-mode miss is informational — no warning-level acceptance.
+        assert not any("miss" in str(c) for c in captured.warning.call_args_list)
 
 
 def _run_encode_with_targets(

@@ -822,17 +822,6 @@ band).
 
 ---
 
-## 85. Exhausted-search log message is missing the limiter annotation
-
-The success path logs the limiter: "success ✅ with CRF 11.5 after 3 attempts —
-limited by vmaf_median". The exhaustion path ("CRF search space exhausted for
-chunk ... after N attempts — accepting best attempt (CRF=...)") has no such
-annotation. Add the same "limited by {metric_stat}" there — the worst /
-constraining metric of the accepted best attempt (find_worst_target over the
-best attempt's metrics, exactly like the success path computes it).
-
----
-
 ## 86. Merge-phase invalidation is incomplete — general design needed — needs thinking
 
 Found by the 2026-10-03 fixed-quality smoke test on real data. The quick fix for

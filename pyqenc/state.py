@@ -228,6 +228,7 @@ class LimiterSummaryRow(BaseModel):
     passed:      int
     missed:      int
     med_deficit: float | None = None  # median deficit among the misses
+    med_surplus: float | None = None  # median surplus among the passes (worst-target surplus)
     med_crf:     DecimalYaml         # median winning CRF of the row's chunks
 
 

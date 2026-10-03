@@ -210,9 +210,18 @@ def fmt_chunk_attempt_start(strategy: str, chunk_id: str, attempt: int, quality:
 def fmt_chunk_attempt_result(strategy: str, chunk_id: str, attempt: int, msg: str, use_visual_hash: bool = True) -> str:
     return fmt_chunk(strategy, chunk_id, f"attempt #{attempt}: {msg}", use_visual_hash)
 
-def fmt_chunk_final(strategy: str, chunk_id: str, quality: Decimal, attempts: int, quality_label: str = "CRF", use_visual_hash: bool = True, quality_padding: int = 4, limited_by: str | None = None) -> str:
+def fmt_chunk_final(strategy: str, chunk_id: str, quality: Decimal, attempts: int, quality_label: str = "CRF", use_visual_hash: bool = True, quality_padding: int = 4, limited_by: str | None = None, status: str | None = None) -> str:
+    """The per-chunk acceptance line — success, miss, or exhaustion.
+
+    The single shape for every accepted winner: ``{status} with {label} {q}
+    after N attempts — limited by {limiter}``. *status* defaults to
+    ``success ✅``; callers pass e.g. ``miss ✘`` (fixed-mode ruler miss —
+    expected behavior) or ``exhausted ✘`` (search ran out of candidates),
+    keeping all acceptance lines uniform.
+    """
+    status_text = status if status is not None else f"success {SUCCESS_SYMBOL_MAJOR}"
     limit_note = f" — limited by {limited_by}" if limited_by is not None else ""
-    return fmt_chunk(strategy, chunk_id, f"success {SUCCESS_SYMBOL_MAJOR} with {quality_label} {str(quality).rjust(quality_padding)} after {attempts} attempts{limit_note}", use_visual_hash)
+    return fmt_chunk(strategy, chunk_id, f"{status_text} with {quality_label} {str(quality).rjust(quality_padding)} after {attempts} attempts{limit_note}", use_visual_hash)
 
 def fmt_key_value_table(kv_to_show: Mapping[str, object]) -> None:
     """Log a key-value table at INFO level with aligned columns.
