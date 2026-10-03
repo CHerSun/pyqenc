@@ -2,7 +2,9 @@
 
 <!-- markdownlint-disable MD024 -->
 
+- Spec: Fixed-Quality Mode — implementation plan for the 2026-10-02 spec
 - Created: 2026-10-03
+- Completed: 2026-10-03
 
 ## Overview
 
@@ -123,7 +125,7 @@ three gates green and searched runs byte-identical. Requirement ids reference
     fixed; persistence round-trip + reuse; single-strategy and `optimize:
     false` runs skip all of it (Req 8.7)
 
-- [ ] 5. Fixed-mode encoding and merged presentation (Req 9.1, 9.4–9.7)
+- [x] 5. Fixed-mode encoding and merged presentation (Req 9.1, 9.4–9.7)
   - Verify + pin (tests first): fixed encoding performs exactly one accepted
     attempt per pair via the existing single-point degenerate path — no loop
     changes expected (Req 9.1)
@@ -140,7 +142,7 @@ three gates green and searched runs byte-identical. Requirement ids reference
     display; merged warning suppressed on fixed, present on searched; searched
     encoding paths byte-identical (incl. reuse-run)
 
-- [ ] 6. Docs + e2e closeout
+- [x] 6. Docs + e2e closeout
   - docs: fixed-quality section (usage: `-q` forms; compared vs uncompared
     behavior; banner meaning; cleanup guard rationale; iterative q-change
     workflow incl. attempts preservation); demote the duplicated-profile

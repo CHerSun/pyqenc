@@ -1065,6 +1065,9 @@ Examples:
   # Custom quality target and strategies
   pyqenc auto source.mkv --targets vmaf-min:95 --strategies h265-aq -y
 
+  # Fixed-quality run: pin the knob, skip the per-chunk search
+  pyqenc auto source.mkv -q 18 -y
+
   # Use all profiles with their default presets
   pyqenc auto source.mkv --strategies "*" -y
 

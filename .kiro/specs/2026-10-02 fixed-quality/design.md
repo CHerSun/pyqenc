@@ -4,6 +4,7 @@
 
 - Spec: Fixed-Quality Mode — first-class pinned-knob encoding via a CLI quality override
 - Created: 2026-10-02
+- Completed: 2026-10-03
 
 ## Context
 
