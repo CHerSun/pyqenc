@@ -817,13 +817,26 @@ class TestDominancePruning:
         assert OptimizationPhase._dominance_survivors(results) == ["a+slow", "b+slow"]
 
     def test_all_measured_metrics_evaluated(self) -> None:
-        """Dominance needs advantage on every metric — a single deficit blocks
-        the prune even when every other metric wins."""
+        """Dominance needs advantage on every compared statistic — a single
+        deficit blocks the prune even when every other compared stat wins."""
         results = [
             _result("a+slow", 1000, {"vmaf_median": 93.0, "vif_median": 83.9}),
             _result("b+slow", 1400, {"vmaf_median": 91.0, "vif_median": 84.0}),
         ]
         assert OptimizationPhase._dominance_survivors(results) == ["a+slow", "b+slow"]
+
+    def test_stability_stats_do_not_sway_dominance(self) -> None:
+        """std/max-style statistics are outside the comparison set — a
+        strategy that wins only those stays dominated."""
+        results = [
+            _result("a+slow", 1000, {
+                "vmaf_p10": 90.0, "vmaf_median": 93.0, "vmaf_std": 1.0, "vmaf_max": 95.0,
+            }),
+            _result("b+slow", 1400, {
+                "vmaf_p10": 88.0, "vmaf_median": 91.0, "vmaf_std": 2.0, "vmaf_max": 99.0,
+            }),
+        ]
+        assert OptimizationPhase._dominance_survivors(results) == ["a+slow"]
 
 
 class TestAnchorSelection:
@@ -875,6 +888,18 @@ class TestAnchorSelection:
             results, ["a+slow", "b+slow"], survivors,
         ) == "b+slow"
 
+    def test_stability_only_survivor_cannot_anchor(self) -> None:
+        """A survivor measured only on stats outside the comparison set has
+        an empty ruler — it must not anchor over a compared survivor."""
+        results = [
+            _result("a+slow", 1000, {"vmaf_std": 1.5, "vmaf_max": 98.0}),
+            _result("b+slow", 1400, {"vmaf_p10": 88.0, "vmaf_median": 91.0}),
+        ]
+        survivors = OptimizationPhase._dominance_survivors(results)
+        assert OptimizationPhase._select_anchor(
+            results, ["a+slow", "b+slow"], survivors,
+        ) == "b+slow"
+
     def test_no_measured_survivors_no_anchor(self) -> None:
         results = [_result("a+slow", 1000, {})]
         assert OptimizationPhase._select_anchor(results, ["a+slow"], ["a+slow"]) is None
@@ -883,14 +908,21 @@ class TestAnchorSelection:
 class TestSyntheticTargets:
     """The synthetic set mirrors the anchor's min-aggregated metrics (Req 8.3)."""
 
-    def test_all_measured_metrics_covered_sorted(self) -> None:
+    def test_comparison_stats_only_sorted(self) -> None:
+        """The ruler carries only the fixed-mode comparison statistics (p10,
+        median) per metric — stability/shape stats stay out."""
         anchor = _result(
             "av1+slow", 1000,
-            {"vif_median": 84.0, "vmaf_median": 91.2},
+            {
+                "vif_p10": 81.0, "vif_median": 84.0, "vif_max": 92.0,
+                "vmaf_p10": 88.5, "vmaf_median": 91.2, "vmaf_std": 1.0,
+            },
         )
         targets = OptimizationPhase._synthetic_targets_from(anchor)
         assert [(t.metric, t.statistic, t.value) for t in targets] == [
+            ("vif", "p10", 81.0),
             ("vif", "median", 84.0),
+            ("vmaf", "p10", 88.5),
             ("vmaf", "median", 91.2),
         ]
 
@@ -1054,9 +1086,22 @@ class TestFixedComparedExecute:
         "h265-anime+slow":  (800, 800),
     }
     _SCENARIO_METRICS: ClassVar[dict[str, dict[str, float]]] = {
-        "h265-aq+slow":     {"vmaf_median": 91.0, "vif_median": 84.0},
-        "h265+slow":        {"vmaf_median": 93.1, "vif_median": 90.3},
-        "h265-anime+slow":  {"vmaf_median": 91.7, "vif_median": 85.0},
+        # Compared stats (p10, median) carry the dominance structure:
+        # h265 beats h265-anime on every compared stat at smaller size
+        # (dominates it); h265-aq is smallest with the weakest metrics
+        # (incomparable with both). std/max are noise outside the set.
+        "h265-aq+slow": {
+            "vmaf_p10": 87.0, "vmaf_median": 91.0, "vmaf_std": 1.1, "vmaf_max": 96.0,
+            "vif_p10": 81.0, "vif_median": 84.0, "vif_max": 91.0,
+        },
+        "h265+slow": {
+            "vmaf_p10": 89.5, "vmaf_median": 93.1, "vmaf_std": 1.0, "vmaf_max": 95.0,
+            "vif_p10": 87.5, "vif_median": 90.3, "vif_max": 92.0,
+        },
+        "h265-anime+slow": {
+            "vmaf_p10": 88.5, "vmaf_median": 92.0, "vmaf_std": 2.0, "vmaf_max": 99.0,
+            "vif_p10": 83.0, "vif_median": 85.0, "vif_max": 94.0,
+        },
     }
 
     def test_pruning_anchor_synthetic_and_persistence(
@@ -1074,9 +1119,11 @@ class TestFixedComparedExecute:
         assert survivor_names == ["h265-aq+slow", "h265+slow"]
 
         # The anchor is the smallest survivor; the synthetic set mirrors its
-        # min-aggregated metrics (sorted).
+        # min-aggregated COMPARED stats only (sorted) — std/max stay out.
         assert [(t.metric, t.statistic, t.value) for t in result.synthetic_targets] == [
+            ("vif", "p10", 81.0),
             ("vif", "median", 84.0),
+            ("vmaf", "p10", 87.0),
             ("vmaf", "median", 91.0),
         ]
 
@@ -1087,12 +1134,16 @@ class TestFixedComparedExecute:
         assert [
             (t.metric, t.statistic, t.value) for t in persisted.synthetic_targets
         ] == [
+            ("vif", "p10", 81.0),
             ("vif", "median", 84.0),
+            ("vmaf", "p10", 87.0),
             ("vmaf", "median", 91.0),
         ]
-        # The per-strategy records carry the aggregated metrics for reuse.
+        # The per-strategy records keep the FULL aggregated metrics for reuse
+        # (data retention — re-selecting the comparison set never re-measures).
         by_name = {r.strategy: r for r in persisted.strategy_results}
         assert by_name["h265-aq+slow"].metrics["vmaf_median"] == 91.0
+        assert by_name["h265-aq+slow"].metrics["vmaf_std"] == 1.1
 
     def test_tolerance_not_applied_in_fixed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

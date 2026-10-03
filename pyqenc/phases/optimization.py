@@ -69,6 +69,35 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_FIXED_COMPARISON_STATS: tuple[str, ...] = ("p10", "median")
+"""The fixed-mode comparison statistic set per metric.
+
+The single definition of what fixed-mode comparison consumes: the anchor's
+synthetic target set (the ruler), the dominance pruning input, and the
+comparison-table columns. ``p10`` guards the worst decile, ``median`` the
+central tendency; the remaining stats are stability/shape indicators
+(``std``, ``min``, ``max``, other percentiles), not quality bars — comparing
+or ruling on them silently skews selection. The full measured set stays
+aggregated in ``StrategyTestResult.metrics`` / sidecars (data retention), so
+re-selecting the comparison set never re-measures.
+"""
+
+
+def _comparison_metrics(metrics: dict[str, float]) -> dict[str, float]:
+    """Project measured metrics onto the fixed-mode comparison stat set.
+
+    Args:
+        metrics: ``{metric_statistic: value}`` — the aggregated measurement.
+
+    Returns:
+        The subset restricted to :data:`_FIXED_COMPARISON_STATS` statistics.
+    """
+    return {
+        key: value for key, value in metrics.items()
+        if key.rsplit("_", 1)[1] in _FIXED_COMPARISON_STATS
+    }
+
+
 
 # ---------------------------------------------------------------------------
 # OptimizationPhaseResult
@@ -868,21 +897,25 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
     def _dominates(a: StrategyTestResult, b: StrategyTestResult) -> bool:
         """Whether *a* Pareto-dominates *b* (the pruning predicate).
 
-        Requires ``size(a) ≤ size(b)``, ``a ≥ b`` on every measured
-        metric-statistic, at least one strict inequality (exact duplicates
-        coexist), and identical non-empty measured key sets on both sides —
-        strategies with missing or partial measurements are never honestly
-        comparable.
+        Evaluated over the fixed-mode comparison statistics only
+        (:data:`_FIXED_COMPARISON_STATS`) — stability/shape statistics are not
+        quality bars and must not sway selection. Requires ``size(a) ≤
+        size(b)``, ``a ≥ b`` on every compared statistic, at least one strict
+        inequality (exact duplicates coexist), and identical non-empty
+        compared key sets on both sides — strategies with missing or partial
+        measurements are never honestly comparable.
         """
-        if not a.metrics or set(a.metrics) != set(b.metrics):
+        a_metrics = _comparison_metrics(a.metrics)
+        b_metrics = _comparison_metrics(b.metrics)
+        if not a_metrics or set(a_metrics) != set(b_metrics):
             return False
         if a.total_size > b.total_size:
             return False
-        if any(a.metrics[k] < b.metrics[k] for k in a.metrics):
+        if any(a_metrics[k] < b_metrics[k] for k in a_metrics):
             return False
         return (
             a.total_size < b.total_size
-            or any(a.metrics[k] > b.metrics[k] for k in a.metrics)
+            or any(a_metrics[k] > b_metrics[k] for k in a_metrics)
         )
 
     @staticmethod
@@ -921,7 +954,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         (or about-to-be-pruned) size-tied duplicate. The anchor is the only
         front member selectable without a quality opinion; ties break
         deterministically by resolved-strategy order. Survivors without
-        measured metrics cannot anchor (the ruler would be empty).
+        compared statistics cannot anchor (the ruler would be empty).
 
         Args:
             results:        Per-strategy test results.
@@ -930,12 +963,12 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         Returns:
             The anchor's strategy name, or ``None`` when no survivor carries
-            measurements.
+            compared measurements.
         """
         order = {name: i for i, name in enumerate(resolved_names)}
         eligible = [
             r for r in results
-            if r.strategy in survivors and r.metrics
+            if r.strategy in survivors and _comparison_metrics(r.metrics)
         ]
         if not eligible:
             return None
@@ -948,26 +981,31 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
     def _synthetic_targets_from(anchor: StrategyTestResult | None) -> list[QualityTarget]:
         """The anchor's aggregated metrics as the synthetic target set.
 
-        Covers every measured ``(metric, statistic)`` — the ruler's breadth is
-        the measurement's breadth, independent of any configured target set.
-        Min-across-test-chunks values match search-mode per-chunk strictness.
-        Presentation data only — never search goals, pass/fail gates, or
-        selection thresholds.
+        Restricted to the fixed-mode comparison statistics
+        (:data:`_FIXED_COMPARISON_STATS`) — the ruler pipes straight into the
+        presentation machinery, so its breadth also bounds the chunk log
+        lines and the winner-limiter table. Min-across-test-chunks values
+        match search-mode per-chunk strictness. Presentation data only —
+        never search goals, pass/fail gates, or selection thresholds.
 
         Args:
             anchor: The anchor's test result, or ``None`` (empty set).
 
         Returns:
-            Sorted quality targets mirroring the anchor's metrics.
+            Sorted quality targets mirroring the anchor's compared metrics.
         """
         if anchor is None:
             return []
+        compared = _comparison_metrics(anchor.metrics)
+        metrics_present = sorted({key.rsplit("_", 1)[0] for key in compared})
         targets: list[QualityTarget] = []
-        for key, value in sorted(anchor.metrics.items()):
-            metric, statistic = key.rsplit("_", 1)
-            targets.append(QualityTarget(
-                metric=metric, statistic=statistic, value=float(value),
-            ))
+        for metric in metrics_present:
+            for statistic in _FIXED_COMPARISON_STATS:
+                key = f"{metric}_{statistic}"
+                if key in compared:
+                    targets.append(QualityTarget(
+                        metric=metric, statistic=statistic, value=float(compared[key]),
+                    ))
         return targets
 
     def _aggregate_strategy_metrics(
@@ -1226,27 +1264,28 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
 
 
 def _headline_metric_keys(metric_maps: list[dict[str, float]]) -> list[str]:
-    """One headline statistic per measured metric (median preferred).
+    """The fixed-mode comparison-table column set.
 
-    The fixed-mode comparison table shows a compact column set: for every
-    distinct metric, its ``median`` statistic when measured, else its
-    alphabetically-first one. Full statistics live in ``optimization.yaml``.
+    Exactly what the ruler judges (:data:`_FIXED_COMPARISON_STATS` — the
+    table must not imply a different comparison basis than pruning used): for
+    every distinct metric, its ``p10`` and ``median`` statistics when
+    measured, ordered metric-major. Full statistics live in
+    ``optimization.yaml``.
 
     Args:
-        metric_maps: The measured metric maps to derive the headline set from.
+        metric_maps: The measured metric maps to derive the column set from.
 
     Returns:
-        Headline keys as ``"{metric}_{statistic}"``, sorted by metric.
+        Headline keys as ``"{metric}_{statistic}"``, metric-major ordered.
     """
-    stats_by_metric: dict[str, set[str]] = {}
+    present: set[str] = set()
     for metrics in metric_maps:
-        for key in metrics:
-            metric, statistic = key.rsplit("_", 1)
-            stats_by_metric.setdefault(metric, set()).add(statistic)
+        present.update(_comparison_metrics(metrics))
     return [
-        f"{metric}_median" if "median" in stats
-        else f"{metric}_{min(stats)}"
-        for metric, stats in sorted(stats_by_metric.items())
+        f"{metric}_{statistic}"
+        for metric in sorted({key.rsplit("_", 1)[0] for key in present})
+        for statistic in _FIXED_COMPARISON_STATS
+        if f"{metric}_{statistic}" in present
     ]
 
 
