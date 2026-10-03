@@ -203,6 +203,12 @@ zero recomputation cost.
        the model is the renderer's only input.
 4. The `Files named` location hint SHALL reflect actual output naming
        (including the fixed-run ` q<value>` suffix).
+5. Replay-only data SHALL NOT be persisted when live-readable from a
+       resolved dependency at render time (e.g. the source stem and size for
+       the summary's source row come from the JobPhase result, not from
+       `merge.yaml`). Invalidation comparisons SHALL use the declared
+       invalidation keys only (Req 8.7) — never whole-model equality, which
+       replay fields would perpetually break.
 
 ### Requirement 7 — First-class metric-statistic pair type
 
@@ -223,13 +229,16 @@ statistics worth inspecting, while internal intermediates retain everything.
    authority; no other code spells a metric-statistic key.
 2. The closed statistic set SHALL be defined once (validated against what the
    evaluator actually produces); unknown statistics fail loudly at parse.
-3. **Presentation surfaces** — tables, log lines, winner result sidecars,
-   merged-output sidecars — SHALL present only the inspectable statistic set
-   (the comparison set: p10 + median per metric, unless a surface states
-   otherwise). **Retention surfaces** — attempt sidecars (internal
-   intermediate results) — SHALL preserve the full measured set; the
-   optimization aggregation reads retention surfaces so the comparison set
-   can be re-selected without re-measuring.
+3. **Presentation surfaces** — tables, log lines, winner result sidecars —
+   SHALL present only the inspectable statistic set (the comparison set:
+   p10 + median per metric, unless a surface states otherwise).
+   **Retention surfaces** preserve the full measured set: attempt sidecars
+   (internal intermediates) and per-video merged-output sidecars (the
+   re-measure-avoidance record next to each product — a merged sidecar
+   carrying full stats means a re-merged/re-measured output never needs
+   re-measuring for any future stat set). The optimization aggregation
+   reads retention surfaces so the comparison set can be re-selected
+   without re-measuring.
 4. Table data paths (targets, ruler keys, sidecar metric keys, prepared
    data) SHALL use the pair type end to end — no ad hoc
    `f"{metric}_{stat}"` / `.rsplit("_", 1)` plumbing in new code.
@@ -249,11 +258,27 @@ assumed — and no broader measurement than the table needs.
    merged output, in addition to any configured targets.
 2. In search runs, merge SHALL measure the configured target statistics (as
    today).
-3. The optimization anchor (identity + ruler values) SHALL flow to merge via
-   the optimization result and `optimization.yaml` — merge does not re-derive
-   or re-measure the ruler itself.
-4. Merge prepared data (Req 6) SHALL persist the measured values the table
-   rendered, keyed by the pair type (Req 7).
+3. The optimization anchor SHALL flow to merge as: the anchor identity +
+   survivors + per-strategy facts in `optimization.yaml`, and the ready
+   ruler via the optimization result. The ruler values themselves are never
+   persisted — they derive on demand from the persisted `strategy_results`
+   (a changed comparison stat set re-projects old measurements correctly) —
+   and merge never re-measures the ruler.
+4. Merge prepared data (Req 6) SHALL persist ONLY the measured values the
+   table renders (fixed: ruler statistics via the anchor-derived targets;
+   search: configured target statistics) — no full-stat dumps on the phase
+   sidecar; the full measured set lives on the per-video sidecar (Req 7.3).
+5. Per-video merged-output sidecar content SHALL be mode-honest. Search
+   runs: `targets` + target-keyed verdict fields, as today. Fixed runs: the
+   pinned knob (quality label + value — parseable; the filename carries it
+   for humans only) and the ruler basis (anchor identity) instead of a
+   config-`targets` block; full measured stats under `metrics` (retention).
+6. The merge phase sidecar's invalidation keys SHALL be mode-honest:
+   search → (configured quality targets, sampling, probe); fixed → (ruler
+   basis — anchor identity + comparison set, sampling, probe). A fixed
+   run's `merge.yaml` carries no configured-`quality_targets` key: those
+   targets drive nothing in fixed mode, so a fixed merge must not be
+   invalidated (nor re-measured) by their change.
 
 ### Requirement 9 — Explicitly deferred
 
