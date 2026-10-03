@@ -23,11 +23,13 @@ from typing import TYPE_CHECKING, ClassVar
 import yaml
 
 from pyqenc.constants import (
+    APPROXIMATE_INDICATOR_SYMBOL,
     BRACKET_LEFT,
     BRACKET_RIGHT,
     ENCODED_ATTEMPT_NAME_PATTERN,
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
+    FAILURE_SYMBOL_MAJOR,
     FAILURE_SYMBOL_MINOR,
     METRIC_KEY_QUALITY_MEASURE,
     NEUTRAL_INDICATOR_SYMBOL,
@@ -1235,20 +1237,25 @@ class ChunkEncoder:
         elif not search.best_targets_met and best_fail_attempt is not None:
             assert search.best_quality is not None, "a surviving attempt implies a measured quality"
             # Every accepted winner logs an acceptance line in the uniform
-            # success shape. A single-point (fixed) domain misses the ruler by
-            # construction — informational, not a search failure. A ranged
-            # domain that exhausted without passing is a warning: the search
-            # normally converges.
+            # success shape, with severity-carrying symbols: a single-point
+            # (fixed) domain misses the ruler by construction — a soft ≈ at
+            # INFO (the anchor is an approximation, not a user target); a
+            # ranged domain that exhausted without passing is a real — if
+            # bypassable — problem: ❌ at WARNING, distinct from per-attempt
+            # ✘ misses.
             worst = (
                 QualitySearchBase.find_worst_target(search.best_metrics, quality_targets)
                 if search.best_metrics else None
             )
             limited_by = f"{worst[0].metric}_{worst[0].statistic}" if worst is not None else None
             if strategy.codec.quality_better == strategy.codec.quality_worse:
-                status, label, emit = f"miss {FAILURE_SYMBOL_MINOR}", strategy.codec.quality_label, logger.info
+                status, label, emit = (
+                    f"miss {APPROXIMATE_INDICATOR_SYMBOL}",
+                    strategy.codec.quality_label, logger.info,
+                )
             else:
                 status, label, emit = (
-                    f"exhausted {FAILURE_SYMBOL_MINOR}",
+                    f"exhausted {FAILURE_SYMBOL_MAJOR}",
                     f"best {strategy.codec.quality_label}", logger.warning,
                 )
             emit(fmt_chunk_final(

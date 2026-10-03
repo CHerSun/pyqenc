@@ -364,13 +364,44 @@ class TestFixedDegenerateSinglePoint:
         # The winner is still promoted.
         assert (tmp_path / "encoded" / "test_strategy" / "chunk_001.1920x1080.yaml").exists()
         # Every accepted winner logs its acceptance, uniform with the success
-        # line: visual hash + strategy + chunk + miss status + limiter.
+        # line: visual hash + strategy + chunk + soft-miss status + limiter.
+        # The ≈ marks a matter-of-fact miss against the approximate anchor —
+        # softer than per-attempt ✘ and exhausted-search ❌.
         assert any(
-            "miss ✘ with CRF" in str(call) and "limited by" in str(call)
+            "miss ≈ with CRF" in str(call) and "limited by" in str(call)
             for call in captured.info.call_args_list
         )
         # The fixed-mode miss is informational — no warning-level acceptance.
         assert not any("miss" in str(c) for c in captured.warning.call_args_list)
+
+    def test_searched_exhaustion_is_pronounced(self, tmp_path: Path) -> None:
+        """A ranged domain that exhausts short of user-requested quality is a
+        real (bypassable) problem: ❌ at WARNING, 'best' marking the accepted
+        fallback — visibly stronger than the fixed-mode soft miss."""
+        codec = _MM()
+        codec.quality_better      = _D("18.0")
+        codec.quality_worse       = _D("19.0")   # narrow range: exhausts fast
+        codec.quality_granularity = _D("0.5")
+        codec.quality_max_step    = None
+        codec.quality_label       = "CRF"
+        codec.quality_log_padding = 4
+        strategy = _MM()
+        strategy.display_name.return_value = "test-strategy"
+        strategy.safe_name.return_value    = "test_strategy"
+        strategy.codec = codec
+
+        unreachable = [QualityTarget(metric="vmaf", statistic="min", value=99.0)]
+        with _patch("pyqenc.phases.encoding.logger") as captured:
+            result, _ = _run_encode_with_targets(
+                tmp_path, targets=unreachable, measure_attempts=True,
+                strategy=_cast(_Strategy, strategy),
+            )
+        assert result.success is True
+        assert result.targets_met is False
+        assert any(
+            "exhausted ❌ with best CRF" in str(call) and "limited by" in str(call)
+            for call in captured.warning.call_args_list
+        )
 
 
 def _run_encode_with_targets(
@@ -378,9 +409,15 @@ def _run_encode_with_targets(
     *,
     targets: list[QualityTarget],
     measure_attempts: bool,
+    strategy: _Strategy | None = None,
 ):
-    """encode_chunk over a fixed single-point domain with explicit targets."""
-    strategy = _fixed_strategy()
+    """encode_chunk over a strategy's domain with explicit targets.
+
+    Defaults to the fixed single-point strategy; a ranged strategy exercises
+    the searched-exhaustion path.
+    """
+    if strategy is None:
+        strategy = _fixed_strategy()
     chunk = _chunk_mock(tmp_path)
 
     fake_eval = _MM(spec=_QE)

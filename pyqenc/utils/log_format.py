@@ -215,9 +215,11 @@ def fmt_chunk_final(strategy: str, chunk_id: str, quality: Decimal, attempts: in
 
     The single shape for every accepted winner: ``{status} with {label} {q}
     after N attempts — limited by {limiter}``. *status* defaults to
-    ``success ✅``; callers pass e.g. ``miss ✘`` (fixed-mode ruler miss —
-    expected behavior) or ``exhausted ✘`` (search ran out of candidates),
-    keeping all acceptance lines uniform.
+    ``success ✅``; callers pass a severity-carrying status — ``miss ≈``
+    (fixed-mode ruler miss — the auto-elected anchor is approximate, a
+    matter of fact) or ``exhausted ❌`` (search ran out of candidates short
+    of user-requested quality — a real, bypassable problem) — keeping all
+    acceptance lines uniform in shape while distinct in severity.
     """
     status_text = status if status is not None else f"success {SUCCESS_SYMBOL_MAJOR}"
     limit_note = f" — limited by {limited_by}" if limited_by is not None else ""
