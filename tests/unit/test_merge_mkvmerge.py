@@ -965,6 +965,16 @@ class TestFixedOutputSuffix:
         strategies = [_fixed_strategy_fixture("18.5")]
         assert MergePhase._fixed_output_suffix(strategies) == " q18.5"
 
+    def test_spelling_normalized_to_minimal_form(self) -> None:
+        """The same logical value yields the same name regardless of which
+        layer's Decimal spelling declared it: CLI ``-q 18`` (Decimal "18")
+        and a collapsed profile ``[18.0, 18.0]`` both name the output q18."""
+        assert MergePhase._fixed_output_suffix([_fixed_strategy_fixture("18.0")]) == " q18"
+        assert MergePhase._fixed_output_suffix([_fixed_strategy_fixture("18.50")]) == " q18.5"
+        # Mixed spellings of one value count as uniform and render minimally.
+        mixed = [_fixed_strategy_fixture("18"), _fixed_strategy_fixture("18.0")]
+        assert MergePhase._fixed_output_suffix(mixed) == " q18"
+
     def test_searched_run_no_suffix(self) -> None:
         from decimal import Decimal
 

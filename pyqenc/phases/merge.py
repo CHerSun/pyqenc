@@ -806,7 +806,15 @@ class MergePhase(Phase[MergePhaseResult]):
         values = {s.codec.quality_better for s in collapsed}
         if len(values) != 1:
             return ""
-        return f" q{next(iter(values))}"
+        pinned = values.pop()
+        # Minimal fixed-point form ("18", not "18.0"): the value is the
+        # validated effective-range endpoint — identical runs must produce
+        # identical names regardless of which layer's Decimal spelling
+        # declared it (CLI "18" vs profile "18.0").
+        normalized = pinned.normalize()
+        if normalized == normalized.to_integral_value():
+            normalized = normalized.quantize(Decimal(1))
+        return f" q{normalized}"
 
     @staticmethod
     def _tmp_output_path(output_file: Path) -> Path:
