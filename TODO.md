@@ -815,7 +815,41 @@ best attempt's metrics, exactly like the success path computes it).
 
 ---
 
-## Last known = 85
+## 86. Fixed-mode q-change does not invalidate `merged/` — stale outputs reused as COMPLETE — needs thinking
+
+Found by the 2026-10-03 fixed-quality smoke test on real data (work dir with
+prior search-mode results). The fixed-mode start wipes `encoded/` and re-derives
+winners (uniform pinned q), but `MergePhase` currency is keyed only on
+(quality_targets, sampling, probe) — all unchanged by a q change. Merged
+outputs from the earlier run whose names match a surviving strategy are
+classified COMPLETE and REUSED verbatim, silently keeping content built from
+the OLD winners (observed: search-mode h265/h265-anime merges of ~441 MB kept
+while uniform-q18 winners would merge to ~285 MB; run still reported success).
+
+Design tension: the fixed-quality spec (Req 6.1) deliberately invalidates only
+the winner layer — merged outputs are downstream products and the spec's
+iteration table doesn't cover them. Options to think through:
+
+- Wipe `merged/` for surviving strategies at fixed start too (consistent with
+  the winner-layer story: merged outputs are re-derivable from winners, so the
+  wipe costs only re-concatenation, not re-encoding; but it deletes the user's
+  final products on EVERY fixed start, including same-q resumes).
+- Persist the winners' identity fingerprint (e.g. per-strategy Σ winner CRF or
+  attempt names) in `merge.yaml` and invalidate per-output on mismatch — no
+  wholesale deletion, but adds the q-persistence-adjacent bookkeeping the spec
+  avoided for `encoded/` (arguably fine HERE: merged is a leaf product, not a
+  substrate).
+- Leave as-is and document: users iterating on q must delete stale `merged/`
+  files themselves (current workaround).
+
+Adjacent: search-mode winners changing between runs has the same gap in
+principle (e.g. tolerance change re-selects different winners under the same
+strategy name) — today's targets/sampling invalidation only catches it when
+those params move.
+
+---
+
+## Last known = 86
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
