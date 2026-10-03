@@ -43,6 +43,7 @@ from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import (
     CleanupLevel,
     PhaseOutcome,
+    Strategy,
 )
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
@@ -934,3 +935,113 @@ class TestMissedTargetsWarning:
             )
 
         assert [r for r in caplog.records if r.levelno == _logging.WARNING]
+
+
+# ---------------------------------------------------------------------------
+# Fixed-run merged-output naming (TODO §86 quick fix)
+# ---------------------------------------------------------------------------
+
+def _fixed_strategy_fixture(pinned: str) -> Strategy:
+    """A strategy whose codec range is collapsed at *pinned*."""
+    from decimal import Decimal
+
+    from pyqenc.models import CodecConfig
+
+    codec = CodecConfig(
+        name="h265-10bit", default_quality=Decimal(pinned), default_preset="slow",
+        quality_range=(Decimal(pinned), Decimal(pinned)), presets=["slow"],
+    )
+    return Strategy(preset="slow", profile="h265-aq", codec=codec, profile_args=[])
+
+
+class TestFixedOutputSuffix:
+    """The q suffix exists only for uniform pinned-value fixed runs."""
+
+    def test_uniform_fixed_run_gets_q_suffix(self) -> None:
+        strategies = [_fixed_strategy_fixture("18"), _fixed_strategy_fixture("18")]
+        assert MergePhase._fixed_output_suffix(strategies) == " q18"
+
+    def test_decimal_form_preserved(self) -> None:
+        strategies = [_fixed_strategy_fixture("18.5")]
+        assert MergePhase._fixed_output_suffix(strategies) == " q18.5"
+
+    def test_searched_run_no_suffix(self) -> None:
+        from decimal import Decimal
+
+        from pyqenc.models import CodecConfig
+
+        codec = CodecConfig(
+            name="h265-10bit", default_quality=Decimal("18"), default_preset="slow",
+            quality_range=(Decimal("6"), Decimal("30")), presets=["slow"],
+        )
+        strategy = Strategy(preset="slow", profile="h265-aq", codec=codec, profile_args=[])
+        assert MergePhase._fixed_output_suffix([strategy]) == ""
+
+    def test_mixed_pinned_values_no_suffix(self) -> None:
+        strategies = [_fixed_strategy_fixture("18"), _fixed_strategy_fixture("20")]
+        assert MergePhase._fixed_output_suffix(strategies) == ""
+
+    def test_expected_path_carries_suffix(self, tmp_path: Path) -> None:
+        strategy = _fixed_strategy_fixture("18.0")
+        path = MergePhase._expected_output_path(tmp_path, "test", strategy, " q18.0")
+        assert path.name == "test h265-aq+slow q18.0.mkv"
+
+
+class TestFixedMergeRecoveryNaming:
+    """Recovery classifies fixed-run outputs under the q-suffixed name."""
+
+    def test_fixed_run_expects_suffixed_output_and_surplus_kept(
+        self, tmp_path: Path,
+    ) -> None:
+        """A uniform fixed run expects ``<stem> <strategy> q18.0.mkv``; a
+        pre-existing plain-name output (search-mode era) is surplus, kept in
+        place — never silently reused as this run's product."""
+        from decimal import Decimal
+
+        from pyqenc.phases.encoding import EncodingPhase, EncodingPhaseResult
+
+        source = tmp_path / "test.mkv"
+        source.write_bytes(b"\x00" * 64)
+        chunk = tmp_path / "chunk1.q18.0.mkv"
+        chunk.write_bytes(b"\x00" * 128)
+        work_dir = tmp_path / "work"
+        timestamps = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+        timestamps.parent.mkdir(parents=True, exist_ok=True)
+        timestamps.write_text("0\n", encoding="utf-8")
+
+        phase = _make_merge_phase(
+            work_dir, source, chunk, timestamps_path=timestamps, frame_count=24,
+        )
+        config = phase._config
+        config.encoding.strategies = ["h265-aq+slow"]
+        config.encoding.quality_range_override = (Decimal("18"), Decimal("18"))
+        config.encoding.resolve(config.codecs, config.profiles)
+        fixed_strategy = config.encoding.resolved_strategies[0]
+
+        encoding = phase._phases[EncodingPhase]
+        winner = Artifact(
+            payload=_encoded_chunk(chunk, "chunk1", "h265-aq").model_copy(
+                deep=True, update={"strategy": fixed_strategy, "crf": Decimal("18")},
+            ),
+            state=ArtifactState.COMPLETE,
+        )
+        encoding.result = EncodingPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="encoding complete",
+            winners=[winner],
+        )
+
+        # A stale search-mode output under the plain name.
+        merged_dir = work_dir / MERGED_OUTPUT_DIR
+        merged_dir.mkdir(parents=True, exist_ok=True)
+        stale = merged_dir / "test h265-aq+slow.mkv"
+        stale.write_bytes(b"\x00" * 32)
+
+        recovery = phase._recover()
+        wanted_rows = [r for r in recovery.artifacts if r.wanted]
+        assert [r.payload.output_path.name for r in wanted_rows] == [
+            "test h265-aq+slow q18.mkv",
+        ]
+        assert wanted_rows[0].state is ArtifactState.ABSENT  # q18 output not yet produced
+        surplus = [r for r in recovery.artifacts if not r.wanted]
+        assert [r.payload.path.name for r in surplus] == ["test h265-aq+slow.mkv"]
+        assert stale.exists()  # kept in place — no blind deletion

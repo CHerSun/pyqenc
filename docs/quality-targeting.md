@@ -244,7 +244,9 @@ codec such as AV1 fails at startup naming the nearest aligned values).
 "Try CRF 18, look, adjust, re-run on the same work dir" costs only the new
 encodes. Every fixed start wipes the winner layer (`encoded/`) wholesale and
 re-derives it from the attempt workspace — nothing about the fixed value is
-persisted:
+persisted. Merged outputs carry the value in their name
+(`<movie> <strategy> q18.mkv`), so switching to `-q 20` merges fresh outputs
+while your q18 results stay on disk untouched:
 
 ```sh
 pyqenc auto movie.mkv -q 18 -y    # encode at 18
@@ -255,5 +257,6 @@ pyqenc auto movie.mkv -q 20 -y    # new value: only the crf-20 encodes run;
 
 Configuration targets do not drive any decision or verdict in a fixed run —
 encoding presentation judges winners against the anchor's synthetic ruler
-(compared runs) or shows absolute values (uncompared runs), and the merged
+(the anchor's min-across-test-chunk p10 and median values per metric;
+compared runs) or shows absolute values (uncompared runs), and the merged
 phase suppresses the config-target missed-targets warning.

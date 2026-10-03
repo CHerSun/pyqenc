@@ -761,6 +761,24 @@ the texture-retention guard (already in our measured set; all metrics normalized
 per-metric constraints; grain-aware / temporal metrics worth adopting; BD-rate
 applicability at single operating points.
 
+Real-data observation (2026-10-03 smoke test, `-q 18` over h264 + three h265
+profiles, comparison restricted to p10+median per metric): **dominance pruning
+selected 4/4 strategies — zero reduction.** The three h265 variants are mutually
+incomparable (each wins a different mix of compared stats at near-equal sizes;
+the full-stat set was even more permissive), and h264 is bigger but vmaf-better,
+so it also survives. Pareto pruning as implemented is honest but toothless for
+the "pick a few for me" job — the pre-spec concern confirmed. Extra angles for
+the research pass beyond the papers above:
+
+- Reduction mechanisms with an actual bite: user-supplied size/quality budget
+  (top-K within budget), epsilon-dominance (near-equal stats count as equal),
+  explicit trade-off sliders, or a "dominance with tolerance" per metric.
+- The anchor-relative table already gives the human the trade-off picture —
+  maybe the right v2 is interactive/filtered presentation, not stronger
+  auto-pruning (auto-picking needs the composite opinion the spec refuses).
+- Stat-subset choice interacts here: p10+median compares worst-decile +
+  central tendency; adding min/max-style stats made pruning strictly weaker.
+
 ---
 
 ## 83. Metrics-absence tolerance across consumers — prerequisite for measurement-skip
@@ -815,37 +833,34 @@ best attempt's metrics, exactly like the success path computes it).
 
 ---
 
-## 86. Fixed-mode q-change does not invalidate `merged/` — stale outputs reused as COMPLETE — needs thinking
+## 86. Merge-phase invalidation is incomplete — general design needed — needs thinking
 
-Found by the 2026-10-03 fixed-quality smoke test on real data (work dir with
-prior search-mode results). The fixed-mode start wipes `encoded/` and re-derives
-winners (uniform pinned q), but `MergePhase` currency is keyed only on
-(quality_targets, sampling, probe) — all unchanged by a q change. Merged
-outputs from the earlier run whose names match a surviving strategy are
-classified COMPLETE and REUSED verbatim, silently keeping content built from
-the OLD winners (observed: search-mode h265/h265-anime merges of ~441 MB kept
-while uniform-q18 winners would merge to ~285 MB; run still reported success).
+Found by the 2026-10-03 fixed-quality smoke test on real data. The quick fix for
+the common case LANDED the same day: uniform pinned-value fixed runs (the `-q`
+workflow) name their outputs `<stem> <strategy> q<value>.mkv`, so q changes and
+search↔fixed mode switches produce a different output name — stale merges are
+never reused as current, no blind wipes, and same-q reruns keep their
+measurements.
 
-Design tension: the fixed-quality spec (Req 6.1) deliberately invalidates only
-the winner layer — merged outputs are downstream products and the spec's
-iteration table doesn't cover them. Options to think through:
+Still open (the general problem — related to phase invalidation broadly and to
+§68 config-change invalidation):
 
-- Wipe `merged/` for surviving strategies at fixed start too (consistent with
-  the winner-layer story: merged outputs are re-derivable from winners, so the
-  wipe costs only re-concatenation, not re-encoding; but it deletes the user's
-  final products on EVERY fixed start, including same-q resumes).
-- Persist the winners' identity fingerprint (e.g. per-strategy Σ winner CRF or
-  attempt names) in `merge.yaml` and invalidate per-output on mismatch — no
-  wholesale deletion, but adds the q-persistence-adjacent bookkeeping the spec
-  avoided for `encoded/` (arguably fine HERE: merged is a leaf product, not a
-  substrate).
-- Leave as-is and document: users iterating on q must delete stale `merged/`
-  files themselves (current workaround).
-
-Adjacent: search-mode winners changing between runs has the same gap in
-principle (e.g. tolerance change re-selects different winners under the same
-strategy name) — today's targets/sampling invalidation only catches it when
-those params move.
+- Searched runs: winner sets can change under the same strategy name (tolerance
+  change re-selection, target changes producing different winners) while merge
+  params (targets/sampling/probe) stay constant → stale merge reused as
+  COMPLETE. Same mechanism the smoke test exposed.
+- Non-uniform fixed runs (collapsed profiles of different values, no `-q`): no
+  suffix is possible from a single value; need a different identity.
+- Is naming the right mechanism in general, or a winners-identity fingerprint
+  persisted in merge.yaml (per-output invalidation without deletion)? Naming
+  preserves measurements across back-and-forth switches; fingerprints re-merge
+  and re-measure on any change. Mixed design possible: name carries the
+  coarse identity (mode + q), fingerprint catches the rest.
+- The merge summary table showed wrong numbers during the smoke test precisely
+  because of this stale reuse — any fix must also make the summary trustworthy.
+- Do NOT copy the `encoded/` unconditional-wipe approach: merge measurement is
+  expensive (full-file VMAF/etc. per output); the user explicitly rejected
+  blind deletion here.
 
 ---
 
