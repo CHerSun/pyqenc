@@ -854,7 +854,26 @@ Still open (the general problem — related to phase invalidation broadly and to
 
 ---
 
-## Last known = 86
+## 87. `encoded_chunks` double-nested dict is an index in the wrong orientation — needs thinking
+
+`EncodingResult.encoded_chunks: dict[chunk_id][strategy_name] -> EncodedChunk`
+(and the derived `EncodingPhaseResult.encoded_chunks`) re-keys identity the
+payload already carries (EncodedChunk owns its chunk + strategy). Orientation
+audit (2026-10-03): merge's concat needs one strategy's chunks ordered by
+chunk; optimization's sizes/aggregation need per-strategy-over-chunks; the
+winner scan and winners build iterate all pairs; the encode loop writes
+per pair. No consumer needs chunk-major O(1) lookup — the only thing the
+nesting provides. Candidate shape: `dict[strategy_name] -> list[EncodedChunk]`
+(grouping is what two consumers actually need; a flat list is more
+doctrine-pure but pushes grouping to every consumer). Mechanical but
+cross-phase: EncodingResult + writers + the derived property + 4 read sites
++ tests. Could ride along with the `2026-10-03 unified-quality-summaries`
+implementation (it reworks the aggregation data path anyway) or land
+standalone.
+
+---
+
+## Last known = 87
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
