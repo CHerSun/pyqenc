@@ -873,7 +873,44 @@ standalone.
 
 ---
 
-## Last known = 87
+## 88. EncodingConfig two-representation dance — resolve once at the boundary, objects everywhere — needs thinking
+
+Finding (2026-10-03 code review): `EncodingConfig` carries raw pattern strings
+(`strategies`, `targets`) past the load boundary, gets mutated post-load by
+the CLI, and is re-read by every phase — hence the resolved caches, explicit
+`resolve()`, the idempotency guard, and the cache-invalidation validator.
+None of that machinery has a reason to exist if resolution happens exactly
+once at the boundary and the config carries resolved objects from then on.
+
+Doctrine (user, 2026-10-03): raw strings are only (a) the YAML parse form and
+(b) sidecar serialization for recovering back to objects (as
+`optimization.yaml`'s `selected:` already does). Everywhere else — strategies,
+codecs, profiles, targets — objects.
+
+Design sketch:
+- `EncodingConfig` gains real fields `resolved_strategies: list[Strategy]` /
+  `resolved_targets: list[QualityTarget]`; loses `resolve()`, the private
+  caches, and the invalidation validator; reads become plain field reads.
+- Exactly two population points: the `AppConfig` load validator (fail-fast on
+  bad patterns stays at `model_validate`) and ONE sanctioned mutation method
+  on `AppConfig` (e.g. `apply_cli_overrides(...)`) that assigns raw overrides
+  and re-resolves in one step — the codec/profile context lives on the
+  parent. Free-form post-load assignment of raw `strategies` without
+  re-resolution becomes structurally impossible.
+- Re-home the module-level composition helpers
+  (`_validate_profile_quality_range`, `_validate_override_quality_range`,
+  `_effective_codec`, `_expand_strategy_pattern`, `_get_codec`) as
+  `AppConfig` methods in the same motion (disowned-functions rule).
+- CLI `_build_config` + ~a dozen test helpers drop the assign-then-resolve
+  dance.
+
+Behaviorally identical; pure structure. Sequencing: after the code-review
+pass and PR — pairs with §87 and the `2026-10-03 unified-quality-summaries`
+implementation as the spec-window mechanical-debt sweep.
+
+---
+
+## Last known = 88
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
