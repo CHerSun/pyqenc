@@ -22,7 +22,6 @@ from pydantic import BaseModel, Field, model_serializer
 from pyqenc.audio.chain import ResolvedChain, chain_signature
 from pyqenc.models import (
     CropParams,
-    QualityTarget,
 )
 from pyqenc.stream_model import DecimalYaml, LongPathYaml
 from pyqenc.utils.yaml_utils import load_model, save_model
@@ -162,10 +161,12 @@ class OptimizationParams(BaseModel):
     the quality targets, and the metrics sampling factor active when the last
     run wrote this file.
 
-    Fixed-quality compared runs additionally persist the anchor identity and
-    the synthetic target set (the anchor's min-aggregated metrics) alongside
-    the survivor list in ``selected``; searched runs leave them at their
-    defaults.
+    Fixed-quality compared runs additionally persist the anchor identity
+    alongside the survivor list in ``selected``; searched runs leave it at
+    its default. The anchor's synthetic target set is NOT persisted — it is
+    a pure derivation from ``strategy_results`` (the anchor's aggregated
+    metrics projected onto the comparison stat set) and re-derives on read,
+    so a changed comparison set re-projects old measurements correctly.
 
     Attributes:
         probe:            Probe state (crop + frame count) active when optimization ran.
@@ -183,9 +184,6 @@ class OptimizationParams(BaseModel):
                           (treated as unknown — no mismatch triggered).
         anchor:           The fixed-mode measurement anchor (survivor with the
                           smallest total test size); ``None`` in searched runs.
-        synthetic_targets: The anchor's min-aggregated metrics as quality
-                          targets — presentation ruler only, never search
-                          goals. Sorted for deterministic serialisation.
     """
 
     probe:            ProbeState | None       = None
@@ -196,7 +194,6 @@ class OptimizationParams(BaseModel):
     quality_targets:  list[str]                = Field(default_factory=list)
     sampling:         int | None               = None
     anchor:           str | None               = None
-    synthetic_targets: list[QualityTarget]     = Field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path) -> Self | None:

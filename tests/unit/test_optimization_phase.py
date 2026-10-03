@@ -1131,19 +1131,28 @@ class TestFixedComparedExecute:
         assert persisted is not None
         assert persisted.anchor == "h265-aq+slow"
         assert persisted.selected == ["h265-aq+slow", "h265+slow"]
+        # The sidecar persists facts + decisions only — the synthetic ruler
+        # is NOT persisted (no synthetic_targets field); it re-derives from
+        # strategy_results on read.
+        assert not hasattr(persisted, "synthetic_targets")
+        # The per-strategy records keep the FULL aggregated metrics for reuse
+        # (data retention — re-selecting the comparison set never re-measures).
+        by_name = {r.strategy: r for r in persisted.strategy_results}
+        assert by_name["h265-aq+slow"].metrics["vmaf_median"] == 91.0
+        assert by_name["h265-aq+slow"].metrics["vmaf_std"] == 1.1
+        # Re-derivation from the persisted facts reproduces the ruler verbatim.
+        anchor_result = next(
+            r for r in persisted.strategy_results if r.strategy == persisted.anchor
+        )
         assert [
-            (t.metric, t.statistic, t.value) for t in persisted.synthetic_targets
+            (t.metric, t.statistic, t.value)
+            for t in OptimizationPhase._synthetic_targets_from(anchor_result)
         ] == [
             ("vif", "p10", 81.0),
             ("vif", "median", 84.0),
             ("vmaf", "p10", 87.0),
             ("vmaf", "median", 91.0),
         ]
-        # The per-strategy records keep the FULL aggregated metrics for reuse
-        # (data retention — re-selecting the comparison set never re-measures).
-        by_name = {r.strategy: r for r in persisted.strategy_results}
-        assert by_name["h265-aq+slow"].metrics["vmaf_median"] == 91.0
-        assert by_name["h265-aq+slow"].metrics["vmaf_std"] == 1.1
 
     def test_tolerance_not_applied_in_fixed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -1256,4 +1265,3 @@ class TestUncomparedFixedSkipsAnchor:
         persisted = OptimizationParams.load(work_dir / "optimization.yaml")
         assert persisted is not None
         assert persisted.anchor is None
-        assert persisted.synthetic_targets == []

@@ -670,7 +670,10 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         if fixed:
             # Selection = dominance pruning; anchor = smallest survivor (the
             # only front member selectable without a quality opinion);
-            # synthetic set = the anchor's min-aggregated metrics.
+            # synthetic set = the anchor's min-aggregated metrics. The sidecar
+            # persists facts (strategy_results) + decisions (selected, anchor)
+            # only — the ruler re-derives on read, so a changed comparison
+            # stat set re-projects old measurements correctly.
             final_results = new_results
             selected      = self._dominance_survivors(final_results)
             self._anchor_name = self._select_anchor(final_results, resolved_names, selected)
@@ -680,15 +683,14 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             self._synthetic_targets = self._synthetic_targets_from(anchor_result)
 
             OptimizationParams(
-                probe             = self._current_probe,
-                test_chunks       = [c.safe_name() for c in test_chunks],
-                strategy_results  = final_results,
-                tolerance_pct     = tolerance,
-                selected          = selected,
-                quality_targets   = current_targets,
-                sampling          = current_sampling,
-                anchor            = self._anchor_name,
-                synthetic_targets = self._synthetic_targets,
+                probe            = self._current_probe,
+                test_chunks      = [c.safe_name() for c in test_chunks],
+                strategy_results = final_results,
+                tolerance_pct    = tolerance,
+                selected         = selected,
+                quality_targets  = current_targets,
+                sampling         = current_sampling,
+                anchor           = self._anchor_name,
             ).save(opt_yaml)
 
             self._selected_names   = selected
