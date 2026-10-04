@@ -991,7 +991,48 @@ start, alongside §90's typed per-mode sidecar models.
 
 ---
 
-## Last known = 93
+## 94. Config layer merge semantics — explicit intent markers + empty-container asymmetry — needs thinking
+
+Raised 2026-10-05 (user, reviewing `_deep_merge`): layers can express "merge"
+(dicts, the default) and silent "keep" (null values), but never "drop
+previous and use mine wholesale"; lists are unconditional replacement with no
+way to ask for append.
+
+Semantics inventory (verified in code):
+
+- scalar → replace (the only option).
+- dict + dict → recursive merge; a null section OR an empty `{}` silently
+  keeps the base — base keys can never be REMOVED by a higher layer.
+- list → replace; `[]` replaces with empty (failing later as e.g. "No
+  strategies configured") while `{}` keeps base — an ASYMMETRY between empty
+  containers, surprising in both directions, worth documenting or unifying
+  regardless of the bigger question.
+
+Assessment (no code yet):
+
+- Demand today is thin: leftover bundled codecs/profiles are inert, and the
+  only list-append candidate is `profile.extra_args`. The gap may be more
+  documentation than mechanism — the four merge rules are currently stated
+  only inside `_deep_merge`'s docstring.
+- If a mechanism is wanted: prefer an OUT-OF-BAND marker — a custom YAML tag
+  (e.g. `filters: !replace {…}`, `extra_args: !append [...]`) resolved by a
+  conservative loader subclass at the config boundary, BEFORE `_deep_merge`;
+  the marker never enters the schema, pydantic never sees it, and one
+  mechanism covers both directions. Costs: needs a custom loader
+  (`safe_load` rejects tags), unknown-tag errors are cryptic, editors flag
+  nonstandard tags; input-only concept (dumps never emit it) — acceptable.
+- IN-BAND sentinels (empty-string/null first list item, reserved dict key)
+  are feasible but magic-value programming: ambiguous against legal values,
+  must be stripped pre-validation, undiscoverable, and would sit beside the
+  existing null-means-keep rule (two silent in-band concepts). Rejected.
+- List MERGE should never be implicit — for every current list
+  (`strategies`, `targets`, `chains`, `select`, `extra_args`) replacement is
+  the honest intent; append needs arbitrary order/dedup answers and must be
+  opt-in per instance if it exists at all.
+
+---
+
+## Last known = 94
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
