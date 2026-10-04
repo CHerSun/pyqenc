@@ -891,11 +891,25 @@ the mode-honest sidecar landing):
   basis; search: quality_targets) — replace mode-conditional optional fields
   with type-explicit classes: a common base + `Fixed…Params` / `Search…Params`
   derivatives for both `OptimizationParams` and `MergeParams`, so the schema
-  itself states the mode's shape.
+  itself states the mode's shape. Confirmed from the code side 2026-10-05
+  (user, reading the `MergeParams` construction split): difference should be
+  by TYPE, not by construction — the None-guards work but the schema lies.
+  Mechanics: pydantic discriminated union (`mode: Literal["fixed"]` /
+  `Literal["search"]` + `Field(discriminator="mode")` — same shape as §79's
+  FilterInstance idea); the discriminator is what persisted models need and
+  in-memory objects get for free (the config layer's analog was solved
+  2026-10-05 by splitting resolved state into `EncodingPlan`). Mode-specific
+  invalidation-key comparison rehomes onto the variants. Full census of the
+  pattern: `MergeParams` (anchor vs quality_targets optionals),
+  `OptimizationParams` (anchor optional; strategy_results.metrics
+  fixed-only), and the per-video merged sidecar (mode-honest but as an
+  untyped dict — candidate for a typed model in the same pass).
 
 Supersedes parts of the interim sidecar landing (88975c7); fold into the
 `2026-10-03 unified-quality-summaries` implementation or land standalone
-before it.
+before it — recommended FIRST in that window: the spec's prepared-table
+data lands ON these models, so building it onto the honest types beats
+retrofitting (splitting now and again at spec time would churn twice).
 
 ---
 
