@@ -952,7 +952,45 @@ Effort shape (continuation of the 2026-09-30 cleanup lineage):
 
 ---
 
-## Last known = 92
+## 93. PhaseDependencies — typed deps view replacing `_dep_result` — design agreed, implementation parked
+
+Born from the 2026-10-05 config-resolution review (91 `self._dep_result(...)`
+call sites; 62 of them `JobPhase`; merge 29 + optimization 27 the hotspots).
+Design agreed in discussion (user-driven):
+
+- `PhaseRegistry` STAYS the dict alias — it already is the registry; no class.
+- New `PhaseDependencies` view, held by `Phase` as `self._deps`, built at
+  init from the registry reference + the phase's own `DEPENDS_ON` (its key
+  domain = declared deps only, so indexing an undeclared phase is
+  structurally out of vocabulary).
+- `__getitem__[R: PhaseResult](dep_cls: type[Phase[R]]) -> R` — generic
+  subscript returning the asserted typed result. Subscript semantics are
+  honest here (the view stores nothing — it IS a result map over declared
+  deps) and directly answer the original objection: function-call form
+  implies cost, subscript reads as near-instant data access.
+- Per-dep property layer (`job_result` etc.) evaluated and DROPPED — with a
+  typed subscript, properties are redundant indirection (no-dumb-wrappers;
+  `_deps[JobPhase]` and `self.job_result` are the same length).
+- `_dep_result` retires; all 91 sites become `self._deps[X]`.
+
+Implementation nuances to settle:
+
+- Resolve PER ACCESS against the live registry — not an init-time snapshot of
+  dep instances. Results only populate during the dependency walk (after
+  construction), and the test pattern constructs phases with empty/partial
+  registries and attaches stub results afterward; a snapshot breaks both.
+  Key-domain from `DEPENDS_ON`; both asserts stay at access time (as today).
+- `_ensure_dependencies` needs phase INSTANCES (`dep.run()`): either `Phase`
+  keeps the raw registry reference for framework use, or the view gains a
+  minimal instance accessor.
+
+Sequencing: the sweep rewrites merge.py + optimization.py — the
+unified-summaries spec-window files — so land it at that implementation's
+start, alongside §90's typed per-mode sidecar models.
+
+---
+
+## Last known = 93
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
