@@ -214,8 +214,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             The all-strategies result, a FAILED result when the cleanup guard
             stops the run — or ``None`` to proceed with the template.
         """
-        plan = self._dep_result(JobPhase).plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan = self._dep_result(ProbePhase).plan
+
         strategies = plan.strategies
 
         if plan.fixed_quality:
@@ -321,8 +321,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
     def _log_key_params(self) -> None:
         """Log the strategy list and tolerance (key parameters)."""
-        plan = self._dep_result(JobPhase).plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan = self._dep_result(ProbePhase).plan
+
         logger.info("Strategies:  %s", ", ".join(s.display_name() for s in plan.strategies))
         logger.info("Tolerance:   %.1f%%", self._config.encoding.optimize_tolerance)
 
@@ -360,8 +360,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         work_dir     = job_result.work_dir
         opt_yaml     = work_dir / OptimizationPhase.SIDECAR_NAME
         tolerance    = self._config.encoding.optimize_tolerance
-        plan         = job_result.plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan         = probe_result.plan
+
         strategies   = plan.strategies
         force_wipe   = job_result.force_wipe
 
@@ -543,8 +543,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         opt_yaml   = work_dir / OptimizationPhase.SIDECAR_NAME
         tolerance  = self._config.encoding.optimize_tolerance
         persisted  = self._persisted
-        plan       = job_result.plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan       = self._dep_result(ProbePhase).plan
+
         fixed      = plan.fixed_quality
         assert self._current_probe is not None, "_recover populates the probe state before execution"
         crop       = self._current_probe.crop
@@ -747,8 +747,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> OptimizationPhaseResult:
         """Build the reused result from the cached strategy results stash."""
-        plan = self._dep_result(JobPhase).plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan = self._dep_result(ProbePhase).plan
+
         if plan.fixed_quality:
             resolved_names = [s.display_name() for s in plan.strategies]
             self._log_fixed_comparison(
@@ -780,8 +780,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             exists).
         """
         # Resolve strategy name strings to Strategy objects from the live plan.
-        plan = self._dep_result(JobPhase).plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan = self._dep_result(ProbePhase).plan
+
         by_name = {s.display_name(): s for s in plan.strategies}
         return OptimizationPhaseResult(
             outcome             = outcome,
@@ -817,8 +817,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         """
         job_result       = self._dep_result(JobPhase)
         work_dir         = job_result.work_dir
-        plan             = job_result.plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan             = self._dep_result(ProbePhase).plan
+
         opt_yaml         = work_dir / OptimizationPhase.SIDECAR_NAME
         current_targets  = targets_as_strings(plan.targets)
         current_sampling = self._config.measurement.sampling

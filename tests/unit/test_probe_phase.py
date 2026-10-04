@@ -59,7 +59,6 @@ def _make_job_result(work_dir: Path, source: Path) -> JobPhaseResult:
         message   = "job complete",
         file      = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         config    = _APP_CONFIG,
-        plan      = _PLAN,
         work_dir  = work_dir,
         source    = source,
     )
@@ -121,7 +120,6 @@ def _make_probe_phase(
         cleanup    = CleanupLevel.NONE,
         no_metrics = True,
         collector  = collector,
-        plan       = _PLAN,
     )
     job.result = job_result
 
@@ -135,6 +133,7 @@ def _make_probe_phase(
         _APP_CONFIG, registry,
         collector   = collector,
         crop_params = crop_params,
+        plan        = _PLAN,
     )
 
 

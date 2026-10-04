@@ -488,7 +488,7 @@ class TestEncodingPresentationTargets:
         job = JobPhase(
             config, {}, source=src, work_dir=work_dir, force=False,
             cleanup=CleanupLevel.NONE, no_metrics=True,
-            collector=NoOpMetricsCollector(), plan=plan,
+            collector=NoOpMetricsCollector(),
         )
         job.run(dry_run=False)
 
@@ -514,9 +514,10 @@ class TestEncodingPresentationTargets:
             ),
             frame_count=240, crop=CropParams(),
         )
-        probe = ProbePhase(config, {}, collector=NoOpMetricsCollector(), crop_params=None)
+        probe = ProbePhase(config, {}, collector=NoOpMetricsCollector(), crop_params=None, plan=plan)
         probe.result = ProbePhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="stub",
+            plan=plan,
             stream=_PAArtifact(payload=extended, state=_PAState.COMPLETE),
         )
 

@@ -2056,8 +2056,8 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         logger.info("Strategies:  %s", ", ".join(s.display_name() for s in strategies) if strategies else "none")
         if crop:
             logger.info("Crop:        %s", crop)
-        plan = self._dep_result(JobPhase).plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan = self._dep_result(ProbePhase).plan
+
         logger.info("Targets:     %s", ", ".join(f"{t.metric}-{t.statistic}≥{t.value}" for t in plan.targets))
 
     def _log_limiter_summary(self, summaries: list[LimiterSummary]) -> None:
@@ -2340,8 +2340,8 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # read as all-miss noise); uncompared fixed runs have no ruler
         # (absolute values, no verdicts — the limiter table self-extinguishes
         # on empty targets); searched runs use the config targets, unchanged.
-        plan = self._dep_result(JobPhase).plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan = self._dep_result(ProbePhase).plan
+
         if plan.fixed_quality:
             presentation_targets = optimization_result.synthetic_targets
         else:

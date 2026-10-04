@@ -187,8 +187,7 @@ class MergePhase(Phase[MergePhaseResult]):
         """
         probe = ProbeState.from_probe(self._dep_result(ProbePhase))
         job_result = self._dep_result(JobPhase)
-        plan = job_result.plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan = self._dep_result(ProbePhase).plan
         if plan.fixed_quality:
             return MergeParams(
                 anchor   = self._dep_result(OptimizationPhase).anchor,
@@ -208,8 +207,8 @@ class MergePhase(Phase[MergePhaseResult]):
     def _log_key_params(self) -> None:
         """Log the source stem and quality targets (key parameters)."""
         logger.info("Source stem:  %s", self._dep_result(JobPhase).source.stem)
-        plan = self._dep_result(JobPhase).plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan = self._dep_result(ProbePhase).plan
+
         if plan.targets:
             logger.info("Targets:      %s", ", ".join(
                 f"{t.metric}-{t.statistic}≥{t.value}" for t in plan.targets
@@ -283,8 +282,8 @@ class MergePhase(Phase[MergePhaseResult]):
             persisted = MergeParams.load(merge_yaml)
             if persisted is not None:
                 current  = self.params
-                plan     = self._dep_result(JobPhase).plan
-                assert plan is not None, "video registry guarantees the plan"
+                plan     = self._dep_result(ProbePhase).plan
+        
                 fixed    = plan.fixed_quality
                 key_changed     = (
                     persisted.anchor != current.anchor
@@ -424,8 +423,8 @@ class MergePhase(Phase[MergePhaseResult]):
         targets in both modes (the anchor-relative table is the unified-
         summaries spec's work), so the rendered set is the target-key set.
         """
-        plan = self._dep_result(JobPhase).plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan = self._dep_result(ProbePhase).plan
+
         return {
             f"{t.metric}_{t.statistic}"
             for t in plan.targets
@@ -434,8 +433,7 @@ class MergePhase(Phase[MergePhaseResult]):
     def _reused_result(self, wanted: list[Artifact], message: str) -> MergePhaseResult:
         """Build the reused result, replaying the persisted merge summary."""
         job_result = self._dep_result(JobPhase)
-        plan = job_result.plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan = self._dep_result(ProbePhase).plan
         merge_yaml = job_result.work_dir / MergePhase.SIDECAR_NAME
         persisted  = MergeParams.load(merge_yaml)
         if persisted is not None:
@@ -508,9 +506,8 @@ class MergePhase(Phase[MergePhaseResult]):
         merged_dir.mkdir(parents=True, exist_ok=True)
 
         job_result = self._dep_result(JobPhase)
-        plan = job_result.plan
-        assert plan is not None, "video registry guarantees the plan"
         probe_result = self._dep_result(ProbePhase)
+        plan = probe_result.plan
         crop: CropParams = probe_result.crop
         # The dependency walk guarantees a completed probe with a resolved stream.
         assert probe_result.stream is not None, "probe guaranteed complete by the dependency walk"
@@ -990,8 +987,8 @@ class MergePhase(Phase[MergePhaseResult]):
         never needs re-measuring for a future stat set.
         """
         data: dict = {"frame_count": frame_count}
-        plan = self._dep_result(JobPhase).plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan = self._dep_result(ProbePhase).plan
+
         if plan.fixed_quality:
             pinned = MergePhase._uniform_pinned_quality([strategy])
             data["quality"] = {
@@ -1041,8 +1038,8 @@ class MergePhase(Phase[MergePhaseResult]):
         evaluator = QualityEvaluator(output_dir)
         plot_path = output_dir / f"{final_result.stem}.png"
 
-        plan = self._dep_result(JobPhase).plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan = self._dep_result(ProbePhase).plan
+
         evaluation = evaluator.evaluate_chunk(
             encoded            = final_result,
             reference          = source_stream.stream.as_input(),
@@ -1078,8 +1075,8 @@ class MergePhase(Phase[MergePhaseResult]):
             Space-separated metric readings, or empty string if no targets.
         """
         parts: list[str] = []
-        plan = self._dep_result(JobPhase).plan
-        assert plan is not None, "video registry guarantees the plan"
+        plan = self._dep_result(ProbePhase).plan
+
         for target in plan.targets:
             key   = f"{target.metric}_{target.statistic}"
             value = metrics_dict.get(key)

@@ -65,7 +65,6 @@ from pyqenc.stream_model import (
     VideoStream,
     VideoStreamInfo,
 )
-from pyqenc.utils.disk_space import log_disk_space_info
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg
 from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
@@ -728,19 +727,6 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
         if self._sidecar_dirty:
             self._persist_sidecar(work_dir / ExtractionPhase.SIDECAR_NAME)
-
-        # Disk-space estimate on the enumerated stream data (log-only).
-        # The plan read lives under the video branch: the audio-only
-        # registry carries no plan.
-        if self._video is not None:
-            assert job_result.plan is not None, "video registry guarantees the plan"
-            n_strategies = len(job_result.plan.strategies)
-            log_disk_space_info(
-                stream         = self._video,
-                work_dir       = work_dir,
-                min_strategies = 1 if (self._config.encoding.optimize or n_strategies == 0) else n_strategies,
-                max_strategies = max(1, n_strategies),
-            )
 
         source = job_result.source
         if not source.exists():

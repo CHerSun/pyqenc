@@ -31,7 +31,6 @@ from pyqenc.metrics import (
 )
 from pyqenc.models import (
     CleanupLevel,
-    EncodingPlan,
     PhaseOutcome,
     Strategy,
 )
@@ -298,7 +297,7 @@ class TestJobPhaseTiming:
 
         def run(collector: MetricsCollector) -> None:
             JobPhase(
-                config, {}, collector=collector, plan=config.resolve_encoding(), **volatile,
+                config, {}, collector=collector, **volatile,
             ).run()
 
         metrics    = _recorded_metrics(tmp_path, run)
@@ -325,7 +324,7 @@ class TestJobPhaseTiming:
         volatile = _make_volatile(tmp_path)
         collector = _spy_collector()
         phase    = JobPhase(
-            config, {}, collector=collector, plan=config.resolve_encoding(), **volatile,
+            config, {}, collector=collector, **volatile,
         )
 
         # Pre-create a valid job.yaml (the File dump) so the phase takes the
@@ -355,7 +354,7 @@ class TestJobPhaseTiming:
         volatile = _make_volatile(tmp_path)
         collector = NoOpMetricsCollector()
         phase    = JobPhase(
-            config, {}, collector=collector, plan=config.resolve_encoding(), **volatile,
+            config, {}, collector=collector, **volatile,
         )
 
         result = phase.run()
@@ -397,7 +396,6 @@ class TestExtractionPhaseTiming:
             source     = source,
             work_dir   = source.parent / "work",
             config     = config,
-            plan       = config.resolve_encoding(),
         )
         result.file     = Artifact(
             payload=File(path=source, file_size_bytes=source.stat().st_size),
@@ -592,7 +590,6 @@ class TestChunkingPhaseTiming:
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
-            plan       = config.resolve_encoding(),
         )
         return result
 
@@ -626,6 +623,7 @@ class TestChunkingPhaseTiming:
         probe_mock = MagicMock(spec=ProbePhase)
         probe_mock.result = ProbePhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="ok",
+            plan=_SHARED_APP_CONFIG.resolve_encoding(),
             stream=Artifact(payload=stream, state=ArtifactState.COMPLETE),
         )
 
@@ -784,7 +782,6 @@ class TestAudioPhaseTiming:
             source     = source,
             work_dir   = work_dir,
             config     = config,
-            plan       = config.resolve_encoding(),
         )
 
         extraction_result = ExtractionPhaseResult(
@@ -903,7 +900,7 @@ class TestOptimizationPhaseTiming:
     """Integration tests for ``OptimizationPhase`` timing instrumentation (Req 6.5)."""
 
     def _make_job_result(
-        self, tmp_path: Path, *, config: AppConfig | None = None, plan: EncodingPlan | None = None,
+        self, tmp_path: Path, *, config: AppConfig | None = None,
     ) -> JobPhaseResult:
         """Return a minimal complete ``JobPhaseResult`` stub."""
         from pyqenc.models import PhaseOutcome
@@ -921,7 +918,6 @@ class TestOptimizationPhaseTiming:
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
-            plan       = plan if plan is not None else config.resolve_encoding(),
         )
         return result
 
@@ -964,7 +960,7 @@ class TestOptimizationPhaseTiming:
         )
 
         job_mock = MagicMock(spec=JobPhase)
-        job_mock.result = self._make_job_result(tmp_path, config=config, plan=plan)
+        job_mock.result = self._make_job_result(tmp_path, config=config)
 
         # ProbePhase is a dependency; the uniform run() resolves deps first, so a
         # completed probe result must be present for the reuse path to be reached.
@@ -975,6 +971,7 @@ class TestOptimizationPhaseTiming:
         probe_mock.result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
             message   = "probe complete",
+            plan      = plan,
             stream    = None,
         )
 
@@ -1157,7 +1154,6 @@ class TestEncodingPhaseTiming:
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
-            plan       = config.resolve_encoding(),
         )
         return result
 
@@ -1207,6 +1203,7 @@ class TestEncodingPhaseTiming:
         probe_result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
             message   = "ok",
+            plan      = config.resolve_encoding(),
             stream    = None,
         )
         probe_mock = MagicMock(spec=ProbePhase)
@@ -1449,7 +1446,6 @@ class TestMergePhaseTiming:
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
-            plan       = config.resolve_encoding(),
         )
         return result
 
@@ -1558,6 +1554,7 @@ class TestMergePhaseTiming:
         probe_mock.result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
             message   = "probe complete",
+            plan      = _SHARED_APP_CONFIG.resolve_encoding(),
             stream    = Artifact(payload=probe_stream, state=ArtifactState.COMPLETE),
         )
 

@@ -207,7 +207,6 @@ def _make_merge_phase(
         cleanup    = CleanupLevel.NONE,
         no_metrics = True,
         collector  = collector,
-        plan       = plan,
     )
     job.result = JobPhaseResult(
         outcome    = PhaseOutcome.COMPLETED,
@@ -215,7 +214,6 @@ def _make_merge_phase(
         file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         force_wipe = False,
         config     = config,
-        plan       = plan,
         work_dir   = work_dir,
         source     = source,
     )
@@ -242,10 +240,11 @@ def _make_merge_phase(
     )
     registry[ExtractionPhase] = extraction
 
-    probe = ProbePhase(config, registry, collector=collector, crop_params=None)
+    probe = ProbePhase(config, registry, collector=collector, crop_params=None, plan=plan)
     probe.result = ProbePhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
         message   = "probe complete",
+        plan      = plan,
         stream    = Artifact(
             payload = _extended_stream(source, frame_count),
             state   = ArtifactState.COMPLETE,
@@ -1073,13 +1072,13 @@ class TestFixedMergeRecoveryNaming:
             work_dir, source, chunk, timestamps_path=timestamps, frame_count=24,
         )
         config = phase._config
-        job_result = phase._phases[JobPhase].result
-        assert job_result is not None
-        job_result.plan = config.resolve_encoding(
+        probe_result = phase._phases[ProbePhase].result
+        assert probe_result is not None
+        probe_result.plan = config.resolve_encoding(
             strategies = ["h265-aq+slow"],
             quality    = (Decimal("18"), Decimal("18")),
         )
-        fixed_strategy = job_result.plan.strategies[0]
+        fixed_strategy = probe_result.plan.strategies[0]
 
         encoding = phase._phases[EncodingPhase]
         winner = Artifact(
@@ -1148,13 +1147,13 @@ def _run_full_merge(
         from pyqenc.phases.optimization import OptimizationPhase as _OptPhase
 
         config = merge._config
-        job_result = merge._phases[JobPhase].result
-        assert job_result is not None
-        job_result.plan = config.resolve_encoding(
+        probe_result = merge._phases[ProbePhase].result
+        assert probe_result is not None
+        probe_result.plan = config.resolve_encoding(
             strategies = ["h265-aq+slow"],
             quality    = (Decimal("18"), Decimal("18")),
         )
-        fixed_strategy = job_result.plan.strategies[0]
+        fixed_strategy = probe_result.plan.strategies[0]
 
         encoding = merge._phases[_EncodingPhase]
         winner = Artifact(
@@ -1262,9 +1261,9 @@ class TestModeHonestMergeSidecars:
         sidecar_before = sidecar.read_text(encoding="utf-8")
 
         config = merge._config
-        job_result = merge._phases[JobPhase].result
-        assert job_result is not None
-        job_result.plan = config.resolve_encoding(
+        probe_result = merge._phases[ProbePhase].result
+        assert probe_result is not None
+        probe_result.plan = config.resolve_encoding(
             strategies = ["h265-aq+slow"],
             targets    = ["vmaf-min:99.0"],
             quality    = (Decimal("18"), Decimal("18")),

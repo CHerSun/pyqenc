@@ -332,10 +332,14 @@ class TestEncodingParamsTotals:
 
 def _make_encoding_phase(tmp_path: Path, probe_frames: int) -> EncodingPhase:
     """An EncodingPhase wired to a completed ProbePhase with a known frame count."""
-    probe = ProbePhase(_APP_CONFIG, {}, collector=MagicMock(), crop_params=None)
+    probe = ProbePhase(
+        _APP_CONFIG, {}, collector=MagicMock(), crop_params=None,
+        plan=_APP_CONFIG.resolve_encoding(),
+    )
     probe.result = ProbePhaseResult(
         outcome = PhaseOutcome.COMPLETED,
         message = "probe complete",
+        plan    = _APP_CONFIG.resolve_encoding(),
         stream  = Artifact(
             payload = ExtendedVideoStream(
                 stream = VideoStream(

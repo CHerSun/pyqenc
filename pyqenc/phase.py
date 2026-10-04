@@ -703,13 +703,15 @@ def _build_registry(
     """Construct all phase objects in execution order and wire their dependencies.
 
     ``JobPhase`` receives all volatile per-run parameters (``source``,
-    ``work_dir``, ``force``, ``cleanup``, ``no_metrics``, ``plan``) as plain
-    kwargs and stores them on ``JobPhaseResult`` so all downstream phases can
-    read them via ``self._dep_result(JobPhase)``.  ``plan`` is ``None`` only
-    for the audio-only registry — no phase there reads it, and the audio
-    pass must not depend on the video config being resolvable.  All other
-    phases are constructed with only ``(config, registry, collector=collector)``
-    — they never receive volatile args directly.
+    ``work_dir``, ``force``, ``cleanup``, ``no_metrics``) as plain kwargs and
+    stores them on ``JobPhaseResult`` so all downstream phases can read them
+    via ``self._dep_result(JobPhase)``.  ``ProbePhase`` — constructed only in
+    the video registry — additionally receives the run's ``plan``, carrying it
+    on its result as the video chain's entry context; the audio-only registry
+    passes no plan at all, keeping the audio pass independent of the video
+    config.  All other phases are constructed with only
+    ``(config, registry, collector=collector)`` — they never receive volatile
+    args directly.
 
     The registry is a plain ``dict`` keyed by phase *class* (not instance),
     preserving insertion order (Python 3.7+).
@@ -776,7 +778,6 @@ def _build_registry(
         cleanup    = cleanup,
         no_metrics = no_metrics,
         collector  = collector,
-        plan       = plan,
     )
 
     # ExtractionPhase follows Job unconditionally.
@@ -791,7 +792,10 @@ def _build_registry(
     if video_required:
         # ProbePhase sits between Extraction and the remaining video phases.
         # crop_params is forwarded here (not to JobPhase) so ProbePhase owns
-        # crop detection and manual overrides.
+        # crop detection and manual overrides. The video registry always
+        # carries the plan (video subcommands resolve it); only the
+        # audio-only registry passes None — and it omits Probe entirely.
+        assert plan is not None, "video registry carries the plan"
         from pyqenc.phases.chunking import ChunkingPhase  # deferred: phases import phase (registry cycle)
         from pyqenc.phases.encoding import EncodingPhase
         from pyqenc.phases.merge import MergePhase
@@ -802,6 +806,7 @@ def _build_registry(
             config, registry,
             crop_params = crop_params,
             collector   = collector,
+            plan        = plan,
         )
 
         for cls in [

@@ -90,7 +90,6 @@ def _make_extraction_phase(
         file       = Artifact(payload=File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64), state=ArtifactState.COMPLETE),
         force_wipe = force_wipe,
         config     = config,
-        plan       = config.resolve_encoding(),
         work_dir   = work_dir,
         source     = source,
     )
@@ -103,7 +102,6 @@ def _make_extraction_phase(
         cleanup    = CleanupLevel.NONE,
         no_metrics = True,
         collector  = collector,
-        plan       = job_result.plan,
     )
     job.result = job_result
 
@@ -377,7 +375,6 @@ def _run_and_capture(
         patch("pyqenc.phases.extraction._probe_streams_json", return_value=ffprobe_data),
         patch("pyqenc.phases.extraction.run_ffmpeg", side_effect=fake_run_ffmpeg),
         patch("pyqenc.phases.extraction._extract_timestamps"),
-        patch("pyqenc.phases.extraction.log_disk_space_info"),
         patch("subprocess.run", side_effect=sp_effect),
     ):
         phase.run(dry_run=False)
@@ -408,7 +405,6 @@ class TestNoVideoAudioExtraction:
         with (
             patch("pyqenc.phases.extraction._probe_streams_json",
                   return_value=_ffprobe_json(_video_json(), _audio_json())),
-            patch("pyqenc.phases.extraction.log_disk_space_info"),
         ):
             result = phase.run(dry_run=True)
 
@@ -600,7 +596,6 @@ class TestExtractionSidecarLifecycle:
         phase = _make_extraction_phase(work_dir, source)
         with (
             patch("pyqenc.phases.extraction._probe_streams_json") as probe_mock,
-            patch("pyqenc.phases.extraction.log_disk_space_info"),
         ):
             result = phase.run(dry_run=True)
 
@@ -625,7 +620,6 @@ class TestExtractionSidecarLifecycle:
         with (
             patch("pyqenc.phases.extraction._probe_streams_json",
                   return_value=_ffprobe_json(_video_json())) as probe_mock,
-            patch("pyqenc.phases.extraction.log_disk_space_info"),
         ):
             phase.run(dry_run=True)
 

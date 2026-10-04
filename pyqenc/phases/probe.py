@@ -26,6 +26,7 @@ from pyqenc.constants import TEMP_SUFFIX, THICK_LINE
 from pyqenc.metrics import MetricKey
 from pyqenc.models import (
     CropParams,
+    EncodingPlan,
     PhaseOutcome,
 )
 from pyqenc.phase import (
@@ -42,6 +43,7 @@ from pyqenc.phases.job import JobPhase
 from pyqenc.state import ProbeState
 from pyqenc.stream_model import ExtendedVideoStream, VideoStream
 from pyqenc.utils.crop import detect_crop_parameters
+from pyqenc.utils.disk_space import log_disk_space_info
 from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
 from pyqenc.utils.fs import remove_stale_tmp_file
 from pyqenc.utils.timestamps import count_frames
@@ -63,11 +65,17 @@ class ProbePhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying probe-specific payload.
 
     Attributes:
+        plan:   The run's video encoding plan. Required here by construction:
+                Probe exists only in the video registry (the audio registry
+                omits it), so the head of the video chain can carry the plan
+                non-optionally — the audio-shared phases (Job, Extraction)
+                never see it.
         stream: The extended-video-stream artifact — the slow facet (frame
                 count + crop) over the base video stream; ``None`` when no
                 video stream exists and ``ProbePhase`` returned ``FAILED``.
     """
 
+    plan:   EncodingPlan
     stream: Artifact[ExtendedVideoStream] | None = field(default=None)
 
     @property
@@ -108,6 +116,9 @@ class ProbePhase(Phase[ProbePhaseResult]):
         crop_params: Optional manual ``--crop`` override forwarded from the CLI.
                      When ``not None`` it invalidates the cached sidecar (cheap
                      rewrite reusing the cached frame count).
+        plan:        The run's video encoding plan — stored on the result as
+                     the video chain's entry context (Probe is constructed
+                     only in the video registry).
     """
 
     name:        str       = "probe"
@@ -123,10 +134,12 @@ class ProbePhase(Phase[ProbePhaseResult]):
         *,
         collector:   MetricsCollector,
         crop_params: CropParams | None = None,
+        plan:        EncodingPlan,
     ) -> None:
         super().__init__(config, phases, collector=collector)
 
         self._crop_params: CropParams | None = crop_params
+        self._plan:        EncodingPlan      = plan
 
         # Recovery stash — the loaded probe.yaml state, the extraction stream
         # and the resolved payload for result construction.
@@ -257,6 +270,19 @@ class ProbePhase(Phase[ProbePhaseResult]):
             crop        = crop,
         )
 
+        # Disk-space estimate on the resolved stream (log-only). The plan
+        # lives here — the head of the video chain — so the strategy counts
+        # come from Probe's own context (the estimate moved here from
+        # Extraction together with the plan; audio-only registries never
+        # see it).
+        n_strategies = len(self._plan.strategies)
+        log_disk_space_info(
+            stream         = video,
+            work_dir       = self._dep_result(JobPhase).work_dir,
+            min_strategies = 1 if (self._config.encoding.optimize or n_strategies == 0) else n_strategies,
+            max_strategies = max(1, n_strategies),
+        )
+
         logger.info(
             "Probe: done — frame_count=%d, crop=%s",
             frame_count, crop.display(),
@@ -293,6 +319,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         return ProbePhaseResult(
             outcome   = outcome,
             message   = message,
+            plan      = self._plan,
             stream    = (
                 Artifact(payload=self._resolved, state=ArtifactState.COMPLETE)
                 if self._resolved is not None else None

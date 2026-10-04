@@ -60,7 +60,7 @@ def _make_job_phase(
     tolerance: float = 5.0,
     force: bool = False,
     cleanup: CleanupLevel = CleanupLevel.NONE,
-) -> tuple[JobPhase, Path]:
+) -> tuple[JobPhase, Path, EncodingPlan]:
     """Create and run a JobPhase so that result is populated for downstream phases."""
     src = tmp_path / "source.mkv"
     src.write_bytes(b"\x00" * 1024)
@@ -82,10 +82,9 @@ def _make_job_phase(
         cleanup    = cleanup,
         no_metrics = True,
         collector  = MagicMock(),
-        plan       = plan,
     )
     job.run(dry_run=False)
-    return job, work_dir
+    return job, work_dir, plan
 
 
 def _make_phase(
@@ -111,17 +110,18 @@ def _make_phase(
     from pyqenc.phases.probe import ProbePhase as _PP
     from pyqenc.phases.probe import ProbePhaseResult
 
-    job, work_dir = _make_job_phase(
+    job, work_dir, plan = _make_job_phase(
         tmp_path, strategies, optimize=optimize, tolerance=tolerance,
         force=force, cleanup=cleanup,
     )
     config = job._config  # already resolved AppConfig
     phases: PhaseRegistry = {_JP: job}
 
-    probe = _PP(config, phases, collector=MagicMock(), crop_params=None)
+    probe = _PP(config, phases, collector=MagicMock(), crop_params=None, plan=plan)
     probe.result = ProbePhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
         message   = "probe complete",
+        plan      = plan,
         stream    = None,
     )
     phases[_PP] = probe
@@ -564,13 +564,14 @@ def _make_fixed_phase(
         cleanup    = cleanup,
         no_metrics = True,
         collector  = MagicMock(),
-        plan       = plan,
     )
     job.run(dry_run=False)
     phases: PhaseRegistry = {_JP: job}
 
-    probe = _PP(config, phases, collector=MagicMock(), crop_params=None)
-    probe.result = ProbePhaseResult(outcome=PhaseOutcome.COMPLETED, message="stub", stream=None)
+    probe = _PP(config, phases, collector=MagicMock(), crop_params=None, plan=plan)
+    probe.result = ProbePhaseResult(
+        outcome=PhaseOutcome.COMPLETED, message="stub", plan=plan, stream=None,
+    )
     phases[_PP] = probe
 
     chunking = _CP(config, phases, collector=MagicMock())
@@ -737,12 +738,13 @@ class TestFixedQualityBanner:
         job = JobPhase(
             config, {}, source=src, work_dir=tmp_path / "work", force=False,
             cleanup=CleanupLevel.NONE, no_metrics=True, collector=MagicMock(),
-            plan=plan,
         )
         job.run(dry_run=False)
         phases: PhaseRegistry = {JobPhase: job}
-        probe = _PP(config, phases, collector=MagicMock(), crop_params=None)
-        probe.result = ProbePhaseResult(outcome=PhaseOutcome.COMPLETED, message="stub", stream=None)
+        probe = _PP(config, phases, collector=MagicMock(), crop_params=None, plan=plan)
+        probe.result = ProbePhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="stub", plan=plan, stream=None,
+        )
         phases[_PP] = probe
         chunking = _CP(config, phases, collector=MagicMock())
         chunking.result = ChunkingPhaseResult(outcome=PhaseOutcome.COMPLETED, message="stub", chunks=[])
