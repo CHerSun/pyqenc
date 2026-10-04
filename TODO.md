@@ -579,7 +579,8 @@ Deferred as costly/structural:
 
 - encoding⇄optimization import cycle (marked `# deferred: circular import` at
   3 sites) — worth breaking properly.
-- CLI `_cmd_*` bodies ×6 near-identical (crop-parse → build config → api → log).
+- CLI `_cmd_*` bodies ×6 near-identical (crop-parse → build config → api → log)
+  — promoted to §95 (2026-10-05 feasibility check).
 - Test fixture factories duplicated across files (Strategy/CodecConfig,
   extended-stream, encoded-chunk builders) → conftest consolidation.
 - `EncodedChunk` composition duplicated (`_pair_placeholder` vs
@@ -1057,7 +1058,37 @@ Assessment (updated 2026-10-05 after user review of the first take):
 
 ---
 
-## Last known = 94
+## 95. CLI condensation — one pipeline-command template, declarative subcommand table — needs thinking
+
+User observation 2026-10-05: "CLI looks to be very bloated with all the
+`process_*` and `_cmd_*` functions basically duplicating each other.
+Leftovers of previous bad design." Feasibility check (same day) confirms:
+
+- `_cmd_extract` / `_cmd_chunk` / `_cmd_encode` are byte-identical except the
+  banner line, the api callable, and the success/fail noun (40 lines each).
+  `_cmd_merge` = the same body + output-file listing; `_cmd_auto` = + the
+  key-value display table; `_cmd_audio` = the body minus crop and plan.
+  After the config-resolution branch, the per-command differences reduced to
+  exactly THREE axes: needs-crop, needs-plan (audio: no), output flavor
+  (plain / list-files / display-table).
+- The six `_create_*_subcommand` parsers are the same shape: name + help +
+  one arg-group mix — a declarative table drives them.
+- `api.py` is already uniform (six thin `_drive` wrappers); its named
+  functions are the public surface and can stay as thin aliases of one
+  `run_to(target=…)` if desired.
+
+Design sketch to think through: one `_SubcommandSpec` (banner, runner,
+needs_crop, needs_plan, flavor) + a single `_cmd_pipeline(args, spec)` +
+table-driven parser creation. Estimated −250 lines of cli.py with zero
+behavior change. Interactions to decide: §66 (the subcommand SET redesign —
+intent-based auto/video/audio/measure) should land FIRST or together — no
+point condensing commands that may be renamed/merged; `_cmd_config` and
+`_cmd_measure` stay separate (genuinely different shapes). Supersedes the
+§65 deferred bullet.
+
+---
+
+## Last known = 95
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
