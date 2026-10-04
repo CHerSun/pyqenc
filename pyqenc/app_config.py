@@ -544,14 +544,12 @@ class AppConfig(BaseModel):
 
         Each profile's declared ``quality_range`` may be written in either
         input order; it is normalized here to the referenced codec's
-        direction convention (CRF/CQ/QP: ``(better, worse)`` with
-        ``better < worse``; VBR: reversed) — the codec context is only
-        available at this level. The normalized range is then checked
-        against the codec to ensure it only narrows (never extends) the
-        codec's bounds. This runs eagerly for all defined profiles, not
-        just those referenced by the active strategy list, so config bugs
-        are caught at load time regardless of which strategies are
-        currently enabled.
+        direction convention — the codec context is only available at this
+        level. The normalized range must then satisfy the one narrowing rule
+        (:meth:`_validate_quality_range`). This runs eagerly for all defined
+        profiles, not just those referenced by the active strategy list, so
+        config bugs are caught at load time regardless of which strategies
+        are currently enabled.
 
         Any :class:`ValueError` raised here propagates as a Pydantic
         ``ValidationError`` — Pydantic v2 wraps ``ValueError`` from
@@ -568,12 +566,13 @@ class AppConfig(BaseModel):
             if profile_cfg.quality_range is None:
                 continue
             codec = self._get_codec(profile_cfg.codec)
-            low, high = sorted(profile_cfg.quality_range)
-            profile_cfg.quality_range = (
-                (high, low) if codec.quality_better > codec.quality_worse else (low, high)
+            profile_cfg.quality_range = self._codec_ordered_range(
+                codec, profile_cfg.quality_range,
             )
-            self._validate_profile_quality_range(
-                profile_name, profile_cfg.quality_range, codec,
+            self._validate_quality_range(
+                f"Profile '{profile_name}' quality_range (codec '{codec.name}')",
+                profile_cfg.quality_range,
+                codec,
             )
         return self
 
@@ -752,8 +751,11 @@ class AppConfig(BaseModel):
             profile_cfg = self.profiles[profile_name]
             codec       = self._get_codec(profile_cfg.codec)
             if quality_range_override is not None:
-                self._validate_override_quality_range(
-                    quality_range_override, profile_name, codec,
+                self._validate_quality_range(
+                    f"Quality override for profile '{profile_name}' "
+                    f"(codec '{codec.name}')",
+                    quality_range_override,
+                    codec,
                 )
             codec = self._effective_codec(profile_cfg, codec, quality_range_override)
 
@@ -782,106 +784,70 @@ class AppConfig(BaseModel):
 
         return result
 
-    def _validate_profile_quality_range(
+    def _validate_quality_range(
         self,
-        profile_name:  str,
-        profile_range: tuple[Decimal, Decimal],
-        codec:         CodecConfig,
+        owner: str,
+        rng:    tuple[Decimal, Decimal],
+        codec:  CodecConfig,
     ) -> None:
-        """Raise ``ValueError`` if *profile_range* is invalid for *codec*.
+        """Raise ``ValueError`` if *rng* may not narrow *codec*'s range.
 
-        Two rules:
+        The one rule for every layer that narrows a codec's range — a
+        profile's ``quality_range`` or the CLI ``-q`` override:
 
-        - **Subset**: only narrowing is permitted — a profile may restrict the
-          search band but must never extend it beyond the codec's declared bounds.
-          Direction is inferred from the codec: for CRF/CQ/QP codecs
-          ``better < worse`` (lower is better); for VBR codecs ``better > worse``
-          (higher is better).
-        - **Endpoint alignment**: both endpoints must be exact multiples of the
-          codec's ``quality_granularity`` — the search can attempt an endpoint
-          verbatim, so a misaligned value would violate the encoder-args
-          "already quantized" contract.
+        - **Subset**: only narrowing is permitted — the range must sit inside
+          the codec's declared bounds. Direction-free: a numeric span is a
+          subset of another iff its minimum and maximum fit inside.
+        - **Endpoint alignment**: both endpoints must be exact multiples of
+          the codec's ``quality_granularity`` — the search can attempt an
+          endpoint verbatim, so a misaligned value would violate the
+          encoder-args "already quantized" contract.
 
         Args:
-            profile_name:  Profile key, used in the error message.
-            profile_range: The ``(better, worse)`` tuple from the profile config.
-            codec:         The resolved ``CodecConfig`` the profile references.
+            owner: Error-message prefix naming the range's layer
+                   (e.g. ``"Profile 'h265-aq' quality_range (codec 'h265-10bit')"``).
+            rng:   The range in any order.
+            codec: The codec whose bounds and granularity apply.
 
         Raises:
-            ValueError: If ``profile_range`` exceeds the codec's range in either
+            ValueError: If *rng* extends beyond the codec's range in either
                 direction, or an endpoint is off the granularity grid.
         """
-        p_better, p_worse = profile_range
-        c_better, c_worse = codec.quality_better, codec.quality_worse
-
-        if codec.quality_range[0] > codec.quality_range[1]:
-            # VBR: better > worse (e.g. [99.5, 0.5] Mbit/s).
-            # Profile better must not exceed codec better; profile worse must not go below codec worse.
-            out_of_range = p_better > c_better or p_worse < c_worse
-        else:
-            # CRF/CQ/QP: better < worse (e.g. [6, 30]).
-            # Profile better must not go below codec better; profile worse must not exceed codec worse.
-            out_of_range = p_better < c_better or p_worse > c_worse
-
-        if out_of_range:
+        lo, hi = min(rng), max(rng)
+        c_lo, c_hi = min(codec.quality_range), max(codec.quality_range)
+        if lo < c_lo or hi > c_hi:
             raise ValueError(
-                f"Profile '{profile_name}' quality_range [{p_better}, {p_worse}] "
-                f"extends beyond codec '{codec.name}' range [{c_better}, {c_worse}]. "
-                f"Profile quality_range must be a subset of the codec range (only narrowing is allowed)."
+                f"{owner} [{rng[0]}, {rng[1]}] extends beyond codec "
+                f"'{codec.name}' range [{codec.quality_range[0]}, "
+                f"{codec.quality_range[1]}]. "
+                f"Must be a subset of the codec range (only narrowing is allowed)."
             )
-
-        for endpoint in profile_range:
-            error = quality_alignment_error(
-                endpoint, codec.quality_granularity,
-                f"Profile '{profile_name}' quality_range (codec '{codec.name}')",
-            )
+        for endpoint in rng:
+            error = quality_alignment_error(endpoint, codec.quality_granularity, owner)
             if error is not None:
                 raise ValueError(error)
 
-    def _validate_override_quality_range(
+    def _codec_ordered_range(
         self,
-        override:     tuple[Decimal, Decimal],
-        profile_name: str,
-        codec:        CodecConfig,
-    ) -> None:
-        """Raise ``ValueError`` if the CLI ``-q`` override is invalid for *codec*.
+        codec: CodecConfig,
+        rng:   tuple[Decimal, Decimal],
+    ) -> tuple[Decimal, Decimal]:
+        """Return *rng* as ``(better, worse)`` in the codec's direction convention.
 
-        The CLI-override sibling of :meth:`_validate_profile_quality_range` — the
-        same two rules (subset of the codec range, endpoints on the granularity
-        grid), evaluated per matched profile so a shared ``-q`` value must satisfy
-        every matched codec (across codecs the granularity intersection applies:
-        the coarsest step wins).
+        The single home of the direction convention: CRF/CQ/QP codecs keep
+        ``(low, high)`` (lower is better); VBR codecs store ``(high, low)``
+        (higher is better). Every range entering a ``CodecConfig`` passes
+        through here.
 
         Args:
-            override:     The override as canonical ``(lower, upper)`` bounds.
-            profile_name: Profile key, used in the error message.
-            codec:        The resolved ``CodecConfig`` the profile references.
+            codec: The codec whose convention applies.
+            rng:   The range in any order.
 
-        Raises:
-            ValueError: If the override exceeds the codec's range in either
-                direction, or an endpoint is off the granularity grid.
+        Returns:
+            The range in the codec's ``(better, worse)`` order.
         """
-        o_lower, o_upper = override
-        c_better, c_worse = codec.quality_better, codec.quality_worse
-        c_lower, c_upper = (
-            (c_worse, c_better) if c_better > c_worse else (c_better, c_worse)
-        )
-
-        if o_lower < c_lower or o_upper > c_upper:
-            raise ValueError(
-                f"Quality override [{o_lower}, {o_upper}] for profile '{profile_name}' "
-                f"extends beyond codec '{codec.name}' range [{c_better}, {c_worse}]. "
-                f"The -q override must be a subset of every matched codec's range "
-                f"(only narrowing is allowed)."
-            )
-
-        for endpoint in override:
-            error = quality_alignment_error(
-                endpoint, codec.quality_granularity,
-                f"Quality override (profile '{profile_name}', codec '{codec.name}')",
-            )
-            if error is not None:
-                raise ValueError(error)
+        lo, hi = min(rng), max(rng)
+        return (hi, lo) if codec.quality_better > codec.quality_worse else (lo, hi)
 
     def _effective_codec(
         self,
@@ -892,9 +858,9 @@ class AppConfig(BaseModel):
         """Return a ``CodecConfig`` with the effective quality settings applied.
 
         Range precedence: CLI override (``quality_range_override``, canonical
-        ``(lower, upper)`` bounds re-ordered per the codec's own direction
-        convention) > profile ``quality_range`` (config order, already
-        directional) > codec bounds (returned unchanged, identity).
+        ``(lower, upper)`` bounds) > profile ``quality_range`` (already
+        codec-ordered at load) > codec bounds (returned unchanged, identity).
+        Whatever wins is stored in the codec's own direction convention.
 
         Whenever the resulting effective range excludes ``default_quality`` (the
         search's starting point — nothing else clamps it into the band), the
@@ -903,11 +869,9 @@ class AppConfig(BaseModel):
         the search refines; in fixed runs it makes the effective settings object
         self-consistent with the pinned value.
 
-        Range validation is **not** performed here — it is the caller's
-        responsibility to ensure ``_validate_profile_quality_range`` /
-        ``_validate_override_quality_range`` already ran (which
-        ``_validate_profile_ranges`` and ``_expand_strategy_pattern``
-        guarantee).
+        Range validation is **not** performed here — the callers
+        (``_validate_profile_ranges`` at load, ``_expand_strategy_pattern``
+        for the override) guarantee :meth:`_validate_quality_range` ran.
 
         Args:
             profile_cfg: Profile configuration — may carry an optional quality_range.
@@ -921,11 +885,7 @@ class AppConfig(BaseModel):
             excluded, the adjusted ``default_quality``) otherwise.
         """
         if quality_range_override is not None:
-            o_lower, o_upper = quality_range_override
-            effective_range = (
-                (o_upper, o_lower) if codec.quality_better > codec.quality_worse
-                else (o_lower, o_upper)
-            )
+            effective_range = self._codec_ordered_range(codec, quality_range_override)
         elif profile_cfg.quality_range is not None:
             effective_range = profile_cfg.quality_range
         else:
