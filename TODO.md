@@ -1014,9 +1014,12 @@ Assessment (updated 2026-10-05 after user review of the first take):
   memorize exact nonstandard tags; a forgotten tag fails in the loader with
   a cryptic error before any of our messages can help; no discovery path.
 - LISTS — accepted direction: the empty-first-item convention ("drop
-  pre-existing, use only what follows"), familiar from other tools. Prefer
-  `null` as the marker (`strategies: [~, mine+slow]`) over `""` — no list
-  in the schema accepts nulls today, so collision-free by construction.
+  pre-existing, use only what follows"), familiar from other tools. The
+  marker is a single list's FIRST ITEM being null — `strategies: [~, h265+slow]`
+  (flow `~` = null; one property, one list — a duplicate `strategies:` key
+  "first null, then list" is invalid YAML, hence the in-list marker).
+  Prefer null over `""` — no list in the schema accepts nulls today, so
+  collision-free by construction.
   Mechanics: consumed in `_deep_merge` at the boundary (strip + replace
   mode for that key), pydantic never sees it; failure mode is soft (a
   mistyped marker lands in OUR validation, whose message can teach the
