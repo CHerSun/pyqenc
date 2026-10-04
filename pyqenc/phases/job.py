@@ -70,6 +70,9 @@ class JobPhaseResult(PhaseResult):
                     extraction's strategy count. Derived once at the run
                     boundary (``AppConfig.resolve_encoding``) and threaded
                     here like every other volatile per-run parameter.
+                    ``None`` only in the audio-only registry (no video phase
+                    runs there — the audio pass must not depend on the
+                    video config being resolvable).
         work_dir:   Working directory for all pipeline artifacts.
         source:     Resolved path to the source video file.
         cleanup:    Artifact retention policy applied after encoding.
@@ -78,9 +81,10 @@ class JobPhaseResult(PhaseResult):
 
     # Always-present payload (every phase-built result populates all of it —
     # required, never Optional) comes before the defaulted conveniences.
+    # plan is the one nullable member: None only in the audio-only registry.
     file:       Artifact[File]
     config:     AppConfig
-    plan:       EncodingPlan
+    plan:       EncodingPlan | None
     work_dir:   Path
     source:     Path
     force_wipe: bool                   = field(default=False)
@@ -134,7 +138,7 @@ class JobPhase(Phase[JobPhaseResult]):
         cleanup:     CleanupLevel,
         no_metrics:  bool,
         collector:   MetricsCollector,
-        plan:        EncodingPlan,
+        plan:        EncodingPlan | None,
     ) -> None:
         super().__init__(config, phases, collector=collector)
 
@@ -143,7 +147,7 @@ class JobPhase(Phase[JobPhaseResult]):
         self._force:       bool             = force
         self._cleanup:     CleanupLevel     = cleanup
         self._no_metrics:  bool             = no_metrics
-        self._plan:        EncodingPlan     = plan
+        self._plan:        EncodingPlan | None = plan
 
         # Recovery stash — the run's File, resolved during _recover();
         # consumed by _execute()/_make_result().

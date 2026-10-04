@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 
 def _drive(
     config:   AppConfig,
-    plan:     EncodingPlan,
+    plan:     EncodingPlan | None,
     source:   Path,
     work_dir: Path,
     target:   type[Phase],
@@ -290,7 +290,6 @@ def chunk_video(
 
 def process_audio(
     config:   AppConfig,
-    plan:     EncodingPlan,
     source:   Path,
     work_dir: Path,
     *,
@@ -303,8 +302,9 @@ def process_audio(
 
     Drives ``AudioPhase`` against the audio-only registry (``video_required``
     is ``False``, so ``ProbePhase`` and downstream video phases are omitted).
-    All upstream phases are executed (not merely scanned) as dependencies
-    inside the phases.
+    No encoding plan is taken or built — the audio pass must not depend on
+    the video configuration being resolvable. All upstream phases are
+    executed (not merely scanned) as dependencies inside the phases.
 
     Args:
         config:     Fully assembled application configuration.
@@ -324,7 +324,7 @@ def process_audio(
 
     return _drive(
         config,
-        plan,
+        None,
         source,
         work_dir,
         AudioPhase,

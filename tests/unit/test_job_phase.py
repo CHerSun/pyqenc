@@ -300,3 +300,22 @@ class TestJobPhaseSourceMismatchWithForce:
         phase = _make_phase(tmp_path, src, force=True)
         result = phase.run(dry_run=False)
         assert result.force_wipe is False
+
+
+def test_audio_registry_carries_none_plan(tmp_path: Path) -> None:
+    """The audio-only registry passes plan=None; the result carries it through.
+
+    The audio pass must not depend on the video config being resolvable, so
+    JobPhase accepts a None plan and JobPhaseResult.plan reflects it; video
+    phases narrow with their registry-guarantee asserts.
+    """
+    src = _make_source(tmp_path)
+    phase = JobPhase(
+        _APP_CONFIG.model_copy(deep=True), {},
+        source=src, work_dir=tmp_path / "work", force=False,
+        cleanup=CleanupLevel.NONE, no_metrics=True,
+        collector=MagicMock(), plan=None,
+    )
+    result = phase.run(dry_run=False)
+    assert result.outcome is PhaseOutcome.COMPLETED
+    assert result.plan is None

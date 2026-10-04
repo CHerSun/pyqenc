@@ -187,14 +187,16 @@ class MergePhase(Phase[MergePhaseResult]):
         """
         probe = ProbeState.from_probe(self._dep_result(ProbePhase))
         job_result = self._dep_result(JobPhase)
-        if job_result.plan.fixed_quality:
+        plan = job_result.plan
+        assert plan is not None, "video registry guarantees the plan"
+        if plan.fixed_quality:
             return MergeParams(
                 anchor   = self._dep_result(OptimizationPhase).anchor,
                 sampling = job_result.config.measurement.sampling,
                 probe    = probe,
             )
         return MergeParams(
-            quality_targets  = targets_as_strings(job_result.plan.targets),
+            quality_targets  = targets_as_strings(plan.targets),
             sampling = job_result.config.measurement.sampling,
             probe            = probe,
         )
@@ -206,9 +208,11 @@ class MergePhase(Phase[MergePhaseResult]):
     def _log_key_params(self) -> None:
         """Log the source stem and quality targets (key parameters)."""
         logger.info("Source stem:  %s", self._dep_result(JobPhase).source.stem)
-        if self._dep_result(JobPhase).plan.targets:
+        plan = self._dep_result(JobPhase).plan
+        assert plan is not None, "video registry guarantees the plan"
+        if plan.targets:
             logger.info("Targets:      %s", ", ".join(
-                f"{t.metric}-{t.statistic}≥{t.value}" for t in self._dep_result(JobPhase).plan.targets
+                f"{t.metric}-{t.statistic}≥{t.value}" for t in plan.targets
             ))
 
     def _post_dependency_check(self) -> MergePhaseResult | None:
@@ -279,7 +283,9 @@ class MergePhase(Phase[MergePhaseResult]):
             persisted = MergeParams.load(merge_yaml)
             if persisted is not None:
                 current  = self.params
-                fixed    = self._dep_result(JobPhase).plan.fixed_quality
+                plan     = self._dep_result(JobPhase).plan
+                assert plan is not None, "video registry guarantees the plan"
+                fixed    = plan.fixed_quality
                 key_changed     = (
                     persisted.anchor != current.anchor
                     if fixed else
@@ -418,14 +424,18 @@ class MergePhase(Phase[MergePhaseResult]):
         targets in both modes (the anchor-relative table is the unified-
         summaries spec's work), so the rendered set is the target-key set.
         """
+        plan = self._dep_result(JobPhase).plan
+        assert plan is not None, "video registry guarantees the plan"
         return {
             f"{t.metric}_{t.statistic}"
-            for t in self._dep_result(JobPhase).plan.targets
+            for t in plan.targets
         }
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> MergePhaseResult:
         """Build the reused result, replaying the persisted merge summary."""
         job_result = self._dep_result(JobPhase)
+        plan = job_result.plan
+        assert plan is not None, "video registry guarantees the plan"
         merge_yaml = job_result.work_dir / MergePhase.SIDECAR_NAME
         persisted  = MergeParams.load(merge_yaml)
         if persisted is not None:
@@ -434,7 +444,7 @@ class MergePhase(Phase[MergePhaseResult]):
             logger.info(THICK_LINE)
             MergePhase._log_merge_summary_from_params(
                 params          = persisted,
-                quality_targets = self._dep_result(JobPhase).plan.targets,
+                quality_targets = plan.targets,
                 source_stem     = job_result.source.stem,
                 source_size_bytes = safe_stat_size(job_result.source) or 0,
             )
@@ -498,6 +508,8 @@ class MergePhase(Phase[MergePhaseResult]):
         merged_dir.mkdir(parents=True, exist_ok=True)
 
         job_result = self._dep_result(JobPhase)
+        plan = job_result.plan
+        assert plan is not None, "video registry guarantees the plan"
         probe_result = self._dep_result(ProbePhase)
         crop: CropParams = probe_result.crop
         # The dependency walk guarantees a completed probe with a resolved stream.
@@ -568,7 +580,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 targets_met:  bool             = False
                 plot_path:    Path | None       = None
 
-                if job_result.plan.targets:
+                if plan.targets:
                     try:
                         with self._collector.time(MetricKey.MERGE, METRIC_KEY_QUALITY_MEASURE):
                             metrics_dict, targets_met, plot_path = self._measure_quality(
@@ -621,8 +633,8 @@ class MergePhase(Phase[MergePhaseResult]):
                 )
                 if metrics_dict and not targets_met:
                     self._log_missed_targets_warning(
-                        job_result.plan.targets,
-                        fixed_quality = job_result.plan.fixed_quality,
+                        plan.targets,
+                        fixed_quality = plan.fixed_quality,
                         strategy_name = strategy_name,
                         metrics_dict  = metrics_dict,
                     )
@@ -661,7 +673,7 @@ class MergePhase(Phase[MergePhaseResult]):
             summaries         = strategy_summaries,
             source_stem       = source_stem,
             source_size_bytes = safe_stat_size(source_stream.stream.file.path) or 0,
-            quality_targets   = self._dep_result(JobPhase).plan.targets,
+            quality_targets   = plan.targets,
             metrics_sampling  = self._config.measurement.sampling,
         )
         if failed_strategies and not final_rows:
@@ -978,7 +990,9 @@ class MergePhase(Phase[MergePhaseResult]):
         never needs re-measuring for a future stat set.
         """
         data: dict = {"frame_count": frame_count}
-        if self._dep_result(JobPhase).plan.fixed_quality:
+        plan = self._dep_result(JobPhase).plan
+        assert plan is not None, "video registry guarantees the plan"
+        if plan.fixed_quality:
             pinned = MergePhase._uniform_pinned_quality([strategy])
             data["quality"] = {
                 "label": strategy.codec.quality_label,
@@ -989,7 +1003,7 @@ class MergePhase(Phase[MergePhaseResult]):
             data["anchor"]  = self._dep_result(OptimizationPhase).anchor
             data["metrics"] = {k: float(v) for k, v in all_metrics.items()}
         else:
-            quality_targets = self._dep_result(JobPhase).plan.targets
+            quality_targets = plan.targets
             data["targets_met"] = targets_met
             data["targets"]     = {
                 f"{t.metric}-{t.statistic}": t.value for t in quality_targets
@@ -1027,11 +1041,13 @@ class MergePhase(Phase[MergePhaseResult]):
         evaluator = QualityEvaluator(output_dir)
         plot_path = output_dir / f"{final_result.stem}.png"
 
+        plan = self._dep_result(JobPhase).plan
+        assert plan is not None, "video registry guarantees the plan"
         evaluation = evaluator.evaluate_chunk(
             encoded            = final_result,
             reference          = source_stream.stream.as_input(),
             ref_crop           = ref_crop,
-            targets            = self._dep_result(JobPhase).plan.targets,
+            targets            = plan.targets,
             output_dir         = output_dir,
             duration_seconds   = source_stream.stream.info.duration_seconds or 0.0,
             fps_value          = source_stream.stream.info.fps_fraction,
@@ -1062,7 +1078,9 @@ class MergePhase(Phase[MergePhaseResult]):
             Space-separated metric readings, or empty string if no targets.
         """
         parts: list[str] = []
-        for target in self._dep_result(JobPhase).plan.targets:
+        plan = self._dep_result(JobPhase).plan
+        assert plan is not None, "video registry guarantees the plan"
+        for target in plan.targets:
             key   = f"{target.metric}_{target.statistic}"
             value = metrics_dict.get(key)
             if value is None:

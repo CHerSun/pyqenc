@@ -690,7 +690,7 @@ phase (fetched from at run time — see ``Phase.DEPENDS_ON``). Keys are plain
 
 def _build_registry(
     config:         AppConfig,
-    plan:           EncodingPlan,
+    plan:           EncodingPlan | None,
     source:         Path,
     work_dir:       Path,
     force:          bool,
@@ -705,9 +705,11 @@ def _build_registry(
     ``JobPhase`` receives all volatile per-run parameters (``source``,
     ``work_dir``, ``force``, ``cleanup``, ``no_metrics``, ``plan``) as plain
     kwargs and stores them on ``JobPhaseResult`` so all downstream phases can
-    read them via ``self._dep_result(JobPhase)``.  All other phases are
-    constructed with only ``(config, registry, collector=collector)`` — they
-    never receive volatile args directly.
+    read them via ``self._dep_result(JobPhase)``.  ``plan`` is ``None`` only
+    for the audio-only registry — no phase there reads it, and the audio
+    pass must not depend on the video config being resolvable.  All other
+    phases are constructed with only ``(config, registry, collector=collector)``
+    — they never receive volatile args directly.
 
     The registry is a plain ``dict`` keyed by phase *class* (not instance),
     preserving insertion order (Python 3.7+).

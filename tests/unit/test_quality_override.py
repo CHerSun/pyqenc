@@ -309,7 +309,7 @@ def _build_config_isolated(
     *,
     base_config: AppConfig | None = None,
 ) -> EncodingPlan:
-    """``_build_config`` pinned to the bundled default (no home/CWD layers).
+    """``_build_config`` + ``_resolve_plan`` pinned to the bundled default.
 
     Returns the resolved ``EncodingPlan`` (the mode-check surface); the
     module-level default is deep-copied so it stays pristine for other tests.
@@ -317,8 +317,19 @@ def _build_config_isolated(
     config = (base_config if base_config is not None else _DEFAULT_CONFIG).model_copy(deep=True)
     monkeypatch.setattr("pyqenc.cli.load_app_config", lambda: config)
     from pyqenc.cli import _build_config as build_config
-    _, plan = build_config(args)
-    return plan
+    from pyqenc.cli import _resolve_plan as resolve_plan
+    return resolve_plan(args, build_config(args))
+
+
+def _build_config_only(
+    monkeypatch: pytest.MonkeyPatch,
+    args: argparse.Namespace,
+) -> AppConfig:
+    """``_build_config`` alone (the audio-subcommand surface — no plan)."""
+    config = _DEFAULT_CONFIG.model_copy(deep=True)
+    monkeypatch.setattr("pyqenc.cli.load_app_config", lambda: config)
+    from pyqenc.cli import _build_config as build_config
+    return build_config(args)
 
 
 class TestBuildConfigModeChecks:
@@ -389,3 +400,21 @@ class TestPlanConstructionInvariants:
         )
         assert plan.fixed_quality is True
         assert plan.targets == []
+
+
+class TestAudioPassNeverResolves:
+    """The audio subcommand must not depend on the video config resolving."""
+
+    def test_no_quality_args_no_resolution(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A namespace without quality arguments (the audio parser's shape)
+        builds a config without ever touching plan resolution — so a
+        video-degenerate config (e.g. targets stripped by a fixed-only or
+        audio-only user) cannot fail the audio pass."""
+        def _boom(self: AppConfig, **_kwargs: object) -> EncodingPlan:
+            raise AssertionError("the audio pass must not resolve the plan")
+
+        monkeypatch.setattr(AppConfig, "resolve_encoding", _boom)
+        # An audio-shaped namespace: no strategies/targets/quality attrs at all.
+        audio_args = argparse.Namespace(include=None, exclude=None)
+        config = _build_config_only(monkeypatch, audio_args)
+        assert isinstance(config, AppConfig)

@@ -2056,7 +2056,9 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         logger.info("Strategies:  %s", ", ".join(s.display_name() for s in strategies) if strategies else "none")
         if crop:
             logger.info("Crop:        %s", crop)
-        logger.info("Targets:     %s", ", ".join(f"{t.metric}-{t.statistic}≥{t.value}" for t in self._dep_result(JobPhase).plan.targets))
+        plan = self._dep_result(JobPhase).plan
+        assert plan is not None, "video registry guarantees the plan"
+        logger.info("Targets:     %s", ", ".join(f"{t.metric}-{t.statistic}≥{t.value}" for t in plan.targets))
 
     def _log_limiter_summary(self, summaries: list[LimiterSummary]) -> None:
         """Emit the winning-limiter distribution table at INFO.
@@ -2338,10 +2340,12 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # read as all-miss noise); uncompared fixed runs have no ruler
         # (absolute values, no verdicts — the limiter table self-extinguishes
         # on empty targets); searched runs use the config targets, unchanged.
-        if self._dep_result(JobPhase).plan.fixed_quality:
+        plan = self._dep_result(JobPhase).plan
+        assert plan is not None, "video registry guarantees the plan"
+        if plan.fixed_quality:
             presentation_targets = optimization_result.synthetic_targets
         else:
-            presentation_targets = self._dep_result(JobPhase).plan.targets
+            presentation_targets = plan.targets
 
         # Persist encoding.yaml with current probe state
         encoding_yaml = work_dir / EncodingPhase.SIDECAR_NAME

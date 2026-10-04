@@ -355,28 +355,23 @@ def _parse_targets(targets_str: str | None) -> list[str] | None:
     return [t.strip() for t in targets_str.split(",") if t.strip()]
 
 
-def _build_config(args: argparse.Namespace) -> tuple[AppConfig, EncodingPlan]:
-    """Load app config, apply plain CLI overrides, resolve the encoding plan.
+def _build_config(args: argparse.Namespace) -> AppConfig:
+    """Load app config and apply the plain CLI overrides present in *args*.
 
     Plain overrides (extraction filters, chunking, measurement sampling, and
-    the non-resolution encoding flags) are direct assignments. The
-    resolution-coupled overrides — ``--strategies``, ``--targets``, ``-q`` —
-    are arguments to the single ``resolve_encoding`` call; the config's raw
-    fields are never written.
+    the non-resolution encoding flags) are direct assignments; the config's
+    raw fields are never written by anything resolution-coupled.
 
     Only attributes that are actually defined on *args* are applied, so the
     same helper works correctly for every subcommand regardless of which
-    argument groups were added to its parser.
+    argument groups were added to its parser — including the audio
+    subcommand, which must not depend on the video config being resolvable.
 
     Returns:
-        The assembled ``AppConfig`` (plain overrides applied) and the resolved
-        ``EncodingPlan``.
+        The assembled ``AppConfig``.
 
     Raises:
-        ValueError: If any override value is invalid (unknown profile, quality
-            override outside a codec's range or off its granularity grid,
-            mixed quality labels under ``-q``, or a mixed fixed/searched
-            strategy set).
+        ValueError: If any plain override value is invalid.
     """
     config = load_app_config()
 
@@ -407,13 +402,27 @@ def _build_config(args: argparse.Namespace) -> tuple[AppConfig, EncodingPlan]:
     no_visual_hash = getattr(args, "no_visual_hash", False)
     config.encoding.visual_hash = not no_visual_hash
 
-    plan = config.resolve_encoding(
+    return config
+
+
+def _resolve_plan(args: argparse.Namespace, config: AppConfig) -> EncodingPlan:
+    """Resolve the run's encoding plan from quality args + the config's raws.
+
+    The resolution-coupled overrides — ``--strategies``, ``--targets``,
+    ``-q`` — are arguments to the single ``resolve_encoding`` call. Called by
+    the video subcommands only; the plan is video-work state.
+
+    Raises:
+        ValueError: If any override value is invalid (unknown profile, quality
+            override outside a codec's range or off its granularity grid,
+            mixed quality labels under ``-q``, a mixed fixed/searched strategy
+            set, no strategies, or a searched run without targets).
+    """
+    return config.resolve_encoding(
         strategies = _parse_strategies(getattr(args, "strategies", None)),
         targets    = _parse_targets(getattr(args, "targets", None)),
         quality    = _parse_quality_override(getattr(args, "quality", None)),
     )
-
-    return config, plan
 
 
 # ---------------------------------------------------------------------------
@@ -527,7 +536,8 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        config, plan = _build_config(args)
+        config = _build_config(args)
+        plan   = _resolve_plan(args, config)
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
@@ -586,7 +596,8 @@ def _cmd_extract(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        config, plan = _build_config(args)
+        config = _build_config(args)
+        plan   = _resolve_plan(args, config)
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
@@ -627,7 +638,8 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        config, plan = _build_config(args)
+        config = _build_config(args)
+        plan   = _resolve_plan(args, config)
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
@@ -668,7 +680,8 @@ def _cmd_encode(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        config, plan = _build_config(args)
+        config = _build_config(args)
+        plan   = _resolve_plan(args, config)
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
@@ -703,7 +716,7 @@ def _cmd_audio(args: argparse.Namespace) -> int:
     logger.info(f"Source: {args.source}")
 
     try:
-        config, plan = _build_config(args)
+        config = _build_config(args)
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
@@ -712,7 +725,6 @@ def _cmd_audio(args: argparse.Namespace) -> int:
     try:
         result = process_audio(
             config      = config,
-            plan        = plan,
             source      = args.source,
             work_dir    = args.work_dir,
             force       = args.force,
@@ -743,7 +755,8 @@ def _cmd_merge(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        config, plan = _build_config(args)
+        config = _build_config(args)
+        plan   = _resolve_plan(args, config)
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
