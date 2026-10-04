@@ -481,6 +481,14 @@ def test_frame_count_preservation(frame_count: int) -> None:
         )
         registry[AudioPhase] = audio
 
+        from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
+        optimization = OptimizationPhase(config, registry, collector=collector)
+        optimization.result = OptimizationPhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            message   = "optimization complete",
+        )
+        registry[OptimizationPhase] = optimization
+
         merge = MergePhase(config, registry, collector=collector)
 
         source_stem = source.stem

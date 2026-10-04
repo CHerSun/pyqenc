@@ -8,10 +8,14 @@ Covers requirement 7.7:
 - Tolerance of 100% selects all passing strategies.
 """
 
+import logging
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import MagicMock
 
-from pyqenc.app_config import load_app_config
+import pytest
+
+from pyqenc.app_config import AppConfig, load_app_config
 from pyqenc.models import (
     CleanupLevel,
     CropParams,
@@ -21,13 +25,14 @@ from pyqenc.models import (
 )
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.job import JobPhase
-from pyqenc.phases.optimization import OptimizationPhase
+from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.state import (
     ArtifactState,
     OptimizationParams,
     ProbeState,
     StrategyTestResult,
 )
+from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -53,6 +58,7 @@ def _make_job_phase(
     optimize: bool = True,
     tolerance: float = 5.0,
     force: bool = False,
+    cleanup: CleanupLevel = CleanupLevel.NONE,
 ) -> tuple[JobPhase, Path]:
     """Create and run a JobPhase so that result is populated for downstream phases."""
     src = tmp_path / "source.mkv"
@@ -76,7 +82,7 @@ def _make_job_phase(
         source     = src,
         work_dir   = work_dir,
         force      = force,
-        cleanup    = CleanupLevel.NONE,
+        cleanup    = cleanup,
         no_metrics = True,
         collector  = MagicMock(),
     )
@@ -90,6 +96,7 @@ def _make_phase(
     optimize: bool = True,
     tolerance: float = 5.0,
     force: bool = False,
+    cleanup: CleanupLevel = CleanupLevel.NONE,
 ) -> tuple[OptimizationPhase, Path]:
     """Create an OptimizationPhase with pre-run Job/Probe/Chunking deps wired in.
 
@@ -106,7 +113,10 @@ def _make_phase(
     from pyqenc.phases.probe import ProbePhase as _PP
     from pyqenc.phases.probe import ProbePhaseResult
 
-    job, work_dir = _make_job_phase(tmp_path, strategies, optimize=optimize, tolerance=tolerance, force=force)
+    job, work_dir = _make_job_phase(
+        tmp_path, strategies, optimize=optimize, tolerance=tolerance,
+        force=force, cleanup=cleanup,
+    )
     config = job._config  # already resolved AppConfig
     phases: PhaseRegistry = {_JP: job}
 
@@ -506,3 +516,752 @@ class TestPairLedger:
         assert recovery2.pending is False
         assert recovery2.artifacts[0].payload.crf == Decimal(20)
 
+
+
+# ---------------------------------------------------------------------------
+# Fixed-mode entry: cleanup guard, winner wipe, banner (Req 5-7)
+# ---------------------------------------------------------------------------
+
+from decimal import Decimal
+
+from pyqenc.constants import ENCODED_OUTPUT_DIR
+
+
+def _make_fixed_phase(
+    tmp_path: Path,
+    *,
+    strategy_names: list[str],
+    cleanup: CleanupLevel = CleanupLevel.NONE,
+    optimize: bool = True,
+) -> tuple[OptimizationPhase, Path, AppConfig]:
+    """An OptimizationPhase harness whose config pins the knob via -q semantics.
+
+    The override is applied exactly as ``_build_config`` applies it: assigned
+    on the config, then strategies re-resolved — ``fixed_quality`` derives
+    True for every matched strategy.
+    """
+    from pyqenc.phases.chunking import ChunkingPhase as _CP
+    from pyqenc.phases.chunking import ChunkingPhaseResult
+    from pyqenc.phases.job import JobPhase as _JP
+    from pyqenc.phases.probe import ProbePhase as _PP
+    from pyqenc.phases.probe import ProbePhaseResult
+
+    config = _APP_CONFIG.model_copy(deep=True)
+    config.encoding.strategies = strategy_names
+    config.encoding.quality_range_override = (Decimal("18"), Decimal("18"))
+    config.encoding.optimize = optimize
+    config.encoding.resolve(config.codecs, config.profiles)
+    assert config.encoding.fixed_quality, "harness must derive a fixed run"
+
+    src = tmp_path / "source.mkv"
+    src.write_bytes(b"\x00" * 1024)
+    work_dir = tmp_path / "work"
+
+    job = JobPhase(
+        config, {},
+        source     = src,
+        work_dir   = work_dir,
+        force      = False,
+        cleanup    = cleanup,
+        no_metrics = True,
+        collector  = MagicMock(),
+    )
+    job.run(dry_run=False)
+    phases: PhaseRegistry = {_JP: job}
+
+    probe = _PP(config, phases, collector=MagicMock(), crop_params=None)
+    probe.result = ProbePhaseResult(outcome=PhaseOutcome.COMPLETED, message="stub", stream=None)
+    phases[_PP] = probe
+
+    chunking = _CP(config, phases, collector=MagicMock())
+    chunking.result = ChunkingPhaseResult(outcome=PhaseOutcome.COMPLETED, message="stub", chunks=[])
+    phases[_CP] = chunking
+
+    phase = OptimizationPhase(config, phases=phases, collector=MagicMock())
+    return phase, work_dir, config
+
+
+def _seed_encoded_winner(work_dir: Path, strategy: Strategy) -> Path:
+    """Create an ``encoded/<strategy>/`` winner (file + sidecar) to observe wipes."""
+    strategy_dir = work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
+    strategy_dir.mkdir(parents=True, exist_ok=True)
+    winner = strategy_dir / "chunk-001.1920x1080.q18.mkv"
+    winner.write_bytes(b"x" * 32)
+    (strategy_dir / "chunk-001.1920x1080.yaml").write_text("crf: 18\n", encoding="utf-8")
+    return strategy_dir
+
+
+class TestCleanupGuard:
+    """Fixed + cleanup >= INTERMEDIATE hard-stops before any wipe/encode work."""
+
+    @pytest.mark.parametrize("level", [CleanupLevel.INTERMEDIATE, CleanupLevel.ALL])
+    def test_guard_stops_fixed_run(self, tmp_path: Path, level: CleanupLevel) -> None:
+        phase, work_dir, _ = _make_fixed_phase(
+            tmp_path, strategy_names=["h265-aq+slow"], cleanup=level,
+        )
+        seeded = _seed_encoded_winner(work_dir, phase._config.encoding.resolved_strategies[0])
+        result = phase.run(dry_run=False)
+        assert result.outcome is PhaseOutcome.FAILED
+        assert "cleanup" in result.message and "re-derivation substrate" in result.message
+        # The guard fires BEFORE the wipe — the winner layer stays intact.
+        assert seeded.exists()
+
+    def test_guard_passes_fixed_none(self, tmp_path: Path) -> None:
+        phase, work_dir, _ = _make_fixed_phase(
+            tmp_path, strategy_names=["h265-aq+slow"], cleanup=CleanupLevel.NONE,
+        )
+        seeded = _seed_encoded_winner(work_dir, phase._config.encoding.resolved_strategies[0])
+        phase.run(dry_run=False)
+        # No guard failure — the wipe ran instead.
+        assert not seeded.exists()
+
+    def test_guard_never_applies_to_searched_runs(self, tmp_path: Path) -> None:
+        phase, work_dir = _make_phase(
+            tmp_path, [_S1, _S2], optimize=False, force=False,
+            cleanup=CleanupLevel.ALL,
+        )
+        # Search mode with ALL cleanup: no fixed-quality guard may fire (the
+        # phase proceeds to its normal outcome instead of a guard stop).
+        seeded = _seed_encoded_winner(work_dir, _S1)
+        result = phase.run(dry_run=False)
+        assert "cleanup" not in result.message
+        assert seeded.exists()
+
+
+class TestFixedWinnerWipe:
+    """The winner layer is wiped unconditionally on every fixed start (Req 6)."""
+
+    def test_wipe_on_all_strategies_path(self, tmp_path: Path) -> None:
+        # Single fixed strategy + optimize on → all-strategies skip path.
+        phase, work_dir, _ = _make_fixed_phase(
+            tmp_path, strategy_names=["h265-aq+slow"], optimize=True,
+        )
+        seeded = _seed_encoded_winner(work_dir, phase._config.encoding.resolved_strategies[0])
+        result = phase.run(dry_run=False)
+        assert result.outcome is PhaseOutcome.REUSED  # all-strategies skip result
+        assert not seeded.exists()
+
+    def test_wipe_on_optimize_path(self, tmp_path: Path) -> None:
+        # Two fixed strategies + optimize on → the test-encode path. The
+        # stubbed chunking has no chunks, so recovery fails AFTER the entry
+        # block already ran — the wipe and banner are what must have fired.
+        phase, work_dir, _ = _make_fixed_phase(
+            tmp_path, strategy_names=["h265-aq+slow", "h264+slow"], optimize=True,
+        )
+        strategies = phase._config.encoding.resolved_strategies
+        seeded = [_seed_encoded_winner(work_dir, s) for s in strategies]
+        result = phase.run(dry_run=False)
+        assert result.outcome is PhaseOutcome.FAILED
+        assert "No chunks" in result.message
+        assert not any(d.exists() for d in seeded)
+
+    def test_wipe_never_on_searched_runs(self, tmp_path: Path) -> None:
+        phase, work_dir = _make_phase(tmp_path, [_S1], optimize=False, force=False)
+        seeded = _seed_encoded_winner(work_dir, _S1)
+        phase.run(dry_run=False)
+        assert seeded.exists()
+
+    def test_wipe_skipped_on_dry_run(self, tmp_path: Path) -> None:
+        phase, work_dir, _ = _make_fixed_phase(
+            tmp_path, strategy_names=["h265-aq+slow"], optimize=False,
+        )
+        seeded = _seed_encoded_winner(work_dir, phase._config.encoding.resolved_strategies[0])
+        phase.run(dry_run=True)
+        # A dry run changes nothing — the wipe waits for the executing run.
+        assert seeded.exists()
+
+
+class TestFixedQualityBanner:
+    """One prominent WARNING banner per fixed run; never on searched runs (Req 5)."""
+
+    def _banner_count(self, caplog: pytest.LogCaptureFixture) -> int:
+        return caplog.text.count("FIXED QUALITY MODE")
+
+    def test_banner_single_strategy(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.WARNING, logger="pyqenc.phases.optimization"):
+            phase, _, _ = _make_fixed_phase(tmp_path, strategy_names=["h265-aq+slow"])
+            phase.run(dry_run=False)
+        assert self._banner_count(caplog) == 1
+        assert "CRF=18" in caplog.text
+        assert "per-chunk quality search disabled" in caplog.text
+        assert "NOT comparable across encoder families" in caplog.text
+        # Single strategy: no every-survivor-encodes line.
+        assert "fully encode the video" not in caplog.text
+
+    def test_banner_multi_strategy_heads_up(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level(logging.WARNING, logger="pyqenc.phases.optimization"):
+            phase, _, _ = _make_fixed_phase(
+                tmp_path, strategy_names=["h265-aq+slow", "h264+slow"],
+            )
+            phase.run(dry_run=True)
+        assert self._banner_count(caplog) == 1
+        assert "every surviving strategy will fully encode the video" in caplog.text
+
+    def test_banner_emitted_at_warning_level(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        phase, _, _ = _make_fixed_phase(tmp_path, strategy_names=["h265-aq+slow"])
+        phase.run(dry_run=False)
+        banner_records = [r for r in caplog.records if "FIXED QUALITY MODE" in r.getMessage()]
+        assert banner_records and all(r.levelno == logging.WARNING for r in banner_records)
+
+    def test_no_banner_on_searched_runs(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        phase, _ = _make_phase(tmp_path, [_S1, _S2], optimize=False, force=False)
+        phase.run(dry_run=False)
+        assert self._banner_count(caplog) == 0
+
+    def test_banner_lists_per_strategy_knobs_when_not_uniform(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Collapsed config profiles of different values (no -q): the banner
+        # falls back to a per-strategy pinned-knob listing.
+        from pyqenc.phases.chunking import ChunkingPhase as _CP
+        from pyqenc.phases.chunking import ChunkingPhaseResult
+        from pyqenc.phases.probe import ProbePhase as _PP
+        from pyqenc.phases.probe import ProbePhaseResult
+
+        config_dict = _APP_CONFIG.model_dump()
+        config_dict["profiles"]["h265-aq"]["quality_range"] = [18.0, 18.0]
+        config_dict["profiles"]["h264"]["quality_range"] = [20.0, 20.0]
+        config_dict["encoding"]["strategies"] = ["h265-aq", "h264"]
+        config = AppConfig.model_validate(config_dict)
+        assert config.encoding.fixed_quality
+
+        src = tmp_path / "source.mkv"
+        src.write_bytes(b"\x00" * 1024)
+        job = JobPhase(
+            config, {}, source=src, work_dir=tmp_path / "work", force=False,
+            cleanup=CleanupLevel.NONE, no_metrics=True, collector=MagicMock(),
+        )
+        job.run(dry_run=False)
+        phases: PhaseRegistry = {JobPhase: job}
+        probe = _PP(config, phases, collector=MagicMock(), crop_params=None)
+        probe.result = ProbePhaseResult(outcome=PhaseOutcome.COMPLETED, message="stub", stream=None)
+        phases[_PP] = probe
+        chunking = _CP(config, phases, collector=MagicMock())
+        chunking.result = ChunkingPhaseResult(outcome=PhaseOutcome.COMPLETED, message="stub", chunks=[])
+        phases[_CP] = chunking
+
+        phase = OptimizationPhase(config, phases=phases, collector=MagicMock())
+        with caplog.at_level(logging.WARNING, logger="pyqenc.phases.optimization"):
+            phase.run(dry_run=False)
+        assert "knob pinned (h265-aq+slow: CRF=18.0, h264+veryslow: CRF=20.0)" in caplog.text
+
+# ---------------------------------------------------------------------------
+# Fixed compared-run optimization: pruning, anchor, synthetic set (Req 8)
+# ---------------------------------------------------------------------------
+
+def _result(name: str, size: int, metrics: dict[str, float]) -> StrategyTestResult:
+    """A StrategyTestResult with metrics (the fixed-mode pruning input)."""
+    return StrategyTestResult(strategy=name, total_size=size, metrics=metrics)
+
+
+class TestDominancePruning:
+    """Pareto dominance pruning — selection removes only dominated strategies."""
+
+    _M: ClassVar[dict[str, float]] = {"vmaf_median": 91.0, "vif_median": 84.0}
+
+    def test_h264_pruned_by_h265(self) -> None:
+        """Strictly-worse (bigger AND lower metrics) strategy is pruned."""
+        results = [
+            _result("h265+slow", 1000, {"vmaf_median": 93.0, "vif_median": 90.0}),
+            _result("h264+slow", 1200, {"vmaf_median": 91.5, "vif_median": 85.0}),
+        ]
+        assert OptimizationPhase._dominance_survivors(results) == ["h265+slow"]
+
+    def test_av1_vs_h265_both_survive(self) -> None:
+        """Smaller-but-worse vs bigger-but-better — neither dominates."""
+        results = [
+            _result("av1+slow", 1000, {"vmaf_median": 91.0, "vif_median": 84.0}),
+            _result("h265+slow", 1400, {"vmaf_median": 93.0, "vif_median": 90.0}),
+        ]
+        assert OptimizationPhase._dominance_survivors(results) == [
+            "av1+slow", "h265+slow",
+        ]
+
+    def test_exact_duplicates_coexist(self) -> None:
+        """Equal size and equal metrics both directions — no strict inequality,
+        no dominance, both survive."""
+        results = [
+            _result("a+slow", 1000, dict(self._M)),
+            _result("b+slow", 1000, dict(self._M)),
+        ]
+        assert OptimizationPhase._dominance_survivors(results) == ["a+slow", "b+slow"]
+
+    def test_size_tie_metric_advantage_dominates(self) -> None:
+        """Equal size, better metrics on one — the better one dominates."""
+        results = [
+            _result("a+slow", 1000, {"vmaf_median": 90.0}),
+            _result("b+slow", 1000, {"vmaf_median": 91.0}),
+        ]
+        assert OptimizationPhase._dominance_survivors(results) == ["b+slow"]
+
+    def test_failed_strategies_excluded(self) -> None:
+        """total_size == 0 (failed encodes) never survives."""
+        results = [
+            _result("a+slow", 0, {}),
+            _result("b+slow", 1000, {"vmaf_median": 91.0}),
+        ]
+        assert OptimizationPhase._dominance_survivors(results) == ["b+slow"]
+
+    def test_metric_key_mismatch_incomparable(self) -> None:
+        """Partial measurements cannot be honestly compared — both survive."""
+        results = [
+            _result("a+slow", 1000, {"vmaf_median": 91.0}),
+            _result("b+slow", 1400, {"vmaf_median": 93.0, "vif_median": 90.0}),
+        ]
+        assert OptimizationPhase._dominance_survivors(results) == ["a+slow", "b+slow"]
+
+    def test_all_measured_metrics_evaluated(self) -> None:
+        """Dominance needs advantage on every compared statistic — a single
+        deficit blocks the prune even when every other compared stat wins."""
+        results = [
+            _result("a+slow", 1000, {"vmaf_median": 93.0, "vif_median": 83.9}),
+            _result("b+slow", 1400, {"vmaf_median": 91.0, "vif_median": 84.0}),
+        ]
+        assert OptimizationPhase._dominance_survivors(results) == ["a+slow", "b+slow"]
+
+    def test_stability_stats_do_not_sway_dominance(self) -> None:
+        """std/max-style statistics are outside the comparison set — a
+        strategy that wins only those stays dominated."""
+        results = [
+            _result("a+slow", 1000, {
+                "vmaf_p10": 90.0, "vmaf_median": 93.0, "vmaf_std": 1.0, "vmaf_max": 95.0,
+            }),
+            _result("b+slow", 1400, {
+                "vmaf_p10": 88.0, "vmaf_median": 91.0, "vmaf_std": 2.0, "vmaf_max": 99.0,
+            }),
+        ]
+        assert OptimizationPhase._dominance_survivors(results) == ["a+slow"]
+
+
+class TestAnchorSelection:
+    """The anchor is chosen AFTER pruning, from survivors (Req 8.2)."""
+
+    def test_smallest_survivor_anchors(self) -> None:
+        results = [
+            _result("av1+slow", 1000, {"vmaf_median": 91.0}),
+            _result("h265+slow", 1400, {"vmaf_median": 93.0}),
+        ]
+        survivors = OptimizationPhase._dominance_survivors(results)
+        assert OptimizationPhase._select_anchor(
+            results, ["av1+slow", "h265+slow"], survivors,
+        ) == "av1+slow"
+
+    def test_dominated_size_minimum_not_anchor(self) -> None:
+        """The overall size minimum can itself be dominated (equal size,
+        worse metrics) — pruning first guarantees the ruler is on the front."""
+        results = [
+            _result("a+slow", 900, {"vmaf_median": 80.0}),
+            _result("b+slow", 900, {"vmaf_median": 85.0}),
+            _result("c+slow", 1200, {"vmaf_median": 90.0}),
+        ]
+        survivors = OptimizationPhase._dominance_survivors(results)
+        assert survivors == ["b+slow", "c+slow"]
+        assert OptimizationPhase._select_anchor(
+            results, ["a+slow", "b+slow", "c+slow"], survivors,
+        ) == "b+slow"
+
+    def test_size_tie_breaks_by_resolved_order(self) -> None:
+        """Exact-duplicate survivors at equal size: resolved order decides."""
+        results = [
+            _result("a+slow", 1000, {"vmaf_median": 91.0}),
+            _result("b+slow", 1000, {"vmaf_median": 91.0}),
+        ]
+        survivors = OptimizationPhase._dominance_survivors(results)
+        assert survivors == ["a+slow", "b+slow"]
+        assert OptimizationPhase._select_anchor(
+            results, ["b+slow", "a+slow"], survivors,
+        ) == "b+slow"
+
+    def test_unmeasured_survivor_cannot_anchor(self) -> None:
+        results = [
+            _result("a+slow", 1000, {}),
+            _result("b+slow", 1400, {"vmaf_median": 91.0}),
+        ]
+        survivors = OptimizationPhase._dominance_survivors(results)
+        assert OptimizationPhase._select_anchor(
+            results, ["a+slow", "b+slow"], survivors,
+        ) == "b+slow"
+
+    def test_stability_only_survivor_cannot_anchor(self) -> None:
+        """A survivor measured only on stats outside the comparison set has
+        an empty ruler — it must not anchor over a compared survivor."""
+        results = [
+            _result("a+slow", 1000, {"vmaf_std": 1.5, "vmaf_max": 98.0}),
+            _result("b+slow", 1400, {"vmaf_p10": 88.0, "vmaf_median": 91.0}),
+        ]
+        survivors = OptimizationPhase._dominance_survivors(results)
+        assert OptimizationPhase._select_anchor(
+            results, ["a+slow", "b+slow"], survivors,
+        ) == "b+slow"
+
+    def test_no_measured_survivors_no_anchor(self) -> None:
+        results = [_result("a+slow", 1000, {})]
+        assert OptimizationPhase._select_anchor(results, ["a+slow"], ["a+slow"]) is None
+
+
+class TestSyntheticTargets:
+    """The synthetic set mirrors the anchor's min-aggregated metrics (Req 8.3)."""
+
+    def test_comparison_stats_only_sorted(self) -> None:
+        """The ruler carries only the fixed-mode comparison statistics (p10,
+        median) per metric — stability/shape stats stay out."""
+        anchor = _result(
+            "av1+slow", 1000,
+            {
+                "vif_p10": 81.0, "vif_median": 84.0, "vif_max": 92.0,
+                "vmaf_p10": 88.5, "vmaf_median": 91.2, "vmaf_std": 1.0,
+            },
+        )
+        targets = OptimizationPhase._synthetic_targets_from(anchor)
+        assert [(t.metric, t.statistic, t.value) for t in targets] == [
+            ("vif", "p10", 81.0),
+            ("vif", "median", 84.0),
+            ("vmaf", "p10", 88.5),
+            ("vmaf", "median", 91.2),
+        ]
+
+    def test_none_anchor_empty_set(self) -> None:
+        assert OptimizationPhase._synthetic_targets_from(None) == []
+
+
+class TestAggregateStrategyMetrics:
+    """Min-across-test-chunks aggregation from winner result sidecars."""
+
+    def test_min_across_chunks(self, tmp_path: Path) -> None:
+        from pyqenc.phases.encoding import build_encoded_chunk
+        from pyqenc.stream_model import EncodedChunk
+
+        chunks = [_make_chunk(0.0, 10.0, tmp_path), _make_chunk(10.0, 20.0, tmp_path)]
+        strategy = _S1
+        encoded_chunks: dict[str, dict[str, EncodedChunk]] = {}
+        for i, chunk in enumerate(chunks):
+            name = f"{chunk.safe_name()}.1920x1080.q18.0"
+            strategy_dir = tmp_path / "encoded" / strategy.safe_name()
+            strategy_dir.mkdir(parents=True, exist_ok=True)
+            (strategy_dir / f"{name}.mkv").write_bytes(b"x" * (100 * (i + 1)))
+            # Result sidecar naming: <chunk_id>.<resolution>.yaml (no q part).
+            write_yaml_atomic(
+                strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
+                {"metrics": {"vmaf_median": 91.0 + i, "vif_median": 84.0 - i}},
+            )
+            encoded_chunks.setdefault(chunk.safe_name(), {})[strategy.display_name()] = (
+                build_encoded_chunk(
+                    chunk=chunk, strategy=strategy, crf=Decimal("18.0"),
+                    path=strategy_dir / f"{name}.mkv", resolution="1920x1080",
+                    frame_count=24,
+                )
+            )
+
+        phase, _, _ = _make_fixed_phase(tmp_path, strategy_names=["h265-aq+slow"])
+        mins = phase._aggregate_strategy_metrics(
+            tmp_path, chunks, strategy, encoded_chunks,
+        )
+        assert mins == {"vmaf_median": 91.0, "vif_median": 83.0}
+
+    def test_missing_sidecar_chunk_contributes_nothing(self, tmp_path: Path) -> None:
+        from pyqenc.phases.encoding import build_encoded_chunk
+
+        chunk = _make_chunk(0.0, 10.0, tmp_path)
+        strategy = _S1
+        strategy_dir = tmp_path / "encoded" / strategy.safe_name()
+        strategy_dir.mkdir(parents=True, exist_ok=True)
+        mkv = strategy_dir / f"{chunk.safe_name()}.1920x1080.q18.0.mkv"
+        mkv.write_bytes(b"x" * 100)
+        # No sidecar next to the winner.
+        encoded_chunks = {
+            chunk.safe_name(): {
+                strategy.display_name(): build_encoded_chunk(
+                    chunk=chunk, strategy=strategy, crf=Decimal("18.0"),
+                    path=mkv, resolution="1920x1080", frame_count=24,
+                ),
+            },
+        }
+        phase, _, _ = _make_fixed_phase(tmp_path, strategy_names=["h265-aq+slow"])
+        assert phase._aggregate_strategy_metrics(
+            tmp_path, [chunk], strategy, encoded_chunks,
+        ) == {}
+class TestFixedComparedExecute:
+    """The fixed compared-run execute path end to end (mocked encoder pool).
+
+    Scenario (the design table): av1-analog smallest with lower metrics,
+    h265-analog bigger with better metrics, h264-analog biggest with metrics
+    strictly between — dominated by the h265-analog. Survivors are the first
+    two; the anchor is the smallest survivor; the synthetic set mirrors the
+    anchor's min-aggregated metrics; tolerance is never consulted.
+    """
+
+    def _run_scenario(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        tolerance: float,
+        sizes: dict[str, tuple[int, int]],
+        metrics: dict[str, dict[str, float]],
+    ) -> tuple[OptimizationPhaseResult, Path]:
+        """Run a fixed compared optimization with fabricated test winners.
+
+        The encoder pool is replaced by a stub that seeds each strategy's
+        winner files + result sidecars (post-wipe) and returns the composed
+        encoded-chunk map — sizes come from the fabricated files, metrics
+        from the sidecars.
+        """
+        from pyqenc.phases.encoding import (
+            EncodingResult,
+            build_encoded_chunk,
+        )
+
+        strategy_names = ["h265-aq", "h265", "h265-anime"]
+        phase, work_dir, _ = _make_fixed_phase(
+            tmp_path, strategy_names=[f"{n}+slow" for n in strategy_names],
+            optimize=True,
+        )
+        phase._config.encoding.optimize_tolerance = tolerance
+        # Assignment on EncodingConfig invalidates the resolved caches —
+        # re-resolve so the run sees the same strategies under the new tolerance.
+        phase._config.encoding.resolve(phase._config.codecs, phase._config.profiles)
+
+        chunks = [_make_chunk(float(i * 10), float((i + 1) * 10), tmp_path) for i in range(2)]
+        from pyqenc.phases.chunking import ChunkingPhaseResult
+        chunking = next(
+            ph for cls, ph in phase._phases.items() if cls.__name__ == "ChunkingPhase"
+        )
+        chunking.result = ChunkingPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="stub",
+            chunks=[Artifact(payload=c, state=ArtifactState.COMPLETE) for c in chunks],
+        )
+        # Persist the full chunk set as the test selection (deterministic).
+        _persist_optimization(
+            work_dir, tmp_path / "source.mkv", [],
+            tolerance_pct=tolerance, selected=[],
+            test_chunks=[c.safe_name() for c in chunks],
+        )
+
+        strategies = phase._config.encoding.resolved_strategies
+
+        def _seed_and_compose() -> EncodingResult:
+            result = EncodingResult()
+            for chunk_idx, chunk in enumerate(chunks):
+                for strategy in strategies:
+                    display = strategy.display_name()
+                    per_chunk = sizes[display][chunk_idx]
+                    strategy_dir = work_dir / "encoded" / strategy.safe_name()
+                    strategy_dir.mkdir(parents=True, exist_ok=True)
+                    mkv = strategy_dir / f"{chunk.safe_name()}.1920x1080.q18.0.mkv"
+                    mkv.write_bytes(b"x" * per_chunk)
+                    write_yaml_atomic(
+                        strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
+                        {"crf": "18.0", "targets_met": True, "metrics": metrics[display]},
+                    )
+                    result.encoded_chunks.setdefault(chunk.safe_name(), {})[display] = (
+                        build_encoded_chunk(
+                            chunk=chunk, strategy=strategy, crf=Decimal("18.0"),
+                            path=mkv, resolution="1920x1080", frame_count=24,
+                        )
+                    )
+            return result
+
+        async def _fake_parallel(**_kwargs: object) -> EncodingResult:
+            return _seed_and_compose()
+
+        monkeypatch.setattr(
+            "pyqenc.phases.optimization._make_encoder", lambda **_kw: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "pyqenc.phases.encoding._encode_chunks_parallel", _fake_parallel,
+        )
+        result = phase.run(dry_run=False)
+        return result, work_dir
+
+    _SCENARIO_SIZES: ClassVar[dict[str, tuple[int, int]]] = {
+        # chunk file sizes; totals: h265-aq 1000 (anchor), h265 1400, h265-anime 1600
+        "h265-aq+slow":     (500, 500),
+        "h265+slow":        (700, 700),
+        "h265-anime+slow":  (800, 800),
+    }
+    _SCENARIO_METRICS: ClassVar[dict[str, dict[str, float]]] = {
+        # Compared stats (p10, median) carry the dominance structure:
+        # h265 beats h265-anime on every compared stat at smaller size
+        # (dominates it); h265-aq is smallest with the weakest metrics
+        # (incomparable with both). std/max are noise outside the set.
+        "h265-aq+slow": {
+            "vmaf_p10": 87.0, "vmaf_median": 91.0, "vmaf_std": 1.1, "vmaf_max": 96.0,
+            "vif_p10": 81.0, "vif_median": 84.0, "vif_max": 91.0,
+        },
+        "h265+slow": {
+            "vmaf_p10": 89.5, "vmaf_median": 93.1, "vmaf_std": 1.0, "vmaf_max": 95.0,
+            "vif_p10": 87.5, "vif_median": 90.3, "vif_max": 92.0,
+        },
+        "h265-anime+slow": {
+            "vmaf_p10": 88.5, "vmaf_median": 92.0, "vmaf_std": 2.0, "vmaf_max": 99.0,
+            "vif_p10": 83.0, "vif_median": 85.0, "vif_max": 94.0,
+        },
+    }
+
+    def test_pruning_anchor_synthetic_and_persistence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        result, work_dir = self._run_scenario(
+            tmp_path, monkeypatch,
+            tolerance=5.0,
+            sizes=self._SCENARIO_SIZES,
+            metrics=self._SCENARIO_METRICS,
+        )
+        assert result.outcome is PhaseOutcome.COMPLETED
+
+        survivor_names = [s.display_name() for s in result.selected_strategies]
+        assert survivor_names == ["h265-aq+slow", "h265+slow"]
+
+        # The anchor is the smallest survivor; the synthetic set mirrors its
+        # min-aggregated COMPARED stats only (sorted) — std/max stay out.
+        assert [(t.metric, t.statistic, t.value) for t in result.synthetic_targets] == [
+            ("vif", "p10", 81.0),
+            ("vif", "median", 84.0),
+            ("vmaf", "p10", 87.0),
+            ("vmaf", "median", 91.0),
+        ]
+
+        persisted = OptimizationParams.load(work_dir / "optimization.yaml")
+        assert persisted is not None
+        assert persisted.anchor == "h265-aq+slow"
+        assert persisted.selected == ["h265-aq+slow", "h265+slow"]
+        # The sidecar persists facts + decisions only — the synthetic ruler
+        # is NOT persisted (no synthetic_targets field); it re-derives from
+        # strategy_results on read.
+        assert not hasattr(persisted, "synthetic_targets")
+        # The per-strategy records keep the FULL aggregated metrics for reuse
+        # (data retention — re-selecting the comparison set never re-measures).
+        by_name = {r.strategy: r for r in persisted.strategy_results}
+        assert by_name["h265-aq+slow"].metrics["vmaf_median"] == 91.0
+        assert by_name["h265-aq+slow"].metrics["vmaf_std"] == 1.1
+        # Re-derivation from the persisted facts reproduces the ruler verbatim.
+        anchor_result = next(
+            r for r in persisted.strategy_results if r.strategy == persisted.anchor
+        )
+        assert [
+            (t.metric, t.statistic, t.value)
+            for t in OptimizationPhase._synthetic_targets_from(anchor_result)
+        ] == [
+            ("vif", "p10", 81.0),
+            ("vif", "median", 84.0),
+            ("vmaf", "p10", 87.0),
+            ("vmaf", "median", 91.0),
+        ]
+
+    def test_tolerance_not_applied_in_fixed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A 100% tolerance (searched mode would select everything) must not
+        rescue the dominated strategy."""
+        result, _ = self._run_scenario(
+            tmp_path, monkeypatch,
+            tolerance=100.0,
+            sizes=self._SCENARIO_SIZES,
+            metrics=self._SCENARIO_METRICS,
+        )
+        survivor_names = [s.display_name() for s in result.selected_strategies]
+        assert "h265-anime+slow" not in survivor_names
+
+    def test_comparison_table_rendered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level(logging.INFO, logger="pyqenc.phases.optimization"):
+            self._run_scenario(
+                tmp_path, monkeypatch,
+                tolerance=5.0,
+                sizes=self._SCENARIO_SIZES,
+                metrics=self._SCENARIO_METRICS,
+            )
+        text = caplog.text
+        assert "Fixed-quality comparison — ruler: h265-aq+slow (smallest test size)" in text
+        # The stat convention is stated once; metric columns are one per metric.
+        assert "anchor p10..median, others Δp10/Δmedian vs anchor" in text
+        # Anchor row: bare size (baseline) + p10..median ranges.
+        assert "87.0..91.0" in text and "81.0..84.0" in text
+        # Non-anchor rows: size with folded ratio + paired deltas.
+        assert "(1.40×)" in text
+        assert "+2.5/+2.1" in text  # h265 vmaf Δp10/Δmedian vs anchor
+        assert "dominated by h265+slow" in text
+        assert "Survivors (Pareto front): h265-aq+slow, h265+slow — all will be encoded" in text
+
+
+class TestFixedReuseFromPersisted:
+    """Fixed reuse re-derives pruning/anchor/synthetic from persisted results."""
+
+    def test_reuse_reselects_by_pruning_without_reencoding(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        strategy_names = ["h265-aq+slow", "h265+slow"]
+        phase, work_dir, _ = _make_fixed_phase(
+            tmp_path, strategy_names=strategy_names, optimize=True,
+        )
+        chunks = [_make_chunk(0.0, 10.0, tmp_path), _make_chunk(10.0, 20.0, tmp_path)]
+        from pyqenc.phases.chunking import ChunkingPhaseResult
+        chunking = next(
+            ph for cls, ph in phase._phases.items() if cls.__name__ == "ChunkingPhase"
+        )
+        chunking.result = ChunkingPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="stub",
+            chunks=[Artifact(payload=c, state=ArtifactState.COMPLETE) for c in chunks],
+        )
+
+        # Seed complete winners on disk (dry-run performs no wipe) and the
+        # persisted results they correspond to.
+        for strategy in phase._config.encoding.resolved_strategies:
+            strategy_dir = work_dir / "encoded" / strategy.safe_name()
+            strategy_dir.mkdir(parents=True, exist_ok=True)
+            for chunk in chunks:
+                mkv = strategy_dir / f"{chunk.safe_name()}.1920x1080.q18.0.mkv"
+                mkv.write_bytes(b"x" * 64)
+                write_yaml_atomic(
+                    strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
+                    {"crf": "18.0", "targets_met": True, "metrics": {}},
+                )
+        _persist_optimization(
+            work_dir, tmp_path / "source.mkv",
+            [
+                StrategyTestResult(
+                    strategy="h265-aq+slow", total_size=1000,
+                    metrics={"vmaf_median": 91.0},
+                ),
+                StrategyTestResult(
+                    strategy="h265+slow", total_size=1400,
+                    metrics={"vmaf_median": 93.0},
+                ),
+            ],
+            tolerance_pct=5.0, selected=["h265-aq+slow", "h265+slow"],
+            test_chunks=[c.safe_name() for c in chunks],
+        )
+
+        with caplog.at_level(logging.INFO, logger="pyqenc.phases.optimization"):
+            result = phase.run(dry_run=True)
+
+        assert result.outcome is PhaseOutcome.REUSED
+        assert [s.display_name() for s in result.selected_strategies] == [
+            "h265-aq+slow", "h265+slow",
+        ]
+        assert [(t.metric, t.statistic, t.value) for t in result.synthetic_targets] == [
+            ("vmaf", "median", 91.0),
+        ]
+        assert "Fixed-quality comparison — ruler: h265-aq+slow" in caplog.text
+
+
+class TestUncomparedFixedSkipsAnchor:
+    """Single-strategy / optimize-off fixed runs skip anchor machinery (Req 8.7)."""
+
+    def test_single_strategy_no_synthetic_set(self, tmp_path: Path) -> None:
+        phase, work_dir, _ = _make_fixed_phase(
+            tmp_path, strategy_names=["h265-aq+slow"], optimize=True,
+        )
+        result = phase.run(dry_run=False)
+        assert result.outcome is PhaseOutcome.REUSED  # all-strategies skip path
+        assert result.synthetic_targets == []
+        persisted = OptimizationParams.load(work_dir / "optimization.yaml")
+        assert persisted is not None
+        assert persisted.anchor is None

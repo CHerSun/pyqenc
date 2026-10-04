@@ -43,6 +43,7 @@ from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import (
     CleanupLevel,
     PhaseOutcome,
+    Strategy,
 )
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
@@ -53,6 +54,7 @@ from pyqenc.phases.encoding import (
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.merge import MergePhase
+from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
@@ -266,6 +268,13 @@ def _make_merge_phase(
         message   = "audio complete",
     )
     registry[AudioPhase] = audio
+
+    optimization = OptimizationPhase(config, registry, collector=collector)
+    optimization.result = OptimizationPhaseResult(
+        outcome   = PhaseOutcome.COMPLETED,
+        message   = "optimization complete",
+    )
+    registry[OptimizationPhase] = optimization
 
     return MergePhase(config, registry, collector=collector)
 
@@ -845,17 +854,17 @@ class TestMergeFailsWithoutTimestamps:
 # Missed-targets warning (completion-line escalation)
 # ---------------------------------------------------------------------------
 
-def _make_phase(targets: list) -> MergePhase:
+def _make_phase(targets: list, *, fixed_quality: bool = False) -> MergePhase:
     """A minimal MergePhase whose config carries exactly *targets*."""
     from types import SimpleNamespace
 
     from pyqenc.metrics import NoOpMetricsCollector
 
     config = SimpleNamespace(
-        encoding  = SimpleNamespace(resolved_targets=targets),
+        encoding  = SimpleNamespace(resolved_targets=targets, fixed_quality=fixed_quality),
         measurement = SimpleNamespace(sampling=3),
     )
-    return MergePhase(cast(AppConfig, config), {}, collector=NoOpMetricsCollector())  # stand-in carrying the two read fields
+    return MergePhase(cast(AppConfig, config), {}, collector=NoOpMetricsCollector())  # stand-in carrying the read fields
 
 
 class TestMissedTargetsWarning:
@@ -901,3 +910,364 @@ class TestMissedTargetsWarning:
             _make_phase(targets)._log_missed_targets_warning("h265+ultrafast", metrics)
 
         assert not [r for r in caplog.records if r.levelno == _logging.WARNING]
+
+    def test_warning_suppressed_on_fixed_quality_runs(self, caplog) -> None:
+        """Config targets are search-tuned vocabulary — at a pinned knob they
+        would read as all-miss noise, so the warning stays silent (Req 9.6)."""
+        import logging as _logging
+
+        from pyqenc.models import QualityTarget
+
+        targets = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
+        metrics = {"vmaf_min": 88.3}  # missed — but no warning on a fixed run
+
+        with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
+            _make_phase(targets, fixed_quality=True)._log_missed_targets_warning(
+                "h265+ultrafast", metrics,
+            )
+
+        assert not [r for r in caplog.records if r.levelno == _logging.WARNING]
+
+    def test_warning_present_on_searched_runs(self, caplog) -> None:
+        """The searched-mode behavior is unchanged: a miss still escalates."""
+        import logging as _logging
+
+        from pyqenc.models import QualityTarget
+
+        targets = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
+        metrics = {"vmaf_min": 88.3}
+
+        with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
+            _make_phase(targets, fixed_quality=False)._log_missed_targets_warning(
+                "h265+ultrafast", metrics,
+            )
+
+        assert [r for r in caplog.records if r.levelno == _logging.WARNING]
+
+
+# ---------------------------------------------------------------------------
+# Fixed-run merged-output naming (TODO §86 quick fix)
+# ---------------------------------------------------------------------------
+
+def _fixed_strategy_fixture(pinned: str, granularity: str = "0.5", label: str = "CRF") -> Strategy:
+    """A strategy whose codec range is collapsed at *pinned*."""
+    from decimal import Decimal
+
+    from pyqenc.models import CodecConfig
+
+    codec = CodecConfig(
+        name="h265-10bit", default_quality=Decimal(pinned), default_preset="slow",
+        quality_range=(Decimal(pinned), Decimal(pinned)),
+        quality_granularity=Decimal(granularity),
+        quality_label=label, presets=["slow"],
+    )
+    return Strategy(preset="slow", profile="h265-aq", codec=codec, profile_args=[])
+
+
+class TestUniformPinnedQuality:
+    """The suffix exists only for uniform pinned-value fixed runs."""
+
+    def test_uniform_fixed_run_returns_value(self) -> None:
+        from decimal import Decimal
+
+        strategies = [_fixed_strategy_fixture("18"), _fixed_strategy_fixture("18")]
+        assert MergePhase._uniform_pinned_quality(strategies) == Decimal(18)
+
+    def test_decimal_spellings_are_one_value(self) -> None:
+        """Decimal("18") == Decimal("18.0") numerically — mixed spellings
+        count as one uniform pinned value."""
+        from decimal import Decimal
+
+        mixed = [_fixed_strategy_fixture("18"), _fixed_strategy_fixture("18.0")]
+        assert MergePhase._uniform_pinned_quality(mixed) == Decimal(18)
+
+    def test_searched_run_none(self) -> None:
+        from decimal import Decimal
+
+        from pyqenc.models import CodecConfig
+
+        codec = CodecConfig(
+            name="h265-10bit", default_quality=Decimal("18"), default_preset="slow",
+            quality_range=(Decimal("6"), Decimal("30")), presets=["slow"],
+        )
+        strategy = Strategy(preset="slow", profile="h265-aq", codec=codec, profile_args=[])
+        assert MergePhase._uniform_pinned_quality([strategy]) is None
+
+    def test_mixed_pinned_values_none(self) -> None:
+        strategies = [_fixed_strategy_fixture("18"), _fixed_strategy_fixture("20")]
+        assert MergePhase._uniform_pinned_quality(strategies) is None
+
+
+class TestQSuffix:
+    """The per-strategy rendering: sanitized label + granularity-quantized value."""
+
+    def test_quantized_to_strategy_granularity(self) -> None:
+        """-q 18 at 0.5 granularity renders 18.0 — uniform with 17.5-style
+        siblings, never 'CRF=18' next to 'CRF=17.5'."""
+        from decimal import Decimal
+
+        assert MergePhase._q_suffix(_fixed_strategy_fixture("18"), Decimal(18)) == " CRF=18.0"
+        assert MergePhase._q_suffix(_fixed_strategy_fixture("17.5"), Decimal("17.5")) == " CRF=17.5"
+
+    def test_integer_granularity_stays_integral(self) -> None:
+        from decimal import Decimal
+
+        strategy = _fixed_strategy_fixture("18", granularity="1", label="QP")
+        assert MergePhase._q_suffix(strategy, Decimal(18)) == " QP=18"
+
+    def test_spelling_independent(self) -> None:
+        """CLI '18' and profile '18.0' quantize to the identical name form."""
+        from decimal import Decimal
+
+        assert MergePhase._q_suffix(_fixed_strategy_fixture("18"), Decimal("18")) == " CRF=18.0"
+        assert MergePhase._q_suffix(_fixed_strategy_fixture("18.0"), Decimal("18.0")) == " CRF=18.0"
+
+    def test_label_sanitized_filesystem_safe(self) -> None:
+        """VBR labels like Mbit/s land filesystem-safe in the name."""
+        from decimal import Decimal
+
+        strategy = _fixed_strategy_fixture("20", granularity="0.5", label="Mbit/s")
+        assert MergePhase._q_suffix(strategy, Decimal(20)) == " Mbit_s=20.0"
+
+    def test_expected_path_carries_suffix(self, tmp_path: Path) -> None:
+        from decimal import Decimal
+
+        strategy = _fixed_strategy_fixture("18.0")
+        path = MergePhase._expected_output_path(
+            tmp_path, "test", strategy,
+            MergePhase._q_suffix(strategy, Decimal("18.0")),
+        )
+        assert path.name == "test h265-aq+slow CRF=18.0.mkv"
+
+
+class TestFixedMergeRecoveryNaming:
+    """Recovery classifies fixed-run outputs under the q-suffixed name."""
+
+    def test_fixed_run_expects_suffixed_output_and_surplus_kept(
+        self, tmp_path: Path,
+    ) -> None:
+        """A uniform fixed run expects ``<stem> <strategy> q18.0.mkv``; a
+        pre-existing plain-name output (search-mode era) is surplus, kept in
+        place — never silently reused as this run's product."""
+        from decimal import Decimal
+
+        from pyqenc.phases.encoding import EncodingPhase, EncodingPhaseResult
+
+        source = tmp_path / "test.mkv"
+        source.write_bytes(b"\x00" * 64)
+        chunk = tmp_path / "chunk1.q18.0.mkv"
+        chunk.write_bytes(b"\x00" * 128)
+        work_dir = tmp_path / "work"
+        timestamps = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+        timestamps.parent.mkdir(parents=True, exist_ok=True)
+        timestamps.write_text("0\n", encoding="utf-8")
+
+        phase = _make_merge_phase(
+            work_dir, source, chunk, timestamps_path=timestamps, frame_count=24,
+        )
+        config = phase._config
+        config.encoding.strategies = ["h265-aq+slow"]
+        config.encoding.quality_range_override = (Decimal("18"), Decimal("18"))
+        config.encoding.resolve(config.codecs, config.profiles)
+        fixed_strategy = config.encoding.resolved_strategies[0]
+
+        encoding = phase._phases[EncodingPhase]
+        winner = Artifact(
+            payload=_encoded_chunk(chunk, "chunk1", "h265-aq").model_copy(
+                deep=True, update={"strategy": fixed_strategy, "crf": Decimal("18")},
+            ),
+            state=ArtifactState.COMPLETE,
+        )
+        encoding.result = EncodingPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="encoding complete",
+            winners=[winner],
+        )
+
+        # A stale search-mode output under the plain name.
+        merged_dir = work_dir / MERGED_OUTPUT_DIR
+        merged_dir.mkdir(parents=True, exist_ok=True)
+        stale = merged_dir / "test h265-aq+slow.mkv"
+        stale.write_bytes(b"\x00" * 32)
+
+        recovery = phase._recover()
+        wanted_rows = [r for r in recovery.artifacts if r.wanted]
+        assert [r.payload.output_path.name for r in wanted_rows] == [
+            "test h265-aq+slow CRF=18.0.mkv",
+        ]
+        assert wanted_rows[0].state is ArtifactState.ABSENT  # suffixed output not yet produced
+        surplus = [r for r in recovery.artifacts if not r.wanted]
+        assert [r.payload.path.name for r in surplus] == ["test h265-aq+slow.mkv"]
+        assert stale.exists()  # kept in place — no blind deletion
+
+# ---------------------------------------------------------------------------
+# Mode-honest merge sidecars (unified-summaries spec, interim landing)
+# ---------------------------------------------------------------------------
+
+from pyqenc.state import MergeParams
+
+
+def _run_full_merge(
+    tmp_path: Path,
+    *,
+    fixed: bool,
+    anchor: str | None = None,
+):
+    """Drive MergePhase through run() with external shells mocked.
+
+    Returns ``(merge_phase, merged_dir)``. One strategy's output is produced
+    with measurement mocked to a full-ish metric dict, so both sidecars land
+    on disk.
+    """
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    source = tmp_path / "test.mkv"
+    source.write_bytes(b"\x00" * 64)
+
+    ts_file = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+    ts_file.parent.mkdir(parents=True, exist_ok=True)
+    ts_file.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
+
+    chunk = work_dir / "chunk1.mkv"
+    chunk.write_bytes(b"\x00" * 64)
+
+    merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=ts_file)
+    if fixed:
+        from decimal import Decimal
+
+        from pyqenc.phases.encoding import EncodingPhase as _EncodingPhase
+        from pyqenc.phases.optimization import OptimizationPhase as _OptPhase
+
+        config = merge._config
+        config.encoding.strategies = ["h265-aq+slow"]
+        config.encoding.quality_range_override = (Decimal("18"), Decimal("18"))
+        config.encoding.resolve(config.codecs, config.profiles)
+        fixed_strategy = config.encoding.resolved_strategies[0]
+
+        encoding = merge._phases[_EncodingPhase]
+        winner = Artifact(
+            payload=_encoded_chunk(chunk, "chunk1", "h265-aq").model_copy(
+                deep=True, update={"strategy": fixed_strategy, "crf": Decimal("18")},
+            ),
+            state=ArtifactState.COMPLETE,
+        )
+        encoding.result = EncodingPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="encoding complete",
+            winners=[winner],
+        )
+
+        optimization = merge._phases[_OptPhase]
+        optimization.result = OptimizationPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="optimization complete",
+            anchor=anchor,
+        )
+
+    merged_dir = work_dir / MERGED_OUTPUT_DIR
+
+    def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
+        result = MagicMock()
+        result.returncode = 0
+        result.stderr = ""
+        if cmd[0] == "mkvmerge":
+            # mkvmerge reads its args from the options file — materialize the
+            # tmp twin it names via the "-o" entry.
+            import json as _json
+
+            options_path = Path(str(cmd[1])[1:])
+            args = _json.loads(options_path.read_text(encoding="utf-8"))
+            tmp_out = Path(args[args.index("-o") + 1])
+            tmp_out.parent.mkdir(parents=True, exist_ok=True)
+            tmp_out.write_bytes(b"\x00" * 128)
+        return result
+
+    measured = {
+        "vmaf_min": 94.5, "vmaf_p10": 95.0, "vmaf_median": 96.5, "vmaf_max": 99.0,
+        "vmaf_std": 1.2, "ssim_median": 98.2, "psnr_median": 46.0,
+    }
+
+    with (
+        patch("pyqenc.phases.merge.subprocess.run", side_effect=fake_subprocess_run),
+        patch("pyqenc.phases.merge.get_frame_count", return_value=100),
+        patch.object(MergePhase, "_measure_quality", return_value=(measured, True, None)),
+    ):
+        result = merge.run(dry_run=False)
+    assert result.outcome == PhaseOutcome.COMPLETED, result.message
+    return merge, merged_dir
+
+
+class TestModeHonestMergeSidecars:
+    """Both merge sidecars carry mode-honest content and keys."""
+
+    def test_fixed_per_video_sidecar_holds_knob_anchor_full_metrics(self, tmp_path: Path) -> None:
+        import yaml as _yaml
+
+        _merge, merged_dir = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
+        data = _yaml.safe_load(next(merged_dir.glob("*.yaml")).read_text(encoding="utf-8"))
+        assert data["quality"] == {"label": "CRF", "value": 18.0}
+        assert data["anchor"] == "h265-aq+slow"
+        assert "targets" not in data and "targets_met" not in data
+        # Retention: the full measured set (incl. stats outside any target set).
+        assert data["metrics"]["vmaf_std"] == 1.2
+        assert data["metrics"]["vmaf_max"] == 99.0
+
+    def test_search_per_video_sidecar_unchanged(self, tmp_path: Path) -> None:
+        import yaml as _yaml
+
+        _merge, merged_dir = _run_full_merge(tmp_path, fixed=False)
+        data = _yaml.safe_load(next(merged_dir.glob("*.yaml")).read_text(encoding="utf-8"))
+        assert "targets" in data and "targets_met" in data
+        assert "quality" not in data and "anchor" not in data
+
+    def test_merge_yaml_keys_and_summaries_mode_honest_fixed(self, tmp_path: Path) -> None:
+        merge, _ = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
+        persisted = MergeParams.load(merge._dep_result(JobPhase).work_dir / "merge.yaml")
+        assert persisted is not None
+        # Fixed-run key: the ruler basis; no configured-targets key.
+        assert persisted.anchor == "h265-aq+slow"
+        assert persisted.quality_targets == []
+        # Replay-leak fields are gone.
+        assert "source_stem" not in persisted.model_dump()
+        assert "source_size_bytes" not in persisted.model_dump()
+        # Summaries carry only the rendered (config-target) stats — the
+        # measured-but-unrendered stability stats stay out.
+        [summary] = persisted.strategy_summaries
+        assert "vmaf_std" not in summary.metrics
+        assert "vmaf_max" not in summary.metrics
+
+    def test_merge_yaml_search_mode_keys(self, tmp_path: Path) -> None:
+        merge, _ = _run_full_merge(tmp_path, fixed=False)
+        persisted = MergeParams.load(merge._dep_result(JobPhase).work_dir / "merge.yaml")
+        assert persisted is not None
+        assert persisted.anchor is None
+        assert persisted.quality_targets, "search run keys on configured targets"
+
+    def test_fixed_target_change_does_not_invalidate(self, tmp_path: Path) -> None:
+        """Config targets drive nothing in fixed mode: changing them between
+        fixed runs must NOT delete merge sidecars (anchor/sampling/probe are
+        the only fixed-run keys)."""
+        merge, merged_dir = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
+        sidecar = next(merged_dir.glob("*.yaml"))
+        sidecar_before = sidecar.read_text(encoding="utf-8")
+
+        config = merge._config
+        config.encoding.targets = ["vmaf-min:99.0"]
+        config.encoding.resolve(config.codecs, config.profiles)
+
+        merge._recover()
+        assert sidecar.read_text(encoding="utf-8") == sidecar_before, (
+            "fixed merge must not be invalidated by a config-target change"
+        )
+
+    def test_fixed_anchor_change_invalidates(self, tmp_path: Path) -> None:
+        merge, merged_dir = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
+        sidecar = next(merged_dir.glob("*.yaml"))
+
+        from pyqenc.phases.optimization import OptimizationPhase as _OptPhase
+
+        optimization = merge._phases[_OptPhase]
+        optimization.result = OptimizationPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="optimization complete",
+            anchor="h264+ultrafast",
+        )
+
+        merge._recover()
+        assert not sidecar.exists(), "anchor change is the fixed-run key: sidecars deleted"

@@ -8,7 +8,7 @@ All models use Pydantic BaseModel for validation and serialisation.
 # CHerSun 2026
 
 import logging
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import Enum, IntEnum
 from pathlib import Path
 from typing import Self
@@ -305,6 +305,41 @@ def _coerce_decimal_pair(v: tuple | list) -> tuple[Decimal, Decimal]:
     return Decimal(str(v[0])), Decimal(str(v[1]))
 
 
+def quality_alignment_error(
+    value:      Decimal,
+    granularity: Decimal,
+    owner:      str,
+) -> str | None:
+    """Return the misalignment error line for *value*, or ``None`` when aligned.
+
+    An effective-range endpoint must be an exact multiple of the codec's
+    quality granularity at every layer that supplied it (codec, profile,
+    CLI override): the search treats range boundaries as sentinel candidates
+    and can attempt an endpoint verbatim, so a misaligned value would reach
+    ``to_output_args`` — whose contract requires already-quantized values —
+    and feed fractional values to integer-step encoders.
+
+    Args:
+        value:       The endpoint value to check.
+        granularity: The codec's quality granularity (the required step).
+        owner:       Error-message prefix naming the violating layer
+                     (e.g. ``"Codec 'av1'"``).
+
+    Returns:
+        The full error line, or ``None`` when *value* sits on the grid.
+    """
+    if value % granularity == 0:
+        return None
+    below = (value / granularity).to_integral_value(ROUND_FLOOR) * granularity
+    above = (value / granularity).to_integral_value(ROUND_CEILING) * granularity
+    return (
+        f"{owner}: quality value {value} is not an exact multiple of the "
+        f"granularity {granularity}; nearest aligned values are {below} and {above}. "
+        f"Range endpoints are attempted verbatim by the quality search, so they "
+        f"must sit on the granularity grid."
+    )
+
+
 class CodecConfig(BaseModel):
     """Configuration for a video codec.
 
@@ -368,6 +403,22 @@ class CodecConfig(BaseModel):
                 f"Codec '{self.name}': default_preset '{self.default_preset}' "
                 f"is not in the presets list {self.presets}."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_range_endpoint_alignment(self) -> Self:
+        """Require both ``quality_range`` endpoints on the granularity grid.
+
+        Raises:
+            ValueError: If either endpoint is not an exact multiple of
+                ``quality_granularity``.
+        """
+        for endpoint in self.quality_range:
+            error = quality_alignment_error(
+                endpoint, self.quality_granularity, f"Codec '{self.name}' quality_range",
+            )
+            if error is not None:
+                raise ValueError(error)
         return self
 
     @property

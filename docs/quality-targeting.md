@@ -160,7 +160,7 @@ How to read it for tuning:
 By default the quality search explores the full range declared on the codec — e.g. CRF 6–30 for h.265. For most content that's fine. But you may want tighter control:
 
 - **Avoid extreme values.** CRF 6 on h.265 produces enormous files. Constraining to CRF 12–24 keeps the search focused.
-- **Pin to a single CRF.** Setting `min == max` skips quality search entirely — the encoder runs once at that value, but retains quality of resumability.
+- **Pin the knob for a run.** The `-q` CLI override (see [Fixed-quality mode](#fixed-quality-mode-q)) pins the knob without touching the config; a collapsed `quality_range` profile is the legacy config-side equivalent.
 - **Per-content tuning.** Film grain, anime, and clean CGI converge at different CRF bands. A narrowed profile encodes more predictably for a specific type of content.
 
 ### Adding a local profile with a range override
@@ -176,7 +176,7 @@ profiles:
     quality_range: [12.0, 24.0]   # narrows the codec's default [6.0, 30.0]
 
   h265-anime:                # OVERRIDING an existing profile — only add what changes
-    quality_range: [18.0, 18.0]
+    quality_range: [18.0, 18.0]   # collapsed range — legacy fixed-knob form; prefer -q 18
 ```
 
 Then use it:
@@ -190,5 +190,74 @@ pyqenc auto movie.mkv --strategies "h265*" -y   # picks up any overridden h265 p
 
 - The profile range must be a **subset** of the codec's declared range — only narrowing is allowed. A range that extends beyond the codec's bounds raises a `ValidationError` at startup.
 - Direction is preserved: for CRF/CQ/QP codecs `[better, worse]` means `[low_crf, high_crf]`; for VBR codecs it means `[high_bitrate, low_bitrate]`.
-- A pinned value (`min == max`) skips quality search but not the pipeline — chunking, resumption, and merge still work normally.
+- Both endpoints must be exact multiples of the codec's `quality_granularity` — the search can attempt a range boundary verbatim, so a misaligned endpoint would reach the encoder unquantized.
+- A pinned value (`min == max`) skips quality search but not the pipeline — chunking, resumption, and merge still work normally. This is the legacy form of a fixed run; `-q <value>` is the ergonomic path.
 - To affect all profiles that share a codec, override `quality_range` under `codecs:` instead of under `profiles:`. The profile-level override is preferable when you want per-profile control without changing the shared codec definition.
+
+## Fixed-quality mode (`-q`)
+
+The second operating mode: pin the quality knob (CRF/CQ/QP, or Mbit/s for the
+VBR-labelled codec) to a known value and encode, using pyqenc for chunking,
+resumability and measurement — not for search.
+
+```sh
+pyqenc auto movie.mkv -q 18 -y                       # pin every matched strategy at 18
+pyqenc auto movie.mkv -q 18:24 -y                    # constrain the search band (order-free: 24:18 works too)
+pyqenc auto movie.mkv -q 18 -y --strategies "h265-aq+ultrafast,h264+ultrafast"
+```
+
+The pair separators `:`, `-` and `..` are all accepted (`18:24`, `18-24`,
+`18..24`). The override applies uniformly to every matched strategy and
+replaces any profile-level `quality_range` (precedence: CLI > profile > codec
+bounds); it must stay within each codec's range, and every endpoint must sit
+on each matched codec's granularity grid (`-q 18.5` with an integer-step
+codec such as AV1 fails at startup naming the nearest aligned values).
+
+### What changes in a fixed run
+
+- **The mode is derived, never declared.** A run is fixed iff every resolved
+  strategy's effective range is a single point. A collapsed config profile
+  and `-q 18` are the same thing through one door; mixing collapsed and
+  ranged strategies stops loudly before any phase runs.
+- **One attempt per chunk.** The per-chunk quality search is disabled — each
+  chunk encodes exactly once at the pinned value and is accepted
+  unconditionally. Resumability is untouched: attempts are keyed by
+  crf-embedded filenames as always.
+- **A WARNING banner** declares what a fixed run does not guarantee: strategy
+  sizes are compared at *nominally* equal knob, and knob scales are **not**
+  comparable across encoder families (h264 CRF ≠ h265 CRF ≠ AV1 CRF). The
+  merged-output measurement remains the final check.
+- **Compared runs (optimization on, multiple strategies):** strictly-dominated
+  strategies (bigger **and** no better on any measured metric) are pruned;
+  every **survivor** is fully encoded — no auto-pick, no composite score.
+  The smallest survivor becomes the measurement **anchor**: its min-across-
+  test-chunks metrics form a synthetic ruler against which the other
+  survivors are shown as size and metric deltas in the optimization table.
+  Single-strategy runs and `--no-optimize` skip this machinery entirely.
+- **Cleanup is blocked.** A fixed run with `--cleanup` (level INTERMEDIATE or
+  above) hard-stops before any work: attempts in `encoding/` are the
+  re-derivation substrate for fixed re-runs, and cleanup would delete them —
+  winners alone cannot re-derive after a value change or interruption.
+
+### Iterating on the value
+
+"Try CRF 18, look, adjust, re-run on the same work dir" costs only the new
+encodes. Every fixed start wipes the winner layer (`encoded/`) wholesale and
+re-derives it from the attempt workspace — nothing about the fixed value is
+persisted. Merged outputs carry the knob in their name
+(`<movie> <strategy> CRF=18.0.mkv` — label + value quantized to the
+strategy's granularity), so switching to `-q 20` merges fresh outputs
+while your q18 results stay on disk untouched:
+
+```sh
+pyqenc auto movie.mkv -q 18 -y    # encode at 18
+pyqenc auto movie.mkv -q 18 -y    # re-run: near-zero work (re-promotion from attempts)
+pyqenc auto movie.mkv -q 20 -y    # new value: only the crf-20 encodes run;
+                                  # crf-18 attempts stay on disk, unwanted but intact
+```
+
+Configuration targets do not drive any decision or verdict in a fixed run —
+encoding presentation judges winners against the anchor's synthetic ruler
+(the anchor's min-across-test-chunk p10 and median values per metric;
+compared runs) or shows absolute values (uncompared runs), and the merged
+phase suppresses the config-target missed-targets warning.

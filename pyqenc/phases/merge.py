@@ -56,6 +56,7 @@ from pyqenc.phases.audio import AudioPhase
 from pyqenc.phases.encoding import EncodingPhase
 from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
+from pyqenc.phases.optimization import OptimizationPhase
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.quality import flatten_metric_stats
 from pyqenc.state import MergeParams, MergeStrategySummary, ProbeState
@@ -68,6 +69,7 @@ from pyqenc.utils.log_format import (
     fmt_size_mb,
 )
 from pyqenc.utils.long_path import LongPath
+from pyqenc.utils.naming import sanitize_filesystem_text
 from pyqenc.utils.visualization import QualityEvaluator, create_crf_plot
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
@@ -147,8 +149,15 @@ class MergePhase(Phase[MergePhaseResult]):
     _NS_PER_SECOND       = 1_000_000_000
     _MKVPROPEDIT_VIDEO_TRACK = "track:v1"
     _OUTPUT_SUFFIX       = ".mkv"
+    # Declaration order is the dependency-walk order: audio runs as early as
+    # its own dependencies allow (right after extraction, before the probe)
+    # so the fast audio result is available long before the slow encode work.
+    # Optimization is a declared (direct) dependency because the fixed-run
+    # ruler and anchor flow from its result; it is transitively guaranteed
+    # via Encoding anyway.
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (
-        JobPhase, ExtractionPhase, ProbePhase, EncodingPhase, AudioPhase,
+        JobPhase, ExtractionPhase, AudioPhase, ProbePhase, OptimizationPhase,
+        EncodingPhase,
     )
     _METRIC_KEY: MetricKey = MetricKey.MERGE
 
@@ -169,12 +178,21 @@ class MergePhase(Phase[MergePhaseResult]):
     def params(self) -> MergeParams:
         """Current merge params derived from the job result config and probe result.
 
-        Built at runtime from ``self._dep_result(JobPhase)`` and ``self._dep_result(ProbePhase)``
-        so the values are always current (e.g. after CLI overrides) rather than
-        snapshotted at construction time.
+        Built at runtime from ``self._dep_result(JobPhase)`` and
+        ``self._dep_result(ProbePhase)`` so the values are always current
+        (e.g. after CLI overrides) rather than snapshotted at construction
+        time. The invalidation key is mode-honest: search runs carry the
+        configured quality targets; fixed runs carry the ruler basis (the
+        optimization anchor) — config targets drive nothing in fixed mode.
         """
         probe = ProbeState.from_probe(self._dep_result(ProbePhase))
         job_result = self._dep_result(JobPhase)
+        if job_result.config.encoding.fixed_quality:
+            return MergeParams(
+                anchor   = self._dep_result(OptimizationPhase).anchor,
+                sampling = job_result.config.measurement.sampling,
+                probe    = probe,
+            )
         return MergeParams(
             quality_targets  = targets_as_strings(job_result.config.encoding.resolved_targets),
             sampling = job_result.config.measurement.sampling,
@@ -251,22 +269,35 @@ class MergePhase(Phase[MergePhaseResult]):
             merge_yaml.unlink(missing_ok=True)
             logger.debug("force_wipe: deleted %s", merge_yaml)
 
-        # Step 2: quality-target / metrics_sampling change detection.
-        # When params change, delete all per-output sidecars so every row
-        # is reclassified as PARTIAL and the merge re-runs with fresh metrics.
+        # Step 2: invalidation-key change detection. Only the declared keys
+        # are compared — never whole-model equality (replay fields would
+        # perpetually break it). Mode-honest keys: search → configured
+        # quality targets; fixed → the ruler basis (anchor identity). When a
+        # key changes, delete all per-output sidecars so every row is
+        # reclassified as PARTIAL and the merge re-runs with fresh metrics.
         if not force_wipe and merged_dir.exists():
             persisted = MergeParams.load(merge_yaml)
-            if persisted is not None and persisted != self.params:
-                targets_changed  = bool(persisted.quality_targets) and persisted.quality_targets != self.params.quality_targets
-                sampling_changed = persisted.sampling is not None and persisted.sampling != self.params.sampling
+            if persisted is not None:
+                current  = self.params
+                fixed    = self._config.encoding.fixed_quality
+                key_changed     = (
+                    persisted.anchor != current.anchor
+                    if fixed else
+                    bool(persisted.quality_targets) and persisted.quality_targets != current.quality_targets
+                )
+                sampling_changed = (
+                    persisted.sampling is not None
+                    and persisted.sampling != current.sampling
+                )
                 probe_changed    = (
                     persisted.probe is not None
-                    and persisted.probe != self.params.probe
+                    and persisted.probe != current.probe
                 )
-                if targets_changed or sampling_changed:
+                key_label = "ruler anchor" if fixed else "quality targets"
+                if key_changed or sampling_changed:
                     logger.info(
                         "Merge params changed (%s) — deleting merge sidecars to re-measure quality",
-                        "quality targets" if targets_changed else "sampling",
+                        key_label if key_changed else "sampling",
                     )
                     for sidecar in merged_dir.glob("*.yaml"):
                         try:
@@ -279,7 +310,7 @@ class MergePhase(Phase[MergePhaseResult]):
                     logger.warning(
                         "Probe params changed since last merge run "
                         "(persisted=%s, current=%s) — deleting merge artifacts to re-merge",
-                        persisted.probe, self.params.probe,
+                        persisted.probe, current.probe,
                     )
                     if merged_dir.exists():
                         shutil.rmtree(merged_dir)
@@ -301,13 +332,15 @@ class MergePhase(Phase[MergePhaseResult]):
             return Recovery()
 
         source_stem = job_result.source.stem
+        pinned = MergePhase._uniform_pinned_quality(strategies)
 
         # Step 5: classify each expected output — the output name derives at
         # the single site from File.path.stem + the strategy's safe name.
         rows: list[Artifact] = []
         expected_names: set[str] = set()
         for strategy in strategies:
-            output_file = MergePhase._expected_output_path(merged_dir, source_stem, strategy)
+            q_suffix = MergePhase._q_suffix(strategy, pinned) if pinned is not None else ""
+            output_file = MergePhase._expected_output_path(merged_dir, source_stem, strategy, q_suffix)
             expected_names.add(output_file.name)
             sidecar = MergePhase._load_merge_sidecar(output_file)
 
@@ -378,15 +411,33 @@ class MergePhase(Phase[MergePhaseResult]):
 
         return Recovery.from_artifacts(rows)
 
+    def _summary_rendered_keys(self) -> set[str]:
+        """Metric keys the summary table renders — what summaries persist.
+
+        The current renderer judges and displays the configured quality
+        targets in both modes (the anchor-relative table is the unified-
+        summaries spec's work), so the rendered set is the target-key set.
+        """
+        return {
+            f"{t.metric}_{t.statistic}"
+            for t in self._config.encoding.resolved_targets
+        }
+
     def _reused_result(self, wanted: list[Artifact], message: str) -> MergePhaseResult:
         """Build the reused result, replaying the persisted merge summary."""
-        merge_yaml = self._dep_result(JobPhase).work_dir / MergePhase.SIDECAR_NAME
+        job_result = self._dep_result(JobPhase)
+        merge_yaml = job_result.work_dir / MergePhase.SIDECAR_NAME
         persisted  = MergeParams.load(merge_yaml)
         if persisted is not None:
             logger.info(THICK_LINE)
             logger.info("MERGE SUMMARY")
             logger.info(THICK_LINE)
-            MergePhase._log_merge_summary_from_params(persisted, self._config.encoding.resolved_targets)
+            MergePhase._log_merge_summary_from_params(
+                params          = persisted,
+                quality_targets = self._config.encoding.resolved_targets,
+                source_stem     = job_result.source.stem,
+                source_size_bytes = safe_stat_size(job_result.source) or 0,
+            )
         return self._make_result(PhaseOutcome.REUSED, wanted, message)
 
     def _make_result(
@@ -458,6 +509,10 @@ class MergePhase(Phase[MergePhaseResult]):
         # Build encoded_chunks dict from EncodingPhase result
         encoded_chunks = self._collect_encoded_chunks()
 
+        pinned = MergePhase._uniform_pinned_quality(
+            [a.payload.strategy for a in rows],
+        )
+
         final_rows: list[Artifact[MergedVideo]] = []
         failed_strategies: list[str] = []
 
@@ -471,7 +526,8 @@ class MergePhase(Phase[MergePhaseResult]):
                 continue
 
             # The merge output name derives at the single site.
-            output_file = MergePhase._expected_output_path(merged_dir, source_stem, strategy)
+            q_suffix = MergePhase._q_suffix(strategy, pinned) if pinned is not None else ""
+            output_file = MergePhase._expected_output_path(merged_dir, source_stem, strategy, q_suffix)
             assert output_file == payload.output_path, "recovery derived the same location"
 
             try:
@@ -548,6 +604,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 # Write sidecar (marks this output as COMPLETE)
                 self._write_merge_sidecar(
                     output_file = output_file,
+                    strategy    = strategy,
                     frame_count = frame_count,
                     all_metrics = metrics_dict,
                     targets_met = targets_met,
@@ -589,9 +646,11 @@ class MergePhase(Phase[MergePhaseResult]):
         logger.info(THICK_LINE)
         if failed_strategies:
             logger.error("  Failed strategies: %s", ", ".join(failed_strategies))
+        rendered_keys = self._summary_rendered_keys()
         _, strategy_summaries = MergePhase._build_strategy_summaries(
             final_rows,
             source_stream.stream.file.path,
+            rendered_keys,
         )
         MergePhase._log_merge_summary(
             summaries         = strategy_summaries,
@@ -603,19 +662,21 @@ class MergePhase(Phase[MergePhaseResult]):
         if failed_strategies and not final_rows:
             return self._make_result(PhaseOutcome.FAILED, [], "All strategy merges failed")
 
-        # Persist merge params (with summary) so quality-target / sampling changes are
+        # Persist merge params (with summary) so invalidation-key changes are
         # detected next run and the summary table can be replayed on rerun.
+        # Replay-only facts (source stem/size) render live from JobPhase and
+        # are not persisted.
         if complete_count > 0:
-            source_size_bytes, strategy_summaries = MergePhase._build_strategy_summaries(
+            _, strategy_summaries = MergePhase._build_strategy_summaries(
                 final_rows,
                 source_stream.stream.file.path,
+                rendered_keys,
             )
             MergeParams(
                 quality_targets    = self.params.quality_targets,
                 sampling           = self.params.sampling,
                 probe              = self.params.probe,
-                source_stem        = source_stem,
-                source_size_bytes  = source_size_bytes,
+                anchor             = self.params.anchor,
                 strategy_summaries = strategy_summaries,
             ).save(self._dep_result(JobPhase).work_dir / MergePhase.SIDECAR_NAME)
 
@@ -765,13 +826,60 @@ class MergePhase(Phase[MergePhaseResult]):
 
 
     @staticmethod
-    def _expected_output_path(merged_dir: Path, source_stem: str, strategy: Strategy) -> Path:
+    def _expected_output_path(
+        merged_dir:  Path,
+        source_stem: str,
+        strategy:    Strategy,
+        q_suffix:    str = "",
+    ) -> Path:
         """The merged output location — the single derivation site.
 
-        ``<file stem> <strategy.safe_name()>.mkv`` below ``merged/``; names are
-        safe by construction.
+        ``<file stem> <strategy.safe_name()>[ <label>=<value>].mkv`` below
+        ``merged/``; names are safe by construction. *q_suffix* carries the
+        fixed-run pinned-value suffix (see :meth:`_q_suffix`) —
+        identity-based invalidation so a pinned-q output never collides with
+        a search-mode output or another q value.
         """
-        return merged_dir / f"{source_stem} {strategy.safe_name()}{MergePhase._OUTPUT_SUFFIX}"
+        return merged_dir / f"{source_stem} {strategy.safe_name()}{q_suffix}{MergePhase._OUTPUT_SUFFIX}"
+
+    @staticmethod
+    def _uniform_pinned_quality(strategies: list[Strategy]) -> Decimal | None:
+        """The run's pinned quality value when every strategy pins the same one.
+
+        A uniform pinned value (the ``-q`` case) enables the suffixed output
+        naming — switching q or mode then produces a different output name,
+        so the stale merge is never reused and same-q reruns keep theirs (no
+        blind wipes; measurements survive). Searched runs and mixed-value
+        fixed runs (collapsed profiles of different values) get ``None`` —
+        their general invalidation is TODO §86.
+        """
+        collapsed = [
+            s for s in strategies
+            if s.codec.quality_better == s.codec.quality_worse
+        ]
+        if not collapsed or len(collapsed) != len(strategies):
+            return None
+        values = {s.codec.quality_better for s in collapsed}
+        if len(values) != 1:
+            return None
+        return values.pop()
+
+    @staticmethod
+    def _q_suffix(strategy: Strategy, pinned: Decimal) -> str:
+        """The per-strategy pinned-knob suffix: ``" CRF=18.0"``.
+
+        The label is the strategy's own (sanitized — labels like ``Mbit/s``
+        must land filesystem-safe), and the value is quantized to the
+        strategy's granularity: each output belongs to exactly one strategy,
+        so its name carries that strategy's rendering — and the quantized
+        form keeps the spelling uniform across runs (``-q 18`` and ``-q 17.5``
+        at 0.5 granularity become ``CRF=18.0`` and ``CRF=17.5``, never
+        ``CRF=18`` vs ``CRF=17.5``). Identical settings always produce
+        identical names, whatever Decimal spelling declared them.
+        """
+        label = sanitize_filesystem_text(strategy.codec.quality_label)
+        quantized = pinned.quantize(strategy.codec.quality_granularity)
+        return f" {label}={quantized}"
 
     @staticmethod
     def _tmp_output_path(output_file: Path) -> Path:
@@ -808,12 +916,18 @@ class MergePhase(Phase[MergePhaseResult]):
     def _build_strategy_summaries(
         rows:              list[Artifact[MergedVideo]],
         source_video_path: Path | None,
+        rendered_keys:     set[str],
     ) -> tuple[int, list[MergeStrategySummary]]:
         """Build per-strategy summary rows and source size from complete rows.
+
+        Summary metrics carry ONLY the stats the summary table renders — the
+        phase sidecar is a presentation surface (full measured stats live on
+        the per-video sidecars, the re-measure-avoidance record).
 
         Args:
             rows:              The merged-output rows (complete ones are summarized).
             source_video_path: Path to the source video for size capture; ``None`` if unavailable.
+            rendered_keys:     Metric keys the summary table displays; others are dropped.
 
         Returns:
             Tuple of ``(source_size_bytes, strategy_summaries)``.
@@ -832,7 +946,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 strategy_name   = payload.strategy.display_name(),
                 output_path     = payload.output_path,
                 file_size_bytes = safe_stat_size(payload.output_path) or 0,
-                metrics         = payload.metrics,
+                metrics         = {k: v for k, v in payload.metrics.items() if k in rendered_keys},
                 targets_met     = payload.targets_met,
             ))
         return source_size, summaries
@@ -840,6 +954,7 @@ class MergePhase(Phase[MergePhaseResult]):
     def _write_merge_sidecar(
         self,
         output_file:  Path,
+        strategy:     Strategy,
         frame_count:  int | None,
         all_metrics:  dict[str, float],
         targets_met:  bool,
@@ -847,27 +962,39 @@ class MergePhase(Phase[MergePhaseResult]):
     ) -> None:
         """Atomically write a merge sidecar alongside *output_file*.
 
-        Only metrics for user-requested quality targets are persisted.
-        Quality target values are written before measured metrics so the user
-        can directly compare target vs. actual in the YAML.
-        Keys use ``{metric}-{statistic}`` form (e.g. ``vmaf-min``) matching the CLI convention.
+        Content is mode-honest. Search runs: the configured ``targets``
+        block, target-filtered metrics, and the target verdict — target vs.
+        actual comparable in the YAML (``{metric}-{statistic}`` keys, CLI
+        convention). Fixed runs: the pinned knob (label + value — parseable;
+        the filename carries it for humans only) and the ruler basis (anchor
+        identity) instead of a config-targets block, with the FULL measured
+        metrics as the re-measure-avoidance record — a re-merged output
+        never needs re-measuring for a future stat set.
         """
-        quality_targets = self._config.encoding.resolved_targets
-        targets_section = {f"{t.metric}-{t.statistic}": t.value for t in quality_targets}
-        # Only the user-requested targets' metrics; values coerced to plain Python
-        # ``float`` to avoid numpy scalar serialisation artefacts.
-        metrics_section = {
-            f"{t.metric}-{t.statistic}": float(all_metrics[f"{t.metric}_{t.statistic}"])
-            for t in quality_targets
-            if f"{t.metric}_{t.statistic}" in all_metrics
-        }
-
-        data: dict = {
-            "frame_count":   frame_count,
-            "targets_met":   targets_met,
-            "targets":       targets_section,
-            "metrics":       metrics_section,
-        }
+        data: dict = {"frame_count": frame_count}
+        if self._config.encoding.fixed_quality:
+            pinned = MergePhase._uniform_pinned_quality([strategy])
+            data["quality"] = {
+                "label": strategy.codec.quality_label,
+                "value": float(
+                    pinned.quantize(strategy.codec.quality_granularity)
+                ) if pinned is not None else None,
+            }
+            data["anchor"]  = self._dep_result(OptimizationPhase).anchor
+            data["metrics"] = {k: float(v) for k, v in all_metrics.items()}
+        else:
+            quality_targets = self._config.encoding.resolved_targets
+            data["targets_met"] = targets_met
+            data["targets"]     = {
+                f"{t.metric}-{t.statistic}": t.value for t in quality_targets
+            }
+            # Only the user-requested targets' metrics; values coerced to plain
+            # Python ``float`` to avoid numpy scalar serialisation artefacts.
+            data["metrics"] = {
+                f"{t.metric}-{t.statistic}": float(all_metrics[f"{t.metric}_{t.statistic}"])
+                for t in quality_targets
+                if f"{t.metric}_{t.statistic}" in all_metrics
+            }
         if plot_path is not None:
             data["plot"] = str(plot_path)
         try:
@@ -949,11 +1076,16 @@ class MergePhase(Phase[MergePhaseResult]):
         place a missed target is escalated to warning level so the reason is
         immediately visible where the merge happened.
 
+        Suppressed on fixed-quality runs: the config targets are search-tuned
+        vocabulary and would read as all-miss noise at a pinned knob — the
+        merged-output measurement itself remains the final check.
+
         Args:
             strategy_name:   The merged strategy.
             metrics_dict:    Measured metrics keyed by ``"{metric}_{statistic}"``.
-            quality_targets: The targets that were checked.
         """
+        if self._config.encoding.fixed_quality:
+            return
         missed: list[str] = []
         for target in self._config.encoding.resolved_targets:
             value = metrics_dict.get(f"{target.metric}_{target.statistic}")
@@ -1079,18 +1211,24 @@ class MergePhase(Phase[MergePhaseResult]):
 
     @staticmethod
     def _log_merge_summary_from_params(
-        params:          MergeParams,
-        quality_targets: list[QualityTarget],
+        params:            MergeParams,
+        quality_targets:   list[QualityTarget],
+        source_stem:       str,
+        source_size_bytes: int,
     ) -> None:
         """Replay the merge summary table from persisted ``MergeParams``.
 
         Delegates to ``_log_merge_summary`` over the persisted summary rows.
         Called on the REUSED path so the user sees the same table as on the
-        original run.
+        original run. The source row renders live from the JobPhase result —
+        replay-only facts are not persisted (Req 6.5, unified-summaries
+        spec).
 
         Args:
-            params:          Loaded ``MergeParams`` from ``merge.yaml``.
-            quality_targets: Current quality targets (for miss-detail rendering).
+            params:            Loaded ``MergeParams`` from ``merge.yaml``.
+            quality_targets:   Current quality targets (for miss-detail rendering).
+            source_stem:       Source filename stem (live from the job result).
+            source_size_bytes: Source size in bytes (live from the job result).
         """
         if not params.strategy_summaries:
             logger.info("  No summary data saved — re-run to generate.")
@@ -1098,8 +1236,8 @@ class MergePhase(Phase[MergePhaseResult]):
 
         MergePhase._log_merge_summary(
             summaries         = params.strategy_summaries,
-            source_stem       = params.source_stem,
-            source_size_bytes = params.source_size_bytes,
+            source_stem       = source_stem,
+            source_size_bytes = source_size_bytes,
             quality_targets   = quality_targets,
             metrics_sampling  = params.sampling or 1,
         )

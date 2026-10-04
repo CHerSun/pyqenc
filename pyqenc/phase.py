@@ -283,16 +283,17 @@ class Phase[ResultT: PhaseResult](ABC):
                  and ``.result`` then carry the concrete type with no casts,
                  overloads, or base-module imports (no circular dependencies).
 
-    The single concrete ``run()`` owns the run footprint shared by every
-    phase, in exact order: memoization guard → ``_skip_check()`` → dependency
-    resolution → banner → timed ``_recover()`` → dry-run / no-pending
-    branches → timed ``_execute(wanted, dry_run)``. The template never
-    decides ``COMPLETED`` / ``FAILED`` and never computes per-phase payloads —
-    those live in the mandatory abstract methods (``_recover``, ``_execute``,
-    ``_make_result`` — every concrete phase implements all three) and the
-    optional hooks (``_skip_check``, ``_reused_result``, ``_log_key_params``,
-    ``_recovery_unit`` — base defaults); timing, banner, guards, and the
-    wanted-filter exist exactly once, here.
+        The single concrete ``run()`` owns the run footprint shared by every
+        phase, in exact order: memoization guard → dependency resolution →
+        ``_skip_check()`` → banner → timed ``_recover()`` → dry-run /
+        no-pending branches → timed ``_execute(wanted, dry_run)``. The
+        template never decides ``COMPLETED`` / ``FAILED`` and never computes
+        per-phase payloads — those live in the mandatory abstract methods
+        (``_recover``, ``_execute``, ``_make_result`` — every concrete phase
+        implements all three) and the optional hooks (``_skip_check``,
+        ``_reused_result``, ``_log_key_params``, ``_recovery_unit`` — base
+        defaults); timing, banner, guards, and the wanted-filter exist
+        exactly once, here.
 
     Class attributes:
         name:              Human-readable phase name (logs, banners, summary).
@@ -416,17 +417,19 @@ class Phase[ResultT: PhaseResult](ABC):
         if self.result is not None:
             return self.result
 
-        # 2. Phase-specific skip (config-only decision; no banner).
-        skip = self._skip_check(dry_run)
-        if skip is not None:
-            self.result = skip
-            return self.result
-
-        # 3. Dependencies: FAILED deps chain FAILED (one ERROR line), PENDING
-        #    deps (dry-run only) chain PENDING (one INFO line). No banner.
+        # 2. Dependencies first: FAILED deps chain FAILED (one ERROR line),
+        #    PENDING deps (dry-run only) chain PENDING (one INFO line). No
+        #    banner. Resolving deps before the skip check means every hook
+        #    below — skip included — may read dependency results freely.
         dep_result = self._ensure_dependencies(dry_run=dry_run)
         if dep_result is not None:
             self.result = dep_result
+            return self.result
+
+        # 3. Phase-specific skip (config + dependency state; no banner).
+        skip = self._skip_check(dry_run)
+        if skip is not None:
+            self.result = skip
             return self.result
 
         # 4./5. Phase-intro separator (once, after deps) and key-parameter
@@ -567,13 +570,13 @@ class Phase[ResultT: PhaseResult](ABC):
     # ------------------------------------------------------------------
 
     def _skip_check(self, dry_run: bool) -> ResultT | None:
-        """Phase-specific skip decision made before the template resolves deps.
+        """Phase-specific skip decision, made after dependencies resolved.
 
-        Must decide from constructor state (config) only. When the skip path
-        itself needs dependency state (e.g. a work_dir for bookkeeping), it
-        calls ``self._ensure_dependencies`` itself — the template's step 3 is
-        skipped when a skip result is returned, and dependency results are
-        memoized, so this is safe. No banner is emitted on this path.
+        Dependencies are already run (and their results cached) when this
+        hook executes — the hook may read ``self._dep_result(...)`` freely.
+        The decision itself still reads constructor state (config) plus
+        dependency results; no banner is emitted on this path, and returning
+        a result short-circuits before recovery/execution.
 
         Args:
             dry_run: The run's dry-run flag (skip bookkeeping may skip writes).
@@ -707,17 +710,21 @@ def _build_registry(
     The registry is a plain ``dict`` keyed by phase *class* (not instance),
     preserving insertion order (Python 3.7+).
 
-    When ``video_required=True`` (default, all video subcommands), execution
-    order matches the full pipeline dependency graph:
+    When ``video_required=True`` (default, all video subcommands), the
+    registry contains the full video dependency graph. Insertion order
+    follows construction; EXECUTION order for a merge-target run is the
+    depth-first walk of ``DEPENDS_ON`` tuples:
 
     1. ``JobPhase``          — no dependencies
     2. ``ExtractionPhase``   — depends on Job
-    3. ``ProbePhase``        — depends on Job, Extraction
-    4. ``AudioPhase``        — depends on Job, Extraction
+    3. ``AudioPhase``        — depends on Job, Extraction (declared early by
+                               Merge so the fast audio result lands before
+                               the slow probe/encode work)
+    4. ``ProbePhase``        — depends on Job, Extraction
     5. ``ChunkingPhase``     — depends on Job, Probe
     6. ``OptimizationPhase`` — depends on Job, Probe, Chunking
     7. ``EncodingPhase``     — depends on Job, Probe, Chunking, Optimization
-    8. ``MergePhase``        — depends on Job, Probe, Encoding, Audio
+    8. ``MergePhase``        — depends on Job, Extraction, Audio, Probe, Encoding
 
     When ``video_required=False`` (``audio`` subcommand), ``ProbePhase`` is
     omitted from the registry:

@@ -23,11 +23,13 @@ from typing import TYPE_CHECKING, ClassVar
 import yaml
 
 from pyqenc.constants import (
+    APPROXIMATE_INDICATOR_SYMBOL,
     BRACKET_LEFT,
     BRACKET_RIGHT,
     ENCODED_ATTEMPT_NAME_PATTERN,
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
+    FAILURE_SYMBOL_MAJOR,
     FAILURE_SYMBOL_MINOR,
     METRIC_KEY_QUALITY_MEASURE,
     NEUTRAL_INDICATOR_SYMBOL,
@@ -578,6 +580,7 @@ class ChunkEncoder:
         visual_hash:       bool              = True,
         metrics_sampling:  int               = 3,
         metric_prefix:     MetricKey         = MetricKey.ENCODING,
+        measure_attempts:  bool              = True,
     ):
         """Initialize chunk encoder.
 
@@ -597,6 +600,13 @@ class ChunkEncoder:
                                EncodingPhase uses the default (``encoding``);
                                OptimizationPhase passes ``optimization`` so its test
                                encodes are attributed to the owning phase.
+            measure_attempts:  When ``True`` (default) every encoded attempt gets a
+                               quality evaluation. When ``False``, attempts are
+                               encoded and promoted without measurement — the seam
+                               exists for measurement cost control (TODO §83 owns
+                               default-flipping and the metrics-absence tolerance);
+                               callers exercising it must run a single-point quality
+                               domain where the search never consumes metrics.
         """
         self.quality_evaluator = quality_evaluator
         self.work_dir          = work_dir
@@ -606,6 +616,7 @@ class ChunkEncoder:
         self._visual_hash      = visual_hash
         self._metrics_sampling = metrics_sampling
         self._metric_prefix    = metric_prefix
+        self._measure_attempts = measure_attempts
 
     def _get_output_dir(self, strategy: Strategy) -> Path:
         """Get the CRF search workspace directory for *strategy*.
@@ -921,6 +932,11 @@ class ChunkEncoder:
         encode run, or carried from the attempt sidecar on a cache hit /
         re-measure; 0 = could not be determined).  Feeds the winner sidecar
         and the result's frame_count."""
+        all_metrics_by_path: dict[Path, dict[str, float]] = {}
+        """Attempt file path → its full measured metrics (every metric, not
+        target-filtered) — same data the attempt sidecar persists.  Feeds the
+        winner result sidecar, whose metrics contract is "all measured
+        metric values of the winning attempt"."""
         _any_real_work: bool                       = False
 
         while True:
@@ -983,6 +999,7 @@ class ChunkEncoder:
                         all_sidecar_metrics: dict[str, float] = {
                             k: float(v) for k, v in sidecar.get("metrics", {}).items()
                         }
+                        all_metrics_by_path[existing.path] = all_sidecar_metrics
                         targets_set_reused = {f"{t.metric}_{t.statistic}" for t in quality_targets}
                         metrics_dict: dict[str, float] = {
                             k: v for k, v in all_sidecar_metrics.items() if k in targets_set_reused
@@ -1012,10 +1029,11 @@ class ChunkEncoder:
                         elif not search.best_targets_met and search.best_quality == existing.crf:
                             best_fail_attempt = existing
 
+                        summary_suffix = f" ({metric_summary})" if metric_summary else ""
                         logger.info(
                             fmt_chunk_attempt_result(
                                 strategy.display_name(), chunk.safe_name(), attempt_number,
-                                f"{pass_fail} with {strategy.codec.quality_label} {str(existing.crf).rjust(strategy.codec.quality_log_padding)} ({metric_summary}){best_string} [reused]",
+                                f"{pass_fail} with {strategy.codec.quality_label} {str(existing.crf).rjust(strategy.codec.quality_log_padding)}{summary_suffix}{best_string} [reused]",
                                 self._visual_hash,
                             )
                         )
@@ -1111,25 +1129,31 @@ class ChunkEncoder:
             assert output_file is not None
 
             # Evaluate quality — raw metric logs/stats go into a per-attempt subfolder;
-            # the plot and YAML sidecar stay next to the .mkv.
-            with self._collector.time(self._metric_prefix, METRIC_KEY_QUALITY_MEASURE):
-                evaluation = self.quality_evaluator.evaluate_chunk(
-                    encoded              = output_file,
-                    reference            = chunk.as_input(),
-                    ref_crop             = self._crop_params or CropParams(),
-                    targets              = quality_targets,
-                    output_dir           = output_file.parent,
-                    duration_seconds     = chunk.duration_seconds,
-                    fps_value            = chunk.stream.stream.info.fps_fraction,
-                    subsample_factor     = self._metrics_sampling,
-                    plot_path            = output_file.parent / f"{output_file.stem}.png",
-                    chunk_start_seconds  = chunk.start_timestamp,
-                )
+            # the plot and YAML sidecar stay next to the .mkv. The measure_attempts
+            # seam off-path (TODO §83) skips evaluation entirely: no metrics, no
+            # verdict — single-point domains accept the attempt unconditionally.
+            if self._measure_attempts:
+                with self._collector.time(self._metric_prefix, METRIC_KEY_QUALITY_MEASURE):
+                    evaluation = self.quality_evaluator.evaluate_chunk(
+                        encoded              = output_file,
+                        reference            = chunk.as_input(),
+                        ref_crop             = self._crop_params or CropParams(),
+                        targets              = quality_targets,
+                        output_dir           = output_file.parent,
+                        duration_seconds     = chunk.duration_seconds,
+                        fps_value            = chunk.stream.stream.info.fps_fraction,
+                        subsample_factor     = self._metrics_sampling,
+                        plot_path            = output_file.parent / f"{output_file.stem}.png",
+                        chunk_start_seconds  = chunk.start_timestamp,
+                    )
+                all_metrics         = flatten_metric_stats(evaluation.metrics)
+                attempt_targets_met = evaluation.targets_met
+            else:
+                all_metrics         = {}
+                attempt_targets_met = True
 
             # Collect ALL measured metrics (not filtered to current targets) for the sidecar
             # so the quality history is reusable when quality targets change.
-            all_metrics = flatten_metric_stats(evaluation.metrics)
-
             # Targeted metrics subset (for search and convergence decisions).
             targets_set  = {f"{t.metric}_{t.statistic}" for t in quality_targets}
             metrics_dict = {k: v for k, v in all_metrics.items() if k in targets_set}
@@ -1137,8 +1161,9 @@ class ChunkEncoder:
             # Record the final path's count (post resolution-correction rename)
             # and write the per-attempt metrics sidecar atomically.
             frame_counts[output_file] = attempt_frames
+            all_metrics_by_path[output_file] = all_metrics
             _write_metrics_sidecar(
-                output_file, evaluation.targets_met, current_q, all_metrics,
+                output_file, attempt_targets_met, current_q, all_metrics,
                 self._metrics_sampling, attempt_frames,
             )
 
@@ -1170,13 +1195,14 @@ class ChunkEncoder:
             )
             pass_fail      = (
                 f"{SUCCESS_SYMBOL_MINOR} pass"
-                if evaluation.targets_met
+                if attempt_targets_met
                 else f"{FAILURE_SYMBOL_MINOR} miss"
             )
+            summary_suffix = f" ({metric_summary})" if metric_summary else ""
             logger.info(
                 fmt_chunk_attempt_result(
                     strategy.display_name(), chunk.safe_name(), attempt_number,
-                    f"{pass_fail} with {strategy.codec.quality_label} {str(current_q).rjust(strategy.codec.quality_log_padding)} ({metric_summary}){best_string}",
+                    f"{pass_fail} with {strategy.codec.quality_label} {str(current_q).rjust(strategy.codec.quality_log_padding)}{summary_suffix}{best_string}",
                     self._visual_hash,
                 )
             )
@@ -1204,24 +1230,49 @@ class ChunkEncoder:
                 resolution      = final_attempt.resolution,
                 winning_attempt = final_attempt.path,
                 crf             = search.best_quality,
-                metrics         = search.best_metrics or {},
+                metrics         = all_metrics_by_path.get(final_attempt.path, {}),
                 frame_count     = frame_counts.get(final_attempt.path, 0),
                 targets_met     = True,
             )
         elif not search.best_targets_met and best_fail_attempt is not None:
             assert search.best_quality is not None, "a surviving attempt implies a measured quality"
-            logger.warning(
-                "%s search space exhausted for chunk %s strategy %s after %d attempts — accepting best attempt (%s=%s)",
-                strategy.codec.quality_label, chunk.safe_name(), strategy.display_name(), attempt_number,
-                strategy.codec.quality_label, search.best_quality,
+            # Every accepted winner logs an acceptance line in the uniform
+            # success shape, with severity-carrying symbols: a single-point
+            # (fixed) domain misses the ruler by construction — a soft ≈ at
+            # INFO (the anchor is an approximation, not a user target); a
+            # ranged domain that exhausted without passing is a real — if
+            # bypassable — problem: ❌ at WARNING, distinct from per-attempt
+            # ✘ misses.
+            worst = (
+                QualitySearchBase.find_worst_target(search.best_metrics, quality_targets)
+                if search.best_metrics else None
             )
+            limited_by = f"{worst[0].metric}_{worst[0].statistic}" if worst is not None else None
+            if strategy.codec.quality_better == strategy.codec.quality_worse:
+                status, label, emit = (
+                    f"miss {APPROXIMATE_INDICATOR_SYMBOL}",
+                    strategy.codec.quality_label, logger.info,
+                )
+            else:
+                status, label, emit = (
+                    f"exhausted {FAILURE_SYMBOL_MAJOR}",
+                    f"best {strategy.codec.quality_label}", logger.warning,
+                )
+            emit(fmt_chunk_final(
+                strategy.display_name(), chunk.safe_name(), search.best_quality, attempt_number,
+                quality_label    = label,
+                use_visual_hash  = self._visual_hash,
+                quality_padding  = strategy.codec.quality_log_padding,
+                limited_by       = limited_by,
+                status           = status,
+            ))
             self._finalize_winning_attempt(
                 strategy        = strategy,
                 chunk_id        = chunk.safe_name(),
                 resolution      = best_fail_attempt.resolution,
                 winning_attempt = best_fail_attempt.path,
                 crf             = search.best_quality,
-                metrics         = search.best_metrics or {},
+                metrics         = all_metrics_by_path.get(best_fail_attempt.path, {}),
                 frame_count     = frame_counts.get(best_fail_attempt.path, 0),
                 targets_met     = False,
             )
@@ -1597,14 +1648,17 @@ async def _encode_chunks_parallel(
 class _LimiterTally:
     """Accumulation over winning attempts sharing one limiter metric.
 
-    Deficits are collected for misses only (how far the unreachable target
-    was); CRFs over every winner in the row feed the med CRF column.
+    Misses collect deficits (how far the unreachable target was); passes
+    collect surpluses (how far above the bar the worst target sits — the
+    fixed-mode anchor ruler makes this meaningful, search mode gets
+    uniformity); CRFs over every winner in the row feed the med CRF column.
     """
 
-    passed:   int           = 0
-    missed:   int           = 0
-    deficits: list[float]   = field(default_factory=list)
-    crfs:     list[Decimal] = field(default_factory=list)
+    passed:    int           = 0
+    missed:    int           = 0
+    deficits:  list[float]   = field(default_factory=list)
+    surpluses: list[float]   = field(default_factory=list)
+    crfs:      list[Decimal] = field(default_factory=list)
 
 
 def _scan_winner_sidecars(
@@ -1684,6 +1738,7 @@ def _scan_winner_sidecars(
             tally.crfs.append(winner.crf)
             if targets_met:
                 tally.passed += 1
+                tally.surpluses.append(worst[1])
             else:
                 tally.missed += 1
                 tally.deficits.append(worst[1])
@@ -1706,6 +1761,7 @@ def _scan_winner_sidecars(
                             passed      = t.passed,
                             missed      = t.missed,
                             med_deficit = statistics.median(t.deficits) if t.deficits else None,
+                            med_surplus = statistics.median(t.surpluses) if t.surpluses else None,
                             med_crf     = statistics.median(t.crfs),
                         )
                         for key, t in sorted(rows_map.items(), key=lambda kv: (-kv[1].passed - kv[1].missed, kv[0]))
@@ -1729,6 +1785,7 @@ def encode_all_chunks(
     visual_hash:     bool              = True,
     metrics_sampling: int              = 10,
     metric_prefix:   MetricKey         = MetricKey.ENCODING,
+    measure_attempts: bool             = True,
 ) -> EncodingResult:
     """Encode all chunks with quality-targeted CRF adjustment.
 
@@ -1759,6 +1816,8 @@ def encode_all_chunks(
         metrics_sampling:  Frame subsampling factor for quality metric generation.
                            Passed through to ``ChunkEncoder`` and then to
                            ``QualityEvaluator.evaluate_chunk``.
+        measure_attempts:  Whether encoded attempts get quality evaluations
+                           (the ``ChunkEncoder`` seam; default = measure).
 
     Returns:
         EncodingResult with paths to encoded chunks and statistics
@@ -1801,6 +1860,7 @@ def encode_all_chunks(
         visual_hash       = visual_hash,
         metrics_sampling  = metrics_sampling,
         metric_prefix     = metric_prefix,
+        measure_attempts  = measure_attempts,
     )
 
     # Run parallel encoding — COMPLETE pairs are skipped inside _encode_chunks_parallel
@@ -1951,7 +2011,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         """
         # Column widths
         LIMIT_WIDTH = 14
-        PASS_WIDTH  = 8
+        PASS_WIDTH  = 13
         MISS_WIDTH  = 12
         SHARE_WIDTH = 7
         CRF_WIDTH   = 8
@@ -1967,11 +2027,22 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             logger.info("%s — %d chunks", f"{BRACKET_LEFT}{summary.strategy}{BRACKET_RIGHT}", summary.chunks)
             logger.info(header)
             for row in summary.rows:
+                pass_cell = (
+                    f"{row.passed} (+{row.med_surplus:.1f})"
+                    if row.passed and row.med_surplus is not None
+                    else f"{row.passed}"
+                )
                 miss_cell = f"{row.missed} ({row.med_deficit:.1f})" if row.missed else "0"
                 share     = 100.0 * (row.passed + row.missed) / summary.chunks if summary.chunks else 0.0
                 logger.info(
-                    f"  {row.limiter:<{LIMIT_WIDTH}}   {row.passed:>{PASS_WIDTH}}   {miss_cell:>{MISS_WIDTH}}   "
+                    f"  {row.limiter:<{LIMIT_WIDTH}}   {pass_cell:>{PASS_WIDTH}}   {miss_cell:>{MISS_WIDTH}}   "
                     f"{share:>{SHARE_WIDTH - 1}.1f}%   {row.med_crf:{CRF_WIDTH}.1f}"
+                )
+            passed_total = sum(r.passed for r in summary.rows)
+            missed_total = sum(r.missed for r in summary.rows)
+            if summary.chunks:
+                logger.info(
+                    f"  Passed {100.0 * passed_total / summary.chunks:.1f}% · missed {100.0 * missed_total / summary.chunks:.1f}%"
                 )
 
     def finalize(self, ctx: FinalizeContext) -> None:
@@ -2206,6 +2277,17 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # Cache quality labels for downstream phases (e.g. MergePhase CRF plot)
         self.quality_labels = {s.display_name(): s.codec.quality_label for s in strategies}
 
+        # Presentation targets — what winner sidecars and the limiter-style
+        # output are judged against. Fixed compared runs use the anchor's
+        # synthetic set (config targets are search-tuned vocabulary and would
+        # read as all-miss noise); uncompared fixed runs have no ruler
+        # (absolute values, no verdicts — the limiter table self-extinguishes
+        # on empty targets); searched runs use the config targets, unchanged.
+        if self._config.encoding.fixed_quality:
+            presentation_targets = optimization_result.synthetic_targets
+        else:
+            presentation_targets = self._config.encoding.resolved_targets
+
         # Persist encoding.yaml with current probe state
         encoding_yaml = work_dir / EncodingPhase.SIDECAR_NAME
         if self.params is None:
@@ -2217,7 +2299,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         enc_result = encode_all_chunks(
             chunks           = chunks,
             strategies       = strategies,
-            quality_targets  = self._config.encoding.resolved_targets,
+            quality_targets  = presentation_targets,
             work_dir         = work_dir,
             collector        = self._collector,
             max_parallel     = self._config.encoding.concurrency,
@@ -2228,6 +2310,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             cleanup_level    = self._dep_result(JobPhase).cleanup,
             visual_hash      = self._config.encoding.visual_hash,
             metrics_sampling = self._config.measurement.sampling,
+            measure_attempts = True,  # default-flipping is TODO §83's decision
         )
 
         if enc_result.outcome == PhaseOutcome.FAILED:

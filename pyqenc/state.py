@@ -142,10 +142,15 @@ class StrategyTestResult(BaseModel):
     Attributes:
         strategy:    Display name of the strategy that was tested (e.g. ``'h265-aq+slow'``).
         total_size:  Total encoded size across all test chunks in bytes.
+        metrics:     Min-across-test-chunks value for every measured
+                     ``(metric, statistic)`` key — the fixed-mode dominance and
+                     anchor inputs. Empty when nothing was measured (failed
+                     strategies, or files written before this field existed).
     """
 
     strategy:   str
     total_size: int
+    metrics:    dict[str, float] = Field(default_factory=dict)
 
 
 class OptimizationParams(BaseModel):
@@ -155,6 +160,13 @@ class OptimizationParams(BaseModel):
     per-strategy test results, the tolerance used, the selected strategies,
     the quality targets, and the metrics sampling factor active when the last
     run wrote this file.
+
+    Fixed-quality compared runs additionally persist the anchor identity
+    alongside the survivor list in ``selected``; searched runs leave it at
+    its default. The anchor's synthetic target set is NOT persisted — it is
+    a pure derivation from ``strategy_results`` (the anchor's aggregated
+    metrics projected onto the comparison stat set) and re-derives on read,
+    so a changed comparison set re-projects old measurements correctly.
 
     Attributes:
         probe:            Probe state (crop + frame count) active when optimization ran.
@@ -170,6 +182,8 @@ class OptimizationParams(BaseModel):
         sampling:          Frame subsampling factor used when test encodes ran.
                           ``None`` for files written before this field was added
                           (treated as unknown — no mismatch triggered).
+        anchor:           The fixed-mode measurement anchor (survivor with the
+                          smallest total test size); ``None`` in searched runs.
     """
 
     probe:            ProbeState | None       = None
@@ -179,6 +193,7 @@ class OptimizationParams(BaseModel):
     selected:         list[str]                = Field(default_factory=list)
     quality_targets:  list[str]                = Field(default_factory=list)
     sampling:         int | None               = None
+    anchor:           str | None               = None
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
@@ -210,6 +225,7 @@ class LimiterSummaryRow(BaseModel):
     passed:      int
     missed:      int
     med_deficit: float | None = None  # median deficit among the misses
+    med_surplus: float | None = None  # median surplus among the passes (worst-target surplus)
     med_crf:     DecimalYaml         # median winning CRF of the row's chunks
 
 
@@ -442,33 +458,39 @@ class MergeStrategySummary(BaseModel):
 class MergeParams(BaseModel):
     """Phase parameter file model for merging (``merge.yaml``).
 
-    Stores the quality targets and metrics sampling factor active when the
-    last merge run wrote this file.  Used to detect changes on subsequent
-    runs and delete stale merge artifacts (sidecar + output) so the merge
-    phase re-runs with the new parameters.
+    Stores the run's merge invalidation keys plus the per-strategy summary
+    rows so the merge summary table can be replayed on rerun without
+    re-reading every per-output sidecar. Keys are mode-honest: search runs
+    key on the configured quality targets; fixed runs key on the ruler basis
+    (anchor identity) — config targets drive nothing in fixed mode, so a
+    fixed merge is neither invalidated nor re-measured by their change.
 
-    Also stores per-strategy summary rows so the merge summary table can be
-    replayed on rerun without re-reading every per-output sidecar.
+    Replay-only facts (source stem/size) are deliberately NOT persisted:
+    they render live from the JobPhase result on the fast-exit path, and
+    persisting them beside the keys would break whole-model comparisons.
 
     Attributes:
-        quality_targets:    Quality targets serialised as ``"metric-statistic:value"``
-                            strings.  ``None`` / empty means no targets were configured.
-        sampling:           Frame subsampling factor used during quality measurement.
-                            ``None`` for files written before this field was added
-                            (treated as unknown — no mismatch triggered).
-        probe:              Probe state (crop + frame count) active when merge ran.
-                            ``None`` for files written before this field was added
-                            (treated as unknown — no mismatch triggered).
-        source_stem:        Source video filename stem (without extension).
-        source_size_bytes:  Size of the source video file in bytes; ``0`` if unknown.
-        strategy_summaries: Per-strategy summary rows for summary replay on rerun.
+        quality_targets:    Search-run key: quality targets serialised as
+                            ``"metric-statistic:value"`` strings. Empty in
+                            fixed runs (not a key there).
+        sampling:           Frame subsampling factor used during quality
+                            measurement. ``None`` for files written before
+                            this field was added (treated as unknown — no
+                            mismatch triggered).
+        probe:              Probe state (crop + frame count) active when
+                            merge ran. ``None`` for files written before this
+                            field was added (treated as unknown — no mismatch
+                            triggered).
+        anchor:             Fixed-run key: the optimization anchor's display
+                            name — the ruler basis. ``None`` in search runs.
+        strategy_summaries: Per-strategy summary rows for summary replay on
+                            rerun. Only the stats the summary table renders.
     """
 
     quality_targets:    list[str]                  = Field(default_factory=list)
     sampling:           int | None                 = None
     probe:              ProbeState | None          = None
-    source_stem:        str                        = ""
-    source_size_bytes:  int                        = 0
+    anchor:             str | None                 = None
     strategy_summaries: list[MergeStrategySummary] = Field(default_factory=list)
 
     @classmethod

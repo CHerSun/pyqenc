@@ -1543,13 +1543,24 @@ class TestMergePhaseTiming:
             stream    = Artifact(payload=probe_stream, state=ArtifactState.COMPLETE),
         )
 
+        from unittest.mock import MagicMock as _MM
+
+        from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
+
+        optimization_mock = _MM(spec=OptimizationPhase)
+        optimization_mock.result = OptimizationPhaseResult(
+            outcome   = PhaseOutcome.COMPLETED,
+            message   = "optimization complete",
+        )
+
         registry: PhaseRegistry = {}
         phase = MergePhase(config, registry, collector=collector)
-        registry[JobPhase]        = job_mock
-        registry[ExtractionPhase] = extraction_mock
-        registry[ProbePhase]      = probe_mock
-        registry[EncodingPhase]   = encoding_mock
-        registry[AudioPhase]      = audio_mock
+        registry[JobPhase]          = job_mock
+        registry[ExtractionPhase]   = extraction_mock
+        registry[ProbePhase]        = probe_mock
+        registry[OptimizationPhase] = optimization_mock
+        registry[EncodingPhase]     = encoding_mock
+        registry[AudioPhase]        = audio_mock
         return phase
 
     def test_reused_run_reports_recovery_without_merge(self, tmp_path: Path) -> None:

@@ -724,7 +724,245 @@ Central name ownership (both serializing and deserializing) should also be consi
 
 ---
 
-## Last known = 81
+## 82. Research: multi-metric quality scoring/evaluation — joint paper review for possible improvements
+
+Born from the fixed-quality mode design discussion (2026-10-02). In fixed mode the
+optimization phase loses its "targets met -> compare sizes" assumption (knob pinned,
+strategies sit at different actual quality levels), so cross-strategy judging needs a
+defensible multi-metric story. Current working direction: anchor-relative deltas
+(size-winner strategy as reference) + Pareto dominance pruning, no composite scalar.
+This item collects sources for a dedicated joint research pass over the papers.
+
+Articles:
+
+- Multi-objective Pareto vs scalar selection (Univ. of Oviedo, PDF):
+  https://digibuo.uniovi.es/dspace/bitstream/handle/10651/85820/1-s2.0-S0167865526002977-main.pdf
+  — empirical: Pareto advantage over scalarization is real but partial and
+  metric-specific.
+- Zwei: self-play RL for perceptual video coding (IEEE TMM 2021, PDF):
+  https://godka.github.io/tmm21-zwei.pdf
+  — VMAF used as THE perceptual scalar objective; canonical example of
+  VMAF-as-trained-fusion being the industry's composite.
+- Zhang et al., "Enhancing VMAF through New Feature Integration" (arXiv, 2021) —
+  integrates new video features / alternative metrics into VMAF; documents
+  base-metric gaps.
+- "Gain of Grain: A Film Grain Handling Toolchain for VVC" (2024, ResearchGate) —
+  conventional metrics don't model grain perception; FGS-aware evaluation.
+  Directly matches our av1 observation (VMAF rewards grain removal/smoothing).
+- Cloudinary, "Using VMAF with other metrics" (blog) — practical multi-metric
+  pairing (VMAF primary + PSNR/SSIM as checks).
+- AWS Elemental MediaConvert — per-frame quality metrics docs (PSNR/SSIM/VMAF/QVBR
+  interpretation thresholds; production practice).
+
+Known context going in: VMAF is spatial-only (no temporal effects) and treats grain
+as distortion, so it rewards denoise/smoothing — our av1-at-same-CRF trap; VIF is
+the texture-retention guard (already in our measured set; all metrics normalized
+0-100). Open questions for the research pass: principled scalar fusion vs
+per-metric constraints; grain-aware / temporal metrics worth adopting; BD-rate
+applicability at single operating points.
+
+Real-data observation (2026-10-03 smoke test, `-q 18` over h264 + three h265
+profiles, comparison restricted to p10+median per metric): **dominance pruning
+selected 4/4 strategies — zero reduction.** The three h265 variants are mutually
+incomparable (each wins a different mix of compared stats at near-equal sizes;
+the full-stat set was even more permissive), and h264 is bigger but vmaf-better,
+so it also survives. Pareto pruning as implemented is honest but toothless for
+the "pick a few for me" job — the pre-spec concern confirmed. Extra angles for
+the research pass beyond the papers above:
+
+- Reduction mechanisms with an actual bite: user-supplied size/quality budget
+  (top-K within budget), epsilon-dominance (near-equal stats count as equal),
+  explicit trade-off sliders, or a "dominance with tolerance" per metric.
+- The anchor-relative table already gives the human the trade-off picture —
+  maybe the right v2 is interactive/filtered presentation, not stronger
+  auto-pruning (auto-picking needs the composite opinion the spec refuses).
+- Stat-subset choice interacts here: p10+median compares worst-decile +
+  central tendency; adding min/max-style stats made pruning strictly weaker.
+
+---
+
+## 83. Metrics-absence tolerance across consumers — prerequisite for measurement-skip
+
+Born from the fixed-quality spec design (2026-10-02). Decision there: the
+measure_attempts control ships with default = measure (current behavior kept).
+Flipping the default — or skipping per-chunk measurements in fixed encoding runs —
+additionally requires every consumer of attempt/winner metrics to tolerate their
+absence: ChunkEncodingResult fields, winner sidecars, the winner-scan limiter
+tallies (those self-extinguish — empty metrics -> find_worst_target returns None),
+summary/log formatting, optimization's reads of encoding results, metrics-collector
+keys / dashboards. A deliberate sweep, not just the flag. Reference: fixed-quality
+spec (2026-10-02) defers this here; adjacent: §82 scoring research.
+
+---
+
+## 84. Re-home quality ranges: codec = actual codec range, profile = reasonable working band
+
+Background: profiles originally had no `quality_range` override, so the practical
+working band had to be defined on the codec itself — default_config.yaml comments
+say it outright ("full codec range is 0–51; 6–30 is the practical working band").
+Now that profiles narrow ranges (and the fixed-quality CLI override layers on top),
+each value should live in its right layer:
+
+- codec `quality_range` — the codec's ACTUAL domain (x264/x265/NVENC-CQ/QP: [0,51];
+  AV1: [0,63]; NVENC-VBR: needs thinking — the 99.5 Mbit/s cap is already a
+  practical cap, not a factual bound; vulkan QP: real range is −1–255, but values
+  above ~50 produce visible artefacts — even "actual" needs a sanity discussion
+  there)
+- profile `quality_range` — the reasonable working band (today's [6,30]-style
+  values move here; bundled profiles should all carry one, otherwise
+  profile-less searches roam the full codec range)
+
+Follow-ons to consider while at it: `default_quality` must stay inside the moved
+bands (the fixed-quality spec's starting-point auto-adjust already covers
+exclusion); `quality_log_padding` derives from range width (cosmetic); search
+convergence from wider codec bounds (phase-0 half-range steps get coarser —
+probably fine, verify); the fixed-quality `-q` override is bounded by the codec
+range, so it gains the wider freedom too (consistent — CLI replaces the profile
+band).
+
+---
+
+## 86. Merge-phase invalidation is incomplete — general design needed — needs thinking
+
+Found by the 2026-10-03 fixed-quality smoke test on real data. The quick fix for
+the common case LANDED the same day: uniform pinned-value fixed runs (the `-q`
+workflow) name their outputs `<stem> <strategy> <label>=<value>.mkv` (label
+sanitized, value quantized to the strategy's granularity), so q changes and
+search↔fixed mode switches produce a different output name — stale merges are
+never reused as current, no blind wipes, and same-q reruns keep their
+measurements.
+
+Still open (the general problem — related to phase invalidation broadly and to
+§68 config-change invalidation):
+
+- Searched runs: winner sets can change under the same strategy name (tolerance
+  change re-selection, target changes producing different winners) while merge
+  params (targets/sampling/probe) stay constant → stale merge reused as
+  COMPLETE. Same mechanism the smoke test exposed.
+- Non-uniform fixed runs (collapsed profiles of different values, no `-q`): no
+  suffix is possible from a single value; need a different identity.
+- Is naming the right mechanism in general, or a winners-identity fingerprint
+  persisted in merge.yaml (per-output invalidation without deletion)? Naming
+  preserves measurements across back-and-forth switches; fingerprints re-merge
+  and re-measure on any change. Mixed design possible: name carries the
+  coarse identity (mode + q), fingerprint catches the rest.
+- The merge summary table showed wrong numbers during the smoke test precisely
+  because of this stale reuse — any fix must also make the summary trustworthy.
+- Do NOT copy the `encoded/` unconditional-wipe approach: merge measurement is
+  expensive (full-file VMAF/etc. per output); the user explicitly rejected
+  blind deletion here.
+
+---
+
+## 87. `encoded_chunks` double-nested dict is an index in the wrong orientation — needs thinking
+
+`EncodingResult.encoded_chunks: dict[chunk_id][strategy_name] -> EncodedChunk`
+(and the derived `EncodingPhaseResult.encoded_chunks`) re-keys identity the
+payload already carries (EncodedChunk owns its chunk + strategy). Orientation
+audit (2026-10-03): merge's concat needs one strategy's chunks ordered by
+chunk; optimization's sizes/aggregation need per-strategy-over-chunks; the
+winner scan and winners build iterate all pairs; the encode loop writes
+per pair. No consumer needs chunk-major O(1) lookup — the only thing the
+nesting provides. Candidate shape: `dict[strategy_name] -> list[EncodedChunk]`
+(grouping is what two consumers actually need; a flat list is more
+doctrine-pure but pushes grouping to every consumer). Mechanical but
+cross-phase: EncodingResult + writers + the derived property + 4 read sites
++ tests. Could ride along with the `2026-10-03 unified-quality-summaries`
+implementation (it reworks the aggregation data path anyway) or land
+standalone.
+
+---
+
+## 88. EncodingConfig two-representation dance — resolve once at the boundary, objects everywhere — needs thinking
+
+Finding (2026-10-03 code review): `EncodingConfig` carries raw pattern strings
+(`strategies`, `targets`) past the load boundary, gets mutated post-load by
+the CLI, and is re-read by every phase — hence the resolved caches, explicit
+`resolve()`, the idempotency guard, and the cache-invalidation validator.
+None of that machinery has a reason to exist if resolution happens exactly
+once at the boundary and the config carries resolved objects from then on.
+
+Doctrine (user, 2026-10-03): raw strings are only (a) the YAML parse form and
+(b) sidecar serialization for recovering back to objects (as
+`optimization.yaml`'s `selected:` already does). Everywhere else — strategies,
+codecs, profiles, targets — objects.
+
+Design sketch:
+- `EncodingConfig` gains real fields `resolved_strategies: list[Strategy]` /
+  `resolved_targets: list[QualityTarget]`; loses `resolve()`, the private
+  caches, and the invalidation validator; reads become plain field reads.
+- Exactly two population points: the `AppConfig` load validator (fail-fast on
+  bad patterns stays at `model_validate`) and ONE sanctioned mutation method
+  on `AppConfig` (e.g. `apply_cli_overrides(...)`) that assigns raw overrides
+  and re-resolves in one step — the codec/profile context lives on the
+  parent. Free-form post-load assignment of raw `strategies` without
+  re-resolution becomes structurally impossible.
+- Re-home the module-level composition helpers
+  (`_validate_profile_quality_range`, `_validate_override_quality_range`,
+  `_effective_codec`, `_expand_strategy_pattern`, `_get_codec`) as
+  `AppConfig` methods in the same motion (disowned-functions rule).
+- Re-home `_validate_resolved_strategies` out of cli.py (2026-10-03 review):
+  the uniform-label-under-override and no-mixed-fixed/searched rules are
+  invariants of the resolved set (pure config facts — "was -q given?" is
+  `quality_range_override is not None`), not CLI policy. They become the
+  post-resolve validation owned by the same sanctioned method/load
+  validator; the CLI keeps only the try/except that surfaces the error.
+  Still checked before any phase runs — just from the right layer.
+- CLI `_build_config` + ~a dozen test helpers drop the assign-then-resolve
+  dance.
+
+Behaviorally identical; pure structure. Sequencing: after the code-review
+pass and PR — pairs with §87 and the `2026-10-03 unified-quality-summaries`
+implementation as the spec-window mechanical-debt sweep.
+
+---
+
+## 89. Check the code for `str` usages
+
+Old code used `str` directly in many places. Instead of Paths, instead of strategies, profiles, etc.
+We've moved to objects & classes since then. Single instanciacion where possible.
+strings instead of objects could be used for serialization/deserialization, but only to directly recover to objects.
+Legitimate usages for `str` do exist, like messages. But if it masks object usage - this must not happen.
+
+---
+
+## 90. Sidecar content round 2 — optimization.yaml metrics, per-video extras, typed per-mode models — needs thinking
+
+Findings from inspecting the 2026-10-04 recovered-run artifacts (follow-up to
+the mode-honest sidecar landing):
+
+- **Per-video merged sidecar extras**: `plot` is redundant — the plots
+  (`<stem>.png`, `<stem>.crf.png`) are discoverable by the merged file's stem
+  alone; drop the path. `anchor` is a fleeting election artifact — it lives
+  at the optimization phase (fast-exit re-derivation); a merge-phase
+  per-video record has no consumer for it; drop it.
+- **`optimization.yaml` has the metrics problem `merge.yaml` had**:
+  `strategy_results[].metrics` dumps ALL stats — narrow to the comparison set
+  (p10 + median), like the merge summaries were narrowed. Tension to resolve
+  while at it: the full set on strategy_results is the current re-derivation
+  substrate for the "changed comparison stat set re-projects old
+  measurements" property; narrowing moves retention to the attempt sidecars
+  (where it already lives) and makes re-derivation read them — acceptable,
+  but the reuse path then re-reads sidecars (or re-derives within p10/med
+  only). Decide explicitly.
+- **`quality_targets` on fixed runs is misleading in BOTH files**: an empty
+  list reads as "no targets configured". Omit the key entirely for fixed
+  runs (mode-conditional serialization) in `optimization.yaml` and
+  `merge.yaml`.
+- **Typed per-mode sidecar models**: fixed and search runs now carry
+  genuinely different data on both params sidecars (fixed: anchor/ruler
+  basis; search: quality_targets) — replace mode-conditional optional fields
+  with type-explicit classes: a common base + `Fixed…Params` / `Search…Params`
+  derivatives for both `OptimizationParams` and `MergeParams`, so the schema
+  itself states the mode's shape.
+
+Supersedes parts of the interim sidecar landing (88975c7); fold into the
+`2026-10-03 unified-quality-summaries` implementation or land standalone
+before it.
+
+---
+
+## Last known = 90
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
