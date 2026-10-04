@@ -1637,7 +1637,58 @@ async def _encode_chunks_parallel(
     # the dotted sub-action spans are recorded by the encoder machinery.
     await asyncio.gather(*workers)
 
+    _assert_one_winner_per_chunk(result, chunks, strategies)
+
     return result
+
+
+def _assert_one_winner_per_chunk(
+    result:     EncodingResult,
+    chunks:     list[VideoStreamChunk],
+    strategies: list[Strategy],
+) -> None:
+    """Contract guard: every non-failed chunk has exactly one winner per strategy.
+
+    The span ``(start_timestamp, end_timestamp)`` is the compared identity —
+    the chunk→winner seam is transitional data between phases, and this is the
+    earliest point where a lost, duplicated, or foreign winner is localizable
+    (the frame-count invariant at merge fires far too late to point anywhere).
+    Two checks per strategy, each catching what the other cannot: the span
+    set comparison catches lost and foreign winners (a frozenset would
+    silently coalesce duplicates), and the count comparison catches
+    same-span duplicates (invisible to set equality). Spans of failed pairs
+    are excluded: a failed pair legitimately has no winner and is reported
+    through ``failed_chunks``.
+
+    Args:
+        result:     The concluded encode result.
+        chunks:     The chunk set the run was asked to encode.
+        strategies: The strategies the run was asked to encode with.
+
+    Raises:
+        AssertionError: When any strategy's winner count or spans diverge
+            from the non-failed chunks.
+    """
+    failed_ids = set(result.failed_chunks)
+    expected = frozenset(
+        (c.start_timestamp, c.end_timestamp) for c in chunks
+        if c.safe_name() not in failed_ids
+    )
+    for strategy in strategies:
+        winners = result.encoded_chunks.get(strategy.display_name(), [])
+        actual = frozenset(
+            (w.chunk.start_timestamp, w.chunk.end_timestamp) for w in winners
+        )
+        assert actual == expected, (
+            f"Winner spans diverge from chunk spans for strategy "
+            f"{strategy.display_name()}: missing={sorted(expected - actual)}, "
+            f"unexpected={sorted(actual - expected)}"
+        )
+        assert len(winners) == len(expected), (
+            f"Winner count diverges from chunk count for strategy "
+            f"{strategy.display_name()}: {len(winners)} winners for "
+            f"{len(expected)} non-failed chunks (duplicate same-span winners?)"
+        )
 
 
 # ---------------------------------------------------------------------------
