@@ -215,13 +215,13 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             configured or the cleanup guard stops the run — or ``None`` to
             proceed with the template.
         """
-        strategies = self._config.encoding.resolved_strategies
+        strategies = self._dep_result(JobPhase).plan.strategies
         if not strategies:
             err = "No strategies configured"
             logger.error(err)
             return self._make_result(PhaseOutcome.FAILED, [], err)
 
-        if self._config.encoding.fixed_quality:
+        if self._dep_result(JobPhase).plan.fixed_quality:
             entry = self._fixed_mode_entry(dry_run, strategies)
             if entry is not None:
                 return entry
@@ -324,7 +324,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
     def _log_key_params(self) -> None:
         """Log the strategy list and tolerance (key parameters)."""
-        logger.info("Strategies:  %s", ", ".join(s.display_name() for s in self._config.encoding.resolved_strategies))
+        logger.info("Strategies:  %s", ", ".join(s.display_name() for s in self._dep_result(JobPhase).plan.strategies))
         logger.info("Tolerance:   %.1f%%", self._config.encoding.optimize_tolerance)
 
     def _recovery_unit(self) -> str:
@@ -361,7 +361,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         work_dir     = job_result.work_dir
         opt_yaml     = work_dir / OptimizationPhase.SIDECAR_NAME
         tolerance    = self._config.encoding.optimize_tolerance
-        strategies   = self._config.encoding.resolved_strategies
+        strategies   = self._dep_result(JobPhase).plan.strategies
         force_wipe   = job_result.force_wipe
 
         current_probe      = ProbeState.from_probe(probe_result)
@@ -383,7 +383,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             )
 
         # Step 3 — quality-target / sampling change detection.
-        current_targets  = targets_as_strings(self._config.encoding.resolved_targets)
+        current_targets  = targets_as_strings(self._dep_result(JobPhase).plan.targets)
         current_sampling = self._config.measurement.sampling
         targets_changed = (
             persisted is not None
@@ -426,7 +426,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         self._test_chunks = self._resolve_test_chunks(persisted)
         rows = self._pair_ledger(work_dir, strategies)
-        fixed = self._config.encoding.fixed_quality
+        fixed = self._dep_result(JobPhase).plan.fixed_quality
 
         if fixed:
             # Presence-based re-test decision: the fixed start wiped encoded/,
@@ -542,11 +542,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         opt_yaml   = work_dir / OptimizationPhase.SIDECAR_NAME
         tolerance  = self._config.encoding.optimize_tolerance
         persisted  = self._persisted
-        fixed      = self._config.encoding.fixed_quality
+        fixed      = self._dep_result(JobPhase).plan.fixed_quality
         assert self._current_probe is not None, "_recover populates the probe state before execution"
         crop       = self._current_probe.crop
 
-        current_targets  = targets_as_strings(self._config.encoding.resolved_targets)
+        current_targets  = targets_as_strings(self._dep_result(JobPhase).plan.targets)
         current_sampling = self._config.measurement.sampling
 
         # Cheap path: all results cached, only the tolerance changed —
@@ -569,7 +569,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             self._selected_names   = selected
             self._strategy_results = persisted.strategy_results
             self._log_optimization_summary(persisted.strategy_results, selected)
-            rows = self._pair_ledger(work_dir, self._config.encoding.resolved_strategies)
+            rows = self._pair_ledger(work_dir, self._dep_result(JobPhase).plan.strategies)
             return self._make_result(
                 PhaseOutcome.COMPLETED,
                 [r for r in rows if r.wanted],
@@ -636,7 +636,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                     # Fixed mode presents the test encodes no ruler: config
                     # targets drive no verdict there, and the anchor's
                     # synthetic set does not exist until these results do.
-                    quality_targets   = [] if fixed else self._config.encoding.resolved_targets,
+                    quality_targets   = [] if fixed else self._dep_result(JobPhase).plan.targets,
                     max_parallel      = self._config.encoding.concurrency,
                     force             = False,
                     collector         = self._collector,
@@ -652,7 +652,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         # result sidecars) — persisted results are never trusted there,
         # because no q value is recorded to prove them current.
         result_strategies = (
-            self._config.encoding.resolved_strategies if fixed else strategies_to_test
+            self._dep_result(JobPhase).plan.strategies if fixed else strategies_to_test
         )
         new_results: list[StrategyTestResult] = []
         for strategy in result_strategies:
@@ -669,7 +669,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 ) if fixed else {},
             ))
 
-        resolved_names = [s.display_name() for s in self._config.encoding.resolved_strategies]
+        resolved_names = [s.display_name() for s in self._dep_result(JobPhase).plan.strategies]
 
         if fixed:
             # Selection = dominance pruning; anchor = smallest survivor (the
@@ -702,7 +702,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
             self._log_fixed_comparison(final_results, selected, self._anchor_name, resolved_names)
 
-            rows = self._pair_ledger(work_dir, self._config.encoding.resolved_strategies)
+            rows = self._pair_ledger(work_dir, self._dep_result(JobPhase).plan.strategies)
             return self._make_result(
                 PhaseOutcome.COMPLETED,
                 [r for r in rows if r.wanted],
@@ -731,7 +731,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         self._log_optimization_summary(final_results, selected)
 
-        rows = self._pair_ledger(work_dir, self._config.encoding.resolved_strategies)
+        rows = self._pair_ledger(work_dir, self._dep_result(JobPhase).plan.strategies)
         return self._make_result(
             PhaseOutcome.COMPLETED,
             [r for r in rows if r.wanted],
@@ -740,8 +740,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> OptimizationPhaseResult:
         """Build the reused result from the cached strategy results stash."""
-        if self._config.encoding.fixed_quality:
-            resolved_names = [s.display_name() for s in self._config.encoding.resolved_strategies]
+        if self._dep_result(JobPhase).plan.fixed_quality:
+            resolved_names = [s.display_name() for s in self._dep_result(JobPhase).plan.strategies]
             self._log_fixed_comparison(
                 self._strategy_results, self._selected_names, self._anchor_name, resolved_names,
             )
@@ -771,7 +771,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             exists).
         """
         # Resolve strategy name strings to Strategy objects from the live config.
-        by_name = {s.display_name(): s for s in self._config.encoding.resolved_strategies}
+        by_name = {s.display_name(): s for s in self._dep_result(JobPhase).plan.strategies}
         return OptimizationPhaseResult(
             outcome             = outcome,
             message             = message,
@@ -806,7 +806,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         """
         work_dir         = self._dep_result(JobPhase).work_dir
         opt_yaml         = work_dir / OptimizationPhase.SIDECAR_NAME
-        current_targets  = targets_as_strings(self._config.encoding.resolved_targets)
+        current_targets  = targets_as_strings(self._dep_result(JobPhase).plan.targets)
         current_sampling = self._config.measurement.sampling
 
         if not dry_run:
@@ -823,7 +823,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                     "All-strategies mode: quality targets or metrics sampling changed"
                     " — wiping encoded/ dirs"
                 )
-                _wipe_encoded_dir(work_dir, self._config.encoding.resolved_strategies)
+                _wipe_encoded_dir(work_dir, self._dep_result(JobPhase).plan.strategies)
             elif persisted is not None:
                 logger.debug(
                     "All-strategies mode: params unchanged (sampling=%s, targets=%s) — encoded/ kept",
@@ -837,7 +837,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 test_chunks      = [],
                 strategy_results = [],
                 tolerance_pct    = 0.0,
-                selected         = [s.display_name() for s in self._config.encoding.resolved_strategies],
+                selected         = [s.display_name() for s in self._dep_result(JobPhase).plan.strategies],
                 quality_targets  = current_targets,
                 sampling = current_sampling,
             ).save(opt_yaml)
@@ -845,7 +845,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         return OptimizationPhaseResult(
             outcome             = PhaseOutcome.REUSED,
             message             = "all-strategies mode — skipping optimization",
-            selected_strategies = list(self._config.encoding.resolved_strategies),
+            selected_strategies = list(self._dep_result(JobPhase).plan.strategies),
         )
 
     def _wipe_artifacts(self, work_dir: Path) -> None:

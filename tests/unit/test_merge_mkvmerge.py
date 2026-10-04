@@ -32,12 +32,12 @@ import contextlib
 import json
 import os
 import tempfile
+from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import cast
 from unittest.mock import MagicMock, patch
 
-from pyqenc.app_config import AppConfig, load_app_config
+from pyqenc.app_config import load_app_config
 from pyqenc.constants import EXTRACTED_DIR, MERGED_OUTPUT_DIR, TIMESTAMPS_FILENAME
 from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import (
@@ -197,6 +197,7 @@ def _make_merge_phase(
     """
     collector = NoOpMetricsCollector()
     config    = _APP_CONFIG.model_copy(deep=True)
+    plan      = config.resolve_encoding()
 
     job = JobPhase(
         config, {},
@@ -206,6 +207,7 @@ def _make_merge_phase(
         cleanup    = CleanupLevel.NONE,
         no_metrics = True,
         collector  = collector,
+        plan       = plan,
     )
     job.result = JobPhaseResult(
         outcome    = PhaseOutcome.COMPLETED,
@@ -213,6 +215,7 @@ def _make_merge_phase(
         file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         force_wipe = False,
         config     = config,
+        plan       = plan,
         work_dir   = work_dir,
         source     = source,
     )
@@ -854,17 +857,13 @@ class TestMergeFailsWithoutTimestamps:
 # Missed-targets warning (completion-line escalation)
 # ---------------------------------------------------------------------------
 
-def _make_phase(targets: list, *, fixed_quality: bool = False) -> MergePhase:
-    """A minimal MergePhase whose config carries exactly *targets*."""
-    from types import SimpleNamespace
-
+def _make_phase() -> MergePhase:
+    """A minimal MergePhase (real config, empty registry) for the warning tests."""
     from pyqenc.metrics import NoOpMetricsCollector
 
-    config = SimpleNamespace(
-        encoding  = SimpleNamespace(resolved_targets=targets, fixed_quality=fixed_quality),
-        measurement = SimpleNamespace(sampling=3),
+    return MergePhase(
+        _APP_CONFIG, {}, collector=NoOpMetricsCollector(),
     )
-    return MergePhase(cast(AppConfig, config), {}, collector=NoOpMetricsCollector())  # stand-in carrying the read fields
 
 
 class TestMissedTargetsWarning:
@@ -889,7 +888,10 @@ class TestMissedTargetsWarning:
         metrics = {"vmaf_min": 88.3, "psnr_min": 43.5}   # vmaf missed, psnr met
 
         with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
-            _make_phase(targets)._log_missed_targets_warning("h265+ultrafast", metrics)
+            _make_phase()._log_missed_targets_warning(
+                targets, fixed_quality=False,
+                strategy_name="h265+ultrafast", metrics_dict=metrics,
+            )
 
         warnings = [r for r in caplog.records if r.levelno == _logging.WARNING]
         assert len(warnings) == 1, "exactly one warning expected"
@@ -907,7 +909,10 @@ class TestMissedTargetsWarning:
         metrics = {"vmaf_min": 96.5}
 
         with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
-            _make_phase(targets)._log_missed_targets_warning("h265+ultrafast", metrics)
+            _make_phase()._log_missed_targets_warning(
+                targets, fixed_quality=False,
+                strategy_name="h265+ultrafast", metrics_dict=metrics,
+            )
 
         assert not [r for r in caplog.records if r.levelno == _logging.WARNING]
 
@@ -922,8 +927,9 @@ class TestMissedTargetsWarning:
         metrics = {"vmaf_min": 88.3}  # missed — but no warning on a fixed run
 
         with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
-            _make_phase(targets, fixed_quality=True)._log_missed_targets_warning(
-                "h265+ultrafast", metrics,
+            _make_phase()._log_missed_targets_warning(
+                targets, fixed_quality=True,
+                strategy_name="h265+ultrafast", metrics_dict=metrics,
             )
 
         assert not [r for r in caplog.records if r.levelno == _logging.WARNING]
@@ -938,8 +944,9 @@ class TestMissedTargetsWarning:
         metrics = {"vmaf_min": 88.3}
 
         with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
-            _make_phase(targets, fixed_quality=False)._log_missed_targets_warning(
-                "h265+ultrafast", metrics,
+            _make_phase()._log_missed_targets_warning(
+                targets, fixed_quality=False,
+                strategy_name="h265+ultrafast", metrics_dict=metrics,
             )
 
         assert [r for r in caplog.records if r.levelno == _logging.WARNING]
@@ -1066,10 +1073,13 @@ class TestFixedMergeRecoveryNaming:
             work_dir, source, chunk, timestamps_path=timestamps, frame_count=24,
         )
         config = phase._config
-        config.encoding.strategies = ["h265-aq+slow"]
-        config.encoding.quality_range_override = (Decimal("18"), Decimal("18"))
-        config.encoding.resolve(config.codecs, config.profiles)
-        fixed_strategy = config.encoding.resolved_strategies[0]
+        job_result = phase._phases[JobPhase].result
+        assert job_result is not None
+        job_result.plan = config.resolve_encoding(
+            strategies = ["h265-aq+slow"],
+            quality    = (Decimal("18"), Decimal("18")),
+        )
+        fixed_strategy = job_result.plan.strategies[0]
 
         encoding = phase._phases[EncodingPhase]
         winner = Artifact(
@@ -1138,10 +1148,13 @@ def _run_full_merge(
         from pyqenc.phases.optimization import OptimizationPhase as _OptPhase
 
         config = merge._config
-        config.encoding.strategies = ["h265-aq+slow"]
-        config.encoding.quality_range_override = (Decimal("18"), Decimal("18"))
-        config.encoding.resolve(config.codecs, config.profiles)
-        fixed_strategy = config.encoding.resolved_strategies[0]
+        job_result = merge._phases[JobPhase].result
+        assert job_result is not None
+        job_result.plan = config.resolve_encoding(
+            strategies = ["h265-aq+slow"],
+            quality    = (Decimal("18"), Decimal("18")),
+        )
+        fixed_strategy = job_result.plan.strategies[0]
 
         encoding = merge._phases[_EncodingPhase]
         winner = Artifact(
@@ -1249,8 +1262,13 @@ class TestModeHonestMergeSidecars:
         sidecar_before = sidecar.read_text(encoding="utf-8")
 
         config = merge._config
-        config.encoding.targets = ["vmaf-min:99.0"]
-        config.encoding.resolve(config.codecs, config.profiles)
+        job_result = merge._phases[JobPhase].result
+        assert job_result is not None
+        job_result.plan = config.resolve_encoding(
+            strategies = ["h265-aq+slow"],
+            targets    = ["vmaf-min:99.0"],
+            quality    = (Decimal("18"), Decimal("18")),
+        )
 
         merge._recover()
         assert sidecar.read_text(encoding="utf-8") == sidecar_before, (

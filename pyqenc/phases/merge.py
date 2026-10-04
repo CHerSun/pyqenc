@@ -187,14 +187,14 @@ class MergePhase(Phase[MergePhaseResult]):
         """
         probe = ProbeState.from_probe(self._dep_result(ProbePhase))
         job_result = self._dep_result(JobPhase)
-        if job_result.config.encoding.fixed_quality:
+        if job_result.plan.fixed_quality:
             return MergeParams(
                 anchor   = self._dep_result(OptimizationPhase).anchor,
                 sampling = job_result.config.measurement.sampling,
                 probe    = probe,
             )
         return MergeParams(
-            quality_targets  = targets_as_strings(job_result.config.encoding.resolved_targets),
+            quality_targets  = targets_as_strings(job_result.plan.targets),
             sampling = job_result.config.measurement.sampling,
             probe            = probe,
         )
@@ -206,9 +206,9 @@ class MergePhase(Phase[MergePhaseResult]):
     def _log_key_params(self) -> None:
         """Log the source stem and quality targets (key parameters)."""
         logger.info("Source stem:  %s", self._dep_result(JobPhase).source.stem)
-        if self._config.encoding.resolved_targets:
+        if self._dep_result(JobPhase).plan.targets:
             logger.info("Targets:      %s", ", ".join(
-                f"{t.metric}-{t.statistic}≥{t.value}" for t in self._config.encoding.resolved_targets
+                f"{t.metric}-{t.statistic}≥{t.value}" for t in self._dep_result(JobPhase).plan.targets
             ))
 
     def _post_dependency_check(self) -> MergePhaseResult | None:
@@ -279,7 +279,7 @@ class MergePhase(Phase[MergePhaseResult]):
             persisted = MergeParams.load(merge_yaml)
             if persisted is not None:
                 current  = self.params
-                fixed    = self._config.encoding.fixed_quality
+                fixed    = self._dep_result(JobPhase).plan.fixed_quality
                 key_changed     = (
                     persisted.anchor != current.anchor
                     if fixed else
@@ -420,7 +420,7 @@ class MergePhase(Phase[MergePhaseResult]):
         """
         return {
             f"{t.metric}_{t.statistic}"
-            for t in self._config.encoding.resolved_targets
+            for t in self._dep_result(JobPhase).plan.targets
         }
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> MergePhaseResult:
@@ -434,7 +434,7 @@ class MergePhase(Phase[MergePhaseResult]):
             logger.info(THICK_LINE)
             MergePhase._log_merge_summary_from_params(
                 params          = persisted,
-                quality_targets = self._config.encoding.resolved_targets,
+                quality_targets = self._dep_result(JobPhase).plan.targets,
                 source_stem     = job_result.source.stem,
                 source_size_bytes = safe_stat_size(job_result.source) or 0,
             )
@@ -568,7 +568,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 targets_met:  bool             = False
                 plot_path:    Path | None       = None
 
-                if job_result.config.encoding.resolved_targets:
+                if job_result.plan.targets:
                     try:
                         with self._collector.time(MetricKey.MERGE, METRIC_KEY_QUALITY_MEASURE):
                             metrics_dict, targets_met, plot_path = self._measure_quality(
@@ -620,7 +620,12 @@ class MergePhase(Phase[MergePhaseResult]):
                     f"  {metrics_str}" if metrics_str else "",
                 )
                 if metrics_dict and not targets_met:
-                    self._log_missed_targets_warning(strategy_name, metrics_dict)
+                    self._log_missed_targets_warning(
+                        job_result.plan.targets,
+                        fixed_quality = job_result.plan.fixed_quality,
+                        strategy_name = strategy_name,
+                        metrics_dict  = metrics_dict,
+                    )
 
                 final_rows.append(Artifact(
                     payload = MergedVideo(
@@ -656,7 +661,7 @@ class MergePhase(Phase[MergePhaseResult]):
             summaries         = strategy_summaries,
             source_stem       = source_stem,
             source_size_bytes = safe_stat_size(source_stream.stream.file.path) or 0,
-            quality_targets   = self._config.encoding.resolved_targets,
+            quality_targets   = self._dep_result(JobPhase).plan.targets,
             metrics_sampling  = self._config.measurement.sampling,
         )
         if failed_strategies and not final_rows:
@@ -972,7 +977,7 @@ class MergePhase(Phase[MergePhaseResult]):
         never needs re-measuring for a future stat set.
         """
         data: dict = {"frame_count": frame_count}
-        if self._config.encoding.fixed_quality:
+        if self._dep_result(JobPhase).plan.fixed_quality:
             pinned = MergePhase._uniform_pinned_quality([strategy])
             data["quality"] = {
                 "label": strategy.codec.quality_label,
@@ -983,7 +988,7 @@ class MergePhase(Phase[MergePhaseResult]):
             data["anchor"]  = self._dep_result(OptimizationPhase).anchor
             data["metrics"] = {k: float(v) for k, v in all_metrics.items()}
         else:
-            quality_targets = self._config.encoding.resolved_targets
+            quality_targets = self._dep_result(JobPhase).plan.targets
             data["targets_met"] = targets_met
             data["targets"]     = {
                 f"{t.metric}-{t.statistic}": t.value for t in quality_targets
@@ -1025,7 +1030,7 @@ class MergePhase(Phase[MergePhaseResult]):
             encoded            = final_result,
             reference          = source_stream.stream.as_input(),
             ref_crop           = ref_crop,
-            targets            = self._config.encoding.resolved_targets,
+            targets            = self._dep_result(JobPhase).plan.targets,
             output_dir         = output_dir,
             duration_seconds   = source_stream.stream.info.duration_seconds or 0.0,
             fps_value          = source_stream.stream.info.fps_fraction,
@@ -1056,7 +1061,7 @@ class MergePhase(Phase[MergePhaseResult]):
             Space-separated metric readings, or empty string if no targets.
         """
         parts: list[str] = []
-        for target in self._config.encoding.resolved_targets:
+        for target in self._dep_result(JobPhase).plan.targets:
             key   = f"{target.metric}_{target.statistic}"
             value = metrics_dict.get(key)
             if value is None:
@@ -1067,8 +1072,11 @@ class MergePhase(Phase[MergePhaseResult]):
 
     def _log_missed_targets_warning(
         self,
-        strategy_name: str,
-        metrics_dict:  dict[str, float],
+        quality_targets: list[QualityTarget],
+        *,
+        fixed_quality:   bool,
+        strategy_name:   str,
+        metrics_dict:    dict[str, float],
     ) -> None:
         """Log a WARNING naming every target this strategy missed, with wanted vs actual.
 
@@ -1081,13 +1089,15 @@ class MergePhase(Phase[MergePhaseResult]):
         merged-output measurement itself remains the final check.
 
         Args:
+            quality_targets: The run's resolved quality targets (the plan's).
+            fixed_quality:   Whether the run pins the quality knob.
             strategy_name:   The merged strategy.
             metrics_dict:    Measured metrics keyed by ``"{metric}_{statistic}"``.
         """
-        if self._config.encoding.fixed_quality:
+        if fixed_quality:
             return
         missed: list[str] = []
-        for target in self._config.encoding.resolved_targets:
+        for target in quality_targets:
             value = metrics_dict.get(f"{target.metric}_{target.statistic}")
             if value is not None and value < target.value:
                 missed.append(

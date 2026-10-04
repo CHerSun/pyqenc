@@ -21,7 +21,7 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 # ---------------------------------------------------------------------------
 
 _STRATEGY_OBJ = next(
-    s for s in load_app_config(default_only=True).encoding.resolved_strategies
+    s for s in load_app_config(default_only=True).resolve_encoding().strategies
     if s.preset == "slow" and s.profile == "h265-aq"
 )
 _CHUNK_ID   = "00꞉00꞉00․000-00꞉01꞉30․000"
@@ -474,11 +474,11 @@ class TestEncodingPresentationTargets:
         from pyqenc.app_config import load_app_config
 
         config = load_app_config(default_only=True).model_copy(deep=True)
-        config.encoding.strategies = ["h265-aq+slow"]
-        config.encoding.targets = ["vmaf-min:93.0"]
-        if quality_range_override is not None:
-            config.encoding.quality_range_override = quality_range_override
-        config.encoding.resolve(config.codecs, config.profiles)
+        plan = config.resolve_encoding(
+            strategies = ["h265-aq+slow"],
+            targets    = ["vmaf-min:93.0"],
+            quality    = quality_range_override,
+        )
 
         src = tmp_path / "source.mkv"
         src.write_bytes(b"\x00" * 64)
@@ -488,7 +488,7 @@ class TestEncodingPresentationTargets:
         job = JobPhase(
             config, {}, source=src, work_dir=work_dir, force=False,
             cleanup=CleanupLevel.NONE, no_metrics=True,
-            collector=NoOpMetricsCollector(),
+            collector=NoOpMetricsCollector(), plan=plan,
         )
         job.run(dry_run=False)
 
@@ -528,7 +528,7 @@ class TestEncodingPresentationTargets:
             chunks=[_PAArtifact(payload=chunk, state=_PAState.COMPLETE)],
         )
 
-        strategy = config.encoding.resolved_strategies[0]
+        strategy = plan.strategies[0]
         optimization = OptimizationPhase(config, {}, collector=NoOpMetricsCollector())
         optimization.result = OptimizationPhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="stub",

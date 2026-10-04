@@ -19,6 +19,7 @@ from pyqenc.app_config import AppConfig, load_app_config
 from pyqenc.models import (
     CleanupLevel,
     CropParams,
+    EncodingPlan,
     PhaseOutcome,
     QualityTarget,
     Strategy,
@@ -43,7 +44,7 @@ _QUALITY_TARGETS = [QualityTarget(metric="vmaf", statistic="min", value=93.0)]
 _APP_CONFIG = load_app_config(default_only=True)
 
 # Resolve a few specific strategies for use in tests.
-_ALL_STRATEGIES = _APP_CONFIG.encoding.resolved_strategies
+_ALL_STRATEGIES = _APP_CONFIG.resolve_encoding().strategies
 _STRATEGY_MAP = {s.display_name(): s for s in _ALL_STRATEGIES}
 
 # Pick 3 well-known strategies that exist in the default config.
@@ -66,16 +67,12 @@ def _make_job_phase(
     work_dir = tmp_path / "work"
 
     config = _APP_CONFIG.model_copy(deep=True)
-    # Set quality targets as raw strings
-    config.encoding.targets = ["vmaf-min:93.0"]
-    # Set strategy pattern strings matching the requested strategies
-    config.encoding.strategies = [f"{s.profile}+{s.preset}" for s in strategies]
     config.encoding.optimize = optimize
     config.encoding.optimize_tolerance = tolerance
-    # Reset resolved caches so they get re-resolved from new strings
-    config.encoding._resolved_targets   = None
-    config.encoding._resolved_strategies = None
-    config.encoding.resolve(config.codecs, config.profiles)
+    plan = config.resolve_encoding(
+        targets    = ["vmaf-min:93.0"],
+        strategies = [f"{s.profile}+{s.preset}" for s in strategies],
+    )
 
     job = JobPhase(
         config, {},
@@ -85,6 +82,7 @@ def _make_job_phase(
         cleanup    = cleanup,
         no_metrics = True,
         collector  = MagicMock(),
+        plan       = plan,
     )
     job.run(dry_run=False)
     return job, work_dir
@@ -533,12 +531,12 @@ def _make_fixed_phase(
     strategy_names: list[str],
     cleanup: CleanupLevel = CleanupLevel.NONE,
     optimize: bool = True,
-) -> tuple[OptimizationPhase, Path, AppConfig]:
-    """An OptimizationPhase harness whose config pins the knob via -q semantics.
+) -> tuple[OptimizationPhase, Path, EncodingPlan]:
+    """An OptimizationPhase harness whose run plan pins the knob via -q semantics.
 
-    The override is applied exactly as ``_build_config`` applies it: assigned
-    on the config, then strategies re-resolved — ``fixed_quality`` derives
-    True for every matched strategy.
+    The override is applied exactly as ``_build_config`` applies it: passed to
+    ``resolve_encoding`` together with the strategy patterns —
+    ``plan.fixed_quality`` derives True for every matched strategy.
     """
     from pyqenc.phases.chunking import ChunkingPhase as _CP
     from pyqenc.phases.chunking import ChunkingPhaseResult
@@ -547,11 +545,12 @@ def _make_fixed_phase(
     from pyqenc.phases.probe import ProbePhaseResult
 
     config = _APP_CONFIG.model_copy(deep=True)
-    config.encoding.strategies = strategy_names
-    config.encoding.quality_range_override = (Decimal("18"), Decimal("18"))
     config.encoding.optimize = optimize
-    config.encoding.resolve(config.codecs, config.profiles)
-    assert config.encoding.fixed_quality, "harness must derive a fixed run"
+    plan = config.resolve_encoding(
+        strategies = strategy_names,
+        quality    = (Decimal("18"), Decimal("18")),
+    )
+    assert plan.fixed_quality, "harness must derive a fixed run"
 
     src = tmp_path / "source.mkv"
     src.write_bytes(b"\x00" * 1024)
@@ -565,6 +564,7 @@ def _make_fixed_phase(
         cleanup    = cleanup,
         no_metrics = True,
         collector  = MagicMock(),
+        plan       = plan,
     )
     job.run(dry_run=False)
     phases: PhaseRegistry = {_JP: job}
@@ -578,7 +578,7 @@ def _make_fixed_phase(
     phases[_CP] = chunking
 
     phase = OptimizationPhase(config, phases=phases, collector=MagicMock())
-    return phase, work_dir, config
+    return phase, work_dir, plan
 
 
 def _seed_encoded_winner(work_dir: Path, strategy: Strategy) -> Path:
@@ -596,10 +596,10 @@ class TestCleanupGuard:
 
     @pytest.mark.parametrize("level", [CleanupLevel.INTERMEDIATE, CleanupLevel.ALL])
     def test_guard_stops_fixed_run(self, tmp_path: Path, level: CleanupLevel) -> None:
-        phase, work_dir, _ = _make_fixed_phase(
+        phase, work_dir, plan = _make_fixed_phase(
             tmp_path, strategy_names=["h265-aq+slow"], cleanup=level,
         )
-        seeded = _seed_encoded_winner(work_dir, phase._config.encoding.resolved_strategies[0])
+        seeded = _seed_encoded_winner(work_dir, plan.strategies[0])
         result = phase.run(dry_run=False)
         assert result.outcome is PhaseOutcome.FAILED
         assert "cleanup" in result.message and "re-derivation substrate" in result.message
@@ -607,10 +607,10 @@ class TestCleanupGuard:
         assert seeded.exists()
 
     def test_guard_passes_fixed_none(self, tmp_path: Path) -> None:
-        phase, work_dir, _ = _make_fixed_phase(
+        phase, work_dir, plan = _make_fixed_phase(
             tmp_path, strategy_names=["h265-aq+slow"], cleanup=CleanupLevel.NONE,
         )
-        seeded = _seed_encoded_winner(work_dir, phase._config.encoding.resolved_strategies[0])
+        seeded = _seed_encoded_winner(work_dir, plan.strategies[0])
         phase.run(dry_run=False)
         # No guard failure — the wipe ran instead.
         assert not seeded.exists()
@@ -633,10 +633,10 @@ class TestFixedWinnerWipe:
 
     def test_wipe_on_all_strategies_path(self, tmp_path: Path) -> None:
         # Single fixed strategy + optimize on → all-strategies skip path.
-        phase, work_dir, _ = _make_fixed_phase(
+        phase, work_dir, plan = _make_fixed_phase(
             tmp_path, strategy_names=["h265-aq+slow"], optimize=True,
         )
-        seeded = _seed_encoded_winner(work_dir, phase._config.encoding.resolved_strategies[0])
+        seeded = _seed_encoded_winner(work_dir, plan.strategies[0])
         result = phase.run(dry_run=False)
         assert result.outcome is PhaseOutcome.REUSED  # all-strategies skip result
         assert not seeded.exists()
@@ -645,10 +645,10 @@ class TestFixedWinnerWipe:
         # Two fixed strategies + optimize on → the test-encode path. The
         # stubbed chunking has no chunks, so recovery fails AFTER the entry
         # block already ran — the wipe and banner are what must have fired.
-        phase, work_dir, _ = _make_fixed_phase(
+        phase, work_dir, plan = _make_fixed_phase(
             tmp_path, strategy_names=["h265-aq+slow", "h264+slow"], optimize=True,
         )
-        strategies = phase._config.encoding.resolved_strategies
+        strategies = plan.strategies
         seeded = [_seed_encoded_winner(work_dir, s) for s in strategies]
         result = phase.run(dry_run=False)
         assert result.outcome is PhaseOutcome.FAILED
@@ -662,10 +662,10 @@ class TestFixedWinnerWipe:
         assert seeded.exists()
 
     def test_wipe_skipped_on_dry_run(self, tmp_path: Path) -> None:
-        phase, work_dir, _ = _make_fixed_phase(
+        phase, work_dir, plan = _make_fixed_phase(
             tmp_path, strategy_names=["h265-aq+slow"], optimize=False,
         )
-        seeded = _seed_encoded_winner(work_dir, phase._config.encoding.resolved_strategies[0])
+        seeded = _seed_encoded_winner(work_dir, plan.strategies[0])
         phase.run(dry_run=True)
         # A dry run changes nothing — the wipe waits for the executing run.
         assert seeded.exists()
@@ -729,13 +729,15 @@ class TestFixedQualityBanner:
         config_dict["profiles"]["h264"]["quality_range"] = [20.0, 20.0]
         config_dict["encoding"]["strategies"] = ["h265-aq", "h264"]
         config = AppConfig.model_validate(config_dict)
-        assert config.encoding.fixed_quality
+        plan = config.resolve_encoding()
+        assert plan.fixed_quality
 
         src = tmp_path / "source.mkv"
         src.write_bytes(b"\x00" * 1024)
         job = JobPhase(
             config, {}, source=src, work_dir=tmp_path / "work", force=False,
             cleanup=CleanupLevel.NONE, no_metrics=True, collector=MagicMock(),
+            plan=plan,
         )
         job.run(dry_run=False)
         phases: PhaseRegistry = {JobPhase: job}
@@ -1018,14 +1020,11 @@ class TestFixedComparedExecute:
         )
 
         strategy_names = ["h265-aq", "h265", "h265-anime"]
-        phase, work_dir, _ = _make_fixed_phase(
+        phase, work_dir, plan = _make_fixed_phase(
             tmp_path, strategy_names=[f"{n}+slow" for n in strategy_names],
             optimize=True,
         )
         phase._config.encoding.optimize_tolerance = tolerance
-        # Assignment on EncodingConfig invalidates the resolved caches —
-        # re-resolve so the run sees the same strategies under the new tolerance.
-        phase._config.encoding.resolve(phase._config.codecs, phase._config.profiles)
 
         chunks = [_make_chunk(float(i * 10), float((i + 1) * 10), tmp_path) for i in range(2)]
         from pyqenc.phases.chunking import ChunkingPhaseResult
@@ -1043,7 +1042,7 @@ class TestFixedComparedExecute:
             test_chunks=[c.safe_name() for c in chunks],
         )
 
-        strategies = phase._config.encoding.resolved_strategies
+        strategies = plan.strategies
 
         def _seed_and_compose() -> EncodingResult:
             result = EncodingResult()
@@ -1198,7 +1197,7 @@ class TestFixedReuseFromPersisted:
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ) -> None:
         strategy_names = ["h265-aq+slow", "h265+slow"]
-        phase, work_dir, _ = _make_fixed_phase(
+        phase, work_dir, plan = _make_fixed_phase(
             tmp_path, strategy_names=strategy_names, optimize=True,
         )
         chunks = [_make_chunk(0.0, 10.0, tmp_path), _make_chunk(10.0, 20.0, tmp_path)]
@@ -1213,7 +1212,7 @@ class TestFixedReuseFromPersisted:
 
         # Seed complete winners on disk (dry-run performs no wipe) and the
         # persisted results they correspond to.
-        for strategy in phase._config.encoding.resolved_strategies:
+        for strategy in plan.strategies:
             strategy_dir = work_dir / "encoded" / strategy.safe_name()
             strategy_dir.mkdir(parents=True, exist_ok=True)
             for chunk in chunks:

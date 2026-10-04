@@ -39,13 +39,14 @@ from pyqenc.stream_model import (
 # ---------------------------------------------------------------------------
 
 _APP_CONFIG = load_app_config(default_only=True)
+_ALL_STRATS = _APP_CONFIG.resolve_encoding().strategies
 
 _STRATEGY = next(
-    s for s in _APP_CONFIG.encoding.resolved_strategies
+    s for s in _ALL_STRATS
     if s.preset == "slow" and s.profile == "h265-aq"
 )
 _STRATEGY_B = next(
-    s for s in _APP_CONFIG.encoding.resolved_strategies
+    s for s in _ALL_STRATS
     if s.preset == "slow" and s.profile == "h265"
 )
 _RESOLUTION = "1920x1080"

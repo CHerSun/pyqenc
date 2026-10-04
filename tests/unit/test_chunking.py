@@ -81,11 +81,13 @@ def _make_registry(
         message   = "job complete",
         file      = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         config    = config,
+        plan      = config.resolve_encoding(),
         work_dir  = work_dir,
         source    = source,
     )
     job = JobPhase(config, {}, source=source, work_dir=work_dir, force=False,
-                   cleanup=CleanupLevel.NONE, no_metrics=True, collector=collector)
+                   cleanup=CleanupLevel.NONE, no_metrics=True, collector=collector,
+                   plan=config.resolve_encoding())
     job.result = job_result
 
     extraction = ExtractionPhase(config, {}, collector=collector)

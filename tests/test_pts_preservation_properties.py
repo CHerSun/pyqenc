@@ -109,6 +109,7 @@ def _extended_stream(path: Path, frame_count: int):
 # ---------------------------------------------------------------------------
 
 _APP_CONFIG = load_app_config(default_only=True)
+_PLAN       = _APP_CONFIG.resolve_encoding()
 
 
 
@@ -139,6 +140,7 @@ def _make_extraction_phase(
         message    = "job complete",
         force_wipe = False,
         config     = config,
+        plan       = _PLAN,
         work_dir   = work_dir,
         source     = source,
     )
@@ -151,6 +153,7 @@ def _make_extraction_phase(
         cleanup    = CleanupLevel.NONE,
         no_metrics = True,
         collector  = collector,
+        plan       = _PLAN,
     )
     job.result = job_result
 
@@ -427,6 +430,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
             cleanup    = CleanupLevel.NONE,
             no_metrics = True,
             collector  = collector,
+            plan       = _PLAN,
         )
         job.result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
@@ -434,6 +438,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             force_wipe = False,
             config     = config,
+            plan       = _PLAN,
             work_dir   = work_dir,
             source     = source,
         )

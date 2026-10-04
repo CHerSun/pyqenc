@@ -25,6 +25,7 @@ from pyqenc.constants import TEMP_SUFFIX
 from pyqenc.metrics import MetricKey, MetricsCollector
 from pyqenc.models import (
     CleanupLevel,
+    EncodingPlan,
     PhaseOutcome,
 )
 from pyqenc.phase import (
@@ -64,9 +65,14 @@ class JobPhaseResult(PhaseResult):
                     was detected; downstream phases must delete their own output
                     directories and phase parameter YAMLs before proceeding.
         config:     Full validated application configuration.
+        plan:       The run's resolved encoding plan — strategies and quality
+                    targets as consumed by optimization, encoding, merge, and
+                    extraction's strategy count. Derived once at the run
+                    boundary (``AppConfig.resolve_encoding``) and threaded
+                    here like every other volatile per-run parameter.
         work_dir:   Working directory for all pipeline artifacts.
         source:     Resolved path to the source video file.
-        cleanup:     Artifact retention policy applied after encoding.
+        cleanup:    Artifact retention policy applied after encoding.
         no_metrics: When ``True``, skip writing ``metrics.yaml`` files.
     """
 
@@ -74,6 +80,7 @@ class JobPhaseResult(PhaseResult):
     # required, never Optional) comes before the defaulted conveniences.
     file:       Artifact[File]
     config:     AppConfig
+    plan:       EncodingPlan
     work_dir:   Path
     source:     Path
     force_wipe: bool                   = field(default=False)
@@ -127,6 +134,7 @@ class JobPhase(Phase[JobPhaseResult]):
         cleanup:     CleanupLevel,
         no_metrics:  bool,
         collector:   MetricsCollector,
+        plan:        EncodingPlan,
     ) -> None:
         super().__init__(config, phases, collector=collector)
 
@@ -135,6 +143,7 @@ class JobPhase(Phase[JobPhaseResult]):
         self._force:       bool             = force
         self._cleanup:     CleanupLevel     = cleanup
         self._no_metrics:  bool             = no_metrics
+        self._plan:        EncodingPlan     = plan
 
         # Recovery stash — the run's File, resolved during _recover();
         # consumed by _execute()/_make_result().
@@ -289,6 +298,7 @@ class JobPhase(Phase[JobPhaseResult]):
             file        = Artifact(payload=self._file, state=file_state),
             force_wipe  = self._force_wipe,
             config      = self._config,
+            plan        = self._plan,
             work_dir    = self._work_dir,
             source      = self._source,
             cleanup     = self._cleanup,

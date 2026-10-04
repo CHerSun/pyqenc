@@ -15,6 +15,7 @@ import psutil
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
+    from pyqenc.models import EncodingPlan
 
 import pyqenc
 from pyqenc.api import (
@@ -106,9 +107,8 @@ def _parse_quality_override(quality_str: str | None) -> tuple[Decimal, Decimal] 
     or a pair separated by any of :data:`_QUALITY_PAIR_SEPARATORS`
     (``"18:24"``, ``"18-24"``, ``"18..24"``).  The pair is returned in input
     order — canonical ``(lower, upper)`` normalization is owned solely by
-    the ``EncodingConfig.quality_range_override`` field validator, and the
-    codec's direction convention is applied later, at
-    :func:`pyqenc.app_config._effective_codec`.
+    :meth:`AppConfig.resolve_encoding`, and the codec's direction
+    convention is applied during its strategy expansion.
 
     Args:
         quality_str: Raw CLI value, or ``None`` when the flag was not given.
@@ -345,72 +345,32 @@ def _add_quality_arguments(parser: argparse.ArgumentParser) -> None:
 # Config assembly helper
 # ---------------------------------------------------------------------------
 
-def _validate_resolved_strategies(
-    config:           AppConfig,
-    quality_override: tuple[Decimal, Decimal] | None,
-) -> None:
-    """Loud post-resolution exits over the resolved strategy set.
+def _parse_targets(targets_str: str | None) -> list[str] | None:
+    """Parse comma-separated quality targets into raw target strings.
 
-    Two structural rules, both checked before any phase executes:
-
-    - **Uniform labels under -q** — one shared number must never be silently
-      reinterpreted per codec; without ``-q`` mixed labels stay legal (each
-      search runs per strategy over its own range).
-    - **No mixed fixed/searched sets** — a collapsed (single-point) range
-      among ranged strategies voids the size-comparison assumptions of
-      optimization; all strategies must be fixed or all searched.
-
-    Args:
-        config:           Assembled config with strategies already resolved.
-        quality_override: The parsed ``-q`` bounds, or ``None``.
-
-    Raises:
-        ValueError: On a label mix under ``-q``, or a mixed fixed/searched set.
+    Returns ``None`` meaning "use defaults from config".
     """
-    strategies = config.encoding.resolved_strategies
-
-    if quality_override is not None:
-        labels = {s.codec.quality_label for s in strategies}
-        if len(labels) > 1:
-            listing = ", ".join(
-                f"{s.display_name()}={s.codec.quality_label}" for s in strategies
-            )
-            raise ValueError(
-                f"--quality shares one value across strategies, but the matched "
-                f"strategies use different quality labels: {listing}. "
-                f"A shared number would be silently reinterpreted per codec; "
-                f"use --strategies to select a single label family."
-            )
-
-    collapsed = [
-        s.display_name() for s in strategies
-        if s.codec.quality_better == s.codec.quality_worse
-    ]
-    ranged = [
-        s.display_name() for s in strategies
-        if s.codec.quality_better != s.codec.quality_worse
-    ]
-    if collapsed and ranged:
-        raise ValueError(
-            f"Mixed fixed and searched strategies: fixed (single-point range) "
-            f"[{', '.join(collapsed)}], searched (ranged) "
-            f"[{', '.join(ranged)}]. All strategies must be fixed (every range "
-            f"collapsed, e.g. via -q <value>) or all searched — mixed sets void "
-            f"the size-comparison assumptions of optimization. Adjust "
-            f"--strategies or the profile quality_range settings."
-        )
+    if targets_str is None:
+        return None
+    return [t.strip() for t in targets_str.split(",") if t.strip()]
 
 
-def _build_config(args: argparse.Namespace) -> AppConfig:
-    """Load app config and apply all CLI overrides present in *args*.
+def _build_config(args: argparse.Namespace) -> tuple[AppConfig, EncodingPlan]:
+    """Load app config, apply plain CLI overrides, resolve the encoding plan.
+
+    Plain overrides (extraction filters, chunking, measurement sampling, and
+    the non-resolution encoding flags) are direct assignments. The
+    resolution-coupled overrides — ``--strategies``, ``--targets``, ``-q`` —
+    are arguments to the single ``resolve_encoding`` call; the config's raw
+    fields are never written.
 
     Only attributes that are actually defined on *args* are applied, so the
     same helper works correctly for every subcommand regardless of which
     argument groups were added to its parser.
 
     Returns:
-        Fully assembled ``AppConfig`` with CLI overrides applied and strategies
-        resolved.
+        The assembled ``AppConfig`` (plain overrides applied) and the resolved
+        ``EncodingPlan``.
 
     Raises:
         ValueError: If any override value is invalid (unknown profile, quality
@@ -432,19 +392,7 @@ def _build_config(args: argparse.Namespace) -> AppConfig:
     if getattr(args, "min_scene_length", None) is not None:
         config.chunking.min_scene_length = args.min_scene_length
 
-    # --- encoding / quality ---
-    quality_target_str = getattr(args, "targets", None)
-    if quality_target_str is not None:
-        config.encoding.targets = [t.strip() for t in quality_target_str.split(",") if t.strip()]
-
-    strategies = _parse_strategies(getattr(args, "strategies", None))
-    if strategies is not None:
-        config.encoding.strategies = strategies
-
-    quality_override = _parse_quality_override(getattr(args, "quality", None))
-    if quality_override is not None:
-        config.encoding.quality_range_override = quality_override
-
+    # --- plain encoding flags (no resolution coupling) ---
     if getattr(args, "no_optimize", False):
         config.encoding.optimize = False
 
@@ -459,12 +407,13 @@ def _build_config(args: argparse.Namespace) -> AppConfig:
     no_visual_hash = getattr(args, "no_visual_hash", False)
     config.encoding.visual_hash = not no_visual_hash
 
-    # Re-resolve strategies so resolved_strategies reflects all overrides.
-    config.encoding.resolve(config.codecs, config.profiles)
+    plan = config.resolve_encoding(
+        strategies = _parse_strategies(getattr(args, "strategies", None)),
+        targets    = _parse_targets(getattr(args, "targets", None)),
+        quality    = _parse_quality_override(getattr(args, "quality", None)),
+    )
 
-    _validate_resolved_strategies(config, quality_override)
-
-    return config
+    return config, plan
 
 
 # ---------------------------------------------------------------------------
@@ -578,26 +527,25 @@ def _cmd_auto(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        config = _build_config(args)
+        config, plan = _build_config(args)
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
     execute = args.execute
     cleanup = _parse_cleanup_level(args.cleanup)
 
-    # Build display values from resolved config
+    # Build display values from resolved plan
     strategies     = _parse_strategies(getattr(args, "strategies", None))
-    resolved_strats = config.encoding.resolved_strategies
     strategy_display = (
         "using defaults from config file" if strategies is None
-        else ", ".join(s.display_name() for s in resolved_strats)
+        else ", ".join(s.display_name() for s in plan.strategies)
     )
     kv_to_show = {
         "Source:":         args.source,
         "Work directory:": args.work_dir,
         "Cropping:":       f"manual ({crop_params})" if crop_params else "automatic",
         "Strategies:":     strategy_display,
-        "Targets:":        ", ".join(str(t) for t in config.encoding.resolved_targets),
+        "Targets:":        ", ".join(str(t) for t in plan.targets),
         "Work mode:":      "DRY-RUN (no changes will be made)" if not execute else "EXECUTE",
     }
     fmt_key_value_table(kv_to_show)
@@ -606,12 +554,13 @@ def _cmd_auto(args: argparse.Namespace) -> int:
     try:
         result = run_pipeline(
             config      = config,
+            plan        = plan,
             source      = args.source,
             work_dir    = args.work_dir,
             force       = args.force,
             cleanup     = cleanup,
             no_metrics  = args.no_metrics,
-            dry_run     = not execute,
+            dry_run     = not args.execute,
             crop_params = crop_params,
         )
         if result.success:
@@ -637,7 +586,7 @@ def _cmd_extract(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        config = _build_config(args)
+        config, plan = _build_config(args)
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
@@ -646,6 +595,7 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     try:
         result = extract_streams(
             config      = config,
+            plan        = plan,
             source      = args.source,
             work_dir    = args.work_dir,
             force       = args.force,
@@ -677,7 +627,7 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        config = _build_config(args)
+        config, plan = _build_config(args)
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
@@ -686,6 +636,7 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
     try:
         result = chunk_video(
             config      = config,
+            plan        = plan,
             source      = args.source,
             work_dir    = args.work_dir,
             force       = args.force,
@@ -717,7 +668,7 @@ def _cmd_encode(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        config = _build_config(args)
+        config, plan = _build_config(args)
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
@@ -726,6 +677,7 @@ def _cmd_encode(args: argparse.Namespace) -> int:
     try:
         result = encode_chunks(
             config      = config,
+            plan        = plan,
             source      = args.source,
             work_dir    = args.work_dir,
             force       = args.force,
@@ -751,7 +703,7 @@ def _cmd_audio(args: argparse.Namespace) -> int:
     logger.info(f"Source: {args.source}")
 
     try:
-        config = _build_config(args)
+        config, plan = _build_config(args)
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
@@ -760,6 +712,7 @@ def _cmd_audio(args: argparse.Namespace) -> int:
     try:
         result = process_audio(
             config      = config,
+            plan        = plan,
             source      = args.source,
             work_dir    = args.work_dir,
             force       = args.force,
@@ -790,7 +743,7 @@ def _cmd_merge(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        config = _build_config(args)
+        config, plan = _build_config(args)
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
@@ -799,6 +752,7 @@ def _cmd_merge(args: argparse.Namespace) -> int:
     try:
         result = merge_final(
             config      = config,
+            plan        = plan,
             source      = args.source,
             work_dir    = args.work_dir,
             force       = args.force,

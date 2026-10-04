@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
+    from pyqenc.models import EncodingPlan
     from pyqenc.phases.measure import MeasureResult
 
 
@@ -53,6 +54,7 @@ if TYPE_CHECKING:
 
 def _drive(
     config:   AppConfig,
+    plan:     EncodingPlan,
     source:   Path,
     work_dir: Path,
     target:   type[Phase],
@@ -105,6 +107,7 @@ def _drive(
 
     registry = _build_registry(
         config,
+        plan,
         source,
         work_dir,
         force,
@@ -133,6 +136,7 @@ def _drive(
 
 def run_pipeline(
     config:   AppConfig,
+    plan:     EncodingPlan,
     source:   Path,
     work_dir: Path,
     *,
@@ -149,6 +153,8 @@ def run_pipeline(
 
     Args:
         config:      Fully assembled application configuration.
+        plan:        The run's resolved encoding plan
+                     (:meth:`AppConfig.resolve_encoding` output).
         source:      Resolved path to the source video file.
         work_dir:    Working directory for all pipeline artifacts.
         force:       Wipe existing artifacts on source mismatch when ``True``.
@@ -168,6 +174,7 @@ def run_pipeline(
     """
     return _drive(
         config,
+        plan,
         source,
         work_dir,
         MergePhase,
@@ -182,6 +189,7 @@ def run_pipeline(
 
 def extract_streams(
     config:   AppConfig,
+    plan:     EncodingPlan,
     source:   Path,
     work_dir: Path,
     *,
@@ -216,6 +224,7 @@ def extract_streams(
 
     return _drive(
         config,
+        plan,
         source,
         work_dir,
         ExtractionPhase,
@@ -230,6 +239,7 @@ def extract_streams(
 
 def chunk_video(
     config:   AppConfig,
+    plan:     EncodingPlan,
     source:   Path,
     work_dir: Path,
     *,
@@ -265,6 +275,7 @@ def chunk_video(
 
     return _drive(
         config,
+        plan,
         source,
         work_dir,
         ChunkingPhase,
@@ -279,6 +290,7 @@ def chunk_video(
 
 def process_audio(
     config:   AppConfig,
+    plan:     EncodingPlan,
     source:   Path,
     work_dir: Path,
     *,
@@ -312,6 +324,7 @@ def process_audio(
 
     return _drive(
         config,
+        plan,
         source,
         work_dir,
         AudioPhase,
@@ -325,6 +338,7 @@ def process_audio(
 
 def encode_chunks(
     config:   AppConfig,
+    plan:     EncodingPlan,
     source:   Path,
     work_dir: Path,
     *,
@@ -360,6 +374,7 @@ def encode_chunks(
 
     return _drive(
         config,
+        plan,
         source,
         work_dir,
         EncodingPhase,
@@ -374,6 +389,7 @@ def encode_chunks(
 
 def merge_final(
     config:   AppConfig,
+    plan:     EncodingPlan,
     source:   Path,
     work_dir: Path,
     *,
@@ -408,6 +424,7 @@ def merge_final(
     """
     return _drive(
         config,
+        plan,
         source,
         work_dir,
         MergePhase,

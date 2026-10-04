@@ -56,6 +56,7 @@ def _make_phase(
         cleanup     = CleanupLevel.NONE,
         no_metrics  = True,
         collector   = MagicMock(),
+        plan        = config.resolve_encoding(),
     )
 
 

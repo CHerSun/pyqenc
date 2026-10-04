@@ -31,6 +31,7 @@ from pyqenc.metrics import (
 )
 from pyqenc.models import (
     CleanupLevel,
+    EncodingPlan,
     PhaseOutcome,
     Strategy,
 )
@@ -49,7 +50,7 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 _SHARED_APP_CONFIG: AppConfig = load_app_config(default_only=True)
 
 # Resolve a couple of known strategies once at module level for use in tests.
-_resolved = _SHARED_APP_CONFIG.encoding.resolved_strategies
+_resolved = _SHARED_APP_CONFIG.resolve_encoding().strategies
 _STRATEGY_SLOW_H265 = next((s for s in _resolved if s.preset == "slow" and "h265" in s.profile and "aq" not in s.profile), _resolved[0])
 _STRATEGY_H265_AQ   = next((s for s in _resolved if "h265" in s.profile and "aq" in s.profile), _resolved[min(1, len(_resolved) - 1)])
 
@@ -296,7 +297,9 @@ class TestJobPhaseTiming:
         volatile = _make_volatile(tmp_path)
 
         def run(collector: MetricsCollector) -> None:
-            JobPhase(config, {}, collector=collector, **volatile).run()
+            JobPhase(
+                config, {}, collector=collector, plan=config.resolve_encoding(), **volatile,
+            ).run()
 
         metrics    = _recorded_metrics(tmp_path, run)
         top_level  = _top_level_keys(metrics)
@@ -321,7 +324,9 @@ class TestJobPhaseTiming:
         config   = _make_config(tmp_path)
         volatile = _make_volatile(tmp_path)
         collector = _spy_collector()
-        phase    = JobPhase(config, {}, collector=collector, **volatile)
+        phase    = JobPhase(
+            config, {}, collector=collector, plan=config.resolve_encoding(), **volatile,
+        )
 
         # Pre-create a valid job.yaml (the File dump) so the phase takes the
         # REUSED path.
@@ -349,7 +354,9 @@ class TestJobPhaseTiming:
         config   = _make_config(tmp_path)
         volatile = _make_volatile(tmp_path)
         collector = NoOpMetricsCollector()
-        phase    = JobPhase(config, {}, collector=collector, **volatile)
+        phase    = JobPhase(
+            config, {}, collector=collector, plan=config.resolve_encoding(), **volatile,
+        )
 
         result = phase.run()
 
@@ -381,6 +388,7 @@ class TestExtractionPhaseTiming:
             source.parent.mkdir(parents=True, exist_ok=True)
             source.write_bytes(b"\x00" * 64)
 
+        config = _make_config(source.parent)
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
@@ -388,7 +396,8 @@ class TestExtractionPhaseTiming:
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = source.parent / "work",
-            config     = _make_config(source.parent),
+            config     = config,
+            plan       = config.resolve_encoding(),
         )
         result.file     = Artifact(
             payload=File(path=source, file_size_bytes=source.stat().st_size),
@@ -574,6 +583,7 @@ class TestChunkingPhaseTiming:
         source = tmp_path / "source.mkv"
         source.write_bytes(b"" * 64)
 
+        config = _make_config(tmp_path)
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
@@ -581,7 +591,8 @@ class TestChunkingPhaseTiming:
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
-            config     = _make_config(tmp_path),
+            config     = config,
+            plan       = config.resolve_encoding(),
         )
         return result
 
@@ -773,6 +784,7 @@ class TestAudioPhaseTiming:
             source     = source,
             work_dir   = work_dir,
             config     = config,
+            plan       = config.resolve_encoding(),
         )
 
         extraction_result = ExtractionPhaseResult(
@@ -890,7 +902,9 @@ class TestAudioPhaseTiming:
 class TestOptimizationPhaseTiming:
     """Integration tests for ``OptimizationPhase`` timing instrumentation (Req 6.5)."""
 
-    def _make_job_result(self, tmp_path: Path, *, config: AppConfig | None = None) -> JobPhaseResult:
+    def _make_job_result(
+        self, tmp_path: Path, *, config: AppConfig | None = None, plan: EncodingPlan | None = None,
+    ) -> JobPhaseResult:
         """Return a minimal complete ``JobPhaseResult`` stub."""
         from pyqenc.models import PhaseOutcome
         from pyqenc.phases.job import JobPhaseResult
@@ -898,6 +912,7 @@ class TestOptimizationPhaseTiming:
         source = tmp_path / "source.mkv"
         source.write_bytes(b"\x00" * 64)
 
+        config = config if config is not None else _make_config(tmp_path)
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
@@ -905,7 +920,8 @@ class TestOptimizationPhaseTiming:
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
-            config     = config if config is not None else _make_config(tmp_path),
+            config     = config,
+            plan       = plan if plan is not None else config.resolve_encoding(),
         )
         return result
 
@@ -939,18 +955,16 @@ class TestOptimizationPhaseTiming:
         config = _make_config(tmp_path)
         work_dir = tmp_path / "work"
         work_dir.mkdir(parents=True, exist_ok=True)
-        config.encoding.optimize   = optimize
-        config.encoding.strategies = [
-            f"{s.profile}+{s.preset}"
-            for s in [_STRATEGY_SLOW_H265, _STRATEGY_H265_AQ]
-        ]
-        # Reset resolved caches so they re-resolve from the updated strategy strings.
-        config.encoding._resolved_targets   = None
-        config.encoding._resolved_strategies = None
-        config.encoding.resolve(config.codecs, config.profiles)
+        config.encoding.optimize = optimize
+        plan = config.resolve_encoding(
+            strategies = [
+                f"{s.profile}+{s.preset}"
+                for s in [_STRATEGY_SLOW_H265, _STRATEGY_H265_AQ]
+            ],
+        )
 
         job_mock = MagicMock(spec=JobPhase)
-        job_mock.result = self._make_job_result(tmp_path, config=config)
+        job_mock.result = self._make_job_result(tmp_path, config=config, plan=plan)
 
         # ProbePhase is a dependency; the uniform run() resolves deps first, so a
         # completed probe result must be present for the reuse path to be reached.
@@ -1134,6 +1148,7 @@ class TestEncodingPhaseTiming:
         source = tmp_path / "source.mkv"
         source.write_bytes(b"\x00" * 64)
 
+        config = _make_config(tmp_path)
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
@@ -1141,7 +1156,8 @@ class TestEncodingPhaseTiming:
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
-            config     = _make_config(tmp_path),
+            config     = config,
+            plan       = config.resolve_encoding(),
         )
         return result
 
@@ -1424,6 +1440,7 @@ class TestMergePhaseTiming:
         source = tmp_path / "source.mkv"
         source.write_bytes(b"\x00" * 64)
 
+        config = _make_config(tmp_path)
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
@@ -1431,7 +1448,8 @@ class TestMergePhaseTiming:
             file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
-            config     = _make_config(tmp_path),
+            config     = config,
+            plan       = config.resolve_encoding(),
         )
         return result
 

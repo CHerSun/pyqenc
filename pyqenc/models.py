@@ -280,12 +280,47 @@ def targets_as_strings(targets: list[QualityTarget]) -> list[str]:
     the same targets in different config order serialise identically.
 
     Args:
-        targets: Quality targets from :class:`~pyqenc.app_config.AppConfig`.
+        targets: Quality targets from an :class:`EncodingPlan`.
 
     Returns:
         Sorted list of strings like ``["vmaf-min:93.0"]``.
     """
     return sorted(f"{t.metric}-{t.statistic}:{t.value}" for t in targets)
+
+
+class EncodingPlan(BaseModel):
+    """The run's resolved encoding inputs — derived once, consumed everywhere.
+
+    Produced by :meth:`pyqenc.app_config.AppConfig.resolve_encoding` at the
+    run boundary (the CLI) from the raw config plus any CLI overrides, then
+    threaded through ``JobPhaseResult`` like every other volatile per-run
+    parameter. Phases consume this object; nobody re-resolves
+    ``encoding.strategies`` downstream, and the config is never written
+    after load.
+
+    Attributes:
+        strategies: Resolved strategies (identity + effective codec each).
+        targets:    Resolved quality targets.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    strategies: list[Strategy]
+    targets:    list[QualityTarget]
+
+    @property
+    def fixed_quality(self) -> bool:
+        """Whether the run pins the quality knob: every strategy's effective
+        range is a single point (``quality_better == quality_worse``).
+
+        Derived, never declared or persisted — a collapsed config profile
+        and the ``-q`` override produce the same value here.
+        """
+        if not self.strategies:
+            return False
+        return all(
+            s.codec.quality_better == s.codec.quality_worse for s in self.strategies
+        )
 
 
 def _coerce_decimal_pair(v: tuple | list) -> tuple[Decimal, Decimal]:

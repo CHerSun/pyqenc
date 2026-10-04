@@ -227,6 +227,7 @@ def test_job_phase_stores_collector(tmp_path: Path) -> None:
         force      = False,
         cleanup    = CleanupLevel.NONE,
         no_metrics = False,
+        plan       = config.resolve_encoding(),
     )
     assert phase._collector is collector
 

@@ -4,14 +4,14 @@ Covers the fixed-quality spec's config layer (Req 1–4):
 
 - ``-q`` parsing: single value, pair separators (``:``, ``-``, ``..``),
   unordered input, error forms.
-- Override application through ``EncodingConfig.resolve``: per-codec direction
-  (CRF and VBR), precedence over profile ranges, ``default_quality``
-  auto-adjust.
+- Override application through ``AppConfig.resolve_encoding``: per-codec
+  direction (CRF and VBR), precedence over profile ranges,
+  ``default_quality`` auto-adjust.
 - Validation at the shared range-validation site: subset-of-codec and endpoint
   granularity alignment for the CLI override, profile-declared ranges, and
   codec-declared ranges (multi-codec intersection included).
-- Derived run mode: ``fixed_quality`` derivation and the mixed-mode /
-  uniform-label loud exits in ``_build_config``.
+- Derived run mode: ``EncodingPlan.fixed_quality`` derivation and the
+  mixed-mode / uniform-label loud exits in ``resolve_encoding``.
 - Searched configs (no override) resolve unchanged.
 """
 
@@ -24,10 +24,10 @@ from pydantic import ValidationError
 
 from pyqenc.app_config import (
     AppConfig,
-    EncodingConfig,
     load_app_config,
 )
 from pyqenc.cli import _parse_quality_override
+from pyqenc.models import EncodingPlan
 
 _DEFAULT_CONFIG = load_app_config(default_only=True)
 
@@ -36,8 +36,8 @@ def _config_with_strategies(*patterns: str) -> AppConfig:
     """Build a default-config ``AppConfig`` with the given strategy patterns.
 
     Strategies are injected into the dumped default config and re-validated,
-    so ``EncodingConfig.resolve()`` runs fresh through the supported
-    ``model_validate`` path.
+    so the config is constructed through the supported ``model_validate``
+    path; resolution itself happens per-call via ``resolve_encoding``.
     """
     config_dict = _DEFAULT_CONFIG.model_dump()
     config_dict["encoding"]["strategies"] = list(patterns)
@@ -47,12 +47,10 @@ def _config_with_strategies(*patterns: str) -> AppConfig:
 def _resolve_with_override(
     patterns: list[str],
     override: tuple[Decimal, Decimal] | None,
-) -> EncodingConfig:
-    """Resolve the given patterns under a ``-q`` override; returns the config."""
+) -> EncodingPlan:
+    """Resolve the given patterns under a ``-q`` override; returns the plan."""
     config = _config_with_strategies(*patterns)
-    config.encoding.quality_range_override = override
-    config.encoding.resolve(config.codecs, config.profiles)
-    return config.encoding
+    return config.resolve_encoding(quality=override)
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +80,7 @@ class TestParseQualityOverride:
 
     def test_pair_returned_in_input_order(self) -> None:
         """The parser does not canonicalize — order normalization is owned
-        solely by the EncodingConfig field validator (pinned there)."""
+        solely by ``AppConfig.resolve_encoding`` (pinned there)."""
         assert _parse_quality_override("24:18") == (Decimal("24"), Decimal("18"))
 
     def test_whitespace_tolerated(self) -> None:
@@ -98,31 +96,31 @@ class TestParseQualityOverride:
 
 
 # ---------------------------------------------------------------------------
-# Override application through resolve()
+# Override application through resolve_encoding()
 # ---------------------------------------------------------------------------
 
 class TestOverrideApplication:
     """The override threads into strategy resolution as the effective range."""
 
     def test_crf_direction_better_lower(self) -> None:
-        encoding = _resolve_with_override(["h265-aq"], (Decimal("18"), Decimal("24")))
-        (strategy,) = encoding.resolved_strategies
+        plan = _resolve_with_override(["h265-aq"], (Decimal("18"), Decimal("24")))
+        (strategy,) = plan.strategies
         assert strategy.codec.quality_better == Decimal("18")
         assert strategy.codec.quality_worse == Decimal("24")
 
     def test_crf_unordered_input_normalized(self) -> None:
-        encoding = _resolve_with_override(["h265-aq"], (Decimal("24"), Decimal("18")))
-        (strategy,) = encoding.resolved_strategies
+        plan = _resolve_with_override(["h265-aq"], (Decimal("24"), Decimal("18")))
+        (strategy,) = plan.strategies
         assert strategy.codec.quality_better == Decimal("18")
         assert strategy.codec.quality_worse == Decimal("24")
 
     def test_vbr_direction_better_higher(self) -> None:
         # VBR codec range is [99.5, 0.5] (higher = better): the canonical
         # (lower, upper) override must be re-ordered into that convention.
-        encoding = _resolve_with_override(
+        plan = _resolve_with_override(
             ["nvenc-h265-10bit-vbr"], (Decimal("10"), Decimal("40")),
         )
-        (strategy,) = encoding.resolved_strategies
+        (strategy,) = plan.strategies
         assert strategy.codec.quality_better == Decimal("40")
         assert strategy.codec.quality_worse == Decimal("10")
 
@@ -130,39 +128,40 @@ class TestOverrideApplication:
         config_dict = _DEFAULT_CONFIG.model_dump()
         config_dict["profiles"]["h265-aq"]["quality_range"] = [12.0, 20.0]
         config = AppConfig.model_validate(config_dict)
-        config.encoding.strategies = ["h265-aq"]
-        config.encoding.quality_range_override = (Decimal("22"), Decimal("26"))
-        config.encoding.resolve(config.codecs, config.profiles)
-        (strategy,) = config.encoding.resolved_strategies
+        plan = config.resolve_encoding(
+            strategies = ["h265-aq"],
+            quality    = (Decimal("22"), Decimal("26")),
+        )
+        (strategy,) = plan.strategies
         # CLI wins over the profile band entirely.
         assert (strategy.codec.quality_better, strategy.codec.quality_worse) == (
             Decimal("22"), Decimal("26"),
         )
 
     def test_fixed_quality_derivation_single_point(self) -> None:
-        encoding = _resolve_with_override(["h265-aq", "h264"], (Decimal("18"), Decimal("18")))
-        assert encoding.fixed_quality is True
+        plan = _resolve_with_override(["h265-aq", "h264"], (Decimal("18"), Decimal("18")))
+        assert plan.fixed_quality is True
         assert all(
             s.codec.quality_better == s.codec.quality_worse == Decimal("18")
-            for s in encoding.resolved_strategies
+            for s in plan.strategies
         )
 
     def test_fixed_quality_false_for_ranged_override(self) -> None:
-        encoding = _resolve_with_override(["h265-aq"], (Decimal("18"), Decimal("24")))
-        assert encoding.fixed_quality is False
+        plan = _resolve_with_override(["h265-aq"], (Decimal("18"), Decimal("24")))
+        assert plan.fixed_quality is False
 
     def test_default_quality_auto_adjusted_to_override(self, caplog: pytest.LogCaptureFixture) -> None:
         # h265 default_quality is 18.0; pinning to 20 excludes it → nearest
         # bound (20) with a recorded adjustment.
         with caplog.at_level(logging.INFO, logger="pyqenc.app_config"):
-            encoding = _resolve_with_override(["h265-aq"], (Decimal("20"), Decimal("20")))
-        (strategy,) = encoding.resolved_strategies
+            plan = _resolve_with_override(["h265-aq"], (Decimal("20"), Decimal("20")))
+        (strategy,) = plan.strategies
         assert strategy.codec.default_quality == Decimal("20")
         assert "default_quality" in caplog.text and "adjusted" in caplog.text
 
     def test_default_quality_untouched_when_inside_override(self) -> None:
-        encoding = _resolve_with_override(["h265-aq"], (Decimal("16"), Decimal("22")))
-        (strategy,) = encoding.resolved_strategies
+        plan = _resolve_with_override(["h265-aq"], (Decimal("16"), Decimal("22")))
+        (strategy,) = plan.strategies
         assert strategy.codec.default_quality == Decimal("18.0")
 
     def test_default_quality_auto_adjusted_for_profile_narrowing(
@@ -173,19 +172,18 @@ class TestOverrideApplication:
         config_dict = _DEFAULT_CONFIG.model_dump()
         config_dict["profiles"]["h265-aq"]["quality_range"] = [20.0, 24.0]
         config = AppConfig.model_validate(config_dict)
-        config.encoding.strategies = ["h265-aq"]
         with caplog.at_level(logging.INFO, logger="pyqenc.app_config"):
-            config.encoding.resolve(config.codecs, config.profiles)
-        (strategy,) = config.encoding.resolved_strategies
+            plan = config.resolve_encoding(strategies=["h265-aq"])
+        (strategy,) = plan.strategies
         assert strategy.codec.default_quality == Decimal("20.0")
         assert "default_quality" in caplog.text
 
     def test_vbr_default_quality_adjusted_to_lower_bound(self) -> None:
         # VBR default 20.0; override [30, 60] excludes it → nearest bound is 30.
-        encoding = _resolve_with_override(
+        plan = _resolve_with_override(
             ["nvenc-h265-10bit-vbr"], (Decimal("30"), Decimal("60")),
         )
-        (strategy,) = encoding.resolved_strategies
+        (strategy,) = plan.strategies
         assert strategy.codec.default_quality == Decimal("30")
 
 
@@ -193,30 +191,28 @@ class TestSearchedRunsUnchanged:
     """Without the override, resolution is identical to today's behavior."""
 
     def test_no_override_resolves_default_ranges(self) -> None:
-        encoding = _resolve_with_override(["h265-aq", "h264"], None)
-        default_encoding = _config_with_strategies("h265-aq", "h264").encoding
+        plan = _resolve_with_override(["h265-aq", "h264"], None)
+        default_plan = _config_with_strategies("h265-aq", "h264").resolve_encoding()
         assert [
-            (s.codec.quality_better, s.codec.quality_worse) for s in encoding.resolved_strategies
+            (s.codec.quality_better, s.codec.quality_worse) for s in plan.strategies
         ] == [
             (s.codec.quality_better, s.codec.quality_worse)
-            for s in default_encoding.resolved_strategies
+            for s in default_plan.strategies
         ]
-        assert encoding.fixed_quality is False
+        assert plan.fixed_quality is False
 
     def test_override_clearing_restores_original_ranges(self) -> None:
         config = _config_with_strategies("h265-aq")
         original = [
             (s.codec.quality_better, s.codec.quality_worse)
-            for s in config.encoding.resolved_strategies
+            for s in config.resolve_encoding().strategies
         ]
-        config.encoding.quality_range_override = (Decimal("18"), Decimal("18"))
-        config.encoding.resolve(config.codecs, config.profiles)
-        assert config.encoding.fixed_quality is True
-        config.encoding.quality_range_override = None
-        config.encoding.resolve(config.codecs, config.profiles)
+        pinned = config.resolve_encoding(quality=(Decimal("18"), Decimal("18")))
+        assert pinned.fixed_quality is True
+        restored = config.resolve_encoding()
         assert [
             (s.codec.quality_better, s.codec.quality_worse)
-            for s in config.encoding.resolved_strategies
+            for s in restored.strategies
         ] == original
 
 
@@ -259,8 +255,8 @@ class TestOverrideValidation:
             _resolve_with_override(["h265-aq", "av1"], (Decimal("18.5"), Decimal("18.5")))
 
     def test_aligned_pair_accepted_across_codecs(self) -> None:
-        encoding = _resolve_with_override(["h265-aq", "av1"], (Decimal("18"), Decimal("24")))
-        assert len(encoding.resolved_strategies) == 2
+        plan = _resolve_with_override(["h265-aq", "av1"], (Decimal("18"), Decimal("24")))
+        assert len(plan.strategies) == 2
 
 
 class TestProfileAndCodecAlignment:
@@ -279,9 +275,8 @@ class TestProfileAndCodecAlignment:
         config_dict = _DEFAULT_CONFIG.model_dump()
         config_dict["profiles"]["av1"]["quality_range"] = [18.0, 24.0]
         config = AppConfig.model_validate(config_dict)
-        config.encoding.strategies = ["av1"]
-        config.encoding.resolve(config.codecs, config.profiles)
-        (strategy,) = config.encoding.resolved_strategies
+        plan = config.resolve_encoding(strategies=["av1"])
+        (strategy,) = plan.strategies
         assert strategy.codec.quality_better == Decimal("18.0")
 
     def test_codec_range_misaligned_rejected(self) -> None:
@@ -292,7 +287,7 @@ class TestProfileAndCodecAlignment:
 
 
 # ---------------------------------------------------------------------------
-# _build_config: uniform labels under -q, mixed-mode stop
+# resolve_encoding mode checks (exercised through _build_config)
 # ---------------------------------------------------------------------------
 
 def _build_args(**overrides: object) -> argparse.Namespace:
@@ -313,20 +308,21 @@ def _build_config_isolated(
     args: argparse.Namespace,
     *,
     base_config: AppConfig | None = None,
-) -> AppConfig:
+) -> EncodingPlan:
     """``_build_config`` pinned to the bundled default (no home/CWD layers).
 
-    The base is deep-copied: ``_build_config`` mutates the config it loads,
-    and the module-level default must stay pristine for other tests.
+    Returns the resolved ``EncodingPlan`` (the mode-check surface); the
+    module-level default is deep-copied so it stays pristine for other tests.
     """
     config = (base_config if base_config is not None else _DEFAULT_CONFIG).model_copy(deep=True)
     monkeypatch.setattr("pyqenc.cli.load_app_config", lambda: config)
     from pyqenc.cli import _build_config as build_config
-    return build_config(args)
+    _, plan = build_config(args)
+    return plan
 
 
 class TestBuildConfigModeChecks:
-    """Post-resolve loud exits in ``_build_config`` (Req 3.2, Req 4)."""
+    """Post-resolve loud exits in ``resolve_encoding`` via ``_build_config`` (Req 3.2, Req 4)."""
 
     def test_uniform_label_required_under_q(self, monkeypatch: pytest.MonkeyPatch) -> None:
         args = _build_args(strategies="h265-aq,vulkan-h265-10bit-qp", quality="18")
@@ -337,8 +333,8 @@ class TestBuildConfigModeChecks:
         # h265-aq and av1 both carry the default "CRF" label — string equality
         # passes; knob-scale incomparability is the banner's message, not a stop.
         args = _build_args(strategies="h265-aq,av1", quality="18")
-        config = _build_config_isolated(monkeypatch, args)
-        assert config.encoding.fixed_quality is True
+        plan = _build_config_isolated(monkeypatch, args)
+        assert plan.fixed_quality is True
 
     def test_mixed_fixed_and_searched_stops(self, monkeypatch: pytest.MonkeyPatch) -> None:
         config_dict = _DEFAULT_CONFIG.model_dump()
@@ -352,14 +348,13 @@ class TestBuildConfigModeChecks:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         args = _build_args(strategies="h265-aq,h264", quality="20")
-        config = _build_config_isolated(monkeypatch, args)
-        assert config.encoding.fixed_quality is True
+        plan = _build_config_isolated(monkeypatch, args)
+        assert plan.fixed_quality is True
 
     def test_default_config_builds_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The default searched configuration must build identically (no -q).
-        config = _build_config_isolated(monkeypatch, _build_args())
-        assert config.encoding.fixed_quality is False
-        assert config.encoding.quality_range_override is None
+        plan = _build_config_isolated(monkeypatch, _build_args())
+        assert plan.fixed_quality is False
 
     def test_invalid_q_exits_with_value_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         args = _build_args(strategies="h265-aq,av1", quality="18.5")

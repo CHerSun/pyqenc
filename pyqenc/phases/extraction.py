@@ -731,7 +731,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
         # Disk-space estimate on the enumerated stream data (log-only).
         if self._video is not None:
-            n_strategies = len(self._config.encoding.resolved_strategies)
+            n_strategies = len(job_result.plan.strategies)
             log_disk_space_info(
                 stream         = self._video,
                 work_dir       = work_dir,

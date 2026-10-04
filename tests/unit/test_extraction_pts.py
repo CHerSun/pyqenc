@@ -90,6 +90,7 @@ def _make_extraction_phase(
         file       = Artifact(payload=File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64), state=ArtifactState.COMPLETE),
         force_wipe = force_wipe,
         config     = config,
+        plan       = config.resolve_encoding(),
         work_dir   = work_dir,
         source     = source,
     )
@@ -102,6 +103,7 @@ def _make_extraction_phase(
         cleanup    = CleanupLevel.NONE,
         no_metrics = True,
         collector  = collector,
+        plan       = job_result.plan,
     )
     job.result = job_result
 
