@@ -536,7 +536,7 @@ def _make_fixed_phase(
 
     The override is applied exactly as ``_build_config`` applies it: passed to
     ``resolve_encoding`` together with the strategy patterns —
-    ``plan.fixed_quality`` derives True for every matched strategy.
+    ``plan._fixed_quality`` derives True for every matched strategy.
     """
     from pyqenc.phases.chunking import ChunkingPhase as _CP
     from pyqenc.phases.chunking import ChunkingPhaseResult
@@ -550,7 +550,7 @@ def _make_fixed_phase(
         strategies = strategy_names,
         quality    = (Decimal("18"), Decimal("18")),
     )
-    assert plan.fixed_quality, "harness must derive a fixed run"
+    assert plan._fixed_quality, "harness must derive a fixed run"
 
     src = tmp_path / "source.mkv"
     src.write_bytes(b"\x00" * 1024)
@@ -730,7 +730,7 @@ class TestFixedQualityBanner:
         config_dict["encoding"]["strategies"] = ["h265-aq", "h264"]
         config = AppConfig.model_validate(config_dict)
         plan = config.resolve_encoding()
-        assert plan.fixed_quality
+        assert plan._fixed_quality
 
         src = tmp_path / "source.mkv"
         src.write_bytes(b"\x00" * 1024)

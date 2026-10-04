@@ -309,33 +309,22 @@ class EncodingPlan(BaseModel):
     strategies: list[Strategy]
     targets:    list[QualityTarget]
 
-    # Derived once at construction; a private attr by design — outside the
-    # schema, so model_dump and equality never see it.
+    # Whether the run pins the quality knob: every strategy's effective
+    # range is a single point (``quality_better == quality_worse``).
+    # Derived once at construction from ``strategies`` — a collapsed config
+    # profile and the ``-q`` override produce the same value here. Private
+    # by design: outside the schema, so model_dump and equality never see
+    # it; consumers read it directly. (Plain private-attr assignment works
+    # in validators even on frozen models — verified on pydantic 2.12.5.)
     _fixed_quality: bool = PrivateAttr(default=False)
 
     @model_validator(mode="after")
     def _derive_fixed_quality(self) -> Self:
-        # object.__setattr__: frozen blocks plain assignment, even in validators.
-        object.__setattr__(
-            self, "_fixed_quality",
-            bool(self.strategies) and all(
-                s.codec.quality_better == s.codec.quality_worse
-                for s in self.strategies
-            ),
+        self._fixed_quality = bool(self.strategies) and all(
+            s.codec.quality_better == s.codec.quality_worse
+            for s in self.strategies
         )
         return self
-
-    @property
-    def fixed_quality(self) -> bool:
-        """Whether the run pins the quality knob: every strategy's effective
-        range is a single point (``quality_better == quality_worse``).
-
-        Derived once at construction into a private attr — outside the
-        schema, so ``model_dump`` and equality never see it; reads return
-        the stored value. A collapsed config profile and the ``-q``
-        override produce the same value here.
-        """
-        return self._fixed_quality
 
 
 def _coerce_decimal_pair(v: tuple | list) -> tuple[Decimal, Decimal]:
