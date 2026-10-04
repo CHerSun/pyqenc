@@ -922,13 +922,47 @@ implementation as the spec-window mechanical-debt sweep.
 Old code used `str` directly in many places. Instead of Paths, instead of strategies, profiles, etc.
 We've moved to objects & classes since then. Single instanciacion where possible.
 strings instead of objects could be used for serialization/deserialization, but only to directly recover to objects.
-
 Legitimate usages for `str` do exist, like messages. But if it masks object usage - this must not happen.
 
 ---
 
+## 90. Sidecar content round 2 — optimization.yaml metrics, per-video extras, typed per-mode models — needs thinking
 
-## Last known = 89
+Findings from inspecting the 2026-10-04 recovered-run artifacts (follow-up to
+the mode-honest sidecar landing):
+
+- **Per-video merged sidecar extras**: `plot` is redundant — the plots
+  (`<stem>.png`, `<stem>.crf.png`) are discoverable by the merged file's stem
+  alone; drop the path. `anchor` is a fleeting election artifact — it lives
+  at the optimization phase (fast-exit re-derivation); a merge-phase
+  per-video record has no consumer for it; drop it.
+- **`optimization.yaml` has the metrics problem `merge.yaml` had**:
+  `strategy_results[].metrics` dumps ALL stats — narrow to the comparison set
+  (p10 + median), like the merge summaries were narrowed. Tension to resolve
+  while at it: the full set on strategy_results is the current re-derivation
+  substrate for the "changed comparison stat set re-projects old
+  measurements" property; narrowing moves retention to the attempt sidecars
+  (where it already lives) and makes re-derivation read them — acceptable,
+  but the reuse path then re-reads sidecars (or re-derives within p10/med
+  only). Decide explicitly.
+- **`quality_targets` on fixed runs is misleading in BOTH files**: an empty
+  list reads as "no targets configured". Omit the key entirely for fixed
+  runs (mode-conditional serialization) in `optimization.yaml` and
+  `merge.yaml`.
+- **Typed per-mode sidecar models**: fixed and search runs now carry
+  genuinely different data on both params sidecars (fixed: anchor/ruler
+  basis; search: quality_targets) — replace mode-conditional optional fields
+  with type-explicit classes: a common base + `Fixed…Params` / `Search…Params`
+  derivatives for both `OptimizationParams` and `MergeParams`, so the schema
+  itself states the mode's shape.
+
+Supersedes parts of the interim sidecar landing (88975c7); fold into the
+`2026-10-03 unified-quality-summaries` implementation or land standalone
+before it.
+
+---
+
+## Last known = 90
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
