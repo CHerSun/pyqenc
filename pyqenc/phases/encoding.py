@@ -545,8 +545,9 @@ class EncodingResult:
     """Result of encoding all chunks.
 
     Attributes:
-        encoded_chunks: Mapping of chunk_id -> strategy name -> the winning
-                        :class:`~pyqenc.stream_model.EncodedChunk`.
+        encoded_chunks: Winners grouped by strategy display name (insertion
+                        order is completion order — consumers sort explicitly;
+                        the payload carries its own chunk + strategy identity).
         reused_count:   Number of chunks reused from previous runs.
         encoded_count:  Number of chunks newly encoded.
         outcome:        Phase outcome.
@@ -554,7 +555,7 @@ class EncodingResult:
         error:          Error message if pipeline failed.
     """
 
-    encoded_chunks: dict[str, dict[str, EncodedChunk]] = field(default_factory=dict)
+    encoded_chunks: dict[str, list[EncodedChunk]] = field(default_factory=dict)
     reused_count:   int                         = 0
     encoded_count:  int                         = 0
     outcome:        PhaseOutcome                = PhaseOutcome.COMPLETED
@@ -1541,17 +1542,17 @@ async def _encode_chunks_parallel(
                         f"winning file guaranteed for COMPLETE pair "
                         f"{chunk.safe_name()}/{strategy.display_name()}"
                     )
-                    if chunk.safe_name() not in result.encoded_chunks:
-                        result.encoded_chunks[chunk.safe_name()] = {}
                     name_record = EncodedChunk.parse_file_name(pair_recovery.winning_file.name)
-                    result.encoded_chunks[chunk.safe_name()][strategy.display_name()] = build_encoded_chunk(
+                    result.encoded_chunks.setdefault(
+                        strategy.display_name(), [],
+                    ).append(build_encoded_chunk(
                         chunk        = chunk,
                         strategy     = strategy,
                         crf          = name_record.crf,
                         path         = pair_recovery.winning_file,
                         resolution   = name_record.resolution,
                         frame_count  = 0,  # unknown on recovery
-                    )
+                    ))
                     result.reused_count += 1
                     complete_pairs.add((chunk.safe_name(), strategy.display_name()))
 
@@ -1593,16 +1594,16 @@ async def _encode_chunks_parallel(
                 if chunk_result.success:
                     # Success implies a built winner (encode_chunk's contract).
                     assert chunk_result.encoded_file is not None and chunk_result.final_crf is not None
-                    if chunk.safe_name() not in result.encoded_chunks:
-                        result.encoded_chunks[chunk.safe_name()] = {}
-                    result.encoded_chunks[chunk.safe_name()][strategy.display_name()] = build_encoded_chunk(
+                    result.encoded_chunks.setdefault(
+                        strategy.display_name(), [],
+                    ).append(build_encoded_chunk(
                         chunk        = chunk,
                         strategy     = strategy,
                         crf          = chunk_result.final_crf,
                         path         = chunk_result.encoded_file.path,
                         resolution   = chunk_result.encoded_file.resolution,
                         frame_count  = chunk_result.frame_count,
-                    )
+                    ))
 
                     if chunk_result.reused:
                         result.reused_count += 1
@@ -1663,7 +1664,7 @@ class _LimiterTally:
 
 def _scan_winner_sidecars(
     work_dir:        Path,
-    encoded_chunks:  dict[str, dict[str, EncodedChunk]],
+    encoded_chunks:  dict[str, list[EncodedChunk]],
     strategy_order:  list[str],
     quality_targets: list[QualityTarget],
 ) -> _WinnerScan:
@@ -1679,7 +1680,7 @@ def _scan_winner_sidecars(
 
     Args:
         work_dir:        Work dir root (locates ``encoded/<strategy>/``).
-        encoded_chunks:  Chunk safe name -> strategy display name -> winner.
+        encoded_chunks:  Winners grouped by strategy display name.
         strategy_order:  Strategy display names in pipeline order.
         quality_targets: Targets the winning attempts are judged against
                          (empty → ``summaries`` stays ``None``; frame
@@ -1695,8 +1696,9 @@ def _scan_winner_sidecars(
     frames:      dict[str, list[tuple[str, int]]]    = {}
     frames_known = True
 
-    for by_strategy in encoded_chunks.values():
-        for strategy_name, winner in by_strategy.items():
+    for winners in encoded_chunks.values():
+        for winner in winners:
+            strategy_name = winner.strategy.display_name()
             name_match = ENCODED_ATTEMPT_NAME_PATTERN.match(winner.stream.stream.file.path.name)
             if name_match is None:
                 logger.debug(
@@ -1931,15 +1933,15 @@ class EncodingPhaseResult(PhaseResult):
     quality_labels: dict[str, str]               = field(default_factory=dict)
 
     @property
-    def encoded_chunks(self) -> dict[str, dict[str, EncodedChunk]]:
-        """Derived lookup over the winners: chunk safe name -> strategy name
-        -> the composed payload (path via ``stream.file.path``)."""
-        lookup: dict[str, dict[str, EncodedChunk]] = {}
+    def encoded_chunks(self) -> dict[str, list[EncodedChunk]]:
+        """Derived grouping over the winners: strategy display name -> the
+        composed payloads (path via ``stream.file.path``)."""
+        lookup: dict[str, list[EncodedChunk]] = {}
         for row in self.winners:
             payload = row.payload
             lookup.setdefault(
-                payload.chunk.safe_name(), {}
-            )[payload.strategy.display_name()] = payload
+                payload.strategy.display_name(), [],
+            ).append(payload)
         return lookup
 
 
@@ -2320,12 +2322,12 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
 
         # Winners come from the fresh encode result — every complete pair,
         # with freshly measured payloads (frame counts from the run itself).
+        # Sorted by (chunk, strategy) for a deterministic winners order.
         winners = [
             Artifact(payload=payload, state=ArtifactState.COMPLETE)
-            for chunk_id in sorted(enc_result.encoded_chunks)
-            for payload in (
-                enc_result.encoded_chunks[chunk_id][name]
-                for name in sorted(enc_result.encoded_chunks[chunk_id])
+            for payload in sorted(
+                (p for ps in enc_result.encoded_chunks.values() for p in ps),
+                key=lambda p: (p.chunk.safe_name(), p.strategy.display_name()),
             )
         ]
         complete_pairs = {

@@ -557,7 +557,7 @@ class TestEncodingPresentationTargets:
         def _fake_encode_all(**kwargs: object) -> EncodingResult:
             captured.update(kwargs)
             result = EncodingResult()
-            result.encoded_chunks = {chunk.safe_name(): {strategy.display_name(): winner}}
+            result.encoded_chunks = {strategy.display_name(): [winner]}
             result.encoded_count = 1
             return result
 

@@ -703,7 +703,7 @@ class MergePhase(Phase[MergePhaseResult]):
         strategy:       Strategy,
         output_file:    Path,
         source_stream:  ExtendedVideoStream,
-        encoded_chunks: dict[str, dict[str, EncodedChunk]],
+        encoded_chunks: dict[str, list[EncodedChunk]],
     ) -> bool:
         """Concatenate one strategy's encoded chunks into *output_file*.
 
@@ -719,7 +719,7 @@ class MergePhase(Phase[MergePhaseResult]):
                             options-file name via safe name.
             output_file:    The final output location; the tmp twin derives.
             source_stream:  The source stream (its true fps feeds propedit).
-            encoded_chunks: Encoding winners keyed by chunk id, then strategy.
+            encoded_chunks: Encoding winners grouped by strategy display name.
 
         Returns:
             ``True`` when *output_file* is ready at its final name.
@@ -727,12 +727,12 @@ class MergePhase(Phase[MergePhaseResult]):
         strategy_name = strategy.display_name()
         logger.info("Merging: %s", strategy_name)
 
-        # Collect and sort chunks for this strategy
+        # Collect and sort chunks for this strategy (filename order = the
+        # zero-padded chunk ids, so lexicographic is chronological).
         strategy_chunks: list[Path] = sorted(
             (
-                encoded_chunks[chunk_id][strategy_name].stream.stream.file.path
-                for chunk_id in sorted(encoded_chunks.keys())
-                if strategy_name in encoded_chunks[chunk_id]
+                winner.stream.stream.file.path
+                for winner in encoded_chunks.get(strategy_name, [])
             ),
             key=lambda p: p.name,
         )
@@ -813,14 +813,14 @@ class MergePhase(Phase[MergePhaseResult]):
         tmp_output.replace(output_file)
         return True
 
-    def _collect_encoded_chunks(self) -> dict[str, dict[str, EncodedChunk]]:
+    def _collect_encoded_chunks(self) -> dict[str, list[EncodedChunk]]:
         """Read the winning ``EncodedChunk`` objects from ``EncodingPhase.result``.
 
         The composed objects are resolved once by the shared dependency walk —
         path via ``stream.file.path`` (no duplicated fields).
 
         Returns:
-            Nested dict mapping chunk IDs to strategy-name-to-``EncodedChunk``.
+            Dict mapping strategy display names to their winner payloads.
         """
         return self._dep_result(EncodingPhase).encoded_chunks
 

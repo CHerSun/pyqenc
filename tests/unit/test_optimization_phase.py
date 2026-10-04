@@ -941,7 +941,7 @@ class TestAggregateStrategyMetrics:
 
         chunks = [_make_chunk(0.0, 10.0, tmp_path), _make_chunk(10.0, 20.0, tmp_path)]
         strategy = _S1
-        encoded_chunks: dict[str, dict[str, EncodedChunk]] = {}
+        encoded_chunks: dict[str, list[EncodedChunk]] = {}
         for i, chunk in enumerate(chunks):
             name = f"{chunk.safe_name()}.1920x1080.q18.0"
             strategy_dir = tmp_path / "encoded" / strategy.safe_name()
@@ -952,7 +952,7 @@ class TestAggregateStrategyMetrics:
                 strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
                 {"metrics": {"vmaf_median": 91.0 + i, "vif_median": 84.0 - i}},
             )
-            encoded_chunks.setdefault(chunk.safe_name(), {})[strategy.display_name()] = (
+            encoded_chunks.setdefault(strategy.display_name(), []).append(
                 build_encoded_chunk(
                     chunk=chunk, strategy=strategy, crf=Decimal("18.0"),
                     path=strategy_dir / f"{name}.mkv", resolution="1920x1080",
@@ -977,12 +977,12 @@ class TestAggregateStrategyMetrics:
         mkv.write_bytes(b"x" * 100)
         # No sidecar next to the winner.
         encoded_chunks = {
-            chunk.safe_name(): {
-                strategy.display_name(): build_encoded_chunk(
+            strategy.display_name(): [
+                build_encoded_chunk(
                     chunk=chunk, strategy=strategy, crf=Decimal("18.0"),
                     path=mkv, resolution="1920x1080", frame_count=24,
                 ),
-            },
+            ],
         }
         phase, _, _ = _make_fixed_phase(tmp_path, strategy_names=["h265-aq+slow"])
         assert phase._aggregate_strategy_metrics(
@@ -1058,7 +1058,7 @@ class TestFixedComparedExecute:
                         strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
                         {"crf": "18.0", "targets_met": True, "metrics": metrics[display]},
                     )
-                    result.encoded_chunks.setdefault(chunk.safe_name(), {})[display] = (
+                    result.encoded_chunks.setdefault(display, []).append(
                         build_encoded_chunk(
                             chunk=chunk, strategy=strategy, crf=Decimal("18.0"),
                             path=mkv, resolution="1920x1080", frame_count=24,

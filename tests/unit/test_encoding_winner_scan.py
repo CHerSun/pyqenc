@@ -156,11 +156,14 @@ class TestScanWinnerSidecars:
         """Two strategies over the same chunks: each sums its own winners."""
         chunks = [_make_chunk(0.0, 10.0, tmp_path), _make_chunk(10.0, 20.0, tmp_path)]
         encoded = {
-            c.safe_name(): {
-                _STRATEGY.display_name():  _make_winner(tmp_path, c, _STRATEGY,  Decimal("18.0"), 100 + i),
-                _STRATEGY_B.display_name(): _make_winner(tmp_path, c, _STRATEGY_B, Decimal("20.0"), 200 + i),
-            }
-            for i, c in enumerate(chunks)
+            _STRATEGY.display_name(): [
+                _make_winner(tmp_path, c, _STRATEGY, Decimal("18.0"), 100 + i)
+                for i, c in enumerate(chunks)
+            ],
+            _STRATEGY_B.display_name(): [
+                _make_winner(tmp_path, c, _STRATEGY_B, Decimal("20.0"), 200 + i)
+                for i, c in enumerate(chunks)
+            ],
         }
 
         scan = _scan_winner_sidecars(
@@ -178,9 +181,9 @@ class TestScanWinnerSidecars:
     def test_zero_count_marks_unknown(self, tmp_path: Path) -> None:
         """A winner sidecar with the 0 sentinel → frames_known=False (skip semantics)."""
         chunk = _make_chunk(0.0, 10.0, tmp_path)
-        encoded = {chunk.safe_name(): {_STRATEGY.display_name(): _make_winner(
+        encoded = {_STRATEGY.display_name(): [_make_winner(
             tmp_path, chunk, _STRATEGY, Decimal("18.0"), 0,
-        )}}
+        )]}
 
         scan = _scan_winner_sidecars(tmp_path, encoded, [_STRATEGY.display_name()], _TARGETS)
 
@@ -198,7 +201,7 @@ class TestScanWinnerSidecars:
         data = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
         del data["frame_count"]
         sidecar_path.write_text(yaml.safe_dump(data), encoding="utf-8")
-        encoded = {chunk.safe_name(): {_STRATEGY.display_name(): winner}}
+        encoded = {_STRATEGY.display_name(): [winner]}
 
         scan = _scan_winner_sidecars(tmp_path, encoded, [_STRATEGY.display_name()], _TARGETS)
 
@@ -212,7 +215,7 @@ class TestScanWinnerSidecars:
         # Remove the sidecar the helper wrote.
         (tmp_path / "encoded" / _STRATEGY.safe_name()
          / f"{chunk.safe_name()}.{_RESOLUTION}.yaml").unlink()
-        encoded = {chunk.safe_name(): {_STRATEGY.display_name(): winner}}
+        encoded = {_STRATEGY.display_name(): [winner]}
 
         scan = _scan_winner_sidecars(tmp_path, encoded, [_STRATEGY.display_name()], _TARGETS)
 
@@ -221,9 +224,9 @@ class TestScanWinnerSidecars:
     def test_frame_accounting_runs_without_targets(self, tmp_path: Path) -> None:
         """Frames are target-independent: no targets → summaries None, sums live."""
         chunk = _make_chunk(0.0, 10.0, tmp_path)
-        encoded = {chunk.safe_name(): {_STRATEGY.display_name(): _make_winner(
+        encoded = {_STRATEGY.display_name(): [_make_winner(
             tmp_path, chunk, _STRATEGY, Decimal("18.0"), 240,
-        )}}
+        )]}
 
         scan = _scan_winner_sidecars(tmp_path, encoded, [_STRATEGY.display_name()], [])
 
@@ -234,9 +237,9 @@ class TestScanWinnerSidecars:
     def test_limiter_summaries_still_built(self, tmp_path: Path) -> None:
         """The limiter table path is unchanged by the frame accounting."""
         chunk = _make_chunk(0.0, 10.0, tmp_path)
-        encoded = {chunk.safe_name(): {_STRATEGY.display_name(): _make_winner(
+        encoded = {_STRATEGY.display_name(): [_make_winner(
             tmp_path, chunk, _STRATEGY, Decimal("18.0"), 240,
-        )}}
+        )]}
 
         scan = _scan_winner_sidecars(tmp_path, encoded, [_STRATEGY.display_name()], _TARGETS)
 

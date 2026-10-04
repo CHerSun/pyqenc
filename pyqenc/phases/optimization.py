@@ -656,9 +656,13 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         )
         new_results: list[StrategyTestResult] = []
         for strategy in result_strategies:
+            winners_by_chunk = {
+                w.chunk.safe_name(): w
+                for w in enc_result.encoded_chunks.get(strategy.display_name(), [])
+            }
             file_sizes: list[float] = []
             for chunk in test_chunks:
-                encoded = enc_result.encoded_chunks.get(chunk.safe_name(), {}).get(strategy.display_name())
+                encoded = winners_by_chunk.get(chunk.safe_name())
                 if encoded is not None and encoded.stream.stream.file.path.exists():
                     file_sizes.append(encoded.stream.stream.file.file_size_bytes or 0)
             new_results.append(StrategyTestResult(
@@ -1013,7 +1017,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         work_dir:        Path,
         test_chunks:     list[VideoStreamChunk],
         strategy:        Strategy,
-        encoded_chunks:  dict[str, dict[str, EncodedChunk]],
+        encoded_chunks:  dict[str, list[EncodedChunk]],
     ) -> dict[str, float]:
         """Min-aggregate a strategy's measured metrics across its test winners.
 
@@ -1027,8 +1031,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             work_dir:       Pipeline working directory.
             test_chunks:    The test-chunk set.
             strategy:       The strategy being aggregated.
-            encoded_chunks: The encode result map (chunk id -> strategy
-                            display name -> winner payload).
+            encoded_chunks: The encode result map (strategy display name ->
+                            winner payloads).
 
         Returns:
             ``{metric_statistic: min_across_chunks}``.
@@ -1036,9 +1040,13 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         from pyqenc.constants import ENCODED_ATTEMPT_NAME_PATTERN
         from pyqenc.phases.encoding import _encoded_dir, _read_sidecar_yaml
 
+        winners_by_chunk = {
+            w.chunk.safe_name(): w
+            for w in encoded_chunks.get(strategy.display_name(), [])
+        }
         mins: dict[str, float] = {}
         for chunk in test_chunks:
-            winner = encoded_chunks.get(chunk.safe_name(), {}).get(strategy.display_name())
+            winner = winners_by_chunk.get(chunk.safe_name())
             if winner is None:
                 continue
             name_match = ENCODED_ATTEMPT_NAME_PATTERN.match(winner.stream.stream.file.path.name)

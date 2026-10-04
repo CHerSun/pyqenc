@@ -1642,7 +1642,7 @@ class TestMergePhaseTiming:
                 patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
                 patch("pyqenc.phases.merge.get_frame_count", return_value=100),
                 patch.object(MergePhase, "_collect_encoded_chunks", return_value={
-                    "chunk_0": {"h265+slow": _encoded_chunk(encoded_path, "chunk_0", "h265+slow")},
+                    "h265+slow": [_encoded_chunk(encoded_path, "chunk_0", "h265+slow")],
                 }),
             ):
                 mock_subprocess.return_value = MagicMock(returncode=0, stderr="")
@@ -1697,7 +1697,7 @@ class TestMergePhaseTiming:
                 patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
                 patch("pyqenc.phases.merge.get_frame_count", return_value=100),
                 patch.object(MergePhase, "_collect_encoded_chunks", return_value={
-                    "chunk_0": {"h265+slow": _encoded_chunk(encoded_path, "chunk_0", "h265+slow")},
+                    "h265+slow": [_encoded_chunk(encoded_path, "chunk_0", "h265+slow")],
                 }),
                 patch("pyqenc.phases.merge.MergePhase._measure_quality", return_value=({}, False, None)),
             ):
