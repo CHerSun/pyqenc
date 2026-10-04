@@ -10,7 +10,6 @@ All models use Pydantic BaseModel for validation and serialisation.
 import logging
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import Enum, IntEnum
-from functools import cached_property
 from pathlib import Path
 from typing import Self
 
@@ -18,6 +17,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     field_validator,
     model_validator,
 )
@@ -309,22 +309,33 @@ class EncodingPlan(BaseModel):
     strategies: list[Strategy]
     targets:    list[QualityTarget]
 
-    @cached_property
+    # Derived once at construction; a private attr by design — outside the
+    # schema, so model_dump and equality never see it.
+    _fixed_quality: bool = PrivateAttr(default=False)
+
+    @model_validator(mode="after")
+    def _derive_fixed_quality(self) -> Self:
+        # object.__setattr__: frozen blocks plain assignment, even in validators.
+        object.__setattr__(
+            self, "_fixed_quality",
+            bool(self.strategies) and all(
+                s.codec.quality_better == s.codec.quality_worse
+                for s in self.strategies
+            ),
+        )
+        return self
+
+    @property
     def fixed_quality(self) -> bool:
         """Whether the run pins the quality knob: every strategy's effective
         range is a single point (``quality_better == quality_worse``).
 
-        Derived, never declared or persisted — a collapsed config profile
-        and the ``-q`` override produce the same value here. Computed once
-        per plan instance (``cached_property`` is safe on the frozen model:
-        it stores outside the declared fields, so equality, ``model_dump``,
-        and copies are unaffected — verified).
+        Derived once at construction into a private attr — outside the
+        schema, so ``model_dump`` and equality never see it; reads return
+        the stored value. A collapsed config profile and the ``-q``
+        override produce the same value here.
         """
-        if not self.strategies:
-            return False
-        return all(
-            s.codec.quality_better == s.codec.quality_worse for s in self.strategies
-        )
+        return self._fixed_quality
 
 
 def _coerce_decimal_pair(v: tuple | list) -> tuple[Decimal, Decimal]:
