@@ -30,6 +30,7 @@
 - The default config object is the single source of truth for all config defaults. Everywhere else (function signatures, constructors, internal calls) values must be required explicitly — no default parameter values that could silently diverge from the canonical defaults.
 - **Config is declaration; resolved values are per-run objects.** Raw strings (`encoding.strategies`, `encoding.targets`) exist only as the YAML parse form and as sidecar serialization for recovering to objects — never as read state. The CLI derives the `EncodingPlan` exactly once via `AppConfig.resolve_encoding(...)` (CLI overrides are arguments to that call, not field writes) and threads it through `JobPhaseResult` like every other volatile per-run parameter. Phases consume the plan; nobody re-resolves downstream, and the config object is never written after load. One run = one stable config + one plan.
 - Derived result indices group by the axis consumers actually iterate (`dict[strategy_name] -> list[EncodedChunk]`, not chunk-major nesting): the payload owns its identity, and grouping is a convenience — ordering is always established explicitly at the consuming site, never inherited from insertion order.
+- Chunk-chronological ordering keys on `start_timestamp` (the quantity itself) — never on formatted names or file names, whose lexicographic order coincides with time order only by zero-padding convention.
 
 ## Naming (two-name doctrine)
 
