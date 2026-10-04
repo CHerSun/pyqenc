@@ -10,6 +10,7 @@ All models use Pydantic BaseModel for validation and serialisation.
 import logging
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import Enum, IntEnum
+from functools import cached_property
 from pathlib import Path
 from typing import Self
 
@@ -308,13 +309,16 @@ class EncodingPlan(BaseModel):
     strategies: list[Strategy]
     targets:    list[QualityTarget]
 
-    @property
+    @cached_property
     def fixed_quality(self) -> bool:
         """Whether the run pins the quality knob: every strategy's effective
         range is a single point (``quality_better == quality_worse``).
 
         Derived, never declared or persisted — a collapsed config profile
-        and the ``-q`` override produce the same value here.
+        and the ``-q`` override produce the same value here. Computed once
+        per plan instance (``cached_property`` is safe on the frozen model:
+        it stores outside the declared fields, so equality, ``model_dump``,
+        and copies are unaffected — verified).
         """
         if not self.strategies:
             return False
