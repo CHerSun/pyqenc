@@ -10,7 +10,7 @@ Covers the fixed-quality spec's config layer (Req 1–4):
 - Validation at the shared range-validation site: subset-of-codec and endpoint
   granularity alignment for the CLI override, profile-declared ranges, and
   codec-declared ranges (multi-codec intersection included).
-- Derived run mode: ``EncodingPlan._fixed_quality`` derivation and the
+- Derived run mode: ``EncodingPlan.fixed_quality`` derivation and the
   mixed-mode / uniform-label loud exits in ``resolve_encoding``.
 - Searched configs (no override) resolve unchanged.
 """
@@ -140,7 +140,7 @@ class TestOverrideApplication:
 
     def test_fixed_quality_derivation_single_point(self) -> None:
         plan = _resolve_with_override(["h265-aq", "h264"], (Decimal("18"), Decimal("18")))
-        assert plan._fixed_quality is True
+        assert plan.fixed_quality is True
         assert all(
             s.codec.quality_better == s.codec.quality_worse == Decimal("18")
             for s in plan.strategies
@@ -148,7 +148,7 @@ class TestOverrideApplication:
 
     def test_fixed_quality_false_for_ranged_override(self) -> None:
         plan = _resolve_with_override(["h265-aq"], (Decimal("18"), Decimal("24")))
-        assert plan._fixed_quality is False
+        assert plan.fixed_quality is False
 
     def test_default_quality_auto_adjusted_to_override(self, caplog: pytest.LogCaptureFixture) -> None:
         # h265 default_quality is 18.0; pinning to 20 excludes it → nearest
@@ -199,7 +199,7 @@ class TestSearchedRunsUnchanged:
             (s.codec.quality_better, s.codec.quality_worse)
             for s in default_plan.strategies
         ]
-        assert plan._fixed_quality is False
+        assert plan.fixed_quality is False
 
     def test_override_clearing_restores_original_ranges(self) -> None:
         config = _config_with_strategies("h265-aq")
@@ -208,7 +208,7 @@ class TestSearchedRunsUnchanged:
             for s in config.resolve_encoding().strategies
         ]
         pinned = config.resolve_encoding(quality=(Decimal("18"), Decimal("18")))
-        assert pinned._fixed_quality is True
+        assert pinned.fixed_quality is True
         restored = config.resolve_encoding()
         assert [
             (s.codec.quality_better, s.codec.quality_worse)
@@ -334,7 +334,7 @@ class TestBuildConfigModeChecks:
         # passes; knob-scale incomparability is the banner's message, not a stop.
         args = _build_args(strategies="h265-aq,av1", quality="18")
         plan = _build_config_isolated(monkeypatch, args)
-        assert plan._fixed_quality is True
+        assert plan.fixed_quality is True
 
     def test_mixed_fixed_and_searched_stops(self, monkeypatch: pytest.MonkeyPatch) -> None:
         config_dict = _DEFAULT_CONFIG.model_dump()
@@ -349,12 +349,12 @@ class TestBuildConfigModeChecks:
     ) -> None:
         args = _build_args(strategies="h265-aq,h264", quality="20")
         plan = _build_config_isolated(monkeypatch, args)
-        assert plan._fixed_quality is True
+        assert plan.fixed_quality is True
 
     def test_default_config_builds_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The default searched configuration must build identically (no -q).
         plan = _build_config_isolated(monkeypatch, _build_args())
-        assert plan._fixed_quality is False
+        assert plan.fixed_quality is False
 
     def test_invalid_q_exits_with_value_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         args = _build_args(strategies="h265-aq,av1", quality="18.5")

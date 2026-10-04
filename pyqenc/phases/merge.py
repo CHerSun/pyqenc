@@ -187,7 +187,7 @@ class MergePhase(Phase[MergePhaseResult]):
         """
         probe = ProbeState.from_probe(self._dep_result(ProbePhase))
         job_result = self._dep_result(JobPhase)
-        if job_result.plan._fixed_quality:
+        if job_result.plan.fixed_quality:
             return MergeParams(
                 anchor   = self._dep_result(OptimizationPhase).anchor,
                 sampling = job_result.config.measurement.sampling,
@@ -279,7 +279,7 @@ class MergePhase(Phase[MergePhaseResult]):
             persisted = MergeParams.load(merge_yaml)
             if persisted is not None:
                 current  = self.params
-                fixed    = self._dep_result(JobPhase).plan._fixed_quality
+                fixed    = self._dep_result(JobPhase).plan.fixed_quality
                 key_changed     = (
                     persisted.anchor != current.anchor
                     if fixed else
@@ -622,7 +622,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 if metrics_dict and not targets_met:
                     self._log_missed_targets_warning(
                         job_result.plan.targets,
-                        fixed_quality = job_result.plan._fixed_quality,
+                        fixed_quality = job_result.plan.fixed_quality,
                         strategy_name = strategy_name,
                         metrics_dict  = metrics_dict,
                     )
@@ -978,7 +978,7 @@ class MergePhase(Phase[MergePhaseResult]):
         never needs re-measuring for a future stat set.
         """
         data: dict = {"frame_count": frame_count}
-        if self._dep_result(JobPhase).plan._fixed_quality:
+        if self._dep_result(JobPhase).plan.fixed_quality:
             pinned = MergePhase._uniform_pinned_quality([strategy])
             data["quality"] = {
                 "label": strategy.codec.quality_label,

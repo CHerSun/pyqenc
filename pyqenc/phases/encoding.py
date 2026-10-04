@@ -2338,7 +2338,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # read as all-miss noise); uncompared fixed runs have no ruler
         # (absolute values, no verdicts — the limiter table self-extinguishes
         # on empty targets); searched runs use the config targets, unchanged.
-        if self._dep_result(JobPhase).plan._fixed_quality:
+        if self._dep_result(JobPhase).plan.fixed_quality:
             presentation_targets = optimization_result.synthetic_targets
         else:
             presentation_targets = self._dep_result(JobPhase).plan.targets

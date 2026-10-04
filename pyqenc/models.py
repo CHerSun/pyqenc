@@ -309,13 +309,12 @@ class EncodingPlan(BaseModel):
     strategies: list[Strategy]
     targets:    list[QualityTarget]
 
-    # Whether the run pins the quality knob: every strategy's effective
-    # range is a single point (``quality_better == quality_worse``).
-    # Derived once at construction from ``strategies`` — a collapsed config
-    # profile and the ``-q`` override produce the same value here. Private
-    # by design: outside the schema, so model_dump and equality never see
-    # it; consumers read it directly. (Plain private-attr assignment works
-    # in validators even on frozen models — verified on pydantic 2.12.5.)
+    # Whether the run pins the quality knob — derived once at construction
+    # in the after-validator (plain private-attr assignment works there
+    # even on frozen models; verified on pydantic 2.12.5). Storage is
+    # private so it can never be provided as input and stays outside the
+    # schema (model_dump / equality never see it); the property is the
+    # public read contract.
     _fixed_quality: bool = PrivateAttr(default=False)
 
     @model_validator(mode="after")
@@ -325,6 +324,17 @@ class EncodingPlan(BaseModel):
             for s in self.strategies
         )
         return self
+
+    @property
+    def fixed_quality(self) -> bool:
+        """Whether the run pins the quality knob: every strategy's effective
+        range is a single point (``quality_better == quality_worse``).
+
+        Derived, never an input — a collapsed config profile and the
+        ``-q`` override produce the same value here. Computed once at
+        construction; this property is the read contract.
+        """
+        return self._fixed_quality
 
 
 def _coerce_decimal_pair(v: tuple | list) -> tuple[Decimal, Decimal]:

@@ -221,7 +221,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             logger.error(err)
             return self._make_result(PhaseOutcome.FAILED, [], err)
 
-        if self._dep_result(JobPhase).plan._fixed_quality:
+        if self._dep_result(JobPhase).plan.fixed_quality:
             entry = self._fixed_mode_entry(dry_run, strategies)
             if entry is not None:
                 return entry
@@ -426,7 +426,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         self._test_chunks = self._resolve_test_chunks(persisted)
         rows = self._pair_ledger(work_dir, strategies)
-        fixed = self._dep_result(JobPhase).plan._fixed_quality
+        fixed = self._dep_result(JobPhase).plan.fixed_quality
 
         if fixed:
             # Presence-based re-test decision: the fixed start wiped encoded/,
@@ -542,7 +542,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         opt_yaml   = work_dir / OptimizationPhase.SIDECAR_NAME
         tolerance  = self._config.encoding.optimize_tolerance
         persisted  = self._persisted
-        fixed      = self._dep_result(JobPhase).plan._fixed_quality
+        fixed      = self._dep_result(JobPhase).plan.fixed_quality
         assert self._current_probe is not None, "_recover populates the probe state before execution"
         crop       = self._current_probe.crop
 
@@ -744,7 +744,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> OptimizationPhaseResult:
         """Build the reused result from the cached strategy results stash."""
-        if self._dep_result(JobPhase).plan._fixed_quality:
+        if self._dep_result(JobPhase).plan.fixed_quality:
             resolved_names = [s.display_name() for s in self._dep_result(JobPhase).plan.strategies]
             self._log_fixed_comparison(
                 self._strategy_results, self._selected_names, self._anchor_name, resolved_names,
