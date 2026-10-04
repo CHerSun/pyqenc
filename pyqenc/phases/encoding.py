@@ -2373,12 +2373,14 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
 
         # Winners come from the fresh encode result — every complete pair,
         # with freshly measured payloads (frame counts from the run itself).
-        # Sorted by (chunk, strategy) for a deterministic winners order.
+        # Sorted by (chunk start, strategy) for a deterministic winners order —
+        # start timestamps are the quantity itself; sorting on the formatted
+        # safe name would depend on zero-padded rendering.
         winners = [
             Artifact(payload=payload, state=ArtifactState.COMPLETE)
             for payload in sorted(
                 (p for ps in enc_result.encoded_chunks.values() for p in ps),
-                key=lambda p: (p.chunk.safe_name(), p.strategy.display_name()),
+                key=lambda p: (p.chunk.start_timestamp, p.strategy.display_name()),
             )
         ]
         complete_pairs = {

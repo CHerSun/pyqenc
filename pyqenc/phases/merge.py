@@ -727,15 +727,16 @@ class MergePhase(Phase[MergePhaseResult]):
         strategy_name = strategy.display_name()
         logger.info("Merging: %s", strategy_name)
 
-        # Collect and sort chunks for this strategy (filename order = the
-        # zero-padded chunk ids, so lexicographic is chronological).
-        strategy_chunks: list[Path] = sorted(
-            (
-                winner.stream.stream.file.path
-                for winner in encoded_chunks.get(strategy_name, [])
-            ),
-            key=lambda p: p.name,
-        )
+        # Collect the strategy's winners in timeline order — the start
+        # timestamp is the quantity itself (sorting on the formatted file
+        # name would depend on zero-padded rendering).
+        strategy_chunks: list[Path] = [
+            winner.stream.stream.file.path
+            for winner in sorted(
+                encoded_chunks.get(strategy_name, []),
+                key=lambda w: w.chunk.start_timestamp,
+            )
+        ]
 
         if not strategy_chunks:
             logger.error("No encoded chunks found for strategy %s — skipping", strategy_name)
