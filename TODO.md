@@ -1008,27 +1008,42 @@ Semantics inventory (verified in code):
   containers, surprising in both directions, worth documenting or unifying
   regardless of the bigger question.
 
-Assessment (no code yet):
+Assessment (updated 2026-10-05 after user review of the first take):
 
-- Demand today is thin: leftover bundled codecs/profiles are inert, and the
-  only list-append candidate is `profile.extra_args`. The gap may be more
-  documentation than mechanism — the four merge rules are currently stated
-  only inside `_deep_merge`'s docstring.
-- If a mechanism is wanted: prefer an OUT-OF-BAND marker — a custom YAML tag
-  (e.g. `filters: !replace {…}`, `extra_args: !append [...]`) resolved by a
-  conservative loader subclass at the config boundary, BEFORE `_deep_merge`;
-  the marker never enters the schema, pydantic never sees it, and one
-  mechanism covers both directions. Costs: needs a custom loader
-  (`safe_load` rejects tags), unknown-tag errors are cryptic, editors flag
-  nonstandard tags; input-only concept (dumps never emit it) — acceptable.
-- IN-BAND sentinels (empty-string/null first list item, reserved dict key)
-  are feasible but magic-value programming: ambiguous against legal values,
-  must be stripped pre-validation, undiscoverable, and would sit beside the
-  existing null-means-keep rule (two silent in-band concepts). Rejected.
-- List MERGE should never be implicit — for every current list
-  (`strategies`, `targets`, `chains`, `select`, `extra_args`) replacement is
+- Custom YAML tags (`!replace`/`!append`) REJECTED (user): end users must
+  memorize exact nonstandard tags; a forgotten tag fails in the loader with
+  a cryptic error before any of our messages can help; no discovery path.
+- LISTS — accepted direction: the empty-first-item convention ("drop
+  pre-existing, use only what follows"), familiar from other tools. Prefer
+  `null` as the marker (`strategies: [~, mine+slow]`) over `""` — no list
+  in the schema accepts nulls today, so collision-free by construction.
+  Mechanics: consumed in `_deep_merge` at the boundary (strip + replace
+  mode for that key), pydantic never sees it; failure mode is soft (a
+  mistyped marker lands in OUR validation, whose message can teach the
+  convention). Constraints: rule is global for all future lists (a
+  nullable-element list would need to opt out); a marker in the BASE layer
+  is just data (only meaningful in a higher layer). Live use case: owning
+  `strategies`/`targets` wholesale from `pyqenc.yaml` without editing base.
+- List MERGE stays never-implicit — for every current list replacement is
   the honest intent; append needs arbitrary order/dedup answers and must be
   opt-in per instance if it exists at all.
+- DICTS — open, lean "no marker": (a) null-deletion per key (k8s merge-patch
+  precedent) COLLIDES with our null-means-keep rule (`profiles:` null
+  section = keep today, would mean delete-all → validation failure); a
+  scoped carve-out ("deletes only at nested map level") is baroque and
+  unteachable. (b) null-key first entry — mechanically possible (PyYAML
+  preserves document order) but zero precedent anywhere. (c) reserved
+  marker key — safe for schema-fixed dicts but the user-keyed maps
+  (`codecs`, `profiles`, `filters`) are exactly where wholesale-replace
+  would be wanted and exactly where reserved names can collide. Escape
+  hatch weakening the whole dict case: the `pyqenc config` workflow copies
+  the active base to home/cwd — owning the full document removes the need
+  for layer-deletion; only "stay lean over bundled defaults" remains
+  unserved, and that is cosmetic (unused entries are inert).
+- Demand today is thin overall: the gap may still be more documentation
+  than mechanism — the merge rules currently live only inside
+  `_deep_merge`'s docstring; the config docs should state them (including
+  the `{}`/`[]` asymmetry decision) whatever gets built.
 
 ---
 
