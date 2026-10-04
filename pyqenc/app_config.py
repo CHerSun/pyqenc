@@ -275,11 +275,13 @@ class FilterInstance(BaseModel):
 class ChainSpec(BaseModel):
     """A named, ordered chain of filter references from ``audio.chains``.
 
-    Applied to N matched tracks a chain produces exactly N outputs. Referential
-    integrity (each name resolves in the palette), name uniqueness across the
-    list, passthrough-alone, and filename-safe name are all enforced by
-    :class:`AudioConfig`'s model-validator so failures surface as a
-    ``ValidationError`` at config load.
+    Applied to N matched tracks a chain produces exactly N outputs. The name
+    is validated here — non-blank and filesystem-safe, since it forms the
+    ``chain=<name>`` output filename suffix. Cross-field rules (references
+    resolve in the palette, name uniqueness across the list, passthrough
+    alone) need the owning :class:`AudioConfig` context and are enforced by
+    its model-validator so failures surface as a ``ValidationError`` at
+    config load.
 
     Attributes:
         name:    Unique, filesystem-safe chain name; the ``chain=<name>`` output
@@ -290,6 +292,25 @@ class ChainSpec(BaseModel):
 
     name:    str
     filters: list[str]
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name_filesystem_safe(cls, v: str) -> str:
+        """Reject blank or filesystem-unsafe names.
+
+        Chain names form the ``chain=<name>`` output filename suffix, so the
+        name must be usable in a filename verbatim — validated at the
+        definition point, never sanitized at a use point.
+        """
+        if not v or not v.strip():
+            raise ValueError("Chain name must be a non-empty, non-blank string.")
+        if not is_filesystem_safe_name(v):
+            bad = sorted(set(v) & (FILENAME_FORBIDDEN_CHARS | FILENAME_CONTROL_CHARS))
+            raise ValueError(
+                f"Chain name {v!r} contains filesystem-unsafe character(s): "
+                f"{bad}. Avoid {sorted(FILENAME_FORBIDDEN_CHARS)} and control characters."
+            )
+        return v
 
 
 class SelectEntry(BaseModel):
@@ -358,8 +379,6 @@ class AudioConfig(BaseModel):
                 raise ValueError(f"Duplicate chain name {chain.name!r} in audio.chains.")
             seen_names.add(chain.name)
 
-            _validate_chain_name_filesystem_safe(chain.name)
-
             for filter_name in chain.filters:
                 if filter_name not in self.filters:
                     raise ValueError(
@@ -377,30 +396,6 @@ class AudioConfig(BaseModel):
                     f"other filters; a passthrough filter must be the only filter in its chain."
                 )
         return self
-
-
-def _validate_chain_name_filesystem_safe(name: str) -> None:
-    """Raise ``ValueError`` if *name* is unsafe for use in an output filename.
-
-    Rejects empty/whitespace-only names and any filesystem-unsafe character
-    (via :func:`pyqenc.utils.naming.is_filesystem_safe_name`). Chain names
-    form the ``chain=<name>`` filename suffix, so they must be
-    filesystem-safe.
-
-    Args:
-        name: The chain name to validate.
-
-    Raises:
-        ValueError: If *name* is empty/blank or contains a forbidden character.
-    """
-    if not name or not name.strip():
-        raise ValueError("Chain name must be a non-empty, non-blank string.")
-    if not is_filesystem_safe_name(name):
-        bad = sorted(set(name) & (FILENAME_FORBIDDEN_CHARS | FILENAME_CONTROL_CHARS))
-        raise ValueError(
-            f"Chain name {name!r} contains filesystem-unsafe character(s): "
-            f"{bad}. Avoid {sorted(FILENAME_FORBIDDEN_CHARS)} and control characters."
-        )
 
 
 class AppConfig(BaseModel):
