@@ -913,7 +913,32 @@ complete answer?
 
 ---
 
-## Last known = 91
+## 92. Long functions lose semantic clarity — continued cleanup: inventory + assess logic separation — needs thinking
+
+Raised 2026-10-05 (config-resolution review): many functions are too long —
+for a human developer a long body loses the answer to "what exactly does this
+function do". Seed example: `_scan_winner_sidecars` (pyqenc/phases/encoding.py)
+— a flat loop that both LOADS one winner's facts (name-pattern match, sidecar
+read, frame count, worst-target evaluation) and SUMMARIZES into the running
+aggregates (limiter tallies, frames, frames_known). Natural split: a
+"load one" function with a clear per-item footprint (winner → sidecar facts
+or skip-reason), a summarize step over its result, and the aggregate owner
+calling them in a cycle — each function then states its own contract.
+
+Effort shape (continuation of the 2026-09-30 cleanup lineage):
+
+- Build an inventory first: long functions across `pyqenc/` (simple AST/line
+  count scan; `scc` sizing per cleanup conventions) — do not eyeball.
+- For each candidate: assess whether a CLEAN logic separation exists
+  (per-item loaders vs aggregators, stages of a pipeline, decision vs
+  mechanics). Candidates, not mandates — some long functions are honestly
+  one thing and splitting them would only scatter their story.
+- Rule of thumb to validate: the split is right when each part's footprint
+  (inputs → outputs) can be stated in one sentence.
+
+---
+
+## Last known = 92
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
