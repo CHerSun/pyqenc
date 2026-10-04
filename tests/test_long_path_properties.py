@@ -4,6 +4,7 @@
 **Validates: Requirements 7.1**
 """
 
+import re
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -18,8 +19,14 @@ from pyqenc.utils.long_path import _EXT_PREFIX, _MAX_PATH, LongPath
 # Shared strategies
 # ---------------------------------------------------------------------------
 
-# Valid path strings: no null bytes, no pure whitespace
-_path_str = st.text(min_size=1).filter(lambda s: "\x00" not in s and s.strip())
+# Valid path strings: no null bytes, no pure whitespace. Trailing whitespace
+# before a separator or end-of-string is excluded: Windows path normalization
+# (ntpath.abspath → GetFullPathName) strips it, so such strings name paths
+# that cannot exist on NTFS — outside the idempotence property's domain
+# (found live 2026-10-05; TODO §91).
+_path_str = st.text(min_size=1).filter(
+    lambda s: "\x00" not in s and s.strip() and not re.search(r"\s[/\\]|\s$", s)
+)
 
 # Valid child components: safe characters only (no path separators, no special chars)
 _child_str = st.from_regex(r"[a-zA-Z0-9_\-\.]+", fullmatch=True)

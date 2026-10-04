@@ -962,7 +962,21 @@ before it.
 
 ---
 
-## Last known = 90
+## 91. LongPath idempotence breaks for trailing-whitespace path strings — needs thinking
+
+Found live 2026-10-05 by the Hypothesis property suite (example: `'0/ '`): `ntpath.abspath`
+(GetFullPathName) strips whitespace preceding a separator or end-of-string, so
+`LongPath('0/ ').__fspath__()` → `...\0\` while a second round-trip yields `...\0` —
+not idempotent. Pre-existing on main (reproduced on untouched code; the property
+run had simply not drawn this example before). Such paths are unrepresentable on
+NTFS via Win32 APIs; the property generator now excludes the domain
+(`\s[/\\]|\s$` filter) with a pointer here. Open question: is a LongPath-side
+normalization of such strings wanted at all, or is the generator exclusion the
+complete answer?
+
+---
+
+## Last known = 91
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
