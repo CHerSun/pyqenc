@@ -973,16 +973,17 @@ Design agreed in discussion (user-driven):
   `_deps[JobPhase]` and `self.job_result` are the same length).
 - `_dep_result` retires; all 91 sites become `self._deps[X]`.
 
-Implementation nuances to settle:
+Implementation notes:
 
-- Resolve PER ACCESS against the live registry — not an init-time snapshot of
-  dep instances. Results only populate during the dependency walk (after
-  construction), and the test pattern constructs phases with empty/partial
-  registries and attaches stub results afterward; a snapshot breaks both.
-  Key-domain from `DEPENDS_ON`; both asserts stay at access time (as today).
-- `_ensure_dependencies` needs phase INSTANCES (`dep.run()`): either `Phase`
-  keeps the raw registry reference for framework use, or the view gains a
-  minimal instance accessor.
+- The view is a LIVE view over the real registry — reference only, no object
+  copies and no init-time class→instance binding. It carries the registry
+  reference + the frozen key domain (`DEPENDS_ON`); every `__getitem__`
+  resolves against the live registry per access, so results populating
+  during the dependency walk are seen exactly as today (late binding kept).
+  Both asserts stay at access time.
+- Still to settle: `_ensure_dependencies` needs phase INSTANCES
+  (`dep.run()`) — either `Phase` keeps the raw registry reference for
+  framework use, or the view gains a minimal instance accessor.
 
 Sequencing: the sweep rewrites merge.py + optimization.py — the
 unified-summaries spec-window files — so land it at that implementation's
