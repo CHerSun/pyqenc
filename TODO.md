@@ -294,8 +294,14 @@ attempts as "measurement") worth anything for video?
   extraction/chunking results, no partial scanning.
 - 2026-09-27: landed with `2026-09-25 file-stream-model` (Task 4) — estimation
   now runs in ExtractionPhase on the enumerated `VideoStreamInfo` (attempts +
-  finals only; the FFV1/remux/extraction terms are deleted). The remaining
-  open question is unchanged:
+  finals only; the FFV1/remux/extraction terms are deleted).
+- 2026-10-05 (cc63e55): the estimate MOVED to ProbePhase — it reads
+  `plan.strategies` and Probe owns the plan (the video chain's entry
+  context; audio consumption is negligible next to the strategy-multiplied
+  video work, and the audio registry carries no plan). USER: "space
+  estimation needs a complete rework. But right now - just a fast
+  solution" — the rework itself is §50. The remaining open question is
+  unchanged:
 
 **Questions to think about:** per-phase re-estimates later in the pipeline?
 Keep log-only?
@@ -435,6 +441,7 @@ Just a few thoughts:
 - maybe the phase itself should give estimation? Like finalize, but the first call instead to ask for space estimation. Not sure, looks difficult
 - maybe for targets we should add profiles. Something like targets profile "high", "medium", "low", with their own sets of targets each. But also a hint on approximate bits per pixel? like 0.1 for medium, 0.15 for high, 0.08 for low?
 - need a research there
+- 2026-10-05 (user): "Honestly, space estimation needs a complete rework. But right now - just a fast solution" — the current form (Probe-hosted, plan-aware, log-only; see §33) is explicitly a placeholder; fold any rework of this item with §33's open questions (required vs recommended ranges, config-awareness, where in the pipeline it runs).
 
 ## 51. QualitySearchV3 is outright broken.
 
