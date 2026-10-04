@@ -281,8 +281,11 @@ class MetricsSidecar(BaseModel):
     """Per-attempt metrics sidecar (``<attempt_stem>.yaml``).
 
     Stores ALL measured metric values — not filtered to current targets.
-    ``targets_met`` is for human inspection only; the algorithm always
-    re-evaluates pass/fail from ``metrics`` against current quality targets.
+    Facts of the attempt only: pass/fail against quality targets is a
+    comparison with foreign state (which targets, which sampling) and is
+    always re-evaluated from ``metrics`` where it is decided — never stored
+    here (the WINNING attempt's conclusion is recorded on
+    :class:`EncodingResultSidecar`).
 
     ``sampling`` records the frame subsampling factor used when the metrics
     were measured.  On recovery, if this differs from the current config the
@@ -303,7 +306,6 @@ class MetricsSidecar(BaseModel):
     """
 
     crf:         DecimalYaml         # exact string round-trip (no float drift)
-    targets_met: bool                # for human inspection only
     sampling:    int | None = None   # subsampling factor used when metrics were measured
     frame_count: int         = 0     # frames of the attempt file (0 = unknown)
     metrics:     dict[str, float]    # all measured values, e.g. vmaf_min, ssim_median

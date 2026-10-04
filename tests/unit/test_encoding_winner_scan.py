@@ -118,7 +118,7 @@ class TestSidecarFrameCount:
         """The per-attempt sidecar carries the attempt's frame count."""
         attempt = tmp_path / "chunk.1920x1080.q18.0.mkv"
         _write_metrics_sidecar(
-            attempt, True, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 2400,
+            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 2400,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 2400
@@ -127,7 +127,7 @@ class TestSidecarFrameCount:
         """An unknown count is persisted as the 0 sentinel (no None in yaml)."""
         attempt = tmp_path / "chunk.1920x1080.q18.0.mkv"
         _write_metrics_sidecar(
-            attempt, True, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 0,
+            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 0,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 0

@@ -125,9 +125,11 @@ def _probe_resolution(path: Path) -> str | None:
 def _read_sidecar_yaml(sidecar_path: Path) -> dict | None:
     """Read a metrics/result sidecar YAML next to an encoded attempt.
 
-    Both sidecar kinds share the schema (keys: ``targets_met``, ``crf``,
-    ``metrics``, ``frame_count``): the per-attempt metrics sidecar in the
-    workspace and the encoding result sidecar in ``encoded/``.
+    Both sidecar kinds share the core schema (keys: ``crf``, ``metrics``,
+    ``frame_count``): the per-attempt metrics sidecar in the workspace
+    (attempt facts only) and the encoding result sidecar in ``encoded/``
+    (additionally carries ``targets_met`` — the winning attempt's recorded
+    conclusion).
 
     Args:
         sidecar_path: Exact path to the sidecar ``.yaml`` file.
@@ -157,7 +159,6 @@ def _encoded_dir(work_dir: Path, strategy: Strategy) -> Path:
 
 def _write_metrics_sidecar(
     attempt_path:     Path,
-    targets_met:      bool,
     crf:              Decimal,
     metrics:          dict[str, float],
     metrics_sampling: int,
@@ -167,11 +168,11 @@ def _write_metrics_sidecar(
 
     Uses ``write_yaml_atomic`` so a crash during writing never leaves a partial
     sidecar.  Stores ALL measured metric values (not filtered to current targets)
-    so the CRF history is reusable when quality targets change.
+    so the CRF history is reusable when quality targets change — facts of the
+    attempt only; pass/fail is re-evaluated from ``metrics`` where decided.
 
     Args:
         attempt_path:     Path to the encoded attempt ``.mkv`` file.
-        targets_met:      Whether quality targets were met (for human inspection only).
         crf:              CRF value used for this attempt.
         metrics:          ALL measured quality metrics dict (not filtered to targets).
         metrics_sampling: Frame subsampling factor used when metrics were measured.
@@ -182,7 +183,6 @@ def _write_metrics_sidecar(
     sidecar = attempt_path.with_suffix(".yaml")
     data    = MetricsSidecar(
         crf         = crf,
-        targets_met = targets_met,
         metrics     = metrics,
         sampling    = metrics_sampling,
         frame_count = frame_count,
@@ -1148,6 +1148,8 @@ class ChunkEncoder:
                         chunk_start_seconds  = chunk.start_timestamp,
                     )
                 all_metrics         = flatten_metric_stats(evaluation.metrics)
+                # Live comparator verdict — logs this attempt's pass/miss;
+                # never persisted (the attempt sidecar stores facts only).
                 attempt_targets_met = evaluation.targets_met
             else:
                 all_metrics         = {}
@@ -1164,7 +1166,7 @@ class ChunkEncoder:
             frame_counts[output_file] = attempt_frames
             all_metrics_by_path[output_file] = all_metrics
             _write_metrics_sidecar(
-                output_file, attempt_targets_met, current_q, all_metrics,
+                output_file, current_q, all_metrics,
                 self._metrics_sampling, attempt_frames,
             )
 
