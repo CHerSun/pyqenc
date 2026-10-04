@@ -211,15 +211,10 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 the winner-layer wipe (a dry run changes nothing).
 
         Returns:
-            The all-strategies result, a FAILED result when no strategies are
-            configured or the cleanup guard stops the run — or ``None`` to
-            proceed with the template.
+            The all-strategies result, a FAILED result when the cleanup guard
+            stops the run — or ``None`` to proceed with the template.
         """
         strategies = self._dep_result(JobPhase).plan.strategies
-        if not strategies:
-            err = "No strategies configured"
-            logger.error(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err)
 
         if self._dep_result(JobPhase).plan.fixed_quality:
             entry = self._fixed_mode_entry(dry_run, strategies)

@@ -325,6 +325,31 @@ class EncodingPlan(BaseModel):
         )
         return self
 
+    @model_validator(mode="after")
+    def _validate_invariants(self) -> Self:
+        """Construction-time plan invariants (typed — no dict plumbing).
+
+        - No strategies, no plan: the plan IS the video encoding work; an
+          empty strategy set is a configuration error, failed loudly at
+          the run boundary instead of minutes into the pipeline.
+        - A searched (ranged) run must carry quality targets — without a
+          bar the search degenerates into a single default-quality encode.
+          Fixed runs legitimately omit targets: the pinned knob is the
+          bar and config targets drive nothing there.
+        """
+        if not self.strategies:
+            raise ValueError(
+                "Encoding plan has no strategies — there is nothing to encode. "
+                "Check encoding.strategies / --strategies."
+            )
+        if not self._fixed_quality and not self.targets:
+            raise ValueError(
+                "Searched run has no quality targets — the search has no bar "
+                "to meet. Provide config encoding.targets or --targets "
+                "(fixed runs via -q / collapsed profiles may omit targets)."
+            )
+        return self
+
     @property
     def fixed_quality(self) -> bool:
         """Whether the run pins the quality knob: every strategy's effective

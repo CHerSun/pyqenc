@@ -360,3 +360,32 @@ class TestBuildConfigModeChecks:
         args = _build_args(strategies="h265-aq,av1", quality="18.5")
         with pytest.raises(ValueError, match="granularity 1"):
             _build_config_isolated(monkeypatch, args)
+
+
+class TestPlanConstructionInvariants:
+    """The plan's own construction-time invariants (typed after-validators)."""
+
+    def test_no_strategies_is_loud(self) -> None:
+        """An empty strategy set is a configuration error at the run boundary,
+        not a phase failure minutes into the pipeline."""
+        config = _config_with_strategies()
+        config.encoding.strategies = []
+        with pytest.raises(ValueError, match="no strategies.*nothing to encode"):
+            config.resolve_encoding()
+
+    def test_searched_run_without_targets_is_loud(self) -> None:
+        """Without targets a searched run degenerates into a single
+        default-quality encode — no bar means no search."""
+        config = _config_with_strategies("h265-aq", "h264")
+        with pytest.raises(ValueError, match="Searched run has no quality targets"):
+            config.resolve_encoding(targets=[])
+
+    def test_fixed_run_without_targets_allowed(self) -> None:
+        """Fixed runs legitimately omit targets: the pinned knob is the bar
+        and config targets drive nothing there."""
+        config = _config_with_strategies("h265-aq")
+        plan = config.resolve_encoding(
+            strategies=["h265-aq"], targets=[], quality=(Decimal("18"), Decimal("18")),
+        )
+        assert plan.fixed_quality is True
+        assert plan.targets == []

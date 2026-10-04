@@ -604,8 +604,9 @@ class AppConfig(BaseModel):
         Raises:
             ValueError: If any target string or strategy pattern is invalid,
                 the override violates a matched codec's range or granularity,
-                labels mix under an override, or the resolved set mixes fixed
-                and searched strategies.
+                labels mix under an override, the resolved set mixes fixed
+                and searched strategies, the plan resolves to no strategies,
+                or a searched run carries no quality targets.
         """
         resolved_targets = [
             QualityTarget.parse(t)
