@@ -96,7 +96,7 @@ existing commands byte-identical in behavior. Requirement ids reference
   - Tests: wrapper→targets tuples pinned; the audio-shaped namespace never
     resolves a plan (existing monkeypatch pin stays green)
 
-- [ ] 5. Extract materialization — phase mechanics (Req 9.1, 9.2, 9.3, 9.6)
+- [x] 5. Extract materialization — phase mechanics (Req 9.1, 9.2, 9.3, 9.6)
   - Run-scoped materialize flag threaded to `ExtractionPhase` ctor-style
     alongside `video_required`; in materialize mode the selected video and
     audio streams enter the artifact ledger as material rows with real
@@ -113,12 +113,16 @@ existing commands byte-identical in behavior. Requirement ids reference
     `wanted`); processing-mode preservation (rerun does not delete);
     naming doctrine pins; forced mkvextract failure exercises the fallback
 
-- [ ] 6. Extract command UX — dry-run sizes, no cleanup, no plan (Req 9.4, 9.5)
+- [x] 6. Extract command UX — dry-run sizes, no cleanup, no plan (Req 9.4, 9.5)
   - Dedicated `_cmd_extract` handler: source + base + pipeline args minus
     `--cleanup` + filter args; no quality/plan arguments
   - Dry-run: stream table with per-stream destination, expected size, planned
     total (sizes from the enumeration JSON already collected — no extra
     probing); writes nothing; `-y` materializes then prints the results table
+  - IMPLEMENTED (amended): per-stream exact sizes need a packet-level scan —
+    skipped; the phase logs the plan (per-stream destinations, count, the
+    source-size upper bound) on both dry-runs and execute runs (Req 9.4
+    amended accordingly in requirements.md)
   - Tests: dry-run writes nothing and lists everything selected; filter
     exclusion respected in the listing; no `--cleanup`/plan args on the parser
 

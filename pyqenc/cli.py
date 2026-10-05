@@ -179,25 +179,30 @@ def _add_base_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_pipeline_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add arguments common to all pipeline-phase subcommands (not used by measure/config)."""
+def _add_pipeline_arguments(parser: argparse.ArgumentParser, *, cleanup: bool = True) -> None:
+    """Add arguments common to all pipeline-phase subcommands (not used by measure/config).
+
+    The ``cleanup`` keyword omits ``--cleanup`` for commands whose outputs are
+    the product (``extract`` — materialized files must not be cleanable).
+    """
     parser.add_argument(
         "-y", "--execute",
         action="store_true",
         default=False,
         help="Execute phases (default: dry-run). Without this flag only a dry-run is performed.",
     )
-    parser.add_argument(
-        "--cleanup",
-        nargs="?",
-        const="intermediate",
-        metavar="all",
-        help=(
-            "Cleanup level for intermediate files. "
-            "--cleanup (no argument): delete workspace files per artifact after completion. "
-            "--cleanup all: also delete remaining intermediate directories after full pipeline success."
-        ),
-    )
+    if cleanup:
+        parser.add_argument(
+            "--cleanup",
+            nargs="?",
+            const="intermediate",
+            metavar="all",
+            help=(
+                "Cleanup level for intermediate files. "
+                "--cleanup (no argument): delete workspace files per artifact after completion. "
+                "--cleanup all: also delete remaining intermediate directories after full pipeline success."
+            ),
+        )
     parser.add_argument(
         "--force",
         action="store_true",
@@ -446,16 +451,15 @@ def _create_auto_subcommand(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _create_extract_subcommand(subparsers: argparse._SubParsersAction) -> None:
-    """Create the 'extract' subcommand (runs up to and including ExtractionPhase)."""
+    """Create the 'extract' subcommand (end-user stream materialization)."""
     p = subparsers.add_parser(
         "extract",
-        help="Extract video and audio streams from source MKV",
+        help="Materialize streams from the source into standalone files (all kinds, incl. video and audio)",
     )
     p.add_argument("source", type=LongPath, help="Source MKV video file")
     _add_base_arguments(p)
-    _add_pipeline_arguments(p)
+    _add_pipeline_arguments(p, cleanup=False)
     _add_filter_arguments(p)
-    _add_crop_arguments(p)
     p.set_defaults(func=_cmd_extract)
 
 
@@ -584,23 +588,16 @@ def _cmd_auto(args: argparse.Namespace) -> int:
 
 
 def _cmd_extract(args: argparse.Namespace) -> int:
-    """Execute the 'extract' subcommand."""
+    """Execute the 'extract' subcommand (end-user stream materialization)."""
 
-    logger.info("Starting stream extraction")
+    logger.info("Starting stream materialization (extract)")
     logger.info(f"Source: {args.source}")
-
-    try:
-        crop_params = _resolve_crop_params(args)
-    except ValueError as e:
-        logger.critical(f"Invalid crop parameters: {e}")
-        return 1
 
     try:
         config = _build_config(args)
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
-    cleanup = _parse_cleanup_level(args.cleanup)
 
     try:
         result = extract_streams(
@@ -608,18 +605,17 @@ def _cmd_extract(args: argparse.Namespace) -> int:
             source      = args.source,
             work_dir    = args.work_dir,
             force       = args.force,
-            cleanup     = cleanup,
             no_metrics  = args.no_metrics,
             dry_run     = not args.execute,
-            crop_params = crop_params,
+            materialize = True,
         )
         if result.success:
-            logger.info("Extraction completed successfully")
+            logger.info("Materialization completed successfully")
             return 0
-        logger.critical(f"Extraction failed: {result.error}")
+        logger.critical(f"Materialization failed: {result.error}")
         return 1
     except Exception as e:
-        logger.critical(f"Extraction failed: {e}", exc_info=True)
+        logger.critical(f"Materialization failed: {e}", exc_info=True)
         return 1
 
 

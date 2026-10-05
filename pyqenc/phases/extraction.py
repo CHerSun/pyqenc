@@ -67,6 +67,7 @@ from pyqenc.stream_model import (
 )
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg
 from pyqenc.utils.fs import remove_stale_tmp_files
+from pyqenc.utils.log_format import fmt_size_mb
 from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 
 if TYPE_CHECKING:
@@ -611,7 +612,37 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             ))
 
         _log_stream_table(rows)
+        if self._materialize:
+            self._log_materialization_plan(rows)
         return Recovery.from_artifacts(rows)
+
+    def _log_materialization_plan(self, rows: list[_ExtractionRow]) -> None:
+        """Log the planned destinations and the size bound (extract command).
+
+        Per-stream sizes are not cheaply available (they need a packet-level
+        scan); the source's own size bounds the materialization — video and
+        audio dominate it, the container-artifact kinds are negligible. The
+        plan prints on dry-runs (the whole cost picture before anything is
+        written) and on execute runs alike.
+        """
+        file_size = self._source_file.file_size_bytes if self._source_file else 0
+        assert file_size is not None, "the job's File carries the source size"
+        logger.info("Materialization plan:")
+        for row in rows:
+            if not row.wanted:
+                continue
+            if _is_chapters_row(row):
+                name, dest = "Chapters", CHAPTERS_FILENAME
+            else:
+                extracted = row.payload.info.extracted_path
+                if extracted is None:
+                    continue
+                name, dest = row.payload.display_name(), extracted.name
+            logger.info("  %s -> %s", name, dest)
+        logger.info(
+            "Planned total: up to ~%s (bounded by the source size; exact per-stream sizes need a packet scan)",
+            fmt_size_mb(file_size),
+        )
 
     def _normalize_extracted_paths(self, work_dir: Path) -> None:
         """Set each file-backed stream's expected extracted location eagerly.

@@ -202,12 +202,13 @@ source.mkv --exclude "video-" -y`).
     never filter-driven.
 - **9.4 — Dry-run contract.**
   - When `extract` is invoked without `-y`, the command shall list the stream
-    table and each planned destination file — with its expected size and the
-    planned total — and shall write nothing (materializing video and audio
-    can duplicate a source-sized tree; the user sees the cost before it
-    happens).
-  - When `extract` is invoked with `-y`, the command shall materialize the
-    listed streams.
+    table and each planned destination file and shall write nothing;
+    with `-y`, it shall materialize the listed streams.
+  - The plan shall state the cost picture before anything is written:
+    materializing video and audio can duplicate a source-sized tree.
+    (Amended 2026-10-05 at implementation: per-stream exact sizes are not
+    cheaply available — they need a packet-level scan — so the plan logs the
+    per-stream destinations and the source-size upper bound instead.)
 - **9.5 — Plan-free, cleanup-free.**
   - The `extract` command shall not resolve an encoding plan (no
     strategies/targets arguments).
