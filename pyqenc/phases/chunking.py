@@ -30,7 +30,6 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
-from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.state import ArtifactState
@@ -205,7 +204,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
 
     name:        str       = "chunking"
     SIDECAR_NAME = "chunking.yaml"
-    DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase, ProbePhase)
+    DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ProbePhase)
     _METRIC_KEY: MetricKey = MetricKey.CHUNKING
 
     def __init__(

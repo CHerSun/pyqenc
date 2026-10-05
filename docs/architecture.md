@@ -73,6 +73,23 @@ flowchart TD
     end
 ```
 
+Every `DEPENDS_ON` declaration is audited against the phase's actual
+dependency reads (`_dep_result` sites) — an undeclared read would be a silent
+absence once the registry is derived from the declarations (2026-10-05
+`cli-intent-commands` spec, Req 13). Audit result: every declared dependency
+is read; whole-result assignment reads are summarized as "run context".
+
+| Phase | Declared `DEPENDS_ON` | Consumed from each dependency |
+| --- | --- | --- |
+| **Job** | — | — |
+| **Extraction** | Job | `file.payload` (source), `work_dir`, `config.extraction` (include/exclude) |
+| **Probe** | Job, Extraction | Job: run context (`work_dir`, source); Extraction: stream inventory rows, `timestamps_path` |
+| **Chunking** | Job, Probe | Job: run context (`work_dir`); Probe: `stream` |
+| **Optimization** | Job, Probe, Chunking | Job: run context (`work_dir`, `config`); Probe: `plan`; Chunking: `chunks` |
+| **Encoding** | Job, Probe, Chunking, Optimization | Job: run context (`work_dir`, `force_wipe`, `cleanup`); Probe: `plan`, `stream`; Chunking: `chunks`; Optimization: `selected_strategies` |
+| **Audio** | Job, Extraction | Job: run context (`config.audio`, `work_dir`, source); Extraction: audio stream rows |
+| **Merge** | Job, Extraction, Probe, Optimization, Encoding | Job: run context (`source`, `work_dir`, `cleanup`); Extraction: `timestamps_path`; Probe: `plan`; Optimization: `anchor`; Encoding: `winners`, `quality_labels`, `encoded_chunks` |
+
 ### Phase descriptions
 
 | Phase            | Ledger rows (internal, complete)                                     | External contract (result fields)                                                       | Key sidecar(s)                                                         |

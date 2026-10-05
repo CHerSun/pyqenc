@@ -24,10 +24,12 @@ existing commands byte-identical in behavior. Requirement ids reference
   relevant `uv run python -m pytest`.
 - Existing-command invariance is the standing regression bar through Task 6:
   `auto`'s product, logs, and reuse behavior must not change until the set
-  change deliberately re-shapes them (the Audio-dep drop in Task 1 changes
-  only which phases execute under a merge terminal — audio still runs under
-  `auto` via its own terminal from Task 3 on; until then `run_pipeline` keeps
-  Merge as sole terminal and audio rides the merge walk exactly as today).
+  change deliberately re-shapes them. RESEQUENCED 2026-10-05 (Task 1 note was
+  self-contradictory): the MergePhase Audio-dep drop lands in TASK 3's commit
+  together with the multi-terminal runner and `run_pipeline`'s re-point to
+  `(AudioPhase, MergePhase)` — dropping it earlier would silently remove
+  audio from `auto` for two tasks. Task 1 records the over-declaration and
+  fixes any OTHER gaps the audit finds.
 - E2E on real media only with the speed rule: `--strategies "h265*+ultrafast"`.
 - Keyword-only construction for every new model/dataclass field; no aliased
   duplicate imports; no test-only production code.
