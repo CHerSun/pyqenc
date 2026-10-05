@@ -21,7 +21,7 @@ from pyqenc.state import ArtifactState
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 _STRATEGY_OBJ = next(
-    s for s in load_app_config(default_only=True).encoding.resolved_strategies
+    s for s in load_app_config(default_only=True).resolve_encoding().strategies
     if s.preset == "slow" and s.profile == "h265-aq"
 )
 _CHUNK_ID   = "00꞉00꞉00․000-00꞉00꞉13․330"

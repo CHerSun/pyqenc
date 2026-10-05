@@ -45,6 +45,7 @@ from pyqenc.utils.log_format import emit_phase_banner, emit_phase_start, log_rec
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
+    from pyqenc.models import EncodingPlan
 
 __all__ = [
     "Artifact",
@@ -689,6 +690,7 @@ phase (fetched from at run time — see ``Phase.DEPENDS_ON``). Keys are plain
 
 def _build_registry(
     config:         AppConfig,
+    plan:           EncodingPlan | None,
     source:         Path,
     work_dir:       Path,
     force:          bool,
@@ -703,9 +705,13 @@ def _build_registry(
     ``JobPhase`` receives all volatile per-run parameters (``source``,
     ``work_dir``, ``force``, ``cleanup``, ``no_metrics``) as plain kwargs and
     stores them on ``JobPhaseResult`` so all downstream phases can read them
-    via ``self._dep_result(JobPhase)``.  All other phases are constructed with
-    only ``(config, registry, collector=collector)`` — they never receive
-    volatile args directly.
+    via ``self._dep_result(JobPhase)``.  ``ProbePhase`` — constructed only in
+    the video registry — additionally receives the run's ``plan``, carrying it
+    on its result as the video chain's entry context; the audio-only registry
+    passes no plan at all, keeping the audio pass independent of the video
+    config.  All other phases are constructed with only
+    ``(config, registry, collector=collector)`` — they never receive volatile
+    args directly.
 
     The registry is a plain ``dict`` keyed by phase *class* (not instance),
     preserving insertion order (Python 3.7+).
@@ -735,6 +741,8 @@ def _build_registry(
 
     Args:
         config:         Full validated application configuration.
+        plan:           The run's resolved encoding plan
+                        (:meth:`AppConfig.resolve_encoding` output).
         source:         Resolved path to the source video file.
         work_dir:       Working directory for all pipeline artifacts.
         force:          When ``True``, wipe existing artifacts before running.
@@ -784,7 +792,10 @@ def _build_registry(
     if video_required:
         # ProbePhase sits between Extraction and the remaining video phases.
         # crop_params is forwarded here (not to JobPhase) so ProbePhase owns
-        # crop detection and manual overrides.
+        # crop detection and manual overrides. The video registry always
+        # carries the plan (video subcommands resolve it); only the
+        # audio-only registry passes None — and it omits Probe entirely.
+        assert plan is not None, "video registry carries the plan"
         from pyqenc.phases.chunking import ChunkingPhase  # deferred: phases import phase (registry cycle)
         from pyqenc.phases.encoding import EncodingPhase
         from pyqenc.phases.merge import MergePhase
@@ -795,6 +806,7 @@ def _build_registry(
             config, registry,
             crop_params = crop_params,
             collector   = collector,
+            plan        = plan,
         )
 
         for cls in [

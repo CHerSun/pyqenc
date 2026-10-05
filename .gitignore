@@ -37,3 +37,4 @@ pyqenc.yaml
 
 # Local zcode config setup
 .zcode/config.json
+.zcodeignore

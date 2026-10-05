@@ -21,7 +21,7 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 # ---------------------------------------------------------------------------
 
 _STRATEGY_OBJ = next(
-    s for s in load_app_config(default_only=True).encoding.resolved_strategies
+    s for s in load_app_config(default_only=True).resolve_encoding().strategies
     if s.preset == "slow" and s.profile == "h265-aq"
 )
 _CHUNK_ID   = "00꞉00꞉00․000-00꞉01꞉30․000"
@@ -474,11 +474,11 @@ class TestEncodingPresentationTargets:
         from pyqenc.app_config import load_app_config
 
         config = load_app_config(default_only=True).model_copy(deep=True)
-        config.encoding.strategies = ["h265-aq+slow"]
-        config.encoding.targets = ["vmaf-min:93.0"]
-        if quality_range_override is not None:
-            config.encoding.quality_range_override = quality_range_override
-        config.encoding.resolve(config.codecs, config.profiles)
+        plan = config.resolve_encoding(
+            strategies = ["h265-aq+slow"],
+            targets    = ["vmaf-min:93.0"],
+            quality    = quality_range_override,
+        )
 
         src = tmp_path / "source.mkv"
         src.write_bytes(b"\x00" * 64)
@@ -514,9 +514,10 @@ class TestEncodingPresentationTargets:
             ),
             frame_count=240, crop=CropParams(),
         )
-        probe = ProbePhase(config, {}, collector=NoOpMetricsCollector(), crop_params=None)
+        probe = ProbePhase(config, {}, collector=NoOpMetricsCollector(), crop_params=None, plan=plan)
         probe.result = ProbePhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="stub",
+            plan=plan,
             stream=_PAArtifact(payload=extended, state=_PAState.COMPLETE),
         )
 
@@ -528,7 +529,7 @@ class TestEncodingPresentationTargets:
             chunks=[_PAArtifact(payload=chunk, state=_PAState.COMPLETE)],
         )
 
-        strategy = config.encoding.resolved_strategies[0]
+        strategy = plan.strategies[0]
         optimization = OptimizationPhase(config, {}, collector=NoOpMetricsCollector())
         optimization.result = OptimizationPhaseResult(
             outcome=PhaseOutcome.COMPLETED, message="stub",
@@ -557,7 +558,7 @@ class TestEncodingPresentationTargets:
         def _fake_encode_all(**kwargs: object) -> EncodingResult:
             captured.update(kwargs)
             result = EncodingResult()
-            result.encoded_chunks = {chunk.safe_name(): {strategy.display_name(): winner}}
+            result.encoded_chunks = {strategy.display_name(): [winner]}
             result.encoded_count = 1
             return result
 
@@ -601,3 +602,101 @@ class TestEncodingPresentationTargets:
         assert received == [
             _QT(metric="vmaf", statistic="min", value=93.0),
         ]
+
+
+# ---------------------------------------------------------------------------
+# The chunk->winner 1:1 span contract guard
+# ---------------------------------------------------------------------------
+
+import pytest
+
+from pyqenc.phases.encoding import (
+    EncodingResult as _EncodingResult,
+)
+from pyqenc.phases.encoding import (
+    _assert_one_winner_per_chunk,
+)
+from pyqenc.stream_model import EncodedChunk as _EncodedChunk
+
+
+class TestOneWinnerPerChunkGuard:
+    """``_assert_one_winner_per_chunk``: exact 1:1 spans, per strategy.
+
+    The guard pins the transitional invariant between phases: every
+    non-failed chunk must have exactly one winner per strategy. Losses,
+    same-span duplicates, and foreign winners fail loudly at the encode
+    conclusion — long before the merge-time frame check could only hint
+    that something dropped.
+    """
+
+    def _chunk(self, start: float, end: float) -> _VSC:
+        from fractions import Fraction
+
+        from pyqenc.stream_model import (
+            ExtendedVideoStream,
+            File,
+            VideoStream,
+            VideoStreamInfo,
+        )
+
+        stream = ExtendedVideoStream(
+            stream=VideoStream(
+                file=File(path=Path(f"c_{start}_{end}.mkv"), file_size_bytes=64),
+                info=VideoStreamInfo(
+                    track_id=0, codec_name="hevc", fps=24.0,
+                    fps_fraction=Fraction(24, 1), resolution="1920x1080",
+                    duration_seconds=end - start,
+                ),
+            ),
+            frame_count=24,
+            crop=CropParams(),
+        )
+        return _VSC(
+            stream=stream, start_timestamp=start, end_timestamp=end, frame_count=24,
+        )
+
+    def _winner(self, chunk: _VSC, tmp_path: Path) -> _EncodedChunk:
+        from pyqenc.phases.encoding import build_encoded_chunk
+
+        mkv = tmp_path / f"{chunk.safe_name()}.1920x1080.q18.0.mkv"
+        mkv.write_bytes(b"x" * 64)
+        return build_encoded_chunk(
+            chunk=chunk, strategy=_STRATEGY_OBJ, crf=Decimal("18.0"),
+            path=mkv, resolution="1920x1080", frame_count=24,
+        )
+
+    def test_exact_match_passes(self, tmp_path: Path) -> None:
+        chunks = [self._chunk(0.0, 10.0), self._chunk(10.0, 20.0)]
+        result = _EncodingResult()
+        result.encoded_chunks[_STRATEGY] = [self._winner(c, tmp_path) for c in chunks]
+        _assert_one_winner_per_chunk(result, chunks, [_STRATEGY_OBJ])
+
+    def test_missing_winner_fails(self, tmp_path: Path) -> None:
+        chunks = [self._chunk(0.0, 10.0), self._chunk(10.0, 20.0)]
+        result = _EncodingResult()
+        result.encoded_chunks[_STRATEGY] = [self._winner(chunks[0], tmp_path)]
+        with pytest.raises(AssertionError, match="missing"):
+            _assert_one_winner_per_chunk(result, chunks, [_STRATEGY_OBJ])
+
+    def test_same_span_duplicate_fails(self, tmp_path: Path) -> None:
+        chunks = [self._chunk(0.0, 10.0)]
+        result = _EncodingResult()
+        result.encoded_chunks[_STRATEGY] = [
+            self._winner(chunks[0], tmp_path), self._winner(chunks[0], tmp_path),
+        ]
+        with pytest.raises(AssertionError, match="duplicate"):
+            _assert_one_winner_per_chunk(result, chunks, [_STRATEGY_OBJ])
+
+    def test_foreign_winner_fails(self, tmp_path: Path) -> None:
+        chunks = [self._chunk(0.0, 10.0)]
+        result = _EncodingResult()
+        result.encoded_chunks[_STRATEGY] = [self._winner(self._chunk(30.0, 40.0), tmp_path)]
+        with pytest.raises(AssertionError, match="unexpected"):
+            _assert_one_winner_per_chunk(result, chunks, [_STRATEGY_OBJ])
+
+    def test_failed_chunk_excluded(self, tmp_path: Path) -> None:
+        chunks = [self._chunk(0.0, 10.0), self._chunk(10.0, 20.0)]
+        result = _EncodingResult()
+        result.failed_chunks = [chunks[1].safe_name()]
+        result.encoded_chunks[_STRATEGY] = [self._winner(chunks[0], tmp_path)]
+        _assert_one_winner_per_chunk(result, chunks, [_STRATEGY_OBJ])

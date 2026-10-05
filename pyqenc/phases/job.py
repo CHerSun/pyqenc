@@ -66,7 +66,7 @@ class JobPhaseResult(PhaseResult):
         config:     Full validated application configuration.
         work_dir:   Working directory for all pipeline artifacts.
         source:     Resolved path to the source video file.
-        cleanup:     Artifact retention policy applied after encoding.
+        cleanup:    Artifact retention policy applied after encoding.
         no_metrics: When ``True``, skip writing ``metrics.yaml`` files.
     """
 

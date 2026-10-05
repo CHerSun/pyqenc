@@ -49,6 +49,7 @@ from tests.test_metrics_integration import (
 # ---------------------------------------------------------------------------
 
 _APP_CONFIG = load_app_config(default_only=True)
+_PLAN        = _APP_CONFIG.resolve_encoding()
 
 
 def _make_job_result(work_dir: Path, source: Path) -> JobPhaseResult:
@@ -132,6 +133,7 @@ def _make_probe_phase(
         _APP_CONFIG, registry,
         collector   = collector,
         crop_params = crop_params,
+        plan        = _PLAN,
     )
 
 

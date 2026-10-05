@@ -39,13 +39,14 @@ from pyqenc.stream_model import (
 # ---------------------------------------------------------------------------
 
 _APP_CONFIG = load_app_config(default_only=True)
+_ALL_STRATS = _APP_CONFIG.resolve_encoding().strategies
 
 _STRATEGY = next(
-    s for s in _APP_CONFIG.encoding.resolved_strategies
+    s for s in _ALL_STRATS
     if s.preset == "slow" and s.profile == "h265-aq"
 )
 _STRATEGY_B = next(
-    s for s in _APP_CONFIG.encoding.resolved_strategies
+    s for s in _ALL_STRATS
     if s.preset == "slow" and s.profile == "h265"
 )
 _RESOLUTION = "1920x1080"
@@ -117,7 +118,7 @@ class TestSidecarFrameCount:
         """The per-attempt sidecar carries the attempt's frame count."""
         attempt = tmp_path / "chunk.1920x1080.q18.0.mkv"
         _write_metrics_sidecar(
-            attempt, True, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 2400,
+            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 2400,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 2400
@@ -126,7 +127,7 @@ class TestSidecarFrameCount:
         """An unknown count is persisted as the 0 sentinel (no None in yaml)."""
         attempt = tmp_path / "chunk.1920x1080.q18.0.mkv"
         _write_metrics_sidecar(
-            attempt, True, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 0,
+            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 0,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 0
@@ -155,11 +156,14 @@ class TestScanWinnerSidecars:
         """Two strategies over the same chunks: each sums its own winners."""
         chunks = [_make_chunk(0.0, 10.0, tmp_path), _make_chunk(10.0, 20.0, tmp_path)]
         encoded = {
-            c.safe_name(): {
-                _STRATEGY.display_name():  _make_winner(tmp_path, c, _STRATEGY,  Decimal("18.0"), 100 + i),
-                _STRATEGY_B.display_name(): _make_winner(tmp_path, c, _STRATEGY_B, Decimal("20.0"), 200 + i),
-            }
-            for i, c in enumerate(chunks)
+            _STRATEGY.display_name(): [
+                _make_winner(tmp_path, c, _STRATEGY, Decimal("18.0"), 100 + i)
+                for i, c in enumerate(chunks)
+            ],
+            _STRATEGY_B.display_name(): [
+                _make_winner(tmp_path, c, _STRATEGY_B, Decimal("20.0"), 200 + i)
+                for i, c in enumerate(chunks)
+            ],
         }
 
         scan = _scan_winner_sidecars(
@@ -177,9 +181,9 @@ class TestScanWinnerSidecars:
     def test_zero_count_marks_unknown(self, tmp_path: Path) -> None:
         """A winner sidecar with the 0 sentinel → frames_known=False (skip semantics)."""
         chunk = _make_chunk(0.0, 10.0, tmp_path)
-        encoded = {chunk.safe_name(): {_STRATEGY.display_name(): _make_winner(
+        encoded = {_STRATEGY.display_name(): [_make_winner(
             tmp_path, chunk, _STRATEGY, Decimal("18.0"), 0,
-        )}}
+        )]}
 
         scan = _scan_winner_sidecars(tmp_path, encoded, [_STRATEGY.display_name()], _TARGETS)
 
@@ -197,7 +201,7 @@ class TestScanWinnerSidecars:
         data = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
         del data["frame_count"]
         sidecar_path.write_text(yaml.safe_dump(data), encoding="utf-8")
-        encoded = {chunk.safe_name(): {_STRATEGY.display_name(): winner}}
+        encoded = {_STRATEGY.display_name(): [winner]}
 
         scan = _scan_winner_sidecars(tmp_path, encoded, [_STRATEGY.display_name()], _TARGETS)
 
@@ -211,7 +215,7 @@ class TestScanWinnerSidecars:
         # Remove the sidecar the helper wrote.
         (tmp_path / "encoded" / _STRATEGY.safe_name()
          / f"{chunk.safe_name()}.{_RESOLUTION}.yaml").unlink()
-        encoded = {chunk.safe_name(): {_STRATEGY.display_name(): winner}}
+        encoded = {_STRATEGY.display_name(): [winner]}
 
         scan = _scan_winner_sidecars(tmp_path, encoded, [_STRATEGY.display_name()], _TARGETS)
 
@@ -220,9 +224,9 @@ class TestScanWinnerSidecars:
     def test_frame_accounting_runs_without_targets(self, tmp_path: Path) -> None:
         """Frames are target-independent: no targets → summaries None, sums live."""
         chunk = _make_chunk(0.0, 10.0, tmp_path)
-        encoded = {chunk.safe_name(): {_STRATEGY.display_name(): _make_winner(
+        encoded = {_STRATEGY.display_name(): [_make_winner(
             tmp_path, chunk, _STRATEGY, Decimal("18.0"), 240,
-        )}}
+        )]}
 
         scan = _scan_winner_sidecars(tmp_path, encoded, [_STRATEGY.display_name()], [])
 
@@ -233,9 +237,9 @@ class TestScanWinnerSidecars:
     def test_limiter_summaries_still_built(self, tmp_path: Path) -> None:
         """The limiter table path is unchanged by the frame accounting."""
         chunk = _make_chunk(0.0, 10.0, tmp_path)
-        encoded = {chunk.safe_name(): {_STRATEGY.display_name(): _make_winner(
+        encoded = {_STRATEGY.display_name(): [_make_winner(
             tmp_path, chunk, _STRATEGY, Decimal("18.0"), 240,
-        )}}
+        )]}
 
         scan = _scan_winner_sidecars(tmp_path, encoded, [_STRATEGY.display_name()], _TARGETS)
 
@@ -328,10 +332,14 @@ class TestEncodingParamsTotals:
 
 def _make_encoding_phase(tmp_path: Path, probe_frames: int) -> EncodingPhase:
     """An EncodingPhase wired to a completed ProbePhase with a known frame count."""
-    probe = ProbePhase(_APP_CONFIG, {}, collector=MagicMock(), crop_params=None)
+    probe = ProbePhase(
+        _APP_CONFIG, {}, collector=MagicMock(), crop_params=None,
+        plan=_APP_CONFIG.resolve_encoding(),
+    )
     probe.result = ProbePhaseResult(
         outcome = PhaseOutcome.COMPLETED,
         message = "probe complete",
+        plan    = _APP_CONFIG.resolve_encoding(),
         stream  = Artifact(
             payload = ExtendedVideoStream(
                 stream = VideoStream(

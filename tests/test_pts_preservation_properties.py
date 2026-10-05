@@ -109,6 +109,7 @@ def _extended_stream(path: Path, frame_count: int):
 # ---------------------------------------------------------------------------
 
 _APP_CONFIG = load_app_config(default_only=True)
+_PLAN       = _APP_CONFIG.resolve_encoding()
 
 
 
@@ -452,10 +453,11 @@ def test_frame_count_preservation(frame_count: int) -> None:
         )
         registry[ExtractionPhase] = extraction
 
-        probe = ProbePhase(config, registry, collector=collector, crop_params=None)
+        probe = ProbePhase(config, registry, collector=collector, crop_params=None, plan=_PLAN)
         probe.result = ProbePhaseResult(
             outcome   = PhaseOutcome.COMPLETED,
             message   = "probe complete",
+            plan      = _PLAN,
             stream    = Artifact(
                 payload = _extended_stream(source, frame_count),
                 state   = ArtifactState.COMPLETE,

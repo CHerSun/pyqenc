@@ -19,10 +19,9 @@ def _make_config(
     """Build an ``AppConfig`` with the given strategies/targets through the public path.
 
     Strategies and targets are injected into the dumped default config and
-    re-validated, so ``EncodingConfig.resolve()`` runs fresh (it early-returns
-    on an already-resolved instance). Optimisation is disabled to keep the
-    encoding phase deterministic for e2e. No private ``_resolved_*`` caches are
-    touched — resolution happens through the supported ``model_validate`` path.
+    re-validated. Optimisation is disabled to keep the encoding phase
+    deterministic for e2e. Resolution happens per-run via
+    ``config.resolve_encoding()`` — the raw fields carry the overrides.
     """
     config_dict = load_app_config(default_only=True).model_dump()
     config_dict["encoding"]["strategies"] = strategies
@@ -46,6 +45,7 @@ class TestCompletePipeline:
         config = _make_config(strategies=["h265+fast"], targets=["vmaf-min:90.0"])
         result = api.run_pipeline(
             config,
+            config.resolve_encoding(),
             get_sample_video_path(),
             tmp_path / "work",
             no_metrics = True,
@@ -65,6 +65,7 @@ class TestCompletePipeline:
         config = _make_config(strategies=["h265+fast"], targets=["vmaf-min:90.0"])
         result = api.run_pipeline(
             config,
+            config.resolve_encoding(),
             get_sample_video_path(),
             tmp_path / "work",
             no_metrics  = True,
@@ -90,6 +91,7 @@ class TestPipelineValidation:
         with pytest.raises(FileNotFoundError):
             api.run_pipeline(
                 config,
+                config.resolve_encoding(),
                 tmp_path / "nonexistent.mkv",
                 tmp_path / "work",
                 no_metrics = True,
@@ -97,10 +99,9 @@ class TestPipelineValidation:
             )
 
     def test_invalid_strategy_raises_on_config_build(self, tmp_path: Path) -> None:
-        """Test that an invalid strategy raises ValidationError at config load time."""
-        from pydantic import ValidationError
-
+        """Test that an invalid strategy raises at the resolution boundary."""
         config_dict = load_app_config(default_only=True).model_dump()
         config_dict["encoding"]["strategies"] = ["invalid+nonexistent"]
-        with pytest.raises((ValidationError, ValueError)):
-            AppConfig.model_validate(config_dict)
+        config = AppConfig.model_validate(config_dict)
+        with pytest.raises(ValueError):
+            config.resolve_encoding()

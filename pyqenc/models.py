@@ -17,6 +17,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     field_validator,
     model_validator,
 )
@@ -280,12 +281,85 @@ def targets_as_strings(targets: list[QualityTarget]) -> list[str]:
     the same targets in different config order serialise identically.
 
     Args:
-        targets: Quality targets from :class:`~pyqenc.app_config.AppConfig`.
+        targets: Quality targets from an :class:`EncodingPlan`.
 
     Returns:
         Sorted list of strings like ``["vmaf-min:93.0"]``.
     """
     return sorted(f"{t.metric}-{t.statistic}:{t.value}" for t in targets)
+
+
+class EncodingPlan(BaseModel):
+    """The run's resolved encoding inputs — derived once, consumed everywhere.
+
+    Produced by :meth:`pyqenc.app_config.AppConfig.resolve_encoding` at the
+    run boundary (the CLI) from the raw config plus any CLI overrides, then
+    threaded through ``JobPhaseResult`` like every other volatile per-run
+    parameter. Phases consume this object; nobody re-resolves
+    ``encoding.strategies`` downstream, and the config is never written
+    after load.
+
+    Attributes:
+        strategies: Resolved strategies (identity + effective codec each).
+        targets:    Resolved quality targets.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    strategies: list[Strategy]
+    targets:    list[QualityTarget]
+
+    # Whether the run pins the quality knob — derived once at construction
+    # in the after-validator (plain private-attr assignment works there
+    # even on frozen models; verified on pydantic 2.12.5). Storage is
+    # private so it can never be provided as input and stays outside the
+    # schema (model_dump / equality never see it); the property is the
+    # public read contract.
+    _fixed_quality: bool = PrivateAttr(default=False)
+
+    @model_validator(mode="after")
+    def _derive_fixed_quality(self) -> Self:
+        self._fixed_quality = bool(self.strategies) and all(
+            s.codec.quality_better == s.codec.quality_worse
+            for s in self.strategies
+        )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_invariants(self) -> Self:
+        """Construction-time plan invariants (typed — no dict plumbing).
+
+        - No strategies, no plan: the plan IS the video encoding work; an
+          empty strategy set is a configuration error, failed loudly at
+          the run boundary instead of minutes into the pipeline.
+        - A searched (ranged) run must carry quality targets — without a
+          bar the search degenerates into a single default-quality encode.
+          Fixed runs legitimately omit targets: the pinned knob is the
+          bar and config targets drive nothing there.
+        """
+        if not self.strategies:
+            raise ValueError(
+                "Encoding plan has no strategies — there is nothing to encode. "
+                "Check encoding.strategies / --strategies."
+            )
+        if not self._fixed_quality and not self.targets:
+            raise ValueError(
+                "Searched run has no quality targets — the search has no bar "
+                "to meet. Provide config encoding.targets or --targets "
+                "(fixed runs via -q / collapsed profiles may omit targets)."
+            )
+        return self
+
+    @property
+    def fixed_quality(self) -> bool:
+        """Whether the run pins the quality knob: every strategy's effective
+        range is a single point (``quality_better == quality_worse``).
+
+        Derived, never an input — a collapsed config profile and the
+        ``-q`` override produce the same value here. Computed once at
+        construction; this property is the read contract.
+        """
+        return self._fixed_quality
 
 
 def _coerce_decimal_pair(v: tuple | list) -> tuple[Decimal, Decimal]:

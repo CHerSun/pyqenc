@@ -294,8 +294,14 @@ attempts as "measurement") worth anything for video?
   extraction/chunking results, no partial scanning.
 - 2026-09-27: landed with `2026-09-25 file-stream-model` (Task 4) — estimation
   now runs in ExtractionPhase on the enumerated `VideoStreamInfo` (attempts +
-  finals only; the FFV1/remux/extraction terms are deleted). The remaining
-  open question is unchanged:
+  finals only; the FFV1/remux/extraction terms are deleted).
+- 2026-10-05 (cc63e55): the estimate MOVED to ProbePhase — it reads
+  `plan.strategies` and Probe owns the plan (the video chain's entry
+  context; audio consumption is negligible next to the strategy-multiplied
+  video work, and the audio registry carries no plan). USER: "space
+  estimation needs a complete rework. But right now - just a fast
+  solution" — the rework itself is §50. The remaining open question is
+  unchanged:
 
 **Questions to think about:** per-phase re-estimates later in the pipeline?
 Keep log-only?
@@ -435,6 +441,7 @@ Just a few thoughts:
 - maybe the phase itself should give estimation? Like finalize, but the first call instead to ask for space estimation. Not sure, looks difficult
 - maybe for targets we should add profiles. Something like targets profile "high", "medium", "low", with their own sets of targets each. But also a hint on approximate bits per pixel? like 0.1 for medium, 0.15 for high, 0.08 for low?
 - need a research there
+- 2026-10-05 (user): "Honestly, space estimation needs a complete rework. But right now - just a fast solution" — the current form (Probe-hosted, plan-aware, log-only; see §33) is explicitly a placeholder; fold any rework of this item with §33's open questions (required vs recommended ranges, config-awareness, where in the pipeline it runs).
 
 ## 51. QualitySearchV3 is outright broken.
 
@@ -572,7 +579,8 @@ Deferred as costly/structural:
 
 - encoding⇄optimization import cycle (marked `# deferred: circular import` at
   3 sites) — worth breaking properly.
-- CLI `_cmd_*` bodies ×6 near-identical (crop-parse → build config → api → log).
+- CLI `_cmd_*` bodies ×6 near-identical (crop-parse → build config → api → log)
+  — promoted to §95 (2026-10-05 feasibility check).
 - Test fixture factories duplicated across files (Strategy/CodecConfig,
   extended-stream, encoded-chunk builders) → conftest consolidation.
 - `EncodedChunk` composition duplicated (`_pair_placeholder` vs
@@ -854,69 +862,6 @@ Still open (the general problem — related to phase invalidation broadly and to
 
 ---
 
-## 87. `encoded_chunks` double-nested dict is an index in the wrong orientation — needs thinking
-
-`EncodingResult.encoded_chunks: dict[chunk_id][strategy_name] -> EncodedChunk`
-(and the derived `EncodingPhaseResult.encoded_chunks`) re-keys identity the
-payload already carries (EncodedChunk owns its chunk + strategy). Orientation
-audit (2026-10-03): merge's concat needs one strategy's chunks ordered by
-chunk; optimization's sizes/aggregation need per-strategy-over-chunks; the
-winner scan and winners build iterate all pairs; the encode loop writes
-per pair. No consumer needs chunk-major O(1) lookup — the only thing the
-nesting provides. Candidate shape: `dict[strategy_name] -> list[EncodedChunk]`
-(grouping is what two consumers actually need; a flat list is more
-doctrine-pure but pushes grouping to every consumer). Mechanical but
-cross-phase: EncodingResult + writers + the derived property + 4 read sites
-+ tests. Could ride along with the `2026-10-03 unified-quality-summaries`
-implementation (it reworks the aggregation data path anyway) or land
-standalone.
-
----
-
-## 88. EncodingConfig two-representation dance — resolve once at the boundary, objects everywhere — needs thinking
-
-Finding (2026-10-03 code review): `EncodingConfig` carries raw pattern strings
-(`strategies`, `targets`) past the load boundary, gets mutated post-load by
-the CLI, and is re-read by every phase — hence the resolved caches, explicit
-`resolve()`, the idempotency guard, and the cache-invalidation validator.
-None of that machinery has a reason to exist if resolution happens exactly
-once at the boundary and the config carries resolved objects from then on.
-
-Doctrine (user, 2026-10-03): raw strings are only (a) the YAML parse form and
-(b) sidecar serialization for recovering back to objects (as
-`optimization.yaml`'s `selected:` already does). Everywhere else — strategies,
-codecs, profiles, targets — objects.
-
-Design sketch:
-- `EncodingConfig` gains real fields `resolved_strategies: list[Strategy]` /
-  `resolved_targets: list[QualityTarget]`; loses `resolve()`, the private
-  caches, and the invalidation validator; reads become plain field reads.
-- Exactly two population points: the `AppConfig` load validator (fail-fast on
-  bad patterns stays at `model_validate`) and ONE sanctioned mutation method
-  on `AppConfig` (e.g. `apply_cli_overrides(...)`) that assigns raw overrides
-  and re-resolves in one step — the codec/profile context lives on the
-  parent. Free-form post-load assignment of raw `strategies` without
-  re-resolution becomes structurally impossible.
-- Re-home the module-level composition helpers
-  (`_validate_profile_quality_range`, `_validate_override_quality_range`,
-  `_effective_codec`, `_expand_strategy_pattern`, `_get_codec`) as
-  `AppConfig` methods in the same motion (disowned-functions rule).
-- Re-home `_validate_resolved_strategies` out of cli.py (2026-10-03 review):
-  the uniform-label-under-override and no-mixed-fixed/searched rules are
-  invariants of the resolved set (pure config facts — "was -q given?" is
-  `quality_range_override is not None`), not CLI policy. They become the
-  post-resolve validation owned by the same sanctioned method/load
-  validator; the CLI keeps only the try/except that surfaces the error.
-  Still checked before any phase runs — just from the right layer.
-- CLI `_build_config` + ~a dozen test helpers drop the assign-then-resolve
-  dance.
-
-Behaviorally identical; pure structure. Sequencing: after the code-review
-pass and PR — pairs with §87 and the `2026-10-03 unified-quality-summaries`
-implementation as the spec-window mechanical-debt sweep.
-
----
-
 ## 89. Check the code for `str` usages
 
 Old code used `str` directly in many places. Instead of Paths, instead of strategies, profiles, etc.
@@ -954,15 +899,196 @@ the mode-honest sidecar landing):
   basis; search: quality_targets) — replace mode-conditional optional fields
   with type-explicit classes: a common base + `Fixed…Params` / `Search…Params`
   derivatives for both `OptimizationParams` and `MergeParams`, so the schema
-  itself states the mode's shape.
+  itself states the mode's shape. Confirmed from the code side 2026-10-05
+  (user, reading the `MergeParams` construction split): difference should be
+  by TYPE, not by construction — the None-guards work but the schema lies.
+  Mechanics: pydantic discriminated union (`mode: Literal["fixed"]` /
+  `Literal["search"]` + `Field(discriminator="mode")` — same shape as §79's
+  FilterInstance idea); the discriminator is what persisted models need and
+  in-memory objects get for free (the config layer's analog was solved
+  2026-10-05 by splitting resolved state into `EncodingPlan`). Mode-specific
+  invalidation-key comparison rehomes onto the variants. Full census of the
+  pattern: `MergeParams` (anchor vs quality_targets optionals),
+  `OptimizationParams` (anchor optional; strategy_results.metrics
+  fixed-only), and the per-video merged sidecar (mode-honest but as an
+  untyped dict — candidate for a typed model in the same pass).
 
 Supersedes parts of the interim sidecar landing (88975c7); fold into the
 `2026-10-03 unified-quality-summaries` implementation or land standalone
-before it.
+before it — recommended FIRST in that window: the spec's prepared-table
+data lands ON these models, so building it onto the honest types beats
+retrofitting (splitting now and again at spec time would churn twice).
 
 ---
 
-## Last known = 90
+## 91. LongPath idempotence breaks for trailing-whitespace path strings — needs thinking
+
+Found live 2026-10-05 by the Hypothesis property suite (example: `'0/ '`): `ntpath.abspath`
+(GetFullPathName) strips whitespace preceding a separator or end-of-string, so
+`LongPath('0/ ').__fspath__()` → `...\0\` while a second round-trip yields `...\0` —
+not idempotent. Pre-existing on main (reproduced on untouched code; the property
+run had simply not drawn this example before). Such paths are unrepresentable on
+NTFS via Win32 APIs; the property generator now excludes the domain
+(`\s[/\\]|\s$` filter) with a pointer here. Open question: is a LongPath-side
+normalization of such strings wanted at all, or is the generator exclusion the
+complete answer?
+
+---
+
+## 92. Long functions lose semantic clarity — continued cleanup: inventory + assess logic separation — needs thinking
+
+Raised 2026-10-05 (config-resolution review): many functions are too long —
+for a human developer a long body loses the answer to "what exactly does this
+function do". Seed example: `_scan_winner_sidecars` (pyqenc/phases/encoding.py)
+— a flat loop that both LOADS one winner's facts (name-pattern match, sidecar
+read, frame count, worst-target evaluation) and SUMMARIZES into the running
+aggregates (limiter tallies, frames, frames_known). Natural split: a
+"load one" function with a clear per-item footprint (winner → sidecar facts
+or skip-reason), a summarize step over its result, and the aggregate owner
+calling them in a cycle — each function then states its own contract.
+
+Effort shape (continuation of the 2026-09-30 cleanup lineage):
+
+- Build an inventory first: long functions across `pyqenc/` (simple AST/line
+  count scan; `scc` sizing per cleanup conventions) — do not eyeball.
+- For each candidate: assess whether a CLEAN logic separation exists
+  (per-item loaders vs aggregators, stages of a pipeline, decision vs
+  mechanics). Candidates, not mandates — some long functions are honestly
+  one thing and splitting them would only scatter their story.
+- Rule of thumb to validate: the split is right when each part's footprint
+  (inputs → outputs) can be stated in one sentence.
+
+---
+
+## 93. PhaseDependencies — typed deps view replacing `_dep_result` — design agreed, implementation parked
+
+Born from the 2026-10-05 config-resolution review (91 `self._dep_result(...)`
+call sites; 62 of them `JobPhase`; merge 29 + optimization 27 the hotspots).
+Design agreed in discussion (user-driven):
+
+- `PhaseRegistry` STAYS the dict alias — it already is the registry; no class.
+- New `PhaseDependencies` view, held by `Phase` as `self._deps`, built at
+  init from the registry reference + the phase's own `DEPENDS_ON` (its key
+  domain = declared deps only, so indexing an undeclared phase is
+  structurally out of vocabulary).
+- `__getitem__[R: PhaseResult](dep_cls: type[Phase[R]]) -> R` — generic
+  subscript returning the asserted typed result. Subscript semantics are
+  honest here (the view stores nothing — it IS a result map over declared
+  deps) and directly answer the original objection: function-call form
+  implies cost, subscript reads as near-instant data access.
+- Per-dep property layer (`job_result` etc.) evaluated and DROPPED — with a
+  typed subscript, properties are redundant indirection (no-dumb-wrappers;
+  `_deps[JobPhase]` and `self.job_result` are the same length).
+- `_dep_result` retires; all 91 sites become `self._deps[X]`.
+
+Implementation notes:
+
+- The view is a LIVE view over the real registry — reference only, no object
+  copies and no init-time class→instance binding. It carries the registry
+  reference + the frozen key domain (`DEPENDS_ON`); every `__getitem__`
+  resolves against the live registry per access, so results populating
+  during the dependency walk are seen exactly as today (late binding kept).
+  Both asserts stay at access time.
+- Still to settle: `_ensure_dependencies` needs phase INSTANCES
+  (`dep.run()`) — either `Phase` keeps the raw registry reference for
+  framework use, or the view gains a minimal instance accessor.
+
+Sequencing: the sweep rewrites merge.py + optimization.py — the
+unified-summaries spec-window files — so land it at that implementation's
+start, alongside §90's typed per-mode sidecar models.
+
+---
+
+## 94. Config layer merge semantics — explicit intent markers + empty-container asymmetry — needs thinking
+
+Raised 2026-10-05 (user, reviewing `_deep_merge`): layers can express "merge"
+(dicts, the default) and silent "keep" (null values), but never "drop
+previous and use mine wholesale"; lists are unconditional replacement with no
+way to ask for append.
+
+Semantics inventory (verified in code):
+
+- scalar → replace (the only option).
+- dict + dict → recursive merge; a null section OR an empty `{}` silently
+  keeps the base — base keys can never be REMOVED by a higher layer.
+- list → replace; `[]` replaces with empty (failing later as e.g. "No
+  strategies configured") while `{}` keeps base — an ASYMMETRY between empty
+  containers, surprising in both directions, worth documenting or unifying
+  regardless of the bigger question.
+
+Assessment (updated 2026-10-05 after user review of the first take):
+
+- Custom YAML tags (`!replace`/`!append`) REJECTED (user): end users must
+  memorize exact nonstandard tags; a forgotten tag fails in the loader with
+  a cryptic error before any of our messages can help; no discovery path.
+- LISTS — accepted direction: the empty-first-item convention ("drop
+  pre-existing, use only what follows"), familiar from other tools. The
+  marker is a single list's FIRST ITEM being null — `strategies: [~, h265+slow]`
+  (flow `~` = null; one property, one list — a duplicate `strategies:` key
+  "first null, then list" is invalid YAML, hence the in-list marker).
+  Prefer null over `""` — no list in the schema accepts nulls today, so
+  collision-free by construction.
+  Mechanics: consumed in `_deep_merge` at the boundary (strip + replace
+  mode for that key), pydantic never sees it; failure mode is soft (a
+  mistyped marker lands in OUR validation, whose message can teach the
+  convention). Constraints: rule is global for all future lists (a
+  nullable-element list would need to opt out); a marker in the BASE layer
+  is just data (only meaningful in a higher layer). Live use case: owning
+  `strategies`/`targets` wholesale from `pyqenc.yaml` without editing base.
+- List MERGE stays never-implicit — for every current list replacement is
+  the honest intent; append needs arbitrary order/dedup answers and must be
+  opt-in per instance if it exists at all.
+- DICTS — open, lean "no marker": (a) null-deletion per key (k8s merge-patch
+  precedent) COLLIDES with our null-means-keep rule (`profiles:` null
+  section = keep today, would mean delete-all → validation failure); a
+  scoped carve-out ("deletes only at nested map level") is baroque and
+  unteachable. (b) null-key first entry — mechanically possible (PyYAML
+  preserves document order) but zero precedent anywhere. (c) reserved
+  marker key — safe for schema-fixed dicts but the user-keyed maps
+  (`codecs`, `profiles`, `filters`) are exactly where wholesale-replace
+  would be wanted and exactly where reserved names can collide. Escape
+  hatch weakening the whole dict case: the `pyqenc config` workflow copies
+  the active base to home/cwd — owning the full document removes the need
+  for layer-deletion; only "stay lean over bundled defaults" remains
+  unserved, and that is cosmetic (unused entries are inert).
+- Demand today is thin overall: the gap may still be more documentation
+  than mechanism — the merge rules currently live only inside
+  `_deep_merge`'s docstring; the config docs should state them (including
+  the `{}`/`[]` asymmetry decision) whatever gets built.
+
+---
+
+## 95. CLI condensation — one pipeline-command template, declarative subcommand table — needs thinking
+
+User observation 2026-10-05: "CLI looks to be very bloated with all the
+`process_*` and `_cmd_*` functions basically duplicating each other.
+Leftovers of previous bad design." Feasibility check (same day) confirms:
+
+- `_cmd_extract` / `_cmd_chunk` / `_cmd_encode` are byte-identical except the
+  banner line, the api callable, and the success/fail noun (40 lines each).
+  `_cmd_merge` = the same body + output-file listing; `_cmd_auto` = + the
+  key-value display table; `_cmd_audio` = the body minus crop and plan.
+  After the config-resolution branch, the per-command differences reduced to
+  exactly THREE axes: needs-crop, needs-plan (audio: no), output flavor
+  (plain / list-files / display-table).
+- The six `_create_*_subcommand` parsers are the same shape: name + help +
+  one arg-group mix — a declarative table drives them.
+- `api.py` is already uniform (six thin `_drive` wrappers); its named
+  functions are the public surface and can stay as thin aliases of one
+  `run_to(target=…)` if desired.
+
+Design sketch to think through: one `_SubcommandSpec` (banner, runner,
+needs_crop, needs_plan, flavor) + a single `_cmd_pipeline(args, spec)` +
+table-driven parser creation. Estimated −250 lines of cli.py with zero
+behavior change. Interactions to decide: §66 (the subcommand SET redesign —
+intent-based auto/video/audio/measure) should land FIRST or together — no
+point condensing commands that may be renamed/merged; `_cmd_config` and
+`_cmd_measure` stay separate (genuinely different shapes). Supersedes the
+§65 deferred bullet.
+
+---
+
+## Last known = 95
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

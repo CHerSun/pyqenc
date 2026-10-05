@@ -680,9 +680,8 @@ class TestDeepMergeLayerPriorityOrdering:
 # encoding.targets and encoding.strategies preserved as their raw
 # string forms so that re-validation triggers resolution again correctly.
 #
-# Bug this catches: if model_dump() accidentally serialises resolved private
-# fields (like _resolved_targets or _resolved_strategies) back as top-level
-# fields, model_validate() would fail or produce incorrect results. Also
+# Bug this catches: if model_dump() serialised anything beyond the raw parse
+# form, model_validate() would fail or produce incorrect results. Also
 # catches cases where scalar fields lose their values during the round-trip.
 #
 # **Validates: Requirements 3.1, 11.1, 11.2**
@@ -846,10 +845,10 @@ class TestAppConfigRoundTrip:
     ) -> None:
         """quality_targets and strategies are stored and re-serialised as raw strings.
 
-        Bug condition: model_dump() accidentally serialises the resolved private
-        caches (_resolved_targets / _resolved_strategies) as public fields, causing
-        model_validate() to receive typed objects instead of raw strings — which
-        would fail validation or silently bypass re-resolution.
+        The config carries only the raw parse form — resolved state lives on
+        the ``EncodingPlan`` produced by ``resolve_encoding``, never on the
+        model — so a round-trip must preserve the raw strings and stay
+        resolvable.
 
         # Feature: config-refactor, Property 5
         **Validates: Requirements 3.1, 11.1, 11.2**
@@ -857,11 +856,6 @@ class TestAppConfigRoundTrip:
         config = _BASE_CONFIG.model_copy(deep=True)
         config.encoding.targets = quality_targets
         config.encoding.strategies      = strategies
-
-        # Force re-resolution to populate the private caches.
-        config.encoding._resolved_targets    = None
-        config.encoding._resolved_strategies = None
-        config.encoding.resolve(config.codecs, config.profiles)
 
         dumped        = config.model_dump()
         round_tripped = AppConfig.model_validate(dumped)
@@ -878,17 +872,8 @@ class TestAppConfigRoundTrip:
             f"  got      : {round_tripped.encoding.strategies!r}"
         )
 
-        # The round-tripped config must also have successfully re-resolved
-        # the strategies — i.e., resolution was triggered again from raw strings
-        # and did not fail.
-        assert round_tripped.encoding.resolved_targets is not None, (
-            "encoding.resolved_targets is None after round-trip — "
-            "model_validator did not trigger re-resolution."
-        )
-        assert round_tripped.encoding.resolved_strategies is not None, (
-            "encoding.resolved_strategies is None after round-trip — "
-            "model_validator did not trigger re-resolution."
-        )
+        # The round-tripped config must still resolve from its raw strings.
+        round_tripped.resolve_encoding()
 
     def test_default_config_round_trips_without_mutation(self) -> None:
         """load_app_config() round-trips cleanly with all defaults intact.
@@ -923,20 +908,19 @@ class TestAppConfigRoundTrip:
 
 
 # ---------------------------------------------------------------------------
-# Property 7: Strategy resolution is deterministic and idempotent
+# Property 7: Strategy resolution is deterministic
 #
 # For any AppConfig with a given encoding.strategies list and a given
-# codecs/profiles map, calling encoding.resolved_strategies multiple times
-# must always return the same list of Strategy objects (same count, same
-# order, same content) — resolution is performed exactly once and cached.
+# codecs/profiles map, resolve_encoding() is a pure derivation: every call
+# returns a plan with the same strategies (same count, same order, same
+# content). No resolved state lives on the config between calls.
 #
 # Bug this catches:
-#   - If resolution is not cached, repeated calls could trigger re-expansion
-#     of wildcard patterns and produce a different list each time (e.g. if
-#     dict iteration order is not stable, or if expansion has side-effects).
-#   - If resolve() is not idempotent (i.e. calling it a second time clears
-#     and re-populates the cache), the second call could produce a different
-#     result if the underlying codecs/profiles have changed in the interim.
+#   - Repeated calls triggering re-expansion of wildcard patterns that
+#     produces a different list each time (e.g. dict iteration order is not
+#     stable, or expansion has side-effects).
+#   - Resolution silently expanding to too many or too few strategies for
+#     the given patterns.
 #
 # **Validates: Requirements 3.3, 3.4, 10.1, 10.2**
 # ---------------------------------------------------------------------------
@@ -966,29 +950,26 @@ _strategy_subset = st.lists(
 )
 
 
-class TestStrategyResolutionDeterministicAndIdempotent:
-    """Property 7: resolved_strategies is deterministic and idempotent.
+class TestStrategyResolutionDeterministic:
+    """Property 7: resolve_encoding() is a deterministic pure derivation.
 
-    For any AppConfig with a given encoding.strategies list, calling
-    encoding.resolved_strategies multiple times returns the same list
-    every time, and calling resolve() again does not change the result.
+    For any AppConfig with a given encoding.strategies list, every call
+    returns a plan carrying the same strategy list.
 
     **Validates: Requirements 3.3, 3.4, 10.1, 10.2**
     """
 
     @given(strategy_patterns=_strategy_subset)
     @settings(max_examples=100)
-    def test_resolved_strategies_is_stable_across_multiple_reads(
+    def test_resolve_encoding_called_twice_returns_equal_plans(
         self,
         strategy_patterns: list[str],
     ) -> None:
-        """Reading resolved_strategies multiple times always returns the same list.
+        """Two calls on the same config return equal plans.
 
-        Bug condition: resolution is not cached — each access to
-        resolved_strategies re-expands the raw pattern strings. If expansion
-        has any non-determinism (e.g. dict iteration order varies between
-        calls, or state mutates during expansion), successive reads would
-        return lists with a different order or content.
+        Bug condition: expansion has non-determinism (dict iteration order
+        varies between calls, or state mutates during expansion), so
+        successive calls return lists with a different order or content.
 
         # Feature: config-refactor, Property 7
         **Validates: Requirements 3.3, 3.4, 10.1, 10.2**
@@ -996,92 +977,13 @@ class TestStrategyResolutionDeterministicAndIdempotent:
         config = _BASE_CONFIG.model_copy(deep=True)
         config.encoding.strategies = strategy_patterns
 
-        # Force re-resolution with the new strategy list.
-        config.encoding._resolved_targets    = None
-        config.encoding._resolved_strategies = None
-        config.encoding.resolve(config.codecs, config.profiles)
+        first  = config.resolve_encoding()
+        second = config.resolve_encoding()
 
-        first_read:  list[Strategy] = config.encoding.resolved_strategies
-        second_read: list[Strategy] = config.encoding.resolved_strategies
-        third_read:  list[Strategy] = config.encoding.resolved_strategies
-
-        assert len(first_read) == len(second_read) == len(third_read), (
-            f"resolved_strategies returned different lengths on successive reads.\n"
-            f"  first  : {len(first_read)}\n"
-            f"  second : {len(second_read)}\n"
-            f"  third  : {len(third_read)}\n"
-            f"  patterns: {strategy_patterns!r}"
-        )
-
-        for i, (s1, s2, s3) in enumerate(zip(first_read, second_read, third_read)):
-            assert (s1.preset, s1.profile) == (s2.preset, s2.profile) == (s3.preset, s3.profile), (
-                f"resolved_strategies[{i}] differed between reads.\n"
-                f"  first  : ({s1.preset!r}, {s1.profile!r})\n"
-                f"  second : ({s2.preset!r}, {s2.profile!r})\n"
-                f"  third  : ({s3.preset!r}, {s3.profile!r})\n"
-                f"  patterns: {strategy_patterns!r}"
-            )
-
-        # Also verify it is literally the same list object (i.e. cached, not rebuilt).
-        assert first_read is second_read, (
-            "resolved_strategies returned a different list object on the second "
-            "read — the cache is either missing or returning a copy each time.\n"
-            f"  id(first)  : {id(first_read)}\n"
-            f"  id(second) : {id(second_read)}\n"
-            f"  patterns: {strategy_patterns!r}"
-        )
-
-    @given(strategy_patterns=_strategy_subset)
-    @settings(max_examples=100)
-    def test_resolve_called_twice_does_not_change_result(
-        self,
-        strategy_patterns: list[str],
-    ) -> None:
-        """Calling resolve() a second time leaves resolved_strategies unchanged.
-
-        Bug condition: resolve() is not idempotent — a second call clears and
-        re-populates the private cache. If the re-expansion produces a
-        different list (or raises an error), the second call would silently
-        corrupt the resolved result.
-
-        # Feature: config-refactor, Property 7
-        **Validates: Requirements 3.3, 3.4, 10.1, 10.2**
-        """
-        config = _BASE_CONFIG.model_copy(deep=True)
-        config.encoding.strategies = strategy_patterns
-
-        # First resolution (fresh cache).
-        config.encoding._resolved_targets    = None
-        config.encoding._resolved_strategies = None
-        config.encoding.resolve(config.codecs, config.profiles)
-
-        after_first_resolve: list[Strategy] = config.encoding.resolved_strategies
-
-        # Second call — must be a no-op because the cache is already populated.
-        config.encoding.resolve(config.codecs, config.profiles)
-
-        after_second_resolve: list[Strategy] = config.encoding.resolved_strategies
-
-        assert len(after_first_resolve) == len(after_second_resolve), (
-            f"resolve() called twice produced a different number of strategies.\n"
-            f"  after 1st resolve : {len(after_first_resolve)}\n"
-            f"  after 2nd resolve : {len(after_second_resolve)}\n"
-            f"  patterns: {strategy_patterns!r}"
-        )
-
-        for i, (s1, s2) in enumerate(zip(after_first_resolve, after_second_resolve)):
-            assert (s1.preset, s1.profile) == (s2.preset, s2.profile), (
-                f"resolve() changed resolved_strategies[{i}] on the second call.\n"
-                f"  after 1st : ({s1.preset!r}, {s1.profile!r})\n"
-                f"  after 2nd : ({s2.preset!r}, {s2.profile!r})\n"
-                f"  patterns: {strategy_patterns!r}"
-            )
-
-        # The cache object itself must be the same (not replaced by a new list).
-        assert after_first_resolve is after_second_resolve, (
-            "resolve() replaced the cached list object on the second call.\n"
-            f"  id after 1st : {id(after_first_resolve)}\n"
-            f"  id after 2nd : {id(after_second_resolve)}\n"
+        assert first == second, (
+            f"resolve_encoding() returned different plans on two calls.\n"
+            f"  first  : {[(s.preset, s.profile) for s in first.strategies]!r}\n"
+            f"  second : {[(s.preset, s.profile) for s in second.strategies]!r}\n"
             f"  patterns: {strategy_patterns!r}"
         )
 
@@ -1091,11 +993,10 @@ class TestStrategyResolutionDeterministicAndIdempotent:
         self,
         strategy_patterns: list[str],
     ) -> None:
-        """resolved_strategies contains exactly the strategies matching the given patterns.
+        """resolve_encoding() returns exactly the strategies matching the patterns.
 
         Bug condition: resolution silently expands to too many or too few
-        strategies, or returns strategies from a previous resolve() call
-        (stale cache after strategies list was updated).
+        strategies for the given patterns.
 
         # Feature: config-refactor, Property 7
         **Validates: Requirements 3.3, 3.4, 10.1, 10.2**
@@ -1103,12 +1004,7 @@ class TestStrategyResolutionDeterministicAndIdempotent:
         config = _BASE_CONFIG.model_copy(deep=True)
         config.encoding.strategies = strategy_patterns
 
-        # Clear the cache so we resolve fresh for this specific pattern list.
-        config.encoding._resolved_targets    = None
-        config.encoding._resolved_strategies = None
-        config.encoding.resolve(config.codecs, config.profiles)
-
-        resolved: list[Strategy] = config.encoding.resolved_strategies
+        resolved: list[Strategy] = config.resolve_encoding().strategies
 
         # Every resolved strategy must carry one of the (preset, profile) pairs
         # that come from the given patterns.  Since the patterns are all explicit
@@ -1123,38 +1019,30 @@ class TestStrategyResolutionDeterministicAndIdempotent:
         ]
 
         assert actual_pairs == expected_pairs, (
-            f"resolved_strategies (preset, profile) pairs do not match the "
+            f"resolved strategies (preset, profile) pairs do not match the "
             f"expected pairs derived from the pattern list.\n"
             f"  expected : {expected_pairs!r}\n"
             f"  got      : {actual_pairs!r}\n"
             f"  patterns : {strategy_patterns!r}"
         )
 
-    def test_default_config_resolved_strategies_is_stable(self) -> None:
-        """The base loaded config's resolved_strategies is stable across reads.
+    def test_default_config_resolves_stably(self) -> None:
+        """The base loaded config resolves to the same plan on every call.
 
-        Bug condition: load_app_config() returns a config whose
-        resolved_strategies is re-computed on every access (no caching),
-        which could cause subtle ordering bugs in phases that iterate
-        strategies multiple times.
+        Bug condition: load_app_config() returns a config whose resolution
+        varies between calls, causing subtle ordering bugs in phases that
+        re-derive the plan.
 
         # Feature: config-refactor, Property 7
         **Validates: Requirements 3.3, 3.4, 10.1, 10.2**
         """
         config = _BASE_CONFIG
 
-        first_read:  list[Strategy] = config.encoding.resolved_strategies
-        second_read: list[Strategy] = config.encoding.resolved_strategies
+        first_read:  list[Strategy] = config.resolve_encoding().strategies
+        second_read: list[Strategy] = config.resolve_encoding().strategies
 
-        assert first_read is second_read, (
-            "load_app_config() returned a config whose resolved_strategies "
-            "property returns a different list object on each access — "
-            "the result is not cached.\n"
-            f"  id(first)  : {id(first_read)}\n"
-            f"  id(second) : {id(second_read)}"
-        )
         assert first_read == second_read, (
-            "load_app_config() resolved_strategies changed between reads.\n"
+            "resolve_encoding() changed between calls on the loaded config.\n"
             f"  first  : {[(s.preset, s.profile) for s in first_read]!r}\n"
             f"  second : {[(s.preset, s.profile) for s in second_read]!r}"
         )
@@ -1213,11 +1101,7 @@ class TestStrategyDeduplicationByPresetProfile:
         config.encoding.strategies = patterns
 
         # Force fresh resolution with the (possibly duplicate) pattern list.
-        config.encoding._resolved_targets    = None
-        config.encoding._resolved_strategies = None
-        config.encoding.resolve(config.codecs, config.profiles)
-
-        resolved: list[Strategy] = config.encoding.resolved_strategies
+        resolved: list[Strategy] = config.resolve_encoding().strategies
         actual_pairs: list[tuple[str, str]] = [
             (s.preset, s.profile) for s in resolved
         ]
@@ -1263,11 +1147,7 @@ class TestStrategyDeduplicationByPresetProfile:
         config.encoding.strategies = patterns
 
         # Force fresh resolution.
-        config.encoding._resolved_targets    = None
-        config.encoding._resolved_strategies = None
-        config.encoding.resolve(config.codecs, config.profiles)
-
-        resolved: list[Strategy] = config.encoding.resolved_strategies
+        resolved: list[Strategy] = config.resolve_encoding().strategies
 
         # Build the expected first-occurrence order: iterate through the
         # expanded pairs in the same order resolution would produce them
@@ -1323,11 +1203,7 @@ class TestStrategyDeduplicationByPresetProfile:
         # Any profile that matches both patterns would be a duplicate.
         config.encoding.strategies = ["h265*+slow", "h265+slow", "h265-aq+slow"]
 
-        config.encoding._resolved_targets    = None
-        config.encoding._resolved_strategies = None
-        config.encoding.resolve(config.codecs, config.profiles)
-
-        resolved: list[Strategy] = config.encoding.resolved_strategies
+        resolved: list[Strategy] = config.resolve_encoding().strategies
         actual_pairs: list[tuple[str, str]] = [
             (s.preset, s.profile) for s in resolved
         ]
@@ -1382,7 +1258,7 @@ class TestValidationErrorOnInvalidStrings:
         return _BASE_CONFIG.model_dump()
 
     def test_invalid_quality_target_metric_raises_validation_error(self) -> None:
-        """AppConfig rejects a targets entry with an unknown metric name.
+        """Resolution rejects a targets entry with an unknown metric name.
 
         Bug condition: if QualityTarget.parse() does not validate the metric name,
         an invalid string like "badmetric-min:95" would be stored silently and
@@ -1394,21 +1270,22 @@ class TestValidationErrorOnInvalidStrings:
         data = self._base_dict()
         # "badmetric" is not a valid MetricType value (valid: vmaf, ssim, psnr, vif)
         data["encoding"]["targets"] = ["badmetric-min:95"]
+        config = AppConfig.model_validate(data)
 
         import pytest
-        with pytest.raises(ValidationError) as exc_info:
-            AppConfig.model_validate(data)
+        with pytest.raises(ValueError) as exc_info:
+            config.resolve_encoding()
 
         # The error must mention the offending field or value
         error_str = str(exc_info.value)
         assert "badmetric" in error_str.lower() or "targets" in error_str.lower() or "encoding" in error_str.lower(), (
-            "ValidationError was raised but does not identify the offending "
+            "ValueError was raised but does not identify the offending "
             f"'badmetric' metric or the targets field.\n"
             f"  error: {error_str}"
         )
 
     def test_invalid_quality_target_statistic_raises_validation_error(self) -> None:
-        """AppConfig rejects a targets entry with an unknown statistic name.
+        """Resolution rejects a targets entry with an unknown statistic name.
 
         Bug condition: if QualityTarget.parse() does not validate the statistic,
         a target like "vmaf-badstat:95" would be accepted silently even though
@@ -1420,25 +1297,26 @@ class TestValidationErrorOnInvalidStrings:
         data = self._base_dict()
         # "badstat" is not among the valid stats (min, med, median, max, p05, p10, p25, p75, p90, p95)
         data["encoding"]["targets"] = ["vmaf-badstat:95"]
+        config = AppConfig.model_validate(data)
 
         import pytest
-        with pytest.raises(ValidationError) as exc_info:
-            AppConfig.model_validate(data)
+        with pytest.raises(ValueError) as exc_info:
+            config.resolve_encoding()
 
         error_str = str(exc_info.value)
         assert "badstat" in error_str.lower() or "targets" in error_str.lower() or "encoding" in error_str.lower(), (
-            "ValidationError was raised but does not identify the offending "
+            "ValueError was raised but does not identify the offending "
             f"'badstat' statistic or the targets field.\n"
             f"  error: {error_str}"
         )
 
     def test_unknown_strategy_profile_raises_validation_error(self) -> None:
-        """AppConfig rejects a strategies entry that references an unknown profile name.
+        """Resolution rejects a strategies entry referencing an unknown profile name.
 
         Bug condition: if strategy resolution does not check profile names,
         "nonexistent-profile+slow" would expand to an empty list (or raise an
         unrelated AttributeError) instead of clearly identifying the missing
-        profile at config load time. Encoding phases would then silently have
+        profile at the run boundary. Encoding phases would then silently have
         fewer strategies than intended.
 
         **Validates: Requirements 3.2, 3.6**
@@ -1446,10 +1324,11 @@ class TestValidationErrorOnInvalidStrings:
         data = self._base_dict()
         # "nonexistent-profile" does not exist in the bundled profiles dict
         data["encoding"]["strategies"] = ["nonexistent-profile+slow"]
+        config = AppConfig.model_validate(data)
 
         import pytest
-        with pytest.raises(ValidationError) as exc_info:
-            AppConfig.model_validate(data)
+        with pytest.raises(ValueError) as exc_info:
+            config.resolve_encoding()
 
         error_str = str(exc_info.value)
         assert (
@@ -1458,15 +1337,15 @@ class TestValidationErrorOnInvalidStrings:
             or "encoding" in error_str.lower()
             or "unknown profile" in error_str.lower()
         ), (
-            "ValidationError was raised but does not identify the offending "
+            "ValueError was raised but does not identify the offending "
             f"'nonexistent-profile' name or the strategies field.\n"
             f"  error: {error_str}"
         )
 
     def test_unknown_strategy_preset_for_valid_profile_raises_validation_error(self) -> None:
-        """AppConfig rejects a strategies entry whose preset is not supported by the profile's codec.
+        """Resolution rejects a strategies entry whose preset is not supported by the profile's codec.
 
-        Bug condition: if _expand_strategy_pattern does not check preset membership
+        Bug condition: if pattern expansion does not check preset membership
         against the codec's preset list, "h265+badpreset" would silently produce
         a Strategy with an unsupported preset, causing ffmpeg to fail at encode time
         with a confusing message rather than a clear startup error.
@@ -1477,10 +1356,11 @@ class TestValidationErrorOnInvalidStrings:
         # "badpreset" is not in h265-10bit codec's presets list
         # "h265" is a known profile that uses the h265-10bit codec
         data["encoding"]["strategies"] = ["h265+badpreset"]
+        config = AppConfig.model_validate(data)
 
         import pytest
-        with pytest.raises(ValidationError) as exc_info:
-            AppConfig.model_validate(data)
+        with pytest.raises(ValueError) as exc_info:
+            config.resolve_encoding()
 
         error_str = str(exc_info.value)
         assert (
@@ -1489,7 +1369,7 @@ class TestValidationErrorOnInvalidStrings:
             or "encoding" in error_str.lower()
             or "preset" in error_str.lower()
         ), (
-            "ValidationError was raised but does not identify the offending "
+            "ValueError was raised but does not identify the offending "
             f"'badpreset' preset or the strategies field.\n"
             f"  error: {error_str}"
         )
@@ -1499,8 +1379,8 @@ class TestValidationErrorOnInvalidStrings:
 # Task 3.10: load_app_config() with only bundled default produces valid AppConfig
 #
 # Calling load_app_config() without any home/cwd config files present must
-# return a fully valid AppConfig with non-empty resolved_strategies,
-# non-empty resolved_targets, non-empty codecs and profiles dicts, and a
+# return a fully valid AppConfig whose default encoding resolves to
+# non-empty strategies and targets, non-empty codecs and profiles dicts, and a
 # non-empty audio.convert_pattern string.
 #
 # Bug this catches:
@@ -1510,8 +1390,8 @@ class TestValidationErrorOnInvalidStrings:
 #   - If the bundled default_config.yaml is structurally invalid or missing
 #     required keys, model_validate() would raise a ValidationError and the
 #     app would be unusable out of the box.
-#   - If resolution is not triggered by the model_validator, resolved_strategies
-#     and resolved_targets would raise RuntimeError on first access.
+#   - If the bundled default fails to resolve (bad pattern, bad target),
+#     every run would crash at the CLI boundary.
 #
 # **Validates: Requirements 1.1, 1.2, 1.3, 11.1**
 # ---------------------------------------------------------------------------
@@ -1539,7 +1419,7 @@ class TestLoadAppConfigWithBundledDefault:
         )
 
     def test_resolved_targets_is_non_empty(self) -> None:
-        """load_app_config() returns a config with at least one resolved quality target.
+        """The bundled default resolves to at least one quality target.
 
         Bug condition: if the bundled default_config.yaml has an empty
         encoding.targets list, encoding phases would silently accept
@@ -1549,15 +1429,15 @@ class TestLoadAppConfigWithBundledDefault:
         **Validates: Requirements 1.2, 1.3**
         """
         config = load_app_config(default_only=True)
-        targets = config.encoding.resolved_targets
+        targets = config.resolve_encoding().targets
         assert len(targets) > 0, (
-            "load_app_config() returned a config with no resolved quality targets. "
-            "encoding.resolved_targets is empty — the bundled default must define "
+            "load_app_config() returned a config resolving to no quality targets. "
+            "plan.targets is empty — the bundled default must define "
             "at least one quality target."
         )
 
     def test_resolved_strategies_is_non_empty(self) -> None:
-        """load_app_config() returns a config with at least one resolved strategy.
+        """The bundled default resolves to at least one strategy.
 
         Bug condition: if the bundled default_config.yaml has an empty
         encoding.strategies list (or all patterns expand to nothing), encoding
@@ -1568,10 +1448,10 @@ class TestLoadAppConfigWithBundledDefault:
         **Validates: Requirements 1.2, 1.3**
         """
         config = load_app_config(default_only=True)
-        strategies = config.encoding.resolved_strategies
+        strategies = config.resolve_encoding().strategies
         assert len(strategies) > 0, (
-            "load_app_config() returned a config with no resolved strategies. "
-            "encoding.resolved_strategies is empty — the bundled default must "
+            "load_app_config() returned a config resolving to no strategies. "
+            "plan.strategies is empty — the bundled default must "
             "define at least one strategy pattern that expands to valid strategies."
         )
 
