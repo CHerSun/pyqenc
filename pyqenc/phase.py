@@ -742,6 +742,7 @@ def _build_registry(
     no_metrics:  bool,
     collector:   MetricsCollector,
     crop_params: CropParams | None = None,
+    materialize: bool              = False,
     *,
     terminals:   tuple[type[Phase], ...],
 ) -> PhaseRegistry:
@@ -830,6 +831,7 @@ def _build_registry(
                 config,
                 registry,
                 video_required = video_required,
+                materialize    = materialize,
                 collector      = collector,
             )
         elif cls is ProbePhase:

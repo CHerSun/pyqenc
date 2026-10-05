@@ -68,6 +68,7 @@ def _make_extraction_phase(
     include:        str | None = None,
     exclude:        str | None = None,
     video_required: bool       = True,
+    materialize:    bool       = False,
     force_wipe:     bool       = False,
 ) -> ExtractionPhase:
     """Construct a REAL ExtractionPhase via its constructor and a real registry.
@@ -107,7 +108,10 @@ def _make_extraction_phase(
 
     registry: PhaseRegistry = {JobPhase: job}
     return ExtractionPhase(
-        config, registry, video_required=video_required, collector=collector,
+        config, registry,
+        video_required = video_required,
+        materialize    = materialize,
+        collector      = collector,
     )
 
 

@@ -64,6 +64,7 @@ def _drive(
     no_metrics:     bool,
     dry_run:        bool,
     crop_params:    CropParams | None = None,
+    materialize:    bool              = False,
 ) -> RunResult:
     """Build the registry and drive the terminal phases via the :class:`Runner`.
 
@@ -115,6 +116,7 @@ def _drive(
         no_metrics,
         collector,
         crop_params,
+        materialize,
         terminals=targets,
     )
 
@@ -196,13 +198,16 @@ def extract_streams(
     no_metrics:  bool             = False,
     dry_run:     bool             = False,
     crop_params: CropParams | None = None,
+    materialize: bool             = False,
 ) -> RunResult:
     """Run the pipeline up to and including the extraction phase.
 
     Drives ``(ExtractionPhase,)``; all upstream phases are executed (not merely
     scanned) as dependencies inside the phases.  No encoding plan is taken or
     built — the extraction closure contains no Probe and must not depend on
-    the video configuration being resolvable.
+    the video configuration being resolvable.  With ``materialize=True`` the
+    pass-through video and audio streams are materialized as real files under
+    ``extracted/`` (the `extract` command's mode).
 
     Args:
         config:      Fully assembled application configuration.
@@ -233,6 +238,7 @@ def extract_streams(
         no_metrics     = no_metrics,
         dry_run        = dry_run,
         crop_params    = crop_params,
+        materialize    = materialize,
     )
 
 
