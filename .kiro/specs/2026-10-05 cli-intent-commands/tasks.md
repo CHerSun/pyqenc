@@ -126,7 +126,7 @@ existing commands byte-identical in behavior. Requirement ids reference
   - Tests: dry-run writes nothing and lists everything selected; filter
     exclusion respected in the listing; no `--cleanup`/plan args on the parser
 
-- [ ] 7. CLI set change + condensation (Req 1, Req 10, Req 2–4 surfaces)
+- [x] 7. CLI set change + condensation (Req 1, Req 10, Req 2–4 surfaces)
   - `_SubcommandSpec` (name, help, runner, arg_groups, flavor) +
     `_cmd_pipeline(args, spec)` + parser-creation loop for
     `auto`/`video`/`audio`; `extract` uses its dedicated handler; `config`
