@@ -985,17 +985,33 @@ class TestOptimizationPhaseTiming:
         registry[ChunkingPhase] = chunking_mock
         return phase
 
+    def _seed_winner_pairs(self, tmp_path: Path) -> None:
+        """Fabricate complete winner pairs (file + result sidecar) for the plan.
+
+        The pair ledger keys on presence — winners on disk make the single
+        test chunk COMPLETE for both plan strategies, so the phase takes the
+        no-pending fast exit instead of spawning real encodes.
+        """
+        from pyqenc.constants import ENCODED_OUTPUT_DIR
+
+        chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
+        for strategy in (_STRATEGY_SLOW_H265, _STRATEGY_H265_AQ):
+            strategy_dir = tmp_path / "work" / ENCODED_OUTPUT_DIR / strategy.safe_name()
+            strategy_dir.mkdir(parents=True, exist_ok=True)
+            (strategy_dir / f"{chunk.safe_name()}.1920x1080.q18.0.mkv").write_bytes(b"x" * 64)
+            (strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml").write_text(
+                "crf: 18.0\n", encoding="utf-8",
+            )
+
     def test_recovery_recorded_with_cached_optimization_params(self, tmp_path: Path) -> None:
-        """An optimization run with cached results must report its recovery scan.
+        """An optimization run with persisted results must report its recovery scan.
 
         Bug guarded: the recovery scan's seconds being lost from the report —
         the scan (loading and validating persisted optimization params) runs
         before any decision and its cost must be visible.
 
-        Note: with this fixture the persisted test-chunk IDs do not match the
-        chunking result, so the phase legitimately re-selects and executes
-        (outcome COMPLETED) — the guaranteed observable is the recovery row,
-        not a reuse outcome.
+        Winners are seeded on disk, so the phase takes the no-pending fast
+        exit; the guaranteed observable is the recovery row either way.
 
         Validates: Requirements 6.5, 2.7
         """
@@ -1003,8 +1019,7 @@ class TestOptimizationPhaseTiming:
         from pyqenc.state import OptimizationParams, ProbeState, StrategyTestResult
 
         strategy = _STRATEGY_SLOW_H265
-        # tolerance_pct and metrics_sampling must match config defaults so the
-        # full-reuse path (step 4) is attempted rather than falling through.
+        # sampling must match the config default so no invalidation fires.
         persisted = OptimizationParams(
             probe            = ProbeState(frame_count=0, crop=CropParams()),
             test_chunks      = ["chunk_0"],
@@ -1012,14 +1027,13 @@ class TestOptimizationPhaseTiming:
                 StrategyTestResult(strategy=strategy.display_name(), total_size=1024),
                 StrategyTestResult(strategy=_STRATEGY_H265_AQ.display_name(), total_size=512),
             ],
-            tolerance_pct    = 5.0,   # matches AppConfig.encoding.strategy_selection_tolerance default
-            selected         = [strategy.display_name()],
             quality_targets  = [],
             sampling = 1,     # matches AppConfig.encoding.sampling default
         )
 
         def run(collector: MetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector, optimize=True)
+            self._seed_winner_pairs(tmp_path)
             with patch.object(OptimizationParams, "load", return_value=persisted):
                 phase.run()
 
@@ -1108,6 +1122,7 @@ class TestOptimizationPhaseTiming:
 
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector, optimize=True)
+        self._seed_winner_pairs(tmp_path)
 
         strategy = _STRATEGY_SLOW_H265
         persisted = OptimizationParams(
@@ -1117,8 +1132,6 @@ class TestOptimizationPhaseTiming:
                 StrategyTestResult(strategy=strategy.display_name(), total_size=1024),
                 StrategyTestResult(strategy=_STRATEGY_H265_AQ.display_name(), total_size=512),
             ],
-            tolerance_pct    = 0.0,
-            selected         = [strategy.display_name()],
             quality_targets  = [],
             sampling = 1,
         )

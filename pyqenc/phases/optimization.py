@@ -176,11 +176,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         # Recovery stash — resolved during _recover(), consumed by
         # _execute()/_reused_result()/_make_result().
-        self._persisted:         OptimizationParams | None          = None
-        self._cached_results:    dict[str, StrategyTestResult]     = {}
         self._strategies_to_test: list[Strategy]                   = []
         self._test_chunks:       list[VideoStreamChunk]            = []
-        self._tolerance_reapply: bool                              = False
         self._selected_names:    list[str]                         = []
         self._strategy_results:  list[StrategyTestResult]          = []
         self._current_probe:     ProbeState | None                 = None
@@ -331,7 +328,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         return "attempt"
 
     def _recover(self) -> Recovery:
-        """Resolve optimization state currency: invalidations first, then caches.
+        """Resolve optimization state currency: invalidations first, then the ledger.
 
         Steps:
 
@@ -341,12 +338,17 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
            ``--force`` (handled in step 1 when forced).
         3. Quality-target / metrics-sampling change → wipe ``encoded/``
            result dirs and treat all cached strategy results as stale.
-        4. The per-pair ledger (one ``Artifact[EncodedChunk]`` row per
-           (test chunk, strategy) winning attempt, presence-based) plus the
-           to-test decision: searched mode keys on cached results; fixed
-           mode keys on pair presence (the fixed start wiped the winners —
-           re-promotion via attempt cache-hits is near-free on unchanged q).
-        5. Cached tolerance mismatch → cheap pending re-select (searched only).
+        4. Missing sidecar with winners present → wipe ``encoded/``: no file
+           proves which parameters produced those winners, so they re-derive
+           from the attempt workspace (near-free replay via attempt
+           cache-hits).
+        5. The per-pair ledger (one ``Artifact[EncodedChunk]`` row per
+           (test chunk, strategy) winning attempt, presence-based). The
+           to-test set is its projection: any strategy with a non-``COMPLETE``
+           pair has work pending; complete pairs are the reuse substrate.
+        6. Nothing to test and a persisted table covering the plan → the
+           fast exit seeds the display from the persisted rows (plan-scoped)
+           and computes the selection live.
 
         Returns:
             The :class:`Recovery` single source of truth.
@@ -410,83 +412,85 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 probe            = persisted.probe,
                 test_chunks      = persisted.test_chunks,
                 strategy_results = [],
-                tolerance_pct    = persisted.tolerance_pct,
-                selected         = [],
                 quality_targets  = persisted.quality_targets,
                 sampling         = persisted.sampling,
             )
-        self._persisted = persisted
 
-        # Step 4 — the per-pair ledger first (fixed mode derives its to-test
-        # set from pair presence), then the cached-results / to-test decision.
-        cached_results: dict[str, StrategyTestResult] = {}
-        if persisted is not None:
-            for r in persisted.strategy_results:
-                cached_results[r.strategy] = r
-        self._cached_results = cached_results
+        # Step 4 — missing sidecar with winners present: unknown currency.
+        # Nothing proves which targets/probe produced the winners, so they
+        # are conservatively invalidated and re-derived from attempts.
+        if (
+            persisted is None
+            and not force_wipe
+            and (work_dir / ENCODED_OUTPUT_DIR).exists()
+        ):
+            logger.info(
+                "optimization.yaml missing — winner currency unknown; "
+                "wiping encoded/ (winners re-derive from the attempt workspace)"
+            )
+            _wipe_encoded_dir(work_dir, strategies)
 
+        # Step 5 — the per-pair ledger. The to-test set is a projection of
+        # the ledger (presence-based, both modes): a strategy with any
+        # non-COMPLETE (test chunk, strategy) pair re-tests. Re-test cost is
+        # bounded by the attempt workspace — per-attempt cache-hits in
+        # encoding/ make an unchanged-parameters replay near-free.
         self._test_chunks = self._resolve_test_chunks(persisted)
         rows = self._pair_ledger(work_dir, strategies)
-        fixed = plan.fixed_quality
 
-        if fixed:
-            # Presence-based re-test decision: the fixed start wiped encoded/,
-            # so any strategy with an incomplete test pair re-tests. Attempt
-            # cache-hits (crf-embedded filenames) make an unchanged-q re-test
-            # near-free re-promotion; a q change encodes only the new value —
-            # no q is persisted for comparison (attempts are the substrate).
-            incomplete: set[str] = set()
-            for row in rows:
-                if isinstance(row.payload, EncodedChunk) and row.state != ArtifactState.COMPLETE:
-                    incomplete.add(row.payload.strategy.display_name())
-            self._strategies_to_test = [
-                s for s in strategies if s.display_name() in incomplete
+        incomplete: set[str] = set()
+        for row in rows:
+            if isinstance(row.payload, EncodedChunk) and row.state != ArtifactState.COMPLETE:
+                incomplete.add(row.payload.strategy.display_name())
+        self._strategies_to_test = [
+            s for s in strategies if s.display_name() in incomplete
+        ]
+
+        # Step 6 — the no-pending fast exit: the single sanctioned reader of
+        # the persisted rows. The display seeds plan-scoped from the table;
+        # the selection is computed LIVE (current tolerance / dominance) and
+        # so can never be stale.
+        plan_names   = [s.display_name() for s in strategies]
+        table_covers = persisted is not None and (
+            {r.strategy for r in persisted.strategy_results} >= set(plan_names)
+        )
+        if not self._strategies_to_test and table_covers:
+            assert persisted is not None
+            table_rows = [
+                r for r in persisted.strategy_results if r.strategy in set(plan_names)
             ]
-        else:
-            self._strategies_to_test = [
-                s for s in strategies if s.display_name() not in cached_results
-            ]
-
-        if (
-            not fixed
-            and not self._strategies_to_test
-            and cached_results
-            and persisted is not None
-            and persisted.tolerance_pct != tolerance
-        ):
-            self._tolerance_reapply = True
-
-        # All cached with nothing to test → current; seed the reused payload.
-        if not self._strategies_to_test and cached_results and persisted is not None:
-            self._strategy_results = persisted.strategy_results
-            if fixed:
+            self._strategy_results = table_rows
+            if plan.fixed_quality:
                 # Re-select by pruning (tolerance is void in fixed mode) and
                 # re-derive the anchor ruler from the persisted measurements.
-                resolved_names = [s.display_name() for s in strategies]
-                self._selected_names = self._dominance_survivors(persisted.strategy_results)
+                self._selected_names = self._dominance_survivors(table_rows)
                 self._anchor_name = self._select_anchor(
-                    persisted.strategy_results, resolved_names, self._selected_names,
+                    table_rows, plan_names, self._selected_names,
                 )
                 anchor_result = next(
-                    (r for r in persisted.strategy_results if r.strategy == self._anchor_name),
+                    (r for r in table_rows if r.strategy == self._anchor_name),
                     None,
                 )
                 self._synthetic_targets = self._synthetic_targets_from(anchor_result)
             else:
-                self._selected_names = persisted.selected or self._apply_tolerance(
-                    persisted.strategy_results, tolerance,
+                self._selected_names = self._apply_tolerance(
+                    sorted(table_rows, key=lambda r: r.total_size), tolerance,
                 )
 
         # Searched: fatal only when work is actually pending. Fixed:
         # _recover only runs for compared runs (single-strategy and
         # optimize-off take the all-strategies skip path) — a compared run
         # without test chunks cannot prune and always fails loudly.
-        if not self._test_chunks and (self._strategies_to_test or fixed):
+        if not self._test_chunks and (self._strategies_to_test or plan.fixed_quality):
             raise RecoveryError("No chunks available from ChunkingPhase")
-        if self._tolerance_reapply:
-            # Every pair is COMPLETE but the tolerance is stale — cheap
-            # re-select work. Settings staleness, not artifact presence:
-            # pending is set explicitly (the ledger alone would read current).
+
+        if not self._strategies_to_test and not table_covers:
+            # Every pair is COMPLETE but the persisted table does not cover
+            # the plan (sidecar absent, or rows missing for current
+            # strategies) — derive sizes live and persist a fresh table.
+            # Cheap: no encodes, the winners are already on disk. Settings
+            # staleness, not artifact presence: pending is set explicitly
+            # (the ledger alone would read current).
             return Recovery(artifacts=rows, pending=True)
         return Recovery.from_artifacts(rows)
 
@@ -522,7 +526,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         wanted:  list[Artifact],
         dry_run: bool,
     ) -> OptimizationPhaseResult:
-        """Run test encodes for pending strategies, or re-apply the tolerance.
+        """Run test encodes for pending strategies, then derive and select.
 
         The top-level ``optimization`` span belongs to the template and covers
         everything here. Test encodes run through the shared encoder machinery
@@ -530,6 +534,12 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         ``optimization.<strategy>`` / ``optimization.quality_measure``.
         ``dry_run`` is never ``True`` here (optimization is not a
         readonly-execute phase; the template previews instead).
+
+        The persisted table is WRITE-ONLY here: per-strategy sizes derive
+        from the live pair ledger (the winners on disk), plan-scoped by
+        construction — rows for strategies no longer configured can never
+        reach selection or the saved sidecar. The sidecar is saved exactly
+        once, after successful processing.
 
         Args:
             wanted:  The wanted artifact list from ``_recover()``.
@@ -542,7 +552,6 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         work_dir   = job_result.work_dir
         opt_yaml   = work_dir / OptimizationPhase.SIDECAR_NAME
         tolerance  = self._config.encoding.optimize_tolerance
-        persisted  = self._persisted
         plan       = self._dep_result(ProbePhase).plan
 
         fixed      = plan.fixed_quality
@@ -552,34 +561,12 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         current_targets  = targets_as_strings(plan.targets)
         current_sampling = self._config.measurement.sampling
 
-        # Cheap path: all results cached, only the tolerance changed —
-        # re-select without re-encoding.
-        if self._tolerance_reapply and persisted is not None:
-            logger.info(
-                "All strategy results cached; tolerance changed (%.1f%% → %.1f%%) — re-selecting without re-encoding",
-                persisted.tolerance_pct, tolerance,
-            )
-            selected = self._apply_tolerance(persisted.strategy_results, tolerance)
-            OptimizationParams(
-                probe            = persisted.probe,
-                test_chunks      = persisted.test_chunks,
-                strategy_results = persisted.strategy_results,
-                tolerance_pct    = tolerance,
-                selected         = selected,
-                quality_targets  = current_targets,
-                sampling = current_sampling,
-            ).save(opt_yaml)
-            self._selected_names   = selected
-            self._strategy_results = persisted.strategy_results
-            self._log_optimization_summary(persisted.strategy_results, selected)
-            rows = self._pair_ledger(work_dir, plan.strategies)
-            return self._make_result(
-                PhaseOutcome.COMPLETED,
-                [r for r in rows if r.wanted],
-                "tolerance re-applied from cached results",
-            )
+        from pyqenc.phases.encoding import (
+            EncodingResult,
+            _encode_chunks_parallel,
+            _recover_encoding_attempts,
+        )  # deferred: circular import (encoding <-> optimization)
 
-        cached_results     = self._cached_results
         strategies_to_test = self._strategies_to_test
 
         # The test-chunk set was resolved by recovery (persisted selection or
@@ -590,103 +577,92 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             logger.critical(err)
             return self._make_result(PhaseOutcome.FAILED, [], err)
 
-        # Persist test chunk selection early (before encoding starts).
-        OptimizationParams(
-            probe            = self._current_probe,
-            test_chunks      = [c.safe_name() for c in test_chunks],
-            strategy_results = list(cached_results.values()),
-            tolerance_pct    = tolerance,
-            selected         = [],
-            quality_targets  = current_targets,
-            sampling = current_sampling,
-        ).save(opt_yaml)
-
         # Run test encodes for all pending strategies in parallel (unified
-        # pool; the top-level span belongs to the template).
-        encoder       = _make_encoder(
-            work_dir         = work_dir,
-            collector        = self._collector,
-            crop_params      = crop,
-            visual_hash      = self._config.encoding.visual_hash,
-            metrics_sampling = self._config.measurement.sampling,
-            cleanup_level    = job_result.cleanup,
-            metric_prefix    = MetricKey.OPTIMIZATION,
-        )
-        test_chunk_seconds = sum(c.end_timestamp - c.start_timestamp for c in test_chunks)
-        total_seconds      = test_chunk_seconds * len(strategies_to_test)
-        total_count        = len(test_chunks) * len(strategies_to_test)
-
-        test_chunk_ids = [c.safe_name() for c in test_chunks]
-        from pyqenc.phases.encoding import (
-            _encode_chunks_parallel,
-            _recover_encoding_attempts,
-        )  # deferred: circular import (encoding <-> optimization)
-
-        phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, strategies_to_test)
-
-        with ProgressBar(total_seconds, title="Optimization", total_count=total_count) as advance:
-            # Pre-advance bar for already-complete pairs
-            chunks_by_id = {c.safe_name(): c for c in test_chunks}
-            for r in phase_recovery.pairs.values():
-                if r.state == ArtifactState.COMPLETE:
-                    advance((chunks_by_id[r.chunk_id].end_timestamp - chunks_by_id[r.chunk_id].start_timestamp), AdvanceState.SKIPPED)
-
-            enc_result = asyncio.run(
-                _encode_chunks_parallel(
-                    encoder           = encoder,
-                    chunks            = test_chunks,
-                    strategies        = strategies_to_test,
-                    # Fixed mode presents the test encodes no ruler: config
-                    # targets drive no verdict there, and the anchor's
-                    # synthetic set does not exist until these results do.
-                    quality_targets   = [] if fixed else plan.targets,
-                    max_parallel      = self._config.encoding.concurrency,
-                    force             = False,
-                    collector         = self._collector,
-                    phase_recovery    = phase_recovery,
-                    advance           = advance,
-                    metric_prefix     = MetricKey.OPTIMIZATION,
-                )
+        # pool; the top-level span belongs to the template). Skipped entirely
+        # on a derive-only run (all pairs complete, table not covering the
+        # plan) — there is nothing to encode.
+        enc_result: EncodingResult | None = None
+        if strategies_to_test:
+            encoder = _make_encoder(
+                work_dir         = work_dir,
+                collector        = self._collector,
+                crop_params      = crop,
+                visual_hash      = self._config.encoding.visual_hash,
+                metrics_sampling = self._config.measurement.sampling,
+                cleanup_level    = job_result.cleanup,
+                metric_prefix    = MetricKey.OPTIMIZATION,
             )
-            advance(0, AdvanceState.COMPLETE)
+            test_chunk_seconds = sum(c.end_timestamp - c.start_timestamp for c in test_chunks)
+            total_seconds      = test_chunk_seconds * len(strategies_to_test)
+            total_count        = len(test_chunks) * len(strategies_to_test)
 
-        # Derive per-strategy results from encoded output. Fixed mode derives
-        # every strategy fresh from the current disk state (the winners'
-        # result sidecars) — persisted results are never trusted there,
-        # because no q value is recorded to prove them current.
-        result_strategies = (
-            plan.strategies if fixed else strategies_to_test
-        )
-        new_results: list[StrategyTestResult] = []
-        for strategy in result_strategies:
-            winners_by_chunk = {
-                w.chunk.safe_name(): w
-                for w in enc_result.encoded_chunks.get(strategy.display_name(), [])
-            }
-            file_sizes: list[float] = []
-            for chunk in test_chunks:
-                encoded = winners_by_chunk.get(chunk.safe_name())
-                if encoded is not None and encoded.stream.stream.file.path.exists():
-                    file_sizes.append(encoded.stream.stream.file.file_size_bytes or 0)
-            new_results.append(StrategyTestResult(
-                strategy     = strategy.display_name(),
-                total_size    = int(sum(file_sizes)),
-                metrics      = self._aggregate_strategy_metrics(
-                    work_dir, test_chunks, strategy, enc_result.encoded_chunks,
-                ) if fixed else {},
-            ))
+            test_chunk_ids = [c.safe_name() for c in test_chunks]
+            phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, strategies_to_test)
 
-        resolved_names = [s.display_name() for s in plan.strategies]
+            with ProgressBar(total_seconds, title="Optimization", total_count=total_count) as advance:
+                # Pre-advance bar for already-complete pairs
+                chunks_by_id = {c.safe_name(): c for c in test_chunks}
+                for r in phase_recovery.pairs.values():
+                    if r.state == ArtifactState.COMPLETE:
+                        advance((chunks_by_id[r.chunk_id].end_timestamp - chunks_by_id[r.chunk_id].start_timestamp), AdvanceState.SKIPPED)
+
+                enc_result = asyncio.run(
+                    _encode_chunks_parallel(
+                        encoder           = encoder,
+                        chunks            = test_chunks,
+                        strategies        = strategies_to_test,
+                        # Fixed mode presents the test encodes no ruler: config
+                        # targets drive no verdict there, and the anchor's
+                        # synthetic set does not exist until these results do.
+                        quality_targets   = [] if fixed else plan.targets,
+                        max_parallel      = self._config.encoding.concurrency,
+                        force             = False,
+                        collector         = self._collector,
+                        phase_recovery    = phase_recovery,
+                        advance           = advance,
+                        metric_prefix     = MetricKey.OPTIMIZATION,
+                    )
+                )
+                advance(0, AdvanceState.COMPLETE)
+
+        # The live ledger after processing — one source for the derived
+        # table, the logged summary, and the result rows.
+        rows = self._pair_ledger(work_dir, plan.strategies)
 
         if fixed:
+            # Fixed mode derives every strategy fresh from the current disk
+            # state (the winners' result sidecars) — sizes from the just-run
+            # encode pool, metrics from the sidecars.
+            assert enc_result is not None, "fixed compared runs always re-test (the entry wiped the winners)"
+
+            new_results: list[StrategyTestResult] = []
+            for strategy in plan.strategies:
+                winners_by_chunk = {
+                    w.chunk.safe_name(): w
+                    for w in enc_result.encoded_chunks.get(strategy.display_name(), [])
+                }
+                file_sizes: list[float] = []
+                for chunk in test_chunks:
+                    encoded = winners_by_chunk.get(chunk.safe_name())
+                    if encoded is not None and encoded.stream.stream.file.path.exists():
+                        file_sizes.append(encoded.stream.stream.file.file_size_bytes or 0)
+                new_results.append(StrategyTestResult(
+                    strategy     = strategy.display_name(),
+                    total_size    = int(sum(file_sizes)),
+                    metrics      = self._aggregate_strategy_metrics(
+                        work_dir, test_chunks, strategy, enc_result.encoded_chunks,
+                    ),
+                ))
+
             # Selection = dominance pruning; anchor = smallest survivor (the
             # only front member selectable without a quality opinion);
             # synthetic set = the anchor's min-aggregated metrics. The sidecar
-            # persists facts (strategy_results) + decisions (selected, anchor)
-            # only — the ruler re-derives on read, so a changed comparison
-            # stat set re-projects old measurements correctly.
-            final_results = new_results
-            selected      = self._dominance_survivors(final_results)
+            # persists facts (strategy_results) only — the ruler re-derives on
+            # read, so a changed comparison stat set re-projects old
+            # measurements correctly.
+            resolved_names  = [s.display_name() for s in plan.strategies]
+            final_results   = new_results
+            selected        = self._dominance_survivors(final_results)
             self._anchor_name = self._select_anchor(final_results, resolved_names, selected)
             anchor_result = next(
                 (r for r in final_results if r.strategy == self._anchor_name), None,
@@ -697,11 +673,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 probe            = self._current_probe,
                 test_chunks      = [c.safe_name() for c in test_chunks],
                 strategy_results = final_results,
-                tolerance_pct    = tolerance,
-                selected         = selected,
                 quality_targets  = current_targets,
                 sampling         = current_sampling,
-                anchor           = self._anchor_name,
             ).save(opt_yaml)
 
             self._selected_names   = selected
@@ -709,28 +682,39 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
             self._log_fixed_comparison(final_results, selected, self._anchor_name, resolved_names)
 
-            rows = self._pair_ledger(work_dir, plan.strategies)
             return self._make_result(
                 PhaseOutcome.COMPLETED,
                 [r for r in rows if r.wanted],
                 f"{len(selected)} survivor(s) selected",
             )
 
-        all_results: list[StrategyTestResult] = list(cached_results.values()) + new_results
+        # Searched: per-strategy sizes derive from the live ledger — the
+        # winner files of the plan's strategies (never the persisted table).
+        sizes: dict[str, int] = {}
+        for row in rows:
+            if row.state == ArtifactState.COMPLETE and isinstance(row.payload, EncodedChunk):
+                name = row.payload.strategy.display_name()
+                sizes[name] = sizes.get(name, 0) + (row.payload.stream.stream.file.file_size_bytes or 0)
 
-        # Sort final results by size and select strategies.
-        final_results = sorted(all_results, key=lambda r: r.total_size)
-        selected      = self._apply_tolerance(final_results, tolerance)
+        final_results = sorted(
+            [
+                StrategyTestResult(
+                    strategy    = s.display_name(),
+                    total_size  = sizes.get(s.display_name(), 0),
+                )
+                for s in plan.strategies
+            ],
+            key=lambda r: r.total_size,
+        )
+        selected = self._apply_tolerance(final_results, tolerance)
 
-        # Persist final state with current quality targets and sampling.
+        # The single sidecar save — after successful processing.
         OptimizationParams(
             probe            = self._current_probe,
             test_chunks      = [c.safe_name() for c in test_chunks],
             strategy_results = final_results,
-            tolerance_pct    = tolerance,
-            selected         = selected,
             quality_targets  = current_targets,
-            sampling = current_sampling,
+            sampling         = current_sampling,
         ).save(opt_yaml)
 
         self._selected_names   = selected
@@ -738,7 +722,6 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         self._log_optimization_summary(final_results, selected)
 
-        rows = self._pair_ledger(work_dir, plan.strategies)
         return self._make_result(
             PhaseOutcome.COMPLETED,
             [r for r in rows if r.wanted],
@@ -746,7 +729,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         )
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> OptimizationPhaseResult:
-        """Build the reused result from the cached strategy results stash."""
+        """Build the reused result from the fast-exit stash (display + live selection)."""
         plan = self._dep_result(ProbePhase).plan
 
         if plan.fixed_quality:
@@ -783,6 +766,16 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         plan = self._dep_result(ProbePhase).plan
 
         by_name = {s.display_name(): s for s in plan.strategies}
+        unknown = [n for n in self._selected_names if n not in by_name]
+        assert not unknown, (
+            f"selection escaped the plan: {unknown} not among {sorted(by_name)}"
+        )
+        selected = [by_name[n] for n in self._selected_names]
+        if outcome in (PhaseOutcome.COMPLETED, PhaseOutcome.REUSED):
+            # Logically impossible by construction (selection derives from
+            # plan-scoped live data) — the assert catches runtime bugs at
+            # the phase that caused them, not downstream at Encoding.
+            assert selected, "successful optimization must select at least one strategy"
         return OptimizationPhaseResult(
             outcome             = outcome,
             message             = message,
@@ -790,7 +783,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 r for r in artifacts
                 if isinstance(r.payload, EncodedChunk) and r.state == ArtifactState.COMPLETE
             ],
-            selected_strategies = [by_name[n] for n in self._selected_names if n in by_name],
+            selected_strategies = selected,
             synthetic_targets   = list(self._synthetic_targets),
             anchor              = self._anchor_name,
         )
@@ -850,12 +843,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 probe            = None,
                 test_chunks      = [],
                 strategy_results = [],
-                tolerance_pct    = 0.0,
-                selected         = [s.display_name() for s in plan.strategies],
                 quality_targets  = current_targets,
-                sampling = current_sampling,
+                sampling         = current_sampling,
             ).save(opt_yaml)
 
+        assert plan.strategies, "all-strategies mode requires at least one strategy"
         return OptimizationPhaseResult(
             outcome             = PhaseOutcome.REUSED,
             message             = "all-strategies mode — skipping optimization",
