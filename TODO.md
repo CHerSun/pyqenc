@@ -1155,7 +1155,74 @@ Fix direction (user ruling 2026-10-05):
 
 ---
 
-## Last known = 99
+## 100. Artifact-owned recovery classification — mass/individual ownership split
+
+**Status:** 🤔 needs thinking (user sketch 2026-10-05, verified against code
+same day — feasible; a candidate refactor, nothing broken today)
+
+The idea: the phase owns its ARTIFACT SET and the mass/orchestration side of
+recovery (produce the directory listing ONCE — or once per strategy — build
+the rows with their externally-derived `wanted`, decide what to do next).
+The INDIVIDUAL side — "which files constitute my COMPLETE/PARTIAL/ABSENT,
+given the listing" — moves to the artifact/payload itself, which already
+owns name composition (two-name doctrine). A row gets the listing, consumes
+its own names out of it, sets its state.
+
+What recovery classification looks like TODAY (verified — same concept,
+five hand-rolled mechanics, all phase-local):
+
+- Extraction: ONE `on_disk_names` listing + inline per-kind membership
+  checks in `_recover` (~130 lines; every kind is "expected name in set",
+  with the video row's expected name being MODE-dependent: timestamps file
+  in processing runs, materialized container in extract runs).
+- Encoding `_recover_encoding_attempts`: per-strategy ONE listing, TWO
+  indexes (pattern-matched winning `.mkv` — name embeds the discovered
+  `q<N>` — plus sidecar chunk-ids); pair COMPLETE iff BOTH exist. A genuine
+  multi-file, PATTERN-shaped footprint — a naive `set[str]` interface
+  cannot express it; the rule owns regex + pairing. Plus
+  `_orphan_strategy_rows` (surplus detection) and `_scan_winner_sidecars`
+  (fact-loading/aggregation — the §92 seed example).
+- Audio `_classify`: per-row `Path.exists()` (N stats, NOT one listing) +
+  one iterdir for surplus rows.
+- Merge: per-output glob discovery; optimization shares the pair-ledger
+  builders with encoding.
+
+Why it looks right:
+
+- Single-ownership rule applied honestly: name composition already lives on
+  entities; completeness-from-names is the same fact family — today it is
+  re-derived in phase code instead.
+- Structural fix for §92's recovery bloat: every `_recover` shrinks to
+  orchestration (build rows → classify via listing → aggregate facts), the
+  per-kind rules become small entity-owned methods with one-sentence
+  contracts; per-kind classification becomes testable without a phase.
+- The listing-only recovery invariant is preserved trivially (the listing is
+  the INPUT); sidecar fact-loads (winner scan) stay a separate phase-owned
+  mass step — reinforcing exactly the §92 load-one/aggregate split.
+
+Design questions for the spec:
+
+- Protocol shape: minimal `SupportsRecovery`-style protocol on file-backed
+  payloads vs a `classify(listing)` hook on the `Artifact` wrapper (which is
+  deliberately thin today — its docstring already says "file-backed
+  locations derive from the payload" but nothing structures it).
+- Pattern footprints (encoding): the classifier owns regex+pairing — fine
+  for entity ownership, kills a static-name interface.
+- Mode-dependent rows (extraction video): the phase picks the footprint at
+  ROW CONSTRUCTION (run-mode knowledge stays phase-side); classification
+  stays artifact-side.
+- PARTIAL: nothing uses it in classification today (all-or-nothing rules);
+  decide whether the design keeps binary or makes PARTIAL expressible
+  (mkv-without-sidecar → PARTIAL?).
+- Audio's per-row exists() gets unified under the one-listing protocol.
+
+Sequencing thought: natural companion to §92's long-function pass (same
+files, same split); the unified-summaries window also rewrites merge +
+optimization recovery — landing this first or folding it there both work.
+
+---
+
+## Last known = 100
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
