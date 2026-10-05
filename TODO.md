@@ -1337,11 +1337,35 @@ largest-deficit-first scheduling, racing algorithms (successive elimination);
 Netflix Dynamic Optimizer is the batch-mode cousin (full grid, no anytime
 property — the interactive stop is the novel bit).
 
+Research links (from the 2026-10-05 discussion):
+
+- Netflix Tech Blog, "Dynamic Optimizer — A Perceptual Video Encoding
+  System" (2018) — the per-shot parameter-grid system; boundaries still from
+  shot detection: https://netflixtechblog.com
+- Streaming Media, "The Past, Present, and Future of Per-Title Encoding"
+  (2021) — probe-encode→complexity→parameters lineage:
+  https://www.streamingmedia.com/Articles/Editorial/Featured-Articles/The-Past-Present-and-Future-of-Per-Title-Encoding-152221.aspx
+- "Machine-Learning-Based Method for Content-Adaptive Encoding" (IEEE,
+  2022) — per-segment parameter prediction from features:
+  https://videoprocessing.github.io
+- VCA — Video Complexity Analyzer (per-frame SI/TI-style complexity without
+  encoding; aimed at shot detection + per-title encoding): https://vca.itec.aau.at
+- EVCA — Extended Video Complexity Analyzer (ACM MMSys 2024) — complexity
+  features for rate control and per-segment parameter selection:
+  https://dl.acm.org/doi/10.1145/3625468.3652171
+- IVCA — Inter-relation-aware Video Complexity Analyzer:
+  https://arxiv.org/html/2407.00280v1
+- "Video Encoding Complexity Characterization" (IEEE Access) — SI/TI vs
+  encoding complexity; scene complexity ≠ encoding complexity:
+  https://ieeexplore.ieee.org/document/9900917
+
 Adjacent but separate (same discussion, NOT folded into this item): intra-chunk
 quality refinement via x264/x265 `--zones` (per-frame-range `q=`/`b=`;
 x265 `crf=` zones silently don't work; SVT-AV1 has none — our
 segment+concat architecture IS its standard workaround) — a per-chunk
-post-convergence refinement idea, also not now.
+post-convergence refinement idea, also not now. Zone mechanics docs:
+x264 manpage (https://manpages.debian.org — frame-based `<start>,<end>,q=|b=`);
+x265 docs (https://x265.readthedocs.io — `q=`/`b=` only).
 
 ---
 
