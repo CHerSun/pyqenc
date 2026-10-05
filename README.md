@@ -55,7 +55,7 @@ That's it. Default settings should work well. Later you can customize settings.
 
 > Use a separate folder per encode job — either `cd` into a dedicated folder first, or pass `--work-dir <path>`. Don't run two encodes in parallel onto the same work dir.
 
-The other intents: `pyqenc video movie.mkv -y` runs the video chain only, `pyqenc audio movie.mkv -y` the audio processing only, and `pyqenc extract movie.mkv -y` materializes streams (video and audio included) as standalone files. The intents compose — run `video` and `audio`, then `auto` finishes the merge without redoing work.
+The other intents: `pyqenc video movie.mkv -y` runs the video chain only, `pyqenc audio movie.mkv -y` the audio processing only, and `pyqenc extract movie.mkv -y` materializes streams (video and audio included) as standalone files.
 
 For all options: `pyqenc auto --help` or [CLI Reference](docs/cli-reference.md).
 

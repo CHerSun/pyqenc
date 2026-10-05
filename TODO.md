@@ -1247,6 +1247,8 @@ Sequencing thought: natural companion to §92's long-function pass (same
 files, same split); the unified-summaries window also rewrites merge +
 optimization recovery — landing this first or folding it there both work.
 
+Extra consideration: status recovery only? or actual artifact producing too? Could save on clarity for partial re-producing.
+
 ---
 
 ## 101. Winner promotion keeps the ATTEMPT's q-bearing name — winners must be statically named per chunk
