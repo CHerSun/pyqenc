@@ -1291,7 +1291,61 @@ Fix surface:
 
 ---
 
-## Last known = 101
+## 102. Evolutionary / anytime encoding — deficit-driven scheduler (idea)
+
+**Status:** 🤔 idea (discussed 2026-10-05; NOT for right now — needs a full
+scheduler rework, or an alternative scheduler. Deliberately separate from
+§51: QualitySearchV4 stays the per-chunk next-attempt search, untouched by
+this)
+
+Today the encoding phase finishes chunks one at a time — each chunk runs its
+whole CRF search before the pipeline moves on. The idea inverts the order:
+encode ALL chunks once at an initial quality (wave 1 → a complete, valid
+video immediately), measure, then iteratively re-encode the WORST chunks
+toward their targets — always improving the largest deficit — until
+convergence. The user can stop anytime and materialize as-is.
+
+Why it looks good:
+
+- Anytime-readiness: a complete video exists after one encode per chunk;
+  every later pass only improves it. "Enough, stop there, materialize as is"
+  becomes a product knob.
+- Deficit-driven priority IS quality-floor equalization — the same semantics
+  our p10/min targets express (water-filling / largest-deficit-first).
+- Attempt savings via temporal autocorrelation: neighbors inherit initial
+  CRF guesses from already-encoded neighbors (the "smoothing to adjacents"
+  effect — implemented as warm-starting, not averaging measured values); a
+  single cheap global probe could seed wave-1 initial values the same way.
+- Asynchronous shape, no wave barriers: a priority pool of
+  (chunk, next-guess) jobs pulled continuously by the concurrency workers,
+  prioritized by deficit.
+
+What it costs / needs first:
+
+- The scheduler rework itself: per-chunk search (§51) unchanged — this
+  changes attempt ORDER, parallelism shape, and the global stop condition.
+- Merge-on-current-best: "materialize as is" requires merging every chunk's
+  current winner (wave 1 guarantees one attempt per chunk — no gaps);
+  re-merging as winners change composes with the §86/§100/§101 invalidation
+  work.
+- Total encodes do NOT shrink by themselves (a wave = one attempt for that
+  chunk, same count as depth-first) — the count win comes from warm-starts
+  and probe seeding, not from the wave structure.
+
+Research vocabulary: anytime algorithms (Zilberstein), water-filling /
+largest-deficit-first scheduling, racing algorithms (successive elimination);
+Netflix Dynamic Optimizer is the batch-mode cousin (full grid, no anytime
+property — the interactive stop is the novel bit).
+
+Adjacent but separate (same discussion, NOT folded into this item): intra-chunk
+quality refinement via x264/x265 `--zones` (per-frame-range `q=`/`b=`;
+x265 `crf=` zones silently don't work; SVT-AV1 has none — our
+segment+concat architecture IS its standard workaround) — a per-chunk
+post-convergence refinement idea, also not now.
+
+---
+
+## Last known = 102
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
