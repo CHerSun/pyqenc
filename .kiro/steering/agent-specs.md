@@ -1,6 +1,19 @@
 # Requirements to agent when making specs
 
 - BEFORE changing any code - discuss the strategy and get user confirmation.
+- Requirement statements are written in **EARS notation** (Easy Approach to
+  Requirements Syntax, adopted 2026-10-05). Each normative statement uses one
+  of the five templates — ubiquitous `The ⟨subject⟩ shall ⟨response⟩`;
+  state-driven `While ⟨state⟩, the ⟨subject⟩ shall ⟨response⟩`; event-driven
+  `When ⟨trigger⟩, the ⟨subject⟩ shall ⟨response⟩`; unwanted behavior
+  `If ⟨condition⟩, then the ⟨subject⟩ shall ⟨response⟩`; optional feature
+  `Where ⟨feature is included⟩, the ⟨subject⟩ shall ⟨response⟩` — with
+  conditions combinable (`If ⟨precondition⟩, when ⟨trigger⟩, …`). The subject
+  is the concrete component (`the CLI`, `the runner`, `the extraction phase`),
+  never a generic "the system". Context, motivation, and design rationale stay
+  freeform prose — only the normative requirement sentences follow EARS. Specs
+  written before adoption keep their original phrasing; archived specs are
+  never rewritten.
 - Specs are authored in two gated stages: **requirements + design first**, for human review; **tasks only after the human approves those two** — never lay out the task plan in the same pass as the initial spec documents.
 - Add HTML comment to specs to disable MD024 markdownlint rule `<!-- markdownlint-disable MD024 -->` after the first header to prevent excessive warnings about duplicate headers.
 - Add dates in ISO format to specs to have a clear indication of specs order: "- Created: " - when we started working on the spec, "- Completed: " date - update once all tasks were done (add as a last task). In form of a list under the top header, after MD024 comment.

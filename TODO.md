@@ -1169,7 +1169,37 @@ actually prunes; interplay with §82's other candidate mechanisms
 
 ---
 
-## Last known = 97
+## 98. API execution surface — small intent-based surface vs phase-mirroring wrappers
+
+**Status:** needs thinking (raised 2026-10-05 during the `cli-intent-commands`
+spec review; supersedes that spec's Open-items lean "keep named wrappers")
+
+api.py exposes seven public functions: six near-identical `_drive` wrappers
+mirroring phases (`run_pipeline`, `extract_streams`, `chunk_video`,
+`process_audio`, `encode_chunks`, `merge_final` — the first and last are the
+same shape, both targeting Merge) plus the standalone `measure_quality`.
+`pyqenc/__init__.py` re-exports all seven as THE package surface
+(`__all__`). Consumers today: `cli.py` + three test files (a handful of call
+sites); zero external consumers — the surface is free to change.
+
+With the CLI going intent-based, the phase-mirroring API becomes the odd one
+out. Candidate shape: intent-named entries mirroring the commands —
+auto / video / audio / extract (+ `measure_quality` unchanged) — or a single
+`run(intent=…)`. Considerations:
+
+- Phase-level access for tests needing partial runs: through the intent set
+  (the intents ARE the sanctioned partials now) or directly via
+  `Runner`/`_build_registry` (the real low-level surface).
+- Whether it lands inside the cli-intent-commands window (same files: api.py,
+  `__init__.py`, cli re-pointing, the three test files) or as a follow-up.
+- `plan` stays an explicit api argument, presumably (resolution is the CLI's
+  job per config-resolution) — but video/audio/extract intents differ in
+  needing it at all.
+- `extract`'s materialize flag: public api parameter or CLI-only detail?
+
+---
+
+## Last known = 98
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
