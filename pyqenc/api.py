@@ -64,14 +64,15 @@ def _drive(
     no_metrics:     bool,
     dry_run:        bool,
     crop_params:    CropParams | None = None,
-    video_required: bool              = True,
 ) -> RunResult:
     """Build the registry and drive a single target phase via the :class:`Runner`.
 
     Constructs the run-scoped metrics collector and phase registry, then hands
-    both to a :class:`Runner` that runs only ``target``.  Dependency execution
-    happens inside the phases; the metrics lifecycle and ``finalize`` broadcast
-    are owned by the runner.
+    both to a :class:`Runner` that runs only ``target``.  The registry is the
+    dependency closure of ``target``; the video-need flag is derived from that
+    closure inside ``_build_registry`` (never hand-set here).  Dependency
+    execution happens inside the phases; the metrics lifecycle and
+    ``finalize`` broadcast are owned by the runner.
 
     Args:
         config:         Fully assembled application configuration.
@@ -84,8 +85,6 @@ def _drive(
         dry_run:        Report only — no files written.
         crop_params:    Optional manual crop override; ``None`` falls back to
                         cached value in ``probe.yaml``, then auto-detection.
-        video_required: When ``True`` (default), build the full video registry;
-                        pass ``False`` for the audio-only registry.
 
     Returns:
         ``RunResult`` summarising the run.
@@ -115,7 +114,7 @@ def _drive(
         no_metrics,
         collector,
         crop_params,
-        video_required,
+        terminals=(target,),
     )
 
     runner = Runner(
@@ -183,7 +182,6 @@ def run_pipeline(
         no_metrics     = no_metrics,
         dry_run        = dry_run,
         crop_params    = crop_params,
-        video_required = True,
     )
 
 
@@ -233,7 +231,6 @@ def extract_streams(
         no_metrics     = no_metrics,
         dry_run        = dry_run,
         crop_params    = crop_params,
-        video_required = True,
     )
 
 
@@ -284,7 +281,6 @@ def chunk_video(
         no_metrics     = no_metrics,
         dry_run        = dry_run,
         crop_params    = crop_params,
-        video_required = True,
     )
 
 
@@ -300,9 +296,10 @@ def process_audio(
 ) -> RunResult:
     """Run the pipeline up to and including the audio processing phase.
 
-    Drives ``AudioPhase`` against the audio-only registry (``video_required``
-    is ``False``, so ``ProbePhase`` and downstream video phases are omitted).
-    No encoding plan is taken or built — the audio pass must not depend on
+    Drives ``AudioPhase`` against the audio closure (Job → Extraction →
+    Audio; the walk never reaches ``ProbePhase`` or the video chain, and the
+    derived video-need is ``False``). No encoding plan is taken or built —
+    the audio pass must not depend on
     the video configuration being resolvable. All upstream phases are
     executed (not merely scanned) as dependencies inside the phases.
 
@@ -332,7 +329,6 @@ def process_audio(
         cleanup        = cleanup,
         no_metrics     = no_metrics,
         dry_run        = dry_run,
-        video_required = False,
     )
 
 
@@ -383,7 +379,6 @@ def encode_chunks(
         no_metrics     = no_metrics,
         dry_run        = dry_run,
         crop_params    = crop_params,
-        video_required = True,
     )
 
 
@@ -433,7 +428,6 @@ def merge_final(
         no_metrics     = no_metrics,
         dry_run        = dry_run,
         crop_params    = crop_params,
-        video_required = True,
     )
 
 

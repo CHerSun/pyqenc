@@ -33,6 +33,7 @@ pre-resolved ``FinalizeContext.deep_cleanup`` flag is set.
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Self
@@ -61,6 +62,7 @@ __all__ = [
     "RecoveryError",
     "Strategy",
     "_build_registry",
+    "dependency_closure",
 ]
 
 logger = logging.getLogger(__name__)
@@ -678,10 +680,52 @@ class Phase[ResultT: PhaseResult](ABC):
 PhaseRegistry = dict[type[Phase], Phase]
 """The phase registry: maps each phase **class** to its constructed instance.
 
-Built incrementally by ``_build_registry`` and shared by reference with every
-phase (fetched from at run time — see ``Phase.DEPENDS_ON``). Keys are plain
-``dict`` keys, so lookup by type is direct and order follows insertion
-(execution order)."""
+Built by ``_build_registry`` from ``dependency_closure(terminals)`` and shared
+by reference with every phase (fetched from at run time — see
+``Phase.DEPENDS_ON``). Keys are plain ``dict`` keys, so lookup by type is
+direct and order follows insertion (construction = topological order)."""
+
+
+def dependency_closure(terminals: Sequence[type[Phase]]) -> tuple[type[Phase], ...]:
+    """The dependency closure of *terminals*, in deterministic walk order.
+
+    Depth-first post-order over the static ``DEPENDS_ON`` declarations:
+    terminals are visited in the given order and each phase's own tuple in
+    its declaration order, so the result is a topological order whose
+    tie-breaks are fully determined by the declarations and the terminal
+    sequence. A dependency shared by several terminals keeps its first-visited
+    position. Requires no constructed phase — the walk reads class
+    declarations only.
+
+    Args:
+        terminals: The terminal phase classes of the run, in drive order.
+
+    Returns:
+        Every phase reachable from *terminals*, each exactly once.
+
+    Raises:
+        ValueError: If the declarations contain a dependency cycle.
+    """
+    order: list[type[Phase]] = []
+    seen: set[type[Phase]] = set()
+    in_progress: list[type[Phase]] = []
+
+    def visit(cls: type[Phase]) -> None:
+        if cls in seen:
+            return
+        if cls in in_progress:
+            cycle = " -> ".join(c.__name__ for c in [*in_progress, cls])
+            raise ValueError(f"DEPENDS_ON cycle: {cycle}")
+        in_progress.append(cls)
+        for dep in cls.DEPENDS_ON:
+            visit(dep)
+        in_progress.pop()
+        seen.add(cls)
+        order.append(cls)
+
+    for terminal in terminals:
+        visit(terminal)
+    return tuple(order)
 
 
 # ---------------------------------------------------------------------------
@@ -689,136 +733,118 @@ phase (fetched from at run time — see ``Phase.DEPENDS_ON``). Keys are plain
 # ---------------------------------------------------------------------------
 
 def _build_registry(
-    config:         AppConfig,
-    plan:           EncodingPlan | None,
-    source:         Path,
-    work_dir:       Path,
-    force:          bool,
-    cleanup:        CleanupLevel,
-    no_metrics:     bool,
-    collector:      MetricsCollector,
-    crop_params:    CropParams | None = None,
-    video_required: bool              = True,
+    config:      AppConfig,
+    plan:        EncodingPlan | None,
+    source:      Path,
+    work_dir:    Path,
+    force:       bool,
+    cleanup:     CleanupLevel,
+    no_metrics:  bool,
+    collector:   MetricsCollector,
+    crop_params: CropParams | None = None,
+    *,
+    terminals:   tuple[type[Phase], ...],
 ) -> PhaseRegistry:
-    """Construct all phase objects in execution order and wire their dependencies.
+    """Construct the phase objects for a run and wire their dependencies.
+
+    The registry contains exactly ``dependency_closure(terminals)`` — the
+    static ``DEPENDS_ON`` declarations alone decide membership and
+    construction order; there is no hand-curated phase list and no omission
+    special case. ``video_required`` is not a parameter: it is DERIVED here
+    (the closure reaching the video chain) and forwarded to
+    ``ExtractionPhase``, which uses it for the timestamps artifact and the
+    video artifact row's want — the video stream's material components that
+    audio-only runs must not touch.
 
     ``JobPhase`` receives all volatile per-run parameters (``source``,
     ``work_dir``, ``force``, ``cleanup``, ``no_metrics``) as plain kwargs and
     stores them on ``JobPhaseResult`` so all downstream phases can read them
-    via ``self._dep_result(JobPhase)``.  ``ProbePhase`` — constructed only in
-    the video registry — additionally receives the run's ``plan``, carrying it
-    on its result as the video chain's entry context; the audio-only registry
-    passes no plan at all, keeping the audio pass independent of the video
-    config.  All other phases are constructed with only
-    ``(config, registry, collector=collector)`` — they never receive volatile
-    args directly.
+    via ``self._dep_result(JobPhase)``.  ``ProbePhase`` — constructed only
+    when the closure reaches it — additionally receives the run's ``plan``,
+    carrying it on its result as the video chain's entry context; an
+    audio-only closure contains no Probe and needs no plan at all.  All other
+    phases are constructed with only ``(config, registry,
+    collector=collector)`` — they never receive volatile args directly.
 
     The registry is a plain ``dict`` keyed by phase *class* (not instance),
     preserving insertion order (Python 3.7+).
 
-    When ``video_required=True`` (default, all video subcommands), the
-    registry contains the full video dependency graph. Insertion order
-    follows construction; EXECUTION order for a merge-target run is the
-    depth-first walk of ``DEPENDS_ON`` tuples:
-
-    1. ``JobPhase``          — no dependencies
-    2. ``ExtractionPhase``   — depends on Job
-    3. ``AudioPhase``        — depends on Job, Extraction (declared early by
-                               Merge so the fast audio result lands before
-                               the slow probe/encode work)
-    4. ``ProbePhase``        — depends on Job, Extraction
-    5. ``ChunkingPhase``     — depends on Job, Probe
-    6. ``OptimizationPhase`` — depends on Job, Probe, Chunking
-    7. ``EncodingPhase``     — depends on Job, Probe, Chunking, Optimization
-    8. ``MergePhase``        — depends on Job, Extraction, Audio, Probe, Encoding
-
-    When ``video_required=False`` (``audio`` subcommand), ``ProbePhase`` is
-    omitted from the registry:
-
-    1. ``JobPhase``          — no dependencies
-    2. ``ExtractionPhase``   — depends on Job (video extraction skipped)
-    3. ``AudioPhase``        — depends on Job, Extraction
-
     Args:
-        config:         Full validated application configuration.
-        plan:           The run's resolved encoding plan
-                        (:meth:`AppConfig.resolve_encoding` output).
-        source:         Resolved path to the source video file.
-        work_dir:       Working directory for all pipeline artifacts.
-        force:          When ``True``, wipe existing artifacts before running.
-        cleanup:        Artifact retention policy applied after encoding.
-        no_metrics:     When ``True``, skip writing ``metrics.yaml`` files.
-        collector:      Metrics collector injected into every phase constructor.
-        crop_params:    Optional manual crop override forwarded to ``ProbePhase``
-                        (video subcommands only); ``None`` falls back to cached
-                        value in ``probe.yaml``, then auto-detection.
-        video_required: When ``True`` (default), insert ``ProbePhase`` and all
-                        downstream video phases.  Pass ``False`` for the
-                        ``audio`` subcommand to skip video processing entirely.
+        config:      Full validated application configuration.
+        plan:        The run's resolved encoding plan
+                     (:meth:`AppConfig.resolve_encoding` output); may be
+                     ``None`` only when the closure contains no Probe.
+        source:      Resolved path to the source video file.
+        work_dir:    Working directory for all pipeline artifacts.
+        force:       When ``True``, wipe existing artifacts before running.
+        cleanup:     Artifact retention policy applied after encoding.
+        no_metrics:  When ``True``, skip writing ``metrics.yaml`` files.
+        collector:   Metrics collector injected into every phase constructor.
+        crop_params: Optional manual crop override forwarded to ``ProbePhase``
+                     (video chain only); ``None`` falls back to cached value
+                     in ``probe.yaml``, then auto-detection.
+        terminals:   The run's terminal phase classes, in drive order — the
+                     closure input that defines the registry.
 
     Returns:
         A ``PhaseRegistry`` (ordered dict) mapping each phase class to its
-        constructed instance.  Iterating the values yields phases in execution
-        order.
+        constructed instance. Iterating the values yields phases in
+        topological (construction) order.
     """
     # Deferred imports to avoid circular dependencies at module load time.
-    from pyqenc.phases.audio import AudioPhase
+    from pyqenc.phases.chunking import ChunkingPhase
+    from pyqenc.phases.encoding import EncodingPhase
     from pyqenc.phases.extraction import ExtractionPhase
     from pyqenc.phases.job import JobPhase
+    from pyqenc.phases.merge import MergePhase
+    from pyqenc.phases.optimization import OptimizationPhase
+    from pyqenc.phases.probe import ProbePhase
+
+    # The video chain: everything downstream of extraction that consumes
+    # video-derived materials. A closure reaching any of these means the run
+    # requires the video stream's material components.
+    video_chain: frozenset[type[Phase]] = frozenset(
+        {ProbePhase, ChunkingPhase, OptimizationPhase, EncodingPhase, MergePhase},
+    )
+    order = dependency_closure(terminals)
+    video_required = not video_chain.isdisjoint(order)
 
     registry: PhaseRegistry = {}
-
-    # JobPhase receives all volatile kwargs — it stores them on JobPhaseResult
-    # so downstream phases can access them via _dep_result(JobPhase).
-    registry[JobPhase] = JobPhase(
-        config, registry,
-        source     = source,
-        work_dir   = work_dir,
-        force      = force,
-        cleanup    = cleanup,
-        no_metrics = no_metrics,
-        collector  = collector,
-    )
-
-    # ExtractionPhase follows Job unconditionally.
-    # video_required is forwarded so ExtractionPhase can skip video/timestamp
-    # extraction when running in audio-only mode.
-    registry[ExtractionPhase] = ExtractionPhase(
-        config, registry,
-        video_required = video_required,
-        collector      = collector,
-    )
-
-    if video_required:
-        # ProbePhase sits between Extraction and the remaining video phases.
-        # crop_params is forwarded here (not to JobPhase) so ProbePhase owns
-        # crop detection and manual overrides. The video registry always
-        # carries the plan (video subcommands resolve it); only the
-        # audio-only registry passes None — and it omits Probe entirely.
-        assert plan is not None, "video registry carries the plan"
-        from pyqenc.phases.chunking import ChunkingPhase  # deferred: phases import phase (registry cycle)
-        from pyqenc.phases.encoding import EncodingPhase
-        from pyqenc.phases.merge import MergePhase
-        from pyqenc.phases.optimization import OptimizationPhase
-        from pyqenc.phases.probe import ProbePhase
-
-        registry[ProbePhase] = ProbePhase(
-            config, registry,
-            crop_params = crop_params,
-            collector   = collector,
-            plan        = plan,
-        )
-
-        for cls in [
-            AudioPhase,
-            ChunkingPhase,
-            OptimizationPhase,
-            EncodingPhase,
-            MergePhase,
-        ]:
+    for cls in order:
+        if cls is JobPhase:
+            # JobPhase receives all volatile kwargs — it stores them on
+            # JobPhaseResult so downstream phases can access them via
+            # _dep_result(JobPhase).
+            registry[cls] = JobPhase(
+                config,
+                registry,
+                source    = source,
+                work_dir  = work_dir,
+                force     = force,
+                cleanup   = cleanup,
+                no_metrics = no_metrics,
+                collector = collector,
+            )
+        elif cls is ExtractionPhase:
+            registry[cls] = ExtractionPhase(
+                config,
+                registry,
+                video_required = video_required,
+                collector      = collector,
+            )
+        elif cls is ProbePhase:
+            # crop_params is forwarded here (not to JobPhase) so ProbePhase
+            # owns crop detection and manual overrides. The plan is the video
+            # chain's entry context; a registry containing Probe always
+            # carries it.
+            assert plan is not None, "video registry carries the plan"
+            registry[cls] = ProbePhase(
+                config,
+                registry,
+                crop_params = crop_params,
+                collector   = collector,
+                plan        = plan,
+            )
+        else:
             registry[cls] = cls(config, registry, collector=collector)
-    else:
-        # Audio-only path: only AudioPhase is needed after Extraction.
-        registry[AudioPhase] = AudioPhase(config, registry, collector=collector)
-
     return registry
