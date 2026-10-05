@@ -1216,13 +1216,59 @@ Design questions for the spec:
   (mkv-without-sidecar → PARTIAL?).
 - Audio's per-row exists() gets unified under the one-listing protocol.
 
+Consumption semantics (user, 2026-10-05): classification should CONSUME its
+expected names out of the shared listing rather than test membership — two
+free invariants: whatever is left over after all rows consumed is stale
+(surfaced immediately as present-but-unwanted rows), and a double
+consumption (two artifacts composing the same name — a naming bug) is
+caught structurally at the collision. Audio's `_classify` surplus scan is
+the partial precedent. NOTE: §101 below (static winner names) dissolves
+this item's "pattern-shaped footprint" wrinkle — with static winner names
+every footprint in the codebase becomes a static name set.
+
 Sequencing thought: natural companion to §92's long-function pass (same
 files, same split); the unified-summaries window also rewrites merge +
 optimization recovery — landing this first or folding it there both work.
 
 ---
 
-## Last known = 100
+## 101. Winner promotion keeps the ATTEMPT's q-bearing name — winners must be statically named per chunk
+
+**Status:** 🤔 bug (design doctrine violation; user finding from a live
+optimization run 2026-10-05; pre-existing on main)
+
+Doctrine: attempts (the `encoding/` search workspace) are named WITH quality
+— they are search artifacts. Winners (`encoded/<strategy>/`) map 1:1 to
+chunks — their naming must be STATIC (chunk identity + resolution, no
+quality), so they are directly discoverable from the chunk set. Live
+evidence (`D:\_encoding\pyqenc_cp\encoded\h264+ultrafast`): winners present
+as `<chunk>.<res>.q15.5.mkv` + `.q15.5.png`, only the result sidecar is
+correctly static (`<chunk>.<res>.yaml`).
+
+Root cause: `phases/encoding.py:775` — promotion hard-links the winning
+attempt keeping `winning_attempt.name` (same for the graph at `:781`);
+only `_write_encoding_result_sidecar` composes the static name.
+
+Fix surface:
+
+- Promotion site: name the destination `<chunk_id>.<res>.mkv` / `.png`.
+- Consumers parsing winner filenames through the ATTEMPT pattern for chunk
+  identity: the pair-ledger placeholder (`:326`), the replay path (`:1547`),
+  the winner scan (`:1755`) — with static names these become static-name
+  lookups (and `_recover_encoding_attempts`' mkv index drops the regex).
+- The winner record's crf/quality currently rides the filename — under
+  static naming it must come from the result sidecar (which already
+  persists crf); verify every EncodedChunk composition site.
+- Pre-alpha, no migration: existing q-bearing winners stop matching the
+  static footprint — pairs re-derive as ABSENT (re-encode) or the workdir
+  gets a force-wipe; note it in the fix commit.
+
+Sequencing: natural §100 companion — static winner names make every
+recovery footprint a static name set, shrinking both items at once.
+
+---
+
+## Last known = 101
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
