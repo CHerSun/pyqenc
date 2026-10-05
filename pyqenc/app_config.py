@@ -251,9 +251,6 @@ class FilterInstance(BaseModel):
         """
         if not isinstance(data, dict):
             return data
-        # Already in resolved form (e.g. model_dump round-trip) — pass through.
-        if "params" in data and "type" in data and not (set(data) - {"type", "params"}):
-            return data
 
         raw = dict(data)
         type_id = raw.pop("type", None)
@@ -266,9 +263,14 @@ class FilterInstance(BaseModel):
                 f"Unknown filter type {type_id!r}. "
                 f"Registered filter types: {registered_type_ids()}."
             ) from None
-        # Validate the remaining fields against the type's param model.
+        # Accept both shapes — the flat YAML form ({type, ...params}) and the
+        # resolved/serialised form ({type, params: {...}}). The params are
+        # ALWAYS re-validated against the type's model: a round-tripped
+        # ``params`` dict would otherwise validate against the declared
+        # ``BaseModel`` and land as a plain instance, losing the subclass.
         # extra="forbid" on the param model rejects any parameter not valid for the type.
-        params = filter_cls.params_model(**raw)
+        params_source = raw.pop("params", raw)
+        params = filter_cls.params_model.model_validate(params_source)
         return {"type": type_id, "params": params}
 
 
