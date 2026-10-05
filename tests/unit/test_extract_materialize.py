@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import yaml
 
-from pyqenc.constants import EXTRACTED_DIR, TIMESTAMPS_FILENAME
+from pyqenc.constants import EXTRACTED_DIR, TEMP_SUFFIX, TIMESTAMPS_FILENAME
 from pyqenc.models import PhaseOutcome
 from pyqenc.utils.ffmpeg_runner import FFmpegRequest, compose_command
 from tests.unit.test_extraction_pts import (
@@ -98,6 +98,12 @@ class TestTrackMaterialization:
         assert len(track_copies) == 2  # video (track 0) + audio (track 1)
         assert any("0:0" in c and "copy" in c for c in track_copies)
         assert any("0:1" in c and "copy" in c for c in track_copies)
+        # The atomic-write protocol: ffmpeg writes a .tmp sibling with an
+        # explicit matroska muxer; the runner renames it to the final name
+        # only on success (pinned here at the composed-argv level).
+        for cmd in track_copies:
+            assert "-f" in cmd and "matroska" in cmd
+            assert any(a.endswith(TEMP_SUFFIX) for a in cmd)
 
         names = {f.name for f in (work_dir / EXTRACTED_DIR).iterdir()}
         assert any(n.endswith(".mkv") for n in names)  # video container
