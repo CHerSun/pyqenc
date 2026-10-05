@@ -1071,7 +1071,84 @@ auto / video / audio / extract (+ `measure_quality` unchanged) — or a single
 
 ---
 
-## Last known = 98
+## 99. Optimization execution path selects strategies from the STALE persisted summary table — even strategies not in the run's plan
+
+**Status:** 🤔 bug (verified from code + live log 2026-10-05; pre-existing on
+main, independent of the cli-intent-commands window)
+
+Doctrine (listing-only-recovery): the persisted summary aggregate is a
+display artifact for the no-pending FAST-EXIT path; the execution path must
+only WRITE it. Here the execution path READS the stale table and feeds it
+into strategy selection.
+
+Live evidence (2026-10-05 run, searched mode, 4 strategies
+`h264/h265/h265-aq/h265-anime +ultrafast`): the phase ran fresh test encodes
+for the 4 current strategies, then printed an 8-row summary table mixing in
+4 stale rows from a previous run's strategy set (`h265+slow`,
+`h264+veryslow`, `h265-anime+slow`, `h265-aq+slow`), selected
+`h265+slow` (smallest stale size, 3.8 MB) — a strategy NOT in the run's
+plan — and EncodingPhase then crashed: "Strategies: none" → CRITICAL "No
+strategies available from OptimizationPhase" → merge failed on failed deps.
+
+Footprint (verified in code):
+
+- `phases/optimization.py:422-426` — `_recover` builds `cached_results`
+  from `persisted.strategy_results` with NO scoping to `plan.strategies`.
+  ROOT CAUSE: a strategy-set change is not an invalidation key — rows for
+  strategies no longer configured survive every currency check (probe,
+  targets, sampling all unchanged), because the sidecar caches per-strategy
+  rows by name.
+- `phases/optimization.py:719-723` — searched-mode execution merges
+  stale+fresh (`all_results = cached + new`), size-ranks, and runs
+  `_apply_tolerance` over the MERGED set → selection can pick a stale
+  strategy. (Fixed mode is clean: `:688` `final_results = new_results`
+  derived from `plan.strategies` only.)
+- `phases/optimization.py:793` — selected names are resolved against the
+  plan via `if n in by_name` — the stale pick is DROPPED SILENTLY (no
+  warning), yielding an empty selection.
+- `phases/optimization.py:597` — the mid-run sidecar save persists the
+  unfiltered cache back (`list(cached_results.values())`), laundering the
+  stale rows into the new run's sidecar.
+- `phases/optimization.py:557-574` and `:460-478` — the tolerance-reapply
+  cheap path and the all-cached fast-exit select/re-use from
+  `persisted.strategy_results` unfiltered: same class, will mis-select or
+  display stale rows after any strategy-set shrink.
+- `phases/encoding.py:2201, 2330` — empty `selected_strategies` surfaces as
+  CRITICAL/RecoveryError far from the cause.
+
+Fix direction (user ruling 2026-10-05):
+
+- The execution path shall NOT read `persisted.strategy_results` AT ALL.
+  The table is write-only there: derived from LIVE DATA accumulated from
+  actual run artifacts on disk — sizes from the encoded test outputs; the
+  reuse substrate is the artifact layer (`_recover_encoding_attempts` +
+  winner/attempt sidecars — the `[reused]` tags in the live log show that
+  machinery already working). The one sanctioned READER of persisted rows
+  is the no-pending fast-exit display path in `.run`.
+- Consequently the to-test decision becomes presence-based per plan
+  strategy (fixed mode's precedent, `optimization.py:438-444`) — the
+  sidecar-row-driven `not in cached_results` check (`:446-448`) dies with
+  the read.
+- In-repo precedent for the exact model: fixed mode's comment at
+  `optimization.py:653-656` ("derives every strategy fresh from the current
+  disk state … persisted results are never trusted") — searched mode
+  converges to the same rule.
+- REJECTED alternative (first take): load-side plan-scoping of cached rows —
+  it patches the selection while preserving the execution-path read of the
+  persisted table, which is the actual violation.
+- Belt regardless: contract asserts where the result is assembled —
+  `selected ⊆ plan names`, and an EMPTY selected set raises at construction
+  (loud, at the phase that caused it) instead of EncodingPhase's downstream
+  CRITICAL.
+- Adjacent: §11 (invalidation matrix — presence-based to-test IS the
+  strategy-set-change answer: a plan change makes artifacts incomplete or
+  foreign rows simply never load); §90 (the same `strategy_results` model
+  gets narrowed/typed at the unified-summaries window — fix order matters
+  if both land close together).
+
+---
+
+## Last known = 99
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
