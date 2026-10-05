@@ -44,7 +44,7 @@ existing commands byte-identical in behavior. Requirement ids reference
 
 ## Tasks
 
-- [ ] 1. DEPENDS_ON audit + dependency table (Req 13, Req 7)
+- [x] 1. DEPENDS_ON audit + dependency table (Req 13, Req 7)
   - Per phase file: enumerate every `_dep_result(X)` / registry fetch and
     compare against the declared `DEPENDS_ON` tuple; record undeclared reads
     and over-declarations; fix the tuples
@@ -58,7 +58,7 @@ existing commands byte-identical in behavior. Requirement ids reference
     set — audio still executes under today's `run_pipeline` target until
     Task 3 re-points it)
 
-- [ ] 2. Closure-derived registry + derived video-need (Req 6, Req 8)
+- [x] 2. Closure-derived registry + derived video-need (Req 6, Req 8)
   - New `_dependency_closure(terminals) -> tuple[type[Phase], ...]` next to
     the `PhaseRegistry` alias: depth-first over static `DEPENDS_ON`,
     deterministic topological order with declaration order as tie-break,
@@ -72,7 +72,7 @@ existing commands byte-identical in behavior. Requirement ids reference
     failure; derived video-need matrix (audio → False; video/auto → True;
     extract → False); registry contents for each intent shape
 
-- [ ] 3. Multi-terminal runner (Req 5, Req 2, Req 3, Req 4)
+- [x] 3. Multi-terminal runner (Req 5, Req 2, Req 3, Req 4)
   - `Runner` and `_drive` accept an ordered `targets: tuple[type[Phase], ...]`
     (single target = one-element tuple); walks in order over the one registry;
     shared deps hit the per-instance memoization guard on later walks
@@ -82,16 +82,17 @@ existing commands byte-identical in behavior. Requirement ids reference
     (Job/Extraction counters); terminal ordering pinned (audio result
     available before encoding starts); single-terminal runs byte-identical
 
-- [ ] 4. api re-pointing + plan-free extract_streams (Req 1, Req 4; §98 call)
+- [x] 4. api re-pointing + plan-free extract_streams (Req 1, Req 4; §98 call)
   - Wrappers pass `targets=` tuples: `run_pipeline → (AudioPhase,
     MergePhase)`, `merge_final → (MergePhase,)`, `encode_chunks →
     (EncodingPhase,)`, `chunk_video → (ChunkingPhase,)`, `extract_streams →
     (ExtractionPhase,)`, `process_audio → (AudioPhase,)`
   - `extract_streams` drops its `plan` parameter (joins `process_audio`'s
     shape); no wrapper sets `video_required` by hand anymore
-  - §98 decision point: keep the six names this window (default) or apply
-    the intent-named collapse if the user opts in at review — record the
-    outcome in the task report either way
+  - §98 DECIDED 2026-10-05 (implementation-time, default applied): keep the
+    six current names re-pointed onto `targets=` tuples this window; the
+    intent-named collapse stays TODO §98 for its own pass. `pyqenc/__init__.py`
+    re-exports unchanged.
   - Tests: wrapper→targets tuples pinned; the audio-shaped namespace never
     resolves a plan (existing monkeypatch pin stays green)
 

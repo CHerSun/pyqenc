@@ -7,10 +7,13 @@ video-need flag (Req 6, Req 8).
 
 # CHerSun 2026
 
+from annotationlib import Format
+from inspect import signature
 from typing import ClassVar
 
 import pytest
 
+from pyqenc.api import extract_streams, process_audio
 from pyqenc.app_config import load_app_config
 from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import CleanupLevel
@@ -155,3 +158,14 @@ class TestClosureDerivedRegistry:
     def test_probe_in_closure_without_plan_fails_loudly(self, tmp_path) -> None:
         with pytest.raises(AssertionError, match="video registry carries the plan"):
             self._registry((ChunkingPhase,), None, tmp_path)
+
+
+class TestApiPlanFreedom:
+    """The no-Probe closures' api entry points are plan-free by signature (Req 4)."""
+
+    @pytest.mark.parametrize("func", [extract_streams, process_audio])
+    def test_plan_free_signature(self, func) -> None:
+        # STRING keeps annotations unevaluated (3.14 lazy annotations would
+        # otherwise trip on api.py's TYPE_CHECKING-only names).
+        sig = signature(func, annotation_format=Format.STRING)
+        assert "plan" not in sig.parameters

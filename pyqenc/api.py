@@ -188,7 +188,6 @@ def run_pipeline(
 
 def extract_streams(
     config:   AppConfig,
-    plan:     EncodingPlan,
     source:   Path,
     work_dir: Path,
     *,
@@ -200,8 +199,10 @@ def extract_streams(
 ) -> RunResult:
     """Run the pipeline up to and including the extraction phase.
 
-    Drives ``ExtractionPhase``; all upstream phases are executed (not merely
-    scanned) as dependencies inside the phases.
+    Drives ``(ExtractionPhase,)``; all upstream phases are executed (not merely
+    scanned) as dependencies inside the phases.  No encoding plan is taken or
+    built — the extraction closure contains no Probe and must not depend on
+    the video configuration being resolvable.
 
     Args:
         config:      Fully assembled application configuration.
@@ -223,7 +224,7 @@ def extract_streams(
 
     return _drive(
         config,
-        plan,
+        None,
         source,
         work_dir,
         (ExtractionPhase,),

@@ -597,7 +597,6 @@ def _cmd_extract(args: argparse.Namespace) -> int:
 
     try:
         config = _build_config(args)
-        plan   = _resolve_plan(args, config)
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
@@ -606,7 +605,6 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     try:
         result = extract_streams(
             config      = config,
-            plan        = plan,
             source      = args.source,
             work_dir    = args.work_dir,
             force       = args.force,
