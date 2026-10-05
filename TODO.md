@@ -252,25 +252,6 @@ parameters to expose (title, fps, year, strategy, …)?
 
 ---
 
-## 🤔 24. Phase registry is a static hand-ordered list, not derived from dependencies
-
-**Status:** covered by `2026-10-05 cli-intent-commands` spec (pending approval) — Req 6:
-registry = dependency closure of the run's terminals, topologically ordered; the static
-list and the `video_required` Probe-omission branch are deleted in the same motion as
-§66/§95 (2026-10-05). Follow-up safety net once landed: §54 (DEPENDS_ON usage audit
-becomes load-bearing — an undeclared dep is now a silent absence).
-
-- `_build_registry` is a static ordered construction list
-  (`pyqenc/phase.py:320-438`); the Probe-omission-when-`video_required=False`
-  part is done (`phase.py:355-360,410-436`). But nothing derives the registry
-  from the terminal phase's dependency graph — `api.py` passes an explicit
-  `target` (`api.py:52,100,114,119`); only execution is dependency-driven.
-
-**Questions to think about:** auto-populate the registry from terminal-phase
-dependencies (that's what the dependency declarations are for)?
-
----
-
 ## 🤔 30. Multi-pass video (audio chains already do it)
 
 **Status:** needs thinking (feature)
@@ -402,11 +383,11 @@ Why? I'm often seeing a movie being split like - titles, full movie as SINGLE HU
 
 ## 48. Remove include/exclude filters?
 
-2026-10-05: bullet 2 is CONSUMED by the `2026-10-05 cli-intent-commands` spec (pending
-approval) — `extract` materializes every selected stream kind incl. pass-through
-video/audio (Req 9.1); the retargetting idea is REJECTED (processing stays
-source-anchored; spec Constraints). Bullet 1 (removing filters from processing runs)
-stays open and out of that spec's scope.
+2026-10-05: bullet 2 (materialize AV for the end user) was CONSUMED by the
+`2026-10-05 cli-intent-commands` spec (approved) — `extract` materializes every
+selected stream kind incl. pass-through video/audio (Req 9.1); the retargetting
+idea is REJECTED (processing stays source-anchored). The open question below is
+bullet 1 only.
 
 Previously include/exclude filters were made specifically for extraction phase - it was costly to extract everything. Also, this was the only mean to
 actually control which audio gets processed.
@@ -416,7 +397,6 @@ Now, we have audio selectors, which give a more controllable choice with sub-pre
 
 It looks like we should consider:
 - completely removing the include/exclude filters (materialize all non video/audio things; video and audio has separate processing)
-- or maybe keep filters but re-add the ability to materialize audio/video (not for processing, but for the end-user) via some special option? Maybe even with video/audio stream retartgetting to extracted files, if actually materialized.
 
 ---
 
@@ -503,18 +483,6 @@ Need to check code. Especially metadata extraction, files materialization (extra
 
 ---
 
-## 54. Validate Phase's DEPENDS_ON by actual usage
-
-**Status:** covered by `2026-10-05 cli-intent-commands` spec (pending approval) — Req 13:
-the audit + the per-phase dependency table (recorded in architecture.md) ride that
-window as a PREREQUISITE of the closure-derived registry (undeclared dep = silent
-absence under closure construction). Delete this entry with the spec's approval.
-
-Validate Phase's class field DEPENDS_ON vs actual inputs used from those phases via `_deps` or similar mechanics. We need a clean concise dependencies graph.
-Also need to build a table or a graph with actual dependencies - inputs, internals, results - both artifacts and settings. between phases and phase's internals.
-
----
-
 ## 59. Parallel metrics
 
 Currently, if we run 2 jobs onto the same folder (say, separate video and audio passes) - metrics will get garbled.
@@ -569,8 +537,6 @@ Deferred as costly/structural:
 
 - encoding⇄optimization import cycle (marked `# deferred: circular import` at
   3 sites) — worth breaking properly.
-- CLI `_cmd_*` bodies ×6 near-identical (crop-parse → build config → api → log)
-  — promoted to §95 (2026-10-05 feasibility check).
 - Test fixture factories duplicated across files (Strategy/CodecConfig,
   extended-stream, encoded-chunk builders) → conftest consolidation.
 - `EncodedChunk` composition duplicated (`_pair_placeholder` vs
@@ -582,62 +548,6 @@ Deferred as costly/structural:
   and api→measure `_parse_duration` — re-homing per §57.
 - Broader test-surface rework beyond metrics (string-format pinning etc.);
   skipped integration tests need a real run on a media sample.
-
----
-
-## 66. CLI subcommands review
-
-**Status:** decisions made 2026-10-05; spec `2026-10-05 cli-intent-commands` drafted
-(requirements + design, awaiting approval → tasks.md).
-
-Decisions from the 2026-10-05 session:
-
-- Command set: `auto` / `video` / `audio` / `measure` / `config` / `extract` (new
-  meaning). `chunk`/`encode`/`merge` removed (pre-alpha, no compat); api named
-  functions remain the dev/test surface.
-- Verified while designing: MergePhase is ALREADY video-only by behavior
-  (`merge.py:8-9` — audio muxing intentionally omitted, delivery files kept
-  alongside; zero `_dep_result(AudioPhase)` reads) — the AudioPhase dep existed
-  purely to schedule audio early in `auto` runs. Dropped; scheduling moves to
-  multi-terminal ordering: `_drive(targets=(AudioPhase, MergePhase))` over one
-  registry (memoization dedupes shared deps). No no-op scheduler phase; `Phase.run()`
-  untouched.
-- `video_required` is NOT retired (my wrong first take): the video stream has a
-  MATERIAL component — timestamps (and the video-row want) — that audio-only runs
-  must not touch. The flag stays but is DERIVED per run from the terminals'
-  dependency closure (closure reaches video chain → True). Registry itself also
-  becomes closure-derived (§24 consumed).
-- `extract` is phase-bound (user override of my standalone lean): runs Job →
-  Extraction with a materialize mode; video/audio (pass-through streams) become
-  real files under `extracted/` — §48 bullet 2 in scope. Plan-free, no --cleanup,
-  sidecar-honest, preserved on later processing runs.
-- NO real final-materialization phase this window: chapter translation / subtitle
-  rework / best-of selection are human-in-the-loop with no settled UX — future
-  spec of its own.
-- §95 lands in the SAME branch (user choice): set redesign + condensation +
-  extract in one window.
-
-Do we really need all current subcommands? From UX point of view for end-user.
-Current setup was mirroring the initial phases structure and allowed better testing for devs.
-But ordinary user likely doesn't need that.
-
-What would ordinary user need? I'd guess it should be intent based. Something like:
-- auto - kept for full default pipeline
-- video - for video only processing
-- audio - for audio only processing
-- measure - for measuring, including EXTERNAL videos (i.e. things produced not by pyqenc).
-
-anything else?
-
-I was thinking about a way to give user mechanics to extract (materialize) anything from source really.
-Maybe this should be the function of `extract` subcommand (a bit different from extract mechanics in auto/video/audio), if we moved to virtual streams in main phases.
-This is also a question specifically for audio - user might want source audio available as standalone files to use in external audio editors.
-I was thinking of maybe introducing a dump filter (like passthrough, but to a file). But direct extract command might be a better way.
-As another point for extract subcommand working like this - it was always a problem to just extract everything from mkv. Most CLI tools require explicit
-streams listing, which is quite painful when making commands manually. with `extract` subcommand it could be something like `pyqenc extract source.mkv --exclude "video-" -y` to dump everything.
-Ideally reusing the current extract phase mechanics.
-
-other considerations?
 
 ---
 
@@ -1084,44 +994,6 @@ Assessment (updated 2026-10-05 after user review of the first take):
   than mechanism — the merge rules currently live only inside
   `_deep_merge`'s docstring; the config docs should state them (including
   the `{}`/`[]` asymmetry decision) whatever gets built.
-
----
-
-## 95. CLI condensation — one pipeline-command template, declarative subcommand table — needs thinking
-
-User observation 2026-10-05: "CLI looks to be very bloated with all the
-`process_*` and `_cmd_*` functions basically duplicating each other.
-Leftovers of previous bad design." Feasibility check (same day) confirms:
-
-- `_cmd_extract` / `_cmd_chunk` / `_cmd_encode` are byte-identical except the
-  banner line, the api callable, and the success/fail noun (40 lines each).
-  `_cmd_merge` = the same body + output-file listing; `_cmd_auto` = + the
-  key-value display table; `_cmd_audio` = the body minus crop and plan.
-  After the config-resolution branch, the per-command differences reduced to
-  exactly THREE axes: needs-crop, needs-plan (audio: no), output flavor
-  (plain / list-files / display-table).
-- The six `_create_*_subcommand` parsers are the same shape: name + help +
-  one arg-group mix — a declarative table drives them.
-- `api.py` is already uniform (six thin `_drive` wrappers); its named
-  functions are the public surface and can stay as thin aliases of one
-  `run_to(target=…)` if desired.
-
-Design sketch to think through: one `_SubcommandSpec` (banner, runner,
-needs_crop, needs_plan, flavor) + a single `_cmd_pipeline(args, spec)` +
-table-driven parser creation. Estimated −250 lines of cli.py with zero
-behavior change. Interactions to decide: §66 (the subcommand SET redesign —
-intent-based auto/video/audio/measure) should land FIRST or together — no
-point condensing commands that may be renamed/merged; `_cmd_config` and
-`_cmd_measure` stay separate (genuinely different shapes). Supersedes the
-§65 deferred bullet.
-
-2026-10-05: superseded-as-decided — §66 decisions landed same session; §95 is
-Req 10 of the `2026-10-05 cli-intent-commands` spec (pending approval), same
-single branch. With only three pipeline commands remaining (`auto`/`video`/
-`audio`) the table shrinks; needs-crop/needs-plan collapse into arg_groups;
-`extract` joins config/measure as a dedicated handler. §24 (closure-derived
-registry) folded into the same spec — the closure computation was already
-needed for the derived `video_required`.
 
 ---
 
