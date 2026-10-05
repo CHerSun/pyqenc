@@ -22,6 +22,7 @@
 - `2026-09-28 artifact-model` (successor for the artifact layer) — defines the generic `Artifact[PayloadT]` recovery/contract layer above this spec's entity family: which entities become artifacts, internal ledger vs external result contracts, and the per-phase artifact flow. The stream model, naming ownership (Req 15), unique-property dumps and sidecar schemas here are unchanged. The `timestamps.txt` extraction row becomes the video artifact's material component there.
 - `2026-04-29 pts-preservation` — global PTS restoration via `timestamps.txt` at merge is unchanged; this spec adds the frame-preservation invariant on top of it.
 - `2026-09-01 probe-phase-refactor` — ProbePhase keeps its sidecar and slow-facet ownership; its frame-count source changes (see Req 9).
+- `2026-10-05 cli-intent-commands` — the pass-through video/audio streams gain their first sanctioned file-forming path: the `extract` command's materialization mode writes codec-derived elementary streams under `extracted/` (presence-based rows, recorded via `extracted_path` on the info slices). Processing runs stay direct-from-source; the materialized files are never retargeted as pipeline inputs. `video_required` (the timestamps gating this spec's extraction step relied on) is now derived from the run's terminal closure instead of hand-set per command.
 
 ## Introduction
 

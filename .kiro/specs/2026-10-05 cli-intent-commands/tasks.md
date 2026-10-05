@@ -4,7 +4,7 @@
 
 - Spec: CLI Intent Commands — implementation plan for the 2026-10-05 spec
 - Created: 2026-10-05
-- Completed:
+- Completed: 2026-10-05
 
 ## Overview
 
@@ -167,7 +167,7 @@ existing commands byte-identical in behavior. Requirement ids reference
     (auto performs no work), extract (every kind + codec-verified + rerun
     byte-stable). Speed rule applied (`h265+ultrafast`).
 
-- [ ] 10. Closeout
+- [x] 10. Closeout
   - Cross-spec review per agent-specs: summarize supersessions/changes at the
     top of this spec and the affected older specs (`2026-09-25
     file-stream-model`, `2026-09-28 artifact-model` virtual-stream notes)

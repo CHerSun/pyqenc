@@ -4,7 +4,7 @@
 
 - Spec: CLI Intent Commands — intent-based command surface, dependency-derived registry, and explicit stream materialization
 - Created: 2026-10-05
-- Completed:
+- Completed: 2026-10-05
 
 ## Current state (verified 2026-10-05)
 
