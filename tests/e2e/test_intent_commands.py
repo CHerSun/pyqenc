@@ -145,11 +145,10 @@ class TestExtractMaterializeEndToEnd:
         names = {f.name for f in extracted.iterdir() if f.is_file()}
         assert any(n.endswith(".mkv") for n in names), "video container"
         assert sum(n.endswith(".mka") for n in names) == 2, "one .mka per audio track"
+        assert TIMESTAMPS_FILENAME in names, "the video row's standing PTS-index component"
         assert any(n.endswith(".srt") for n in names), "subtitle"
         assert any(n.endswith(".jpg") for n in names), "attachment"
         assert "chapters.xml" in names, "chapters"
-        assert TIMESTAMPS_FILENAME not in names, \
-            "extract derives no video-need — no timestamps component"
 
         # Verify CORRECTNESS semantically: each container must carry its
         # expected stream (the codec survives the remux; a byte-compare

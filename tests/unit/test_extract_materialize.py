@@ -28,8 +28,14 @@ from tests.unit.test_extraction_pts import (
 )
 
 
-def _extract_timestamps_noop(*args: object, **kwargs: object) -> None:
-    """Stand-in for the patched-away timestamps extraction."""
+def _fake_timestamps(*args: Path, **kwargs: object) -> None:
+    """Stand-in for the patched-away timestamps extraction: write the index.
+
+    The PTS index is the video row's standing material component — produced
+    in materialization runs too — so the fake must materialize it for the
+    row to complete.
+    """
+    args[2].write_bytes(b"0\n0\n")
 
 
 def _run_materialize(
@@ -77,12 +83,83 @@ def _run_materialize(
     with (
         patch("pyqenc.phases.extraction._probe_streams_json", return_value=ffprobe_data),
         patch("pyqenc.phases.extraction.run_ffmpeg", side_effect=fake_run_ffmpeg),
-        patch("pyqenc.phases.extraction._extract_timestamps", side_effect=_extract_timestamps_noop),
+        patch("pyqenc.phases.extraction._extract_timestamps", side_effect=_fake_timestamps),
         patch("subprocess.run", side_effect=fake_subprocess),
     ):
         result = phase.run(dry_run=False)
 
     return result, ffmpeg_cmds, subprocess_cmds, work_dir, source
+
+
+class TestVideoRowComponents:
+    """The video artifact's components are cumulative (user review 2026-10-05):
+    the PTS index always; the container additionally in extract runs; neither
+    when the row is not wanted."""
+
+    def test_materialize_run_produces_both_components(self, tmp_path: Path) -> None:
+        result, _, _, work_dir, _ = _run_materialize(
+            tmp_path, _ffprobe_json(_video_json(), _audio_json()),
+        )
+        assert result.outcome is PhaseOutcome.COMPLETED
+        names = {f.name for f in (work_dir / EXTRACTED_DIR).iterdir()}
+        assert TIMESTAMPS_FILENAME in names
+        assert any(n.endswith(".mkv") for n in names)
+
+    def test_processing_run_produces_only_the_index(self, tmp_path: Path) -> None:
+        result, _, _, work_dir, _ = _run_materialize(
+            tmp_path, _ffprobe_json(_video_json(), _audio_json()),
+            video_required=True, materialize=False,
+        )
+        assert result.outcome is PhaseOutcome.COMPLETED
+        names = {f.name for f in (work_dir / EXTRACTED_DIR).iterdir()}
+        assert names == {TIMESTAMPS_FILENAME}
+
+    def test_unwanted_video_row_produces_neither(self, tmp_path: Path) -> None:
+        result, _, _, work_dir, _ = _run_materialize(
+            tmp_path, _ffprobe_json(_video_json(), _audio_json()),
+            exclude="video",
+        )
+        assert result.outcome is PhaseOutcome.COMPLETED
+        names = {f.name for f in (work_dir / EXTRACTED_DIR).iterdir()}
+        assert TIMESTAMPS_FILENAME not in names
+        assert not any(n.endswith(".mkv") for n in names)
+
+    def test_partial_row_completes_its_missing_component(self, tmp_path: Path) -> None:
+        """A pre-existing index with a missing container (a PARTIAL row) is
+        completed by producing only the container — the index producer is
+        not re-run."""
+        work_dir, source = _make_work_and_source(tmp_path)
+        extracted = work_dir / EXTRACTED_DIR
+        extracted.mkdir(parents=True)
+        (extracted / TIMESTAMPS_FILENAME).write_bytes(b"0\n0\n")
+
+        phase = _make_extraction_phase(
+            work_dir, source, video_required=False, materialize=True,
+        )
+        ffmpeg_cmds: list[list[str]] = []
+        index_calls: list[Path] = []
+
+        def fake_index(*args: Path) -> None:
+            index_calls.append(args[2])
+
+        def fake_run_ffmpeg(request: FFmpegRequest, **kwargs: object) -> MagicMock:
+            ffmpeg_cmds.append([str(a) for a in compose_command(request)[0]])
+            if request.output is not None:
+                request.output.write_bytes(b"x" * 16)
+            return MagicMock(success=True, returncode=0, stderr_lines=[], frame_count=None)
+
+        with (
+            patch("pyqenc.phases.extraction._probe_streams_json",
+                  return_value=_ffprobe_json(_video_json(), _audio_json())),
+            patch("pyqenc.phases.extraction.run_ffmpeg", side_effect=fake_run_ffmpeg),
+            patch("pyqenc.phases.extraction._extract_timestamps", side_effect=fake_index),
+            patch("subprocess.run"),
+        ):
+            result = phase.run(dry_run=False)
+
+        assert result.outcome is PhaseOutcome.COMPLETED
+        assert index_calls == []  # the index component was already present
+        assert any("copy" in c for c in ffmpeg_cmds)  # the container was produced
 
 
 class TestTrackMaterialization:
@@ -150,10 +227,11 @@ class TestProcessingPreservesMaterializedFiles:
             tmp_path, _ffprobe_json(_video_json(), _audio_json()),
         )
         extracted = work_dir / EXTRACTED_DIR
+        # The materialize run already produced the index (the video row's
+        # standing component); the processing rerun takes the all-complete
+        # fast exit over exactly this set.
         materialized = sorted(f.name for f in extracted.iterdir())
-        # The processing run's wanted video component, present beforehand so
-        # the rerun takes the all-complete fast exit.
-        (extracted / TIMESTAMPS_FILENAME).write_bytes(b"0\n0\n")
+        assert TIMESTAMPS_FILENAME in materialized
 
         phase = _make_extraction_phase(work_dir, source)  # processing mode
         with (
@@ -170,6 +248,4 @@ class TestProcessingPreservesMaterializedFiles:
         sp.assert_not_called()
         ff.assert_not_called()
         # Materialized AV survives a processing run untouched.
-        assert sorted(f.name for f in extracted.iterdir()) == [
-            *materialized, TIMESTAMPS_FILENAME,
-        ]
+        assert sorted(f.name for f in extracted.iterdir()) == materialized

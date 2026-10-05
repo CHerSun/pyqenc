@@ -101,6 +101,11 @@ existing commands byte-identical in behavior. Requirement ids reference
     `.mkv`, audio `.mka`) via one ffmpeg stream-copy mechanism — the codec
     extension maps and the mkvextract tracks batch (mkvextract cannot write
     containers) are gone.
+  - AMENDED at user review (2nd): the video row's components are cumulative —
+    the PTS index is produced whenever the row is wanted (extract runs
+    included), the container additionally on materialize; unwanted rows
+    produce neither. Per-kind row classification consolidated into
+    `_row_state(expected_names, on_disk)` (one on-disk listing helper).
   - Run-scoped materialize flag threaded to `ExtractionPhase` ctor-style
     alongside `video_required`; in materialize mode the selected video and
     audio streams enter the artifact ledger as material rows with real

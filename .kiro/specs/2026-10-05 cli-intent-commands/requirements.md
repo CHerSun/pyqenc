@@ -187,13 +187,21 @@ source.mkv --exclude "video-" -y`).
 
 - **9.1 — Every stream kind, including pass-through.**
   - The `extract` run shall materialize every stream kind matching the
-    filters — subtitles, attachments, chapters, timestamps as in any run,
-    plus video and audio streams as real files. `extract` is the sanctioned
-    path where the virtual streams become files.
+    filters — subtitles, attachments, chapters, the video row's PTS-index
+    component, plus video and audio streams as real files. `extract` is the
+    sanctioned path where the virtual streams become files.
   - (Amended 2026-10-05 at implementation, user review: materialized video
     and audio land as Matroska containers — `.mkv` / `.mka` — not
     codec-derived elementary streams: containers accept any codec (no
     codec-to-extension knowledge), and keep the stream's timestamps.)
+  - (Amended 2026-10-05, user review — the video row's components are
+    CUMULATIVE, not mode-swapped: the per-frame PTS index is the row's
+    standing component whenever the row is wanted; the container joins it
+    additionally in extract runs. Output matrix: wanted row in an extract
+    run → index + container; wanted row in a processing run → index only;
+    unwanted row (audio-only closure, or the exclude filter hitting video in
+    an extract run) → neither. A row with some components present is
+    PARTIAL and completes by producing only the missing ones.)
 - **9.2 — Phase-bound.**
   - The `extract` run shall execute through the job → extraction machinery
     against the source, so that `job.yaml` semantics (source fingerprint,
