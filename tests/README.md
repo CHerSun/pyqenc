@@ -81,7 +81,7 @@ pytest --cov=pyqenc --cov-report=html
 
 Some tests require sample video files to be present in the `samples/` directory:
 
-- `samples/sample-lion-fullhd.mkv`
+- `samples/sample-e2e.mkv` — built by `uv run python -m tests.fixtures.build_e2e_sample <real_video.mkv>` (see `samples/SAMPLES.md`)
 - `samples/sample-sunrise-4k.mkv`
 
 Tests that require sample videos are automatically skipped if the files are not available.
