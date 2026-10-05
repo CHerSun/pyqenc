@@ -97,6 +97,10 @@ existing commands byte-identical in behavior. Requirement ids reference
     resolves a plan (existing monkeypatch pin stays green)
 
 - [x] 5. Extract materialization — phase mechanics (Req 9.1, 9.2, 9.3, 9.6)
+  - AMENDED at user review: tracks remux to Matroska containers (video
+    `.mkv`, audio `.mka`) via one ffmpeg stream-copy mechanism — the codec
+    extension maps and the mkvextract tracks batch (mkvextract cannot write
+    containers) are gone.
   - Run-scoped materialize flag threaded to `ExtractionPhase` ctor-style
     alongside `video_required`; in materialize mode the selected video and
     audio streams enter the artifact ledger as material rows with real

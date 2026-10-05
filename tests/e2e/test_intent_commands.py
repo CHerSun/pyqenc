@@ -143,19 +143,18 @@ class TestExtractMaterializeEndToEnd:
 
         extracted = work / EXTRACTED_DIR
         names = {f.name for f in extracted.iterdir() if f.is_file()}
-        assert any(n.endswith(".h265") for n in names), "video elementary stream"
-        assert any(n.endswith(".aac") for n in names), "aac elementary stream"
-        assert any(n.endswith(".flac") for n in names), "flac elementary stream"
+        assert any(n.endswith(".mkv") for n in names), "video container"
+        assert sum(n.endswith(".mka") for n in names) == 2, "one .mka per audio track"
         assert any(n.endswith(".srt") for n in names), "subtitle"
         assert any(n.endswith(".jpg") for n in names), "attachment"
         assert "chapters.xml" in names, "chapters"
         assert TIMESTAMPS_FILENAME not in names, \
             "extract derives no video-need — no timestamps component"
 
-        # Verify CORRECTNESS semantically: each elementary file must decode as
-        # its expected codec (a byte-compare against a reference mkvextract
-        # call would share this code's track-id convention and prove nothing
-        # about which stream was extracted).
+        # Verify CORRECTNESS semantically: each container must carry its
+        # expected stream (the codec survives the remux; a byte-compare
+        # against a reference extraction would share this code's track-id
+        # convention and prove nothing about which stream was picked).
         def _codec_of(path: Path) -> str:
             probe = subprocess.run(
                 ["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", str(path)],
@@ -164,9 +163,10 @@ class TestExtractMaterializeEndToEnd:
             streams = json.loads(probe.stdout)["streams"]
             return streams[0]["codec_name"]
 
-        assert _codec_of(extracted / next(n for n in names if n.endswith(".h265"))) == "hevc"
-        assert _codec_of(extracted / next(n for n in names if n.endswith(".aac"))) == "aac"
-        assert _codec_of(extracted / next(n for n in names if n.endswith(".flac"))) == "flac"
+        codecs = {_codec_of(extracted / n) for n in names if n.endswith(".mka")}
+        assert "aac" in codecs and "flac" in codecs
+        video_files = [n for n in names if n.endswith(".mkv")]
+        assert len(video_files) == 1 and _codec_of(extracted / video_files[0]) == "hevc"
 
         # Re-run: complete work fast-exits and leaves the files untouched.
         snapshots = {n: (extracted / n).read_bytes() for n in names}

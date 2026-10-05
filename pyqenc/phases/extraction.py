@@ -672,15 +672,18 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             for s in self._attachments
         ]
         if self._materialize:
+            # Containers, not elementary streams: Matroska accepts any codec,
+            # keeps the stream's timestamps, and needs no codec knowledge to
+            # name the file — video lands as .mkv, audio as .mka.
             self._audio = [
                 s.model_copy(update={"info": s.info.model_copy(update={
-                    "extracted_path": extracted_dir / f"{s.safe_name()}.{s.file_extension}",
+                    "extracted_path": extracted_dir / f"{s.safe_name()}.mka",
                 })})
                 for s in self._audio
             ]
             if self._video is not None:
                 self._video = self._video.model_copy(update={"info": self._video.info.model_copy(update={
-                    "extracted_path": extracted_dir / f"{self._video.safe_name()}.{self._video.file_extension}",
+                    "extracted_path": extracted_dir / f"{self._video.safe_name()}.mkv",
                 })})
 
     def _load_or_enumerate(self, source_file: File, sidecar_path: Path) -> None:
@@ -829,16 +832,15 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         if attachment_rows:
             self._extract_attachments(attachment_rows, source, errors)
 
-        # Materialized pass-through tracks (video + audio) extract as one
-        # mkvextract `tracks` batch before the per-row loop.
+        # Materialized pass-through tracks (video + audio) remux to containers.
         track_rows: list[Artifact[VideoStream] | Artifact[AudioStream]] = []
         if self._materialize:
             track_rows = [
                 *[a for a in artifacts if a.state == ArtifactState.ABSENT and _is_video_row(a)],
                 *[a for a in artifacts if a.state == ArtifactState.ABSENT and _is_audio_row(a)],
             ]
-            if track_rows:
-                self._extract_tracks(track_rows, source, errors)
+            for artifact in track_rows:
+                self._materialize_track(artifact, source, errors)
 
         for artifact in artifacts:
             if artifact.state != ArtifactState.ABSENT:
@@ -976,63 +978,21 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         for artifact, _, _ in rows:
             self._dump_attachment_ffmpeg(artifact, source, errors)
 
-    def _extract_tracks(
-        self,
-        artifacts: list[Artifact[VideoStream] | Artifact[AudioStream]],
-        source:    Path,
-        errors:    list[str],
-    ) -> None:
-        """Materialize pass-through tracks — one mkvextract call, ffmpeg fallback.
-
-        mkvextract is the primary: one ``tracks`` batch writes every pair
-        ``track_id:<tmp>`` — the ffprobe-index track selector, the same
-        convention the timestamps extraction uses. Exit 0 means every track
-        was written, so each ``.tmp`` sibling is renamed straight to its
-        final name — a track that never materialized surfaces as ``OSError``
-        at the rename. On any failure the tmps are wiped (mkvextract writes
-        the tracks it can before failing) and every row goes to the per-track
-        ffmpeg fallback — the net for sources whose Matroska track numbers
-        do not line up with the ffprobe indices.
-        """
-        rows: list[tuple[Artifact[VideoStream] | Artifact[AudioStream], Path, Path]] = []
-        for artifact in artifacts:
-            final = artifact.payload.info.extracted_path
-            assert final is not None, "materialization sets the expected location"
-            rows.append((artifact, final, final.parent / f"{final.stem}{TEMP_SUFFIX}"))
-
-        mkvextract_cmd: list[str | os.PathLike] = [
-            "mkvextract", source, "tracks",
-            # "N:<file>" is a track spec sub-string mkvextract parses itself —
-            # plain form only, no extended-length prefix.
-            *(f"{a.payload.info.track_id}:{tmp}" for a, _, tmp in rows),
-        ]
-        logger.debug("Materializing %d track(s) via mkvextract", len(rows))
-        try:
-            subprocess.run(mkvextract_cmd, capture_output=True, check=True)
-            for _, final, tmp in rows:
-                tmp.replace(final)
-            for artifact, _, _ in rows:
-                artifact.state = ArtifactState.COMPLETE
-            return
-        except (subprocess.CalledProcessError, OSError) as exc:
-            logger.debug("mkvextract tracks failed (%s), falling back to ffmpeg", exc)
-            for _, _, tmp in rows:
-                tmp.unlink(missing_ok=True)
-
-        for artifact, _, _ in rows:
-            self._dump_track_ffmpeg(artifact, source, errors)
-
-    def _dump_track_ffmpeg(
+    def _materialize_track(
         self,
         artifact: Artifact[VideoStream] | Artifact[AudioStream],
         source:   Path,
         errors:   list[str],
     ) -> None:
-        """Materialize one track via stream copy — the per-track fallback.
+        """Remux one pass-through track into a Matroska container.
 
-        ``as_input()`` carries the ``-map 0:<track_id>`` selector (the single
-        place stream location is expressed); the extension picked at
-        normalization drives ffmpeg's elementary muxer.
+        Video lands as ``.mkv``, audio as ``.mka`` — containers accept any
+        codec (no codec knowledge needed to name or write the file) and keep
+        the stream's container timestamps, unlike elementary streams. A plain
+        stream copy through the runner (``-map`` selector via ``as_input()``,
+        `.tmp`-then-rename promotion). mkvextract cannot produce containers,
+        so there is no mkv-first variant for this path — ffmpeg is the single
+        mechanism.
         """
         stream = artifact.payload
         final  = stream.info.extracted_path
@@ -1042,7 +1002,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             output_args = ("-c", FFMPEG_CODEC_COPY),
             output      = final,
         )
-        logger.debug("Stream-copying track %d: %s", stream.info.track_id, final.name)
+        logger.debug("Materializing track %d: %s", stream.info.track_id, final.name)
         res = run_ffmpeg(request)
         if res.success and final.exists():
             artifact.state = ArtifactState.COMPLETE

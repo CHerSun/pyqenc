@@ -190,6 +190,10 @@ source.mkv --exclude "video-" -y`).
     filters — subtitles, attachments, chapters, timestamps as in any run,
     plus video and audio streams as real files. `extract` is the sanctioned
     path where the virtual streams become files.
+  - (Amended 2026-10-05 at implementation, user review: materialized video
+    and audio land as Matroska containers — `.mkv` / `.mka` — not
+    codec-derived elementary streams: containers accept any codec (no
+    codec-to-extension knowledge), and keep the stream's timestamps.)
 - **9.2 — Phase-bound.**
   - The `extract` run shall execute through the job → extraction machinery
     against the source, so that `job.yaml` semantics (source fingerprint,
@@ -278,7 +282,10 @@ absence under closure construction; an over-declared read is scheduling debt.
 - Materialized file names follow the two-name doctrine: extraction owns
   composition; filesystem names via `safe_name()`, display via `display_name()`.
 - Stream materialization uses mkvextract first with ffmpeg fallback per the
-  established tool policy (§53); encoding/processing stays ffmpeg-only.
+  established tool policy (§53) — for the kinds that are elementary files
+  (attachments, timestamps, chapters); track materialization is a remux into
+  Matroska containers, which mkvextract cannot produce, so ffmpeg stream
+  copy is its single mechanism (2026-10-05 amendment, see Req 9.1).
 - Pre-alpha: removed commands and reshaped api signatures get no compat shims.
 - Processing remains source-anchored: materialized files are never retargeted
   as pipeline inputs (the §48 "retargetting" idea is rejected).

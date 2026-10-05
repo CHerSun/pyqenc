@@ -230,9 +230,10 @@ class VideoStreamInfo(StreamInfo):
         resolution:    ``"<width>x<height>"`` (e.g. ``"1920x1080"``).
         pix_fmt:       Pixel format name (e.g. ``yuv420p10le``) — a source
                        property worth preserving.
-        extracted_path: Path of the materialized elementary stream (relative
-                       to the work dir on disk), or ``None`` — a fact set only
-                       by materialization runs (the `extract` command).
+        extracted_path: Path of the materialized video file (relative to the
+                       work dir on disk), or ``None`` — a fact set only by
+                       materialization runs (the `extract` command; the
+                       stream lands inside an `.mkv` container).
     """
 
     fps:          float | None       = None
@@ -296,9 +297,10 @@ class AudioStreamInfo(StreamInfo):
     Attributes:
         layout: The track's channel layout (faithful source token plus its
                 canonical form and channel count).
-        extracted_path: Path of the materialized elementary stream (relative
-                to the work dir on disk), or ``None`` — a fact set only by
-                materialization runs (the `extract` command).
+        extracted_path: Path of the materialized audio file (relative to
+                the work dir on disk), or ``None`` — a fact set only by
+                materialization runs (the `extract` command; the stream
+                lands inside an `.mka` container).
     """
 
     layout: ChannelLayout | None = None
@@ -438,43 +440,6 @@ class Stream[InfoT: StreamInfo](BaseModel):
         return sanitize_filesystem_text(self.display_name())
 
 
-_VIDEO_TRACK_EXTENSIONS: tuple[tuple[str, str], ...] = (
-    ("h264", "h264"),
-    ("hevc", "h265"),
-    ("av1", "obu"),
-    ("vp9", "ivf"),
-    ("vp8", "ivf"),
-    ("theora", "ogv"),
-    ("mpeg4", "m4v"),
-    ("msmpeg4", "m4v"),
-    ("mpeg2video", "m2v"),
-    ("mpeg1video", "m1v"),
-    ("ffv1", "ffv1"),
-)
-"""Video codec (ffprobe name substring) → elementary-stream extension for
-materialization runs. Order matters: the first substring match wins; an
-unmapped codec raises (the message names it — extend this map)."""
-
-_AUDIO_TRACK_EXTENSIONS: tuple[tuple[str, str], ...] = (
-    ("eac3", "eac3"),
-    ("ac3", "ac3"),
-    ("aac", "aac"),
-    ("dts", "dts"),
-    ("truehd", "thd"),
-    ("flac", "flac"),
-    ("mp3", "mp3"),
-    ("mp2", "mp2"),
-    ("opus", "opus"),
-    ("vorbis", "ogg"),
-    ("pcm", "wav"),
-    ("alac", "m4a"),
-    ("wavpack", "wv"),
-    ("wma", "wma"),
-)
-"""Audio codec (ffprobe name substring) → elementary-stream extension for
-materialization runs. Same matching rule as the video map."""
-
-
 class VideoStream(Stream[VideoStreamInfo]):
     """A video stream — ``info`` is statically :class:`VideoStreamInfo`."""
 
@@ -484,15 +449,6 @@ class VideoStream(Stream[VideoStreamInfo]):
         if self.info.resolution:
             tags.append(f"res={self.info.resolution}")
         return _format_display_name("video", self.info, tags)
-
-    @property
-    def file_extension(self) -> str:
-        """The elementary-stream extension for materialization, by codec."""
-        codec = (self.info.codec_name or "").lower()
-        for known, ext in _VIDEO_TRACK_EXTENSIONS:
-            if known in codec:
-                return ext
-        raise ValueError(f"Unknown video codec for materialization: {self.info.codec_name}")
 
 
 class AudioStream(Stream[AudioStreamInfo]):
@@ -504,15 +460,6 @@ class AudioStream(Stream[AudioStreamInfo]):
         if self.info.layout is not None:
             tags.append(f"ch={self.info.layout.original}")
         return _format_display_name("audio", self.info, tags)
-
-    @property
-    def file_extension(self) -> str:
-        """The elementary-stream extension for materialization, by codec."""
-        codec = (self.info.codec_name or "").lower()
-        for known, ext in _AUDIO_TRACK_EXTENSIONS:
-            if known in codec:
-                return ext
-        raise ValueError(f"Unknown audio codec for materialization: {self.info.codec_name}")
 
     def selector_string(self) -> str:
         """The conventional, regex-friendly targeting string for ``audio.select``.
