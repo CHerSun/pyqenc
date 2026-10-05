@@ -1247,7 +1247,12 @@ Sequencing thought: natural companion to §92's long-function pass (same
 files, same split); the unified-summaries window also rewrites merge +
 optimization recovery — landing this first or folding it there both work.
 
-Extra consideration: status recovery only? or actual artifact producing too? Could save on clarity for partial re-producing.
+Human: Extra consideration: status recovery only? or actual artifact producing too? Could save on clarity for partial re-producing.
+I.e. phase owns mass processing of specific type artifacts and another specific type artifacts, like `list[Artifact[Chunk]]` into `list[Artifact[EncodedChunk]]` per strategy.
+But how to recover its state from disk (persistence) and how to produce itself - are not phase concerns, rather individual artifacts (or its playload type). While
+the phase takes care of scheduling, aggregation, process tracking, etc. Feasible? I.e. File can give products - its streams/attachments/etc. Video stream can give product - scenes.
+Scenes are basically chunks (maybe skipping scenes as internal; going directly VideoStream - Chunks). Chunks -> EncodedChunk (EncodedChunk as election from attempts). EncodedChunks -> MergedVideo.
+As either a producer or consumer? (consumer for many to one; producer for one-to-one or one-to-many?). This is hypothesis only.
 
 ---
 
@@ -1371,7 +1376,34 @@ x265 docs (https://x265.readthedocs.io — `q=`/`b=` only).
 
 ---
 
-## Last known = 102
+## 103. AudioPhase recovery stats every row separately — listing-first violated
+
+**Status:** 🤔 bug (verified from code 2026-10-05; found in review of the
+cli-intent-commands window)
+
+`AudioPhase._classify` (`pyqenc/phases/audio.py:327-335`) classifies every
+expected (track × chain) row with its own `.exists()` call — N×M stat
+syscalls per recovery — and then runs the `audio_dir.iterdir()` listing
+ANYWAY five lines below (`:339-346`) for the present-but-unwanted surplus
+scan. The single listing the canonical approach needs already happens, just
+AFTER the redundant per-row stats instead of before them.
+
+Recovery classification is listing-only by design (one dir scan → name set
+→ membership; no per-file reads) — extraction already owns the canonical
+shape after the cli-intent-commands consolidation: `_on_disk_file_names()`
++ `_row_state(expected, on_disk)` (`pyqenc/phases/extraction.py`). The
+single `sidecar_path.exists()` is fine — one file, O(1).
+
+**Questions to think about:** fix = hoist the surplus listing above the row
+loop, classify rows by name-membership; decide whether
+`_on_disk_file_names`/`_row_state` re-home to a shared home (utils or the
+phase base) so phases stop re-inventing the pattern — check the other
+phases' recovery loops for the same shape while at it (§92's
+per-item-loader-vs-aggregator split is the natural umbrella).
+
+---
+
+## Last known = 103
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
