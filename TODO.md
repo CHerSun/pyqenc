@@ -636,6 +636,13 @@ single-file: Params + Filter + Instance + union member. Blast radius:
 app_config, chain, 3 test files. Until then the cast (or an assert-isinstance)
 is the sanctioned interim.
 
+2026-10-05 addendum: the interim's fragility went live — the first-ever audio
+e2e run (new sample) caught FilterInstance params landing as plain BaseModel
+after any model_dump→validate round-trip; pydantic 2.13 turned that into hard
+AttributeErrors at the cast site (5339b61 fixed the round-trip to always
+re-validate through the type's params model). The discriminated union kills
+this class of drift structurally — worth the priority bump when next touched.
+
 ---
 
 ## 80. LongPathYaml redefinition — cleaner editor experience + pyright-gate enabler — needs thinking
