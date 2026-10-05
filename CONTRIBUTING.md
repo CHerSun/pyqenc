@@ -251,8 +251,8 @@ Shouldn't be required, but just in case:
 
 1. Create the phase module in `pyqenc/phases/`, subclassing `Phase[YourPhaseResult]`
 2. Implement the contract hooks: `_recover()`, `_execute()`, `_make_result()` (see `pyqenc/phase.py` docstrings; optional hooks as needed)
-3. Wire it in `_build_registry()` (`pyqenc/phase.py`): construction order + `DEPENDS_ON` declarations
-4. Add CLI subcommand in `cli.py`
+3. Declare its `DEPENDS_ON` — the registry is derived from the declarations (`dependency_closure` of the run's terminals), so the declaration alone decides membership and construction order
+4. Add CLI subcommand in `cli.py` (a `_SubcommandSpec` entry in the declarative table, or a dedicated handler for tool-shaped commands)
 5. Add API function in `api.py`
 6. Write tests for the phase
 

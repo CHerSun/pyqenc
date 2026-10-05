@@ -2,7 +2,7 @@
 
 <!-- markdownlint-disable MD024 -->
 
-`pyqenc` processes each extracted audio track through explicit, user-defined recipes. You describe what you want with three pieces of config under `audio:` — a **filter** palette, a set of **chains**, and an optional **select** tree — and pyqenc produces exactly the outputs you asked for. There is no combinatorial fan-out: one chain applied to one track produces one file.
+`pyqenc` processes each source audio track through explicit, user-defined recipes. You describe what you want with three pieces of config under `audio:` — a **filter** palette, a set of **chains**, and an optional **select** tree — and pyqenc produces exactly the outputs you asked for. There is no combinatorial fan-out: one chain applied to one track produces one file. (Tracks are consumed directly from the source — "extracted" below means enumerated at extraction, not materialized to files; `pyqenc extract` is the command that writes standalone audio files.)
 
 The guiding principle is source fidelity: unless a filter explicitly changes something (channel count, loudness), everything else — sample rate, bit depth, timing — is preserved.
 
@@ -12,7 +12,7 @@ The guiding principle is source fidelity: unless a filter explicitly changes som
 
 ```mermaid
 flowchart LR
-    T["Extracted audio tracks"] --> S["select<br/>(which tracks to process)"]
+    T["Source audio tracks"] --> S["select<br/>(which tracks to process)"]
     S -->|working track set| X["chains x tracks"]
     P["filters<br/>(named palette)"] --> C["chains<br/>(ordered filter recipes)"]
     C --> X
@@ -21,7 +21,7 @@ flowchart LR
 
 - **filters** — a palette of named, reusable transformations. Each filter has a `type` and its own parameters. Defined as a mapping, so you can add or tune one filter in a later config layer without redefining the whole palette (dict-merge).
 - **chains** — ordered lists of filter names. A chain is a recipe; applied to N selected tracks it produces exactly N outputs. Defined as a list that a later config layer replaces wholesale (list-replace).
-- **select** — decides which extracted tracks get processed at all. Empty (the default) means every extracted audio track. Also list-replace across layers.
+- **select** — decides which source tracks get processed at all. Empty (the default) means every audio track. Also list-replace across layers.
 
 All three live under the top-level `audio:` key in your config. See `pyqenc/default_config.yaml` for the shipped starter palette.
 
@@ -191,7 +191,7 @@ So in the example above: `normal` produces a peak-normalised FLAC; `night` downm
 
 ## Select
 
-`select` decides which extracted audio tracks are processed. When it is empty or absent, **all** extracted audio tracks are selected.
+`select` decides which source audio tracks are processed. When it is empty or absent, **all** audio tracks are selected.
 
 Selection matches your regexes against each track's **conventional string** — a stable description of the track, not its filename:
 

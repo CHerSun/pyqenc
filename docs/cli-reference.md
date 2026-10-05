@@ -4,24 +4,24 @@
 
 ## Commands
 
+The command set is intent-based — you say what you want done, not which phase to stop at:
+
 ```sh
-# main subcommands
-pyqenc auto    <source_video> [options]   # Full automatic pipeline (main command)
+# intents
+pyqenc auto    <source_video> [options]   # Everything: audio processing + the video chain through the merge
+pyqenc video   <source_video> [options]   # The video chain only (no audio work)
+pyqenc audio   <source_video> [options]   # Audio processing only (never touches the video stream)
+pyqenc extract <source_video> [options]   # Materialize streams from the source into standalone files
+# tools
 pyqenc measure <source_video> [targets]   # Measure quality metrics
 pyqenc config  [target_dir]               # Copy active config for customization
-# advanced subcommands
-pyqenc extract <source_video> [options]   # Extract streams only
-pyqenc chunk   <source_video> [options]   # Detect scene chunking only
-pyqenc encode  <source_video> [options]   # Encode chunks only
-pyqenc audio   <source_video> [options]   # Process audio only
-pyqenc merge   <source_video> [options]   # Merge final output only
 ```
 
 Use `pyqenc --help` or `pyqenc <command> --help` for full argument lists.
 
-Only `auto`, `measure` and `config` subcommands are intended for normal usage.
-
-It is NOT recommended to use phase-specific subcommands (`extract`, `chunk`, `encode`, `audio`, `merge`) unless you know what you're doing.
+The intents compose incrementally: run `video` and `audio` separately (in
+either order), then `auto` — it fast-exits through the completed work and
+only performs what remains (typically the merge).
 
 ---
 
@@ -36,20 +36,22 @@ Applies to all subcommands.
 
 ## Execution Options
 
-Applies to all pipeline subcommands (`auto`, `extract`, `chunk`, `encode`, `audio`, `merge`).
+Applies to all pipeline subcommands (`auto`, `video`, `audio`, `extract`).
 
 | Option          | Description                                                                                                                                       | Default |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `-y, --execute` | Actually execute phases (omit = dry-run preview)                                                                                                  | dry-run |
 | `--force`       | On source-file mismatch or unrecoverable config changes in execute mode: delete all intermediate artifacts and reset state to start anew          | off     |
-| `--cleanup`     | Delete workspace files per artifact after completion. `--cleanup all`: also remove remaining intermediate directories after full pipeline success | off     |
+| `--cleanup`     | Delete workspace files per artifact after completion. `--cleanup all`: also remove remaining intermediate directories after full pipeline success. Not available on `extract` — materialized files are the product | off |
 | `--no-metrics`  | Suppress process metrics.yaml output (pipeline run stats). Does not affect quality metrics measurements.                                          | off     |
 
 ---
 
-## `auto` Options
+## `auto` / `video` Options
 
 ### Quality & Strategy
+
+These options apply to `auto` and `video` (the video chain resolvers).
 
 | Option                    | Description                                                                                                                                                                    | Default                            |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
@@ -73,7 +75,8 @@ Automatic crop detection uses ffmpeg's `cropdetect` filter. The same crop parame
 
 ### Stream Filtering
 
-Applied during extraction phase, use dry-run to preview.
+Applied during the extraction phase, use dry-run to preview. Applies to all
+pipeline subcommands (`auto`, `video`, `audio`, `extract`).
 
 | Option             | Description                  | Example            | Default      |
 | ------------------ | ---------------------------- | ------------------ | ------------ |
@@ -90,6 +93,29 @@ Chunks are timestamp windows computed directly from the source — no intermedia
 | ------------------------- | --------------------------------------------------------------------------- | -------------------- |
 | `--scene-threshold VALUE` | Scene detection sensitivity, 0.0–255.0. Lower = more sensitive (more cuts). | from config (`27.0`) |
 | `--min-scene-length N`    | Minimum frames per chunk — merges short scenes into one chunk.              | from config (`24`)   |
+
+---
+
+## `extract` Subcommand
+
+Materializes streams from the source into standalone files under
+`<work-dir>/extracted/` — every kind matching the include/exclude filters:
+subtitles, attachments, chapters, and the pass-through video and audio
+tracks that processing runs consume directly from the source. Video and
+audio land as codec-derived elementary streams (`.h265`, `.flac`, ...).
+
+The dry-run prints the stream table, the per-stream destinations, and the
+planned cost bound before anything is written; `-y` materializes. No
+`--cleanup` (the files are the product), no quality or crop options.
+
+```sh
+pyqenc extract source.mkv -y                      # everything
+pyqenc extract source.mkv --exclude "video-" -y   # everything except video
+pyqenc extract source.mkv --include ".*eng.*" -y  # English-named streams only
+```
+
+Materialized files are facts: a later processing run in the same workdir
+neither consumes nor deletes them.
 
 ---
 

@@ -7,13 +7,13 @@ flowchart LR
     subgraph ExtractionPhase
         D[ffprobe enumeration] --> E[VideoStream / AudioStream / subs]
         E --> F[extraction.yaml]
-        E --> G["extract: timestamps.txt, chapters, subs, attachments"]
-        E --> H[disk-space estimate]
+        E --> G["extract: timestamps.txt, chapters, subs, attachments<br/>(extract cmd: + video/audio elementary streams)"]
     end
     subgraph ProbePhase
         I[frame count ← timestamps.txt] --> J[ExtendedVideoStream]
         K[cropdetect on source window] --> J
         J --> L[probe.yaml]
+        J --> H[disk-space estimate]
     end
     subgraph AudioPhase
         U["audio chains: AudioStream.as_input() on source"] --> V[chain outputs + audio.yaml]
@@ -44,5 +44,4 @@ flowchart LR
     Y -->|"selected strategies"| P
     N -->|"full chunk set"| P
     R --> S
-    V --> S
     G --> S

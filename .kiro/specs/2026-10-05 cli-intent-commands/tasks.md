@@ -136,7 +136,7 @@ existing commands byte-identical in behavior. Requirement ids reference
   - Tests: parser smoke (six commands present, three absent); per-command
     help and arg surfaces; `auto` flavor (files + table) vs plain flavors
 
-- [ ] 8. Docs (Req 12)
+- [x] 8. Docs (Req 12)
   - `docs/cli-reference.md` rewritten for six commands
   - `docs/architecture.md`: registry/execution-model description
     (closure-derived, derived video-need, multi-terminal), extraction
