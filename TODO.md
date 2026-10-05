@@ -114,6 +114,15 @@ After that we must stop and validate with human the reasoning.
 
 This is also a chance to reestablish sidecars using class model introduced in file-stream-model and artifact-model recent specs, or the prior config rework spec - to use standard objects on sidecars.
 
+DIRECTLY RELATED: §100 + §101 (artifact-owned recovery + static winner
+names). In particular WINNERS invalidation (`encoded/`): consumption-based
+recovery makes staleness structural — leftover names after all wanted rows
+consumed are stale rows, so a winner whose identity no longer matches the
+wanted chunk set surfaces immediately instead of surviving as "COMPLETE";
+§99 (stale-summary selection) is the live evidence of what hand-listed
+invalidation misses. Settle the §100/§101 mechanics first, then this audit
+checks the remaining invalidation logic against them.
+
 ---
 
 ## Metrics & quality search
@@ -1245,7 +1254,11 @@ optimization recovery — landing this first or folding it there both work.
 **Status:** 🤔 bug (design doctrine violation; user finding from a live
 optimization run 2026-10-05; pre-existing on main). DIRECTLY RELATED: §100
 (artifact-owned recovery) — static winner names are what makes §100's
-direct artifact↔on-disk-file matching possible; land as one motion.
+direct artifact↔on-disk-file matching possible; land as one motion. Also
+DIRECTLY RELATED: §11 (invalidation logic check) — winners invalidation
+(`encoded/`) becomes structural under the §100 consumption protocol
+(leftovers = stale), which is the baseline §11's audit should check
+against.
 
 Doctrine: attempts (the `encoding/` search workspace) are named WITH quality
 — they are search artifacts. Winners (`encoded/<strategy>/`) map 1:1 to
