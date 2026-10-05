@@ -69,7 +69,6 @@ flowchart TD
         OP --> EN
         EX --> AU
         EN --> ME
-        AU --> ME
     end
 ```
 

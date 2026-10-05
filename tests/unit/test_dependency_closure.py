@@ -71,11 +71,10 @@ class TestDependencyClosure:
             JobPhase, ExtractionPhase, ProbePhase, ChunkingPhase,
         )
 
-    def test_merge_terminal_walks_the_full_graph(self) -> None:
+    def test_merge_terminal_walks_the_video_chain(self) -> None:
         assert dependency_closure((MergePhase,)) == (
             JobPhase,
             ExtractionPhase,
-            AudioPhase,
             ProbePhase,
             ChunkingPhase,
             OptimizationPhase,
@@ -139,13 +138,12 @@ class TestClosureDerivedRegistry:
         assert list(registry) == [JobPhase, ExtractionPhase]
         assert registry[ExtractionPhase]._video_required is False
 
-    def test_merge_registry_walks_full_graph_with_video_need(self, tmp_path) -> None:
+    def test_merge_registry_walks_video_chain_with_video_need(self, tmp_path) -> None:
         plan = _APP_CONFIG.resolve_encoding()
         registry = self._registry((MergePhase,), plan, tmp_path)
         assert list(registry) == [
             JobPhase,
             ExtractionPhase,
-            AudioPhase,
             ProbePhase,
             ChunkingPhase,
             OptimizationPhase,

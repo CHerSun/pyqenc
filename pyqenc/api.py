@@ -57,7 +57,7 @@ def _drive(
     plan:     EncodingPlan | None,
     source:   Path,
     work_dir: Path,
-    target:   type[Phase],
+    targets:  tuple[type[Phase], ...],
     *,
     force:          bool,
     cleanup:        CleanupLevel,
@@ -65,20 +65,21 @@ def _drive(
     dry_run:        bool,
     crop_params:    CropParams | None = None,
 ) -> RunResult:
-    """Build the registry and drive a single target phase via the :class:`Runner`.
+    """Build the registry and drive the terminal phases via the :class:`Runner`.
 
     Constructs the run-scoped metrics collector and phase registry, then hands
-    both to a :class:`Runner` that runs only ``target``.  The registry is the
-    dependency closure of ``target``; the video-need flag is derived from that
-    closure inside ``_build_registry`` (never hand-set here).  Dependency
-    execution happens inside the phases; the metrics lifecycle and
+    both to a :class:`Runner` that runs the ``targets`` in order.  The registry
+    is the dependency closure of the terminals; the video-need flag is derived
+    from that closure inside ``_build_registry`` (never hand-set here).
+    Dependency execution happens inside the phases — a shared dependency
+    reached by several terminals runs once; the metrics lifecycle and
     ``finalize`` broadcast are owned by the runner.
 
     Args:
         config:         Fully assembled application configuration.
         source:         Resolved path to the source video file.
         work_dir:       Working directory for all pipeline artifacts.
-        target:         The terminal phase class to run.
+        targets:        The terminal phase classes to run, in drive order.
         force:          Wipe existing artifacts on source mismatch when ``True``.
         cleanup:        Artifact retention policy for intermediate files.
         no_metrics:     When ``True``, use a no-op collector (no ``metrics.yaml``).
@@ -114,17 +115,16 @@ def _drive(
         no_metrics,
         collector,
         crop_params,
-        terminals=(target,),
+        terminals=targets,
     )
 
     runner = Runner(
         registry         = registry,
-        target           = target,
+        targets          = targets,
         collector        = collector,
         work_dir         = work_dir,
         cleanup          = cleanup,
         no_metrics       = no_metrics,
-        is_terminal_most = target is MergePhase,
     )
     return runner.run(dry_run=dry_run)
 
@@ -147,8 +147,9 @@ def run_pipeline(
 ) -> RunResult:
     """Execute the complete end-to-end pipeline (all phases) up to ``MergePhase``.
 
-    Drives ``MergePhase`` as the terminal-most target; every upstream phase is
-    executed as a dependency inside the phases.
+    Drives the terminals ``(AudioPhase, MergePhase)`` in that order — the
+    fast audio work completes before the slow encode chain begins — and every
+    upstream phase is executed as a dependency inside the phases.
 
     Args:
         config:      Fully assembled application configuration.
@@ -176,7 +177,7 @@ def run_pipeline(
         plan,
         source,
         work_dir,
-        MergePhase,
+        (AudioPhase, MergePhase),
         force          = force,
         cleanup        = cleanup,
         no_metrics     = no_metrics,
@@ -225,7 +226,7 @@ def extract_streams(
         plan,
         source,
         work_dir,
-        ExtractionPhase,
+        (ExtractionPhase,),
         force          = force,
         cleanup        = cleanup,
         no_metrics     = no_metrics,
@@ -275,7 +276,7 @@ def chunk_video(
         plan,
         source,
         work_dir,
-        ChunkingPhase,
+        (ChunkingPhase,),
         force          = force,
         cleanup        = cleanup,
         no_metrics     = no_metrics,
@@ -324,7 +325,7 @@ def process_audio(
         None,
         source,
         work_dir,
-        AudioPhase,
+        (AudioPhase,),
         force          = force,
         cleanup        = cleanup,
         no_metrics     = no_metrics,
@@ -373,7 +374,7 @@ def encode_chunks(
         plan,
         source,
         work_dir,
-        EncodingPhase,
+        (EncodingPhase,),
         force          = force,
         cleanup        = cleanup,
         no_metrics     = no_metrics,
@@ -396,7 +397,7 @@ def merge_final(
 ) -> RunResult:
     """Run the pipeline up to and including the merge phase.
 
-    Drives ``MergePhase``; all upstream phases are executed (not merely
+    Drives ``(MergePhase,)``; all upstream phases are executed (not merely
     scanned) as dependencies inside the phases.  Callers needing the final
     output paths can read them from ``RunResult.output_files``.
 
@@ -422,7 +423,7 @@ def merge_final(
         plan,
         source,
         work_dir,
-        MergePhase,
+        (MergePhase,),
         force          = force,
         cleanup        = cleanup,
         no_metrics     = no_metrics,
