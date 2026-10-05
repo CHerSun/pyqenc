@@ -404,8 +404,11 @@ def _recover_encoding_attempts(
     chunk_id appears in that set are ``COMPLETE``; all others are ``ABSENT``.
     No per-pair globs and no file reads are performed during recovery.
 
-    CRF history for pending pairs is loaded lazily by the encoding worker via
-    ``_load_history_from_sidecars`` when the pair is actually picked up.
+    CRF history for pending pairs is not pre-loaded: when the encoding worker
+    actually picks a pair up, each attempt the search proposes is checked
+    against the attempt workspace first — an existing file at that
+    (chunk, strategy, crf) is a cache hit (``[reused]``), so replaying an
+    unchanged pair re-runs the search without re-encoding.
 
     Args:
         work_dir:   Pipeline working directory.

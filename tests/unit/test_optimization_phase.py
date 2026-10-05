@@ -1,11 +1,14 @@
-"""Unit tests for OptimizationPhase tolerance re-application from cached results.
+"""Unit tests for OptimizationPhase selection and recovery currency.
 
-Covers requirement 7.7:
-- When all strategy results are cached and only tolerance changed, re-select
-  without re-encoding.
-- Correct strategy selection at various tolerance levels.
-- Tolerance of 0% selects exactly one strategy (the best).
-- Tolerance of 100% selects all passing strategies.
+Covers:
+- Live selection: the fast exit (all winner pairs COMPLETE) computes the
+  selection from the CURRENT tolerance over the persisted rows — tolerance
+  changes cost nothing and are never persisted.
+- Plan-scoped derivation (TODO §99): rows for strategies outside the run's
+  plan never reach selection, display, or the rewritten sidecar.
+- The per-pair ledger (presence-based to-test, both modes).
+- Fixed-mode entry (cleanup guard, winner wipe, banner) and the fixed
+  compared-run machinery (pruning, anchor, synthetic set).
 """
 
 import logging
@@ -140,10 +143,7 @@ def _make_phase(
 
 def _persist_optimization(
     work_dir: Path,
-    source: Path,
     strategy_results: list[StrategyTestResult],
-    tolerance_pct: float,
-    selected: list[str],
     *,
     test_chunks: list[str] | None = None,
 ) -> None:
@@ -158,9 +158,46 @@ def _persist_optimization(
         probe            = ProbeState(frame_count=0, crop=CropParams()),
         test_chunks      = test_chunks if test_chunks is not None else ["chunk-001", "chunk-002"],
         strategy_results = strategy_results,
-        tolerance_pct    = tolerance_pct,
-        selected         = selected,
     ).save(work_dir / "optimization.yaml")
+
+
+def _seed_winner(
+    work_dir: Path,
+    strategy: Strategy,
+    chunk,
+    *,
+    size_bytes: int = 64,
+) -> None:
+    """Fabricate a COMPLETE winner pair (file + result sidecar) on disk."""
+    from pyqenc.constants import ENCODED_OUTPUT_DIR
+    from pyqenc.phases.encoding import EncodingResultSidecar
+    from pyqenc.stream_model import EncodedChunk as _EC
+
+    strategy_dir = work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
+    strategy_dir.mkdir(parents=True, exist_ok=True)
+    winner = strategy_dir / _EC.format_file_name(
+        chunk.safe_name(), "1920x1080", Decimal(20))
+    winner.write_bytes(b"x" * size_bytes)
+    write_yaml_atomic(
+        strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
+        EncodingResultSidecar(
+            winning_attempt=winner.name, crf=Decimal(20),
+            metrics={}, targets_met=True,
+        ).model_dump(exclude_none=True),
+    )
+
+
+def _wire_chunks(phase: OptimizationPhase, chunks: list) -> None:
+    """Wire a real chunk set into the phase's ChunkingPhase dependency."""
+    from pyqenc.phases.chunking import ChunkingPhaseResult
+    chunking = next(
+        ph for cls, ph in phase._phases.items() if cls.__name__ == "ChunkingPhase"
+    )
+    chunking.result = ChunkingPhaseResult(
+        outcome   = PhaseOutcome.COMPLETED,
+        message   = "chunking complete",
+        chunks    = [Artifact(payload=c, state=ArtifactState.COMPLETE) for c in chunks],
+    )
 
 
 def _make_results(sizes: list[int]) -> list[StrategyTestResult]:
@@ -219,136 +256,244 @@ class TestApplyTolerance:
 
 
 # ---------------------------------------------------------------------------
-# Tolerance re-application from cached results (Req 7.7)
+# Fast exit: live selection over persisted rows (the only sanctioned reader)
 # ---------------------------------------------------------------------------
 
-class TestToleranceReapplication:
-    """Tests for re-selecting strategies from cached results when tolerance changes."""
+class TestFastExitLiveSelection:
+    """All winner pairs COMPLETE → REUSED with the selection computed live.
 
-    def test_reapplication_returns_completed_outcome(self, tmp_path: Path) -> None:
-        """When all results cached and tolerance changed, the cheap re-select runs (COMPLETED)."""
+    Bug guarded (supersedes the old tolerance-reapply class): a tolerance
+    change used to be persisted-decision currency — a cheap re-select
+    execution plus a sidecar rewrite. Selection is now a pure derivation
+    from the current tolerance over the persisted rows: a change costs
+    nothing (no phase work, no write).
+    """
+
+    def _setup(self, tmp_path: Path, tolerance: float):
         strategies = [_S1, _S2, _S3]
-        phase, work_dir = _make_phase(tmp_path, strategies, tolerance=10.0)
-        source = phase._dep_result(JobPhase).source
-
-        results = _make_results([100, 104, 120])
+        phase, work_dir = _make_phase(tmp_path, strategies, tolerance=tolerance)
+        chunks = [
+            _make_chunk(float(i * 10), float((i + 1) * 10), tmp_path)
+            for i in range(2)
+        ]
+        _wire_chunks(phase, chunks)
+        for s in strategies:
+            for chunk in chunks:
+                _seed_winner(work_dir, s, chunk)
         _persist_optimization(
-            work_dir  = work_dir,
-            source    = source,
-            strategy_results = results,
-            tolerance_pct    = 5.0,
-            selected         = [_S1.display_name(), _S2.display_name()],
+            work_dir, _make_results([100, 104, 120]),
+            test_chunks=[c.safe_name() for c in chunks],
         )
+        return phase, work_dir
 
+    def test_tolerance_applied_live(self, tmp_path: Path) -> None:
+        """Tolerance 25% selects all three — recomputed live, no re-encoding."""
+        phase, _ = self._setup(tmp_path, tolerance=25.0)
         result = phase.run(dry_run=False)
-        # Tolerance re-application is cheap pending work (re-select + save),
-        # so the phase COMPLETED it rather than short-circuiting to REUSED.
-        assert result.outcome == PhaseOutcome.COMPLETED
-        assert result.is_complete is True
+        assert result.outcome is PhaseOutcome.REUSED
+        assert [s.display_name() for s in result.selected_strategies] == [
+            s.display_name() for s in [_S1, _S2, _S3]
+        ]
 
-    def test_reapplication_updates_selected_strategies(self, tmp_path: Path) -> None:
-        """Re-application selects strategies based on new tolerance, not old."""
-        strategies = [_S1, _S2, _S3]
-        # New tolerance is 25% — should include S3 (20% above best)
-        phase, work_dir = _make_phase(tmp_path, strategies, tolerance=25.0)
-        source = phase._dep_result(JobPhase).source
-
-        results = _make_results([100, 104, 120])
-        _persist_optimization(
-            work_dir         = work_dir,
-            source           = source,
-            strategy_results = results,
-            tolerance_pct    = 5.0,
-            selected         = [_S1.display_name(), _S2.display_name()],
-        )
-
+    def test_zero_tolerance_selects_best_only(self, tmp_path: Path) -> None:
+        phase, _ = self._setup(tmp_path, tolerance=0.0)
         result = phase.run(dry_run=False)
-        assert _S1 in result.selected_strategies
-        assert _S2 in result.selected_strategies
-        assert _S3 in result.selected_strategies
+        assert result.outcome is PhaseOutcome.REUSED
+        assert result.selected_strategies == [_S1]
 
-    def test_reapplication_persists_new_tolerance(self, tmp_path: Path) -> None:
-        """After re-application, optimization.yaml is updated with the new tolerance."""
-        strategies = [_S1, _S2, _S3]
-        phase, work_dir = _make_phase(tmp_path, strategies, tolerance=10.0)
-        source = phase._dep_result(JobPhase).source
-
-        results = _make_results([100, 104, 120])
-        _persist_optimization(
-            work_dir         = work_dir,
-            source           = source,
-            strategy_results = results,
-            tolerance_pct    = 5.0,
-            selected         = [_S1.display_name(), _S2.display_name()],
-        )
-
+    def test_fast_exit_writes_nothing(self, tmp_path: Path) -> None:
+        """The fast exit is read-only — the sidecar stays byte-identical."""
+        phase, work_dir = self._setup(tmp_path, tolerance=10.0)
+        sidecar = work_dir / "optimization.yaml"
+        before = sidecar.read_bytes()
         phase.run(dry_run=False)
+        assert sidecar.read_bytes() == before
 
-        persisted = OptimizationParams.load(work_dir / "optimization.yaml")
-        assert persisted is not None
-        assert persisted.tolerance_pct == 10.0
-
-    def test_no_reapplication_when_tolerance_unchanged(self, tmp_path: Path) -> None:
-        """When tolerance is unchanged and all results cached, outcome is REUSED (fast path)."""
+    def test_missing_winner_keeps_work_pending(self, tmp_path: Path) -> None:
+        """Presence rules: a strategy without complete pairs is to-test."""
         strategies = [_S1, _S2, _S3]
         phase, work_dir = _make_phase(tmp_path, strategies, tolerance=5.0)
-        source = phase._dep_result(JobPhase).source
-
-        results = _make_results([100, 104, 120])
+        chunks = [_make_chunk(0.0, 10.0, tmp_path)]
+        _wire_chunks(phase, chunks)
+        for s in (strategies[0], strategies[1]):
+            _seed_winner(work_dir, s, chunks[0])
         _persist_optimization(
-            work_dir         = work_dir,
-            source           = source,
-            strategy_results = results,
-            tolerance_pct    = 5.0,
-            selected         = [_S1.display_name(), _S2.display_name()],
+            work_dir, _make_results([100, 104, 120]),
+            test_chunks=[c.safe_name() for c in chunks],
+        )
+        result = phase.run(dry_run=True)
+        assert result.outcome is PhaseOutcome.PENDING
+
+
+# ---------------------------------------------------------------------------
+# §99: selection derives from live, plan-scoped state — never stale rows
+# ---------------------------------------------------------------------------
+
+class TestSelectionFromLiveState:
+    """Rows for strategies outside the run's plan never reach selection.
+
+    Bug guarded (TODO §99, live 2026-10-05): the execution path merged
+    persisted rows unscoped, ranked a stale smallest-size strategy first,
+    selected it, and the silent name-drop then left Encoding with an empty
+    selection. Rows outside the plan are now unread on every path.
+    """
+
+    def test_stale_rows_never_selected_on_fast_exit(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Plan-scoped fast exit: a tiny stale row cannot win selection and
+        is not even displayed."""
+        plan_strategies = [_S1, _S3]
+        phase, work_dir = _make_phase(tmp_path, plan_strategies, tolerance=5.0)
+        chunks = [_make_chunk(0.0, 10.0, tmp_path), _make_chunk(10.0, 20.0, tmp_path)]
+        _wire_chunks(phase, chunks)
+        for s in plan_strategies:
+            for chunk in chunks:
+                _seed_winner(work_dir, s, chunk)
+        # Stale table from a previous run's strategy set: the old bug picked
+        # the tiny stale row ("smallest size") and crashed downstream.
+        _persist_optimization(
+            work_dir,
+            [
+                StrategyTestResult(strategy=_S2.display_name(), total_size=100),
+                StrategyTestResult(strategy="h264+veryslow", total_size=110),
+                StrategyTestResult(strategy=_S1.display_name(), total_size=200),
+                StrategyTestResult(strategy=_S3.display_name(), total_size=300),
+            ],
+            test_chunks=[c.safe_name() for c in chunks],
         )
 
-        result = phase.run(dry_run=False)
-        assert result.outcome == PhaseOutcome.REUSED
-        assert result.is_complete is True
-        assert _S1 in result.selected_strategies
-        assert _S2 in result.selected_strategies
+        with caplog.at_level(logging.INFO, logger="pyqenc.phases.optimization"):
+            result = phase.run(dry_run=False)
 
-    def test_reapplication_zero_tolerance_selects_one(self, tmp_path: Path) -> None:
-        """Changing tolerance to 0% selects exactly the best strategy."""
+        assert result.outcome is PhaseOutcome.REUSED
+        assert result.selected_strategies == [_S1]
+        assert _S2.display_name() not in caplog.text
+        assert "h264+veryslow" not in caplog.text
+
+    def test_processing_rewrites_table_without_stale_rows(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Bug guarded (laundering): the mid-run save used to persist the
+        unfiltered cache back — stale rows survived into the new sidecar.
+        The final table now derives from the live ledger, plan-scoped."""
+        from unittest.mock import MagicMock as _MM
+
+        from pyqenc.phases.encoding import EncodingResult
+
         strategies = [_S1, _S2, _S3]
-        phase, work_dir = _make_phase(tmp_path, strategies, tolerance=0.0)
-        source = phase._dep_result(JobPhase).source
-
-        results = _make_results([100, 104, 120])
+        phase, work_dir = _make_phase(tmp_path, strategies, tolerance=5.0)
+        chunks = [_make_chunk(0.0, 10.0, tmp_path), _make_chunk(10.0, 20.0, tmp_path)]
+        _wire_chunks(phase, chunks)
+        # Winners already on disk for S1/S2; S3 is pending this run.
+        for s in (strategies[0], strategies[1]):
+            for chunk in chunks:
+                _seed_winner(work_dir, s, chunk, size_bytes=100 if s is _S1 else 105)
         _persist_optimization(
-            work_dir         = work_dir,
-            source           = source,
-            strategy_results = results,
-            tolerance_pct    = 5.0,
-            selected         = [_S1.display_name(), _S2.display_name()],
+            work_dir,
+            [
+                StrategyTestResult(strategy="h264+veryslow", total_size=90),
+                StrategyTestResult(strategy=_S1.display_name(), total_size=200),
+                StrategyTestResult(strategy=_S2.display_name(), total_size=210),
+            ],
+            test_chunks=[c.safe_name() for c in chunks],
+        )
+
+        async def _fake_parallel(**_kwargs: object) -> EncodingResult:
+            for chunk in chunks:
+                _seed_winner(work_dir, _S3, chunk, size_bytes=150)
+            return EncodingResult()
+
+        monkeypatch.setattr(
+            "pyqenc.phases.optimization._make_encoder", lambda **_kw: _MM(),
+        )
+        monkeypatch.setattr(
+            "pyqenc.phases.encoding._encode_chunks_parallel", _fake_parallel,
         )
 
         result = phase.run(dry_run=False)
-        assert len(result.selected_strategies) == 1
-        assert result.selected_strategies[0] == _S1
 
-    def test_partial_results_not_reapplied(self, tmp_path: Path) -> None:
-        """Re-application only triggers when ALL strategies have cached results."""
-        strategies = [_S1, _S2, _S3]
-        phase, work_dir = _make_phase(tmp_path, strategies, tolerance=10.0)
-        source = phase._dep_result(JobPhase).source
+        assert result.outcome is PhaseOutcome.COMPLETED
+        plan_names = {s.display_name() for s in strategies}
+        assert {s.display_name() for s in result.selected_strategies} <= plan_names
+        persisted = OptimizationParams.load(work_dir / "optimization.yaml")
+        assert persisted is not None
+        assert {r.strategy for r in persisted.strategy_results} == plan_names
+        # Sizes derive from the live winner files (2 chunks x seeded bytes).
+        by_name = {r.strategy: r for r in persisted.strategy_results}
+        assert by_name[_S1.display_name()].total_size == 200
+        assert by_name[_S3.display_name()].total_size == 300
 
-        # Only 2 of 3 strategies have results
-        partial_results = [
-            StrategyTestResult(strategy=_S1.display_name(), total_size=100),
-            StrategyTestResult(strategy=_S2.display_name(), total_size=104),
-        ]
+    def test_missing_table_rows_derive_only(self, tmp_path: Path) -> None:
+        """All pairs complete but the table misses a plan strategy → sizes
+        derive live from the ledger, a fresh table is saved, nothing encodes
+        (COMPLETED without any encoder mocks is itself the proof)."""
+        plan_strategies = [_S1, _S2]
+        phase, work_dir = _make_phase(tmp_path, plan_strategies, tolerance=5.0)
+        chunks = [_make_chunk(0.0, 10.0, tmp_path), _make_chunk(10.0, 20.0, tmp_path)]
+        _wire_chunks(phase, chunks)
+        for s in plan_strategies:
+            for chunk in chunks:
+                _seed_winner(work_dir, s, chunk, size_bytes=100 if s is _S1 else 110)
+        # Table covers only S1 — S2's row is missing.
         _persist_optimization(
-            work_dir         = work_dir,
-            source           = source,
-            strategy_results = partial_results,
-            tolerance_pct    = 5.0,
-            selected         = [_S1.display_name(), _S2.display_name()],
+            work_dir,
+            [StrategyTestResult(strategy=_S1.display_name(), total_size=1)],
+            test_chunks=[c.safe_name() for c in chunks],
         )
 
         result = phase.run(dry_run=False)
-        assert result.outcome != PhaseOutcome.REUSED
+
+        assert result.outcome is PhaseOutcome.COMPLETED
+        assert result.selected_strategies == [_S1]  # 200 vs 220 at 5% tolerance
+        persisted = OptimizationParams.load(work_dir / "optimization.yaml")
+        assert persisted is not None
+        by_name = {r.strategy: r for r in persisted.strategy_results}
+        assert by_name[_S1.display_name()].total_size == 200
+        assert by_name[_S2.display_name()].total_size == 220
+
+    def test_missing_sidecar_wipes_winners(self, tmp_path: Path) -> None:
+        """No sidecar → winner currency is unknown → conservative wipe +
+        replay from attempts (the pairs become pending again)."""
+        from pyqenc.constants import ENCODED_OUTPUT_DIR
+
+        plan_strategies = [_S1, _S2]
+        phase, work_dir = _make_phase(tmp_path, plan_strategies, tolerance=5.0)
+        chunks = [_make_chunk(0.0, 10.0, tmp_path)]
+        _wire_chunks(phase, chunks)
+        for s in plan_strategies:
+            _seed_winner(work_dir, s, chunks[0])
+        assert (work_dir / ENCODED_OUTPUT_DIR).exists()
+
+        result = phase.run(dry_run=True)
+
+        assert result.outcome is PhaseOutcome.PENDING
+        assert not (work_dir / ENCODED_OUTPUT_DIR / _S1.safe_name()).exists()
+
+
+# ---------------------------------------------------------------------------
+# Selection belt — programmatically-impossible states, caught at assembly
+# ---------------------------------------------------------------------------
+
+class TestSelectionBelt:
+    """Contract asserts in ``_make_result``: selection ⊆ plan, non-empty on success."""
+
+    def test_selection_outside_plan_raises(self, tmp_path: Path) -> None:
+        phase, _ = _make_phase(tmp_path, [_S1, _S2])
+        phase._selected_names = ["not-a-strategy"]
+        with pytest.raises(AssertionError, match="escaped the plan"):
+            phase._make_result(PhaseOutcome.COMPLETED, [], "message")
+
+    def test_empty_selection_raises_on_success(self, tmp_path: Path) -> None:
+        phase, _ = _make_phase(tmp_path, [_S1, _S2])
+        phase._selected_names = []
+        with pytest.raises(AssertionError, match="at least one strategy"):
+            phase._make_result(PhaseOutcome.COMPLETED, [], "message")
+
+    def test_failed_result_allows_empty_selection(self, tmp_path: Path) -> None:
+        phase, _ = _make_phase(tmp_path, [_S1, _S2])
+        result = phase._make_result(PhaseOutcome.FAILED, [], "error")
+        assert result.selected_strategies == []
 
 
 # ---------------------------------------------------------------------------
@@ -421,21 +566,12 @@ class TestPairLedger:
         the persisted-selection path in ``_resolve_test_chunks`` reads them
         back by id.
         """
-        from pyqenc.phases.chunking import ChunkingPhaseResult
         phase, work_dir = _make_phase(tmp_path, [_S1, _S2, _S3][:n_strategies])
-        chunking = next(
-            ph for cls, ph in phase._phases.items() if cls.__name__ == "ChunkingPhase"
-        )
-        chunking.result = ChunkingPhaseResult(
-            outcome   = PhaseOutcome.COMPLETED,
-            message   = "chunking complete",
-            chunks    = [Artifact(payload=c, state=ArtifactState.COMPLETE) for c in chunks],
-        )
+        _wire_chunks(phase, chunks)
         # Persist the full chunk set as the test selection so recovery is
         # deterministic (the fresh random pick stays covered by the e2e run).
         _persist_optimization(
-            work_dir, tmp_path / "source.mkv", [],
-            tolerance_pct=5.0, selected=[],
+            work_dir, [],
             test_chunks=[c.safe_name() for c in chunks],
         )
         return phase, work_dir, chunks
@@ -511,8 +647,10 @@ class TestPairLedger:
         phase2, _, _ = self._phase_with_chunks(tmp_path, 1, chunks)
         recovery2 = phase2._recover()
         assert [a.state for a in recovery2.artifacts] == [ArtifactState.COMPLETE]
-        assert recovery2.pending is False
         assert recovery2.artifacts[0].payload.crf == Decimal(20)
+        # The pair is complete, but the persisted table carries no rows —
+        # sizes/selection must be re-derived, so work IS pending.
+        assert recovery2.pending is True
 
 
 
@@ -1039,8 +1177,7 @@ class TestFixedComparedExecute:
         )
         # Persist the full chunk set as the test selection (deterministic).
         _persist_optimization(
-            work_dir, tmp_path / "source.mkv", [],
-            tolerance_pct=tolerance, selected=[],
+            work_dir, [],
             test_chunks=[c.safe_name() for c in chunks],
         )
 
@@ -1121,6 +1258,7 @@ class TestFixedComparedExecute:
 
         # The anchor is the smallest survivor; the synthetic set mirrors its
         # min-aggregated COMPARED stats only (sorted) — std/max stay out.
+        assert result.anchor == "h265-aq+slow"
         assert [(t.metric, t.statistic, t.value) for t in result.synthetic_targets] == [
             ("vif", "p10", 81.0),
             ("vif", "median", 84.0),
@@ -1128,13 +1266,11 @@ class TestFixedComparedExecute:
             ("vmaf", "median", 91.0),
         ]
 
+        # The sidecar persists facts only — selection/anchor are live
+        # derivations and the synthetic ruler re-derives from
+        # strategy_results on read (no synthetic_targets field).
         persisted = OptimizationParams.load(work_dir / "optimization.yaml")
         assert persisted is not None
-        assert persisted.anchor == "h265-aq+slow"
-        assert persisted.selected == ["h265-aq+slow", "h265+slow"]
-        # The sidecar persists facts + decisions only — the synthetic ruler
-        # is NOT persisted (no synthetic_targets field); it re-derives from
-        # strategy_results on read.
         assert not hasattr(persisted, "synthetic_targets")
         # The per-strategy records keep the FULL aggregated metrics for reuse
         # (data retention — re-selecting the comparison set never re-measures).
@@ -1143,7 +1279,7 @@ class TestFixedComparedExecute:
         assert by_name["h265-aq+slow"].metrics["vmaf_std"] == 1.1
         # Re-derivation from the persisted facts reproduces the ruler verbatim.
         anchor_result = next(
-            r for r in persisted.strategy_results if r.strategy == persisted.anchor
+            r for r in persisted.strategy_results if r.strategy == result.anchor
         )
         assert [
             (t.metric, t.statistic, t.value)
@@ -1225,7 +1361,7 @@ class TestFixedReuseFromPersisted:
                     {"crf": "18.0", "targets_met": True, "metrics": {}},
                 )
         _persist_optimization(
-            work_dir, tmp_path / "source.mkv",
+            work_dir,
             [
                 StrategyTestResult(
                     strategy="h265-aq+slow", total_size=1000,
@@ -1236,7 +1372,6 @@ class TestFixedReuseFromPersisted:
                     metrics={"vmaf_median": 93.0},
                 ),
             ],
-            tolerance_pct=5.0, selected=["h265-aq+slow", "h265+slow"],
             test_chunks=[c.safe_name() for c in chunks],
         )
 
@@ -1263,6 +1398,9 @@ class TestUncomparedFixedSkipsAnchor:
         result = phase.run(dry_run=False)
         assert result.outcome is PhaseOutcome.REUSED  # all-strategies skip path
         assert result.synthetic_targets == []
+        assert result.anchor is None
         persisted = OptimizationParams.load(work_dir / "optimization.yaml")
         assert persisted is not None
-        assert persisted.anchor is None
+        # Selection and anchor are live derivations — not sidecar fields.
+        assert "selected" not in persisted.model_dump()
+        assert "anchor" not in persisted.model_dump()

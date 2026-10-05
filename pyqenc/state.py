@@ -156,24 +156,19 @@ class StrategyTestResult(BaseModel):
 class OptimizationParams(BaseModel):
     """Phase parameter file model for optimization (``optimization.yaml``).
 
-    Stores the probe state active when optimization ran, selected test chunk IDs,
-    per-strategy test results, the tolerance used, the selected strategies,
-    the quality targets, and the metrics sampling factor active when the last
-    run wrote this file.
+    Stores the probe state active when optimization ran, selected test chunk
+    IDs, per-strategy test results, the quality targets, and the metrics
+    sampling factor active when the last run wrote this file.
 
-    Fixed-quality compared runs additionally persist the anchor identity
-    alongside the survivor list in ``selected``; searched runs leave it at
-    its default. The anchor's synthetic target set is NOT persisted — it is
-    a pure derivation from ``strategy_results`` (the anchor's aggregated
-    metrics projected onto the comparison stat set) and re-derives on read,
-    so a changed comparison set re-projects old measurements correctly.
+    Selection is NOT persisted: selected strategies and the fixed-mode
+    anchor are derivations over ``strategy_results`` (tolerance band /
+    dominance pruning) and are computed live from the current configuration
+    at read time — a persisted decision could only go stale.
 
     Attributes:
         probe:            Probe state (crop + frame count) active when optimization ran.
         test_chunks:      Chunk IDs used for test encodes.
         strategy_results: Per-strategy test results ordered by increasing total size.
-        tolerance_pct:    Tolerance percentage used when ``selected`` was computed.
-        selected:         Strategies selected as optimal at time of last run.
         quality_targets:  Quality targets active when test encodes ran, serialised as
                           ``"metric-statistic:value"`` strings (e.g. ``"vmaf-min:93.0"``).
                           Written in both optimization mode and all-strategies mode so
@@ -182,18 +177,13 @@ class OptimizationParams(BaseModel):
         sampling:          Frame subsampling factor used when test encodes ran.
                           ``None`` for files written before this field was added
                           (treated as unknown — no mismatch triggered).
-        anchor:           The fixed-mode measurement anchor (survivor with the
-                          smallest total test size); ``None`` in searched runs.
     """
 
     probe:            ProbeState | None       = None
     test_chunks:      list[str]                = Field(default_factory=list)
     strategy_results: list[StrategyTestResult] = Field(default_factory=list)
-    tolerance_pct:    float                    = 0.0
-    selected:         list[str]                = Field(default_factory=list)
     quality_targets:  list[str]                = Field(default_factory=list)
     sampling:         int | None               = None
-    anchor:           str | None               = None
 
     @classmethod
     def load(cls, path: Path) -> Self | None:

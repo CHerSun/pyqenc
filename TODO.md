@@ -118,9 +118,7 @@ DIRECTLY RELATED: §100 + §101 (artifact-owned recovery + static winner
 names). In particular WINNERS invalidation (`encoded/`): consumption-based
 recovery makes staleness structural — leftover names after all wanted rows
 consumed are stale rows, so a winner whose identity no longer matches the
-wanted chunk set surfaces immediately instead of surviving as "COMPLETE";
-§99 (stale-summary selection) is the live evidence of what hand-listed
-invalidation misses. Settle the §100/§101 mechanics first, then this audit
+wanted chunk set surfaces immediately instead of surviving as "COMPLETE". Settle the §100/§101 mechanics first, then this audit
 checks the remaining invalidation logic against them.
 
 ---
@@ -1031,6 +1029,16 @@ Assessment (updated 2026-10-05 after user review of the first take):
 single bar (ProgressBarState extension?); whether concat/append steps share
 the same bar or only the measuring stretch reports progress.
 
+Current output looks wrong:
+2026-10-06 01:34 [INFO] Merging: h265+ultrafast
+2026-10-06 01:34 [INFO]   Starting concatenation of 107 chunks...
+
+Starting concatenation of {bracket} h265+ultrafast {bracket}...
+Starting quality measurement of {bracket} h265+ultrafast {bracket}...
+...
+
+Looks more concise, with distinct steps. Single progress bar for full phase too (N*duration)? based on measurements, as concatenation is rather fast (1:20 aproximately)
+
 ---
 
 ## 97. Pareto dominance with tolerance — ignore small positive deltas
@@ -1084,83 +1092,6 @@ auto / video / audio / extract (+ `measure_quality` unchanged) — or a single
   job per config-resolution) — but video/audio/extract intents differ in
   needing it at all.
 - `extract`'s materialize flag: public api parameter or CLI-only detail?
-
----
-
-## 99. Optimization execution path selects strategies from the STALE persisted summary table — even strategies not in the run's plan
-
-**Status:** 🤔 bug (verified from code + live log 2026-10-05; pre-existing on
-main, independent of the cli-intent-commands window)
-
-Doctrine (listing-only-recovery): the persisted summary aggregate is a
-display artifact for the no-pending FAST-EXIT path; the execution path must
-only WRITE it. Here the execution path READS the stale table and feeds it
-into strategy selection.
-
-Live evidence (2026-10-05 run, searched mode, 4 strategies
-`h264/h265/h265-aq/h265-anime +ultrafast`): the phase ran fresh test encodes
-for the 4 current strategies, then printed an 8-row summary table mixing in
-4 stale rows from a previous run's strategy set (`h265+slow`,
-`h264+veryslow`, `h265-anime+slow`, `h265-aq+slow`), selected
-`h265+slow` (smallest stale size, 3.8 MB) — a strategy NOT in the run's
-plan — and EncodingPhase then crashed: "Strategies: none" → CRITICAL "No
-strategies available from OptimizationPhase" → merge failed on failed deps.
-
-Footprint (verified in code):
-
-- `phases/optimization.py:422-426` — `_recover` builds `cached_results`
-  from `persisted.strategy_results` with NO scoping to `plan.strategies`.
-  ROOT CAUSE: a strategy-set change is not an invalidation key — rows for
-  strategies no longer configured survive every currency check (probe,
-  targets, sampling all unchanged), because the sidecar caches per-strategy
-  rows by name.
-- `phases/optimization.py:719-723` — searched-mode execution merges
-  stale+fresh (`all_results = cached + new`), size-ranks, and runs
-  `_apply_tolerance` over the MERGED set → selection can pick a stale
-  strategy. (Fixed mode is clean: `:688` `final_results = new_results`
-  derived from `plan.strategies` only.)
-- `phases/optimization.py:793` — selected names are resolved against the
-  plan via `if n in by_name` — the stale pick is DROPPED SILENTLY (no
-  warning), yielding an empty selection.
-- `phases/optimization.py:597` — the mid-run sidecar save persists the
-  unfiltered cache back (`list(cached_results.values())`), laundering the
-  stale rows into the new run's sidecar.
-- `phases/optimization.py:557-574` and `:460-478` — the tolerance-reapply
-  cheap path and the all-cached fast-exit select/re-use from
-  `persisted.strategy_results` unfiltered: same class, will mis-select or
-  display stale rows after any strategy-set shrink.
-- `phases/encoding.py:2201, 2330` — empty `selected_strategies` surfaces as
-  CRITICAL/RecoveryError far from the cause.
-
-Fix direction (user ruling 2026-10-05):
-
-- The execution path shall NOT read `persisted.strategy_results` AT ALL.
-  The table is write-only there: derived from LIVE DATA accumulated from
-  actual run artifacts on disk — sizes from the encoded test outputs; the
-  reuse substrate is the artifact layer (`_recover_encoding_attempts` +
-  winner/attempt sidecars — the `[reused]` tags in the live log show that
-  machinery already working). The one sanctioned READER of persisted rows
-  is the no-pending fast-exit display path in `.run`.
-- Consequently the to-test decision becomes presence-based per plan
-  strategy (fixed mode's precedent, `optimization.py:438-444`) — the
-  sidecar-row-driven `not in cached_results` check (`:446-448`) dies with
-  the read.
-- In-repo precedent for the exact model: fixed mode's comment at
-  `optimization.py:653-656` ("derives every strategy fresh from the current
-  disk state … persisted results are never trusted") — searched mode
-  converges to the same rule.
-- REJECTED alternative (first take): load-side plan-scoping of cached rows —
-  it patches the selection while preserving the execution-path read of the
-  persisted table, which is the actual violation.
-- Belt regardless: contract asserts where the result is assembled —
-  `selected ⊆ plan names`, and an EMPTY selected set raises at construction
-  (loud, at the phase that caused it) instead of EncodingPhase's downstream
-  CRITICAL.
-- Adjacent: §11 (invalidation matrix — presence-based to-test IS the
-  strategy-set-change answer: a plan change makes artifacts incomplete or
-  foreign rows simply never load); §90 (the same `strategy_results` model
-  gets narrowed/typed at the unified-summaries window — fix order matters
-  if both land close together).
 
 ---
 
@@ -1403,7 +1334,39 @@ per-item-loader-vs-aggregator split is the natural umbrella).
 
 ---
 
-## Last known = 103
+## 104. too many `str` usages as attributes with convention
+
+We need to check class fields, which still use `str`. 
+
+Bad examples: 
+- fps, fps_fraction - looks like candidates for single class with 2 representations
+- resolution - actually a width and height and a name (display_name / safe_name?). Probably also with support for Crop operations or resizes.
+
+Good examples:
+- include/exclude patterns - regex is text. Could probably also switch to compiled regex to make it obvious, but in general this is okeish.
+
+## 105. Extra thoughts on Optimization/Encoding phase invalidation
+
+- Optimization phase owns winners invalidation (`encoded`).
+- We now have 2 run modes - fixed vs search.
+- fixed mode - uses direct quality. quality change between reruns = invalidation of full `encoded`.
+- search mode - uses targets. targets changed = invalidation of full `encoded`.
+
+hypothesis - saving either quality or targets ~= mode
+after winners invalidation - save updated sphase sidecar with new params.
+as an option - 2 types for sidecar model, explicitly typed for fixed vs search mode (from common base to define common params once).
+- fixed - quality
+- search - targets
+- summary table as common? Same data for pareto and tolerance application? See also summary reworks to do here.
+
+How to understand on load which type to use for sidecar? Just try both (with mandatory fields should be a fast-fail)?
+
+## 106. Encoding/optimization phases share a lot of mechanics
+
+Should we move them into separate file, to be readily available for both optimization and encoding phases (not circular imports optimization <--> encoding).
+
+
+## Last known = 106
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
