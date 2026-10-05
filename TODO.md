@@ -1206,8 +1206,13 @@ Design questions for the spec:
   payloads vs a `classify(listing)` hook on the `Artifact` wrapper (which is
   deliberately thin today — its docstring already says "file-backed
   locations derive from the payload" but nothing structures it).
-- Pattern footprints (encoding): the classifier owns regex+pairing — fine
-  for entity ownership, kills a static-name interface.
+- Pattern footprints (encoding): a TRANSITIONAL shape — it exists only
+  because winners keep attempt names (§101, DIRECTLY RELATED). With §101's
+  static winner names every footprint in the codebase is a static name set
+  and the design question dissolves. End-state doctrine (user, 2026-10-05):
+  NO pattern-matching anywhere — naming (composition AND parsing) is owned
+  by the entity classes, and recovery is direct matching of wanted
+  artifacts to on-disk files.
 - Mode-dependent rows (extraction video): the phase picks the footprint at
   ROW CONSTRUCTION (run-mode knowledge stays phase-side); classification
   stays artifact-side.
@@ -1222,9 +1227,12 @@ free invariants: whatever is left over after all rows consumed is stale
 (surfaced immediately as present-but-unwanted rows), and a double
 consumption (two artifacts composing the same name — a naming bug) is
 caught structurally at the collision. Audio's `_classify` surplus scan is
-the partial precedent. NOTE: §101 below (static winner names) dissolves
-this item's "pattern-shaped footprint" wrinkle — with static winner names
-every footprint in the codebase becomes a static name set.
+the partial precedent.
+
+DIRECTLY RELATED: §101 (static winner names). §101 dissolves this item's
+pattern-shaped-footprint question — with static winner names every
+footprint in the codebase becomes a static name set; land them as one
+motion.
 
 Sequencing thought: natural companion to §92's long-function pass (same
 files, same split); the unified-summaries window also rewrites merge +
@@ -1235,14 +1243,19 @@ optimization recovery — landing this first or folding it there both work.
 ## 101. Winner promotion keeps the ATTEMPT's q-bearing name — winners must be statically named per chunk
 
 **Status:** 🤔 bug (design doctrine violation; user finding from a live
-optimization run 2026-10-05; pre-existing on main)
+optimization run 2026-10-05; pre-existing on main). DIRECTLY RELATED: §100
+(artifact-owned recovery) — static winner names are what makes §100's
+direct artifact↔on-disk-file matching possible; land as one motion.
 
 Doctrine: attempts (the `encoding/` search workspace) are named WITH quality
 — they are search artifacts. Winners (`encoded/<strategy>/`) map 1:1 to
 chunks — their naming must be STATIC (chunk identity + resolution, no
-quality), so they are directly discoverable from the chunk set. Live
-evidence (`D:\_encoding\pyqenc_cp\encoded\h264+ultrafast`): winners present
-as `<chunk>.<res>.q15.5.mkv` + `.q15.5.png`, only the result sidecar is
+quality), so they are directly discoverable from the chunk set: direct
+matching of wanted artifacts to on-disk files, owned by the artifacts
+(payloads). End state: NO pattern-matching anywhere — naming (composition
+AND parsing) is owned by the entity classes. Live evidence
+(`D:\_encoding\pyqenc_cp\encoded\h264+ultrafast`): winners present as
+`<chunk>.<res>.q15.5.mkv` + `.q15.5.png`, only the result sidecar is
 correctly static (`<chunk>.<res>.yaml`).
 
 Root cause: `phases/encoding.py:775` — promotion hard-links the winning
@@ -1256,15 +1269,12 @@ Fix surface:
   identity: the pair-ledger placeholder (`:326`), the replay path (`:1547`),
   the winner scan (`:1755`) — with static names these become static-name
   lookups (and `_recover_encoding_attempts`' mkv index drops the regex).
-- The winner record's crf/quality currently rides the filename — under
-  static naming it must come from the result sidecar (which already
-  persists crf); verify every EncodedChunk composition site.
+- CRF: the winner-limiter scan already reads sidecars (crf included) — the
+  result sidecar is the live crf source; under static naming every
+  EncodedChunk composition reads crf from there, never from a filename.
 - Pre-alpha, no migration: existing q-bearing winners stop matching the
   static footprint — pairs re-derive as ABSENT (re-encode) or the workdir
   gets a force-wipe; note it in the fix commit.
-
-Sequencing: natural §100 companion — static winner names make every
-recovery footprint a static name set, shrinking both items at once.
 
 ---
 
