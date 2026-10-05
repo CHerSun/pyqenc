@@ -230,12 +230,17 @@ class VideoStreamInfo(StreamInfo):
         resolution:    ``"<width>x<height>"`` (e.g. ``"1920x1080"``).
         pix_fmt:       Pixel format name (e.g. ``yuv420p10le``) — a source
                        property worth preserving.
+        extracted_path: Path of the materialized video file (relative to the
+                       work dir on disk), or ``None`` — a fact set only by
+                       materialization runs (the `extract` command; the
+                       stream lands inside an `.mkv` container).
     """
 
     fps:          float | None       = None
     fps_fraction: FractionYaml | None = None
     resolution:   str | None         = None
     pix_fmt:      str | None         = None
+    extracted_path: LongPathYaml | None = None
 
     @staticmethod
     def _parse_resolution(resolution: str) -> tuple[int, int] | None:
@@ -292,9 +297,14 @@ class AudioStreamInfo(StreamInfo):
     Attributes:
         layout: The track's channel layout (faithful source token plus its
                 canonical form and channel count).
+        extracted_path: Path of the materialized audio file (relative to
+                the work dir on disk), or ``None`` — a fact set only by
+                materialization runs (the `extract` command; the stream
+                lands inside an `.mka` container).
     """
 
     layout: ChannelLayout | None = None
+    extracted_path: LongPathYaml | None = None
 
     @classmethod
     def from_ffprobe(cls, raw: dict) -> Self:

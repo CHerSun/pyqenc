@@ -25,6 +25,7 @@ uv.lock
 *.mov
 *.flv
 *.webm
+samples/_build/
 
 # Local environment Kiro steering doc
 .kiro/steering/environment.md

@@ -1,10 +1,12 @@
-"""Slim, phase-agnostic runner that drives a single target phase.
+"""Slim, phase-agnostic runner that drives the run's terminal phases.
 
 Responsibilities:
 
-1. Run exactly one *target* phase via ``target.run(dry_run=...)``; dependency
-   resolution lives inside the phases, so the runner never iterates the
-   registry to *drive* execution.
+1. Run the *terminal* phases in order via ``target.run(dry_run=...)``;
+   dependency resolution lives inside the phases, so the runner never
+   iterates the registry to *drive* execution. A shared dependency reached
+   by several terminals runs once — later walks hit the per-instance
+   memoization guard.
 2. Own the run-scoped metrics collector's final flush lifecycle.
 3. Build a uniform run summary from each phase's cached ``PhaseResult.outcome``,
    using only the common ``PhaseResult`` surface.
@@ -13,11 +15,12 @@ Responsibilities:
 
 The runner knows only the ``Phase`` / ``PhaseResult`` protocol surface,
 ``CleanupLevel``, ``PhaseOutcome``, and the registry ``dict`` — plus the one
-sanctioned exception: reading the merge target's deliverable contract
+sanctioned exception: reading the merge terminal's deliverable contract
 (``Artifact[MergedVideo]`` payloads) to collect the run's output files. It
 never names any other phase's internals.
 
-Spec: .kiro/specs/2026-09-09 phase-terminal-runner/
+Spec: .kiro/specs/2026-09-09 phase-terminal-runner/ (multi-terminal
+extension: 2026-10-05 cli-intent-commands).
 """
 # CHerSun 2026
 
@@ -35,7 +38,7 @@ from pyqenc.phase import (
     PhaseRegistry,
     PhaseResult,
 )
-from pyqenc.phases.merge import MergePhaseResult
+from pyqenc.phases.merge import MergePhase, MergePhaseResult
 from pyqenc.utils.long_path import LongPath
 
 logger = logging.getLogger(__name__)
@@ -54,8 +57,8 @@ class RunResult:
     partial subcommands alike).
 
     Attributes:
-        success:             ``True`` when the target phase completed or reused
-                             (its ``PhaseResult.is_complete`` is ``True``).
+        success:             ``True`` when every terminal phase completed or
+                             was reused (each ``PhaseResult.is_complete``).
         outcomes:            Ordered ``{phase_name: PhaseOutcome}`` collected
                              from every phase that has a cached ``result``.
         phases_executed:     Names of phases whose outcome is ``COMPLETED``
@@ -66,12 +69,13 @@ class RunResult:
                              work remains; in a dry-run these are the phases that
                              would need to do work).
         phases_failed:       Names of phases whose outcome is ``FAILED``.
-        output_files:        Final output file paths, taken from the *target*
-                             phase's result only — the merge target's complete
-                             outputs; empty for every other target.
+        output_files:        Final output file paths, taken from the LAST
+                             terminal's result only — a merge terminal's
+                             complete outputs; empty for every other terminal.
         error:               Failure description when ``success`` is ``False``
-                             (the target result's ``message`` — on ``FAILED``
-                             it IS the error description); ``None`` otherwise.
+                             (the last driven terminal's ``message`` — on
+                             ``FAILED`` it IS the error description); ``None``
+                             otherwise.
     """
 
     success:             bool
@@ -89,57 +93,59 @@ class RunResult:
 # ---------------------------------------------------------------------------
 
 class Runner:
-    """Slim, phase-agnostic driver that runs one target phase and owns run-level concerns.
+    """Slim, phase-agnostic driver that runs the terminal phases and owns run-level concerns.
 
     The registry and collector are constructed by the caller (``api.py``)
-    before being passed here. The runner runs only the target phase, then
-    iterates the registry read-only to build the summary and broadcast
-    ``finalize``.
+    before being passed here. The runner runs the terminal phases in order
+    (stopping at the first unsuccessful one), then iterates the registry
+    read-only to build the summary and broadcast ``finalize``.
 
     Args:
         registry:         Ordered phase registry produced by ``_build_registry``.
-        target:           The terminal phase *class* to run (its instance is
-                          looked up in ``registry``).
+        targets:          The terminal phase *classes* to run, in drive order
+                          (their instances are looked up in ``registry``).
         collector:        Run-scoped metrics collector, owned for this one run.
         work_dir:         Work directory (used to log the metrics path).
         cleanup:          Requested cleanup level for this run.
         no_metrics:       When ``True``, skip the final ``metrics.yaml`` flush.
-        is_terminal_most: ``True`` when ``target`` is the terminal-most phase
-                          (``MergePhase``); only such a run is eligible for
-                          ``ALL`` deep cleanup.
     """
 
     def __init__(
         self,
-        registry:          PhaseRegistry,
-        target:            type[Phase],
-        collector:         MetricsCollector,
+        registry:         PhaseRegistry,
+        targets:          tuple[type[Phase], ...],
+        collector:        MetricsCollector,
         *,
-        work_dir:          Path,
-        cleanup:           CleanupLevel,
-        no_metrics:        bool,
-        is_terminal_most:  bool,
+        work_dir:         Path,
+        cleanup:          CleanupLevel,
+        no_metrics:       bool,
     ) -> None:
-        self._registry:         PhaseRegistry = registry
-        self._target:           type[Phase]              = target
-        self._collector:        MetricsCollector         = collector
-        self._work_dir:         LongPath                 = LongPath(work_dir)
-        self._cleanup:          CleanupLevel             = cleanup
-        self._no_metrics:       bool                     = no_metrics
-        self._is_terminal_most: bool                     = is_terminal_most
+        self._registry:   PhaseRegistry = registry
+        self._targets:    tuple[type[Phase], ...]   = targets
+        self._collector:  MetricsCollector         = collector
+        self._work_dir:   LongPath                 = LongPath(work_dir)
+        self._cleanup:    CleanupLevel             = cleanup
+        self._no_metrics: bool                     = no_metrics
+        # Derived, never hand-set: a run whose LAST terminal is MergePhase is
+        # the terminal-most run, eligible for ``ALL`` deep cleanup.
+        self._is_terminal_most: bool = bool(targets) and targets[-1] is MergePhase
 
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
 
     def run(self, dry_run: bool = False) -> RunResult:
-        """Run the target phase and produce a uniform run summary.
+        """Run the terminal phases in order and produce a uniform run summary.
 
-        Runs only the target phase (dependency resolution happens inside the
-        phases). A ``PENDING`` outcome from an execute run is treated as a
-        failure-to-progress. On a successful, non-dry-run execution the metrics
-        collector is flushed and ``finalize`` is broadcast to every phase with
-        the pre-resolved ``deep_cleanup`` decision.
+        Terminals are driven in the given order; dependency resolution happens
+        inside the phases, and a shared dependency reached again by a later
+        walk simply reads its memoized result. The walk stops at the first
+        unsuccessful terminal — later terminals' dependency walks would only
+        cascade the failure. A ``PENDING`` outcome from an execute run is
+        treated as a failure-to-progress. On a successful, non-dry-run
+        execution the metrics collector is flushed and ``finalize`` is
+        broadcast to every phase with the pre-resolved ``deep_cleanup``
+        decision.
 
         Args:
             dry_run: When ``True``, phases report what work would be done
@@ -149,36 +155,47 @@ class Runner:
         Returns:
             ``RunResult`` summarising the run.
         """
-        target = self._registry[self._target]
-        logger.debug("Runner: driving target phase '%s' (dry_run=%s)", target.name, dry_run)
+        results: list[PhaseResult] = []
+        run_ok = True
+        contract_violation_name: str | None = None
 
-        result: PhaseResult = target.run(dry_run=dry_run)
+        for target_cls in self._targets:
+            target = self._registry[target_cls]
+            logger.debug("Runner: driving target phase '%s' (dry_run=%s)", target.name, dry_run)
+            result = target.run(dry_run=dry_run)
+            results.append(result)
 
-        # PENDING on an execute run is a phase-contract violation, not a
-        # runtime condition: the template's dry-run branch is the only
-        # legitimate PENDING producer, so a surviving PENDING means a phase
-        # hook broke its contract. Metrics are still flushed (debug evidence)
-        # and the collector closed (always-unregister invariant); finalize is
-        # skipped and the run fails loudly below.
-        contract_violation = not dry_run and result.outcome is PhaseOutcome.PENDING
-        if contract_violation:
-            logger.error(
-                "Internal error: phase '%s' returned PENDING on an execute run — "
-                "this is a bug in the phase implementation; please report it.",
-                target.name,
-            )
+            # PENDING on an execute run is a phase-contract violation, not a
+            # runtime condition: the template's dry-run branch is the only
+            # legitimate PENDING producer, so a surviving PENDING means a phase
+            # hook broke its contract. Metrics are still flushed (debug
+            # evidence) and the collector closed (always-unregister invariant);
+            # finalize is skipped and the run fails loudly below.
+            if not dry_run and result.outcome is PhaseOutcome.PENDING:
+                contract_violation_name = target.name
+                logger.error(
+                    "Internal error: phase '%s' returned PENDING on an execute run — "
+                    "this is a bug in the phase implementation; please report it.",
+                    target.name,
+                )
 
-        # Whether the run succeeded at its PURPOSE. On an execute run that means
-        # the target completed (is_complete). On a dry-run the purpose is a
-        # preview: a PENDING target ("work remains here") is the normal,
-        # successful preview outcome — only a genuine FAILED makes a dry-run
-        # unsuccessful.
-        if dry_run:
-            run_ok = result.outcome != PhaseOutcome.FAILED
-        else:
-            run_ok = result.is_complete  # PENDING and FAILED are both not-complete.
+            # Whether the run succeeded at its PURPOSE so far. On an execute
+            # run that means each terminal completed (is_complete). On a
+            # dry-run the purpose is a preview: a PENDING terminal ("work
+            # remains here") is the normal, successful preview outcome — only
+            # a genuine FAILED makes a dry-run unsuccessful.
+            if dry_run:
+                terminal_ok = result.outcome != PhaseOutcome.FAILED
+            else:
+                terminal_ok = result.is_complete  # PENDING and FAILED are both not-complete.
+            if not terminal_ok:
+                run_ok = False
+                break
 
-        summary = self._build_summary(run_ok=run_ok, target_result=result)
+        # The last driven terminal's result carries the run's output/error
+        # surface (for a merge-final run, the deliverable contract).
+        target_result = results[-1]
+        summary = self._build_summary(run_ok=run_ok, target_result=target_result)
 
         # Final metrics flush on an execute run; never on dry-run.
         if not dry_run and not self._no_metrics:
@@ -190,10 +207,10 @@ class Runner:
         # this run is done. close() only unregisters; it never writes.
         self._collector.close()
 
-        if contract_violation:
+        if contract_violation_name is not None:
             self._log_summary(summary, dry_run=dry_run)
             raise PhaseContractError(
-                f"phase '{target.name}' returned PENDING on an execute run "
+                f"phase '{contract_violation_name}' returned PENDING on an execute run "
                 "(phase contract violation — _execute must return COMPLETED or FAILED)"
             )
 
@@ -202,7 +219,7 @@ class Runner:
             logger.warning(
                 "Full cleanup (--cleanup all) requested but '%s' is not the terminal "
                 "command; downgraded to intermediate cleanup.",
-                target.name,
+                self._registry[self._targets[-1]].name,
             )
 
         # Single deep_cleanup decision, computed once.

@@ -29,9 +29,9 @@ pyqenc is a quality-first video encoding pipeline. The user specifies quality ta
 flowchart LR
     User -->|CLI| cli["pyqenc CLI\n(cli.py)"]
     User -->|code| api["Public API\n(api.py)"]
-    cli --> orch["PipelineOrchestrator"]
-    api --> orch
-    orch --> phases["Phase objects"]
+    cli --> api
+    api --> drive["_drive: closure registry\n+ Runner (terminals in order)"]
+    drive --> phases["Phase objects"]
     phases --> ffmpeg["FFmpeg / FFprobe"]
     phases --> mkv["MKVToolNix"]
 ```
@@ -69,16 +69,32 @@ flowchart TD
         OP --> EN
         EX --> AU
         EN --> ME
-        AU --> ME
     end
 ```
+
+Every `DEPENDS_ON` declaration is audited against the phase's actual
+dependency reads (`_dep_result` sites) — an undeclared read would be a silent
+absence once the registry is derived from the declarations (2026-10-05
+`cli-intent-commands` spec, Req 13). Audit result: every declared dependency
+is read; whole-result assignment reads are summarized as "run context".
+
+| Phase | Declared `DEPENDS_ON` | Consumed from each dependency |
+| --- | --- | --- |
+| **Job** | — | — |
+| **Extraction** | Job | `file.payload` (source), `work_dir`, `config.extraction` (include/exclude) |
+| **Probe** | Job, Extraction | Job: run context (`work_dir`, source); Extraction: stream inventory rows, `timestamps_path` |
+| **Chunking** | Job, Probe | Job: run context (`work_dir`); Probe: `stream` |
+| **Optimization** | Job, Probe, Chunking | Job: run context (`work_dir`, `config`); Probe: `plan`; Chunking: `chunks` |
+| **Encoding** | Job, Probe, Chunking, Optimization | Job: run context (`work_dir`, `force_wipe`, `cleanup`); Probe: `plan`, `stream`; Chunking: `chunks`; Optimization: `selected_strategies` |
+| **Audio** | Job, Extraction | Job: run context (`config.audio`, `work_dir`, source); Extraction: audio stream rows |
+| **Merge** | Job, Extraction, Probe, Optimization, Encoding | Job: run context (`source`, `work_dir`, `cleanup`); Extraction: `timestamps_path`; Probe: `plan`; Optimization: `anchor`; Encoding: `winners`, `quality_labels`, `encoded_chunks` |
 
 ### Phase descriptions
 
 | Phase            | Ledger rows (internal, complete)                                     | External contract (result fields)                                                       | Key sidecar(s)                                                         |
 | ---------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | **Job**          | `Artifact[File]` × 1                                                   | `file`; run parameters                                                                       | `job.yaml`                                                              |
-| **Extraction**   | video (index-gated), audio/subs/attachments, chapters rows            | `video_stream`, `audio_streams`, `subtitle_streams`, `attachment_streams`, `chapters`; derived `timestamps_path` / `chapters_path` | `extraction.yaml`                                  |
+| **Extraction**   | video/audio/subs/attachments + chapters rows (video & audio virtual in processing runs; presence-based material rows in `extract` materialization runs) | `video_stream`, `audio_streams`, `subtitle_streams`, `attachment_streams`, `chapters`; derived `timestamps_path` / `chapters_path` | `extraction.yaml`                                  |
 | **Probe**        | `Artifact[ExtendedVideoStream]` × 1                                    | `stream`; derived `crop`                                                                     | `probe.yaml`                                                             |
 | **Chunking**     | `Artifact[VideoStreamChunk]` × N (set-flip)                            | `chunks`                                                                                      | `chunking.yaml`                                                          |
 | **Optimization** | `Artifact[EncodedChunk]` per (test chunk × strategy) + orphaned rows   | `winners` (unconsumed — sanctioned exception), `selected_strategies` (settings subset)      | `optimization.yaml`                                                      |
@@ -116,10 +132,14 @@ classDiagram
   whether work is pending
 - `_execute(wanted)` — produces every wanted row not already `COMPLETE`
 
-The runner is a thin, phase-agnostic driver: it runs one *target* phase
-(dependencies resolve inside the phases via the registry), builds the uniform
-summary from cached results, and broadcasts `finalize`. Results are passed
-forward directly — no filesystem re-scanning between phases.
+The runner is a thin, phase-agnostic driver: it runs the run's *terminal*
+phases in order (dependencies resolve inside the phases via the registry; a
+shared dependency reached by several terminals runs once — later walks read
+the memoized result), builds the uniform summary from cached results, and
+broadcasts `finalize`. The registry itself is the dependency closure of the
+terminals (`dependency_closure`), so `DEPENDS_ON` alone decides membership
+and construction order. Results are passed forward directly — no filesystem
+re-scanning between phases.
 
 ### The Phase pending gate
 
@@ -442,16 +462,16 @@ All models are Pydantic.
 
 ## Public API
 
-`pyqenc/api.py` exposes standalone functions for each phase, usable without the CLI:
+`pyqenc/api.py` exposes standalone functions per intent, usable without the CLI:
 
 ```python
-run_pipeline(config, dry_run)          # full pipeline
-extract_streams(source, work_dir, ...) # extraction only
-chunk_video(source, work_dir, ...)     # chunking only
-encode_chunks(source, work_dir, ...)   # encoding only
-process_audio(source, work_dir, ...)   # audio only
-merge_final(source, work_dir, ...)     # merge only
-measure_quality(source, work_dir, ...) # standalone quality measurement
+run_pipeline(config, plan, ...)          # terminals (Audio, Merge) — the `auto` intent
+extract_streams(config, ...)             # extraction terminal; plan-free; materialize= for `extract`
+chunk_video(config, plan, ...)           # chunking terminal
+encode_chunks(config, plan, ...)         # encoding terminal
+process_audio(config, ...)               # audio terminal; plan-free
+merge_final(config, plan, ...)           # merge terminal — the `video` intent
+measure_quality(source, work_dir, ...)   # standalone quality measurement
 ```
 
 All functions accept `work_dir: Path` as a required parameter (no default). The CLI is the only place where `work_dir` defaults to `.`.

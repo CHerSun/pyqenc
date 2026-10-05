@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, TypeIs, assert_never
@@ -67,6 +68,7 @@ from pyqenc.stream_model import (
 )
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg
 from pyqenc.utils.fs import remove_stale_tmp_files
+from pyqenc.utils.log_format import fmt_size_mb
 from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 
 if TYPE_CHECKING:
@@ -349,6 +351,32 @@ def _is_chapters_row(row: _ExtractionRow) -> TypeIs[Artifact[Chapters]]:
     return isinstance(row.payload, Chapters)
 
 
+def _on_disk_file_names(extracted_dir: Path) -> set[str]:
+    """Final (non-``.tmp``) file names under *extracted_dir*; empty when absent."""
+    if not extracted_dir.exists():
+        return set()
+    return {
+        f.name for f in extracted_dir.iterdir()
+        if f.is_file() and not f.name.endswith(TEMP_SUFFIX)
+    }
+
+
+def _row_state(expected: Collection[str], on_disk: Collection[str]) -> ArtifactState:
+    """Presence-based row completeness over the expected material file names.
+
+    Every producer writes through ``.tmp``-then-rename, so a name's presence
+    implies a complete write of that component. A row with several expected
+    components is ``PARTIAL`` when only some are present.
+    """
+    expected_names = set(expected)
+    if not expected_names:
+        return ArtifactState.COMPLETE
+    present = expected_names & set(on_disk)
+    if present == expected_names:
+        return ArtifactState.COMPLETE
+    return ArtifactState.PARTIAL if present else ArtifactState.ABSENT
+
+
 @dataclass
 class ExtractionPhaseResult(PhaseResult):
     """``PhaseResult`` subclass carrying extraction's typed artifact contract.
@@ -399,8 +427,16 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
     Args:
         config: Full pipeline configuration.
         phases: Phase registry; used to resolve typed dependency references.
-        video_required: When ``True`` (default), the timestamps artifact is
-                        wanted; audio-only registries pass ``False``.
+        video_required: When ``True`` (default), the video artifact row is
+                        wanted in processing runs (audio-only closures
+                        derive ``False`` and produce neither of its
+                        components).
+        materialize: When ``True``, the video and audio streams are wanted
+                        as materialized files additionally (the `extract`
+                        command) — the video row's container joins the
+                        always-wanted PTS index as a second component, and
+                        the rows' wanted becomes filter-driven like every
+                        other kind.
         collector: Metrics collector for timing instrumentation.
     """
 
@@ -415,11 +451,16 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         phases:         PhaseRegistry,
         *,
         video_required: bool              = True,
+        materialize:    bool              = False,
         collector:      MetricsCollector,
     ) -> None:
         super().__init__(config, phases, collector=collector)
 
         self._video_required: bool = video_required
+        # Materialization mode (the `extract` command): the pass-through
+        # video and audio streams are wanted as real files under extracted/
+        # instead of being consumed virtually from the source.
+        self._materialize: bool = materialize
 
         # Recovery stash — the run's stream inventory and sidecar currency.
         self._source_file: File | None             = None
@@ -503,58 +544,60 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         )
 
         # Single on-disk listing shared by every artifact's completeness check.
-        if extracted_dir.exists():
-            on_disk_names = {
-                f.name for f in extracted_dir.iterdir()
-                if f.is_file() and not f.name.endswith(TEMP_SUFFIX)
-            }
-        else:
-            on_disk_names = set()
+        on_disk_names = _on_disk_file_names(extracted_dir)
 
         rows: list[_ExtractionRow] = []
 
         if self._video is not None:
-            # The video artifact: a virtual stream whose single expected
-            # material component is the per-frame PTS index —
-            # COMPLETE iff the index is present; no PARTIAL (both producer
-            # paths write through .tmp-then-rename, so presence implies a
-            # complete write). The stream's existence in the source is a
+            # The video artifact's material components: the per-frame PTS
+            # index always; the materialized container additionally in
+            # extract runs. `wanted` governs BOTH components — filter-driven
+            # in materialization runs, the pipeline mode (video-need)
+            # otherwise. The stream's existence in the source is a
             # precondition of the row, not a state.
+            expected_video_files: set[str] = {TIMESTAMPS_FILENAME}
+            if self._materialize:
+                container = self._video.info.extracted_path
+                assert container is not None, "materialization sets the expected location"
+                expected_video_files.add(container.name)
             rows.append(Artifact(
                 payload = self._video,
-                state   = (
-                    ArtifactState.COMPLETE
-                    if TIMESTAMPS_FILENAME in on_disk_names
-                    else ArtifactState.ABSENT
+                state   = _row_state(expected_video_files, on_disk_names),
+                wanted  = (
+                    self._video in streams_filter_plain_regex(
+                        [self._video],
+                        job_result.config.extraction.include,
+                        job_result.config.extraction.exclude,
+                    )
+                    if self._materialize
+                    else self._video_required
                 ),
-                wanted  = self._video_required,
             ))
         for stream in self._audio:
+            if self._materialize:
+                assert stream.info.extracted_path is not None, "materialization sets the expected location"
+                audio_state: ArtifactState = _row_state(
+                    {stream.info.extracted_path.name}, on_disk_names,
+                )
+            else:
+                audio_state = ArtifactState.COMPLETE  # virtual — exists in the source
             rows.append(Artifact(
                 payload = stream,
-                state   = ArtifactState.COMPLETE,  # virtual — exists in the source
+                state   = audio_state,
                 wanted  = stream in selected,
             ))
         for stream in self._subtitles:
             assert stream.info.extracted_path is not None
             rows.append(Artifact(
                 payload = stream,
-                state   = (
-                    ArtifactState.COMPLETE
-                    if stream.info.extracted_path.name in on_disk_names
-                    else ArtifactState.ABSENT
-                ),
+                state   = _row_state({stream.info.extracted_path.name}, on_disk_names),
                 wanted  = stream in selected,
             ))
         for stream in self._attachments:
             assert stream.info.extracted_path is not None
             rows.append(Artifact(
                 payload = stream,
-                state   = (
-                    ArtifactState.COMPLETE
-                    if stream.info.extracted_path.name in on_disk_names
-                    else ArtifactState.ABSENT
-                ),
+                state   = _row_state({stream.info.extracted_path.name}, on_disk_names),
                 wanted  = stream in selected,
             ))
 
@@ -562,18 +605,46 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             assert self._source_file is not None, "inventory resolution sets the File before rows are built"
             rows.append(Artifact(
                 payload = Chapters(file=self._source_file),
-                state   = (
-                    ArtifactState.COMPLETE
-                    if CHAPTERS_FILENAME in on_disk_names
-                    else ArtifactState.ABSENT
-                ),
+                state   = _row_state({CHAPTERS_FILENAME}, on_disk_names),
                 wanted  = bool(streams_filter_plain_regex(
                     [_ChaptersProxy()], job_result.config.extraction.include, job_result.config.extraction.exclude,
                 )),
             ))
 
         _log_stream_table(rows)
+        if self._materialize:
+            self._log_materialization_plan(rows)
         return Recovery.from_artifacts(rows)
+
+    def _log_materialization_plan(self, rows: list[_ExtractionRow]) -> None:
+        """Log the planned destinations and the size bound (extract command).
+
+        Per-stream sizes are not cheaply available (they need a packet-level
+        scan); the source's own size bounds the materialization — video and
+        audio dominate it, the container-artifact kinds are negligible. The
+        plan prints on dry-runs (the whole cost picture before anything is
+        written) and on execute runs alike.
+        """
+        file_size = self._source_file.file_size_bytes if self._source_file else 0
+        assert file_size is not None, "the job's File carries the source size"
+        logger.info("Materialization plan:")
+        for row in rows:
+            if not row.wanted:
+                continue
+            if _is_chapters_row(row):
+                name, dest = "Chapters", CHAPTERS_FILENAME
+            else:
+                extracted = row.payload.info.extracted_path
+                if extracted is None:
+                    continue
+                name, dest = row.payload.display_name(), extracted.name
+                if _is_video_row(row):
+                    dest = f"{dest} + {TIMESTAMPS_FILENAME}"
+            logger.info("  %s -> %s", name, dest)
+        logger.info(
+            "Planned total: up to ~%s (bounded by the source size; exact per-stream sizes need a packet scan)",
+            fmt_size_mb(file_size),
+        )
 
     def _normalize_extracted_paths(self, work_dir: Path) -> None:
         """Set each file-backed stream's expected extracted location eagerly.
@@ -581,6 +652,10 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         The location is a pure function of the stream's identity (safe name +
         codec-derived extension for subtitles; safe name as-is for
         attachments) — set once here, never reconciled with artifact states.
+        In materialization mode the pass-through video and audio streams get
+        the same treatment: safe name + codec-derived elementary-stream
+        extension, recorded on the info slice so the sidecar persists the
+        materialization facts.
 
         Args:
             work_dir: The run's work directory (``extracted/`` lives below it).
@@ -598,6 +673,20 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             })})
             for s in self._attachments
         ]
+        if self._materialize:
+            # Containers, not elementary streams: Matroska accepts any codec,
+            # keeps the stream's timestamps, and needs no codec knowledge to
+            # name the file — video lands as .mkv, audio as .mka.
+            self._audio = [
+                s.model_copy(update={"info": s.info.model_copy(update={
+                    "extracted_path": extracted_dir / f"{s.safe_name()}.mka",
+                })})
+                for s in self._audio
+            ]
+            if self._video is not None:
+                self._video = self._video.model_copy(update={"info": self._video.info.model_copy(update={
+                    "extracted_path": extracted_dir / f"{self._video.safe_name()}.mkv",
+                })})
 
     def _load_or_enumerate(self, source_file: File, sidecar_path: Path) -> None:
         """Resolve the run's stream inventory from the sidecar or ffprobe.
@@ -725,7 +814,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         extracted_dir = work_dir / EXTRACTED_DIR
         extracted_dir.mkdir(parents=True, exist_ok=True)
 
-        if self._sidecar_dirty:
+        if self._sidecar_dirty or self._materialize:
             self._persist_sidecar(work_dir / ExtractionPhase.SIDECAR_NAME)
 
         source = job_result.source
@@ -745,24 +834,36 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         if attachment_rows:
             self._extract_attachments(attachment_rows, source, errors)
 
+        # Materialized audio tracks remux to containers before the per-row
+        # loop (the video row's components are handled per-row — it can be
+        # PARTIAL, carrying some components already).
+        track_rows: list[Artifact[AudioStream]] = []
+        if self._materialize:
+            track_rows = [
+                a for a in artifacts
+                if a.state != ArtifactState.COMPLETE and _is_audio_row(a)
+            ]
+            for artifact in track_rows:
+                self._materialize_track(artifact, source, errors)
+
         for artifact in artifacts:
-            if artifact.state != ArtifactState.ABSENT:
+            if artifact.state == ArtifactState.COMPLETE:
                 continue
             if _is_video_row(artifact):
-                self._extract_index(artifact, work_dir, errors)
+                self._produce_video_components(artifact, work_dir, source, errors)
             elif _is_subtitle_row(artifact):
                 self._extract_subtitle(artifact, source, errors)
             elif _is_chapters_row(artifact):
                 self._extract_chapters(artifact, work_dir, source, errors)
             elif _is_audio_row(artifact):
-                pass  # virtual — exists in the source, nothing to extract
+                pass  # virtual in processing runs; materialized as one batch above
             elif _is_attachment_row(artifact):
                 pass  # extracted as one batch before this loop
             else:
                 assert_never(artifact)
 
         if errors:
-            failed_count = sum(1 for a in artifacts if a.state == ArtifactState.ABSENT)
+            failed_count = sum(1 for a in artifacts if a.state != ArtifactState.COMPLETE)
             err_summary  = f"{len(errors)} extraction error(s): {'; '.join(errors)}"
             logger.error(err_summary)
             outcome = PhaseOutcome.FAILED if failed_count > 0 else PhaseOutcome.COMPLETED
@@ -790,10 +891,12 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         work_dir:  Path,
         errors:    list[str],
     ) -> None:
-        """Produce the video row's material component: the per-frame PTS index.
+        """Produce the video row's PTS-index component: the per-frame timestamps.
 
         Flips the row to ``COMPLETE`` on success (the writer follows the
-        ``.tmp``-then-rename protocol, so presence implies a complete write).
+        ``.tmp``-then-rename protocol, so presence implies a complete
+        write); in materialization runs the caller re-derives the state over
+        both of the row's components afterwards.
         """
         video = artifact.payload
         try:
@@ -877,6 +980,65 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
         for artifact, _, _ in rows:
             self._dump_attachment_ffmpeg(artifact, source, errors)
+
+    def _produce_video_components(
+        self,
+        artifact:  Artifact[VideoStream],
+        work_dir:  Path,
+        source:    Path,
+        errors:    list[str],
+    ) -> None:
+        """Produce the video row's missing material components.
+
+        The per-frame PTS index whenever absent — in every mode; the
+        materialized container additionally in extract runs. The row's state
+        is re-derived from disk truth afterwards: the per-component producers
+        flip states for their own success, and only the full expected set on
+        disk makes the row COMPLETE (a succeeded component plus a failed one
+        leaves it PARTIAL, honestly).
+        """
+        if not _expected_index_path(work_dir).exists():
+            self._extract_index(artifact, work_dir, errors)
+        container = artifact.payload.info.extracted_path if self._materialize else None
+        if container is not None and not container.exists():
+            self._materialize_track(artifact, source, errors)
+        expected: set[str] = {TIMESTAMPS_FILENAME}
+        if container is not None:
+            expected.add(container.name)
+        artifact.state = _row_state(expected, _on_disk_file_names(work_dir / EXTRACTED_DIR))
+
+    def _materialize_track(
+        self,
+        artifact: Artifact[VideoStream] | Artifact[AudioStream],
+        source:   Path,
+        errors:   list[str],
+    ) -> None:
+        """Remux one pass-through track into a Matroska container.
+
+        Video lands as ``.mkv``, audio as ``.mka`` — containers accept any
+        codec (no codec knowledge needed to name or write the file) and keep
+        the stream's container timestamps, unlike elementary streams. A plain
+        stream copy through the runner (``-map`` selector via ``as_input()``,
+        `.tmp`-then-rename promotion). mkvextract cannot produce containers,
+        so there is no mkv-first variant for this path — ffmpeg is the single
+        mechanism.
+        """
+        stream = artifact.payload
+        final  = stream.info.extracted_path
+        assert final is not None, "materialization sets the expected location"
+        request = FFmpegRequest(
+            inputs      = [stream.as_input()],
+            output_args = ("-c", FFMPEG_CODEC_COPY),
+            output      = final,
+        )
+        logger.debug("Materializing track %d: %s", stream.info.track_id, final.name)
+        res = run_ffmpeg(request)
+        if res.success and final.exists():
+            artifact.state = ArtifactState.COMPLETE
+        else:
+            err = f"ffmpeg failed materializing track {stream.info.track_id} ({final.name})"
+            logger.error(err)
+            errors.append(err)
 
     def _dump_attachment_ffmpeg(
         self,

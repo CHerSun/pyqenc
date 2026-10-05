@@ -7,9 +7,11 @@ import os
 import shutil
 import signal
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import psutil
 
@@ -19,8 +21,6 @@ if TYPE_CHECKING:
 
 import pyqenc
 from pyqenc.api import (
-    chunk_video,
-    encode_chunks,
     extract_streams,
     measure_quality,
     merge_final,
@@ -41,6 +41,7 @@ from pyqenc.models import (
     CleanupLevel,
     CropParams,
 )
+from pyqenc.runner import RunResult
 from pyqenc.utils.ffmpeg_runner import kill_all_ffmpeg
 from pyqenc.utils.log_format import fmt_key_value_table
 from pyqenc.utils.logging import setup_logging
@@ -179,25 +180,30 @@ def _add_base_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_pipeline_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add arguments common to all pipeline-phase subcommands (not used by measure/config)."""
+def _add_pipeline_arguments(parser: argparse.ArgumentParser, *, cleanup: bool = True) -> None:
+    """Add arguments common to all pipeline-phase subcommands (not used by measure/config).
+
+    The ``cleanup`` keyword omits ``--cleanup`` for commands whose outputs are
+    the product (``extract`` — materialized files must not be cleanable).
+    """
     parser.add_argument(
         "-y", "--execute",
         action="store_true",
         default=False,
         help="Execute phases (default: dry-run). Without this flag only a dry-run is performed.",
     )
-    parser.add_argument(
-        "--cleanup",
-        nargs="?",
-        const="intermediate",
-        metavar="all",
-        help=(
-            "Cleanup level for intermediate files. "
-            "--cleanup (no argument): delete workspace files per artifact after completion. "
-            "--cleanup all: also delete remaining intermediate directories after full pipeline success."
-        ),
-    )
+    if cleanup:
+        parser.add_argument(
+            "--cleanup",
+            nargs="?",
+            const="intermediate",
+            metavar="all",
+            help=(
+                "Cleanup level for intermediate files. "
+                "--cleanup (no argument): delete workspace files per artifact after completion. "
+                "--cleanup all: also delete remaining intermediate directories after full pipeline success."
+            ),
+        )
     parser.add_argument(
         "--force",
         action="store_true",
@@ -429,364 +435,218 @@ def _resolve_plan(args: argparse.Namespace, config: AppConfig) -> EncodingPlan:
 # Subcommand definitions
 # ---------------------------------------------------------------------------
 
-def _create_auto_subcommand(subparsers: argparse._SubParsersAction) -> None:
-    """Create the 'auto' subcommand for full pipeline execution."""
-    p = subparsers.add_parser(
-        "auto",
-        help="Execute complete pipeline from extraction to final merge",
-    )
+_Flavor = Literal["plain", "auto_table", "files"]
+
+_ARG_GROUP_ADDERS: dict[str, Callable[[argparse.ArgumentParser], None]] = {
+    "pipeline": _add_pipeline_arguments,
+    "filter":   _add_filter_arguments,
+    "crop":     _add_crop_arguments,
+    "chunking": _add_chunking_arguments,
+    "quality":  _add_quality_arguments,
+}
+"""The argument-group vocabulary: group name → the existing `_add_*` helper.
+
+Membership doubles as intent: the `crop` group present means the run resolves
+crop parameters; the `quality` group present means it resolves a plan."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class _SubcommandSpec:
+    """One intent command's declarative definition (2026-10-05 cli-intent-commands).
+
+    Attributes:
+        name:       Subcommand name.
+        help:       One-line help.
+        banner:     The "Starting <banner>" log line's subject.
+        noun:       Success/failure message noun ("Pipeline", "Video
+                    processing", ...).
+        runner:     The api entry point called with the assembled run inputs
+                    (plan/crop_params kwargs included only when their groups
+                    are present — the api signatures are honest about what
+                    each intent consumes).
+        arg_groups: Ordered argument-group names from `_ARG_GROUP_ADDERS`.
+        flavor:     Output flavor — "plain", "auto_table" (the pre-run
+                    key-value display), or "files" (post-success output-file
+                    listing).
+    """
+
+    name:       str
+    help:       str
+    banner:     str
+    noun:       str
+    runner:     Callable[..., RunResult]
+    arg_groups: tuple[str, ...]
+    flavor:     _Flavor = "plain"
+
+
+_PIPELINE_SUBCOMMANDS: tuple[_SubcommandSpec, ...] = (
+    _SubcommandSpec(
+        name       = "auto",
+        help       = "Execute the complete pipeline — audio processing and the video chain through the final merge",
+        banner     = "automatic pipeline execution",
+        noun       = "Pipeline",
+        runner     = run_pipeline,
+        arg_groups = ("pipeline", "filter", "crop", "chunking", "quality"),
+        flavor     = "auto_table",
+    ),
+    _SubcommandSpec(
+        name       = "video",
+        help       = "Process the video chain only — probe, chunking, optimization, encoding and merge (no audio work)",
+        banner     = "video processing",
+        noun       = "Video processing",
+        runner     = merge_final,
+        arg_groups = ("pipeline", "filter", "crop", "chunking", "quality"),
+        flavor     = "files",
+    ),
+    _SubcommandSpec(
+        name       = "audio",
+        help       = "Process audio streams only (normalization chains; never touches the video stream)",
+        banner     = "audio processing",
+        noun       = "Audio processing",
+        runner     = process_audio,
+        arg_groups = ("pipeline", "filter"),
+    ),
+)
+
+
+def _create_pipeline_subcommand(
+    subparsers: argparse._SubParsersAction,
+    spec: _SubcommandSpec,
+) -> None:
+    """Create one intent subcommand from its declarative spec."""
+    p = subparsers.add_parser(spec.name, help=spec.help)
     p.add_argument("source", type=LongPath, help="Source MKV video file")
     _add_base_arguments(p)
-    _add_pipeline_arguments(p)
-    _add_filter_arguments(p)
-    _add_crop_arguments(p)
-    _add_chunking_arguments(p)
-    _add_quality_arguments(p)
-    p.set_defaults(func=_cmd_auto)
+    for group in spec.arg_groups:
+        _ARG_GROUP_ADDERS[group](p)
+    p.set_defaults(func=_cmd_pipeline, spec=spec)
 
 
 def _create_extract_subcommand(subparsers: argparse._SubParsersAction) -> None:
-    """Create the 'extract' subcommand (runs up to and including ExtractionPhase)."""
+    """Create the 'extract' subcommand (end-user stream materialization)."""
     p = subparsers.add_parser(
         "extract",
-        help="Extract video and audio streams from source MKV",
+        help="Materialize streams from the source into standalone files (all kinds, incl. video and audio)",
     )
     p.add_argument("source", type=LongPath, help="Source MKV video file")
     _add_base_arguments(p)
-    _add_pipeline_arguments(p)
+    _add_pipeline_arguments(p, cleanup=False)
     _add_filter_arguments(p)
-    _add_crop_arguments(p)
     p.set_defaults(func=_cmd_extract)
-
-
-def _create_chunk_subcommand(subparsers: argparse._SubParsersAction) -> None:
-    """Create the 'chunk' subcommand (runs up to and including ChunkingPhase)."""
-    p = subparsers.add_parser(
-        "chunk",
-        help="Split extracted video into scene-based chunks",
-    )
-    p.add_argument("source", type=LongPath, help="Source MKV video file")
-    _add_base_arguments(p)
-    _add_pipeline_arguments(p)
-    _add_filter_arguments(p)
-    _add_crop_arguments(p)
-    _add_chunking_arguments(p)
-    p.set_defaults(func=_cmd_chunk)
-
-
-def _create_encode_subcommand(subparsers: argparse._SubParsersAction) -> None:
-    """Create the 'encode' subcommand (runs up to and including EncodingPhase)."""
-    p = subparsers.add_parser(
-        "encode",
-        help="Encode chunks to meet quality targets",
-    )
-    p.add_argument("source", type=LongPath, help="Source MKV video file")
-    _add_base_arguments(p)
-    _add_pipeline_arguments(p)
-    _add_filter_arguments(p)
-    _add_crop_arguments(p)
-    _add_chunking_arguments(p)
-    _add_quality_arguments(p)
-    p.set_defaults(func=_cmd_encode)
-
-
-def _create_audio_subcommand(subparsers: argparse._SubParsersAction) -> None:
-    """Create the 'audio' subcommand (runs up to and including AudioPhase)."""
-    p = subparsers.add_parser(
-        "audio",
-        help="Process audio streams with normalization",
-    )
-    p.add_argument("source", type=LongPath, help="Source MKV video file")
-    _add_base_arguments(p)
-    _add_pipeline_arguments(p)
-    _add_filter_arguments(p)
-    p.set_defaults(func=_cmd_audio)
-
-
-def _create_merge_subcommand(subparsers: argparse._SubParsersAction) -> None:
-    """Create the 'merge' subcommand (runs up to and including MergePhase)."""
-    p = subparsers.add_parser(
-        "merge",
-        help="Merge encoded chunks and audio into final MKV files",
-    )
-    p.add_argument("source", type=LongPath, help="Source MKV video file")
-    _add_base_arguments(p)
-    _add_pipeline_arguments(p)
-    _add_filter_arguments(p)
-    _add_crop_arguments(p)
-    _add_chunking_arguments(p)
-    _add_quality_arguments(p)
-    p.set_defaults(func=_cmd_merge)
 
 
 # ---------------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------------
 
-def _cmd_auto(args: argparse.Namespace) -> int:
-    """Execute the 'auto' subcommand."""
+def _cmd_pipeline(args: argparse.Namespace) -> int:
+    """Execute one intent subcommand (the `spec` arrives via set_defaults)."""
 
-    logger.info("Starting automatic pipeline execution...")
-    logger.info("")
+    spec: _SubcommandSpec = args.spec
+    needs_crop = "crop" in spec.arg_groups
+    needs_plan = "quality" in spec.arg_groups
 
-    try:
-        crop_params = _resolve_crop_params(args)
-    except ValueError as e:
-        logger.critical(f"Invalid crop parameters: {e}")
-        return 1
+    logger.info(f"Starting {spec.banner}")
+    logger.info(f"Source: {args.source}")
+
+    crop_params: CropParams | None = None
+    if needs_crop:
+        try:
+            crop_params = _resolve_crop_params(args)
+        except ValueError as e:
+            logger.critical(f"Invalid crop parameters: {e}")
+            return 1
 
     try:
         config = _build_config(args)
-        plan   = _resolve_plan(args, config)
+        plan   = _resolve_plan(args, config) if needs_plan else None
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
     execute = args.execute
     cleanup = _parse_cleanup_level(args.cleanup)
 
-    # Build display values from resolved plan
-    strategies     = _parse_strategies(getattr(args, "strategies", None))
-    strategy_display = (
-        "using defaults from config file" if strategies is None
-        else ", ".join(s.display_name() for s in plan.strategies)
-    )
-    kv_to_show = {
-        "Source:":         args.source,
-        "Work directory:": args.work_dir,
-        "Cropping:":       f"manual ({crop_params})" if crop_params else "automatic",
-        "Strategies:":     strategy_display,
-        "Targets:":        ", ".join(str(t) for t in plan.targets),
-        "Work mode:":      "DRY-RUN (no changes will be made)" if not execute else "EXECUTE",
-    }
-    fmt_key_value_table(kv_to_show)
-    logger.info("")
+    if spec.flavor == "auto_table":
+        assert plan is not None, "the auto_table flavor resolves the plan"
+        strategies = _parse_strategies(getattr(args, "strategies", None))
+        strategy_display = (
+            "using defaults from config file" if strategies is None
+            else ", ".join(s.display_name() for s in plan.strategies)
+        )
+        fmt_key_value_table({
+            "Source:":         args.source,
+            "Work directory:": args.work_dir,
+            "Cropping:":       f"manual ({crop_params})" if crop_params else "automatic",
+            "Strategies:":     strategy_display,
+            "Targets:":        ", ".join(str(t) for t in plan.targets),
+            "Work mode:":      "DRY-RUN (no changes will be made)" if not execute else "EXECUTE",
+        })
+        logger.info("")
 
     try:
-        result = run_pipeline(
-            config      = config,
-            plan        = plan,
-            source      = args.source,
-            work_dir    = args.work_dir,
-            force       = args.force,
-            cleanup     = cleanup,
-            no_metrics  = args.no_metrics,
-            dry_run     = not args.execute,
-            crop_params = crop_params,
-        )
+        call_kwargs: dict[str, object] = {
+            "config":     config,
+            "source":     args.source,
+            "work_dir":   args.work_dir,
+            "force":      args.force,
+            "cleanup":    cleanup,
+            "no_metrics": args.no_metrics,
+            "dry_run":    not execute,
+        }
+        if needs_plan:
+            call_kwargs["plan"] = plan
+        if needs_crop:
+            call_kwargs["crop_params"] = crop_params
+        result = spec.runner(**call_kwargs)
+
         if result.success:
-            logger.info(f"{SUCCESS_SYMBOL_MAJOR} Pipeline completed successfully")
+            if spec.flavor == "files":
+                files = result.output_files
+                if files:
+                    logger.info(f"{SUCCESS_SYMBOL_MAJOR} {spec.noun} completed successfully: {len(files)} file(s)")
+                    for path in files:
+                        logger.info(f"  {path}")
+                else:
+                    logger.info(f"{SUCCESS_SYMBOL_MAJOR} {spec.noun} completed (no new files created)")
+            else:
+                logger.info(f"{SUCCESS_SYMBOL_MAJOR} {spec.noun} completed successfully")
             return 0
-        logger.critical(f"{FAILURE_SYMBOL_MAJOR} Pipeline execution failed: {result.error}")
+        logger.critical(f"{FAILURE_SYMBOL_MAJOR} {spec.noun} failed: {result.error}")
         return 1
     except Exception as e:
-        logger.critical(f"{FAILURE_SYMBOL_MAJOR} Pipeline execution failed: {e}", exc_info=True)
+        logger.critical(f"{FAILURE_SYMBOL_MAJOR} {spec.noun} failed: {e}", exc_info=True)
         return 1
 
 
 def _cmd_extract(args: argparse.Namespace) -> int:
-    """Execute the 'extract' subcommand."""
+    """Execute the 'extract' subcommand (end-user stream materialization)."""
 
-    logger.info("Starting stream extraction")
+    logger.info("Starting stream materialization (extract)")
     logger.info(f"Source: {args.source}")
 
     try:
-        crop_params = _resolve_crop_params(args)
-    except ValueError as e:
-        logger.critical(f"Invalid crop parameters: {e}")
-        return 1
-
-    try:
         config = _build_config(args)
-        plan   = _resolve_plan(args, config)
     except ValueError as e:
         logger.critical(f"Invalid configuration: {e}")
         return 1
-    cleanup = _parse_cleanup_level(args.cleanup)
 
     try:
         result = extract_streams(
             config      = config,
-            plan        = plan,
             source      = args.source,
             work_dir    = args.work_dir,
             force       = args.force,
-            cleanup     = cleanup,
             no_metrics  = args.no_metrics,
             dry_run     = not args.execute,
-            crop_params = crop_params,
+            materialize = True,
         )
         if result.success:
-            logger.info("Extraction completed successfully")
+            logger.info("Materialization completed successfully")
             return 0
-        logger.critical(f"Extraction failed: {result.error}")
+        logger.critical(f"Materialization failed: {result.error}")
         return 1
     except Exception as e:
-        logger.critical(f"Extraction failed: {e}", exc_info=True)
-        return 1
-
-
-def _cmd_chunk(args: argparse.Namespace) -> int:
-    """Execute the 'chunk' subcommand."""
-
-    logger.info("Starting video chunking")
-    logger.info(f"Source: {args.source}")
-
-    try:
-        crop_params = _resolve_crop_params(args)
-    except ValueError as e:
-        logger.critical(f"Invalid crop parameters: {e}")
-        return 1
-
-    try:
-        config = _build_config(args)
-        plan   = _resolve_plan(args, config)
-    except ValueError as e:
-        logger.critical(f"Invalid configuration: {e}")
-        return 1
-    cleanup = _parse_cleanup_level(args.cleanup)
-
-    try:
-        result = chunk_video(
-            config      = config,
-            plan        = plan,
-            source      = args.source,
-            work_dir    = args.work_dir,
-            force       = args.force,
-            cleanup     = cleanup,
-            no_metrics  = args.no_metrics,
-            dry_run     = not args.execute,
-            crop_params = crop_params,
-        )
-        if result.success:
-            logger.info("Chunking completed successfully")
-            return 0
-        logger.critical(f"Chunking failed: {result.error}")
-        return 1
-    except Exception as e:
-        logger.critical(f"Chunking failed: {e}", exc_info=True)
-        return 1
-
-
-def _cmd_encode(args: argparse.Namespace) -> int:
-    """Execute the 'encode' subcommand."""
-
-    logger.info("Starting chunk encoding")
-    logger.info(f"Source: {args.source}")
-
-    try:
-        crop_params = _resolve_crop_params(args)
-    except ValueError as e:
-        logger.critical(f"Invalid crop parameters: {e}")
-        return 1
-
-    try:
-        config = _build_config(args)
-        plan   = _resolve_plan(args, config)
-    except ValueError as e:
-        logger.critical(f"Invalid configuration: {e}")
-        return 1
-    cleanup = _parse_cleanup_level(args.cleanup)
-
-    try:
-        result = encode_chunks(
-            config      = config,
-            plan        = plan,
-            source      = args.source,
-            work_dir    = args.work_dir,
-            force       = args.force,
-            cleanup     = cleanup,
-            no_metrics  = args.no_metrics,
-            dry_run     = not args.execute,
-            crop_params = crop_params,
-        )
-        if result.success:
-            logger.info("Encoding completed successfully")
-            return 0
-        logger.critical(f"Encoding failed: {result.error}")
-        return 1
-    except Exception as e:
-        logger.critical(f"Encoding failed: {e}", exc_info=True)
-        return 1
-
-
-def _cmd_audio(args: argparse.Namespace) -> int:
-    """Execute the 'audio' subcommand."""
-
-    logger.info("Starting audio processing")
-    logger.info(f"Source: {args.source}")
-
-    try:
-        config = _build_config(args)
-    except ValueError as e:
-        logger.critical(f"Invalid configuration: {e}")
-        return 1
-    cleanup = _parse_cleanup_level(args.cleanup)
-
-    try:
-        result = process_audio(
-            config      = config,
-            source      = args.source,
-            work_dir    = args.work_dir,
-            force       = args.force,
-            cleanup     = cleanup,
-            no_metrics  = args.no_metrics,
-            dry_run     = not args.execute,
-        )
-        if result.success:
-            logger.info("Audio processing completed successfully")
-            return 0
-        logger.critical(f"Audio processing failed: {result.error}")
-        return 1
-    except Exception as e:
-        logger.critical(f"Audio processing failed: {e}", exc_info=True)
-        return 1
-
-
-def _cmd_merge(args: argparse.Namespace) -> int:
-    """Execute the 'merge' subcommand."""
-
-    logger.info("Starting final merge")
-    logger.info(f"Source: {args.source}")
-
-    try:
-        crop_params = _resolve_crop_params(args)
-    except ValueError as e:
-        logger.critical(f"Invalid crop parameters: {e}")
-        return 1
-
-    try:
-        config = _build_config(args)
-        plan   = _resolve_plan(args, config)
-    except ValueError as e:
-        logger.critical(f"Invalid configuration: {e}")
-        return 1
-    cleanup = _parse_cleanup_level(args.cleanup)
-
-    try:
-        result = merge_final(
-            config      = config,
-            plan        = plan,
-            source      = args.source,
-            work_dir    = args.work_dir,
-            force       = args.force,
-            cleanup     = cleanup,
-            no_metrics  = args.no_metrics,
-            dry_run     = not args.execute,
-            crop_params = crop_params,
-        )
-        if result.success:
-            files = result.output_files
-            if files:
-                logger.info(f"Merge completed successfully: {len(files)} file(s)")
-                for path in files:
-                    logger.info(f"  {path}")
-            else:
-                logger.info("Merge completed (no new files created)")
-            return 0
-        logger.critical(f"Merge failed: {result.error}")
-        return 1
-    except Exception as e:
-        logger.critical(f"Merge failed: {e}", exc_info=True)
+        logger.critical(f"Materialization failed: {e}", exc_info=True)
         return 1
 
 
@@ -1050,11 +910,17 @@ Examples:
   # Delete all intermediate directories after full pipeline success
   pyqenc auto source.mkv -y --cleanup all
 
-  # Run only up to audio processing (extracts first if needed)
+  # Video chain only (no audio work)
+  pyqenc video source.mkv -y
+
+  # Audio processing only (never touches the video stream)
   pyqenc audio source.mkv -y
 
-  # Run only up to extraction with custom stream filters
-  pyqenc extract source.mkv --include ".*eng.*" -y
+  # Materialize every stream as standalone files (video and audio included)
+  pyqenc extract source.mkv -y
+
+  # Materialize everything except video, with an exclusion filter
+  pyqenc extract source.mkv --exclude "video-" -y
         """,
     )
 
@@ -1066,17 +932,14 @@ Examples:
 
     subparsers = parser.add_subparsers(
         title="subcommands",
-        description="Available pipeline phases",
+        description="Available commands",
         dest="subcommand",
         required=True,
     )
 
-    _create_auto_subcommand(subparsers)
+    for spec in _PIPELINE_SUBCOMMANDS:
+        _create_pipeline_subcommand(subparsers, spec)
     _create_extract_subcommand(subparsers)
-    _create_chunk_subcommand(subparsers)
-    _create_encode_subcommand(subparsers)
-    _create_audio_subcommand(subparsers)
-    _create_merge_subcommand(subparsers)
     _create_config_subcommand(subparsers)
     _create_measure_subcommand(subparsers)
 

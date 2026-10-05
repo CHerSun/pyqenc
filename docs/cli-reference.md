@@ -4,24 +4,22 @@
 
 ## Commands
 
+The command set is intent-based — you say what you want done:
+
 ```sh
-# main subcommands
-pyqenc auto    <source_video> [options]   # Full automatic pipeline (main command)
+# intents
+pyqenc auto    <source_video> [options]   # Everything: base extraction + audio processing + the video chain
+pyqenc video   <source_video> [options]   # The video chain only
+pyqenc audio   <source_video> [options]   # Audio processing only
+pyqenc extract <source_video> [options]   # Materialize all streams from the source into standalone files
+# tools
 pyqenc measure <source_video> [targets]   # Measure quality metrics
 pyqenc config  [target_dir]               # Copy active config for customization
-# advanced subcommands
-pyqenc extract <source_video> [options]   # Extract streams only
-pyqenc chunk   <source_video> [options]   # Detect scene chunking only
-pyqenc encode  <source_video> [options]   # Encode chunks only
-pyqenc audio   <source_video> [options]   # Process audio only
-pyqenc merge   <source_video> [options]   # Merge final output only
 ```
 
 Use `pyqenc --help` or `pyqenc <command> --help` for full argument lists.
 
-Only `auto`, `measure` and `config` subcommands are intended for normal usage.
-
-It is NOT recommended to use phase-specific subcommands (`extract`, `chunk`, `encode`, `audio`, `merge`) unless you know what you're doing.
+`video` and `audio` are complimentary and form `auto` intent.
 
 ---
 
@@ -36,20 +34,22 @@ Applies to all subcommands.
 
 ## Execution Options
 
-Applies to all pipeline subcommands (`auto`, `extract`, `chunk`, `encode`, `audio`, `merge`).
+Applies to all pipeline subcommands (`auto`, `video`, `audio`, `extract`).
 
-| Option          | Description                                                                                                                                       | Default |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `-y, --execute` | Actually execute phases (omit = dry-run preview)                                                                                                  | dry-run |
-| `--force`       | On source-file mismatch or unrecoverable config changes in execute mode: delete all intermediate artifacts and reset state to start anew          | off     |
-| `--cleanup`     | Delete workspace files per artifact after completion. `--cleanup all`: also remove remaining intermediate directories after full pipeline success | off     |
-| `--no-metrics`  | Suppress process metrics.yaml output (pipeline run stats). Does not affect quality metrics measurements.                                          | off     |
+| Option          | Description                                                                                                                                                                                                        | Default |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
+| `-y, --execute` | Actually execute phases (omit = dry-run preview)                                                                                                                                                                   | dry-run |
+| `--force`       | On source-file mismatch or unrecoverable config changes in execute mode: delete all intermediate artifacts and reset state to start anew                                                                           | off     |
+| `--cleanup`     | Delete workspace files per artifact after completion. `--cleanup all`: also remove remaining intermediate directories after full pipeline success. Not available on `extract` — materialized files are the product | off     |
+| `--no-metrics`  | Suppress process metrics.yaml output (pipeline run stats). Does not affect quality metrics measurements.                                                                                                           | off     |
 
 ---
 
-## `auto` Options
+## `auto` / `video` Options
 
 ### Quality & Strategy
+
+These options apply to `auto` and `video` (the video chain resolvers).
 
 | Option                    | Description                                                                                                                                                                    | Default                            |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------- |
@@ -73,12 +73,13 @@ Automatic crop detection uses ffmpeg's `cropdetect` filter. The same crop parame
 
 ### Stream Filtering
 
-Applied during extraction phase, use dry-run to preview.
+Applied during the extraction phase, use dry-run to preview. Applies to all
+pipeline subcommands (`auto`, `video`, `audio`, `extract`).
 
-| Option             | Description                  | Example            | Default      |
-| ------------------ | ---------------------------- | ------------------ | ------------ |
-| `--include REGEX`  | Regex pattern to include streams | `"\b(RUS\|ENG)\b"` | Include all  |
-| `--exclude REGEX`  | Regex pattern to exclude streams | `"comment"`     | Exclude none |
+| Option            | Description                      | Example            | Default      |
+| ----------------- | -------------------------------- | ------------------ | ------------ |
+| `--include REGEX` | Regex pattern to include streams | `"\b(RUS\|ENG)\b"` | Include all  |
+| `--exclude REGEX` | Regex pattern to exclude streams | `"comment"`        | Exclude none |
 
 > Audio processing (filters, chains, track selection) is configured under `audio:` in your config file, not via CLI flags. See the [Audio Processing Guide](./audio-processing.md).
 
@@ -93,15 +94,39 @@ Chunks are timestamp windows computed directly from the source — no intermedia
 
 ---
 
+## `extract` Subcommand
+
+Materializes streams from the source into standalone files under
+`<work-dir>/extracted/` — every kind matching the include/exclude filters:
+subtitles, attachments, chapters, and the pass-through video and audio
+tracks that processing runs consume directly from the source. Video and
+audio land remuxed into Matroska containers — `.mkv` and `.mka` — so any
+codec works and the stream's timestamps are kept.
+
+The dry-run prints the stream table, the per-stream destinations, and the
+planned cost bound before anything is written; `-y` materializes. No
+`--cleanup` (the files are the product), no quality or crop options.
+
+```sh
+pyqenc extract source.mkv -y                      # everything
+pyqenc extract source.mkv --exclude "video-" -y   # everything except video
+pyqenc extract source.mkv --include "eng" -y      # English-named streams only
+```
+
+Materialized files are facts: a later processing run in the same workdir
+neither consumes nor deletes them.
+
+---
+
 ## `config` Subcommand
 
 Copies the active configuration file to a target location for customisation.
 
 ```sh
-pyqenc config              # Copy to ~/.config/pyqenc/config.yaml (user home)
-pyqenc config .            # Copy to ./pyqenc.yaml (current directory)
-pyqenc config /some/dir    # Copy to /some/dir/config.yaml
-pyqenc config -y           # Actually execute (default is dry-run)
+pyqenc config              # Preview copy to ~/.config/pyqenc/config.yaml (user home)
+pyqenc config .            # Preview copy to ./pyqenc.yaml (current directory)
+pyqenc config /some/dir    # Preview copy to /some/dir/config.yaml
+pyqenc config -y           # Actually copy the config
 ```
 
 Config search order (first found wins):
@@ -145,16 +170,16 @@ Config search order (first found wins):
 
 ```sh
 # Override with a single metric
---targets vmaf-p05:95
+--targets vmaf-p10:95
 
 # Multiple targets (any failing target forces higher quality)
---targets vif-med:92,vmaf-p05:95,psnr-med:45,ssim-med:98
+--targets vif-med:92,vmaf-p10:95,psnr-med:45,ssim-med:98
 
 # Higher quality targets for near-lossless archival
---targets vif-med:94,vmaf-p05:97,psnr-med:48,ssim-med:99
+--targets vif-med:94,vmaf-p10:97,psnr-med:48,ssim-med:99
 ```
 
-When omitted, the config defaults apply (`vmaf-med:96, psnr-med:45, ssim-med:98, vif-med:93` plus `min` floor safeguards at `vmaf-min:93, psnr-min:43, ssim-min:96, vif-min:90`).
+When omitted, the config defaults apply (a set of `med` targets & a set of floor safeguards).
 
 ---
 
@@ -172,18 +197,18 @@ Profiles define the codec and optional extra encoder tuning. Each profile refere
 
 **Built-in profiles:**
 
-| Profile                  | Codec        | Description                                                              |
-| ------------------------ | ------------ | ------------------------------------------------------------------------ |
-| `h264`                   | h264-8bit    | h.264 8-bit, no extra tuning                                             |
-| `h265`                   | h265-10bit   | h.265 10-bit, no extra tuning                                            |
-| `h265-aq`                | h265-10bit   | h.265 10-bit with adaptive quantization (crisper, better dark area detail) |
-| `h265-anime`             | h265-10bit   | h.265 10-bit optimized for anime (crisp edges, reduced blocking)         |
-| `nvenc-h265-10bit-cq`    | nvenc CQ     | HEVC NVENC GPU encoding — CQ mode. Requires NVIDIA GPU.                  |
-| `nvenc-h265-10bit-vbr`   | nvenc VBR    | HEVC NVENC GPU encoding — multipass VBR mode. Not recommended.           |
-| `vulkan-h265-10bit-qp`   | vulkan QP    | HEVC Vulkan GPU encoding — QP mode. Strongly not recommended.            |
-| `av1`                    | av1-10bit    | AV1 10-bit, no extra tuning                                              |
-| `av1-grain`              | av1-10bit    | AV1 10-bit tuned to preserve original grain                              |
-| `fgs-av1-light/medium/high` | av1-10bit | AV1 10-bit with Film Grain Synthesis at varying strength                 |
+| Profile                     | Codec      | Description                                                                |
+| --------------------------- | ---------- | -------------------------------------------------------------------------- |
+| `h264`                      | h264-8bit  | h.264 8-bit, no extra tuning                                               |
+| `h265`                      | h265-10bit | h.265 10-bit, no extra tuning                                              |
+| `h265-aq`                   | h265-10bit | h.265 10-bit with adaptive quantization (crisper, better dark area detail) |
+| `h265-anime`                | h265-10bit | h.265 10-bit optimized for anime (crisp edges, reduced blocking)           |
+| `nvenc-h265-10bit-cq`       | nvenc CQ   | HEVC NVENC GPU encoding — CQ mode. Requires NVIDIA GPU.                    |
+| `nvenc-h265-10bit-vbr`      | nvenc VBR  | HEVC NVENC GPU encoding — multipass VBR mode. Not recommended.             |
+| `vulkan-h265-10bit-qp`      | vulkan QP  | HEVC Vulkan GPU encoding — QP mode. Strongly not recommended.              |
+| `av1`                       | av1-10bit  | AV1 10-bit, no extra tuning                                                |
+| `av1-grain`                 | av1-10bit  | AV1 10-bit tuned to preserve original grain                                |
+| `fgs-av1-light/medium/high` | av1-10bit  | AV1 10-bit with Film Grain Synthesis at varying strength                   |
 
 Additional profiles can be defined in the configuration file. Profile names must not contain `+`.
 
@@ -201,7 +226,7 @@ Presets control encoder speed vs quality tradeoff and are defined per codec. Eac
 
 **nvenc (GPU):** `p1`…`p7` — default: `p7` (highest quality; speed difference between presets is negligible on modern GPUs)
 
-**AV1 (SVT-AV1):** `0`…`13` — default: `3` (good speed/quality balance; `2`+ recommended for grain retention profiles)
+**AV1 (SVT-AV1):** `0`…`13` — default: `3` (good speed/quality balance; `2` or lower is recommended for grain retention profiles)
 
 ### Pattern Syntax
 

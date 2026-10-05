@@ -55,6 +55,8 @@ That's it. Default settings should work well. Later you can customize settings.
 
 > Use a separate folder per encode job — either `cd` into a dedicated folder first, or pass `--work-dir <path>`. Don't run two encodes in parallel onto the same work dir.
 
+The other intents: `pyqenc video movie.mkv -y` runs the video chain only, `pyqenc audio movie.mkv -y` the audio processing only, and `pyqenc extract movie.mkv -y` materializes streams (video and audio included) as standalone files.
+
 For all options: `pyqenc auto --help` or [CLI Reference](docs/cli-reference.md).
 
 ---
@@ -109,7 +111,7 @@ Results are written under the working directory:
 ```
 
 - `merged/` and `audio/` folders hold the results you should care about. Pick the video and audio streams you want, then mux them together with MKVmerge GUI (drag&drop streams, export).
-- `extracted/` might be useful if you want to add translations, for example, or edit subtitles.
+- `extracted/` might be useful if you want to add translations, for example, or edit subtitles. Run `pyqenc extract source.mkv -y` to materialize streams as standalone files — every kind, video and audio included (e.g. source audio for external editors); deselection via `--exclude`.
 - `measure/` holds results if you used `measure` subcommand directly.
 - Everything else is intermediate — preserved for inspection and resumption unless you use `--cleanup`.
 

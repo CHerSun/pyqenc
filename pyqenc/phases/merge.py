@@ -52,7 +52,6 @@ from pyqenc.phase import (
     PhaseResult,
     Recovery,
 )
-from pyqenc.phases.audio import AudioPhase
 from pyqenc.phases.encoding import EncodingPhase
 from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
@@ -149,14 +148,13 @@ class MergePhase(Phase[MergePhaseResult]):
     _NS_PER_SECOND       = 1_000_000_000
     _MKVPROPEDIT_VIDEO_TRACK = "track:v1"
     _OUTPUT_SUFFIX       = ".mkv"
-    # Declaration order is the dependency-walk order: audio runs as early as
-    # its own dependencies allow (right after extraction, before the probe)
-    # so the fast audio result is available long before the slow encode work.
     # Optimization is a declared (direct) dependency because the fixed-run
     # ruler and anchor flow from its result; it is transitively guaranteed
-    # via Encoding anyway.
+    # via Encoding anyway. Audio is NOT a dependency: merge is video-only and
+    # never reads the audio result — `auto` schedules audio via its terminal
+    # position, not via this tuple.
     DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (
-        JobPhase, ExtractionPhase, AudioPhase, ProbePhase, OptimizationPhase,
+        JobPhase, ExtractionPhase, ProbePhase, OptimizationPhase,
         EncodingPhase,
     )
     _METRIC_KEY: MetricKey = MetricKey.MERGE

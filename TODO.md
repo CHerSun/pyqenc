@@ -114,6 +114,15 @@ After that we must stop and validate with human the reasoning.
 
 This is also a chance to reestablish sidecars using class model introduced in file-stream-model and artifact-model recent specs, or the prior config rework spec - to use standard objects on sidecars.
 
+DIRECTLY RELATED: §100 + §101 (artifact-owned recovery + static winner
+names). In particular WINNERS invalidation (`encoded/`): consumption-based
+recovery makes staleness structural — leftover names after all wanted rows
+consumed are stale rows, so a winner whose identity no longer matches the
+wanted chunk set surfaces immediately instead of surviving as "COMPLETE";
+§99 (stale-summary selection) is the live evidence of what hand-listed
+invalidation misses. Settle the §100/§101 mechanics first, then this audit
+checks the remaining invalidation logic against them.
+
 ---
 
 ## Metrics & quality search
@@ -252,25 +261,6 @@ parameters to expose (title, fps, year, strategy, …)?
 
 ---
 
-## 🤔 24. Phase registry is a static hand-ordered list, not derived from dependencies
-
-**Status:** covered by `2026-10-05 cli-intent-commands` spec (pending approval) — Req 6:
-registry = dependency closure of the run's terminals, topologically ordered; the static
-list and the `video_required` Probe-omission branch are deleted in the same motion as
-§66/§95 (2026-10-05). Follow-up safety net once landed: §54 (DEPENDS_ON usage audit
-becomes load-bearing — an undeclared dep is now a silent absence).
-
-- `_build_registry` is a static ordered construction list
-  (`pyqenc/phase.py:320-438`); the Probe-omission-when-`video_required=False`
-  part is done (`phase.py:355-360,410-436`). But nothing derives the registry
-  from the terminal phase's dependency graph — `api.py` passes an explicit
-  `target` (`api.py:52,100,114,119`); only execution is dependency-driven.
-
-**Questions to think about:** auto-populate the registry from terminal-phase
-dependencies (that's what the dependency declarations are for)?
-
----
-
 ## 🤔 30. Multi-pass video (audio chains already do it)
 
 **Status:** needs thinking (feature)
@@ -402,11 +392,11 @@ Why? I'm often seeing a movie being split like - titles, full movie as SINGLE HU
 
 ## 48. Remove include/exclude filters?
 
-2026-10-05: bullet 2 is CONSUMED by the `2026-10-05 cli-intent-commands` spec (pending
-approval) — `extract` materializes every selected stream kind incl. pass-through
-video/audio (Req 9.1); the retargetting idea is REJECTED (processing stays
-source-anchored; spec Constraints). Bullet 1 (removing filters from processing runs)
-stays open and out of that spec's scope.
+2026-10-05: bullet 2 (materialize AV for the end user) was CONSUMED by the
+`2026-10-05 cli-intent-commands` spec (approved) — `extract` materializes every
+selected stream kind incl. pass-through video/audio (Req 9.1); the retargetting
+idea is REJECTED (processing stays source-anchored). The open question below is
+bullet 1 only.
 
 Previously include/exclude filters were made specifically for extraction phase - it was costly to extract everything. Also, this was the only mean to
 actually control which audio gets processed.
@@ -416,7 +406,6 @@ Now, we have audio selectors, which give a more controllable choice with sub-pre
 
 It looks like we should consider:
 - completely removing the include/exclude filters (materialize all non video/audio things; video and audio has separate processing)
-- or maybe keep filters but re-add the ability to materialize audio/video (not for processing, but for the end-user) via some special option? Maybe even with video/audio stream retartgetting to extracted files, if actually materialized.
 
 ---
 
@@ -503,18 +492,6 @@ Need to check code. Especially metadata extraction, files materialization (extra
 
 ---
 
-## 54. Validate Phase's DEPENDS_ON by actual usage
-
-**Status:** covered by `2026-10-05 cli-intent-commands` spec (pending approval) — Req 13:
-the audit + the per-phase dependency table (recorded in architecture.md) ride that
-window as a PREREQUISITE of the closure-derived registry (undeclared dep = silent
-absence under closure construction). Delete this entry with the spec's approval.
-
-Validate Phase's class field DEPENDS_ON vs actual inputs used from those phases via `_deps` or similar mechanics. We need a clean concise dependencies graph.
-Also need to build a table or a graph with actual dependencies - inputs, internals, results - both artifacts and settings. between phases and phase's internals.
-
----
-
 ## 59. Parallel metrics
 
 Currently, if we run 2 jobs onto the same folder (say, separate video and audio passes) - metrics will get garbled.
@@ -569,8 +546,6 @@ Deferred as costly/structural:
 
 - encoding⇄optimization import cycle (marked `# deferred: circular import` at
   3 sites) — worth breaking properly.
-- CLI `_cmd_*` bodies ×6 near-identical (crop-parse → build config → api → log)
-  — promoted to §95 (2026-10-05 feasibility check).
 - Test fixture factories duplicated across files (Strategy/CodecConfig,
   extended-stream, encoded-chunk builders) → conftest consolidation.
 - `EncodedChunk` composition duplicated (`_pair_placeholder` vs
@@ -582,62 +557,6 @@ Deferred as costly/structural:
   and api→measure `_parse_duration` — re-homing per §57.
 - Broader test-surface rework beyond metrics (string-format pinning etc.);
   skipped integration tests need a real run on a media sample.
-
----
-
-## 66. CLI subcommands review
-
-**Status:** decisions made 2026-10-05; spec `2026-10-05 cli-intent-commands` drafted
-(requirements + design, awaiting approval → tasks.md).
-
-Decisions from the 2026-10-05 session:
-
-- Command set: `auto` / `video` / `audio` / `measure` / `config` / `extract` (new
-  meaning). `chunk`/`encode`/`merge` removed (pre-alpha, no compat); api named
-  functions remain the dev/test surface.
-- Verified while designing: MergePhase is ALREADY video-only by behavior
-  (`merge.py:8-9` — audio muxing intentionally omitted, delivery files kept
-  alongside; zero `_dep_result(AudioPhase)` reads) — the AudioPhase dep existed
-  purely to schedule audio early in `auto` runs. Dropped; scheduling moves to
-  multi-terminal ordering: `_drive(targets=(AudioPhase, MergePhase))` over one
-  registry (memoization dedupes shared deps). No no-op scheduler phase; `Phase.run()`
-  untouched.
-- `video_required` is NOT retired (my wrong first take): the video stream has a
-  MATERIAL component — timestamps (and the video-row want) — that audio-only runs
-  must not touch. The flag stays but is DERIVED per run from the terminals'
-  dependency closure (closure reaches video chain → True). Registry itself also
-  becomes closure-derived (§24 consumed).
-- `extract` is phase-bound (user override of my standalone lean): runs Job →
-  Extraction with a materialize mode; video/audio (pass-through streams) become
-  real files under `extracted/` — §48 bullet 2 in scope. Plan-free, no --cleanup,
-  sidecar-honest, preserved on later processing runs.
-- NO real final-materialization phase this window: chapter translation / subtitle
-  rework / best-of selection are human-in-the-loop with no settled UX — future
-  spec of its own.
-- §95 lands in the SAME branch (user choice): set redesign + condensation +
-  extract in one window.
-
-Do we really need all current subcommands? From UX point of view for end-user.
-Current setup was mirroring the initial phases structure and allowed better testing for devs.
-But ordinary user likely doesn't need that.
-
-What would ordinary user need? I'd guess it should be intent based. Something like:
-- auto - kept for full default pipeline
-- video - for video only processing
-- audio - for audio only processing
-- measure - for measuring, including EXTERNAL videos (i.e. things produced not by pyqenc).
-
-anything else?
-
-I was thinking about a way to give user mechanics to extract (materialize) anything from source really.
-Maybe this should be the function of `extract` subcommand (a bit different from extract mechanics in auto/video/audio), if we moved to virtual streams in main phases.
-This is also a question specifically for audio - user might want source audio available as standalone files to use in external audio editors.
-I was thinking of maybe introducing a dump filter (like passthrough, but to a file). But direct extract command might be a better way.
-As another point for extract subcommand working like this - it was always a problem to just extract everything from mkv. Most CLI tools require explicit
-streams listing, which is quite painful when making commands manually. with `extract` subcommand it could be something like `pyqenc extract source.mkv --exclude "video-" -y` to dump everything.
-Ideally reusing the current extract phase mechanics.
-
-other considerations?
 
 ---
 
@@ -725,6 +644,13 @@ direction allows it: app_config already imports filters). Kills the cast
 single-file: Params + Filter + Instance + union member. Blast radius:
 app_config, chain, 3 test files. Until then the cast (or an assert-isinstance)
 is the sanctioned interim.
+
+2026-10-05 addendum: the interim's fragility went live — the first-ever audio
+e2e run (new sample) caught FilterInstance params landing as plain BaseModel
+after any model_dump→validate round-trip; pydantic 2.13 turned that into hard
+AttributeErrors at the cast site (5339b61 fixed the round-trip to always
+re-validate through the type's params model). The discriminated union kills
+this class of drift structurally — worth the priority bump when next touched.
 
 ---
 
@@ -1087,44 +1013,6 @@ Assessment (updated 2026-10-05 after user review of the first take):
 
 ---
 
-## 95. CLI condensation — one pipeline-command template, declarative subcommand table — needs thinking
-
-User observation 2026-10-05: "CLI looks to be very bloated with all the
-`process_*` and `_cmd_*` functions basically duplicating each other.
-Leftovers of previous bad design." Feasibility check (same day) confirms:
-
-- `_cmd_extract` / `_cmd_chunk` / `_cmd_encode` are byte-identical except the
-  banner line, the api callable, and the success/fail noun (40 lines each).
-  `_cmd_merge` = the same body + output-file listing; `_cmd_auto` = + the
-  key-value display table; `_cmd_audio` = the body minus crop and plan.
-  After the config-resolution branch, the per-command differences reduced to
-  exactly THREE axes: needs-crop, needs-plan (audio: no), output flavor
-  (plain / list-files / display-table).
-- The six `_create_*_subcommand` parsers are the same shape: name + help +
-  one arg-group mix — a declarative table drives them.
-- `api.py` is already uniform (six thin `_drive` wrappers); its named
-  functions are the public surface and can stay as thin aliases of one
-  `run_to(target=…)` if desired.
-
-Design sketch to think through: one `_SubcommandSpec` (banner, runner,
-needs_crop, needs_plan, flavor) + a single `_cmd_pipeline(args, spec)` +
-table-driven parser creation. Estimated −250 lines of cli.py with zero
-behavior change. Interactions to decide: §66 (the subcommand SET redesign —
-intent-based auto/video/audio/measure) should land FIRST or together — no
-point condensing commands that may be renamed/merged; `_cmd_config` and
-`_cmd_measure` stay separate (genuinely different shapes). Supersedes the
-§65 deferred bullet.
-
-2026-10-05: superseded-as-decided — §66 decisions landed same session; §95 is
-Req 10 of the `2026-10-05 cli-intent-commands` spec (pending approval), same
-single branch. With only three pipeline commands remaining (`auto`/`video`/
-`audio`) the table shrinks; needs-crop/needs-plan collapse into arg_groups;
-`extract` joins config/measure as a dedicated handler. §24 (closure-derived
-registry) folded into the same spec — the closure computation was already
-needed for the derived `video_required`.
-
----
-
 ## 96. Merge phase: measuring step is silent — no INFO line, no progress
 
 **Status:** needs thinking (pure UX)
@@ -1169,7 +1057,353 @@ actually prunes; interplay with §82's other candidate mechanisms
 
 ---
 
-## Last known = 97
+## 98. API execution surface — small intent-based surface vs phase-mirroring wrappers
+
+**Status:** needs thinking (raised 2026-10-05 during the `cli-intent-commands`
+spec review; supersedes that spec's Open-items lean "keep named wrappers")
+
+api.py exposes seven public functions: six near-identical `_drive` wrappers
+mirroring phases (`run_pipeline`, `extract_streams`, `chunk_video`,
+`process_audio`, `encode_chunks`, `merge_final` — the first and last are the
+same shape, both targeting Merge) plus the standalone `measure_quality`.
+`pyqenc/__init__.py` re-exports all seven as THE package surface
+(`__all__`). Consumers today: `cli.py` + three test files (a handful of call
+sites); zero external consumers — the surface is free to change.
+
+With the CLI going intent-based, the phase-mirroring API becomes the odd one
+out. Candidate shape: intent-named entries mirroring the commands —
+auto / video / audio / extract (+ `measure_quality` unchanged) — or a single
+`run(intent=…)`. Considerations:
+
+- Phase-level access for tests needing partial runs: through the intent set
+  (the intents ARE the sanctioned partials now) or directly via
+  `Runner`/`_build_registry` (the real low-level surface).
+- Whether it lands inside the cli-intent-commands window (same files: api.py,
+  `__init__.py`, cli re-pointing, the three test files) or as a follow-up.
+- `plan` stays an explicit api argument, presumably (resolution is the CLI's
+  job per config-resolution) — but video/audio/extract intents differ in
+  needing it at all.
+- `extract`'s materialize flag: public api parameter or CLI-only detail?
+
+---
+
+## 99. Optimization execution path selects strategies from the STALE persisted summary table — even strategies not in the run's plan
+
+**Status:** 🤔 bug (verified from code + live log 2026-10-05; pre-existing on
+main, independent of the cli-intent-commands window)
+
+Doctrine (listing-only-recovery): the persisted summary aggregate is a
+display artifact for the no-pending FAST-EXIT path; the execution path must
+only WRITE it. Here the execution path READS the stale table and feeds it
+into strategy selection.
+
+Live evidence (2026-10-05 run, searched mode, 4 strategies
+`h264/h265/h265-aq/h265-anime +ultrafast`): the phase ran fresh test encodes
+for the 4 current strategies, then printed an 8-row summary table mixing in
+4 stale rows from a previous run's strategy set (`h265+slow`,
+`h264+veryslow`, `h265-anime+slow`, `h265-aq+slow`), selected
+`h265+slow` (smallest stale size, 3.8 MB) — a strategy NOT in the run's
+plan — and EncodingPhase then crashed: "Strategies: none" → CRITICAL "No
+strategies available from OptimizationPhase" → merge failed on failed deps.
+
+Footprint (verified in code):
+
+- `phases/optimization.py:422-426` — `_recover` builds `cached_results`
+  from `persisted.strategy_results` with NO scoping to `plan.strategies`.
+  ROOT CAUSE: a strategy-set change is not an invalidation key — rows for
+  strategies no longer configured survive every currency check (probe,
+  targets, sampling all unchanged), because the sidecar caches per-strategy
+  rows by name.
+- `phases/optimization.py:719-723` — searched-mode execution merges
+  stale+fresh (`all_results = cached + new`), size-ranks, and runs
+  `_apply_tolerance` over the MERGED set → selection can pick a stale
+  strategy. (Fixed mode is clean: `:688` `final_results = new_results`
+  derived from `plan.strategies` only.)
+- `phases/optimization.py:793` — selected names are resolved against the
+  plan via `if n in by_name` — the stale pick is DROPPED SILENTLY (no
+  warning), yielding an empty selection.
+- `phases/optimization.py:597` — the mid-run sidecar save persists the
+  unfiltered cache back (`list(cached_results.values())`), laundering the
+  stale rows into the new run's sidecar.
+- `phases/optimization.py:557-574` and `:460-478` — the tolerance-reapply
+  cheap path and the all-cached fast-exit select/re-use from
+  `persisted.strategy_results` unfiltered: same class, will mis-select or
+  display stale rows after any strategy-set shrink.
+- `phases/encoding.py:2201, 2330` — empty `selected_strategies` surfaces as
+  CRITICAL/RecoveryError far from the cause.
+
+Fix direction (user ruling 2026-10-05):
+
+- The execution path shall NOT read `persisted.strategy_results` AT ALL.
+  The table is write-only there: derived from LIVE DATA accumulated from
+  actual run artifacts on disk — sizes from the encoded test outputs; the
+  reuse substrate is the artifact layer (`_recover_encoding_attempts` +
+  winner/attempt sidecars — the `[reused]` tags in the live log show that
+  machinery already working). The one sanctioned READER of persisted rows
+  is the no-pending fast-exit display path in `.run`.
+- Consequently the to-test decision becomes presence-based per plan
+  strategy (fixed mode's precedent, `optimization.py:438-444`) — the
+  sidecar-row-driven `not in cached_results` check (`:446-448`) dies with
+  the read.
+- In-repo precedent for the exact model: fixed mode's comment at
+  `optimization.py:653-656` ("derives every strategy fresh from the current
+  disk state … persisted results are never trusted") — searched mode
+  converges to the same rule.
+- REJECTED alternative (first take): load-side plan-scoping of cached rows —
+  it patches the selection while preserving the execution-path read of the
+  persisted table, which is the actual violation.
+- Belt regardless: contract asserts where the result is assembled —
+  `selected ⊆ plan names`, and an EMPTY selected set raises at construction
+  (loud, at the phase that caused it) instead of EncodingPhase's downstream
+  CRITICAL.
+- Adjacent: §11 (invalidation matrix — presence-based to-test IS the
+  strategy-set-change answer: a plan change makes artifacts incomplete or
+  foreign rows simply never load); §90 (the same `strategy_results` model
+  gets narrowed/typed at the unified-summaries window — fix order matters
+  if both land close together).
+
+---
+
+## 100. Artifact-owned recovery classification — mass/individual ownership split
+
+**Status:** 🤔 needs thinking (user sketch 2026-10-05, verified against code
+same day — feasible; a candidate refactor, nothing broken today)
+
+The idea: the phase owns its ARTIFACT SET and the mass/orchestration side of
+recovery (produce the directory listing ONCE — or once per strategy — build
+the rows with their externally-derived `wanted`, decide what to do next).
+The INDIVIDUAL side — "which files constitute my COMPLETE/PARTIAL/ABSENT,
+given the listing" — moves to the artifact/payload itself, which already
+owns name composition (two-name doctrine). A row gets the listing, consumes
+its own names out of it, sets its state.
+
+What recovery classification looks like TODAY (verified — same concept,
+five hand-rolled mechanics, all phase-local):
+
+- Extraction: ONE `on_disk_names` listing + inline per-kind membership
+  checks in `_recover` (~130 lines; every kind is "expected name in set",
+  with the video row's expected name being MODE-dependent: timestamps file
+  in processing runs, materialized container in extract runs).
+- Encoding `_recover_encoding_attempts`: per-strategy ONE listing, TWO
+  indexes (pattern-matched winning `.mkv` — name embeds the discovered
+  `q<N>` — plus sidecar chunk-ids); pair COMPLETE iff BOTH exist. A genuine
+  multi-file, PATTERN-shaped footprint — a naive `set[str]` interface
+  cannot express it; the rule owns regex + pairing. Plus
+  `_orphan_strategy_rows` (surplus detection) and `_scan_winner_sidecars`
+  (fact-loading/aggregation — the §92 seed example).
+- Audio `_classify`: per-row `Path.exists()` (N stats, NOT one listing) +
+  one iterdir for surplus rows.
+- Merge: per-output glob discovery; optimization shares the pair-ledger
+  builders with encoding.
+
+Why it looks right:
+
+- Single-ownership rule applied honestly: name composition already lives on
+  entities; completeness-from-names is the same fact family — today it is
+  re-derived in phase code instead.
+- Structural fix for §92's recovery bloat: every `_recover` shrinks to
+  orchestration (build rows → classify via listing → aggregate facts), the
+  per-kind rules become small entity-owned methods with one-sentence
+  contracts; per-kind classification becomes testable without a phase.
+- The listing-only recovery invariant is preserved trivially (the listing is
+  the INPUT); sidecar fact-loads (winner scan) stay a separate phase-owned
+  mass step — reinforcing exactly the §92 load-one/aggregate split.
+
+Design questions for the spec:
+
+- Protocol shape: minimal `SupportsRecovery`-style protocol on file-backed
+  payloads vs a `classify(listing)` hook on the `Artifact` wrapper (which is
+  deliberately thin today — its docstring already says "file-backed
+  locations derive from the payload" but nothing structures it).
+- Pattern footprints (encoding): a TRANSITIONAL shape — it exists only
+  because winners keep attempt names (§101, DIRECTLY RELATED). With §101's
+  static winner names every footprint in the codebase is a static name set
+  and the design question dissolves. End-state doctrine (user, 2026-10-05):
+  NO pattern-matching anywhere — naming (composition AND parsing) is owned
+  by the entity classes, and recovery is direct matching of wanted
+  artifacts to on-disk files.
+- Mode-dependent rows (extraction video): the phase picks the footprint at
+  ROW CONSTRUCTION (run-mode knowledge stays phase-side); classification
+  stays artifact-side.
+- PARTIAL: nothing uses it in classification today (all-or-nothing rules);
+  decide whether the design keeps binary or makes PARTIAL expressible
+  (mkv-without-sidecar → PARTIAL?).
+- Audio's per-row exists() gets unified under the one-listing protocol.
+
+Consumption semantics (user, 2026-10-05): classification should CONSUME its
+expected names out of the shared listing rather than test membership — two
+free invariants: whatever is left over after all rows consumed is stale
+(surfaced immediately as present-but-unwanted rows), and a double
+consumption (two artifacts composing the same name — a naming bug) is
+caught structurally at the collision. Audio's `_classify` surplus scan is
+the partial precedent.
+
+DIRECTLY RELATED: §101 (static winner names). §101 dissolves this item's
+pattern-shaped-footprint question — with static winner names every
+footprint in the codebase becomes a static name set; land them as one
+motion.
+
+Sequencing thought: natural companion to §92's long-function pass (same
+files, same split); the unified-summaries window also rewrites merge +
+optimization recovery — landing this first or folding it there both work.
+
+Human: Extra consideration: status recovery only? or actual artifact producing too? Could save on clarity for partial re-producing.
+I.e. phase owns mass processing of specific type artifacts and another specific type artifacts, like `list[Artifact[Chunk]]` into `list[Artifact[EncodedChunk]]` per strategy.
+But how to recover its state from disk (persistence) and how to produce itself - are not phase concerns, rather individual artifacts (or its playload type). While
+the phase takes care of scheduling, aggregation, process tracking, etc. Feasible? I.e. File can give products - its streams/attachments/etc. Video stream can give product - scenes.
+Scenes are basically chunks (maybe skipping scenes as internal; going directly VideoStream - Chunks). Chunks -> EncodedChunk (EncodedChunk as election from attempts). EncodedChunks -> MergedVideo.
+As either a producer or consumer? (consumer for many to one; producer for one-to-one or one-to-many?). This is hypothesis only.
+
+---
+
+## 101. Winner promotion keeps the ATTEMPT's q-bearing name — winners must be statically named per chunk
+
+**Status:** 🤔 bug (design doctrine violation; user finding from a live
+optimization run 2026-10-05; pre-existing on main). DIRECTLY RELATED: §100
+(artifact-owned recovery) — static winner names are what makes §100's
+direct artifact↔on-disk-file matching possible; land as one motion. Also
+DIRECTLY RELATED: §11 (invalidation logic check) — winners invalidation
+(`encoded/`) becomes structural under the §100 consumption protocol
+(leftovers = stale), which is the baseline §11's audit should check
+against.
+
+Doctrine: attempts (the `encoding/` search workspace) are named WITH quality
+— they are search artifacts. Winners (`encoded/<strategy>/`) map 1:1 to
+chunks — their naming must be STATIC (chunk identity + resolution, no
+quality), so they are directly discoverable from the chunk set: direct
+matching of wanted artifacts to on-disk files, owned by the artifacts
+(payloads). End state: NO pattern-matching anywhere — naming (composition
+AND parsing) is owned by the entity classes. Live evidence
+(`D:\_encoding\pyqenc_cp\encoded\h264+ultrafast`): winners present as
+`<chunk>.<res>.q15.5.mkv` + `.q15.5.png`, only the result sidecar is
+correctly static (`<chunk>.<res>.yaml`).
+
+Root cause: `phases/encoding.py:775` — promotion hard-links the winning
+attempt keeping `winning_attempt.name` (same for the graph at `:781`);
+only `_write_encoding_result_sidecar` composes the static name.
+
+Fix surface:
+
+- Promotion site: name the destination `<chunk_id>.<res>.mkv` / `.png`.
+- Consumers parsing winner filenames through the ATTEMPT pattern for chunk
+  identity: the pair-ledger placeholder (`:326`), the replay path (`:1547`),
+  the winner scan (`:1755`) — with static names these become static-name
+  lookups (and `_recover_encoding_attempts`' mkv index drops the regex).
+- CRF: the winner-limiter scan already reads sidecars (crf included) — the
+  result sidecar is the live crf source; under static naming every
+  EncodedChunk composition reads crf from there, never from a filename.
+- Pre-alpha, no migration: existing q-bearing winners stop matching the
+  static footprint — pairs re-derive as ABSENT (re-encode) or the workdir
+  gets a force-wipe; note it in the fix commit.
+
+---
+
+## 102. Evolutionary / anytime encoding — deficit-driven scheduler (idea)
+
+**Status:** 🤔 idea (discussed 2026-10-05; NOT for right now — needs a full
+scheduler rework, or an alternative scheduler. Deliberately separate from
+§51: QualitySearchV4 stays the per-chunk next-attempt search, untouched by
+this)
+
+Today the encoding phase finishes chunks one at a time — each chunk runs its
+whole CRF search before the pipeline moves on. The idea inverts the order:
+encode ALL chunks once at an initial quality (wave 1 → a complete, valid
+video immediately), measure, then iteratively re-encode the WORST chunks
+toward their targets — always improving the largest deficit — until
+convergence. The user can stop anytime and materialize as-is.
+
+Why it looks good:
+
+- Anytime-readiness: a complete video exists after one encode per chunk;
+  every later pass only improves it. "Enough, stop there, materialize as is"
+  becomes a product knob.
+- Deficit-driven priority IS quality-floor equalization — the same semantics
+  our p10/min targets express (water-filling / largest-deficit-first).
+- Attempt savings via temporal autocorrelation: neighbors inherit initial
+  CRF guesses from already-encoded neighbors (the "smoothing to adjacents"
+  effect — implemented as warm-starting, not averaging measured values); a
+  single cheap global probe could seed wave-1 initial values the same way.
+- Asynchronous shape, no wave barriers: a priority pool of
+  (chunk, next-guess) jobs pulled continuously by the concurrency workers,
+  prioritized by deficit.
+
+What it costs / needs first:
+
+- The scheduler rework itself: per-chunk search (§51) unchanged — this
+  changes attempt ORDER, parallelism shape, and the global stop condition.
+- Merge-on-current-best: "materialize as is" requires merging every chunk's
+  current winner (wave 1 guarantees one attempt per chunk — no gaps);
+  re-merging as winners change composes with the §86/§100/§101 invalidation
+  work.
+- Total encodes do NOT shrink by themselves (a wave = one attempt for that
+  chunk, same count as depth-first) — the count win comes from warm-starts
+  and probe seeding, not from the wave structure.
+
+Research vocabulary: anytime algorithms (Zilberstein), water-filling /
+largest-deficit-first scheduling, racing algorithms (successive elimination);
+Netflix Dynamic Optimizer is the batch-mode cousin (full grid, no anytime
+property — the interactive stop is the novel bit).
+
+Research links (from the 2026-10-05 discussion):
+
+- Netflix Tech Blog, "Dynamic Optimizer — A Perceptual Video Encoding
+  System" (2018) — the per-shot parameter-grid system; boundaries still from
+  shot detection: https://netflixtechblog.com
+- Streaming Media, "The Past, Present, and Future of Per-Title Encoding"
+  (2021) — probe-encode→complexity→parameters lineage:
+  https://www.streamingmedia.com/Articles/Editorial/Featured-Articles/The-Past-Present-and-Future-of-Per-Title-Encoding-152221.aspx
+- "Machine-Learning-Based Method for Content-Adaptive Encoding" (IEEE,
+  2022) — per-segment parameter prediction from features:
+  https://videoprocessing.github.io
+- VCA — Video Complexity Analyzer (per-frame SI/TI-style complexity without
+  encoding; aimed at shot detection + per-title encoding): https://vca.itec.aau.at
+- EVCA — Extended Video Complexity Analyzer (ACM MMSys 2024) — complexity
+  features for rate control and per-segment parameter selection:
+  https://dl.acm.org/doi/10.1145/3625468.3652171
+- IVCA — Inter-relation-aware Video Complexity Analyzer:
+  https://arxiv.org/html/2407.00280v1
+- "Video Encoding Complexity Characterization" (IEEE Access) — SI/TI vs
+  encoding complexity; scene complexity ≠ encoding complexity:
+  https://ieeexplore.ieee.org/document/9900917
+
+Adjacent but separate (same discussion, NOT folded into this item): intra-chunk
+quality refinement via x264/x265 `--zones` (per-frame-range `q=`/`b=`;
+x265 `crf=` zones silently don't work; SVT-AV1 has none — our
+segment+concat architecture IS its standard workaround) — a per-chunk
+post-convergence refinement idea, also not now. Zone mechanics docs:
+x264 manpage (https://manpages.debian.org — frame-based `<start>,<end>,q=|b=`);
+x265 docs (https://x265.readthedocs.io — `q=`/`b=` only).
+
+---
+
+## 103. AudioPhase recovery stats every row separately — listing-first violated
+
+**Status:** 🤔 bug (verified from code 2026-10-05; found in review of the
+cli-intent-commands window)
+
+`AudioPhase._classify` (`pyqenc/phases/audio.py:327-335`) classifies every
+expected (track × chain) row with its own `.exists()` call — N×M stat
+syscalls per recovery — and then runs the `audio_dir.iterdir()` listing
+ANYWAY five lines below (`:339-346`) for the present-but-unwanted surplus
+scan. The single listing the canonical approach needs already happens, just
+AFTER the redundant per-row stats instead of before them.
+
+Recovery classification is listing-only by design (one dir scan → name set
+→ membership; no per-file reads) — extraction already owns the canonical
+shape after the cli-intent-commands consolidation: `_on_disk_file_names()`
++ `_row_state(expected, on_disk)` (`pyqenc/phases/extraction.py`). The
+single `sidecar_path.exists()` is fine — one file, O(1).
+
+**Questions to think about:** fix = hoist the surplus listing above the row
+loop, classify rows by name-membership; decide whether
+`_on_disk_file_names`/`_row_state` re-home to a shared home (utils or the
+phase base) so phases stop re-inventing the pattern — check the other
+phases' recovery loops for the same shape while at it (§92's
+per-item-loader-vs-aggregator split is the natural umbrella).
+
+---
+
+## Last known = 103
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

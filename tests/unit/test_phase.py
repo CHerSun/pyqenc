@@ -401,13 +401,84 @@ def _runner_with(target: _StubPhase, collector, *, no_metrics: bool = False, wor
     registry: PhaseRegistry = {type(target): target}
     return Runner(
         registry,
-        type(target),
+        (type(target),),
         collector,
         work_dir=work_dir if work_dir is not None else Path("."),
         cleanup=CleanupLevel.NONE,
         no_metrics=no_metrics,
-        is_terminal_most=False,
     )
+
+
+class _TerminalA(_DepStubPhase):
+    name = "terminal_a"
+
+
+class _TerminalB(_DepStubPhase):
+    name = "terminal_b"
+
+
+class TestMultiTerminalRuns:
+    """Multi-terminal runner semantics (2026-10-05 cli-intent-commands, Req 5)."""
+
+    @staticmethod
+    def _wired(collector) -> tuple[PhaseRegistry, _StubPhase, _TerminalA, _TerminalB]:
+        registry: PhaseRegistry = {}
+        shared = _StubPhase(collector, Recovery(pending=True), registry=registry)
+        terminal_a = _TerminalA(collector, Recovery(pending=True), registry=registry)
+        terminal_b = _TerminalB(collector, Recovery(pending=True), registry=registry)
+        registry[_StubPhase] = shared
+        registry[_TerminalA] = terminal_a
+        registry[_TerminalB] = terminal_b
+        return registry, shared, terminal_a, terminal_b
+
+    @staticmethod
+    def _runner(registry, collector) -> Runner:
+        return Runner(
+            registry,
+            (_TerminalA, _TerminalB),
+            collector,
+            work_dir=Path("."),
+            cleanup=CleanupLevel.NONE,
+            no_metrics=True,
+        )
+
+    def test_shared_dependency_runs_once_and_both_terminals_execute(self) -> None:
+        collector = NoOpMetricsCollector()
+        registry, shared, terminal_a, terminal_b = self._wired(collector)
+
+        result = self._runner(registry, collector).run()
+
+        assert result.success
+        # The shared dependency is memoized: the second terminal's walk reads
+        # the cached result instead of re-running it.
+        assert shared.execute_calls == 1
+        assert terminal_a.execute_calls == 1
+        assert terminal_b.execute_calls == 1
+        assert result.phases_executed == ["stub", "terminal_a", "terminal_b"]
+
+    def test_failed_terminal_stops_later_terminals(self) -> None:
+        collector = NoOpMetricsCollector()
+        registry, _shared, terminal_a, terminal_b = self._wired(collector)
+        terminal_a._execute_result = _StubResult(
+            outcome=PhaseOutcome.FAILED, message="boom", rows=[],
+        )
+
+        result = self._runner(registry, collector).run()
+
+        assert not result.success
+        assert result.error == "boom"
+        assert terminal_b.execute_calls == 0
+
+    def test_dry_run_walks_all_terminals_as_preview(self) -> None:
+        collector = NoOpMetricsCollector()
+        registry, _shared, terminal_a, terminal_b = self._wired(collector)
+
+        result = self._runner(registry, collector).run(dry_run=True)
+
+        assert result.success
+        assert result.phases_needing_work == ["stub", "terminal_a", "terminal_b"]
+        assert terminal_a.execute_calls == 0
+        assert terminal_b.execute_calls == 0
 
 
 class TestCollectOutputFiles:

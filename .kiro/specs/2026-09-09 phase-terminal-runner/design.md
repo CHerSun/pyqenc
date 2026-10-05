@@ -20,6 +20,18 @@
 
 > This spec (2026-09-09) is the most recent and takes precedence where it conflicts with the specs above.
 
+### Later changes (2026-10-05 `cli-intent-commands`)
+
+- The runner no longer runs exactly one target: it drives the run's ordered
+  terminal phases, stopping at the first unsuccessful one; shared
+  dependencies memoize across walks. `RunResult.success` = every terminal
+  complete; the output/error surface is the last driven terminal.
+- `is_terminal_most` is no longer a constructor flag — it is derived (the
+  last terminal is `MergePhase`).
+- The registry is no longer a caller-wired construction list: it is the
+  dependency closure of the terminals (`dependency_closure` in `phase.py`),
+  so `DEPENDS_ON` alone decides membership and construction order.
+
 ---
 
 ## Overview
