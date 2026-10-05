@@ -41,6 +41,8 @@ class TestCompletePipeline:
         Prevents the bug where a dry-run on a fresh work_dir silently reports
         success/complete (empty ``phases_needing_work``), which would let the
         pipeline claim there is nothing to do for a source it never touched.
+        A dry-run preview itself succeeds — pending work is its normal
+        outcome, not a failure.
         """
         config = _make_config(strategies=["h265+fast"], targets=["vmaf-min:90.0"])
         result = api.run_pipeline(
@@ -52,7 +54,7 @@ class TestCompletePipeline:
             dry_run    = True,
         )
         assert isinstance(result, RunResult)
-        assert result.success is False
+        assert result.success is True
         assert result.phases_needing_work
 
     def test_manual_crop_accepted_end_to_end(self, tmp_path: Path) -> None:
@@ -60,7 +62,7 @@ class TestCompletePipeline:
 
         Prevents the bug where passing ``crop_params`` breaks the pipeline
         wiring (raising instead of threading the override through to the phases);
-        the dry-run must still complete and report remaining work.
+        the dry-run preview must succeed and report remaining work.
         """
         config = _make_config(strategies=["h265+fast"], targets=["vmaf-min:90.0"])
         result = api.run_pipeline(
@@ -73,7 +75,7 @@ class TestCompletePipeline:
             crop_params = CropParams(top=100, bottom=100, left=0, right=0),
         )
         assert isinstance(result, RunResult)
-        assert result.success is False
+        assert result.success is True
         assert result.phases_needing_work
 
 

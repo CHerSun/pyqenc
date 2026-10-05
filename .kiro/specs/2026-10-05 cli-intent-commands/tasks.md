@@ -149,15 +149,23 @@ existing commands byte-identical in behavior. Requirement ids reference
     extended; `docs/quality-targeting.md` + `CONTRIBUTING.md` verified,
     updated only where stale
 
-- [ ] 9. E2E on real media (all Reqs)
-  - `auto` end-to-end incl. the reuse re-run — product and logs stable
-  - `video`: no audio phase executes; merged output present
-  - `audio`: audio-only; timestamps/video row untouched
-  - Two-pass composition: `video` then `audio` then `auto` performs only the
-    merge (fast-exit verification)
-  - `extract`: dump with an exclusion filter; byte-verify materialized
-    tracks against mkvextract reference; one forced-fallback case
-  - Speed rule on every run that encodes
+- [x] 9. E2E on real media (all Reqs)
+  - Sample built at `samples/sample-lion-fullhd.mkv` (recipe recorded in
+    `samples/SAMPLES.md`; 35 s real content + aac/flac/sub/attachment/
+    chapters) — also un-skips the previously-skipped legacy e2e tests.
+  - Legacy e2e rot repaired: two forever-skipped tests asserted
+    `success is False` for dry-run previews with pending work — stale
+    semantics contradicting the runner contract; now assert preview success
+    + `phases_needing_work`.
+  - FOUND + FIXED (5339b61): FilterInstance params landed as plain BaseModel
+    after any model_dump→validate round-trip — latent, exposed by the first
+    audio e2e under pydantic 2.13 (plain-BaseModel attribute access now
+    raises); both config shapes now always re-validate through the type's
+    params model.
+  - All five scenarios green: auto (execute + reuse replay), video (no
+    audio work), audio (timestamps/probe untouched), two-pass composition
+    (auto performs no work), extract (every kind + codec-verified + rerun
+    byte-stable). Speed rule applied (`h265+ultrafast`).
 
 - [ ] 10. Closeout
   - Cross-spec review per agent-specs: summarize supersessions/changes at the
