@@ -254,7 +254,11 @@ parameters to expose (title, fps, year, strategy, …)?
 
 ## 🤔 24. Phase registry is a static hand-ordered list, not derived from dependencies
 
-**Status:** needs thinking (partially addressed)
+**Status:** covered by `2026-10-05 cli-intent-commands` spec (pending approval) — Req 6:
+registry = dependency closure of the run's terminals, topologically ordered; the static
+list and the `video_required` Probe-omission branch are deleted in the same motion as
+§66/§95 (2026-10-05). Follow-up safety net once landed: §54 (DEPENDS_ON usage audit
+becomes load-bearing — an undeclared dep is now a silent absence).
 
 - `_build_registry` is a static ordered construction list
   (`pyqenc/phase.py:320-438`); the Probe-omission-when-`video_required=False`
@@ -282,26 +286,24 @@ attempts as "measurement") worth anything for video?
 
 ---
 
-## 🤔 33. Disk-space estimation is JobPhase-only, log-only
+## 🤔 33. Disk-space estimation — single Probe-hosted call, log-only
 
-**Status:** needs thinking (partially implemented)
+**Status:** needs thinking (placeholder form; full rework = §50)
 
 - A size-estimation module exists (`utils/disk_space.py`, `SpaceEstimate`,
-  pixel/bpp heuristics) but is invoked only from `JobPhase.run` on cached
-  `job.yaml` metadata (`pyqenc/phases/job.py:150-166`); the
-  insufficient-space FAILED branch is commented out — "I don't want to block,
-  just notify" (`job.py:167-181`). Not per-phase, not based on actual
-  extraction/chunking results, no partial scanning.
-- 2026-09-27: landed with `2026-09-25 file-stream-model` (Task 4) — estimation
-  now runs in ExtractionPhase on the enumerated `VideoStreamInfo` (attempts +
-  finals only; the FFV1/remux/extraction terms are deleted).
-- 2026-10-05 (cc63e55): the estimate MOVED to ProbePhase — it reads
-  `plan.strategies` and Probe owns the plan (the video chain's entry
-  context; audio consumption is negligible next to the strategy-multiplied
-  video work, and the audio registry carries no plan). USER: "space
-  estimation needs a complete rework. But right now - just a fast
-  solution" — the rework itself is §50. The remaining open question is
-  unchanged:
+  pixel/bpp heuristics). The original JobPhase-era invocation (cached
+  `job.yaml` metadata, commented-out insufficient-space branch) is fully
+  gone — no estimate code remains in `job.py`.
+- Timeline: JobPhase (original) → ExtractionPhase (`2026-09-25
+  file-stream-model` Task 4, on the enumerated `VideoStreamInfo`) →
+  ProbePhase (`2026-10-05`, cc63e55): the estimate reads `plan.strategies`
+  and Probe owns the plan (the video chain's entry context; audio
+  consumption is negligible next to the strategy-multiplied video work, and
+  the audio registry carries no plan). USER: "space estimation needs a
+  complete rework. But right now - just a fast solution."
+
+**Questions to think about:** per-phase re-estimates later in the pipeline?
+Keep log-only?
 
 **Questions to think about:** per-phase re-estimates later in the pipeline?
 Keep log-only?
@@ -378,21 +380,6 @@ Or... should we remove it completely?
 
 ---
 
-## 42. Adding ability to fix quality range has broken optimization phase
-
-Previously we were selecting the best strategy via optimization phase - encoding a small subset of chunks using all strategies. Our principle was - we reach targets.
-With fixed quality (range min=max) the principle of reaching targets is broken.
-
-Probably a composite score should be added and used for selection of the best (optimal) variant. Maybe with a cli option allowing either strict min or generic optimum score
-for selection:
-- Min (current default and future default?) - negative score on any missing target and calculate only based on missing targets. Positive only if all targets matched - then score the positive delta.
-- Optimum - score all metrics (both missing and matching) for a single weighted score.
-- Should the score include the size? Size is basically a price for the score, where the score is the profit. Must reach some balance - smaller size is prefered,
-  while too high score doesn't outweight the size (so that we don't blindly always pick largest size - quite the contrary, target is to reach smaller size while
-  keeping good enough quality).
-
----
-
 ## 45. Summary table for audio
 
 Like for extraction phase - I want a similar table for audio phase - a summary on which streams were picked up (wanted flag), maybe with a chain counter per stream. Maybe also add after the table - the selector - selected tracks (as a clear reason for the choice).
@@ -414,6 +401,12 @@ Why? I'm often seeing a movie being split like - titles, full movie as SINGLE HU
 ---
 
 ## 48. Remove include/exclude filters?
+
+2026-10-05: bullet 2 is CONSUMED by the `2026-10-05 cli-intent-commands` spec (pending
+approval) — `extract` materializes every selected stream kind incl. pass-through
+video/audio (Req 9.1); the retargetting idea is REJECTED (processing stays
+source-anchored; spec Constraints). Bullet 1 (removing filters from processing runs)
+stays open and out of that spec's scope.
 
 Previously include/exclude filters were made specifically for extraction phase - it was costly to extract everything. Also, this was the only mean to
 actually control which audio gets processed.
@@ -512,16 +505,13 @@ Need to check code. Especially metadata extraction, files materialization (extra
 
 ## 54. Validate Phase's DEPENDS_ON by actual usage
 
+**Status:** covered by `2026-10-05 cli-intent-commands` spec (pending approval) — Req 13:
+the audit + the per-phase dependency table (recorded in architecture.md) ride that
+window as a PREREQUISITE of the closure-derived registry (undeclared dep = silent
+absence under closure construction). Delete this entry with the spec's approval.
+
 Validate Phase's class field DEPENDS_ON vs actual inputs used from those phases via `_deps` or similar mechanics. We need a clean concise dependencies graph.
 Also need to build a table or a graph with actual dependencies - inputs, internals, results - both artifacts and settings. between phases and phase's internals.
-
----
-
-## 55. Fixed-crf encoding
-
-Current UX for fixed CRF encoding is rather complicated for end-user, involving config editing (duplicate profile and fix there; or do profile override for quality range).
-There should be some easier way. Problem is how to fluently do that without affecting multi-strategy settings. Maybe enforce single strategy if fixed crf key is used?
-Needs thinking.
 
 ---
 
@@ -559,7 +549,7 @@ Ideally, internal things shouldn't log anything but debug messages and propagate
 ## 62. Sidecars - are owned by the Phase
 
 Phase sidecars and internal machinery of the phase. Not part of model or stream_model. No1 else by their respected phase should ever be accessing them.
-Probably worth moving to the phase.
+Probably worth moving to the phase. Adjacent (model types, not module home): §90's typed per-mode params models.
 
 ---
 
@@ -585,17 +575,47 @@ Deferred as costly/structural:
   extended-stream, encoded-chunk builders) → conftest consolidation.
 - `EncodedChunk` composition duplicated (`_pair_placeholder` vs
   `build_encoded_chunk` shapes).
-- ASCII summary-table scaffold duplicated (optimization vs merge).
+- ASCII summary-table scaffold duplicated (optimization vs merge) — consumed
+  by the `2026-10-03 unified-quality-summaries` spec (the shared
+  builder/renderer is the spec's core deliverable).
 - measure→extraction private imports (`_probe_streams_json`, `_video_info`)
   and api→measure `_parse_duration` — re-homing per §57.
 - Broader test-surface rework beyond metrics (string-format pinning etc.);
   skipped integration tests need a real run on a media sample.
-- ty: 83 diagnostics remain (type-modeling noise on pydantic patterns; one
-  false positive on `MetricsCollector.step(*parts)` with zero parts).
 
 ---
 
 ## 66. CLI subcommands review
+
+**Status:** decisions made 2026-10-05; spec `2026-10-05 cli-intent-commands` drafted
+(requirements + design, awaiting approval → tasks.md).
+
+Decisions from the 2026-10-05 session:
+
+- Command set: `auto` / `video` / `audio` / `measure` / `config` / `extract` (new
+  meaning). `chunk`/`encode`/`merge` removed (pre-alpha, no compat); api named
+  functions remain the dev/test surface.
+- Verified while designing: MergePhase is ALREADY video-only by behavior
+  (`merge.py:8-9` — audio muxing intentionally omitted, delivery files kept
+  alongside; zero `_dep_result(AudioPhase)` reads) — the AudioPhase dep existed
+  purely to schedule audio early in `auto` runs. Dropped; scheduling moves to
+  multi-terminal ordering: `_drive(targets=(AudioPhase, MergePhase))` over one
+  registry (memoization dedupes shared deps). No no-op scheduler phase; `Phase.run()`
+  untouched.
+- `video_required` is NOT retired (my wrong first take): the video stream has a
+  MATERIAL component — timestamps (and the video-row want) — that audio-only runs
+  must not touch. The flag stays but is DERIVED per run from the terminals'
+  dependency closure (closure reaches video chain → True). Registry itself also
+  becomes closure-derived (§24 consumed).
+- `extract` is phase-bound (user override of my standalone lean): runs Job →
+  Extraction with a materialize mode; video/audio (pass-through streams) become
+  real files under `extracted/` — §48 bullet 2 in scope. Plan-free, no --cleanup,
+  sidecar-honest, preserved on later processing runs.
+- NO real final-materialization phase this window: chapter translation / subtitle
+  rework / best-of selection are human-in-the-loop with no settled UX — future
+  spec of its own.
+- §95 lands in the SAME branch (user choice): set redesign + condensation +
+  extract in one window.
 
 Do we really need all current subcommands? From UX point of view for end-user.
 Current setup was mirroring the initial phases structure and allowed better testing for devs.
@@ -632,6 +652,11 @@ Investigation needed.
 ---
 
 ## 68. Support invalidation of encoding/optimization results on config change for strategy
+
+**Status:** enabled 2026-10-05 (config-resolution, PR #26) — the comparable
+snapshot exists: `EncodingPlan` rides `ProbePhaseResult` (resolved strategies
++ targets, frozen, directly comparable/serializable). The invalidation
+wiring itself remains open.
 
 We already support config changes for audio chain via a full-string preservation and per-chain comparisson. This allows end-user to change the chain and get proper results still, even if previous outputs exist.
 
@@ -705,6 +730,9 @@ is the sanctioned interim.
 
 ## 80. LongPathYaml redefinition — cleaner editor experience + pyright-gate enabler — needs thinking
 
+Related: §91 (LongPath trailing-whitespace idempotence — the other open
+LongPath finding, 2026-10-05).
+
 2026-10-02, pyright cross-check evaluation DONE and stance DECIDED (recorded in
 agent-commands.md): ruff + ty are the static gates; pyright/Pylance stays an
 editor aid + occasional probe (`uvx pyright --pythonpath .venv/Scripts/python.exe`).
@@ -720,16 +748,6 @@ VS Code experience outright (editor value today), and is the prerequisite step
 if a pyright gate is ever wanted (recipe: this, then widen done, test Decimals
 done, config `reportPrivateImportUsage: none`, a handful of per-checker ignores
 for negative tests + lib gaps).
----
-
-## 81. Quality targets should accept any separator, but use single stable form when serialized from our code
-
-User should be able to use any standard separator for quality targets between metric and statistic, i.e. `vmaf_min` or `vmaf-min` or `vmaf.min` - all should be acceptable deser variants
-probably `-_.` are enough. For the actual value separator `vmaf_min:97` or `vmaf_min=97` or `vmaf_min>97` probably also should be ok with no extra added meaning. Just a convenience.
-But when we serialize to str - we should use one stable across all code form - which exactly? Not sure. Maybe `-` or `.`. Don't like the underscore `_` - it is usually used as a word separator inside single name, rather then between names.
-
-Central name ownership (both serializing and deserializing) should also be considered per DRY rule.
-
 ---
 
 ## 82. Research: multi-metric quality scoring/evaluation — joint paper review for possible improvements
@@ -805,6 +823,12 @@ spec (2026-10-02) defers this here; adjacent: §82 scoring research.
 
 ## 84. Re-home quality ranges: codec = actual codec range, profile = reasonable working band
 
+**Status note (2026-10-05, post-config-resolution):** range VALIDATION is now
+one direction-free rule on `AppConfig` (`_validate_quality_range` +
+`_codec_ordered_range`) — the re-homed values land in exactly one check site.
+The value re-homing itself (default_config.yaml codec/profile bounds) remains
+open.
+
 Background: profiles originally had no `quality_range` override, so the practical
 working band had to be defined on the codec itself — default_config.yaml comments
 say it outright ("full codec range is 0–51; 6–30 is the practical working band").
@@ -863,6 +887,11 @@ Still open (the general problem — related to phase invalidation broadly and to
 ---
 
 ## 89. Check the code for `str` usages
+
+**Status note (2026-10-05, post-config-resolution):** the config layer is
+swept — raw strings survive only as the YAML parse form; resolved state is
+objects (`EncodingPlan` on `ProbePhaseResult`; doctrine in
+coding-standards.md). The sweep remains open for the rest of the codebase.
 
 Old code used `str` directly in many places. Instead of Paths, instead of strategies, profiles, etc.
 We've moved to objects & classes since then. Single instanciacion where possible.
@@ -1086,9 +1115,61 @@ point condensing commands that may be renamed/merged; `_cmd_config` and
 `_cmd_measure` stay separate (genuinely different shapes). Supersedes the
 §65 deferred bullet.
 
+2026-10-05: superseded-as-decided — §66 decisions landed same session; §95 is
+Req 10 of the `2026-10-05 cli-intent-commands` spec (pending approval), same
+single branch. With only three pipeline commands remaining (`auto`/`video`/
+`audio`) the table shrinks; needs-crop/needs-plan collapse into arg_groups;
+`extract` joins config/measure as a dedicated handler. §24 (closure-derived
+registry) folded into the same spec — the closure computation was already
+needed for the derived `video_required`.
+
 ---
 
-## Last known = 95
+## 96. Merge phase: measuring step is silent — no INFO line, no progress
+
+**Status:** needs thinking (pure UX)
+
+- Merge measurement is a long step (full-file VMAF/PSNR/SSIM per output) and
+  starts with no INFO message — the log goes quiet for the whole measurement
+  stretch with no indication anything is running.
+- Wanted: a "Starting measuring..." INFO line for the step, and exactly ONE
+  progress bar for the full phase — not per file — displaying which output
+  file is currently being measured.
+- Gains weight with `2026-10-05 cli-intent-commands`: `video` terminates at
+  Merge, so the phase becomes a first-class user-facing terminal, not just
+  auto's last step.
+
+**Questions to think about:** where the current file name renders on the
+single bar (ProgressBarState extension?); whether concat/append steps share
+the same bar or only the measuring stretch reports progress.
+
+---
+
+## 97. Pareto dominance with tolerance — ignore small positive deltas
+
+**Status:** needs thinking (needs testing; sharpens §82's epsilon-dominance angle)
+
+- Dominance pruning compares metric stats strictly: A dominates B iff
+  `size(A) ≤ size(B)` and A ≥ B on every compared stat. The 2026-10-03
+  real-data smoke test (§82) pruned 0 of 4 strategies — near-equal stats keep
+  every strategy mutually incomparable.
+- Idea: treat a small positive delta as equal (epsilon-dominance), reusing the
+  acceptable positive delta ALREADY defined on metrics (the same
+  "good enough" bar the encoding search fast-exits on). A stat win only
+  counts when it beats the other by more than that tolerance.
+- Needs testing on real data — could turn dominance from toothless
+  (everything survives) into an actual reducer.
+
+**Questions to think about:** tolerance source (the existing
+acceptable-delta definition — per-metric or global, and its config home);
+symmetry — should size get the same treatment (like `optimize_tolerance`'s
+band, §19)?; effect on anchor election (smallest survivor) once pruning
+actually prunes; interplay with §82's other candidate mechanisms
+(user budget, trade-off sliders).
+
+---
+
+## Last known = 97
 
 Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
