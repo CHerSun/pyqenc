@@ -7,6 +7,30 @@
 
 Basis: the grounding documents in this folder (`logical-vs-code.md`, `per-phase-audit.md`, `sidecar-models.md`, `naming-and-consumption.md`, `invalidation-matrix.md`, `spec-plan.md` — every requirement below traces to a ruling recorded there during the 2026-10-06/07 validation sessions).
 
+## Cross-Spec Notes
+
+### What this spec supersedes/changes in prior specs
+
+| Changed | Where | What changed |
+|---|---|---|
+| Attempt file name `<chunk>.<resolution>.q<crf>.mkv` (Req 15.5) and the post-encode resolution probe/rename (Req 14.2) | `2026-09-25 file-stream-model` | Attempts become `<chunk>.q<q>.mkv` (quality is the search's cache key; no resolution component — Req 9/9b here); `EncodedChunk` drops the `crf` payload field entirely (Req 4 here); the winner family is the static `<chunk>.mkv` + `<chunk>.yaml` composed by `EncodedChunk` (Req 1–2 here). |
+| `probe.yaml` shape (Req 3.5 there) | `2026-09-25 file-stream-model` | Gains `crop_source: manual\|detected` (human-facing, never compared — Req 23 here) and the source-fingerprint identity key (Req 31 here). |
+| `chunking.yaml` = boundaries only (Req 4.4 there) | `2026-09-25 file-stream-model` | Gains `scene_threshold` + `min_scene_length` as invalidation keys (Req 26 here). |
+| Merge output name derived at one phase site (Req 15.8 there) | `2026-09-25 file-stream-model` | The family re-homes to the `MergedVideo` entity, including the per-strategy pinned-q suffix whenever the strategy's range is collapsed (Req 6 here; uniformity gate dropped). |
+| Winner-layer wholesale invalidation at every fixed-mode start (Req 6 there) | `2026-10-02 fixed-quality` | Re-keyed: the fixed sidecar variant persists the pinned-quality map; an equal map performs no invalidation — the pending gate alone decides (O-2); mode switches re-key via the union tag (O-1). |
+| Cleanup guard as a skip-time hard stop (Req 7 there) | `2026-10-02 fixed-quality` | Moves to plan-boundary construction validation (Req 55 here); the banner stays presentation. |
+| Recovery classification by membership/regex indexes and per-row `.exists()` | `2026-09-28 artifact-model` (ledger mechanics, retained) + code drift | Becomes the consumption protocol: payload-owned expected names consumed out of ONE listing per owned directory; leftovers → layer policy; collisions loud (Req 12–15 here). Ledger completeness states, `wanted` derivation, and result contracts are unchanged. |
+| `--force` → derived `force_wipe` propagated wipe orders | `2026-09-28 artifact-model` lineage / job.py code | `force_wipe` is deleted; `--force` becomes a permission riding the job result; every phase detects its own conditions from its own persisted keys (Req 33/35a here). |
+| Mode-honest optional key fields on `optimization.yaml`/`merge.yaml` | `2026-10-02 fixed-quality` implementation | Per-mode discriminated-union models tagged `mode: fixed\|search` (Req 18 here). TODO §90's typing half lands here; the summary-content narrowing stays with `2026-10-03 unified-quality-summaries`. |
+| Merged-output sidecar as an untyped dict with persisted verdicts | code (merge.py) | Typed facts+provenance model, no verdict (Req 27 here); verdicts computed live (Req 51); measurement unconditional (Req 52). |
+| §99 conservative wipe on a missing optimization sidecar | optimization-live-selection fix (0.17.3, d552743) | Retained verbatim as optimization's unknown-currency rule (Req 47 here) and generalized per phase (extraction/audio wipe + re-derive; merge per-output records decide; encoding cross-certified). |
+
+### Related, not superseded
+
+- `2026-10-05 cli-intent-commands` — intent command set, closure-derived registry, and `extract` materialization are untouched; `extracted/` materialized containers join the deliverable layer (retained) without changing that spec's requirements.
+- `2026-10-03 unified-quality-summaries` — builds on this spec's substrate (per-mode sidecars, `summary` aggregate key, fingerprints); its table/content work re-forks from this spec's merge.
+- `2026-05-02 quality-search-v3` — search behavior is untouched; only attempt naming (`<chunk>.q<q>.mkv`, no resolution) and pick-up verification (completeness-by-sidecar) change underneath it.
+
 ## Purpose
 
 Rebuild recovery, invalidation, and naming on one ownership model: **the filesystem is the state** (no mirrors), entities own their names and classification, phases own mass operations and condition→effect policy, the template owns sequencing. Closes TODO §100, §101, §11, §9, §39, §62, §68, §86, §103, §105 and the mode-switch gap; parts of §90/§92/§106 ride along.

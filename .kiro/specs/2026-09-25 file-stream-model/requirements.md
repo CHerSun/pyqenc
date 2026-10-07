@@ -19,6 +19,7 @@
 
 ### Related, not superseded
 
+- `2026-10-07 artifact-recovery-ownership` (later spec) — amends several of this spec's outcomes: attempt file names drop the resolution component (`<chunk>.q<q>.mkv`, no post-encode resolution rename — the name is fully known before encoding); `EncodedChunk` drops the `crf` payload field (quality is a fact of the winner sidecar only) and gains the static winner family `<chunk>.mkv`/`<chunk>.yaml`; `probe.yaml` gains `crop_source` (human-facing) and the source-fingerprint identity key; `chunking.yaml` gains `scene_threshold`/`min_scene_length` as invalidation keys; the merge output name family re-homes to the `MergedVideo` entity (per-strategy pinned-q suffix whenever collapsed). Composition, two-name doctrine, and unique-property dumps are unchanged.
 - `2026-09-28 artifact-model` (successor for the artifact layer) — defines the generic `Artifact[PayloadT]` recovery/contract layer above this spec's entity family: which entities become artifacts, internal ledger vs external result contracts, and the per-phase artifact flow. The stream model, naming ownership (Req 15), unique-property dumps and sidecar schemas here are unchanged. The `timestamps.txt` extraction row becomes the video artifact's material component there.
 - `2026-04-29 pts-preservation` — global PTS restoration via `timestamps.txt` at merge is unchanged; this spec adds the frame-preservation invariant on top of it.
 - `2026-09-01 probe-phase-refactor` — ProbePhase keeps its sidecar and slow-facet ownership; its frame-count source changes (see Req 9).

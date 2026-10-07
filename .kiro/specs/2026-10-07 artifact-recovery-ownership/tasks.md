@@ -7,7 +7,7 @@
 
 ## 0. Cross-spec review (convention)
 
-- [ ] 0.1 Review this spec against `2026-09-25 file-stream-model`, `2026-09-28 artifact-model`, `2026-10-02 fixed-quality`, `2026-10-05 cli-intent-commands`, and the §99 optimization-live-selection fix; add a short supersession/changes summary to the top of both this spec and each affected one (notably: winner naming, sidecar shapes, invalidation ownership, §90 split — typing here, summary narrowing stays with `2026-10-03 unified-quality-summaries`).
+- [x] 0.1 Review this spec against `2026-09-25 file-stream-model`, `2026-09-28 artifact-model`, `2026-10-02 fixed-quality`, `2026-10-05 cli-intent-commands`, and the §99 optimization-live-selection fix; add a short supersession/changes summary to the top of both this spec and each affected one (notably: winner naming, sidecar shapes, invalidation ownership, §90 split — typing here, summary narrowing stays with `2026-10-03 unified-quality-summaries`).
 
 ## 1. Dependency access (TODO §93, first — final access shape)
 

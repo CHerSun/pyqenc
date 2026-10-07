@@ -18,6 +18,7 @@
 
 ### Related, not superseded
 
+- `2026-10-07 artifact-recovery-ownership` (later spec) — amends Req 6 and Req 7 here: the unconditional winner-layer wipe at fixed-mode start is replaced by the pinned-quality map as the fixed sidecar variant's invalidation key (an equal map performs no invalidation — the pending gate alone decides; mode switches re-key via the per-mode union tag), and the cleanup guard moves from skip-time logic to plan-boundary construction validation (banner stays presentation). The anchor ruler, dominance pruning, and per-chunk measurement control are unchanged.
 - `2026-09-28 artifact-model` — recovery/ledger mechanics this spec builds on unchanged: presence-based completeness, `wanted` derivation, listing-only recovery classification, phase-params sidecars.
 - `2026-05-02 quality-search-v3` — search behavior in searched runs is untouched; fixed runs simply present the search a single-point domain (its existing degenerate behavior — one attempt, immediate exhaustion).
 - TODO §81 (separator tolerance; one canonical serialized form) — `-q` bound parsing adopts the same tolerant-input policy; canonical serialization aligns with whatever §81 lands.
