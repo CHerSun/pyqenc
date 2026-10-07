@@ -174,8 +174,8 @@ class ProbePhase(Phase[ProbePhaseResult]):
         Raises:
             RecoveryError: When the source has no video stream.
         """
-        job_result        = self._dep_result(JobPhase)
-        extraction_result = self._dep_result(ExtractionPhase)
+        job_result        = self._deps[JobPhase]
+        extraction_result = self._deps[ExtractionPhase]
         probe_yaml        = job_result.work_dir / ProbePhase.SIDECAR_NAME
 
         # Step 1 — no video stream: fatal for all downstream video phases.
@@ -230,7 +230,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         Returns:
             ``ProbePhaseResult`` with outcome ``COMPLETED``.
         """
-        probe_yaml = self._dep_result(JobPhase).work_dir / ProbePhase.SIDECAR_NAME
+        probe_yaml = self._deps[JobPhase].work_dir / ProbePhase.SIDECAR_NAME
         probe_state = self._probe_state
         video       = self._video_stream
         assert video is not None  # recovery guarantees a video stream
@@ -278,7 +278,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         n_strategies = len(self._plan.strategies)
         log_disk_space_info(
             stream         = video,
-            work_dir       = self._dep_result(JobPhase).work_dir,
+            work_dir       = self._deps[JobPhase].work_dir,
             min_strategies = 1 if (self._config.encoding.optimize or n_strategies == 0) else n_strategies,
             max_strategies = max(1, n_strategies),
         )
@@ -339,7 +339,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         """
         video = self._video_stream
         assert video is not None
-        timestamps_path = self._dep_result(ExtractionPhase).timestamps_path
+        timestamps_path = self._deps[ExtractionPhase].timestamps_path
 
         if timestamps_path is not None:
             counted = count_frames(timestamps_path)

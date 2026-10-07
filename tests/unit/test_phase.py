@@ -134,7 +134,7 @@ class TestDeclaredDependencies:
 
         result = target.run()
         assert result.outcome is PhaseOutcome.REUSED
-        assert target._dep_result(_StubPhase) is dep.result
+        assert target._deps[_StubPhase] is dep.result
 
     def test_missing_declared_dependency_raises_loudly(self) -> None:
         """A declared dependency absent from the registry is never dropped."""

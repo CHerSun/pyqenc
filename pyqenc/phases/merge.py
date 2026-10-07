@@ -176,19 +176,19 @@ class MergePhase(Phase[MergePhaseResult]):
     def params(self) -> MergeParams:
         """Current merge params derived from the job result config and probe result.
 
-        Built at runtime from ``self._dep_result(JobPhase)`` and
-        ``self._dep_result(ProbePhase)`` so the values are always current
+        Built at runtime from ``self._deps[JobPhase]`` and
+        ``self._deps[ProbePhase]`` so the values are always current
         (e.g. after CLI overrides) rather than snapshotted at construction
         time. The invalidation key is mode-honest: search runs carry the
         configured quality targets; fixed runs carry the ruler basis (the
         optimization anchor) — config targets drive nothing in fixed mode.
         """
-        probe = ProbeState.from_probe(self._dep_result(ProbePhase))
-        job_result = self._dep_result(JobPhase)
-        plan = self._dep_result(ProbePhase).plan
+        probe = ProbeState.from_probe(self._deps[ProbePhase])
+        job_result = self._deps[JobPhase]
+        plan = self._deps[ProbePhase].plan
         if plan.fixed_quality:
             return MergeParams(
-                anchor   = self._dep_result(OptimizationPhase).anchor,
+                anchor   = self._deps[OptimizationPhase].anchor,
                 sampling = job_result.config.measurement.sampling,
                 probe    = probe,
             )
@@ -204,8 +204,8 @@ class MergePhase(Phase[MergePhaseResult]):
 
     def _log_key_params(self) -> None:
         """Log the source stem and quality targets (key parameters)."""
-        logger.info("Source stem:  %s", self._dep_result(JobPhase).source.stem)
-        plan = self._dep_result(ProbePhase).plan
+        logger.info("Source stem:  %s", self._deps[JobPhase].source.stem)
+        plan = self._deps[ProbePhase].plan
 
         if plan.targets:
             logger.info("Targets:      %s", ", ".join(
@@ -225,7 +225,7 @@ class MergePhase(Phase[MergePhaseResult]):
             A typed ``FAILED`` result, or ``None`` when the phase may proceed.
         """
         incomplete = [
-            a for a in self._dep_result(EncodingPhase).winners
+            a for a in self._deps[EncodingPhase].winners
             if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)
         ]
         if incomplete:
@@ -256,7 +256,7 @@ class MergePhase(Phase[MergePhaseResult]):
             The :class:`Recovery` single source of truth.
         """
 
-        job_result = self._dep_result(JobPhase)
+        job_result = self._deps[JobPhase]
         work_dir   = job_result.work_dir
         merged_dir = work_dir / MERGED_OUTPUT_DIR
         merge_yaml = work_dir / MergePhase.SIDECAR_NAME
@@ -280,7 +280,7 @@ class MergePhase(Phase[MergePhaseResult]):
             persisted = MergeParams.load(merge_yaml)
             if persisted is not None:
                 current  = self.params
-                plan     = self._dep_result(ProbePhase).plan
+                plan     = self._deps[ProbePhase].plan
         
                 fixed    = plan.fixed_quality
                 key_changed     = (
@@ -326,7 +326,7 @@ class MergePhase(Phase[MergePhaseResult]):
         # Step 4: determine expected strategies from the typed winners field —
         # the already-cached EncodingPhase winners, distinct by safe name, in
         # first-seen order.
-        winners = self._dep_result(EncodingPhase).winners
+        winners = self._deps[EncodingPhase].winners
         seen: dict[str, Strategy] = {}
         for row in winners:
             seen.setdefault(row.payload.strategy.safe_name(), row.payload.strategy)
@@ -421,7 +421,7 @@ class MergePhase(Phase[MergePhaseResult]):
         targets in both modes (the anchor-relative table is the unified-
         summaries spec's work), so the rendered set is the target-key set.
         """
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         return {
             f"{t.metric}_{t.statistic}"
@@ -430,8 +430,8 @@ class MergePhase(Phase[MergePhaseResult]):
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> MergePhaseResult:
         """Build the reused result, replaying the persisted merge summary."""
-        job_result = self._dep_result(JobPhase)
-        plan = self._dep_result(ProbePhase).plan
+        job_result = self._deps[JobPhase]
+        plan = self._deps[ProbePhase].plan
         merge_yaml = job_result.work_dir / MergePhase.SIDECAR_NAME
         persisted  = MergeParams.load(merge_yaml)
         if persisted is not None:
@@ -499,12 +499,12 @@ class MergePhase(Phase[MergePhaseResult]):
         """
 
         rows = wanted
-        work_dir   = self._dep_result(JobPhase).work_dir
+        work_dir   = self._deps[JobPhase].work_dir
         merged_dir = work_dir / MERGED_OUTPUT_DIR
         merged_dir.mkdir(parents=True, exist_ok=True)
 
-        job_result = self._dep_result(JobPhase)
-        probe_result = self._dep_result(ProbePhase)
+        job_result = self._deps[JobPhase]
+        probe_result = self._deps[ProbePhase]
         plan = probe_result.plan
         crop: CropParams = probe_result.crop
         # The dependency walk guarantees a completed probe with a resolved stream.
@@ -589,13 +589,13 @@ class MergePhase(Phase[MergePhaseResult]):
 
                 # CRF distribution plot — reads the typed winners field
                 crf_data = MergePhase._collect_crf_data(
-                    self._dep_result(EncodingPhase).winners,
+                    self._deps[EncodingPhase].winners,
                     strategy_name,
                 )
                 if crf_data:
                     crf_plot_path = merged_dir / f"{output_file.stem}.crf.png"
                     try:
-                        qlabel = self._dep_result(EncodingPhase).quality_labels.get(strategy_name, "CRF")
+                        qlabel = self._deps[EncodingPhase].quality_labels.get(strategy_name, "CRF")
                         create_crf_plot(
                             chunks        = crf_data,
                             output_path   = crf_plot_path,
@@ -690,7 +690,7 @@ class MergePhase(Phase[MergePhaseResult]):
                 probe              = self.params.probe,
                 anchor             = self.params.anchor,
                 strategy_summaries = strategy_summaries,
-            ).save(self._dep_result(JobPhase).work_dir / MergePhase.SIDECAR_NAME)
+            ).save(self._deps[JobPhase].work_dir / MergePhase.SIDECAR_NAME)
 
         if failed_strategies:
             return self._make_result(
@@ -753,7 +753,7 @@ class MergePhase(Phase[MergePhaseResult]):
 
         # Resolve timestamps path from ExtractionPhase result
         timestamps_path: Path | None = (
-            self._dep_result(ExtractionPhase).timestamps_path
+            self._deps[ExtractionPhase].timestamps_path
         )
 
         if timestamps_path is None or not timestamps_path.exists():
@@ -830,7 +830,7 @@ class MergePhase(Phase[MergePhaseResult]):
         Returns:
             Dict mapping strategy display names to their winner payloads.
         """
-        return self._dep_result(EncodingPhase).encoded_chunks
+        return self._deps[EncodingPhase].encoded_chunks
 
 
 # ---------------------------------------------------------------------------
@@ -985,7 +985,7 @@ class MergePhase(Phase[MergePhaseResult]):
         never needs re-measuring for a future stat set.
         """
         data: dict = {"frame_count": frame_count}
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         if plan.fixed_quality:
             pinned = MergePhase._uniform_pinned_quality([strategy])
@@ -995,7 +995,7 @@ class MergePhase(Phase[MergePhaseResult]):
                     pinned.quantize(strategy.codec.quality_granularity)
                 ) if pinned is not None else None,
             }
-            data["anchor"]  = self._dep_result(OptimizationPhase).anchor
+            data["anchor"]  = self._deps[OptimizationPhase].anchor
             data["metrics"] = {k: float(v) for k, v in all_metrics.items()}
         else:
             quality_targets = plan.targets
@@ -1036,7 +1036,7 @@ class MergePhase(Phase[MergePhaseResult]):
         evaluator = QualityEvaluator(output_dir)
         plot_path = output_dir / f"{final_result.stem}.png"
 
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         evaluation = evaluator.evaluate_chunk(
             encoded            = final_result,
@@ -1073,7 +1073,7 @@ class MergePhase(Phase[MergePhaseResult]):
             Space-separated metric readings, or empty string if no targets.
         """
         parts: list[str] = []
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         for target in plan.targets:
             key   = f"{target.metric}_{target.statistic}"

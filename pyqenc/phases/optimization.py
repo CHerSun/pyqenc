@@ -211,7 +211,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             The all-strategies result, a FAILED result when the cleanup guard
             stops the run — or ``None`` to proceed with the template.
         """
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         strategies = plan.strategies
 
@@ -248,7 +248,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             ``None`` to continue into the mode branch exactly as a searched
             run would.
         """
-        job_result = self._dep_result(JobPhase)
+        job_result = self._deps[JobPhase]
 
         if job_result.cleanup >= CleanupLevel.INTERMEDIATE:
             err = (
@@ -318,7 +318,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
     def _log_key_params(self) -> None:
         """Log the strategy list and tolerance (key parameters)."""
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         logger.info("Strategies:  %s", ", ".join(s.display_name() for s in plan.strategies))
         logger.info("Tolerance:   %.1f%%", self._config.encoding.optimize_tolerance)
@@ -357,8 +357,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             RecoveryError: On a probe change without ``--force``, or when
                 ChunkingPhase produced no chunks.
         """
-        job_result   = self._dep_result(JobPhase)
-        probe_result = self._dep_result(ProbePhase)
+        job_result   = self._deps[JobPhase]
+        probe_result = self._deps[ProbePhase]
         work_dir     = job_result.work_dir
         opt_yaml     = work_dir / OptimizationPhase.SIDECAR_NAME
         tolerance    = self._config.encoding.optimize_tolerance
@@ -501,7 +501,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         the same set that produced the ledger counts.
         """
         chunks: list[VideoStreamChunk] = [
-            a.payload for a in self._dep_result(ChunkingPhase).chunks
+            a.payload for a in self._deps[ChunkingPhase].chunks
         ]
 
         test_ids = persisted.test_chunks if persisted is not None and persisted.test_chunks else []
@@ -548,11 +548,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         Returns:
             ``OptimizationPhaseResult`` with ``selected_strategies`` set.
         """
-        job_result = self._dep_result(JobPhase)
+        job_result = self._deps[JobPhase]
         work_dir   = job_result.work_dir
         opt_yaml   = work_dir / OptimizationPhase.SIDECAR_NAME
         tolerance  = self._config.encoding.optimize_tolerance
-        plan       = self._dep_result(ProbePhase).plan
+        plan       = self._deps[ProbePhase].plan
 
         fixed      = plan.fixed_quality
         assert self._current_probe is not None, "_recover populates the probe state before execution"
@@ -730,7 +730,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> OptimizationPhaseResult:
         """Build the reused result from the fast-exit stash (display + live selection)."""
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         if plan.fixed_quality:
             resolved_names = [s.display_name() for s in plan.strategies]
@@ -763,7 +763,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             exists).
         """
         # Resolve strategy name strings to Strategy objects from the live plan.
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         by_name = {s.display_name(): s for s in plan.strategies}
         unknown = [n for n in self._selected_names if n not in by_name]
@@ -808,9 +808,9 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         Returns:
             ``OptimizationPhaseResult`` with all configured strategies selected.
         """
-        job_result       = self._dep_result(JobPhase)
+        job_result       = self._deps[JobPhase]
         work_dir         = job_result.work_dir
-        plan             = self._dep_result(ProbePhase).plan
+        plan             = self._deps[ProbePhase].plan
 
         opt_yaml         = work_dir / OptimizationPhase.SIDECAR_NAME
         current_targets  = targets_as_strings(plan.targets)

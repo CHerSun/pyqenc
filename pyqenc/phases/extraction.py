@@ -477,7 +477,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
     def _log_key_params(self) -> None:
         """Log the source path and the active include/exclude filter."""
-        job = self._dep_result(JobPhase)
+        job = self._deps[JobPhase]
         logger.info("Source:   %s", job.source.name)
         extraction_cfg = job.config.extraction
         if extraction_cfg.include or extraction_cfg.exclude:
@@ -510,7 +510,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         Raises:
             RecoveryError: When the source cannot be analysed at all.
         """
-        job_result = self._dep_result(JobPhase)
+        job_result = self._deps[JobPhase]
         work_dir      = job_result.work_dir
         extracted_dir = work_dir / EXTRACTED_DIR
         sidecar_path  = work_dir / ExtractionPhase.SIDECAR_NAME
@@ -783,7 +783,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             subtitle_streams   = [r for r in artifacts if _is_subtitle_row(r)],
             attachment_streams = [r for r in artifacts if _is_attachment_row(r)],
             chapters           = next((r for r in artifacts if _is_chapters_row(r)), None),
-            work_dir           = self._dep_result(JobPhase).work_dir,
+            work_dir           = self._deps[JobPhase].work_dir,
         )
 
     def _execute(
@@ -809,7 +809,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             ``ExtractionPhaseResult`` built directly from the updated rows.
         """
         artifacts = wanted
-        job_result = self._dep_result(JobPhase)
+        job_result = self._deps[JobPhase]
         work_dir      = job_result.work_dir
         extracted_dir = work_dir / EXTRACTED_DIR
         extracted_dir.mkdir(parents=True, exist_ok=True)

@@ -244,7 +244,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         Returns:
             The :class:`Recovery` single source of truth.
         """
-        job_result = self._dep_result(JobPhase)
+        job_result = self._deps[JobPhase]
         work_dir   = job_result.work_dir
         yaml_path  = work_dir / ChunkingPhase.SIDECAR_NAME
         force_wipe = job_result.force_wipe
@@ -261,7 +261,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
                 for record in sidecar.scenes
             ]
             logger.info("Scenes:  %d (from chunking.yaml)", len(self._recovered_scenes))
-            stream = self._dep_result(ProbePhase).stream
+            stream = self._deps[ProbePhase].stream
             assert stream is not None, "probe guaranteed complete by the dependency walk"
             # RecoveryError (unknown duration) propagates — the template
             # converts it to the typed FAILED result.
@@ -289,8 +289,8 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         Returns:
             ``ChunkingPhaseResult`` with the chunk-window rows.
         """
-        work_dir = self._dep_result(JobPhase).work_dir
-        stream   = self._dep_result(ProbePhase).stream
+        work_dir = self._deps[JobPhase].work_dir
+        stream   = self._deps[ProbePhase].stream
         assert stream is not None, "probe guaranteed complete by the dependency walk"
         extended = stream.payload
 
@@ -334,7 +334,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
 
     def _reused_result(self, wanted: list, message: str) -> ChunkingPhaseResult:
         """Build the reused result from the cached boundaries."""
-        stream = self._dep_result(ProbePhase).stream
+        stream = self._deps[ProbePhase].stream
         assert stream is not None, "probe guaranteed complete by the dependency walk"
         try:
             chunks = build_chunks(self._recovered_scenes, stream.payload)

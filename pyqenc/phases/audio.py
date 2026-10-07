@@ -143,7 +143,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
             list: wanted expected outputs plus any present-but-unwanted
             surplus files).
         """
-        job_result = self._dep_result(JobPhase)
+        job_result = self._deps[JobPhase]
         work_dir    = job_result.work_dir
         sidecar_path = work_dir / AudioPhase.SIDECAR_NAME
         audio_cfg   = job_result.config.audio
@@ -216,11 +216,11 @@ class AudioPhase(Phase[AudioPhaseResult]):
 
     def _selected_tracks(self) -> list[AudioStream]:
         """Resolve the working track set from extraction + ``audio.select``."""
-        extraction_result = self._dep_result(ExtractionPhase)
+        extraction_result = self._deps[ExtractionPhase]
         audio_streams: list[AudioStream] = [
             a.payload for a in extraction_result.audio_streams
         ]
-        audio_cfg = self._dep_result(JobPhase).config.audio
+        audio_cfg = self._deps[JobPhase].config.audio
         return resolve_selection(audio_streams, audio_cfg.select)
 
     def _invalidate_and_commit(
@@ -379,7 +379,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
         """
         artifacts  = wanted
         pending    = [a for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)]
-        job_result = self._dep_result(JobPhase)
+        job_result = self._deps[JobPhase]
         audio_cfg  = job_result.config.audio
         resolved   = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
         audio_dir  = job_result.work_dir / AUDIO_OUTPUT_DIR

@@ -2050,16 +2050,16 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         """Log chunks, strategies, crop, and targets (key parameters)."""
         logger.info("Scanning for existing artifacts...")
 
-        probe_result = self._dep_result(ProbePhase)
+        probe_result = self._deps[ProbePhase]
         crop         = probe_result.crop
 
-        strategies = self._dep_result(OptimizationPhase).selected_strategies
-        chunks     = self._dep_result(ChunkingPhase).chunks
+        strategies = self._deps[OptimizationPhase].selected_strategies
+        chunks     = self._deps[ChunkingPhase].chunks
         logger.info("Chunks:      %d", len(chunks))
         logger.info("Strategies:  %s", ", ".join(s.display_name() for s in strategies) if strategies else "none")
         if crop:
             logger.info("Crop:        %s", crop)
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         logger.info("Targets:     %s", ", ".join(f"{t.metric}-{t.statistic}≥{t.value}" for t in plan.targets))
 
@@ -2122,7 +2122,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         """
         if not ctx.deep_cleanup:
             return
-        work_dir = self._dep_result(JobPhase).work_dir
+        work_dir = self._deps[JobPhase].work_dir
         for target in (work_dir / ENCODING_WORKSPACE_DIR, work_dir / ENCODED_OUTPUT_DIR):
             if target.exists():
                 try:
@@ -2156,7 +2156,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             RecoveryError: On a probe change without ``--force``, or when
                 chunking/optimization produced no chunks / strategies.
         """
-        job_result = self._dep_result(JobPhase)
+        job_result = self._deps[JobPhase]
         work_dir   = job_result.work_dir
         enc_dir    = work_dir / ENCODING_WORKSPACE_DIR
         out_dir    = work_dir / ENCODED_OUTPUT_DIR
@@ -2178,7 +2178,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         if not force_wipe:
             persisted_enc = EncodingParams.load(yaml_path)
             self._persisted = persisted_enc
-            current_probe = ProbeState.from_probe(self._dep_result(ProbePhase))
+            current_probe = ProbeState.from_probe(self._deps[ProbePhase])
             self.params   = EncodingParams(probe=current_probe)
 
             if persisted_enc is not None and persisted_enc.probe != current_probe:
@@ -2192,8 +2192,8 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         remove_stale_tmp_files(enc_dir)
 
         # Step 4: get chunks and strategies from dependencies
-        chunking_result     = self._dep_result(ChunkingPhase)
-        optimization_result = self._dep_result(OptimizationPhase)
+        chunking_result     = self._deps[ChunkingPhase]
+        optimization_result = self._deps[OptimizationPhase]
 
         chunks: list[VideoStreamChunk] = [a.payload for a in chunking_result.chunks]
         strategies = optimization_result.selected_strategies
@@ -2252,7 +2252,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         totals = persisted.winners_frame_totals
         if not totals:
             return
-        probe_stream = self._dep_result(ProbePhase).stream
+        probe_stream = self._deps[ProbePhase].stream
         if probe_stream is None or probe_stream.payload.frame_count <= 0:
             return
         source_total = probe_stream.payload.frame_count
@@ -2313,13 +2313,13 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         Returns:
             ``EncodingPhaseResult`` after encoding.
         """
-        work_dir = self._dep_result(JobPhase).work_dir
-        probe_result = self._dep_result(ProbePhase)
+        work_dir = self._deps[JobPhase].work_dir
+        probe_result = self._deps[ProbePhase]
         crop         = probe_result.crop
 
         # Resolve chunks and strategies from dependencies
-        chunking_result     = self._dep_result(ChunkingPhase)
-        optimization_result = self._dep_result(OptimizationPhase)
+        chunking_result     = self._deps[ChunkingPhase]
+        optimization_result = self._deps[OptimizationPhase]
 
         chunks: list[VideoStreamChunk] = [a.payload for a in chunking_result.chunks]
         strategies = optimization_result.selected_strategies
@@ -2343,7 +2343,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # read as all-miss noise); uncompared fixed runs have no ruler
         # (absolute values, no verdicts — the limiter table self-extinguishes
         # on empty targets); searched runs use the config targets, unchanged.
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         if plan.fixed_quality:
             presentation_targets = optimization_result.synthetic_targets
@@ -2365,11 +2365,11 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             work_dir         = work_dir,
             collector        = self._collector,
             max_parallel     = self._config.encoding.concurrency,
-            force            = self._dep_result(JobPhase).force_wipe,
+            force            = self._deps[JobPhase].force_wipe,
             dry_run          = False,
             crop_params      = crop,
             encoding_yaml    = None,  # already persisted above with ProbeState
-            cleanup_level    = self._dep_result(JobPhase).cleanup,
+            cleanup_level    = self._deps[JobPhase].cleanup,
             visual_hash      = self._config.encoding.visual_hash,
             metrics_sampling = self._config.measurement.sampling,
             measure_attempts = True,  # default-flipping is TODO §83's decision

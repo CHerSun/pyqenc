@@ -1231,7 +1231,7 @@ class TestModeHonestMergeSidecars:
 
     def test_merge_yaml_keys_and_summaries_mode_honest_fixed(self, tmp_path: Path) -> None:
         merge, _ = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
-        persisted = MergeParams.load(merge._dep_result(JobPhase).work_dir / "merge.yaml")
+        persisted = MergeParams.load(merge._deps[JobPhase].work_dir / "merge.yaml")
         assert persisted is not None
         # Fixed-run key: the ruler basis; no configured-targets key.
         assert persisted.anchor == "h265-aq+slow"
@@ -1247,7 +1247,7 @@ class TestModeHonestMergeSidecars:
 
     def test_merge_yaml_search_mode_keys(self, tmp_path: Path) -> None:
         merge, _ = _run_full_merge(tmp_path, fixed=False)
-        persisted = MergeParams.load(merge._dep_result(JobPhase).work_dir / "merge.yaml")
+        persisted = MergeParams.load(merge._deps[JobPhase].work_dir / "merge.yaml")
         assert persisted is not None
         assert persisted.anchor is None
         assert persisted.quality_targets, "search run keys on configured targets"
