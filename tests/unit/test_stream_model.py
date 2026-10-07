@@ -2,7 +2,7 @@
 
 Covers the spec's model-family guarantees: static info concretization (no
 casts at use sites), unique-slice dumps (no composed references leak),
-``dump → load → dump`` byte-identity, source-identity validation, the
+``dump → load → dump`` byte-identity, identity keys, the
 ``as_input()`` adapters, chunk-id naming round-trips, and the shared
 filesystem-name primitives.
 """
@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from yaml import safe_dump, safe_load
 
 from pyqenc.audio.layout import ChannelLayout
-from pyqenc.models import CodecConfig, CropParams, Strategy
+from pyqenc.models import CodecConfig, CropParams, Fingerprint, Strategy
 from pyqenc.stream_model import (
     AttachmentStreamInfo,
     AudioStream,
@@ -26,8 +26,8 @@ from pyqenc.stream_model import (
     ExtractionSidecar,
     File,
     JobSidecar,
+    JobSourceRecord,
     SceneRecord,
-    SourceMismatchError,
     SubtitleStreamInfo,
     VideoStream,
     VideoStreamChunk,
@@ -39,6 +39,10 @@ from pyqenc.utils.long_path import LongPath
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+_STUB_FINGERPRINT = Fingerprint(token="a" * 32, size=8_123_498_745)
+"""A source identity key stub — the same shape every phase sidecar persists."""
+
 
 def _file() -> File:
     return File(path=LongPath("D:/media/source.mkv"), file_size_bytes=8_123_498_745)
@@ -247,7 +251,7 @@ def _reload(model):
 
 def _extraction_sidecar() -> ExtractionSidecar:
     return ExtractionSidecar(
-        source = _file(),
+        source = _STUB_FINGERPRINT,
         streams = {
             "video": _video_stream().info,
             "audio": [AudioStreamInfo(
@@ -294,7 +298,9 @@ class TestSidecarByteIdentity:
     """dump → load → dump is byte-identical for every new sidecar (Req 5.3)."""
 
     def test_job_sidecar(self) -> None:
-        sidecar = JobSidecar(source=_file())
+        sidecar = JobSidecar(source=JobSourceRecord(
+            path=_file().path, fingerprint=_STUB_FINGERPRINT,
+        ))
         assert _yaml(_reload(sidecar)) == _yaml(sidecar)
 
     def test_extraction_sidecar(self) -> None:
@@ -302,39 +308,30 @@ class TestSidecarByteIdentity:
         assert _yaml(_reload(sidecar)) == _yaml(sidecar)
 
     def test_chunking_sidecar(self) -> None:
-        sidecar = ChunkingSidecar(scenes=[
-            SceneRecord(timestamp_seconds=0.0, frame=0),
-            SceneRecord(timestamp_seconds=584.917, frame=14012),
-        ])
+        sidecar = ChunkingSidecar(
+            scenes = [
+                SceneRecord(timestamp_seconds=0.0, frame=0),
+                SceneRecord(timestamp_seconds=584.917, frame=14012),
+            ],
+            source           = _STUB_FINGERPRINT,
+            scene_threshold  = 0.27,
+            min_scene_length = 15,
+        )
         assert _yaml(_reload(sidecar)) == _yaml(sidecar)
 
 
 # ---------------------------------------------------------------------------
-# Source-identity validation (Req 5.2)
+# Identity keys on sidecars (Req 31/32 — the fingerprint, no path)
 # ---------------------------------------------------------------------------
 
-class TestSourceIdentityValidation:
-    def test_matching_identity_passes(self) -> None:
-        _extraction_sidecar().validate_source(_file())
-
-    def test_size_mismatch_raises(self) -> None:
-        """Bug prevented: a sidecar from a different (re-created) source file
-        being trusted as a valid inventory."""
-        live = File(path=_file().path, file_size_bytes=999)
-        with pytest.raises(SourceMismatchError, match="identity mismatch"):
-            _extraction_sidecar().validate_source(live)
-
-    def test_path_mismatch_raises(self) -> None:
-        live = File(path=LongPath("D:/media/other.mkv"), file_size_bytes=_file().file_size_bytes)
-        with pytest.raises(SourceMismatchError):
-            _extraction_sidecar().validate_source(live)
-
-    def test_job_sidecar_validates_too(self) -> None:
-        JobSidecar(source=_file()).validate_source(_file())
-        with pytest.raises(SourceMismatchError):
-            JobSidecar(source=_file()).validate_source(
-                File(path=_file().path, file_size_bytes=None),
-            )
+class TestSidecarIdentityKeys:
+    def test_extraction_sidecar_persists_fingerprint_only(self) -> None:
+        """Bug prevented: a sidecar key carrying the source PATH — the path is
+        a runtime locator (a move must not invalidate anything); the key is
+        the fingerprint pair alone (Req 31)."""
+        dumped = _extraction_sidecar().model_dump(exclude_none=True)
+        assert set(dumped["source"]) == {"token", "size"}
+        assert "path" not in dumped["source"]
 
 
 # ---------------------------------------------------------------------------

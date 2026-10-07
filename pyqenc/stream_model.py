@@ -946,42 +946,30 @@ class MergedVideo(BaseModel):
 # Req 5 — sidecar slices (unique-property persistence)
 # ---------------------------------------------------------------------------
 
-class SourceMismatchError(ValueError):
-    """Raised when a sidecar's recorded source identity does not match the live
-    :class:`File` — the owning phase re-enumerates and rewrites the sidecar."""
+class JobSourceRecord(BaseModel):
+    """The ``job.yaml`` identity record: the locator beside the content.
 
-
-class _SourceSidecarBase(BaseModel):
-    """Private base for sidecar models that record the source identity."""
-
-    source: File
-
-    def validate_source(self, live: File) -> None:
-        """Validate the recorded source identity against the live file.
-
-        Args:
-            live: The in-run :class:`File` from JobPhase.
-
-        Raises:
-            SourceMismatchError: When the recorded path or size differs from
-                                 the live values.
-        """
-        if (
-            self.source.path != live.path
-            or self.source.file_size_bytes != live.file_size_bytes
-        ):
-            raise SourceMismatchError(
-                f"Sidecar source identity mismatch: recorded "
-                f"{self.source.path} ({self.source.file_size_bytes} bytes), "
-                f"live {live.path} ({live.file_size_bytes} bytes)."
-            )
-
-
-class JobSidecar(_SourceSidecarBase):
-    """The ``job.yaml`` slice: the :class:`File` dump under the ``source`` key.
-
-    The persisted path + size are the source-mismatch comparison basis.
+    Path is the RUNTIME LOCATOR (a move rewrites ``job.yaml`` and nothing
+    else — no fatal, no invalidation, Req 34); the fingerprint is the
+    identity every phase key compares against (Req 31). The file size lives
+    inside the fingerprint as its belt — it is not duplicated as a field.
     """
+
+    model_config = ConfigDict(frozen=True)
+
+    path:       LongPathYaml
+    fingerprint: Fingerprint
+
+
+class JobSidecar(BaseModel):
+    """The ``job.yaml`` slice — the one human-facing sidecar.
+
+    ``source`` names what this workdir works with (the locator + content
+    identity); it is also the standalone ``measure`` command's source
+    discovery (the sanctioned cross-sidecar read).
+    """
+
+    source: JobSourceRecord
 
 
 class StreamsInventory(BaseModel):
@@ -1003,21 +991,24 @@ class StreamsInventory(BaseModel):
     attachments: list[AttachmentStreamInfo] = []
 
 
-class ExtractionSidecar(_SourceSidecarBase):
+class ExtractionSidecar(BaseModel):
     """The ``extraction.yaml`` slice: stream inventory, chapters presence,
     source identity.
 
-    Owned by ExtractionPhase; a reuse run loads it instead of re-probing, with
-    :meth:`validate_source` deciding whether the inventory is still valid.
+    Owned by ExtractionPhase; a reuse run loads it instead of re-probing.
+    ``source`` is the identity key (the fingerprint pair, no path — Req 31):
+    a mismatch against the live source is the phase's catastrophic condition;
+    an absent key (legacy sidecar) is unknown, never a mismatch (Req 32).
 
     Attributes:
-        source:   The source identity for invalidation.
+        source:   The source identity key (fingerprint only).
         streams:  The per-type stream inventory (info slices).
         chapters: Whether the source carries a chapter edition (the extracted
                   location is the fixed ``chapters.xml`` convention — nothing
                   per-run to record).
     """
 
+    source:   Fingerprint | None = None
     streams:  StreamsInventory
     chapters: bool = False
 
@@ -1036,13 +1027,28 @@ class SceneRecord(BaseModel):
 
 
 class ChunkingSidecar(BaseModel):
-    """The ``chunking.yaml`` slice: scene boundaries (no chunking mode).
+    """The ``chunking.yaml`` slice: scene boundaries + the detection keys.
 
     Chunk windows are derived from these boundaries plus the stream duration
     at load time — no per-chunk records, no per-chunk sidecars.
 
+    Keys (spec 2026-10-07, Req 26/31): the source identity (fingerprint
+    only) and the two detection parameters — a change in either invalidates
+    the persisted boundaries (identity: catastrophic per Req 33; params:
+    automatic re-detect, Req 45). An absent key (legacy sidecar) is unknown,
+    never a mismatch (Req 32).
+
     Attributes:
-        scenes: Scene boundaries in order; the first is the stream start.
+        scenes:           Scene boundaries in order; the first is the stream
+                          start.
+        source:           The source identity key (fingerprint only).
+        scene_threshold:  The ContentDetector threshold the boundaries were
+                          detected under.
+        min_scene_length: The minimum scene length (frames) in force at
+                          detection.
     """
 
-    scenes: list[SceneRecord]
+    scenes:           list[SceneRecord]
+    source:           Fingerprint | None = None
+    scene_threshold:  float | None       = None
+    min_scene_length: int | None         = None

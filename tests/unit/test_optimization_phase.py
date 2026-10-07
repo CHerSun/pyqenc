@@ -23,6 +23,7 @@ from pyqenc.models import (
     CleanupLevel,
     CropParams,
     EncodingPlan,
+    Fingerprint,
     PhaseOutcome,
     QualityTarget,
     Strategy,
@@ -537,7 +538,7 @@ def _make_chunk(cid_start: float, cid_end: float, tmp_path: Path):
     return VideoStreamChunk(
         stream=ExtendedVideoStream(
             stream=VideoStream(
-                file=File(path=tmp_path / "source.mkv", file_size_bytes=64),
+                file=File(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv", file_size_bytes=64),
                 info=VideoStreamInfo(
                     track_id=0, codec_name="hevc", fps=24.0,
                     fps_fraction=Fraction(24, 1), resolution="1920x1080",
@@ -662,6 +663,10 @@ from decimal import Decimal
 
 from pyqenc.constants import ENCODED_OUTPUT_DIR
 
+_STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
+"""Stub source identity — phases read the job File's fingerprint."""
+
+
 
 def _make_fixed_phase(
     tmp_path: Path,
@@ -681,6 +686,8 @@ def _make_fixed_phase(
     from pyqenc.phases.job import JobPhase as _JP
     from pyqenc.phases.probe import ProbePhase as _PP
     from pyqenc.phases.probe import ProbePhaseResult
+
+
 
     config = _APP_CONFIG.model_copy(deep=True)
     config.encoding.optimize = optimize

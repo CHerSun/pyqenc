@@ -42,6 +42,7 @@ from pyqenc.models import (
     PhaseOutcome,
     QualityTarget,
     Strategy,
+    identity_changed,
     targets_as_strings,
 )
 from pyqenc.phase import (
@@ -51,6 +52,7 @@ from pyqenc.phase import (
     PhaseRegistry,
     PhaseResult,
     Recovery,
+    RecoveryError,
 )
 from pyqenc.phases.encoding import EncodingPhase
 from pyqenc.phases.extraction import ExtractionPhase
@@ -191,11 +193,13 @@ class MergePhase(Phase[MergePhaseResult]):
                 anchor   = self._deps[OptimizationPhase].anchor,
                 sampling = job_result.config.measurement.sampling,
                 probe    = probe,
+                source   = job_result.source_fingerprint,
             )
         return MergeParams(
             quality_targets  = targets_as_strings(plan.targets),
             sampling = job_result.config.measurement.sampling,
             probe            = probe,
+            source           = job_result.source_fingerprint,
         )
 
     # ------------------------------------------------------------------
@@ -236,10 +240,14 @@ class MergePhase(Phase[MergePhaseResult]):
         return None
 
     def _recover(self) -> Recovery:
-        """Classify merge rows and handle force-wipe / param invalidation.
+        """Classify merge rows and handle identity / param invalidation.
 
         Steps:
-        1. If ``force_wipe``: delete ``merged/`` and ``merge.yaml``.
+        1. Identity key (Req 33/60): a ``merge.yaml`` identity contradicting
+           the live source is the ONE deliverable-layer catastrophic
+           condition — fatal without the ``--force`` permission; with it,
+           delete ``merged/`` and ``merge.yaml`` (the outputs are functions
+           of the old source and nothing downstream can revalidate them).
         2. Detect quality-target / metrics_sampling change — delete per-output
            sidecars so stale COMPLETE rows are reclassified as PARTIAL
            and the merge re-runs with fresh metrics. A probe change deletes
@@ -254,30 +262,46 @@ class MergePhase(Phase[MergePhaseResult]):
 
         Returns:
             The :class:`Recovery` single source of truth.
+
+        Raises:
+            RecoveryError: On an identity mismatch without ``--force``.
         """
 
         job_result = self._deps[JobPhase]
         work_dir   = job_result.work_dir
         merged_dir = work_dir / MERGED_OUTPUT_DIR
         merge_yaml = work_dir / MergePhase.SIDECAR_NAME
-        force_wipe = job_result.force_wipe
 
-        # Step 1: force-wipe
-        if force_wipe:
+        # Step 1 — identity key: the one permission-gated deliverable wipe.
+        persisted_merge = MergeParams.load(merge_yaml)
+        if (
+            persisted_merge is not None
+            and identity_changed(persisted_merge.source, job_result.source_fingerprint)
+        ):
+            if not job_result.force:
+                raise RecoveryError(
+                    "Source content identity mismatch (merge.yaml) — the merged "
+                    "outputs belong to a different source.  Re-run with --force to "
+                    "grant permission to wipe merged/ and re-merge the new source."
+                )
+            logger.warning(
+                "Source identity mismatch (--force granted — wiping merged/ "
+                "and merge.yaml)"
+            )
             if merged_dir.exists():
                 shutil.rmtree(merged_dir)
-                logger.debug("force_wipe: deleted %s", merged_dir)
+                logger.debug("identity wipe: deleted %s", merged_dir)
             merge_yaml.unlink(missing_ok=True)
-            logger.debug("force_wipe: deleted %s", merge_yaml)
+            persisted_merge = None
 
-        # Step 2: invalidation-key change detection. Only the declared keys
+        # Step 2 — invalidation-key change detection. Only the declared keys
         # are compared — never whole-model equality (replay fields would
         # perpetually break it). Mode-honest keys: search → configured
         # quality targets; fixed → the ruler basis (anchor identity). When a
         # key changes, delete all per-output sidecars so every row is
         # reclassified as PARTIAL and the merge re-runs with fresh metrics.
-        if not force_wipe and merged_dir.exists():
-            persisted = MergeParams.load(merge_yaml)
+        if persisted_merge is not None and merged_dir.exists():
+            persisted = persisted_merge
             if persisted is not None:
                 current  = self.params
                 plan     = self._deps[ProbePhase].plan

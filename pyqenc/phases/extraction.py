@@ -11,7 +11,9 @@ family (:class:`~pyqenc.stream_model.Stream` objects composed with the job's
 stream objects.
 
 Recovery loads ``extraction.yaml`` instead of re-probing whenever the sidecar
-is present and its source identity matches the job's live ``File``.
+is present and its identity key matches the live source; a missing sidecar is
+the unknown-currency condition (conservative wipe + re-extract), and an
+identity mismatch is catastrophic (fatal without ``--force``, wipe with it).
 """
 # CHerSun 2026
 
@@ -38,7 +40,7 @@ from pyqenc.constants import (
     TIMESTAMPS_FILENAME,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import PhaseOutcome
+from pyqenc.models import PhaseOutcome, identity_changed
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -58,7 +60,6 @@ from pyqenc.stream_model import (
     Chapters,
     ExtractionSidecar,
     File,
-    SourceMismatchError,
     StreamInfo,
     StreamsInventory,
     SubtitleStream,
@@ -492,11 +493,17 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
         Steps:
 
-        1. If ``force_wipe``: delete ``extracted/`` and ``extraction.yaml``.
+        1. Identity-key invalidation (Req 33/47): a ``extraction.yaml``
+           identity mismatch against the live source is catastrophic —
+           fatal without the ``--force`` permission; with it, wipe
+           ``extracted/`` and the sidecar, then re-derive. A missing sidecar
+           is the unknown-currency condition (X-1): the artifacts' currency
+           is unknown, so they are conservatively wiped (the wipe is vacuous
+           when nothing exists — no existence probe) and re-extracted.
         2. Clean up leftover ``.tmp`` files.
-        3. Resolve the inventory: load ``extraction.yaml`` when present and its
-           source identity matches the job's live ``File`` (no re-probe);
-           otherwise enumerate via ffprobe and mark the sidecar dirty.
+        3. Resolve the inventory: load ``extraction.yaml`` when present (its
+           identity was just verified — no re-probe); otherwise enumerate via
+           ffprobe and mark the sidecar dirty.
         4. Produce one artifact per subtitle/attachment (name owned by the
            stream class), plus chapters and timestamps artifacts. ``wanted``
            comes from the current include/exclude filter and ``video_required``;
@@ -508,27 +515,50 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             contains every extractable component (including ``wanted=False``).
 
         Raises:
-            RecoveryError: When the source cannot be analysed at all.
+            RecoveryError: When the source cannot be analysed at all, or on
+                an identity mismatch without permission.
         """
-        job_result = self._deps[JobPhase]
+        job_result    = self._deps[JobPhase]
         work_dir      = job_result.work_dir
         extracted_dir = work_dir / EXTRACTED_DIR
         sidecar_path  = work_dir / ExtractionPhase.SIDECAR_NAME
-        force_wipe    = job_result.force_wipe
 
-        # Step 1: force-wipe.
-        if force_wipe:
+        # Step 1: identity key — catastrophic / unknown-currency (the sidecar
+        # load happens once, here; both branches end with it cleared).
+        sidecar = self._load_sidecar(sidecar_path)
+        if identity_changed(sidecar.source if sidecar else None,
+                            job_result.source_fingerprint):
+            if not job_result.force:
+                raise RecoveryError(
+                    "Source content identity mismatch (extraction.yaml) — this "
+                    "workdir's extracted artifacts belong to a different source.  "
+                    "Re-run with --force to grant permission to wipe extracted/ "
+                    "and re-extract from the new source."
+                )
+            logger.warning(
+                "Source identity mismatch (--force granted — wiping extracted/ "
+                "and re-extracting)"
+            )
+            self._wipe_extracted(extracted_dir, sidecar_path)
+            sidecar = None
+        elif sidecar is None:
+            # Unknown currency (Req 47): no record of what produced the
+            # files; everything here re-derives from the source itself, so
+            # the conservative treatment is automatic (no permission — the
+            # investment band is never touched).
             if extracted_dir.exists():
-                shutil.rmtree(extracted_dir)
-                logger.debug("force_wipe: deleted %s", extracted_dir)
-            sidecar_path.unlink(missing_ok=True)
+                logger.info(
+                    "extraction.yaml missing — extracted/ currency unknown; "
+                    "wiping and re-extracting"
+                )
+            shutil.rmtree(extracted_dir, ignore_errors=True)
 
         # Step 2: clean up .tmp files.
         remove_stale_tmp_files(extracted_dir)
 
         # Step 3: resolve the stream inventory (sidecar first, no re-probe).
         self._source_file = job_result.file.payload
-        self._load_or_enumerate(job_result.file.payload, sidecar_path)
+        self._load_or_enumerate(job_result.file.payload, sidecar)
         self._normalize_extracted_paths(work_dir)
 
         # The filter selects extractable streams only — the video row's wanted
@@ -688,33 +718,35 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
                     "extracted_path": extracted_dir / f"{self._video.safe_name()}.mkv",
                 })})
 
-    def _load_or_enumerate(self, source_file: File, sidecar_path: Path) -> None:
-        """Resolve the run's stream inventory from the sidecar or ffprobe.
+    def _load_or_enumerate(
+        self,
+        source_file: File,
+        sidecar:     ExtractionSidecar | None,
+    ) -> None:
+        """Resolve the run's stream inventory from the verified sidecar or ffprobe.
+
+        The caller has already settled the sidecar's currency (identity key
+        verified, or wiped): a non-``None`` sidecar is loaded as-is; ``None``
+        means enumerate fresh via ffprobe (dirty — persisted by ``_execute``).
 
         Args:
-            source_file: The job's live ``File`` (identity for validation).
-            sidecar_path: Path to ``extraction.yaml``.
+            source_file: The job's live ``File`` (composes every stream).
+            sidecar:     The verified sidecar, or ``None`` to enumerate.
 
         Raises:
             RecoveryError: When ffprobe enumeration fails.
         """
-        sidecar = self._load_sidecar(sidecar_path)
         if sidecar is not None:
-            try:
-                sidecar.validate_source(source_file)
-            except SourceMismatchError as exc:
-                logger.info("extraction.yaml source identity mismatch — re-enumerating: %s", exc)
-            else:
-                inv = sidecar.streams
-                self._video = (
-                    VideoStream(file=source_file, info=inv.video)
-                    if inv.video is not None else None
-                )
-                self._audio       = [AudioStream(file=source_file, info=i) for i in inv.audio]
-                self._subtitles   = [SubtitleStream(file=source_file, info=i) for i in inv.subtitles]
-                self._attachments = [AttachmentStream(file=source_file, info=i) for i in inv.attachments]
-                self._has_chapters = sidecar.chapters
-                return
+            inv = sidecar.streams
+            self._video = (
+                VideoStream(file=source_file, info=inv.video)
+                if inv.video is not None else None
+            )
+            self._audio       = [AudioStream(file=source_file, info=i) for i in inv.audio]
+            self._subtitles   = [SubtitleStream(file=source_file, info=i) for i in inv.subtitles]
+            self._attachments = [AttachmentStream(file=source_file, info=i) for i in inv.attachments]
+            self._has_chapters = sidecar.chapters
+            return
 
         try:
             data = _probe_streams_json(source_file.path)
@@ -730,14 +762,20 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         """Load ``extraction.yaml``; ``None`` when absent or unparseable."""
         return load_model(path, ExtractionSidecar)
 
+    def _wipe_extracted(self, extracted_dir: Path, sidecar_path: Path) -> None:
+        """Delete ``extracted/`` and the sidecar (the catastrophic effect)."""
+        shutil.rmtree(extracted_dir, ignore_errors=True)
+        sidecar_path.unlink(missing_ok=True)
+
     def _persist_sidecar(self, sidecar_path: Path) -> None:
         """Write the inventory to ``extraction.yaml`` (the unique info slices)."""
-        # The inventory's source identity — the first enumerated stream's File.
-        stream = self._video or next(iter(self._audio), None) \
-            or next(iter(self._subtitles), None) or next(iter(self._attachments), None)
-        assert stream is not None, "inventory has at least one stream (video required for timestamps)"
+        # The identity key — the live source fingerprint (carried by the
+        # job's File; verified against the previous key during recovery).
+        assert self._source_file is not None, "inventory resolution sets the File first"
+        fingerprint = self._source_file.fingerprint
+        assert fingerprint is not None, "the job's live File carries the source fingerprint"
         sidecar = ExtractionSidecar(
-            source          = stream.file,
+            source          = fingerprint,
             streams         = StreamsInventory(
                 video       = self._video.info if self._video is not None else None,
                 audio       = [s.info for s in self._audio],

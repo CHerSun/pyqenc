@@ -76,17 +76,28 @@ class ProbeState(BaseModel):
     """Sidecar model for ``probe.yaml`` (the slow facet).
 
     Written by ``ProbePhase`` after resolving frame count and crop.  Contains
-    only the delta over the extraction inventory: ``frame_count`` and ``crop``.
+    only the delta over the extraction inventory: ``frame_count``, ``crop``,
+    the crop's provenance, and the source identity key.
 
     ``frame_count=0`` is the sentinel for "could not be determined" — no valid
     video has zero frames.  ``crop`` is non-optional: an empty
     :class:`CropParams` means "no crop" and the key is omitted from the file
     when empty (serialization compactness only); loading always materializes
     a concrete crop — ``None`` ("auto") never appears past config.
+
+    ``crop_source`` is HUMAN-FACING provenance (was the committed crop a
+    manual override or a detection?) — it never participates in any
+    comparison (Req 23); downstream facet keys compare the frame count and
+    the crop values only. ``None`` for sidecars written before the field.
+
+    ``source`` is the identity key (the fingerprint pair, no path — Req 31);
+    ``None`` for legacy sidecars is unknown, never a mismatch (Req 32).
     """
 
     frame_count: int
     crop:        CropParams = CropParams()
+    source:      Fingerprint | None = None
+    crop_source: str | None         = None
 
     @model_serializer
     def _serialize(self) -> dict:
@@ -178,6 +189,10 @@ class OptimizationParams(BaseModel):
         sampling:          Frame subsampling factor used when test encodes ran.
                           ``None`` for files written before this field was added
                           (treated as unknown — no mismatch triggered).
+        source:           The source identity key (fingerprint pair, no path) —
+                          a mismatch against the live source is catastrophic
+                          for the whole shared namespace (Req 33). ``None``
+                          for legacy files: unknown, never a mismatch (Req 32).
     """
 
     probe:            ProbeState | None       = None
@@ -185,6 +200,7 @@ class OptimizationParams(BaseModel):
     strategy_results: list[StrategyTestResult] = Field(default_factory=list)
     quality_targets:  list[str]                = Field(default_factory=list)
     sampling:         int | None               = None
+    source:           Fingerprint | None       = None
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
@@ -385,12 +401,21 @@ class AudioSidecar(BaseModel):
 
     Attributes:
         chains: Map of chain name → its fingerprint.
+        source: The source identity key (fingerprint pair, no path) — a
+                mismatch against the live source is catastrophic (Req 33);
+                ``None`` for legacy files is unknown, never a mismatch
+                (Req 32).
     """
 
     chains: dict[str, Fingerprint]
+    source: Fingerprint | None = None
 
     @classmethod
-    def from_resolved(cls, resolved: dict[str, ResolvedChain]) -> Self:
+    def from_resolved(
+        cls,
+        resolved: dict[str, ResolvedChain],
+        source:   Fingerprint | None = None,
+    ) -> Self:
         """Build an ``AudioSidecar`` from resolved chains, computing each fingerprint.
 
         Each fingerprint is the chain's own
@@ -399,11 +424,16 @@ class AudioSidecar(BaseModel):
 
         Args:
             resolved: Map of chain name → :class:`ResolvedChain`.
+            source:   The source identity key (the live fingerprint at the
+                      writing site).
 
         Returns:
             The sidecar holding one fingerprint per chain.
         """
-        return cls(chains={name: chain.fingerprint for name, chain in resolved.items()})
+        return cls(
+            chains = {name: chain.fingerprint for name, chain in resolved.items()},
+            source = source,
+        )
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
@@ -480,6 +510,11 @@ class MergeParams(BaseModel):
                             name — the ruler basis. ``None`` in search runs.
         strategy_summaries: Per-strategy summary rows for summary replay on
                             rerun. Only the stats the summary table renders.
+        source:             The source identity key (fingerprint pair, no
+                            path) — a mismatch against the live source is the
+                            phase-level catastrophic condition (Req 33/60);
+                            ``None`` for legacy files is unknown, never a
+                            mismatch (Req 32).
     """
 
     quality_targets:    list[str]                  = Field(default_factory=list)
@@ -487,6 +522,7 @@ class MergeParams(BaseModel):
     probe:              ProbeState | None          = None
     anchor:             str | None                 = None
     strategy_summaries: list[MergeStrategySummary] = Field(default_factory=list)
+    source:             Fingerprint | None         = None
 
     @classmethod
     def load(cls, path: Path) -> Self | None:

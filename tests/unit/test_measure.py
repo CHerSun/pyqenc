@@ -106,16 +106,20 @@ class TestParseDuration:
 # _resolve_crop
 # ---------------------------------------------------------------------------
 
-from pyqenc.models import CropParams
+from pyqenc.models import CropParams, Fingerprint
 from pyqenc.phases.measure import _resolve_crop
-from pyqenc.stream_model import File, JobSidecar
+from pyqenc.stream_model import File, JobSidecar, JobSourceRecord
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 
 def _seed_job_yaml(work_dir: Path, source: Path) -> None:
-    """Write a job.yaml (the File dump) recording the given source path."""
+    """Write a job.yaml (the identity record) recording the given source."""
     work_dir.mkdir(parents=True, exist_ok=True)
-    sidecar = JobSidecar(source=File(path=source, file_size_bytes=None))
+    fingerprint = (
+        File.sampled_fingerprint(source) if source.exists()
+        else Fingerprint(token="0" * 32)
+    )
+    sidecar = JobSidecar(source=JobSourceRecord(path=source, fingerprint=fingerprint))
     write_yaml_atomic(work_dir / "job.yaml", sidecar.model_dump(exclude_none=True))
 
 

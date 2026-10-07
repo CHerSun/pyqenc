@@ -22,7 +22,7 @@ from hypothesis import strategies as st
 from pyqenc.app_config import load_app_config
 from pyqenc.constants import EXTRACTED_DIR, TIMESTAMPS_FILENAME
 from pyqenc.metrics import NoOpMetricsCollector
-from pyqenc.models import CleanupLevel, PhaseOutcome
+from pyqenc.models import CleanupLevel, Fingerprint, PhaseOutcome
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import (
     ExtractionPhase,
@@ -32,6 +32,10 @@ from pyqenc.phases.extraction import (
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import File, VideoStream, VideoStreamInfo
+
+_STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
+"""Stub source identity — phases read the job File's fingerprint."""
+
 
 
 def _merge_encoded_chunk(path, chunk_id: str, strategy_name: str):
@@ -56,7 +60,7 @@ def _merge_encoded_chunk(path, chunk_id: str, strategy_name: str):
     strategy = Strategy(preset=preset, profile=profile or "h265", codec=codec, profile_args=[])
     base_stream = ExtendedVideoStream(
         stream=VideoStream(
-            file=File(path=path.parent / "source.mkv"),
+            file=File(fingerprint=_STUB_SOURCE_FP, path=path.parent / "source.mkv"),
             info=VideoStreamInfo(track_id=0, resolution="1920x1080"),
         ),
         frame_count=24,
@@ -65,7 +69,7 @@ def _merge_encoded_chunk(path, chunk_id: str, strategy_name: str):
     return EncodedChunk(
         stream=ExtendedVideoStream(
             stream=VideoStream(
-                file=File(path=path, file_size_bytes=128),
+                file=File(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=128),
                 info=VideoStreamInfo(track_id=0, resolution="1920x1080"),
             ),
             frame_count=24,
@@ -93,7 +97,7 @@ def _extended_stream(path: Path, frame_count: int):
 
     return ExtendedVideoStream(
         stream=VideoStream(
-            file=File(path=path, file_size_bytes=64),
+            file=File(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=64),
             info=VideoStreamInfo(
                 track_id=0, codec_name="hevc", fps=24.0,
                 fps_fraction=Fraction(24, 1), resolution="1920x1080",
@@ -135,10 +139,10 @@ def _make_extraction_phase(
     config.extraction.include = include
     config.extraction.exclude = exclude
     job_result = JobPhaseResult(
-        file       = Artifact(payload=File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64), state=ArtifactState.COMPLETE),
+        file       = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=source.stat().st_size if source.exists() else 64), state=ArtifactState.COMPLETE),
         outcome    = PhaseOutcome.COMPLETED,
         message    = "job complete",
-        force_wipe = False,
+        force  = False,
         config     = config,
         work_dir   = work_dir,
         source     = source,
@@ -330,12 +334,24 @@ def test_timestamp_artifact_classification(file_present: bool) -> None:
         source   = tmp_path / "source.mkv"
         source.write_bytes(b"\x00" * 64)
 
+        # Seed a current sidecar via one execute run (the index writer is a
+        # mocked boundary) — presence classification is trusted only against
+        # a sidecar that vouches for the files (a missing sidecar wipes
+        # conservatively, by design).
+        seed_phase = _make_extraction_phase(work_dir, source, include=None, exclude=None)
+        with (
+            patch("pyqenc.phases.extraction._probe_streams_json",
+                  return_value={"streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc"}], "chapters": []}),
+            patch("pyqenc.phases.extraction._extract_timestamps"),
+        ):
+            seed_phase.run(dry_run=False)
+
         extracted_dir = work_dir / EXTRACTED_DIR
         extracted_dir.mkdir(parents=True, exist_ok=True)
+        index = extracted_dir / TIMESTAMPS_FILENAME
+        index.unlink(missing_ok=True)
         if file_present:
-            (extracted_dir / TIMESTAMPS_FILENAME).write_text(
-                "# timestamp format v2\n0\n42\n", encoding="utf-8"
-            )
+            index.write_text("# timestamp format v2\n0\n42\n", encoding="utf-8")
 
         phase = _make_extraction_phase(work_dir, source, include=None, exclude=None)
 
@@ -432,8 +448,8 @@ def test_frame_count_preservation(frame_count: int) -> None:
         job.result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "job complete",
-            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
-            force_wipe = False,
+            file       = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            force  = False,
             config     = config,
             work_dir   = work_dir,
             source     = source,
@@ -446,7 +462,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
             outcome     = PhaseOutcome.COMPLETED,
             message     = "extraction complete",
             video_stream = Artifact(
-                payload = VideoStream(file=File(path=source), info=VideoStreamInfo(track_id=0)),
+                payload = VideoStream(file=File(fingerprint=_STUB_SOURCE_FP, path=source), info=VideoStreamInfo(track_id=0)),
                 state   = ArtifactState.COMPLETE,
             ),
             work_dir    = work_dir,
@@ -613,6 +629,8 @@ def test_pts_accuracy(pts_values: list[float]) -> None:
     import tempfile
 
     from pyqenc.phases.extraction import _extract_timestamps
+
+
 
     # The implementation receives integer ms values directly (from mkvextract or
     # ffprobe with integer PTS format). The round-trip accuracy is exact — no

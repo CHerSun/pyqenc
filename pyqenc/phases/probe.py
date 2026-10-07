@@ -22,12 +22,13 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar
 
-from pyqenc.constants import TEMP_SUFFIX, THICK_LINE
+from pyqenc.constants import CROP_SOURCE_DETECTED, CROP_SOURCE_MANUAL, TEMP_SUFFIX, THICK_LINE
 from pyqenc.metrics import MetricKey
 from pyqenc.models import (
     CropParams,
     EncodingPlan,
     PhaseOutcome,
+    identity_changed,
 )
 from pyqenc.phase import (
     Artifact,
@@ -159,11 +160,17 @@ class ProbePhase(Phase[ProbePhaseResult]):
         1. Fail fast when the source has no video stream — a fatal
            invalidation for every downstream video phase.
         2. Remove a leftover ``probe.yaml.tmp`` from an interrupted write.
-        3. Load ``probe.yaml``. Pending when absent (full probe needed) or
-           when a manual ``--crop`` override invalidates the cached crop
-           (cheap rewrite: the frame count stays cached). Current otherwise —
-           the sidecar is written atomically, so presence implies complete
-           data (no content peeking).
+        3. Identity-key invalidation (Req 33, P-1): a persisted identity that
+           contradicts the live source is catastrophic — fatal without the
+           ``--force`` permission; with it, ``probe.yaml`` is wiped and the
+           facet re-probed. An absent key (legacy sidecar) is unknown, never
+           a mismatch.
+        4. Manual ``--crop`` override (Req 43, P-2): an override EQUAL to the
+           committed crop is a no-op (the workdir is already committed to
+           it); a DIFFERING one invalidates the cached crop only (cheap
+           rewrite — the frame count stays cached). The investment
+           consequence of a real facet change is handled downstream by the
+           probe-facet keys, not here.
 
         Returns:
             The :class:`Recovery` single source of truth — one
@@ -172,7 +179,8 @@ class ProbePhase(Phase[ProbePhaseResult]):
             resolved slow facet when current, stashed on ``self._resolved``).
 
         Raises:
-            RecoveryError: When the source has no video stream.
+            RecoveryError: When the source has no video stream, or on an
+                identity mismatch without permission.
         """
         job_result        = self._deps[JobPhase]
         extraction_result = self._deps[ExtractionPhase]
@@ -189,12 +197,39 @@ class ProbePhase(Phase[ProbePhaseResult]):
         # Step 2 — .tmp pre-clean (probe.yaml is written via .tmp-then-rename).
         remove_stale_tmp_file(probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX))
 
-        # Step 3 — load + currency.
+        # Step 3 — identity key.
         self._probe_state = ProbeState.load(probe_yaml)
-        if self._probe_state is None or self._crop_params is not None:
-            # Absent (full probe needed), or a manual --crop override
-            # invalidates the cached crop (cheap rewrite: the frame count
-            # stays cached). The row is ABSENT with the unknown-sentinel
+        if (
+            self._probe_state is not None
+            and identity_changed(self._probe_state.source, job_result.source_fingerprint)
+        ):
+            if not job_result.force:
+                raise RecoveryError(
+                    "Source content identity mismatch (probe.yaml) — the committed "
+                    "facet belongs to a different source.  Re-run with --force to "
+                    "grant permission to wipe it and re-probe the new source."
+                )
+            logger.warning(
+                "Source identity mismatch (--force granted — wiping probe.yaml "
+                "and re-probing)"
+            )
+            probe_yaml.unlink(missing_ok=True)
+            self._probe_state = None
+
+        # Step 4 — manual crop override: equal is a no-op, differing is a
+        # cheap crop-only rewrite (frame count stays cached).
+        crop_override_active = (
+            self._crop_params is not None
+            and (
+                self._probe_state is None
+                or self._crop_params != self._probe_state.crop
+            )
+        )
+
+        if self._probe_state is None or crop_override_active:
+            # Absent/wiped (full probe needed), or a differing manual --crop
+            # override invalidates the cached crop (cheap rewrite: the frame
+            # count stays cached). The row is ABSENT with the unknown-sentinel
             # composition — the slow facet is unresolved until probed.
             placeholder = ExtendedVideoStream(
                 stream      = self._video_stream,
@@ -245,15 +280,18 @@ class ProbePhase(Phase[ProbePhaseResult]):
             )
 
         if self._crop_params is not None:
-            crop = self._crop_params
+            crop        = self._crop_params
+            crop_source = CROP_SOURCE_MANUAL
             logger.info("Crop: %s (manual)", crop.display())
         elif probe_state is not None:
-            crop = probe_state.crop
+            crop        = probe_state.crop
+            crop_source = probe_state.crop_source or CROP_SOURCE_DETECTED
             logger.info("Crop: %s (cached)", crop.display())
         else:
             logger.info("Detecting crop: %s", video.file.path.name)
             with self._collector.time(MetricKey.PROBE, "crop_detect"):
                 crop = detect_crop_parameters(video)
+            crop_source = CROP_SOURCE_DETECTED
 
         # Resolve frame count: cached → timestamps.txt count → null-count pass.
         if probe_state is not None and probe_state.frame_count > 0:
@@ -262,8 +300,15 @@ class ProbePhase(Phase[ProbePhaseResult]):
         else:
             frame_count = self._count_source_frames()
 
-        # Persist and stash the payload.
-        ProbeState(frame_count=frame_count, crop=crop).save(probe_yaml)
+        # Persist and stash the payload. crop_source is human-facing
+        # provenance only — never a key (Req 23); source is the identity key.
+        job_result = self._deps[JobPhase]
+        ProbeState(
+            frame_count = frame_count,
+            crop        = crop,
+            source      = job_result.source_fingerprint,
+            crop_source = crop_source,
+        ).save(probe_yaml)
         self._resolved = ExtendedVideoStream(
             stream      = video,
             frame_count = frame_count,

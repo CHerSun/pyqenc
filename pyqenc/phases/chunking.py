@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, ClassVar
 from scenedetect import ContentDetector, detect
 
 from pyqenc.metrics import MetricKey
-from pyqenc.models import PhaseOutcome, SceneBoundary
+from pyqenc.models import PhaseOutcome, SceneBoundary, identity_changed
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -232,9 +232,17 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         """Determine ``chunking.yaml`` currency: absent boundaries or current.
 
         Steps:
-        1. If ``force_wipe``: delete ``chunking.yaml``.
-        2. Load scene boundaries from ``chunking.yaml``; pending when absent
-           or empty (detection must run), current otherwise.
+        1. Identity key (Req 33, C-2): a persisted identity contradicting the
+           live source is catastrophic — fatal without the ``--force``
+           permission; with it the sidecar is wiped (boundaries of the old
+           source's timeline are never current). An absent key (legacy
+           sidecar) is unknown, never a mismatch.
+        2. Detection params (Req 26/45, C-1): a ``scene_threshold`` or
+           ``min_scene_length`` change discards the persisted boundaries —
+           automatic re-detect (user-initiated config edit, non-destructive:
+           chunking owns no artifacts; the sidecar is overwritten in place).
+        3. Load scene boundaries; pending when absent or empty (detection
+           must run), current otherwise.
 
         The set-flip ledger: with current boundaries the chunk windows are
         fully derivable and every row is ``COMPLETE`` (the set flips
@@ -243,18 +251,43 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
 
         Returns:
             The :class:`Recovery` single source of truth.
+
+        Raises:
+            RecoveryError: On an identity mismatch without permission.
         """
         job_result = self._deps[JobPhase]
         work_dir   = job_result.work_dir
         yaml_path  = work_dir / ChunkingPhase.SIDECAR_NAME
-        force_wipe = job_result.force_wipe
 
-        # Step 1: force-wipe.
-        if force_wipe:
-            yaml_path.unlink(missing_ok=True)
-
-        # Step 2: load boundaries.
+        # Step 1: identity key.
         sidecar = self._load_sidecar(yaml_path)
+        if sidecar is not None and identity_changed(sidecar.source, job_result.source_fingerprint):
+            if not job_result.force:
+                raise RecoveryError(
+                    "Source content identity mismatch (chunking.yaml) — the "
+                    "persisted boundaries belong to a different source's timeline.  "
+                    "Re-run with --force to grant permission to discard them "
+                    "and re-detect on the new source."
+                )
+            logger.warning(
+                "Source identity mismatch (--force granted — discarding "
+                "chunking.yaml and re-detecting)"
+            )
+            yaml_path.unlink(missing_ok=True)
+            sidecar = None
+
+        # Step 2: detection-params keys — automatic re-detect.
+        if sidecar is not None and self._params_changed(sidecar):
+            logger.info(
+                "Scene detection parameters changed (threshold %s→%s, min length %s→%s) "
+                "— re-detecting boundaries",
+                sidecar.scene_threshold, self._config.chunking.scene_threshold,
+                sidecar.min_scene_length, self._config.chunking.min_scene_length,
+            )
+            yaml_path.unlink(missing_ok=True)
+            sidecar = None
+
+        # Step 3: load boundaries.
         if sidecar is not None and sidecar.scenes:
             self._recovered_scenes = [
                 SceneBoundary(frame=record.frame or 0, timestamp_seconds=record.timestamp_seconds)
@@ -271,6 +304,23 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
 
         logger.debug("Chunking recovery: chunking.yaml absent or empty — scene detection needed")
         return Recovery(pending=True)
+
+    def _params_changed(self, sidecar: ChunkingSidecar) -> bool:
+        """Whether a detection parameter differs from the persisted key.
+
+        Absent keys (legacy sidecars) are unknown, never a mismatch
+        (Req 32).
+        """
+        return (
+            (
+                sidecar.scene_threshold is not None
+                and sidecar.scene_threshold != self._config.chunking.scene_threshold
+            )
+            or (
+                sidecar.min_scene_length is not None
+                and sidecar.min_scene_length != self._config.chunking.min_scene_length
+            )
+        )
 
     def _execute(
         self,
@@ -312,10 +362,15 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
                 logger.exception("Scene detection failed")
                 return self._make_result(PhaseOutcome.FAILED, [], str(exc))
             sidecar_path = work_dir / ChunkingPhase.SIDECAR_NAME
-            sidecar = ChunkingSidecar(scenes=[
-                SceneRecord(timestamp_seconds=b.timestamp_seconds, frame=b.frame)
-                for b in boundaries
-            ])
+            sidecar = ChunkingSidecar(
+                scenes = [
+                    SceneRecord(timestamp_seconds=b.timestamp_seconds, frame=b.frame)
+                    for b in boundaries
+                ],
+                source           = self._deps[JobPhase].source_fingerprint,
+                scene_threshold  = self._config.chunking.scene_threshold,
+                min_scene_length = self._config.chunking.min_scene_length,
+            )
             write_yaml_atomic(sidecar_path, sidecar.model_dump(exclude_none=True))
             logger.debug("Wrote scene boundaries: %s", sidecar_path.name)
 

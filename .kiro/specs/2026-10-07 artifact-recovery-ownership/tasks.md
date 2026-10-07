@@ -24,8 +24,8 @@
 
 ## 3. Permission model + per-phase identity keys (Req 30–35a, 47)
 
-- [ ] 3.1 `job.yaml` → `{path, fingerprint}`; path-only change = locator update rewrite (no fatal/force) (Req 34); place the rewrite per the template (pending → execute).
-- [ ] 3.2 Delete `JobPhaseResult.force_wipe` and all six `if force_wipe` command-wipes; the raw `--force` permission rides the job result (Req 35a); fatal messages name `--force` truthfully (J-2 fix).
+- [x] 3.1 `job.yaml` → `{path, fingerprint}`; path-only change = locator update rewrite (no fatal/force) (Req 34); place the rewrite per the template (pending → execute).
+- [x] 3.2 Delete `JobPhaseResult.force_wipe` and all six `if force_wipe` command-wipes; the raw `--force` permission rides the job result (Req 35a); fatal messages name `--force` truthfully (J-2 fix).
 - [ ] 3.3 Wire the source fingerprint key on every phase sidecar (extraction, probe, chunking, optimization base, audio, merge per-output) with the catastrophic branch: fatal without permission, wipe-own with it (Req 33) — closes X-2, P-1, C-2, and the remaining identity rows.
 - [ ] 3.4 Unknown-currency: own-sidecar-missing alone triggers the conservative treatment per phase (extraction/audio/optimization wipe + re-derive; encoding cross-certified; merge per-output records decide) (Req 47; the §99 branch stays).
 

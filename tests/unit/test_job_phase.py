@@ -1,12 +1,16 @@
-"""Unit tests for JobPhase source identity, mismatch detection and force_wipe.
+"""Unit tests for JobPhase source identity, permission, and job.yaml currency.
 
 Covers:
 - run() dry-run: returns PENDING when job.yaml absent, REUSED when present
 - run() execute: creates job.yaml on first run (COMPLETED)
-- job.yaml persists only the File dump (path + size) and the result carries File
-- Source mismatch (path/size) without --force: returns FAILED, force_wipe=False
-- Source mismatch with --force: returns COMPLETED, force_wipe=True, job.yaml overwritten
-- No mismatch: returns COMPLETED/REUSED, force_wipe=False
+- job.yaml persists the one human-facing record (path + sampled fingerprint)
+- Content-identity mismatch without --force: FAILED, message names --force
+- Content-identity mismatch with --force (permission): COMPLETED, job.yaml
+  rewritten for the new source — no propagated wipe order exists (Req 35a)
+- Path-only change with matching content: locator update (rewrite, no fatal,
+  no force) — Req 34
+- The raw --force flag rides the result unchanged (permission, never a wipe
+  command)
 """
 
 import logging
@@ -24,7 +28,7 @@ from pyqenc.models import (
 )
 from pyqenc.phases.job import JobPhase
 from pyqenc.state import ArtifactState
-from pyqenc.stream_model import File, JobSidecar
+from pyqenc.stream_model import File, JobSidecar, JobSourceRecord
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 # ---------------------------------------------------------------------------
@@ -59,11 +63,26 @@ def _make_phase(
     )
 
 
-def _persist_job(work_dir: Path, source: Path, file_size: int | None = None) -> None:
-    """Write a job.yaml carrying the source identity (path + size)."""
+def _persist_job(
+    work_dir: Path,
+    source: Path,
+    *,
+    fingerprint_of: Path | None = None,
+    as_path: Path | None = None,
+) -> None:
+    """Write a job.yaml record.
+
+    By default the record matches *source* (its real sampled fingerprint and
+    path). ``fingerprint_of`` records a DIFFERENT file's identity (the
+    mismatch fixture); ``as_path`` records a different locator (the
+    locator-update fixture).
+    """
     work_dir.mkdir(parents=True, exist_ok=True)
-    size = file_size if file_size is not None else source.stat().st_size
-    sidecar = JobSidecar(source=File(path=source, file_size_bytes=size))
+    content = fingerprint_of if fingerprint_of is not None else source
+    sidecar = JobSidecar(source=JobSourceRecord(
+        path        = as_path if as_path is not None else source,
+        fingerprint = File.sampled_fingerprint(content),
+    ))
     write_yaml_atomic(work_dir / "job.yaml", sidecar.model_dump(exclude_none=True))
 
 
@@ -103,14 +122,16 @@ class TestJobPhaseRunDryRun:
     ) -> None:
         """Dry-run on a mismatched source fails with the actionable error.
 
-        Contract change (phase-run-template): recovery raises a fatal
-        ``RecoveryError`` on a source mismatch without ``--force`` regardless
-        of dry-run — previewing "success" against stale state would be
-        misleading. The error names the mismatch and points at ``--force``.
+        Contract: recovery raises a fatal ``RecoveryError`` on a content
+        mismatch without ``--force`` regardless of dry-run — previewing
+        "success" against stale state would be misleading. The error names
+        the mismatch and points at ``--force`` truthfully.
         """
         src = _make_source(tmp_path)
+        other = tmp_path / "other.bin"
+        other.write_bytes(b"\xff" * 1024)  # same size, different content
         work_dir = tmp_path / "work"
-        _persist_job(work_dir, src, file_size=9999)  # wrong size
+        _persist_job(work_dir, src, fingerprint_of=other)
         phase = _make_phase(tmp_path, src)
 
         with caplog.at_level(logging.CRITICAL):
@@ -118,9 +139,12 @@ class TestJobPhaseRunDryRun:
 
         assert result.outcome == PhaseOutcome.FAILED
         assert result.message
-        assert "mismatch" in result.message.lower()
+        assert "identity mismatch" in result.message.lower()
         assert "--force" in result.message
-        assert any(r.levelno == logging.CRITICAL and "mismatch" in r.message.lower() for r in caplog.records)
+        assert any(
+            r.levelno == logging.CRITICAL and "mismatch" in r.message.lower()
+            for r in caplog.records
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -135,24 +159,24 @@ class TestJobPhaseRunExecuteNoMismatch:
         assert result.is_complete is True
         assert (tmp_path / "work" / "job.yaml").exists()
 
-    def test_job_yaml_persists_only_the_file_dump(self, tmp_path: Path) -> None:
+    def test_job_yaml_persists_locator_and_fingerprint(self, tmp_path: Path) -> None:
         """Bug prevented: job.yaml regrowing cached fast metadata — the
-        sidecar is the File dump (path + size + sampled fingerprint) and
-        nothing else."""
+        record is the locator + the sampled content identity (the size lives
+        inside the fingerprint as its belt) and nothing else (Req 31)."""
         src = _make_source(tmp_path)
         phase = _make_phase(tmp_path, src)
         phase.run(dry_run=False)
 
         data = yaml.safe_load((tmp_path / "work" / "job.yaml").read_text(encoding="utf-8"))
         assert set(data) == {"source"}
-        assert set(data["source"]) == {"path", "file_size_bytes", "fingerprint"}
-        assert data["source"]["file_size_bytes"] == src.stat().st_size
+        assert set(data["source"]) == {"path", "fingerprint"}
+        assert data["source"]["path"] == str(src)
         assert data["source"]["fingerprint"]["size"] == src.stat().st_size
         assert data["source"]["fingerprint"]["token"]
 
     def test_result_carries_eager_file(self, tmp_path: Path) -> None:
-        """JobPhaseResult exposes the run's single File — path + size from
-        the filesystem, established eagerly."""
+        """JobPhaseResult exposes the run's single File — path + size +
+        fingerprint from the filesystem, established eagerly."""
         src = _make_source(tmp_path)
         phase = _make_phase(tmp_path, src)
         result = phase.run(dry_run=False)
@@ -160,6 +184,8 @@ class TestJobPhaseRunExecuteNoMismatch:
         assert result.file.state == ArtifactState.COMPLETE
         assert result.file.payload.path == src
         assert result.file.payload.file_size_bytes == src.stat().st_size
+        assert result.file.payload.fingerprint is not None
+        assert result.file.payload.fingerprint.size == src.stat().st_size
 
     def test_reused_result_carries_file_too(self, tmp_path: Path) -> None:
         src = _make_source(tmp_path)
@@ -172,11 +198,13 @@ class TestJobPhaseRunExecuteNoMismatch:
         assert result.file.state == ArtifactState.COMPLETE
         assert result.file.payload.path == src
 
-    def test_first_run_force_wipe_false(self, tmp_path: Path) -> None:
+    def test_first_run_force_flag_rides_result(self, tmp_path: Path) -> None:
+        """The raw --force permission rides the result verbatim (Req 35a) —
+        it never becomes a derived wipe order."""
         src = _make_source(tmp_path)
-        phase = _make_phase(tmp_path, src)
+        phase = _make_phase(tmp_path, src, force=True)
         result = phase.run(dry_run=False)
-        assert result.force_wipe is False
+        assert result.force is True
 
     def test_second_run_reuses(self, tmp_path: Path) -> None:
         src = _make_source(tmp_path)
@@ -187,53 +215,71 @@ class TestJobPhaseRunExecuteNoMismatch:
         phase.result = None
         result = phase.run(dry_run=False)
         assert result.is_complete is True
-        assert result.force_wipe is False
+        assert result.outcome == PhaseOutcome.REUSED
 
 
-class TestJobPhasePathMismatch:
-    def test_path_mismatch_without_force_fails(self, tmp_path: Path) -> None:
-        """A sidecar recorded for a different source path is a fatal
-        mismatch (the identity check compares persisted path vs live path)."""
+# ---------------------------------------------------------------------------
+# Locator update — path changed, content identical (Req 34)
+# ---------------------------------------------------------------------------
+
+class TestJobPhaseLocatorUpdate:
+    def test_path_only_change_rewrites_locator_without_force(self, tmp_path: Path) -> None:
+        """A moved source with unchanged content is a locator update: job.yaml
+        is rewritten, no fatal, no --force, no invalidation.
+
+        Bug guarded (J-3): the old behavior demanded --force and wiped the
+        workdir for a zero-content change.
+        """
         src = _make_source(tmp_path)
-        other = tmp_path / "other.mkv"
-        other.write_bytes(b"\x00" * 1024)
+        moved = tmp_path / "moved.mkv"
+        moved.write_bytes(src.read_bytes())  # same content, different path
         work_dir = tmp_path / "work"
-        _persist_job(work_dir, other)  # recorded for a different file
+        _persist_job(work_dir, src, as_path=moved)
         phase = _make_phase(tmp_path, src, force=False)
 
         result = phase.run(dry_run=False)
-        assert result.outcome == PhaseOutcome.FAILED
-        assert "path" in result.message
+
+        assert result.is_complete is True
+        assert result.outcome == PhaseOutcome.COMPLETED  # the rewrite ran
+        data = yaml.safe_load((work_dir / "job.yaml").read_text(encoding="utf-8"))
+        assert data["source"]["path"] == str(src)
 
 
 # ---------------------------------------------------------------------------
-# Source mismatch — execute without --force
+# Content-identity mismatch — execute without --force
 # ---------------------------------------------------------------------------
 
-class TestJobPhaseSourceMismatchNoForce:
-    def test_mismatch_returns_failed(self, tmp_path: Path) -> None:
+class TestJobPhaseIdentityMismatchNoForce:
+    @staticmethod
+    def _mismatched(tmp_path: Path) -> tuple[Path, Path]:
         src = _make_source(tmp_path)
+        other = tmp_path / "other.bin"
+        other.write_bytes(b"\xff" * 1024)  # same size, different bytes
+        return src, other
+
+    def test_mismatch_returns_failed(self, tmp_path: Path) -> None:
+        src, other = self._mismatched(tmp_path)
         work_dir = tmp_path / "work"
-        _persist_job(work_dir, src, file_size=9999)  # wrong size
+        _persist_job(work_dir, src, fingerprint_of=other)
         phase = _make_phase(tmp_path, src, force=False)
         result = phase.run(dry_run=False)
         assert result.outcome == PhaseOutcome.FAILED
         assert result.is_complete is False
 
-    def test_mismatch_force_wipe_false_on_failure(self, tmp_path: Path) -> None:
-        src = _make_source(tmp_path)
+    def test_mismatch_flag_stays_raw_false_on_failure(self, tmp_path: Path) -> None:
+        src, other = self._mismatched(tmp_path)
         work_dir = tmp_path / "work"
-        _persist_job(work_dir, src, file_size=9999)
+        _persist_job(work_dir, src, fingerprint_of=other)
         phase = _make_phase(tmp_path, src, force=False)
         result = phase.run(dry_run=False)
-        assert result.force_wipe is False
+        assert result.force is False
 
     def test_mismatch_logs_critical(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        src = _make_source(tmp_path)
+        src, other = self._mismatched(tmp_path)
         work_dir = tmp_path / "work"
-        _persist_job(work_dir, src, file_size=9999)
+        _persist_job(work_dir, src, fingerprint_of=other)
         phase = _make_phase(tmp_path, src, force=False)
 
         with caplog.at_level(logging.CRITICAL):
@@ -243,62 +289,76 @@ class TestJobPhaseSourceMismatchNoForce:
 
 
 # ---------------------------------------------------------------------------
-# Source mismatch — execute with --force (force_wipe propagation)
+# Content-identity mismatch — execute with --force (permission)
 # ---------------------------------------------------------------------------
 
-class TestJobPhaseSourceMismatchWithForce:
-    def test_mismatch_with_force_returns_completed(self, tmp_path: Path) -> None:
-        src = _make_source(tmp_path)
+class TestJobPhaseIdentityMismatchWithForce:
+    @staticmethod
+    def _mismatched(tmp_path: Path, size: int = 1024) -> tuple[Path, Path]:
+        src = _make_source(tmp_path, size=size)
+        other = tmp_path / "other.bin"
+        other.write_bytes(b"\xff" * size)
+        return src, other
+
+    def test_mismatch_with_permission_returns_completed(self, tmp_path: Path) -> None:
+        src, other = self._mismatched(tmp_path)
         work_dir = tmp_path / "work"
-        _persist_job(work_dir, src, file_size=9999)
+        _persist_job(work_dir, src, fingerprint_of=other)
         phase = _make_phase(tmp_path, src, force=True)
         result = phase.run(dry_run=False)
         assert result.is_complete is True
 
-    def test_mismatch_with_force_sets_force_wipe_true(self, tmp_path: Path) -> None:
-        src = _make_source(tmp_path)
+    def test_permission_flag_rides_result(self, tmp_path: Path) -> None:
+        """The raw flag rides the result even as the phase consumes the
+        permission — downstream phases re-read it for their own fatal-band
+        conditions (each phase detects its own mismatch from its own key)."""
+        src, other = self._mismatched(tmp_path)
         work_dir = tmp_path / "work"
-        _persist_job(work_dir, src, file_size=9999)
+        _persist_job(work_dir, src, fingerprint_of=other)
         phase = _make_phase(tmp_path, src, force=True)
         result = phase.run(dry_run=False)
-        assert result.force_wipe is True
+        assert result.force is True
 
-    def test_mismatch_with_force_overwrites_job_yaml_with_new_source(self, tmp_path: Path) -> None:
-        """On --force + mismatch, job.yaml must be overwritten with current source metadata."""
-        src = _make_source(tmp_path, size=1024)
+    def test_mismatch_with_permission_overwrites_job_yaml(self, tmp_path: Path) -> None:
+        """With permission, job.yaml is rewritten with the new source's
+        identity — downstream phases then see their own keys mismatch (no
+        propagated wipe order; idempotent across crashes, Req 33)."""
+        src, other = self._mismatched(tmp_path, size=1024)
         work_dir = tmp_path / "work"
-        _persist_job(work_dir, src, file_size=9999)  # stale size
+        _persist_job(work_dir, src, fingerprint_of=other)
 
         phase = _make_phase(tmp_path, src, force=True)
         result = phase.run(dry_run=False)
 
-        # job.yaml must exist and carry the real current file size
         assert (work_dir / "job.yaml").exists()
         assert result.file is not None
         assert result.file.state == ArtifactState.COMPLETE
-        assert result.file.payload.file_size_bytes == src.stat().st_size
+        data = yaml.safe_load((work_dir / "job.yaml").read_text(encoding="utf-8"))
+        assert data["source"]["fingerprint"]["token"] == File.sampled_fingerprint(src).token
 
-    def test_mismatch_with_force_logs_warning(
+    def test_mismatch_with_permission_logs_warning(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        src = _make_source(tmp_path)
+        src, other = self._mismatched(tmp_path)
         work_dir = tmp_path / "work"
-        _persist_job(work_dir, src, file_size=9999)
+        _persist_job(work_dir, src, fingerprint_of=other)
         phase = _make_phase(tmp_path, src, force=True)
 
         with caplog.at_level(logging.WARNING):
             phase.run(dry_run=False)
 
         assert any(
-            "force" in r.message.lower() or "wip" in r.message.lower()
+            "mismatch" in r.message.lower() and "force" in r.message.lower()
             for r in caplog.records
         )
 
-    def test_no_mismatch_force_wipe_false(self, tmp_path: Path) -> None:
-        """When source matches, force_wipe must be False even with --force flag."""
+    def test_no_mismatch_flag_rides_without_firing_anything(self, tmp_path: Path) -> None:
+        """--force with a matching identity changes nothing — permission
+        alone never causes a wipe (J-2 fix)."""
         src = _make_source(tmp_path)
         work_dir = tmp_path / "work"
-        _persist_job(work_dir, src)  # correct size
+        _persist_job(work_dir, src)
         phase = _make_phase(tmp_path, src, force=True)
         result = phase.run(dry_run=False)
-        assert result.force_wipe is False
+        assert result.outcome == PhaseOutcome.REUSED
+        assert result.force is True

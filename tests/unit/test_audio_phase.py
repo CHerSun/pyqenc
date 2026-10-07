@@ -30,11 +30,15 @@ from pyqenc.app_config import AudioConfig, ChainSpec, FilterInstance, SelectEntr
 from pyqenc.audio.chain import ResolvedChain, chain_output_path
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import AUDIO_OUTPUT_DIR
-from pyqenc.models import PhaseOutcome
+from pyqenc.models import Fingerprint, PhaseOutcome
 from pyqenc.phases.audio import AudioPhase
 from pyqenc.state import AudioSidecar
 from pyqenc.stream_model import AudioStream, AudioStreamInfo, File
 from pyqenc.utils.long_path import LongPath
+
+_STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
+"""Stub source identity — phases read the job File's fingerprint."""
+
 
 _AUDIO_YAML = "audio.yaml"
 
@@ -76,7 +80,7 @@ def _track(tmp_path: Path, stem: str, *, track_id: int = 1, language: str = "eng
     src = LongPath(tmp_path) / f"{stem}.mkv"
     src.write_bytes(b"\x00" * 16)
     return AudioStream(
-        file = File(path=src, file_size_bytes=16),
+        file = File(fingerprint=_STUB_SOURCE_FP, path=src, file_size_bytes=16),
         info = AudioStreamInfo(
             track_id=track_id, codec_name="flac", language=language,
             layout=ChannelLayout.parse(layout),
@@ -101,7 +105,8 @@ def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioStream]) 
 
     job_result = MagicMock()
     job_result.work_dir   = tmp_path
-    job_result.force_wipe = False
+    job_result.force = False
+    job_result.source_fingerprint = _STUB_SOURCE_FP
     job_result.config     = app_config
 
     job_mock = MagicMock()
@@ -120,6 +125,8 @@ def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioStream]) 
 
     from pyqenc.phases.extraction import ExtractionPhase
     from pyqenc.phases.job import JobPhase
+
+
 
     registry: PhaseRegistry = {}
     phase = AudioPhase(app_config, registry, collector=NoOpMetricsCollector())

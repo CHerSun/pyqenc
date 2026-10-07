@@ -43,13 +43,14 @@ from pyqenc.constants import (
     THICK_LINE,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import PhaseOutcome
+from pyqenc.models import PhaseOutcome, identity_changed
 from pyqenc.phase import (
     Artifact,
     Phase,
     PhaseRegistry,
     PhaseResult,
     Recovery,
+    RecoveryError,
 )
 from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
@@ -126,7 +127,10 @@ class AudioPhase(Phase[AudioPhaseResult]):
 
         1. Resolve the working track set (``resolve_selection`` — select is
            never persisted) and every configured chain (``resolve_chain``).
-        2. ``force_wipe`` → delete every chain output and the sidecar.
+        2. Identity key (Req 33): a persisted identity contradicting the live
+           source is catastrophic — fatal without the ``--force`` permission;
+           with it, delete every chain output and the sidecar (they are
+           functions of the old source).
         3. Clean up leftover ``.tmp`` files.
         4. Compare each resolved chain against the persisted sidecar entry of the
            same name. For a **differing** chain, delete its on-disk
@@ -142,12 +146,14 @@ class AudioPhase(Phase[AudioPhaseResult]):
             The :class:`Recovery` single source of truth (internal artifact
             list: wanted expected outputs plus any present-but-unwanted
             surplus files).
+
+        Raises:
+            RecoveryError: On an identity mismatch without ``--force``.
         """
         job_result = self._deps[JobPhase]
         work_dir    = job_result.work_dir
         sidecar_path = work_dir / AudioPhase.SIDECAR_NAME
         audio_cfg   = job_result.config.audio
-        force_wipe  = job_result.force_wipe
 
         # Step 1 — resolve the working plan (selection is recomputed every run).
         tracks   = self._selected_tracks()
@@ -158,9 +164,23 @@ class AudioPhase(Phase[AudioPhaseResult]):
         audio_dir = self._output_dir(tracks, work_dir)
         audio_dir.mkdir(parents=True, exist_ok=True)
 
-        # Step 2 — force wipe.
-        if force_wipe:
-            self._force_wipe(audio_dir, sidecar_path, resolved)
+        # Step 2 — identity key: catastrophic for the audio outputs.
+        persisted_audio = AudioSidecar.load(sidecar_path)
+        if (
+            persisted_audio is not None
+            and identity_changed(persisted_audio.source, job_result.source_fingerprint)
+        ):
+            if not job_result.force:
+                raise RecoveryError(
+                    "Source content identity mismatch (audio.yaml) — the chain "
+                    "outputs belong to a different source.  Re-run with --force "
+                    "to grant permission to wipe them and reprocess the new source."
+                )
+            logger.warning(
+                "Source identity mismatch (--force granted — wiping chain "
+                "outputs and audio.yaml)"
+            )
+            self._wipe_outputs(audio_dir, sidecar_path)
 
         # Step 3 — clear leftover .tmp files.
         remove_stale_tmp_files(audio_dir)
@@ -188,13 +208,12 @@ class AudioPhase(Phase[AudioPhaseResult]):
         """
         return work_dir / AUDIO_OUTPUT_DIR
 
-    def _force_wipe(
+    def _wipe_outputs(
         self,
         audio_dir:    Path,
         sidecar_path: Path,
-        resolved:     dict[str, ResolvedChain],
     ) -> None:
-        """Delete every chain output and the sidecar.
+        """Delete every chain output and the sidecar (the catastrophic effect).
 
         Only files carrying the ``chain=<name>`` token are removed, so any
         unrelated file dropped into the dedicated audio dir survives.
@@ -202,17 +221,15 @@ class AudioPhase(Phase[AudioPhaseResult]):
         Args:
             audio_dir:    The dedicated audio output directory.
             sidecar_path: The ``audio.yaml`` path.
-            resolved:     Current resolved chains (unused for the wipe; kept for a
-                          uniform invalidation signature).
         """
         if audio_dir.exists():
             for path in audio_dir.iterdir():
                 if path.is_file() and _parse_chain_name(path.name) is not None:
                     path.unlink(missing_ok=True)
-                    logger.debug("force_wipe: deleted %s", path.name)
+                    logger.debug("identity wipe: deleted %s", path.name)
         if sidecar_path.exists():
             sidecar_path.unlink(missing_ok=True)
-            logger.debug("force_wipe: deleted %s", sidecar_path.name)
+            logger.debug("identity wipe: deleted %s", sidecar_path.name)
 
     def _selected_tracks(self) -> list[AudioStream]:
         """Resolve the working track set from extraction + ``audio.select``."""
@@ -243,20 +260,22 @@ class AudioPhase(Phase[AudioPhaseResult]):
             sidecar_path: The ``audio.yaml`` path.
             resolved:     Current resolved chains, keyed by name.
         """
-        persisted   = AudioSidecar.load(sidecar_path)
-        prior_sigs  = persisted.chains if persisted is not None else {}
+        persisted    = AudioSidecar.load(sidecar_path)
+        prior_fps    = persisted.chains if persisted is not None else {}
 
-        # Current chain signatures (the same canonical string the sidecar stores).
-        current      = AudioSidecar.from_resolved(resolved)
-        current_sigs = current.chains
+        # Current chain fingerprints (the same tokens the sidecar stores).
+        current     = AudioSidecar.from_resolved(
+            resolved, source=self._deps[JobPhase].source_fingerprint,
+        )
+        current_fps = current.chains
 
-        # Chains whose signature changed → invalidate (reproduce).
+        # Chains whose fingerprint changed → invalidate (reproduce).
         changed = {
-            name for name, sig in current_sigs.items()
-            if name in prior_sigs and prior_sigs[name] != sig
+            name for name, fp in current_fps.items()
+            if name in prior_fps and prior_fps[name] != fp
         }
         # Chains removed from config → invalidate (cleanup, now unwanted).
-        removed = set(prior_sigs) - set(current_sigs)
+        removed = set(prior_fps) - set(current_fps)
 
         for name in sorted(changed):
             logger.info("Chain %r changed — invalidating its outputs for reprocessing", name)
@@ -265,9 +284,9 @@ class AudioPhase(Phase[AudioPhaseResult]):
             logger.info("Chain %r removed from config — cleaning up its outputs", name)
             self._delete_chain_outputs(audio_dir, name)
 
-        # Commit the current signatures before producing. Skip the rewrite
+        # Commit the current fingerprints before producing. Skip the rewrite
         # when the sidecar already matches exactly.
-        if prior_sigs != current_sigs:
+        if prior_fps != current_fps:
             current.save(sidecar_path)
             logger.debug("Committed audio sidecar (%d chain(s)) before producing", len(resolved))
 

@@ -16,7 +16,7 @@ Covers:
 - Video/audio tracks are NEVER extracted (direct-from-source model)
 - Subtitle / attachment / chapters extraction commands and file-trust wrapping
 - ``extraction.yaml``: persisted on execute, loaded on reuse (no re-probe),
-  re-enumerated on source-identity mismatch
+  Identity-key mismatch: fatal without --force, wipe + re-derive with it (X-2)
 - Result payload: stream objects plus the interim legacy views
 - ``_extract_timestamps``: correct header and integer-ms values per line
 """
@@ -32,7 +32,7 @@ import yaml
 from pyqenc.app_config import load_app_config
 from pyqenc.constants import EXTRACTED_DIR, TIMESTAMPS_FILENAME
 from pyqenc.metrics import NoOpMetricsCollector
-from pyqenc.models import CleanupLevel, PhaseOutcome
+from pyqenc.models import CleanupLevel, Fingerprint, PhaseOutcome
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import (
     ExtractionPhase,
@@ -53,6 +53,10 @@ from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 _APP_CONFIG = load_app_config(default_only=True)
 
+_STUB_FINGERPRINT = Fingerprint(token="0" * 32, size=64)
+"""The live source identity stub files carry (constant across a test unless
+an identity-mismatch case deliberately varies it)."""
+
 
 # ---------------------------------------------------------------------------
 # Shared real-construction helpers
@@ -69,15 +73,16 @@ def _make_extraction_phase(
     exclude:        str | None = None,
     video_required: bool       = True,
     materialize:    bool       = False,
-    force_wipe:     bool       = False,
+    force:          bool       = False,
+    source_fingerprint: Fingerprint | None = None,
 ) -> ExtractionPhase:
     """Construct a REAL ExtractionPhase via its constructor and a real registry.
 
     A real ``JobPhase`` is placed in the registry with its public ``result``
     pre-set to a COMPLETED ``JobPhaseResult`` carrying the config (include/
-    exclude filters), the job's ``File`` and the ``force_wipe`` flag under
-    test, so the shared dependency walk treats the job as already-run without
-    any mocking of phase internals.
+    exclude filters), the job's ``File`` (with its identity fingerprint) and
+    the ``--force`` permission flag under test, so the shared dependency walk
+    treats the job as already-run without any mocking of phase internals.
     """
     collector = NoOpMetricsCollector()
 
@@ -85,11 +90,16 @@ def _make_extraction_phase(
     config.extraction.include = include
     config.extraction.exclude = exclude
 
+    fingerprint = source_fingerprint if source_fingerprint is not None else _STUB_FINGERPRINT
     job_result = JobPhaseResult(
         outcome    = PhaseOutcome.COMPLETED,
         message    = "job complete",
-        file       = Artifact(payload=File(path=source, file_size_bytes=source.stat().st_size if source.exists() else 64), state=ArtifactState.COMPLETE),
-        force_wipe = force_wipe,
+        file       = Artifact(payload=File(
+            path            = source,
+            file_size_bytes = source.stat().st_size if source.exists() else 64,
+            fingerprint     = fingerprint,
+        ), state=ArtifactState.COMPLETE),
+        force      = force,
         config     = config,
         work_dir   = work_dir,
         source     = source,
@@ -577,13 +587,13 @@ class TestSubtitleChaptersDispatch:
 class TestExtractionSidecarLifecycle:
     def test_sidecar_persisted_on_execute(self, tmp_path: Path) -> None:
         """A fresh run writes extraction.yaml with the stream inventory
-        (info slices + source identity)."""
-        _, _, work_dir, source = _run_and_capture(
+        (info slices + the source identity key)."""
+        _, _, work_dir, _ = _run_and_capture(
             tmp_path, _ffprobe_json(_video_json(), _audio_json(), _subtitle_json()),
         )
         data = yaml.safe_load((work_dir / "extraction.yaml").read_text(encoding="utf-8"))
         assert set(data) == {"source", "streams", "chapters"}
-        assert data["source"]["path"] == str(source)
+        assert data["source"]["token"] == _STUB_FINGERPRINT.token
         assert data["chapters"] is False
         assert data["streams"]["video"]["fps_fraction"] == [24000, 1001]
         assert len(data["streams"]["audio"]) == 1
@@ -608,26 +618,58 @@ class TestExtractionSidecarLifecycle:
         assert result.video_stream.payload.info.codec_name == "hevc"
         assert len(result.audio_streams) == 1
 
-    def test_identity_mismatch_reenumerates(self, tmp_path: Path) -> None:
-        """A sidecar recorded for a different source identity is ignored and
-        the source is re-enumerated (Req 2.8)."""
+    def test_identity_mismatch_fatals_without_permission(self, tmp_path: Path) -> None:
+        """A sidecar recorded for a different source identity is catastrophic:
+        without --force the phase fails loudly (X-2 — never an optimistic
+        re-enumerate-and-trust); with the permission it wipes extracted/ and
+        re-enumerates."""
         _, _, work_dir, source = _run_and_capture(
             tmp_path, _ffprobe_json(_video_json()),
         )
-        # Corrupt the recorded identity.
+        # Corrupt the recorded identity key (a different source's token).
         sidecar_path = work_dir / "extraction.yaml"
         data = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
-        data["source"]["file_size_bytes"] = 999999
+        data["source"]["token"] = "f" * 32
         write_yaml_atomic(sidecar_path, data)
 
+        # Without permission: fatal.
         phase = _make_extraction_phase(work_dir, source)
+        result = phase.run(dry_run=True)
+        assert result.outcome is PhaseOutcome.FAILED
+        assert "identity mismatch" in result.message.lower()
+        assert "--force" in result.message
+
+        # With permission: wipe + re-enumerate (the live identity still
+        # contradicts the corrupted key).
+        phase2 = _make_extraction_phase(work_dir, source, force=True)
         with (
             patch("pyqenc.phases.extraction._probe_streams_json",
                   return_value=_ffprobe_json(_video_json())) as probe_mock,
         ):
-            phase.run(dry_run=True)
+            phase2.run(dry_run=True)
 
         assert probe_mock.called
+
+    def test_missing_sidecar_wipes_extracted_conservatively(self, tmp_path: Path) -> None:
+        """X-1: a missing extraction.yaml while extracted/ holds files is the
+        unknown-currency condition — the files are wiped (nothing proves what
+        produced them) and re-extracted, never trusted by name."""
+        _, _, work_dir, source = _run_and_capture(
+            tmp_path, _ffprobe_json(_video_json()),
+        )
+        stale = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text("# timestamp format v2\n0\n", encoding="utf-8")
+        (work_dir / "extraction.yaml").unlink()
+
+        phase = _make_extraction_phase(work_dir, source)
+        with patch("pyqenc.phases.extraction._probe_streams_json",
+                   return_value=_ffprobe_json(_video_json())):
+            result = phase.run(dry_run=True)
+
+        assert not stale.exists(), "unknown-currency files must be wiped"
+        assert result.video_stream is not None
+        assert result.video_stream.state is ArtifactState.ABSENT
 
 
 # ---------------------------------------------------------------------------
@@ -641,26 +683,29 @@ class TestVideoArtifact:
         """Bug prevented: the video row reporting COMPLETE while its single
         material component (the per-frame PTS index) is missing — downstream
         probe/merge would read a nonexistent file."""
-        work_dir, source = _make_work_and_source(tmp_path)
-        phase = _make_extraction_phase(work_dir, source)
+        _, _, work_dir, source = _run_and_capture(
+            tmp_path, _ffprobe_json(_video_json()),
+        )
+        # The execute run persisted the sidecar; the patched writer left no
+        # index on disk — with a current sidecar the row must report ABSENT.
+        index = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
 
-        with patch("pyqenc.phases.extraction._probe_streams_json",
-                   return_value=_ffprobe_json(_video_json())):
+        phase = _make_extraction_phase(work_dir, source)
+        with (patch("pyqenc.phases.extraction._probe_streams_json") as probe_mock,):
             absent = phase.run(dry_run=True)
+        probe_mock.assert_not_called()  # current sidecar loads — no re-probe
         assert absent.video_stream is not None
         assert absent.video_stream.state == ArtifactState.ABSENT
         assert absent.timestamps_path is None
 
-        (work_dir / EXTRACTED_DIR).mkdir(parents=True, exist_ok=True)
-        (work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME).write_text(
-            "# timestamp format v2\n0\n", encoding="utf-8")
+        index.parent.mkdir(parents=True, exist_ok=True)
+        index.write_text("# timestamp format v2\n0\n", encoding="utf-8")
         phase2 = _make_extraction_phase(work_dir, source)
-        with patch("pyqenc.phases.extraction._probe_streams_json",
-                   return_value=_ffprobe_json(_video_json())):
+        with patch("pyqenc.phases.extraction._probe_streams_json"):
             complete = phase2.run(dry_run=True)
         assert complete.video_stream is not None
         assert complete.video_stream.state == ArtifactState.COMPLETE
-        assert complete.timestamps_path == work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+        assert complete.timestamps_path == index
 
     def test_wanted_is_mode_not_filter(self, tmp_path: Path) -> None:
         """Bug prevented: the include/exclude filter gating the video row —

@@ -2,17 +2,19 @@
 
 This is the first phase in the pipeline and has no dependencies.  Every other
 phase declares ``JobPhase`` as a dependency so that job-level data (the source
-:class:`~pyqenc.stream_model.File`, force-wipe flag, run parameters) is always
-available before any phase does real work.
+:class:`~pyqenc.stream_model.File`, the ``--force`` permission, run
+parameters) is always available before any phase does real work.
 
 Responsibilities:
 - Construct exactly one :class:`~pyqenc.stream_model.File` per run — eagerly
-  from the filesystem — and expose it on ``JobPhaseResult``.
-- Persist ``job.yaml`` as the :class:`File` dump only
-  (``{source: {path, file_size_bytes?}}``) and validate it against the live
-  file (path + size).
-- Propagate ``force_wipe=True`` to downstream phases when ``--force`` is
-  provided and a source mismatch is detected.
+  from the filesystem, including the sampled-content fingerprint — and expose
+  it on ``JobPhaseResult``.
+- Persist ``job.yaml`` as the one human-facing header — the source locator
+  beside its content identity (``{source: {path, fingerprint}}``) — and
+  validate it against the live file.
+- Carry the raw ``--force`` permission on the result: it grants destructive
+  invalidation effects for the run and has no other effect (Req 35a); each
+  phase detects its own conditions from its own persisted keys.
 """
 # CHerSun 2026
 
@@ -25,6 +27,7 @@ from pyqenc.constants import TEMP_SUFFIX
 from pyqenc.metrics import MetricKey, MetricsCollector
 from pyqenc.models import (
     CleanupLevel,
+    Fingerprint,
     PhaseOutcome,
 )
 from pyqenc.phase import (
@@ -37,7 +40,7 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
-from pyqenc.stream_model import File, JobSidecar
+from pyqenc.stream_model import File, JobSidecar, JobSourceRecord
 from pyqenc.utils.fs import remove_stale_tmp_file, safe_stat_size
 from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 
@@ -57,15 +60,16 @@ class JobPhaseResult(PhaseResult):
 
     Attributes:
         file:       The source-file artifact — the run's single
-                    :class:`~pyqenc.stream_model.File` (path + size) wrapped
-                    with its recovery facts; ``COMPLETE`` once established and
-                    persisted.
-        force_wipe: ``True`` when ``--force`` was provided and a source mismatch
-                    was detected; downstream phases must delete their own output
-                    directories and phase parameter YAMLs before proceeding.
+                    :class:`~pyqenc.stream_model.File` (path + size +
+                    sampled fingerprint) wrapped with its recovery facts;
+                    ``COMPLETE`` once established and persisted.
         config:     Full validated application configuration.
         work_dir:   Working directory for all pipeline artifacts.
         source:     Resolved path to the source video file.
+        force:      The raw ``--force`` CLI flag — PERMISSION for
+                    destructive invalidation effects this run and nothing
+                    else (Req 35a): it never causes a wipe by itself; each
+                    phase's own fatal-band condition consumes it.
         cleanup:    Artifact retention policy applied after encoding.
         no_metrics: When ``True``, skip writing ``metrics.yaml`` files.
     """
@@ -76,9 +80,21 @@ class JobPhaseResult(PhaseResult):
     config:     AppConfig
     work_dir:   Path
     source:     Path
-    force_wipe: bool                   = field(default=False)
-    cleanup:    CleanupLevel           = field(default=CleanupLevel.NONE)
-    no_metrics: bool                   = field(default=False)
+    force:      bool                  = field(default=False)
+    cleanup:    CleanupLevel          = field(default=CleanupLevel.NONE)
+    no_metrics: bool                  = field(default=False)
+
+    @property
+    def source_fingerprint(self) -> Fingerprint:
+        """The live source content identity — computed once per run at Job.
+
+        The single accessor every phase's identity-key comparison reads; the
+        contract assert replaces per-consumer Optional handling (the source
+        ``File`` always carries its fingerprint).
+        """
+        fingerprint = self.file.payload.fingerprint
+        assert fingerprint is not None, "the source File carries its fingerprint (Req 30)"
+        return fingerprint
 
 
 # ---------------------------------------------------------------------------
@@ -138,76 +154,95 @@ class JobPhase(Phase[JobPhaseResult]):
 
         # Recovery stash — the run's File, resolved during _recover();
         # consumed by _execute()/_make_result().
-        self._file:        File | None      = None
-        self._force_wipe:  bool             = False
+        self._file:   File | None = None
+        self._stale:  bool       = False
+        """Whether the persisted job.yaml record is stale (identity wipe or
+        locator move) and must be rewritten by ``_execute``."""
 
     # ------------------------------------------------------------------
     # Phase hooks
     # ------------------------------------------------------------------
 
     def _recover(self) -> Recovery:
-        """Determine ``job.yaml`` currency: absent, stale, or current.
+        """Determine ``job.yaml`` currency against the live source identity.
 
         Steps:
 
         1. Remove a leftover ``job.yaml.tmp`` from an interrupted write.
-        2. Load the :class:`~pyqenc.stream_model.JobSidecar` (the ``File``
-           dump); when absent or unparseable the phase is pending (must
-           create). A ``job.yaml`` written by an older version does not parse
-           as this schema — it is treated as absent and rebuilt (pre-alpha
-           policy: no mid-work upgrades).
-        3. Compare the persisted source identity (path + ``file_size_bytes``)
-           against live values. On mismatch: with ``--force`` set
-           ``force_wipe`` and go pending (rebuild for the new source);
-           without ``--force`` this is a fatal invalidation.
+        2. Probe the live source eagerly — path, size, and the sampled
+           content fingerprint (computed once per run, Req 30).
+        3. Load the persisted :class:`~pyqenc.stream_model.JobSidecar`;
+           when absent or unparseable the phase is pending (must write). A
+           ``job.yaml`` written by an older version does not parse as this
+           schema — it is treated as absent and rebuilt (pre-alpha policy:
+           no mid-work upgrades).
+        4. Compare identities (Req 33/34): a fingerprint mismatch is the
+           catastrophic condition — fatal without ``--force``; with the
+           permission granted, Job merely rewrites its own record (each
+           downstream phase's identity key re-detects the change and wipes
+           its own artifacts — no propagated wipe order exists). A
+           path-only difference with matching content is a LOCATOR UPDATE:
+           ``job.yaml`` is rewritten with no fatal and no invalidation.
 
         The ledger carries one ``Artifact[File]`` row — ``COMPLETE`` by
-        construction once the source is verified (a missing source fails the
-        phase before recovery); the pending paths leave it ``ABSENT`` with
-        the freshly probed identity as the payload.
+        construction once the identity is verified; the rewrite paths leave
+        it ``ABSENT`` with the freshly probed identity as the payload.
 
         Returns:
             The :class:`Recovery` single source of truth (one row).
 
         Raises:
-            RecoveryError: On a source mismatch without ``--force``.
+            RecoveryError: On a content-identity mismatch without ``--force``.
         """
         job_yaml = self._work_dir / JobPhase.SIDECAR_NAME
 
         # Step 1 — .tmp pre-clean (job.yaml is written via .tmp-then-rename).
         remove_stale_tmp_file(job_yaml.with_name(job_yaml.name + TEMP_SUFFIX))
 
-        # Step 2 — load the File dump; absent/unparseable → must create.
+        # Step 2 — the live identity, probed eagerly every run (the identity
+        # owner; downstream phases compare against this, never re-hash).
+        self._file = self._probe_file()
+
+        # Step 3 — load the persisted record; absent/unparseable → must write.
         existing = self._load_job_sidecar(job_yaml)
         if existing is None:
-            self._file = self._probe_file()
+            self._stale = True
             return Recovery.from_artifacts([
                 Artifact(payload=self._file, state=ArtifactState.ABSENT),
             ])
-        self._file = existing.source
 
-        # Step 3 — source-mismatch invalidation (path + size vs live values).
-        mismatches = self._find_source_mismatches(existing.source)
-        if mismatches:
-            mismatch_desc = "; ".join(
-                f"{field}: persisted={old!r}, current={new!r}"
-                for field, old, new in mismatches
-            )
-            if self._force:
-                logger.warning(
-                    "Source file mismatch detected (--force — downstream phases will wipe their own artifacts): %s",
-                    mismatch_desc,
+        # Step 4 — identity comparison: content first, path second.
+        live_fingerprint = self._file.fingerprint
+        assert live_fingerprint is not None, "the probed File carries its fingerprint"
+        if not existing.source.fingerprint.matches(live_fingerprint):
+            if not self._force:
+                raise RecoveryError(
+                    "Source content identity mismatch — this workdir belongs to a "
+                    "different source file.  Re-run with --force to grant permission "
+                    "for each phase to wipe its own artifacts and re-derive from the "
+                    "new source."
                 )
-                self._force_wipe = True
-                self._file = self._probe_file()
-                return Recovery.from_artifacts([
-                    Artifact(payload=self._file, state=ArtifactState.ABSENT),
-                ])
-            raise RecoveryError(
-                "Source file mismatch detected — stopping execution.  "
-                "Re-run with --force to wipe existing artifacts and continue with the new source.  "
-                f"Mismatch: {mismatch_desc}"
+            logger.warning(
+                "Source content identity mismatch (--force granted — each phase "
+                "wipes its own artifacts via its own identity key)"
             )
+            self._stale = True
+            return Recovery.from_artifacts([
+                Artifact(payload=self._file, state=ArtifactState.ABSENT),
+            ])
+
+        if existing.source.path.resolve() != self._source.resolve():
+            # Locator update (Req 34): the content is unchanged — only the
+            # runtime location moved. Rewrite the record; nothing else fires.
+            logger.info(
+                "Source moved (%s → %s) — updating the recorded locator "
+                "(content identity unchanged)",
+                existing.source.path, self._source,
+            )
+            self._stale = True
+            return Recovery.from_artifacts([
+                Artifact(payload=self._file, state=ArtifactState.ABSENT),
+            ])
 
         return Recovery.from_artifacts([
             Artifact(payload=self._file, state=ArtifactState.COMPLETE),
@@ -216,10 +251,9 @@ class JobPhase(Phase[JobPhaseResult]):
     def _execute(self, wanted: list[Artifact], dry_run: bool) -> JobPhaseResult:
         """Establish the source identity and (unless dry-run) write ``job.yaml``.
 
-        Runs when the sidecar was absent or was invalidated by ``--force``:
-        constructs the eager :class:`~pyqenc.stream_model.File`, builds the
-        interim in-memory fast-metadata state, and persists the shrunk
-        ``job.yaml`` (the File dump only).
+        Runs when the record was absent, stale by identity (permission
+        granted), or moved (locator update): persists the current
+        :class:`~pyqenc.stream_model.JobSidecar`.
 
         Args:
             wanted:  Always empty (job.yaml is state, not artifacts).
@@ -231,13 +265,18 @@ class JobPhase(Phase[JobPhaseResult]):
         """
         job_yaml = self._work_dir / JobPhase.SIDECAR_NAME
 
-        # Fresh identity (job.yaml absent, or force_wipe after a source
-        # mismatch) — recovery already probed it eagerly for the ledger row.
+        # Fresh/stale identity — recovery already probed it eagerly for the
+        # ledger row.
         assert self._file is not None, "file guaranteed by the _recover pending branches"
+        fingerprint = self._file.fingerprint
+        assert fingerprint is not None, "the probed File carries its fingerprint"
         if not dry_run:
             write_yaml_atomic(
                 job_yaml,
-                JobSidecar(source=self._file).model_dump(exclude_none=True),
+                JobSidecar(source=JobSourceRecord(
+                    path       = self._source,
+                    fingerprint = fingerprint,
+                )).model_dump(exclude_none=True),
             )
             logger.info("Initialized job.yaml for new pipeline run")
         return self._make_result(
@@ -287,7 +326,7 @@ class JobPhase(Phase[JobPhaseResult]):
             outcome     = outcome,
             message     = message,
             file        = Artifact(payload=self._file, state=file_state),
-            force_wipe  = self._force_wipe,
+            force       = self._force,
             config      = self._config,
             work_dir    = self._work_dir,
             source      = self._source,
@@ -313,7 +352,7 @@ class JobPhase(Phase[JobPhaseResult]):
 
     @staticmethod
     def _load_job_sidecar(path: Path) -> JobSidecar | None:
-        """Load ``job.yaml`` as the :class:`JobSidecar` (the ``File`` dump).
+        """Load ``job.yaml`` as the :class:`JobSidecar`.
 
         Args:
             path: The ``job.yaml`` path.
@@ -348,38 +387,4 @@ class JobPhase(Phase[JobPhaseResult]):
             file_size_bytes = file_size_bytes,
             fingerprint     = File.sampled_fingerprint(self._source),
         )
-
-    def _find_source_mismatches(
-        self,
-        persisted: File,
-    ) -> list[tuple[str, object, object]]:
-        """Compare the persisted source identity against the live file.
-
-        Checks the persisted path and ``file_size_bytes`` only.
-
-        Args:
-            persisted: The sidecar's recorded :class:`File`.
-
-        Returns:
-            List of ``(field_name, persisted_value, current_value)`` tuples.
-        """
-        mismatches: list[tuple[str, object, object]] = []
-
-        if persisted.path.resolve() != self._source.resolve():
-            mismatches.append(("path", str(persisted.path), str(self._source)))
-            return mismatches
-
-        try:
-            current_size = self._source.stat().st_size
-        except OSError:
-            current_size = None
-
-        if (
-            persisted.file_size_bytes is not None
-            and current_size is not None
-            and persisted.file_size_bytes != current_size
-        ):
-            mismatches.append(("file_size_bytes", persisted.file_size_bytes, current_size))
-
-        return mismatches
 

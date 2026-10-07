@@ -2136,15 +2136,13 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
     # ------------------------------------------------------------------
 
     def _recover(self) -> Recovery:
-        """Classify ``(chunk, strategy)`` pairs and handle force-wipe / crop mismatch.
+        """Classify ``(chunk, strategy)`` pairs and check the crop snapshot.
 
         Steps:
-        1. If ``force_wipe``: delete ``encoding/``, ``encoded/``,
-           and ``encoding.yaml``.
-        2. Check crop mismatch against ``encoding.yaml`` — a probe change
+        1. Check crop mismatch against ``encoding.yaml`` — a probe change
            without ``--force`` is a fatal invalidation.
-        3. Clean up leftover ``.tmp`` files.
-        4. Classify all (chunk, strategy) pairs via the shared pair-ledger
+        2. Clean up leftover ``.tmp`` files.
+        3. Classify all (chunk, strategy) pairs via the shared pair-ledger
            builders; orphaned ``encoded/<strategy>/`` directories surface as
            ``wanted=False`` rows (kept in place; deletion only via explicit
            cleanup).
@@ -2159,39 +2157,25 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         job_result = self._deps[JobPhase]
         work_dir   = job_result.work_dir
         enc_dir    = work_dir / ENCODING_WORKSPACE_DIR
-        out_dir    = work_dir / ENCODED_OUTPUT_DIR
         yaml_path  = work_dir / EncodingPhase.SIDECAR_NAME
-        force_wipe = job_result.force_wipe
 
-        # Step 1: force-wipe
-        if force_wipe:
-            for d in (enc_dir, out_dir):
-                if d.exists():
-                    shutil.rmtree(d)
-                    logger.debug("force_wipe: deleted %s", d)
-            if yaml_path.exists():
-                yaml_path.unlink()
-                logger.debug("force_wipe: deleted %s", yaml_path)
+        # Step 1: probe mismatch check.
+        persisted_enc = EncodingParams.load(yaml_path)
+        self._persisted = persisted_enc
+        current_probe = ProbeState.from_probe(self._deps[ProbePhase])
+        self.params   = EncodingParams(probe=current_probe)
 
-        # Step 2: probe mismatch check (with --force the wipe above already
-        # removed encoding.yaml, so a mismatch can only be seen without it).
-        if not force_wipe:
-            persisted_enc = EncodingParams.load(yaml_path)
-            self._persisted = persisted_enc
-            current_probe = ProbeState.from_probe(self._deps[ProbePhase])
-            self.params   = EncodingParams(probe=current_probe)
+        if persisted_enc is not None and persisted_enc.probe != current_probe:
+            raise RecoveryError(
+                "Probe params changed since last encoding run "
+                f"(persisted={persisted_enc.probe}, current={current_probe}). "
+                "Re-run with --force to delete stale encoding artifacts and continue."
+            )
 
-            if persisted_enc is not None and persisted_enc.probe != current_probe:
-                raise RecoveryError(
-                    "Probe params changed since last encoding run "
-                    f"(persisted={persisted_enc.probe}, current={current_probe}). "
-                    "Re-run with --force to delete stale encoding artifacts and continue."
-                )
-
-        # Step 3: clean up .tmp files
+        # Step 2: clean up .tmp files
         remove_stale_tmp_files(enc_dir)
 
-        # Step 4: get chunks and strategies from dependencies
+        # Step 3: get chunks and strategies from dependencies
         chunking_result     = self._deps[ChunkingPhase]
         optimization_result = self._deps[OptimizationPhase]
 
@@ -2203,7 +2187,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         if not strategies:
             raise RecoveryError("No strategies available from OptimizationPhase")
 
-        # Step 5: the per-pair ledger (winning attempt per chunk x strategy,
+        # Step 4: the per-pair ledger (winning attempt per chunk x strategy,
         # presence-based) plus the orphaned-strategy rows. COMPLETE rows carry
         # the composed winners — a REUSED run's result carries them (merge
         # derives its expected strategies from the winners; without this, a
@@ -2365,7 +2349,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             work_dir         = work_dir,
             collector        = self._collector,
             max_parallel     = self._config.encoding.concurrency,
-            force            = self._deps[JobPhase].force_wipe,
+            force            = False,  # attempt reuse is never bypassed by --force (permission, not a command)
             dry_run          = False,
             crop_params      = crop,
             encoding_yaml    = None,  # already persisted above with ProbeState

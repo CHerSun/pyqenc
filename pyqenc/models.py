@@ -150,6 +150,25 @@ def id_set_fingerprint(ids: Iterable[str]) -> Fingerprint:
     )
 
 
+def identity_changed(persisted: Fingerprint | None, live: Fingerprint) -> bool:
+    """The one source-identity comparison (Req 32/33).
+
+    A key absent from a sidecar is UNKNOWN, never a mismatch — absence
+    inside the type never occurs (the token is required), so unknownness
+    lives only here, at the missing-sidecar-field layer. A present key that
+    does not match the live identity is the phase's catastrophic condition.
+
+    Args:
+        persisted: The sidecar's recorded identity key, or ``None``/absent.
+        live:      The live source identity (from the job's ``File``).
+
+    Returns:
+        ``True`` only when a persisted key exists and contradicts the live
+        identity.
+    """
+    return persisted is not None and not persisted.matches(live)
+
+
 
 # ---------------------------------------------------------------------------
 # Enums

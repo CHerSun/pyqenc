@@ -37,6 +37,7 @@ from pyqenc.models import (
     PhaseOutcome,
     QualityTarget,
     Strategy,
+    identity_changed,
     targets_as_strings,
 )
 from pyqenc.phase import (
@@ -332,10 +333,13 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         Steps:
 
-        1. ``force_wipe`` (from JobPhase) → delete ``optimization.yaml`` and
-           the ``encoding/`` test workspace.
+        1. Identity key (Req 33): a persisted identity contradicting the live
+           source is catastrophic for the whole shared namespace — fatal
+           without the ``--force`` permission; with it, wipe attempts,
+           winners, and the sidecar. An absent key (legacy sidecar) is
+           unknown, never a mismatch.
         2. Probe mismatch against ``optimization.yaml`` — fatal without
-           ``--force`` (handled in step 1 when forced).
+           ``--force``.
         3. Quality-target / metrics-sampling change → wipe ``encoded/``
            result dirs and treat all cached strategy results as stale.
         4. Missing sidecar with winners present → wipe ``encoded/``: no file
@@ -354,8 +358,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             The :class:`Recovery` single source of truth.
 
         Raises:
-            RecoveryError: On a probe change without ``--force``, or when
-                ChunkingPhase produced no chunks.
+            RecoveryError: On an identity or probe change without ``--force``,
+                or when ChunkingPhase produced no chunks.
         """
         job_result   = self._deps[JobPhase]
         probe_result = self._deps[ProbePhase]
@@ -365,16 +369,26 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         plan         = probe_result.plan
 
         strategies   = plan.strategies
-        force_wipe   = job_result.force_wipe
 
         current_probe      = ProbeState.from_probe(probe_result)
         self._current_probe = current_probe
 
-        # Step 1 — force wipe (before any currency decision, so --force
-        # always re-tests).
+        # Step 1 — identity key: catastrophic for the shared namespace.
         persisted: OptimizationParams | None = OptimizationParams.load(opt_yaml)
-        if force_wipe:
-            self._wipe_artifacts(work_dir)
+        if identity_changed(persisted.source if persisted is not None else None,
+                            job_result.source_fingerprint):
+            if not job_result.force:
+                raise RecoveryError(
+                    "Source content identity mismatch (optimization.yaml) — the "
+                    "shared attempt/winner namespace belongs to a different source.  "
+                    "Re-run with --force to grant permission to wipe attempts, "
+                    "winners, and the sidecar, and re-derive from the new source."
+                )
+            logger.warning(
+                "Source identity mismatch (--force granted — wiping the shared "
+                "attempt/winner namespace and optimization.yaml)"
+            )
+            self._wipe_artifacts(work_dir, strategies)
             persisted = None
 
         # Step 2 — probe mismatch invalidation.
@@ -414,6 +428,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 strategy_results = [],
                 quality_targets  = persisted.quality_targets,
                 sampling         = persisted.sampling,
+                source           = persisted.source,
             )
 
         # Step 4 — missing sidecar with winners present: unknown currency.
@@ -421,7 +436,6 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         # are conservatively invalidated and re-derived from attempts.
         if (
             persisted is None
-            and not force_wipe
             and (work_dir / ENCODED_OUTPUT_DIR).exists()
         ):
             logger.info(
@@ -675,6 +689,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 strategy_results = final_results,
                 quality_targets  = current_targets,
                 sampling         = current_sampling,
+                source           = self._deps[JobPhase].source_fingerprint,
             ).save(opt_yaml)
 
             self._selected_names   = selected
@@ -715,6 +730,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             strategy_results = final_results,
             quality_targets  = current_targets,
             sampling         = current_sampling,
+            source           = self._deps[JobPhase].source_fingerprint,
         ).save(opt_yaml)
 
         self._selected_names   = selected
@@ -845,6 +861,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 strategy_results = [],
                 quality_targets  = current_targets,
                 sampling         = current_sampling,
+                source           = self._deps[JobPhase].source_fingerprint,
             ).save(opt_yaml)
 
         assert plan.strategies, "all-strategies mode requires at least one strategy"
@@ -854,25 +871,27 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             selected_strategies = list(plan.strategies),
         )
 
-    def _wipe_artifacts(self, work_dir: Path) -> None:
-        """Delete optimization test artifacts and ``optimization.yaml``.
+    def _wipe_artifacts(self, work_dir: Path, strategies: list[Strategy]) -> None:
+        """Delete the shared namespace and ``optimization.yaml`` (permission band).
 
-        Removes the ``encoded/`` directory (test encode workspace) and the
-        ``optimization.yaml`` parameter file.
+        Removes the ``encoded/`` winner tree, the ``encoding/`` attempt
+        workspace, and the ``optimization.yaml`` parameter file — the whole
+        shared namespace this phase owns invalidation over.
 
         Args:
-            work_dir: Pipeline working directory.
+            work_dir:   Pipeline working directory.
+            strategies: The plan's strategies (winner-tree wipe scope).
         """
         opt_yaml = work_dir / OptimizationPhase.SIDECAR_NAME
         if opt_yaml.exists():
             opt_yaml.unlink()
-            logger.debug("force_wipe: deleted %s", opt_yaml)
+            logger.debug("identity wipe: deleted %s", opt_yaml)
 
-        # Delete test encode artifacts (stored under encoding/ per strategy)
+        _wipe_encoded_dir(work_dir, strategies)
         encoding_dir = work_dir / ENCODING_WORKSPACE_DIR
         if encoding_dir.exists():
             shutil.rmtree(encoding_dir)
-            logger.debug("force_wipe: deleted %s", encoding_dir)
+            logger.debug("identity wipe: deleted %s", encoding_dir)
 
     @staticmethod
     def _apply_tolerance(

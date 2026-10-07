@@ -31,6 +31,7 @@ from pyqenc.metrics import (
 )
 from pyqenc.models import (
     CleanupLevel,
+    Fingerprint,
     PhaseOutcome,
     Strategy,
 )
@@ -45,6 +46,10 @@ from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResul
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import ExtendedVideoStream, File, VideoStreamChunk
 from pyqenc.utils.yaml_utils import write_yaml_atomic
+
+_STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
+"""Stub source identity — phases read the job File's fingerprint."""
+
 
 _SHARED_APP_CONFIG: AppConfig = load_app_config(default_only=True)
 
@@ -98,7 +103,7 @@ def _audio_output(out_path: Path):
 
     return AudioOutput(
         stream=AudioStream(
-            file=File(path=out_path.parent.parent / "source.mkv", file_size_bytes=64),
+            file=File(fingerprint=_STUB_SOURCE_FP, path=out_path.parent.parent / "source.mkv", file_size_bytes=64),
             info=AudioStreamInfo(
                 track_id=1, codec_name="flac", language="eng",
                 layout=ChannelLayout.parse("stereo"), duration_seconds=100.0,
@@ -148,7 +153,7 @@ def _make_video_stream_fixture(path: Path):
     from pyqenc.stream_model import VideoStream, VideoStreamInfo
 
     return VideoStream(
-        file=File(path=path, file_size_bytes=64),
+        file=File(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=64),
         info=VideoStreamInfo(
             track_id=0, codec_name="hevc", fps=24.0,
             fps_fraction=Fraction(24, 1), resolution="1920x1080",
@@ -183,7 +188,7 @@ def _make_extended_stream(path: Path, frame_count: int, duration: float) -> Exte
 
     return ExtendedVideoStream(
         stream=VideoStream(
-            file=File(path=path, file_size_bytes=64),
+            file=File(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=64),
             info=VideoStreamInfo(
                 track_id=0, codec_name="hevc", fps=25.0,
                 fps_fraction=Fraction(25, 1), resolution="1920x1080",
@@ -318,7 +323,7 @@ class TestJobPhaseTiming:
         Validates: Requirements 6.5
         """
         from pyqenc.phases.job import JobPhase
-        from pyqenc.stream_model import File, JobSidecar
+        from pyqenc.stream_model import File, JobSidecar, JobSourceRecord
 
         config   = _make_config(tmp_path)
         volatile = _make_volatile(tmp_path)
@@ -327,12 +332,12 @@ class TestJobPhaseTiming:
             config, {}, collector=collector, **volatile,
         )
 
-        # Pre-create a valid job.yaml (the File dump) so the phase takes the
-        # REUSED path.
+        # Pre-create a valid job.yaml (the identity record) so the phase
+        # takes the REUSED path.
         volatile["work_dir"].mkdir(parents=True, exist_ok=True)
-        sidecar = JobSidecar(source=File(
-            path            = volatile["source"],
-            file_size_bytes = volatile["source"].stat().st_size,
+        sidecar = JobSidecar(source=JobSourceRecord(
+            path        = volatile["source"],
+            fingerprint = File.sampled_fingerprint(volatile["source"]),
         ))
         job_yaml = volatile["work_dir"] / "job.yaml"
         write_yaml_atomic(job_yaml, sidecar.model_dump(exclude_none=True))
@@ -391,14 +396,14 @@ class TestExtractionPhaseTiming:
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
-            force_wipe = False,
-            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            force  = False,
+            file       = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = source.parent / "work",
             config     = config,
         )
         result.file     = Artifact(
-            payload=File(path=source, file_size_bytes=source.stat().st_size),
+            payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=source.stat().st_size),
             state=ArtifactState.COMPLETE,
         )
         return result
@@ -442,7 +447,7 @@ class TestExtractionPhaseTiming:
         # A complete subtitle row so _recover returns all-complete → REUSED path
         stub_artifact = Artifact(
             payload = SubtitleStream(
-                file = File(path=tmp_path / "source.mkv"),
+                file = File(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
                 info = SubtitleStreamInfo(
                     track_id=3, codec_name="subrip",
                     extracted_path=tmp_path / "work" / "extracted" / "sub.srt",
@@ -494,7 +499,7 @@ class TestExtractionPhaseTiming:
 
         stub_artifact = Artifact(
             payload = SubtitleStream(
-                file = File(path=tmp_path / "source.mkv"),
+                file = File(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
                 info = SubtitleStreamInfo(
                     track_id=3, codec_name="subrip",
                     extracted_path=absent_path,
@@ -547,7 +552,7 @@ class TestExtractionPhaseTiming:
 
         stub_artifact = Artifact(
             payload = SubtitleStream(
-                file = File(path=tmp_path / "source.mkv"),
+                file = File(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
                 info = SubtitleStreamInfo(
                     track_id=3, codec_name="subrip",
                     extracted_path=tmp_path / "work" / "extracted" / "sub.srt",
@@ -585,8 +590,8 @@ class TestChunkingPhaseTiming:
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
-            force_wipe = False,
-            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            force  = False,
+            file       = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
@@ -777,8 +782,8 @@ class TestAudioPhaseTiming:
         job_result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
-            force_wipe = False,
-            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            force  = False,
+            file       = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = work_dir,
             config     = config,
@@ -913,8 +918,8 @@ class TestOptimizationPhaseTiming:
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
-            force_wipe = False,
-            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            force  = False,
+            file       = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
@@ -1162,8 +1167,8 @@ class TestEncodingPhaseTiming:
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
-            force_wipe = False,
-            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            force  = False,
+            file       = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
@@ -1454,8 +1459,8 @@ class TestMergePhaseTiming:
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
-            force_wipe = False,
-            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            force  = False,
+            file       = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
@@ -1538,7 +1543,7 @@ class TestMergePhaseTiming:
 
         video_row = _Artifact(
             payload = _VideoStream(
-                file = _File(path=work_dir / "source.mkv"),
+                file = _File(fingerprint=_STUB_SOURCE_FP, path=work_dir / "source.mkv"),
                 info = _VideoStreamInfo(track_id=0),
             ),
             state   = _ArtifactState.COMPLETE,

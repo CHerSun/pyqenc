@@ -15,9 +15,9 @@ from unittest.mock import patch
 
 import pytest
 
-from pyqenc.app_config import load_app_config
+from pyqenc.app_config import AppConfig, load_app_config
 from pyqenc.metrics import NoOpMetricsCollector
-from pyqenc.models import CleanupLevel, PhaseOutcome, SceneBoundary
+from pyqenc.models import CleanupLevel, Fingerprint, PhaseOutcome, SceneBoundary
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.chunking import (
     ChunkingPhase,
@@ -37,6 +37,9 @@ from pyqenc.stream_model import (
     VideoStreamInfo,
 )
 
+_STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
+"""Stub source identity — phases read the job File's fingerprint."""
+
 _APP_CONFIG = load_app_config(default_only=True)
 
 
@@ -48,7 +51,7 @@ def _stream(frame_count: int = 640, duration: float = 26.67) -> ExtendedVideoStr
     """An extended video stream: 24000/1001 fps, 1920x1080, 640 frames."""
     return ExtendedVideoStream(
         stream = VideoStream(
-            file = File(path="D:/media/source.mkv", file_size_bytes=64),
+            file = File(fingerprint=_STUB_SOURCE_FP, path="D:/media/source.mkv", file_size_bytes=64),
             info = VideoStreamInfo(
                 track_id=0, codec_name="hevc",
                 fps=23.976, fps_fraction=Fraction(24000, 1001),
@@ -70,19 +73,23 @@ def _boundaries() -> list[SceneBoundary]:
 def _make_registry(
     work_dir: Path,
     stream: ExtendedVideoStream | None,
+    *,
+    config: AppConfig | None = None,
+    force:   bool = False,
 ) -> PhaseRegistry:
     """A real registry with pre-set Job/Extraction/Probe results."""
     collector = NoOpMetricsCollector()
-    config = _APP_CONFIG.model_copy(deep=True)
+    config = config.model_copy(deep=True) if config is not None else _APP_CONFIG.model_copy(deep=True)
     source = work_dir / "source.mkv"
 
     job_result = JobPhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
         message   = "job complete",
-        file      = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+        file      = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         config    = config,
         work_dir  = work_dir,
         source    = source,
+        force     = force,
     )
     job = JobPhase(config, {}, source=source, work_dir=work_dir, force=False,
                    cleanup=CleanupLevel.NONE, no_metrics=True, collector=collector)
@@ -209,7 +216,7 @@ class TestDetectScenes:
         stream = _stream(duration=13.33)
         stream = stream.model_copy(update={
             "stream": stream.stream.model_copy(update={
-                "file": File(path=tmp_path / "source.mkv"),
+                "file": File(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
             }),
         })
         with patch("pyqenc.phases.chunking.detect", return_value=[]):
@@ -239,9 +246,12 @@ class TestChunkingPhaseLifecycle:
 
         import yaml
         data = yaml.safe_load((work_dir / "chunking.yaml").read_text(encoding="utf-8"))
-        assert set(data) == {"scenes"}
+        assert set(data) == {"scenes", "source", "scene_threshold", "min_scene_length"}
         assert [rec["timestamp_seconds"] for rec in data["scenes"]] == [0.0, 13.33]
         assert data["scenes"][1]["frame"] == 320
+        assert data["source"]["token"] == _STUB_SOURCE_FP.token
+        assert data["scene_threshold"] == _APP_CONFIG.chunking.scene_threshold
+        assert data["min_scene_length"] == _APP_CONFIG.chunking.min_scene_length
 
     def test_reuse_loads_scenes_without_detection(self, tmp_path):
         """Bug prevented: re-running scene detection on every run — cached
@@ -270,10 +280,12 @@ class TestChunkingPhaseLifecycle:
         assert result.outcome == PhaseOutcome.PENDING
         assert not (work_dir / "chunking.yaml").exists()
 
-    def test_force_wipe_invalidates_cached_scenes(self, tmp_path):
-        """force_wipe clears chunking.yaml so detection re-runs. Legacy
-        pre-spec ``chunks/`` leftovers are nobody's concern (no-migration
-        policy) and are left in place."""
+    def test_identity_mismatch_without_permission_fatals(self, tmp_path):
+        """C-2: boundaries of the OLD source's timeline are never current —
+        an identity mismatch is catastrophic: fatal without --force; with
+        the permission the sidecar is discarded and detection re-runs.
+        Legacy pre-spec ``chunks/`` leftovers are nobody's concern
+        (no-migration policy) and are left in place."""
         work_dir = tmp_path / "work"
         work_dir.mkdir(parents=True)
         legacy = work_dir / "chunks"
@@ -285,17 +297,55 @@ class TestChunkingPhaseLifecycle:
             phase.run(dry_run=False)
         assert (work_dir / "chunking.yaml").exists()
 
-        # Rebuild the registry with force_wipe set on the job result.
-        registry = _make_registry(work_dir, _stream())
-        job = registry[JobPhase]
-        assert job.result is not None
-        job.result.force_wipe = True
+        # Corrupt the recorded identity key (a different source).
+        import yaml
+
+        sidecar_path = work_dir / "chunking.yaml"
+        data = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
+        data["source"]["token"] = "f" * 32
+        from pyqenc.utils.yaml_utils import write_yaml_atomic
+
+        write_yaml_atomic(sidecar_path, data)
+
+        # Without permission: fatal.
+        denied = _make_phase(work_dir, _stream())
+        result = denied.run(dry_run=False)
+        assert result.outcome == PhaseOutcome.FAILED
+        assert "identity mismatch" in result.message.lower()
+        assert "--force" in result.message
+
+        # With permission: discard + re-detect.
+        registry = _make_registry(work_dir, _stream(), force=True)
         collector = NoOpMetricsCollector()
         config = _APP_CONFIG.model_copy(deep=True)
         phase2 = ChunkingPhase(config, registry, collector=collector)
         with patch("pyqenc.phases.chunking.detect_scenes", return_value=_boundaries()) as detect_mock:
             phase2.run(dry_run=False)
 
-        assert detect_mock.called, "force_wipe must invalidate the cached scenes"
+        assert detect_mock.called, "the identity wipe must invalidate the cached scenes"
         assert legacy.exists(), "legacy leftovers are deliberately untouched"
         assert (work_dir / "chunking.yaml").exists()
+
+    def test_detection_params_change_reetects_automatically(self, tmp_path):
+        """C-1: a scene_threshold change discards the persisted boundaries —
+        automatic re-detect (user-initiated config edit, nothing deleted)."""
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True)
+        phase = _make_phase(work_dir, _stream())
+        with patch("pyqenc.phases.chunking.detect_scenes", return_value=_boundaries()):
+            phase.run(dry_run=False)
+        assert (work_dir / "chunking.yaml").exists()
+
+        config = _APP_CONFIG.model_copy(deep=True)
+        config.chunking.scene_threshold = 0.99
+        registry = _make_registry(work_dir, _stream(), config=config)
+        phase2 = ChunkingPhase(config, registry, collector=NoOpMetricsCollector())
+        with patch("pyqenc.phases.chunking.detect_scenes", return_value=_boundaries()) as detect_mock:
+            phase2.run(dry_run=False)
+
+        assert detect_mock.called, "a detection-params change must re-detect"
+
+        import yaml
+
+        data = yaml.safe_load((work_dir / "chunking.yaml").read_text(encoding="utf-8"))
+        assert data["scene_threshold"] == 0.99

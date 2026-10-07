@@ -81,7 +81,9 @@ def _drive(
         source:         Resolved path to the source video file.
         work_dir:       Working directory for all pipeline artifacts.
         targets:        The terminal phase classes to run, in drive order.
-        force:          Wipe existing artifacts on source mismatch when ``True``.
+        force: Permission for destructive invalidation effects this
+               run when ``True`` (Req 35a: the flag alone wipes nothing;
+               each phase's own fatal-band condition consumes it).
         cleanup:        Artifact retention policy for intermediate files.
         no_metrics:     When ``True``, use a no-op collector (no ``metrics.yaml``).
         dry_run:        Report only — no files written.
@@ -159,7 +161,9 @@ def run_pipeline(
                      (:meth:`AppConfig.resolve_encoding` output).
         source:      Resolved path to the source video file.
         work_dir:    Working directory for all pipeline artifacts.
-        force:       Wipe existing artifacts on source mismatch when ``True``.
+        force: Permission for destructive invalidation effects this
+               run when ``True`` (Req 35a: the flag alone wipes nothing;
+               each phase's own fatal-band condition consumes it).
         cleanup:     Artifact retention policy for intermediate files.
         no_metrics:  When ``True``, skip writing ``metrics.yaml``.
         dry_run:     If ``True``, only report what would be done (default: ``True``).
@@ -213,7 +217,9 @@ def extract_streams(
         config:      Fully assembled application configuration.
         source:      Resolved path to the source video file.
         work_dir:    Working directory (same as used by ``run_pipeline``).
-        force:       Wipe existing artifacts on source mismatch when ``True``.
+        force: Permission for destructive invalidation effects this
+               run when ``True`` (Req 35a: the flag alone wipes nothing;
+               each phase's own fatal-band condition consumes it).
         cleanup:     Artifact retention policy for intermediate files.
         no_metrics:  When ``True``, skip writing ``metrics.yaml``.
         dry_run:     Report only — no files written.
@@ -263,7 +269,9 @@ def chunk_video(
         config:      Fully assembled application configuration.
         source:      Resolved path to the source video file.
         work_dir:    Working directory (same as used by ``run_pipeline``).
-        force:       Wipe existing artifacts on source mismatch when ``True``.
+        force: Permission for destructive invalidation effects this
+               run when ``True`` (Req 35a: the flag alone wipes nothing;
+               each phase's own fatal-band condition consumes it).
         cleanup:     Artifact retention policy for intermediate files.
         no_metrics:  When ``True``, skip writing ``metrics.yaml``.
         dry_run:     Report only — no files written.
@@ -315,7 +323,9 @@ def process_audio(
         config:     Fully assembled application configuration.
         source:     Resolved path to the source video file.
         work_dir:   Working directory (same as used by ``run_pipeline``).
-        force:      Wipe existing artifacts on source mismatch when ``True``.
+        force: Permission for destructive invalidation effects this
+               run when ``True`` (Req 35a: the flag alone wipes nothing;
+               each phase's own fatal-band condition consumes it).
         cleanup:    Artifact retention policy for intermediate files.
         no_metrics: When ``True``, skip writing ``metrics.yaml``.
         dry_run:    Report only — no files written.
@@ -361,7 +371,9 @@ def encode_chunks(
         config:      Fully assembled application configuration.
         source:      Resolved path to the source video file.
         work_dir:    Working directory (same as used by ``run_pipeline``).
-        force:       Wipe existing artifacts on source mismatch when ``True``.
+        force: Permission for destructive invalidation effects this
+               run when ``True`` (Req 35a: the flag alone wipes nothing;
+               each phase's own fatal-band condition consumes it).
         cleanup:     Artifact retention policy for intermediate files.
         no_metrics:  When ``True``, skip writing ``metrics.yaml``.
         dry_run:     Report only — no files written.
@@ -412,7 +424,9 @@ def merge_final(
         config:      Fully assembled application configuration.
         source:      Resolved path to the source video file.
         work_dir:    Working directory (same as used by ``run_pipeline``).
-        force:       Wipe existing artifacts on source mismatch when ``True``.
+        force: Permission for destructive invalidation effects this
+               run when ``True`` (Req 35a: the flag alone wipes nothing;
+               each phase's own fatal-band condition consumes it).
         cleanup:     Artifact retention policy for intermediate files.
         no_metrics:  When ``True``, skip writing ``metrics.yaml``.
         dry_run:     Report only — no files written.
