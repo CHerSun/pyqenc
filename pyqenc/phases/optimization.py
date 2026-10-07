@@ -1058,8 +1058,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         Returns:
             ``{metric_statistic: min_across_chunks}``.
         """
-        from pyqenc.constants import ENCODED_ATTEMPT_NAME_PATTERN
-        from pyqenc.phases.encoding import _encoded_dir, _read_sidecar_yaml
+        from pyqenc.phases.encoding import read_winner_sidecar
 
         winners_by_chunk = {
             w.chunk.safe_name(): w
@@ -1070,13 +1069,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             winner = winners_by_chunk.get(chunk.safe_name())
             if winner is None:
                 continue
-            name_match = ENCODED_ATTEMPT_NAME_PATTERN.match(winner.stream.stream.file.path.name)
-            if name_match is None:
-                continue
-            sidecar = _read_sidecar_yaml(
-                _encoded_dir(work_dir, strategy)
-                / f"{name_match.group('chunk_id')}.{name_match.group('resolution')}.yaml"
-            )
+            sidecar = read_winner_sidecar(work_dir, winner)
             if sidecar is None:
                 continue
             for key, value in sidecar.get("metrics", {}).items():

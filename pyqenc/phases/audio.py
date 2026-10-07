@@ -32,12 +32,12 @@ from pyqenc.audio.chain import (
     ResolvedChain,
     chain_output_path,
     execute_chain,
+    parse_chain_name,
     resolve_chain,
 )
 from pyqenc.audio.select import resolve_selection
 from pyqenc.constants import (
     AUDIO_OUTPUT_DIR,
-    CHAIN_FILENAME_SUFFIX,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
     THICK_LINE,
@@ -224,7 +224,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
         """
         if audio_dir.exists():
             for path in audio_dir.iterdir():
-                if path.is_file() and _parse_chain_name(path.name) is not None:
+                if path.is_file() and parse_chain_name(path.name) is not None:
                     path.unlink(missing_ok=True)
                     logger.debug("identity wipe: deleted %s", path.name)
         if sidecar_path.exists():
@@ -307,7 +307,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
         for path in audio_dir.iterdir():
             if not path.is_file():
                 continue
-            if _parse_chain_name(path.name) == chain_name:
+            if parse_chain_name(path.name) == chain_name:
                 try:
                     path.unlink()
                     logger.debug("Deleted invalidated output: %s", path.name)
@@ -360,7 +360,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
                 if (
                     path.is_file()
                     and not path.name.endswith(TEMP_SUFFIX)
-                    and _parse_chain_name(path.name) is not None
+                    and parse_chain_name(path.name) is not None
                     and path.name not in expected_names
                 ):
                     rows.append(Artifact(
@@ -495,25 +495,3 @@ class AudioPhase(Phase[AudioPhaseResult]):
 # ---------------------------------------------------------------------------
 # AudioPhase module-level helpers
 # ---------------------------------------------------------------------------
-
-def _parse_chain_name(filename: str) -> str | None:
-    """Return the exact chain name from a ``<stream safe name> chain=<name>.<ext>`` filename.
-
-    Splits on the ``chain=`` suffix delimiter and strips the extension, returning
-    the chain name verbatim for exact-match invalidation. Returns
-    ``None`` when the filename carries no ``chain=`` token (not a chain output).
-
-    Args:
-        filename: A bare filename (no directory component).
-
-    Returns:
-        The chain name, or ``None`` when the file is not a chain output.
-    """
-    idx = filename.rfind(CHAIN_FILENAME_SUFFIX)
-    if idx == -1:
-        return None
-    tail = filename[idx + len(CHAIN_FILENAME_SUFFIX):]
-    # Strip the extension (single trailing suffix) — chain names are filesystem
-    # safe and contain no dot in practice, but rsplit is robust to a dotted stem.
-    dot = tail.rfind(".")
-    return tail[:dot] if dot != -1 else tail

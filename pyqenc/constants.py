@@ -131,13 +131,6 @@ CHUNK_NAME_PATTERN = re.compile(
 ``HH꞉MM꞉SS․mmm-HH꞉MM꞉SS․mmm`` where ``꞉`` is ``TIME_SEPARATOR_SAFE`` and
 ``․`` is ``TIME_SEPARATOR_MS``."""
 
-ENCODED_ATTEMPT_NAME_PATTERN = re.compile(
-    r"^(?P<chunk_id>.+)\.(?P<resolution>\d+x\d+)\.q(?P<quality>[\d.]+)\.mkv$"
-)
-"""Regex that parses encoded attempt filenames produced by the quality-based naming
-scheme.  Named groups: ``chunk_id``, ``resolution`` (e.g. ``1920x800``),
-``quality`` (e.g. ``18.0``)."""
-
 # Audio processing — filename conventions
 CHAIN_FILENAME_SUFFIX = " chain="
 """Filename suffix marking a produced chain output: ``<stream name> chain=<name>.<ext>``.

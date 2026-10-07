@@ -176,13 +176,12 @@ def _seed_winner(
 
     strategy_dir = work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
     strategy_dir.mkdir(parents=True, exist_ok=True)
-    winner = strategy_dir / _EC.format_file_name(
-        chunk.safe_name(), "1920x1080", Decimal(20))
+    winner = strategy_dir / _EC.format_winner_file_name(chunk.safe_name())
     winner.write_bytes(b"x" * size_bytes)
     write_yaml_atomic(
-        strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
+        strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
         EncodingResultSidecar(
-            winning_attempt=winner.name, crf=Decimal(20),
+            resolution="1920x1080", crf=Decimal(20),
             metrics={}, targets_met=True,
         ).model_dump(exclude_none=True),
     )
@@ -634,13 +633,12 @@ class TestPairLedger:
         strat = _S1
         strategy_dir = work_dir / ENCODED_OUTPUT_DIR / strat.safe_name()
         strategy_dir.mkdir(parents=True, exist_ok=True)
-        winner = strategy_dir / _EC.format_file_name(
-            chunk.safe_name(), "1920x1080", Decimal(20))
+        winner = strategy_dir / _EC.format_winner_file_name(chunk.safe_name())
         winner.write_bytes(b"x" * 16)
         write_yaml_atomic(
-            strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
+            strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
             EncodingResultSidecar(
-                winning_attempt=winner.name, crf=Decimal(20),
+                resolution="1920x1080", crf=Decimal(20),
                 metrics={}, targets_met=True,
             ).model_dump(exclude_none=True),
         )
@@ -648,7 +646,6 @@ class TestPairLedger:
         phase2, _, _ = self._phase_with_chunks(tmp_path, 1, chunks)
         recovery2 = phase2._recover()
         assert [a.state for a in recovery2.artifacts] == [ArtifactState.COMPLETE]
-        assert recovery2.artifacts[0].payload.crf == Decimal(20)
         # The pair is complete, but the persisted table carries no rows —
         # sizes/selection must be re-derived, so work IS pending.
         assert recovery2.pending is True
@@ -1090,19 +1087,19 @@ class TestAggregateStrategyMetrics:
         strategy = _S1
         encoded_chunks: dict[str, list[EncodedChunk]] = {}
         for i, chunk in enumerate(chunks):
-            name = f"{chunk.safe_name()}.1920x1080.q18.0"
+            name = EncodedChunk.format_winner_file_name(chunk.safe_name())
             strategy_dir = tmp_path / "encoded" / strategy.safe_name()
             strategy_dir.mkdir(parents=True, exist_ok=True)
-            (strategy_dir / f"{name}.mkv").write_bytes(b"x" * (100 * (i + 1)))
-            # Result sidecar naming: <chunk_id>.<resolution>.yaml (no q part).
+            (strategy_dir / name).write_bytes(b"x" * (100 * (i + 1)))
+            # Result sidecar naming: the winner stem swap.
             write_yaml_atomic(
-                strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
+                strategy_dir / EncodedChunk.format_winner_sidecar_name(chunk.safe_name()),
                 {"metrics": {"vmaf_median": 91.0 + i, "vif_median": 84.0 - i}},
             )
             encoded_chunks.setdefault(strategy.display_name(), []).append(
                 build_encoded_chunk(
-                    chunk=chunk, strategy=strategy, crf=Decimal("18.0"),
-                    path=strategy_dir / f"{name}.mkv", resolution="1920x1080",
+                    chunk=chunk, strategy=strategy,
+                    path=strategy_dir / name, resolution="1920x1080",
                     frame_count=24,
                 )
             )
@@ -1115,18 +1112,19 @@ class TestAggregateStrategyMetrics:
 
     def test_missing_sidecar_chunk_contributes_nothing(self, tmp_path: Path) -> None:
         from pyqenc.phases.encoding import build_encoded_chunk
+        from pyqenc.stream_model import EncodedChunk as _EC
 
         chunk = _make_chunk(0.0, 10.0, tmp_path)
         strategy = _S1
         strategy_dir = tmp_path / "encoded" / strategy.safe_name()
         strategy_dir.mkdir(parents=True, exist_ok=True)
-        mkv = strategy_dir / f"{chunk.safe_name()}.1920x1080.q18.0.mkv"
+        mkv = strategy_dir / _EC.format_winner_file_name(chunk.safe_name())
         mkv.write_bytes(b"x" * 100)
         # No sidecar next to the winner.
         encoded_chunks = {
             strategy.display_name(): [
                 build_encoded_chunk(
-                    chunk=chunk, strategy=strategy, crf=Decimal("18.0"),
+                    chunk=chunk, strategy=strategy,
                     path=mkv, resolution="1920x1080", frame_count=24,
                 ),
             ],
@@ -1165,6 +1163,7 @@ class TestFixedComparedExecute:
             EncodingResult,
             build_encoded_chunk,
         )
+        from pyqenc.stream_model import EncodedChunk as _EC
 
         strategy_names = ["h265-aq", "h265", "h265-anime"]
         phase, work_dir, plan = _make_fixed_phase(
@@ -1198,15 +1197,15 @@ class TestFixedComparedExecute:
                     per_chunk = sizes[display][chunk_idx]
                     strategy_dir = work_dir / "encoded" / strategy.safe_name()
                     strategy_dir.mkdir(parents=True, exist_ok=True)
-                    mkv = strategy_dir / f"{chunk.safe_name()}.1920x1080.q18.0.mkv"
+                    mkv = strategy_dir / _EC.format_winner_file_name(chunk.safe_name())
                     mkv.write_bytes(b"x" * per_chunk)
                     write_yaml_atomic(
-                        strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
+                        strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
                         {"crf": "18.0", "targets_met": True, "metrics": metrics[display]},
                     )
                     result.encoded_chunks.setdefault(display, []).append(
                         build_encoded_chunk(
-                            chunk=chunk, strategy=strategy, crf=Decimal("18.0"),
+                            chunk=chunk, strategy=strategy,
                             path=mkv, resolution="1920x1080", frame_count=24,
                         )
                     )
@@ -1345,6 +1344,8 @@ class TestFixedReuseFromPersisted:
         phase, work_dir, plan = _make_fixed_phase(
             tmp_path, strategy_names=strategy_names, optimize=True,
         )
+        from pyqenc.stream_model import EncodedChunk as _EC
+
         chunks = [_make_chunk(0.0, 10.0, tmp_path), _make_chunk(10.0, 20.0, tmp_path)]
         from pyqenc.phases.chunking import ChunkingPhaseResult
         chunking = next(
@@ -1361,10 +1362,10 @@ class TestFixedReuseFromPersisted:
             strategy_dir = work_dir / "encoded" / strategy.safe_name()
             strategy_dir.mkdir(parents=True, exist_ok=True)
             for chunk in chunks:
-                mkv = strategy_dir / f"{chunk.safe_name()}.1920x1080.q18.0.mkv"
+                mkv = strategy_dir / _EC.format_winner_file_name(chunk.safe_name())
                 mkv.write_bytes(b"x" * 64)
                 write_yaml_atomic(
-                    strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
+                    strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
                     {"crf": "18.0", "targets_met": True, "metrics": {}},
                 )
         _persist_optimization(

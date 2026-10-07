@@ -285,14 +285,19 @@ class EncodingParams(BaseModel):
 
 
 class MetricsSidecar(BaseModel):
-    """Per-attempt metrics sidecar (``<attempt_stem>.yaml``).
+    """Per-attempt sidecar (``<chunk>.q<quality>.yaml`` — the attempt stem swap).
 
     Stores ALL measured metric values — not filtered to current targets.
     Facts of the attempt only: pass/fail against quality targets is a
     comparison with foreign state (which targets, which sampling) and is
     always re-evaluated from ``metrics`` where it is decided — never stored
     here (the WINNING attempt's conclusion is recorded on
-    :class:`EncodingResultSidecar`).
+    :class:`EncodingResultSidecar`). This is the re-judging substrate:
+    cache-hits re-judge under new targets without re-encoding.
+
+    ``resolution`` is the attempt's actual output dimensions (``'WxH'``) —
+    a fact probed after the encode (the attempt's name carries no
+    resolution, Req 9/9b); ``None`` for sidecars written before the field.
 
     ``sampling`` records the frame subsampling factor used when the metrics
     were measured.  On recovery, if this differs from the current config the
@@ -313,36 +318,49 @@ class MetricsSidecar(BaseModel):
     """
 
     crf:         DecimalYaml         # exact string round-trip (no float drift)
+    resolution:  str | None = None   # actual output dimensions ("WxH")
     sampling:    int | None = None   # subsampling factor used when metrics were measured
     frame_count: int         = 0     # frames of the attempt file (0 = unknown)
     metrics:     dict[str, float]    # all measured values, e.g. vmaf_min, ssim_median
 
 
 class EncodingResultSidecar(BaseModel):
-    """Encoding result sidecar (``<chunk_id>.<res>.yaml``).
+    """Winner result sidecar (``<chunk_id>.yaml`` — the winner stem swap).
 
-    Written when the CRF search for a ``(chunk_id, strategy)`` pair concludes.
-    Its presence means the pair is ``COMPLETE``.  ``chunk_id`` and ``strategy``
-    are derived from the filename and directory — not stored here.
+    Written when the quality search for a ``(chunk_id, strategy)`` pair
+    concludes and the winning attempt is promoted to the static winner name.
+    Its presence means the pair is ``COMPLETE``.  ``chunk_id`` and
+    ``strategy`` are derived from the file name and directory — not stored
+    here; the winning attempt's identity is fully derivable from the pair,
+    so no back-pointer to the attempt is persisted (Req 25).
 
     Quality-target tracking is owned exclusively by ``OptimizationPhase`` via
     ``optimization.yaml``.  ``OptimizationPhase`` deletes stale result sidecars
     before ``EncodingPhase`` runs, so ``EncodingPhase._recover()`` simply sees
     ``PARTIAL`` pairs naturally when targets change.
 
+    ``metrics`` carries the TARGETED subset only — the keys the judging
+    targets read (full measured sets live on attempt sidecars, the re-judging
+    substrate, and on merged-output sidecars; phase-sidecar summaries carry
+    targeted metrics as well).
+
     ``frame_count`` is the winning attempt's frame count carried over from
     its attempt sidecar at finalize — the durable per-pair record the
     end-of-run scan sums into the frame-preservation invariant.  ``0`` is
-    the "could not be determined" sentinel (sidecar predates the field, or
-    the winner was accepted from a re-measured attempt with no count on
-    record).
+    the "could not be determined" sentinel (the winner was accepted from a
+    re-measured attempt with no count on record).
+
+    ``crf`` and ``resolution`` are facts of this winner; recovery-time
+    classification and composition never read them — only processing-path
+    consumers (the re-merge CRF graph, the winner scan, the fixed ruler)
+    may.
     """
 
-    winning_attempt: str                # filename of the winning attempt .mkv
-    crf:             DecimalYaml        # exact string round-trip (no float drift)
-    metrics:         dict[str, float]   # only the targeted metric values
-    frame_count:     int         = 0    # frames of the winning attempt (0 = unknown)
-    targets_met:     bool        = True # False when search exhausted without a passing attempt
+    crf:         DecimalYaml        # exact string round-trip (no float drift)
+    resolution:  str | None = None  # actual output dimensions ("WxH")
+    metrics:     dict[str, float]   # the TARGETED metric subset
+    frame_count: int         = 0    # frames of the winning attempt (0 = unknown)
+    targets_met: bool        = True # False when search exhausted without a passing attempt
 
 
 class MeasureSidecar(BaseModel):

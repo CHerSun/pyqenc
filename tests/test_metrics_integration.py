@@ -83,7 +83,6 @@ def _make_chunk_window(source: Path, start: float, end: float) -> VideoStreamChu
 
 def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
     """An EncodedChunk payload over a one-window chunk of the named strategy."""
-    from decimal import Decimal
 
     from pyqenc.stream_model import EncodedChunk
 
@@ -92,7 +91,6 @@ def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
         stream=_make_extended_stream(path, frame_count=24, duration=1.0),
         chunk=_make_chunk_window(path.parent / "source.mkv", 0.0, 1.0),
         strategy=strategy,
-        crf=Decimal(20),
     )
 
 
@@ -998,13 +996,14 @@ class TestOptimizationPhaseTiming:
         no-pending fast exit instead of spawning real encodes.
         """
         from pyqenc.constants import ENCODED_OUTPUT_DIR
+        from pyqenc.stream_model import EncodedChunk
 
         chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
         for strategy in (_STRATEGY_SLOW_H265, _STRATEGY_H265_AQ):
             strategy_dir = tmp_path / "work" / ENCODED_OUTPUT_DIR / strategy.safe_name()
             strategy_dir.mkdir(parents=True, exist_ok=True)
-            (strategy_dir / f"{chunk.safe_name()}.1920x1080.q18.0.mkv").write_bytes(b"x" * 64)
-            (strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml").write_text(
+            (strategy_dir / EncodedChunk.format_winner_file_name(chunk.safe_name())).write_bytes(b"x" * 64)
+            (strategy_dir / EncodedChunk.format_winner_sidecar_name(chunk.safe_name())).write_text(
                 "crf: 18.0\n", encoding="utf-8",
             )
 

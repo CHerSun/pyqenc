@@ -26,7 +26,6 @@ from pyqenc.constants import (
     APPROXIMATE_INDICATOR_SYMBOL,
     BRACKET_LEFT,
     BRACKET_RIGHT,
-    ENCODED_ATTEMPT_NAME_PATTERN,
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
     FAILURE_SYMBOL_MAJOR,
@@ -157,32 +156,59 @@ def _encoded_dir(work_dir: Path, strategy: Strategy) -> Path:
     return work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
 
 
+def read_winner_sidecar(work_dir: Path, winner: EncodedChunk) -> dict | None:
+    """Read a winner's result sidecar by its static name (processing paths).
+
+    The single sanctioned composition site for consumers that need a
+    winner's facts (crf, resolution, targeted metrics, frame count,
+    ``targets_met``) — recovery never calls this (Req 3); processing paths
+    (the winner scan, the merge CRF graph, the fixed ruler) do.
+
+    Args:
+        work_dir: The run's work dir (locates ``encoded/<strategy>/``).
+        winner:   The winner payload whose sidecar to read.
+
+    Returns:
+        Parsed sidecar dict, or ``None`` when absent or unparseable.
+    """
+    return _read_sidecar_yaml(
+        _encoded_dir(work_dir, winner.strategy)
+        / EncodedChunk.format_winner_sidecar_name(winner.chunk.safe_name())
+    )
+
+
 def _write_metrics_sidecar(
     attempt_path:     Path,
     crf:              Decimal,
     metrics:          dict[str, float],
     metrics_sampling: int,
     frame_count:      int,
+    resolution:       str | None,
 ) -> None:
-    """Atomically write a per-attempt metrics sidecar alongside an encoded attempt.
+    """Atomically write a per-attempt sidecar alongside an encoded attempt.
 
     Uses ``write_yaml_atomic`` so a crash during writing never leaves a partial
     sidecar.  Stores ALL measured metric values (not filtered to current targets)
-    so the CRF history is reusable when quality targets change — facts of the
+    so the quality history is reusable when quality targets change — facts of the
     attempt only; pass/fail is re-evaluated from ``metrics`` where decided.
 
     Args:
         attempt_path:     Path to the encoded attempt ``.mkv`` file.
-        crf:              CRF value used for this attempt.
+        crf:              Quality value used.
         metrics:          ALL measured quality metrics dict (not filtered to targets).
         metrics_sampling: Frame subsampling factor used when metrics were measured.
         frame_count:      Frames of the attempt file from its encode run — a fact
                           of the file, carried over unchanged on re-measure;
                           ``0`` = could not be determined.
+        resolution:       The attempt's actual output dimensions (``'WxH'``),
+                          probed after the encode — the name carries no
+                          resolution, so the sidecar is its durable home
+                          (Req 9b).
     """
     sidecar = attempt_path.with_suffix(".yaml")
     data    = MetricsSidecar(
         crf         = crf,
+        resolution  = resolution,
         metrics     = metrics,
         sampling    = metrics_sampling,
         frame_count = frame_count,
@@ -215,48 +241,49 @@ def _hardlink_or_copy(src: Path, dst: Path) -> None:
 def _write_encoding_result_sidecar(
     output_dir:      Path,
     chunk_id:        str,
-    resolution:      str,
-    winning_attempt: Path,
+    resolution:      str | None,
     crf:             Decimal,
     metrics:         dict[str, float],
     frame_count:     int,
     targets_met:     bool = True,
 ) -> None:
-    """Atomically write an encoding result sidecar when CRF search converges.
+    """Atomically write the winner result sidecar when the search converges.
 
-    Written as ``<chunk_id>.<res>.yaml`` in the strategy output directory.
-    Its presence marks the ``(chunk_id, strategy)`` pair as ``COMPLETE``.
+    Written as ``<chunk_id>.yaml`` (the winner stem swap) in the strategy
+    output directory.  Its presence marks the ``(chunk_id, strategy)`` pair
+    as ``COMPLETE``.  ``metrics`` must be the TARGETED subset (the caller
+    filters against the judging targets — full sets live on attempt
+    sidecars).
 
     Args:
         output_dir:      Strategy output directory.
         chunk_id:        Chunk identifier.
-        resolution:      Output resolution string (e.g. ``'1920x800'``).
-        winning_attempt: Path to the winning encoded attempt ``.mkv``.
-        crf:             Winning CRF value.
-        metrics:         All measured metric values for the winning attempt.
+        resolution:      The winner's actual output resolution (``'WxH'``).
+        crf:             Winning quality value.
+        metrics:         The targeted metric subset for the winning attempt.
         frame_count:     Frames of the winning attempt (``0`` = could not be
                          determined).
         targets_met:     Whether quality targets were met; ``False`` when the
                          search was exhausted without a passing attempt.
     """
-    sidecar_path = output_dir / f"{chunk_id}.{resolution}.yaml"
+    sidecar_path = output_dir / EncodedChunk.format_winner_sidecar_name(chunk_id)
     data = EncodingResultSidecar(
-        winning_attempt = winning_attempt.name,
-        crf             = crf,
-        metrics         = metrics,
-        frame_count     = frame_count,
-        targets_met     = targets_met,
+        crf         = crf,
+        resolution  = resolution,
+        metrics     = metrics,
+        frame_count = frame_count,
+        targets_met = targets_met,
     )
     try:
         write_yaml_atomic(sidecar_path, data.model_dump(exclude_none=True))
         logger.debug(
-            "Wrote encoding result sidecar: %s (crf=%s, targets_met=%s)",
+            "Wrote winner result sidecar: %s (crf=%s, targets_met=%s)",
             sidecar_path.name, crf, targets_met,
         )
     except (OSError, ValueError, yaml.YAMLError) as e:
         logger.warning(
-            "Failed to write encoding result sidecar for %s/%s: %s",
-            chunk_id, resolution, e,
+            "Failed to write winner result sidecar for %s: %s",
+            chunk_id, e,
         )
 
 
@@ -268,20 +295,20 @@ def _pair_placeholder(work_dir: Path, chunk: VideoStreamChunk, strategy: Strateg
     """A placeholder payload for a pair row with no winner on disk.
 
     The pair identity (chunk + strategy) is real; the attempt-specific facts
-    (file, crf, resolution) are unknown until a winner exists — the row's
+    (file, resolution) are unknown until a winner exists — the row's
     ``ABSENT``/``PARTIAL`` state says so. Consumers read attempt facts from
-    ``COMPLETE`` rows only. The placeholder file path uses the attempt-in-
-    progress naming convention (the CRF-less fallback of the encoder's own
-    path builder).
+    ``COMPLETE`` rows only. The placeholder file path uses the static winner
+    name (the identity-derived destination the promotion writes to).
     """
     source_info = chunk.stream.stream.info
-    in_progress = (
-        work_dir / ENCODING_WORKSPACE_DIR / strategy.safe_name() / f"{chunk.safe_name()}.mkv"
+    winner = (
+        work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
+        / EncodedChunk.format_winner_file_name(chunk.safe_name())
     )
     return EncodedChunk(
         stream = ExtendedVideoStream(
             stream      = VideoStream(
-                file = StreamFile(path=in_progress),
+                file = StreamFile(path=winner),
                 info = VideoStreamInfo(
                     track_id     = 0,
                     resolution   = source_info.resolution,
@@ -294,7 +321,6 @@ def _pair_placeholder(work_dir: Path, chunk: VideoStreamChunk, strategy: Strateg
         ),
         chunk    = chunk,
         strategy = strategy,
-        crf      = strategy.codec.default_quality,
     )
 
 
@@ -323,15 +349,13 @@ def _pair_rows(
             # Every (chunk_id, name) combination has a row — direct index.
             pair = pair_recovery.pairs[(chunk_id, name)]
             if pair.state == ArtifactState.COMPLETE and pair.winning_file is not None:
-                record = EncodedChunk.parse_file_name(pair.winning_file.name)
                 rows.append(Artifact(
                     payload = build_encoded_chunk(
                         chunk      = chunk_by_id[chunk_id],
                         strategy   = strategy_by_name[name],
-                        crf        = record.crf,
                         path       = pair.winning_file,
-                        resolution = record.resolution,
-                        frame_count= 0,  # unknown on recovery
+                        resolution = None,  # a sidecar fact — never read at recovery (Req 3)
+                        frame_count= 0,     # unknown on recovery
                     ),
                     state   = ArtifactState.COMPLETE,
                 ))
@@ -399,10 +423,11 @@ def _recover_encoding_attempts(
 ) -> _PhaseRecovery:
     """Classify all ``(chunk_id, strategy)`` pairs from a single directory scan per strategy.
 
-    For each strategy, lists ``encoded/<strategy>/`` once to build a set of
-    chunk_ids that have a result sidecar (``<chunk_id>.*.yaml``).  Pairs whose
-    chunk_id appears in that set are ``COMPLETE``; all others are ``ABSENT``.
-    No per-pair globs and no file reads are performed during recovery.
+    For each strategy, lists ``encoded/<strategy>/`` once and consumes the
+    STATIC expected names: a pair is ``COMPLETE`` iff both
+    ``<chunk_id>.mkv`` and ``<chunk_id>.yaml`` (the winner file and its
+    result sidecar, composed by :class:`EncodedChunk`) are present in the
+    listing. No name parsing, no per-pair globs, no file reads.
 
     CRF history for pending pairs is not pre-loaded: when the encoding worker
     actually picks a pair up, each attempt the search proposes is checked
@@ -428,56 +453,40 @@ def _recover_encoding_attempts(
         # The finalized output directory for this strategy under encoded/.
         encoded_dir = _encoded_dir(work_dir, strategy)
 
-        # Build index: chunk_id -> winning .mkv path, from a single directory listing.
-        # Layout in encoded/<strategy>/:
-        #   <chunk_id>.<res>.q<N>.mkv   — winning attempt file
-        #   <chunk_id>.<res>.yaml        — result sidecar (NO quality in name)
-        #   <chunk_id>.<res>.q<N>.png    — quality graph (optional)
-        # A pair is COMPLETE when both the winning .mkv and its result sidecar exist.
-        complete_index: dict[str, Path] = {}
+        # Static-name membership over one listing. Layout in encoded/<strategy>/:
+        #   <chunk_id>.mkv     — the promoted winner (pure chunk identity)
+        #   <chunk_id>.yaml    — the winner result sidecar (stem swap)
+        #   <chunk_id>.png     — the winner quality graph (optional)
+        present_names: set[str] = set()
         if encoded_dir.exists():
-            # Collect mkv paths and result-sidecar chunk_ids in one pass
-            mkv_by_chunk:     dict[str, Path] = {}
-            sidecar_chunk_ids: set[str]        = set()
-
-            for f in encoded_dir.iterdir():
-                if f.suffix == ".mkv":
-                    m = ENCODED_ATTEMPT_NAME_PATTERN.match(f.name)
-                    if m:
-                        mkv_by_chunk[m.group("chunk_id")] = f
-                elif f.suffix == ".yaml":
-                    # Result sidecar: <chunk_id>.<res>.yaml — stem has exactly one dot-separated
-                    # resolution component at the end, no "crf" segment.
-                    stem_parts = f.stem.rsplit(".", 1)
-                    if len(stem_parts) == 2:
-                        res = stem_parts[-1]
-                        if "x" in res and res.replace("x", "").isdigit():
-                            sidecar_chunk_ids.add(stem_parts[0])
-
-            for chunk_id_candidate, mkv_path in mkv_by_chunk.items():
-                if chunk_id_candidate in sidecar_chunk_ids:
-                    complete_index[chunk_id_candidate] = mkv_path
+            present_names = {f.name for f in encoded_dir.iterdir() if f.is_file()}
 
         for chunk_id in chunk_ids:
-            if chunk_id in complete_index:
+            complete = (
+                EncodedChunk.format_winner_file_name(chunk_id) in present_names
+                and EncodedChunk.format_winner_sidecar_name(chunk_id) in present_names
+            )
+            if complete:
                 pairs[(chunk_id, name)] = _EncodingRecovery(
                     chunk_id     = chunk_id,
                     strategy     = name,
                     state        = ArtifactState.COMPLETE,
-                    winning_file = complete_index[chunk_id],
+                    winning_file = encoded_dir / EncodedChunk.format_winner_file_name(chunk_id),
                 )
                 complete_count += 1
             else:
                 pairs[(chunk_id, name)] = _EncodingRecovery(
                     chunk_id = chunk_id,
                     strategy = name,
-                    state    = ArtifactState.ABSENT,
+                    state    = ArtifactState.PARTIAL
+                    if EncodedChunk.format_winner_file_name(chunk_id) in present_names
+                    else ArtifactState.ABSENT,
                 )
                 absent_count += 1
                 pending.append((chunk_id, name))
 
     logger.debug(
-        "Attempts recovery: %d pair(s) total — %d COMPLETE, %d ABSENT",
+        "Attempts recovery: %d pair(s) total — %d COMPLETE, %d not-complete",
         len(pairs), complete_count, absent_count,
     )
     return _PhaseRecovery(pairs=pairs, pending=pending)
@@ -653,185 +662,165 @@ class ChunkEncoder:
 
     def _get_attempt_path(
         self,
-        chunk_id:   str,
-        strategy:   Strategy,
-        resolution: str | None = None,
-        crf:        Decimal | None = None,
+        chunk_id: str,
+        strategy: Strategy,
+        crf: Decimal,
     ) -> Path:
-        """Get the final path for a CRF-only encoded attempt.
+        """The attempt path for a (chunk, quality) pair — the exact cache address.
 
-        Naming pattern: ``<chunk_id>.<width>x<height>.q{CRF}.mkv``
-
-        Falls back to a simpler name when resolution or CRF are not yet known.
+        Naming pattern: ``<chunk_id>.q<quality>.mkv`` — the quality is the
+        search's cache key, and the name is fully known before encoding
+        begins (no resolution component, no post-encode rename — Req 9/9b).
 
         Args:
-            chunk_id:   Chunk identifier (e.g. ``'00꞉00꞉00․000-00꞉05꞉20․000'``).
-            strategy:   Encoding strategy.
-            resolution: Output resolution string (e.g. ``'1920x800'``).
-            crf:        CRF value used for this attempt.
+            chunk_id: Chunk identifier (e.g. ``'00꞉00꞉00․000-00꞉05꞉20․000'``).
+            strategy: Encoding strategy.
+            crf:      Quality value used for this attempt (already quantized
+                      to the codec's granularity).
 
         Returns:
-            Path to encoded file for this attempt.
+            Path to the attempt file.
         """
         output_dir = self._get_output_dir(strategy)
-        if resolution and crf is not None:
-            filename = EncodedChunk.format_file_name(chunk_id, resolution, crf)
-        else:
-            filename = f"{chunk_id}.mkv"
-        return output_dir / filename
+        return output_dir / EncodedChunk.format_attempt_file_name(chunk_id, crf)
 
     def _check_existing_encoding(
         self,
         chunk_id:   str,
         strategy:   Strategy,
-        resolution: str | None,
         crf:        Decimal,
     ) -> AttemptMetadata | None:
-        """Check if a complete encoded attempt already exists on disk.
+        """Check if a complete encoded attempt already exists at the exact address.
 
-        Scans the strategy output directory for a file matching
-        ``ENCODED_ATTEMPT_NAME_PATTERN`` with the correct ``chunk_id``,
-        ``resolution``, and ``crf``.  No progress-tracker lookup is performed.
+        Composes the attempt's static name for the proposed quality and
+        checks existence — no globbing, no name parsing (Req 9). Resolution
+        matching no longer participates: it is a sidecar fact, verified with
+        the rest of the sidecar at pick-up.
 
         Args:
-            chunk_id:   Chunk identifier.
-            strategy:   Encoding strategy.
-            resolution: Expected resolution string (e.g. ``'1920x800'``).
-                        When ``None`` any resolution is accepted.
-            crf:        CRF value to look for.
+            chunk_id: Chunk identifier.
+            strategy: Encoding strategy.
+            crf:      Quality value to look for.
 
         Returns:
-            ``AttemptMetadata`` if a matching file exists, ``None`` otherwise.
+            ``AttemptMetadata`` if the attempt file exists, ``None`` otherwise.
         """
-        output_dir = self._get_output_dir(strategy)
-        if not output_dir.exists():
+        candidate = self._get_attempt_path(chunk_id, strategy, crf)
+        try:
+            size = candidate.stat().st_size
+        except OSError:
             return None
-
-        for candidate in output_dir.glob(f"{chunk_id}.*.q*.mkv"):
-            m = ENCODED_ATTEMPT_NAME_PATTERN.match(candidate.name)
-            if m is None:
-                continue
-            if m.group("chunk_id") != chunk_id:
-                continue
-            try:
-                file_crf = Decimal(str(m.group("quality"))).quantize(strategy.codec.quality_granularity)
-            except ValueError:
-                continue
-            if abs(file_crf - crf) > Decimal("0.05"):
-                continue
-            file_resolution = m.group("resolution")
-            if resolution is not None and file_resolution != resolution:
-                continue
-            # Found a matching file
-            try:
-                size = candidate.stat().st_size
-            except OSError:
-                continue
-            if size == 0:
-                continue
-            return AttemptMetadata(
-                path=candidate,
-                chunk_id=chunk_id,
-                strategy=strategy.display_name(),
-                crf=file_crf,
-                resolution=file_resolution,
-                file_size_bytes=size,
-            )
-        return None
+        if size == 0:
+            return None
+        return AttemptMetadata(
+            path            = candidate,
+            chunk_id        = chunk_id,
+            strategy        = strategy.display_name(),
+            crf             = crf,
+            resolution      = "",
+            file_size_bytes = size,
+        )
 
     def _finalize_winning_attempt(
         self,
         strategy:        Strategy,
         chunk_id:        str,
-        resolution:      str,
+        resolution:      str | None,
         winning_attempt: Path,
         crf:             Decimal,
         metrics:         dict[str, float],
         frame_count:     int,
+        quality_targets: list[QualityTarget],
         targets_met:     bool = True,
     ) -> None:
-        """Hard-link the winning attempt into ``encoded/`` and write the result sidecar.
+        """Promote the winning attempt to the static winner name and write the sidecar.
 
-        On CRF search convergence:
+        On quality-search convergence:
         1. Hard-link the winning ``.mkv`` from ``encoding/<strategy>/`` into
-           ``encoded/<strategy>/`` (same filename).
-        2. Hard-link the winning ``.png`` quality graph (if present) alongside it.
-        3. Write the encoding result sidecar ``<chunk_id>.<res>.yaml`` into
-           ``encoded/<strategy>/`` — its presence marks the pair as ``COMPLETE``.
+           ``encoded/<strategy>/<chunk_id>.mkv`` — the statically composed
+           winner name (pure chunk identity, no quality/resolution — Req 1/2).
+        2. Hard-link the winning ``.png`` quality graph (if present) alongside
+           it under the winner stem.
+        3. Write the winner result sidecar ``<chunk_id>.yaml`` into
+           ``encoded/<strategy>/`` — its presence marks the pair as
+           ``COMPLETE``.  Its metrics are the TARGETED subset (filtered here
+           against the judging targets; full sets stay on attempt sidecars).
 
         Args:
             strategy:        Encoding strategy.
             chunk_id:        Chunk identifier.
-            resolution:      Output resolution string (e.g. ``'1920x800'``).
+            resolution:      The winner's actual output resolution (``'WxH'``).
             winning_attempt: Path to the winning attempt ``.mkv`` in ``encoding/``.
-            crf:             Winning CRF value.
+            crf:             Winning quality value.
             metrics:         All measured metric values for the winning attempt.
             frame_count:     Frames of the winning attempt — the winning encode
                              run's count, or the attempt sidecar's count for a
                              cache-hit winner; ``0`` = could not be determined.
+            quality_targets: The targets that judged the pair (the metrics filter).
             targets_met:     Whether quality targets were met; ``False`` when the
                              search was exhausted without a passing attempt.
         """
         encoded_dir = self._get_encoded_dir(strategy)
         encoded_dir.mkdir(parents=True, exist_ok=True)
 
-        dst_mkv = encoded_dir / winning_attempt.name
+        dst_mkv = encoded_dir / EncodedChunk.format_winner_file_name(chunk_id)
         if not dst_mkv.exists():
             _hardlink_or_copy(winning_attempt, dst_mkv)
 
         src_graph = winning_attempt.with_suffix(".png")
         if src_graph.exists():
-            dst_graph = encoded_dir / src_graph.name
+            dst_graph = encoded_dir / f"{chunk_id}.png"
             if not dst_graph.exists():
                 _hardlink_or_copy(src_graph, dst_graph)
 
+        targeted_keys = {f"{t.metric}_{t.statistic}" for t in quality_targets}
+        targeted_metrics = {k: v for k, v in metrics.items() if k in targeted_keys}
         _write_encoding_result_sidecar(
             output_dir  = encoded_dir,
             chunk_id    = chunk_id,
             resolution  = resolution,
-            winning_attempt = dst_mkv,
             crf         = crf,
-            metrics     = metrics,
+            metrics     = targeted_metrics,
             frame_count = frame_count,
             targets_met = targets_met,
         )
 
         # Intermediate cleanup: delete all attempt files for this pair from
-        # encoding/ — only after the hard-link and sidecar are safely written.
+        # encoding/ — only after the promotion and sidecar are safely written.
         if self._cleanup_level >= CleanupLevel.INTERMEDIATE:
             encoding_dir = self._get_output_dir(strategy)
             if encoding_dir.exists():
-                for attempt_file in list(encoding_dir.glob(f"{chunk_id}.*.q*.mkv")):
-                    m = ENCODED_ATTEMPT_NAME_PATTERN.match(attempt_file.name)
-                    if m and m.group("chunk_id") == chunk_id:
-                        # Delete the attempt .mkv, its per-attempt sidecar, and its graph
-                        for related in (
-                            attempt_file,
-                            attempt_file.with_suffix(".yaml"),
-                            attempt_file.with_suffix(".png"),
-                        ):
-                            if related.exists():
-                                try:
-                                    related.unlink()
-                                    logger.debug("Intermediate cleanup: deleted %s", related.name)
-                                except OSError as exc:
-                                    logger.warning(
-                                        "Intermediate cleanup: could not delete %s: %s",
-                                        related.name, exc,
-                                    )
-                        # Also remove the per-attempt metrics subfolder if present
-                        metrics_dir = encoding_dir / attempt_file.stem
-                        if metrics_dir.is_dir():
+                # The attempt's exact q values are workspace facts — sweep the
+                # pair's attempts by prefix (deletion, not identity parsing).
+                for attempt_file in list(encoding_dir.glob(f"{chunk_id}.q*.mkv")):
+                    # Delete the attempt .mkv, its per-attempt sidecar, and its graph
+                    for related in (
+                        attempt_file,
+                        attempt_file.with_suffix(".yaml"),
+                        attempt_file.with_suffix(".png"),
+                    ):
+                        if related.exists():
                             try:
-                                shutil.rmtree(metrics_dir)
-                                logger.debug(
-                                    "Intermediate cleanup: deleted metrics dir %s", metrics_dir.name
-                                )
+                                related.unlink()
+                                logger.debug("Intermediate cleanup: deleted %s", related.name)
                             except OSError as exc:
                                 logger.warning(
-                                    "Intermediate cleanup: could not delete metrics dir %s: %s",
-                                    metrics_dir.name, exc,
+                                    "Intermediate cleanup: could not delete %s: %s",
+                                    related.name, exc,
                                 )
+                    # Also remove the per-attempt metrics subfolder if present
+                    metrics_dir = encoding_dir / attempt_file.stem
+                    if metrics_dir.is_dir():
+                        try:
+                            shutil.rmtree(metrics_dir)
+                            logger.debug(
+                                "Intermediate cleanup: deleted metrics dir %s", metrics_dir.name,
+                            )
+                        except OSError as exc:
+                            logger.warning(
+                                "Intermediate cleanup: could not delete metrics dir %s: %s",
+                                metrics_dir.name, exc,
+                            )
 
     def _encode_with_ffmpeg(
         self,
@@ -956,27 +945,22 @@ class ChunkEncoder:
 
             logger.debug(fmt_chunk_attempt_start(strategy.display_name(), chunk.safe_name(), attempt_number, current_q, strategy.codec.quality_label, self._visual_hash, strategy.codec.quality_log_padding))
 
-            # Determine the final output path for this CRF (resolution unknown yet)
-            # We'll encode to a temp file, probe resolution, then rename to final path.
+            # The attempt's final name is fully known before encoding begins
+            # (quality = the cache key; no resolution component — Req 9b), so
+            # there is no post-encode rename: the encoded output lands at its
+            # final address and the probed resolution becomes a sidecar fact.
             output_dir = self._get_output_dir(strategy)
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            # The source stream's resolution seeds the attempt path; the
-            # post-encode probe corrects it when crop changes the dimensions.
-            resolution = chunk.stream.stream.info.resolution
-
-            # When crop is active the encoded output resolution differs from the source chunk
-            # resolution, so we cannot use the source resolution to match existing files.
-            # Pass None to accept any resolution for the given chunk_id + crf.
-            check_resolution = None if (self._crop_params and not self._crop_params.is_empty()) else resolution
-
-            # Check for existing encoding at this quality value (filesystem scan, no tracker).
+            # Check for an existing attempt at the exact proposed address
+            # (exact-name compose, no scan — Req 9).
             goto_eval   = False
             output_file: Path | None = None
             attempt_frames: int = 0
+            attempt_resolution: str = ""
             if not force:
                 existing = self._check_existing_encoding(
-                    chunk.safe_name(), strategy, check_resolution, current_q
+                    chunk.safe_name(), strategy, current_q
                 )
                 if existing is not None:
                     sidecar = _read_sidecar_yaml(existing.path.with_suffix(".yaml"))
@@ -1061,13 +1045,14 @@ class ChunkEncoder:
                         _any_real_work  = True
                         output_file     = existing.path
                         attempt_frames  = file_frames
+                        attempt_resolution = str(sidecar.get("resolution") or "") if sidecar is not None else ""
                         goto_eval       = True
 
             if not goto_eval:
                 # Encode — real work.
                 _any_real_work = True
                 output_file    = self._get_attempt_path(
-                    chunk.safe_name(), strategy, resolution=resolution, crf=current_q
+                    chunk.safe_name(), strategy, crf=current_q
                 )
                 with self._collector.time(self._metric_prefix, strategy.display_name()):
                     run_result = self._encode_with_ffmpeg(
@@ -1117,18 +1102,10 @@ class ChunkEncoder:
                             chunk.start_timestamp, chunk.end_timestamp,
                         )
 
-                # Update resolution from actual output (crop may change dimensions).
-                actual_resolution = _probe_resolution(output_file)
-                if actual_resolution and actual_resolution != resolution:
-                    correct_path = self._get_attempt_path(
-                        chunk.safe_name(), strategy, resolution=actual_resolution, crf=current_q
-                    )
-                    try:
-                        output_file.replace(correct_path)
-                    except OSError:
-                        output_file.rename(correct_path)
-                    output_file = correct_path
-                    resolution  = actual_resolution
+                # Probe the actual output resolution (crop may change the
+                # dimensions) — a sidecar fact; the file's name is already
+                # final, so there is no rename (Req 9b).
+                attempt_resolution = _probe_resolution(output_file) or ""
 
             assert output_file is not None
 
@@ -1164,13 +1141,14 @@ class ChunkEncoder:
             targets_set  = {f"{t.metric}_{t.statistic}" for t in quality_targets}
             metrics_dict = {k: v for k, v in all_metrics.items() if k in targets_set}
 
-            # Record the final path's count (post resolution-correction rename)
-            # and write the per-attempt metrics sidecar atomically.
+            # Record the attempt's facts and write the per-attempt sidecar
+            # atomically (resolution included — the name carries none).
             frame_counts[output_file] = attempt_frames
             all_metrics_by_path[output_file] = all_metrics
             _write_metrics_sidecar(
                 output_file, current_q, all_metrics,
                 self._metrics_sampling, attempt_frames,
+                resolution=attempt_resolution or None,
             )
 
             # Build AttemptMetadata for this attempt.
@@ -1179,7 +1157,7 @@ class ChunkEncoder:
                 chunk_id        = chunk.safe_name(),
                 strategy        = strategy.display_name(),
                 crf             = current_q,
-                resolution      = resolution or "",
+                resolution      = attempt_resolution,
                 file_size_bytes = output_file.stat().st_size,
             )
 
@@ -1238,6 +1216,7 @@ class ChunkEncoder:
                 crf             = search.best_quality,
                 metrics         = all_metrics_by_path.get(final_attempt.path, {}),
                 frame_count     = frame_counts.get(final_attempt.path, 0),
+                quality_targets = quality_targets,
                 targets_met     = True,
             )
         elif not search.best_targets_met and best_fail_attempt is not None:
@@ -1280,6 +1259,7 @@ class ChunkEncoder:
                 crf             = search.best_quality,
                 metrics         = all_metrics_by_path.get(best_fail_attempt.path, {}),
                 frame_count     = frame_counts.get(best_fail_attempt.path, 0),
+                quality_targets = quality_targets,
                 targets_met     = False,
             )
             final_attempt = best_fail_attempt
@@ -1338,9 +1318,8 @@ class ChunkEncoder:
 def build_encoded_chunk(
     chunk:        VideoStreamChunk,
     strategy:     Strategy,
-    crf:          Decimal,
     path:         Path,
-    resolution:   str,
+    resolution:   str | None,
     frame_count:  int,
 ) -> EncodedChunk:
     """Compose the winning attempt as an :class:`EncodedChunk`.
@@ -1348,14 +1327,16 @@ def build_encoded_chunk(
     The attempt's own video stream: crop empty by construction (applied
     during the encode), frame count from the encode run, info from the
     post-encode probe (resolution) plus the source fps — path and size are
-    read through ``stream.file``, never duplicated.
+    read through ``stream.file``, never duplicated. The winning quality is
+    deliberately NOT composed: it lives on the winner sidecar as a fact for
+    processing-path consumers only (Req 4).
 
     Args:
         chunk:        The source window the attempt encodes.
         strategy:     The strategy used.
-        crf:          The winning quality value.
-        path:         The attempt file.
-        resolution:   The attempt's actual output resolution.
+        path:         The winner file.
+        resolution:   The winner's actual output resolution (``None`` when
+                      unknown — e.g. recovery-composed rows).
         frame_count:  Frames from the winning encode run (0 = unknown).
 
     Returns:
@@ -1380,7 +1361,6 @@ def build_encoded_chunk(
         ),
         chunk    = chunk,
         strategy = strategy,
-        crf      = crf,
     )
 
 
@@ -1547,16 +1527,14 @@ async def _encode_chunks_parallel(
                         f"winning file guaranteed for COMPLETE pair "
                         f"{chunk.safe_name()}/{strategy.display_name()}"
                     )
-                    name_record = EncodedChunk.parse_file_name(pair_recovery.winning_file.name)
                     result.encoded_chunks.setdefault(
                         strategy.display_name(), [],
                     ).append(build_encoded_chunk(
                         chunk        = chunk,
                         strategy     = strategy,
-                        crf          = name_record.crf,
                         path         = pair_recovery.winning_file,
-                        resolution   = name_record.resolution,
-                        frame_count  = 0,  # unknown on recovery
+                        resolution   = None,  # a sidecar fact — never read at recovery (Req 3)
+                        frame_count  = 0,     # unknown on recovery
                     ))
                     result.reused_count += 1
                     complete_pairs.add((chunk.safe_name(), strategy.display_name()))
@@ -1604,9 +1582,8 @@ async def _encode_chunks_parallel(
                     ).append(build_encoded_chunk(
                         chunk        = chunk,
                         strategy     = strategy,
-                        crf          = chunk_result.final_crf,
                         path         = chunk_result.encoded_file.path,
-                        resolution   = chunk_result.encoded_file.resolution,
+                        resolution   = chunk_result.encoded_file.resolution or None,
                         frame_count  = chunk_result.frame_count,
                     ))
 
@@ -1730,7 +1707,7 @@ def _scan_winner_sidecars(
     (``encoded/<strategy>/<chunk_id>.<res>.yaml``), written for every
     concluded pair — so the scan is identical on fresh, resumed, and
     recovered runs, and survives intermediate cleanup of the attempt
-    workspace.  Winners with a pattern-mismatched file name, a missing
+    workspace.  Winners with a missing
     sidecar, or no persisted frame count are excluded from the affected
     output and mark ``frames_known=False`` (skip semantics).
 
@@ -1755,18 +1732,8 @@ def _scan_winner_sidecars(
     for winners in encoded_chunks.values():
         for winner in winners:
             strategy_name = winner.strategy.display_name()
-            name_match = ENCODED_ATTEMPT_NAME_PATTERN.match(winner.stream.stream.file.path.name)
-            if name_match is None:
-                logger.debug(
-                    "Winner %s does not match the attempt name pattern — excluded from the winner scan",
-                    winner.stream.stream.file.path.name,
-                )
-                frames_known = False
-                continue
-            sidecar = _read_sidecar_yaml(
-                _encoded_dir(work_dir, winner.strategy)
-                / f"{name_match.group('chunk_id')}.{name_match.group('resolution')}.yaml"
-            )
+            chunk_id = winner.chunk.safe_name()
+            sidecar = read_winner_sidecar(work_dir, winner)
             if sidecar is None:
                 logger.debug(
                     "Winner %s has no result sidecar — excluded from the winner scan",
@@ -1778,7 +1745,7 @@ def _scan_winner_sidecars(
             frames_value = int(sidecar.get("frame_count") or 0)
             if frames_value > 0:
                 frames.setdefault(strategy_name, []).append(
-                    (name_match.group("chunk_id"), frames_value)
+                    (chunk_id, frames_value)
                 )
             else:
                 frames_known = False
@@ -1793,7 +1760,7 @@ def _scan_winner_sidecars(
             tally = tallies.setdefault(strategy_name, {}).setdefault(
                 f"{worst[0].metric}_{worst[0].statistic}", _LimiterTally(),
             )
-            tally.crfs.append(winner.crf)
+            tally.crfs.append(Decimal(str(sidecar.get("crf"))))
             if targets_met:
                 tally.passed += 1
                 tally.surpluses.append(worst[1])

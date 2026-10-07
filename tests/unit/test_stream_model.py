@@ -27,6 +27,7 @@ from pyqenc.stream_model import (
     File,
     JobSidecar,
     JobSourceRecord,
+    MergedVideo,
     SceneRecord,
     SubtitleStreamInfo,
     VideoStream,
@@ -176,7 +177,10 @@ class TestExtendedVideoStream:
 
 
 class TestEncodedChunk:
-    def test_composes_attempt_stream_chunk_strategy_crf(self) -> None:
+    def test_composes_attempt_stream_chunk_strategy(self) -> None:
+        """The payload is identity-only: stream + chunk + strategy. The
+        winning quality is NOT a field (Req 4) — it lives on the winner
+        sidecar as a fact for processing-path consumers."""
         codec = CodecConfig(
             name            = "h265-10bit",
             default_quality = Decimal(28),
@@ -186,11 +190,55 @@ class TestEncodedChunk:
         )
         strategy = Strategy(preset="fast", profile="h265", codec=codec, profile_args=[])
         chunk = VideoStreamChunk(stream=_extended(), start_timestamp=0.0, end_timestamp=10.0)
-        attempt = EncodedChunk(stream=_extended(), chunk=chunk, strategy=strategy, crf=Decimal("22.5"))
-        assert attempt.crf == Decimal("22.5")
+        attempt = EncodedChunk(stream=_extended(), chunk=chunk, strategy=strategy)
         # The attempt's path/size are read through its composed stream chain —
         # never duplicated as fields (Req 14.1).
         assert attempt.stream.stream.file.path == _file().path
+
+    def test_name_families_are_compose_only(self) -> None:
+        """Both encoding name families are pure functions of identity — the
+        attempt keyed by quality (the search's cache address), the winner by
+        chunk alone; sidecars are stem swaps (Req 1/9)."""
+        chunk_id = "00꞉00꞉00․000-00꞉00꞉13․330"
+        assert EncodedChunk.format_attempt_file_name(chunk_id, Decimal("20.5")) == (
+            f"{chunk_id}.q20.5.mkv"
+        )
+        assert EncodedChunk.format_attempt_sidecar_name(chunk_id, Decimal("20.5")) == (
+            f"{chunk_id}.q20.5.yaml"
+        )
+        assert EncodedChunk.format_winner_file_name(chunk_id) == f"{chunk_id}.mkv"
+        assert EncodedChunk.format_winner_sidecar_name(chunk_id) == f"{chunk_id}.yaml"
+
+
+class TestMergedVideoNames:
+    def test_output_name_carries_per_strategy_pinned_suffix(self) -> None:
+        """Req 6 / M-2b: the suffix is per-strategy whenever its range is a
+        single point — uniformity across the run is never a gate."""
+        collapsed = Strategy(
+            preset="fast", profile="h265",
+            codec=CodecConfig(
+                name="h265", default_quality=Decimal("18.5"), default_preset="fast",
+                quality_range=(Decimal("18.5"), Decimal("18.5")), presets=["fast"],
+            ),
+            profile_args=[],
+        )
+        ranged = Strategy(
+            preset="fast", profile="h265",
+            codec=CodecConfig(
+                name="h265", default_quality=Decimal("18.5"), default_preset="fast",
+                quality_range=(Decimal(0), Decimal(51)), presets=["fast"],
+            ),
+            profile_args=[],
+        )
+        assert MergedVideo.output_file_name("movie", collapsed) == "movie h265+fast CRF=18.5.mkv"
+        assert MergedVideo.output_file_name("movie", ranged) == "movie h265+fast.mkv"
+        # Two different collapsed values never share a name.
+        other = collapsed.model_copy(update={
+            "codec": collapsed.codec.model_copy(update={
+                "quality_range": (Decimal("20.0"), Decimal("20.0")),
+            }),
+        })
+        assert MergedVideo.output_file_name("movie", other) != MergedVideo.output_file_name("movie", collapsed)
 
 
 # ---------------------------------------------------------------------------

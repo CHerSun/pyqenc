@@ -84,27 +84,26 @@ def _make_winner(
     """Materialize a winner on disk (mkv + result sidecar) and compose it.
 
     The composed payload mirrors the recovery composition (frame_count=0
-    sentinel) — the scan reads counts from the sidecar, never the payload.
-    ``frames=0`` persists the unknown sentinel.
+    sentinel, resolution unknown) — the scan reads counts from the sidecar,
+    never the payload. ``frames=0`` persists the unknown sentinel.
     """
     strategy_dir = work_dir / "encoded" / strategy.safe_name()
     strategy_dir.mkdir(parents=True, exist_ok=True)
-    name = EncodedChunk.format_file_name(chunk.safe_name(), _RESOLUTION, crf)
-    winner = strategy_dir / name
+    winner = strategy_dir / EncodedChunk.format_winner_file_name(chunk.safe_name())
     winner.write_bytes(b"x" * 16)
     sidecar: dict = {
-        "winning_attempt": name,
         "crf": str(crf),
+        "resolution": _RESOLUTION,
         "metrics": {"vmaf_min": 94.5},
         "targets_met": True,
         "frame_count": frames,
     }
-    (strategy_dir / f"{chunk.safe_name()}.{_RESOLUTION}.yaml").write_text(
+    (strategy_dir / EncodedChunk.format_winner_sidecar_name(chunk.safe_name())).write_text(
         yaml.safe_dump(sidecar), encoding="utf-8",
     )
     return build_encoded_chunk(
-        chunk=chunk, strategy=strategy, crf=crf,
-        path=winner, resolution=_RESOLUTION, frame_count=0,
+        chunk=chunk, strategy=strategy,
+        path=winner, resolution=None, frame_count=0,
     )
 
 
@@ -116,32 +115,31 @@ class TestSidecarFrameCount:
 
     def test_metrics_sidecar_persists_frame_count(self, tmp_path: Path) -> None:
         """The per-attempt sidecar carries the attempt's frame count."""
-        attempt = tmp_path / "chunk.1920x1080.q18.0.mkv"
+        attempt = tmp_path / "chunk.q18.0.mkv"
         _write_metrics_sidecar(
-            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 2400,
+            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 2400, resolution=_RESOLUTION,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 2400
+        assert data["resolution"] == _RESOLUTION
 
     def test_metrics_sidecar_writes_zero_for_unknown_frame_count(self, tmp_path: Path) -> None:
         """An unknown count is persisted as the 0 sentinel (no None in yaml)."""
-        attempt = tmp_path / "chunk.1920x1080.q18.0.mkv"
+        attempt = tmp_path / "chunk.q18.0.mkv"
         _write_metrics_sidecar(
-            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 0,
+            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 0, resolution=None,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 0
 
     def test_result_sidecar_persists_frame_count(self, tmp_path: Path) -> None:
         """The winner result sidecar carries the winning attempt's count."""
-        winner = tmp_path / "chunk.1920x1080.q18.0.mkv"
-        winner.write_bytes(b"x" * 8)
         _write_encoding_result_sidecar(
-            tmp_path, "chunk", _RESOLUTION, winner,
+            tmp_path, "chunk", _RESOLUTION,
             Decimal("18.0"), {"vmaf_min": 94.5}, 2400,
         )
         data = yaml.safe_load(
-            (tmp_path / f"chunk.{_RESOLUTION}.yaml").read_text(encoding="utf-8"),
+            (tmp_path / EncodedChunk.format_winner_sidecar_name("chunk")).read_text(encoding="utf-8"),
         )
         assert data["frame_count"] == 2400
 
@@ -196,7 +194,7 @@ class TestScanWinnerSidecars:
         winner = _make_winner(tmp_path, chunk, _STRATEGY, Decimal("18.0"), 240)
         sidecar_path = (
             tmp_path / "encoded" / _STRATEGY.safe_name()
-            / f"{chunk.safe_name()}.{_RESOLUTION}.yaml"
+            / EncodedChunk.format_winner_sidecar_name(chunk.safe_name())
         )
         data = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
         del data["frame_count"]
@@ -214,7 +212,7 @@ class TestScanWinnerSidecars:
         winner = _make_winner(tmp_path, chunk, _STRATEGY, Decimal("18.0"), 100)
         # Remove the sidecar the helper wrote.
         (tmp_path / "encoded" / _STRATEGY.safe_name()
-         / f"{chunk.safe_name()}.{_RESOLUTION}.yaml").unlink()
+         / EncodedChunk.format_winner_sidecar_name(chunk.safe_name())).unlink()
         encoded = {_STRATEGY.display_name(): [winner]}
 
         scan = _scan_winner_sidecars(tmp_path, encoded, [_STRATEGY.display_name()], _TARGETS)

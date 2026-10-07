@@ -61,6 +61,7 @@ from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
     ExtendedVideoStream,
     File,
+    MergedVideo,
     VideoStream,
     VideoStreamInfo,
 )
@@ -129,7 +130,6 @@ def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
         ),
         chunk    = _make_chunk_window(path.parent / "source.mkv", chunk_id),
         strategy = strategy,
-        crf      = Decimal("20"),
     )
 
 
@@ -971,24 +971,34 @@ def _fixed_strategy_fixture(pinned: str, granularity: str = "0.5", label: str = 
     return Strategy(preset="slow", profile="h265-aq", codec=codec, profile_args=[])
 
 
-class TestUniformPinnedQuality:
-    """The suffix exists only for uniform pinned-value fixed runs."""
+class TestPinnedQualitySuffix:
+    """The per-strategy rendering: sanitized label + granularity-quantized value.
 
-    def test_uniform_fixed_run_returns_value(self) -> None:
-        from decimal import Decimal
+    The uniformity gate is gone (M-2b): the suffix is per-strategy whenever
+    that strategy's own range is a single point."""
 
-        strategies = [_fixed_strategy_fixture("18"), _fixed_strategy_fixture("18")]
-        assert MergePhase._uniform_pinned_quality(strategies) == Decimal(18)
+    def test_quantized_to_strategy_granularity(self) -> None:
+        """-q 18 at 0.5 granularity renders 18.0 — uniform with 17.5-style
+        siblings, never 'CRF=18' next to 'CRF=17.5'."""
+        assert MergedVideo.pinned_quality_suffix(_fixed_strategy_fixture("18")) == " CRF=18.0"
+        assert MergedVideo.pinned_quality_suffix(_fixed_strategy_fixture("17.5")) == " CRF=17.5"
 
-    def test_decimal_spellings_are_one_value(self) -> None:
-        """Decimal("18") == Decimal("18.0") numerically — mixed spellings
-        count as one uniform pinned value."""
-        from decimal import Decimal
+    def test_integer_granularity_stays_integral(self) -> None:
+        strategy = _fixed_strategy_fixture("18", granularity="1", label="QP")
+        assert MergedVideo.pinned_quality_suffix(strategy) == " QP=18"
 
-        mixed = [_fixed_strategy_fixture("18"), _fixed_strategy_fixture("18.0")]
-        assert MergePhase._uniform_pinned_quality(mixed) == Decimal(18)
+    def test_spelling_independent(self) -> None:
+        """CLI '18' and profile '18.0' quantize to the identical name form."""
+        assert MergedVideo.pinned_quality_suffix(_fixed_strategy_fixture("18")) == " CRF=18.0"
+        assert MergedVideo.pinned_quality_suffix(_fixed_strategy_fixture("18.0")) == " CRF=18.0"
 
-    def test_searched_run_none(self) -> None:
+    def test_label_sanitized_filesystem_safe(self) -> None:
+        """VBR labels like Mbit/s land filesystem-safe in the name."""
+        strategy = _fixed_strategy_fixture("20", granularity="0.5", label="Mbit/s")
+        assert MergedVideo.pinned_quality_suffix(strategy) == " Mbit_s=20.0"
+
+    def test_ranged_strategy_carries_no_suffix(self) -> None:
+        """Search-mode outputs get no quality distinguisher (Req 7)."""
         from decimal import Decimal
 
         from pyqenc.models import CodecConfig
@@ -998,53 +1008,17 @@ class TestUniformPinnedQuality:
             quality_range=(Decimal("6"), Decimal("30")), presets=["slow"],
         )
         strategy = Strategy(preset="slow", profile="h265-aq", codec=codec, profile_args=[])
-        assert MergePhase._uniform_pinned_quality([strategy]) is None
+        assert MergedVideo.pinned_quality_suffix(strategy) == ""
+        assert MergedVideo.output_file_name("test", strategy) == "test h265-aq+slow.mkv"
 
-    def test_mixed_pinned_values_none(self) -> None:
-        strategies = [_fixed_strategy_fixture("18"), _fixed_strategy_fixture("20")]
-        assert MergePhase._uniform_pinned_quality(strategies) is None
-
-
-class TestQSuffix:
-    """The per-strategy rendering: sanitized label + granularity-quantized value."""
-
-    def test_quantized_to_strategy_granularity(self) -> None:
-        """-q 18 at 0.5 granularity renders 18.0 — uniform with 17.5-style
-        siblings, never 'CRF=18' next to 'CRF=17.5'."""
-        from decimal import Decimal
-
-        assert MergePhase._q_suffix(_fixed_strategy_fixture("18"), Decimal(18)) == " CRF=18.0"
-        assert MergePhase._q_suffix(_fixed_strategy_fixture("17.5"), Decimal("17.5")) == " CRF=17.5"
-
-    def test_integer_granularity_stays_integral(self) -> None:
-        from decimal import Decimal
-
-        strategy = _fixed_strategy_fixture("18", granularity="1", label="QP")
-        assert MergePhase._q_suffix(strategy, Decimal(18)) == " QP=18"
-
-    def test_spelling_independent(self) -> None:
-        """CLI '18' and profile '18.0' quantize to the identical name form."""
-        from decimal import Decimal
-
-        assert MergePhase._q_suffix(_fixed_strategy_fixture("18"), Decimal("18")) == " CRF=18.0"
-        assert MergePhase._q_suffix(_fixed_strategy_fixture("18.0"), Decimal("18.0")) == " CRF=18.0"
-
-    def test_label_sanitized_filesystem_safe(self) -> None:
-        """VBR labels like Mbit/s land filesystem-safe in the name."""
-        from decimal import Decimal
-
-        strategy = _fixed_strategy_fixture("20", granularity="0.5", label="Mbit/s")
-        assert MergePhase._q_suffix(strategy, Decimal(20)) == " Mbit_s=20.0"
-
-    def test_expected_path_carries_suffix(self, tmp_path: Path) -> None:
-        from decimal import Decimal
-
-        strategy = _fixed_strategy_fixture("18.0")
-        path = MergePhase._expected_output_path(
-            tmp_path, "test", strategy,
-            MergePhase._q_suffix(strategy, Decimal("18.0")),
-        )
-        assert path.name == "test h265-aq+slow CRF=18.0.mkv"
+    def test_non_uniform_fixed_run_each_output_suffixed(self, tmp_path: Path) -> None:
+        """M-2b: two collapsed strategies of DIFFERENT values each name their
+        own output — the old uniformity gate silently dropped both suffixes
+        and a stale same-name reuse became possible."""
+        a = _fixed_strategy_fixture("18")
+        b = _fixed_strategy_fixture("20")
+        assert MergedVideo.output_file_name("test", a) == "test h265-aq+slow CRF=18.0.mkv"
+        assert MergedVideo.output_file_name("test", b) == "test h265-aq+slow CRF=20.0.mkv"
 
 
 class TestFixedMergeRecoveryNaming:
@@ -1084,7 +1058,7 @@ class TestFixedMergeRecoveryNaming:
         encoding = phase._phases[EncodingPhase]
         winner = Artifact(
             payload=_encoded_chunk(chunk, "chunk1", "h265-aq").model_copy(
-                deep=True, update={"strategy": fixed_strategy, "crf": Decimal("18")},
+                deep=True, update={"strategy": fixed_strategy},
             ),
             state=ArtifactState.COMPLETE,
         )
@@ -1165,7 +1139,7 @@ def _run_full_merge(
         encoding = merge._phases[_EncodingPhase]
         winner = Artifact(
             payload=_encoded_chunk(chunk, "chunk1", "h265-aq").model_copy(
-                deep=True, update={"strategy": fixed_strategy, "crf": Decimal("18")},
+                deep=True, update={"strategy": fixed_strategy},
             ),
             state=ArtifactState.COMPLETE,
         )

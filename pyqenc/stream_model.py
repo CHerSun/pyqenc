@@ -49,7 +49,6 @@ from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import (
     CHAIN_FILENAME_SUFFIX,
     CHUNK_NAME_PATTERN,
-    ENCODED_ATTEMPT_NAME_PATTERN,
     FFMPEG_SELECTOR_PREFIX,
     FINGERPRINT_DIGEST_SIZE_BYTES,
     RANGE_SEPARATOR,
@@ -783,21 +782,6 @@ class VideoStreamChunk(BaseModel):
 # Req 14 — Encoded attempt as a stream
 # ---------------------------------------------------------------------------
 
-class EncodedAttemptName(BaseModel):
-    """The typed record parsed from an encoded attempt's file name.
-
-    The name carries only part of a composed identity — recovery joins this
-    record against phase results rather than pretending the name reconstructs
-    the object.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    chunk_id:  str
-    resolution: str
-    crf:       DecimalYaml
-
-
 class EncodedChunk(BaseModel):
     """An encoding attempt: the attempt file's own video as a stream.
 
@@ -806,16 +790,23 @@ class EncodedChunk(BaseModel):
     construction (applied during the encode); the attempt's
     :class:`VideoStreamInfo` is populated eagerly, once, after the encode.
 
-    This class owns the attempt-file name family: the name is a
-    pure function of the composed identity, generation and parsing living
-    here as a strict inverse pair — presence-based recovery is trustworthy
-    only because ``parse(format(x)) == x`` is pinned by tests.
+    This class owns BOTH encoding name families, each compose-only (spec
+    2026-10-07, Req 1/9 — no globbing, no parsing; lookups are exact-name):
+
+    - attempt ``<chunk_id>.q<quality>.mkv`` (the quality is the search's
+      cache key; no resolution component — the name is fully known before
+      encoding begins), sidecar as the stem swap;
+    - winner ``<chunk_id>.mkv`` / ``<chunk_id>.yaml`` — a pure function of
+      the chunk identity, no quality and no resolution.
+
+    The winning quality is NOT a field: it is a fact of the winner sidecar
+    only, read by processing-path consumers (the re-merge CRF graph, the
+    winner scan, the fixed ruler) — never at recovery (Req 4).
 
     Attributes:
         stream:   The attempt file's own extended video stream.
         chunk:    The source window the attempt encodes.
         strategy: The strategy the attempt was encoded with.
-        crf:      The quality parameter value used for the attempt.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -823,34 +814,26 @@ class EncodedChunk(BaseModel):
     stream:   ExtendedVideoStream
     chunk:    VideoStreamChunk
     strategy: Strategy
-    crf:      DecimalYaml
 
     @staticmethod
-    def format_file_name(chunk_id: str, resolution: str, crf: Decimal) -> str:
-        """The attempt file name for an identity: ``<chunk_id>.<res>.q<crf>.mkv``."""
-        return f"{chunk_id}.{resolution}.q{crf}.mkv"
+    def format_attempt_file_name(chunk_id: str, quality: Decimal) -> str:
+        """The attempt file name: ``<chunk_id>.q<quality>.mkv``."""
+        return f"{chunk_id}.q{quality}.mkv"
 
-    @classmethod
-    def parse_file_name(cls, name: str) -> EncodedAttemptName:
-        """Parse an attempt file name into its typed identity record.
+    @staticmethod
+    def format_attempt_sidecar_name(chunk_id: str, quality: Decimal) -> str:
+        """The attempt sidecar name: the attempt stem with a ``.yaml`` suffix."""
+        return f"{chunk_id}.q{quality}.yaml"
 
-        Args:
-            name: The attempt file name.
+    @staticmethod
+    def format_winner_file_name(chunk_id: str) -> str:
+        """The winner file name: ``<chunk_id>.mkv`` (pure chunk identity)."""
+        return f"{chunk_id}.mkv"
 
-        Returns:
-            The parsed :class:`EncodedAttemptName`.
-
-        Raises:
-            ValueError: When ``name`` does not match the attempt-name pattern.
-        """
-        match = ENCODED_ATTEMPT_NAME_PATTERN.match(name)
-        if not match:
-            raise ValueError(f"Not an encoded attempt file name: {name!r}")
-        return EncodedAttemptName(
-            chunk_id   = match.group("chunk_id"),
-            resolution = match.group("resolution"),
-            crf        = Decimal(match.group("quality")),
-        )
+    @staticmethod
+    def format_winner_sidecar_name(chunk_id: str) -> str:
+        """The winner result-sidecar name: the winner stem with ``.yaml``."""
+        return f"{chunk_id}.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -910,8 +893,13 @@ class MergedVideo(BaseModel):
     """One merged output per strategy — the merge phase's payload.
 
     Composes the strategy with the source identity needed for naming plus the
-    measured facts consumers need. The output name materializes from
-    ``<file stem> <strategy>.mkv`` at the merge phase's single derivation site.
+    measured facts consumers need. This entity owns its output-name family:
+    :meth:`output_file_name` composes ``<source stem> <strategy
+    safe_name>[ <LABEL>=<q>].mkv`` — the pinned-quality suffix appears
+    whenever the strategy's effective quality range is a single point
+    (fixed), per-strategy by construction; value uniformity across the run
+    is never a naming gate (spec 2026-10-07, Req 6 — closes M-2b). Search
+    outputs carry no quality or generation distinguisher (Req 7).
 
     Attributes:
         source_stem:  The source file's name stem (naming identity).
@@ -940,6 +928,35 @@ class MergedVideo(BaseModel):
     def safe_name(self) -> str:
         """Filesystem-safe name — the sanitized display form (no extension)."""
         return sanitize_filesystem_text(self.display_name())
+
+    @classmethod
+    def output_file_name(cls, source_stem: str, strategy: Strategy) -> str:
+        """The output's file name: safe base, optional pinned-q suffix, ``.mkv``.
+
+        The pinned suffix is PER-STRATEGY whenever that strategy's effective
+        range is a single point — a non-uniform fixed run (collapsed profiles
+        of different values) still names each output with its own value, so
+        a stale same-name reuse is impossible (M-2b).
+        """
+        base = sanitize_filesystem_text(f"{source_stem} {strategy.display_name()}")
+        return f"{base}{cls.pinned_quality_suffix(strategy)}.mkv"
+
+    @staticmethod
+    def pinned_quality_suffix(strategy: Strategy) -> str:
+        """The strategy's pinned-knob suffix: ``" CRF=18.0"``, or ``""``.
+
+        The label is the strategy's own (sanitized — labels like ``Mbit/s``
+        must land filesystem-safe), and the value is quantized to the
+        strategy's granularity: identical settings always produce identical
+        names, whatever Decimal spelling declared them (``-q 18`` and
+        ``-q 17.5`` at 0.5 granularity render ``18.0`` and ``17.5``).
+        """
+        codec = strategy.codec
+        if codec.quality_better != codec.quality_worse:
+            return ""
+        label = sanitize_filesystem_text(codec.quality_label)
+        quantized = codec.quality_better.quantize(codec.quality_granularity)
+        return f" {label}={quantized}"
 
 
 # ---------------------------------------------------------------------------

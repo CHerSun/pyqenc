@@ -14,6 +14,7 @@ from pathlib import Path
 from pyqenc.app_config import load_app_config
 from pyqenc.phases.encoding import _recover_encoding_attempts
 from pyqenc.state import ArtifactState
+from pyqenc.stream_model import EncodedChunk as _EC
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 # ---------------------------------------------------------------------------
@@ -39,8 +40,8 @@ def _make_complete_pair(encoded_dir: Path, chunk_id: str = _CHUNK_ID, crf: Decim
       <chunk_id>.<res>.yaml        — result sidecar (no quality in name)
     """
     encoded_dir.mkdir(parents=True, exist_ok=True)
-    mkv     = encoded_dir / f"{chunk_id}.{_RESOLUTION}.q{crf}.mkv"
-    sidecar = encoded_dir / f"{chunk_id}.{_RESOLUTION}.yaml"
+    mkv     = encoded_dir / _EC.format_winner_file_name(chunk_id)
+    sidecar = encoded_dir / _EC.format_winner_sidecar_name(chunk_id)
     mkv.write_bytes(b"\x00" * 512)
     write_yaml_atomic(sidecar, {"crf": str(crf), "targets_met": True, "metrics": {"vmaf_min": 94.5}})
     return mkv
@@ -229,7 +230,7 @@ def _run_encode(
             measure_attempts  = measure_attempts,
         )
 
-    attempt = tmp_path / "encoding" / "test_strategy" / "chunk_001.1920x1080.q18.0.mkv"
+    attempt = tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.mkv"
     attempt.parent.mkdir(parents=True, exist_ok=True)
     attempt.write_bytes(b"fake mkv")
 
@@ -275,14 +276,14 @@ class TestMeasureAttemptsSeam:
         assert result.attempts == 1
 
         sidecar_path = (
-            tmp_path / "encoding" / "test_strategy" / "chunk_001.1920x1080.q18.0.yaml"
+            tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.yaml"
         )
         sidecar = _yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
         assert sidecar["metrics"] == {}
         assert sidecar["frame_count"] == 120
 
         winner_sidecar = (
-            tmp_path / "encoded" / "test_strategy" / "chunk_001.1920x1080.yaml"
+            tmp_path / "encoded" / "test_strategy" / "chunk_001.yaml"
         )
         assert winner_sidecar.exists()
 
@@ -292,7 +293,7 @@ class TestMeasureAttemptsSeam:
         evaluator.evaluate_chunk.assert_called_once()
         assert result.success is True
         sidecar_path = (
-            tmp_path / "encoding" / "test_strategy" / "chunk_001.1920x1080.q18.0.yaml"
+            tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.yaml"
         )
         sidecar = _yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
         assert sidecar["metrics"]["vmaf_min"] == 95.0
@@ -362,7 +363,7 @@ class TestFixedDegenerateSinglePoint:
         assert result.attempts == 1
         assert result.final_crf == _D("18.0")
         # The winner is still promoted.
-        assert (tmp_path / "encoded" / "test_strategy" / "chunk_001.1920x1080.yaml").exists()
+        assert (tmp_path / "encoded" / "test_strategy" / "chunk_001.yaml").exists()
         # Every accepted winner logs its acceptance, uniform with the success
         # line: visual hash + strategy + chunk + soft-miss status + limiter.
         # The ≈ marks a matter-of-fact miss against the approximate anchor —
@@ -439,7 +440,7 @@ def _run_encode_with_targets(
         measure_attempts  = measure_attempts,
     )
 
-    attempt = tmp_path / "encoding" / "test_strategy" / "chunk_001.1920x1080.q18.0.mkv"
+    attempt = tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.mkv"
     attempt.parent.mkdir(parents=True, exist_ok=True)
     attempt.write_bytes(b"fake mkv")
 
@@ -546,10 +547,10 @@ class TestEncodingPresentationTargets:
         # The encoded winner the stubbed pool reports back.
         winner_dir = work_dir / "encoded" / strategy.safe_name()
         winner_dir.mkdir(parents=True, exist_ok=True)
-        winner_path = winner_dir / f"{chunk.safe_name()}.1920x1080.q18.0.mkv"
+        winner_path = winner_dir / _EC.format_winner_file_name(chunk.safe_name())
         winner_path.write_bytes(b"x" * 32)
         winner = build_encoded_chunk(
-            chunk=chunk, strategy=strategy, crf=_D("18.0"),
+            chunk=chunk, strategy=strategy,
             path=winner_path, resolution="1920x1080", frame_count=240,
         )
 
@@ -658,10 +659,10 @@ class TestOneWinnerPerChunkGuard:
     def _winner(self, chunk: _VSC, tmp_path: Path) -> _EncodedChunk:
         from pyqenc.phases.encoding import build_encoded_chunk
 
-        mkv = tmp_path / f"{chunk.safe_name()}.1920x1080.q18.0.mkv"
+        mkv = tmp_path / _EC.format_winner_file_name(chunk.safe_name())
         mkv.write_bytes(b"x" * 64)
         return build_encoded_chunk(
-            chunk=chunk, strategy=_STRATEGY_OBJ, crf=Decimal("18.0"),
+            chunk=chunk, strategy=_STRATEGY_OBJ,
             path=mkv, resolution="1920x1080", frame_count=24,
         )
 

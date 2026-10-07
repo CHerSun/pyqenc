@@ -79,7 +79,6 @@ def _merge_encoded_chunk(path, chunk_id: str, strategy_name: str):
             stream=base_stream, start_timestamp=0.0, end_timestamp=1.0, frame_count=24,
         ),
         strategy=strategy,
-        crf=Decimal("20"),
     )
 
 
