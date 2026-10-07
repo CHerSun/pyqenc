@@ -137,15 +137,18 @@ class TestJobPhaseRunExecuteNoMismatch:
 
     def test_job_yaml_persists_only_the_file_dump(self, tmp_path: Path) -> None:
         """Bug prevented: job.yaml regrowing cached fast metadata — the
-        sidecar is the File dump (path + size) and nothing else."""
+        sidecar is the File dump (path + size + sampled fingerprint) and
+        nothing else."""
         src = _make_source(tmp_path)
         phase = _make_phase(tmp_path, src)
         phase.run(dry_run=False)
 
         data = yaml.safe_load((tmp_path / "work" / "job.yaml").read_text(encoding="utf-8"))
         assert set(data) == {"source"}
-        assert set(data["source"]) == {"path", "file_size_bytes"}
+        assert set(data["source"]) == {"path", "file_size_bytes", "fingerprint"}
         assert data["source"]["file_size_bytes"] == src.stat().st_size
+        assert data["source"]["fingerprint"]["size"] == src.stat().st_size
+        assert data["source"]["fingerprint"]["token"]
 
     def test_result_carries_eager_file(self, tmp_path: Path) -> None:
         """JobPhaseResult exposes the run's single File — path + size from

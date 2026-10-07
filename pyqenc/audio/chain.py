@@ -60,6 +60,7 @@ from pyqenc.constants import (
     FLAC_EXTENSION,
     OUTPUT_FORMAT_MUXERS,
 )
+from pyqenc.models import Fingerprint, fingerprint_token
 from pyqenc.stream_model import AudioStream
 from pyqenc.utils.ffmpeg_runner import (
     FFmpegRequest,
@@ -105,10 +106,11 @@ each invocation's :class:`FFmpegRequest` and returns a canned
 class ResolvedChain(BaseModel):
     """A chain with every referenced filter's params inlined and encode resolved.
 
-    Used both to execute the chain and as the sidecar record whose equality
-    drives invalidation. ``encode`` is **always populated** (the last ``encode``
-    filter, else :data:`FLAC_DEFAULT`) so the sidecar captures the concrete
-    output format and a change to it invalidates correctly.
+    Used both to execute the chain and as the sidecar record whose identity
+    drives invalidation (:attr:`fingerprint`). ``encode`` is **always
+    populated** (the last ``encode`` filter, else :data:`FLAC_DEFAULT`) so the
+    sidecar captures the concrete output format and a change to it
+    invalidates correctly.
 
     Attributes:
         name:    The chain's configured, filesystem-safe name (the
@@ -116,8 +118,8 @@ class ResolvedChain(BaseModel):
         filters: The referenced filters as concrete, param-inlined
                  :class:`FilterInstance` objects, in chain order. No synthetic
                  FLAC filter is present.
-        encode:  The effective terminal output format (last ``encode`` filter's
-                 format, or :data:`FLAC_DEFAULT`).
+        encode:  The effective terminal output format (last ``encode``
+                 filter's format, or :data:`FLAC_DEFAULT`).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -126,24 +128,17 @@ class ResolvedChain(BaseModel):
     filters: list[FilterInstance]
     encode:  EncodeParams
 
+    @property
+    def fingerprint(self) -> Fingerprint:
+        """The chain's identity fingerprint: hash of the canonical dump.
 
-def chain_signature(chain: ResolvedChain) -> str:
-    """Return the canonical compact signature string for a resolved chain.
-
-    The signature is :meth:`ResolvedChain.model_dump_json` — a deterministic,
-    compact JSON string (Pydantic emits fields in declaration order). It is used
-    purely for **equality-based invalidation**: two chains are considered the
-    same iff their signatures are equal. This is the single canonical signature
-    function shared by the sidecar (:class:`~pyqenc.state.AudioSidecar`) and the
-    phase, so persistence and comparison never diverge (DRY).
-
-    Args:
-        chain: The resolved chain to sign.
-
-    Returns:
-        The compact JSON signature string.
-    """
-    return chain.model_dump_json()
+        The former chain signature, now opaque — the canonical JSON itself is
+        never persisted (``audio.yaml`` stores the token; debug diffs the
+        config, not the sidecar), and comparisons are token equality only
+        (spec 2026-10-07, Req 10b). No ``size`` belt — a chain has no
+        meaningful pre-check magnitude.
+        """
+        return Fingerprint(token=fingerprint_token(self.model_dump_json()))
 
 
 def resolve_chain(spec: ChainSpec, palette: dict[str, FilterInstance]) -> ResolvedChain:

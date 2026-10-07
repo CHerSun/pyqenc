@@ -7,11 +7,13 @@ All models use Pydantic BaseModel for validation and serialisation.
 """
 # CHerSun 2026
 
+import hashlib
 import logging
+from collections.abc import Iterable
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import Enum, IntEnum
 from pathlib import Path
-from typing import Self
+from typing import ClassVar, Self
 
 from pydantic import (
     BaseModel,
@@ -24,6 +26,7 @@ from pydantic import (
 
 from pyqenc.constants import (
     DOWN_ARROW,
+    FINGERPRINT_DIGEST_SIZE_BYTES,
     LEFT_ARROW,
     RIGHT_ARROW,
     TIME_SEPARATOR_MS,
@@ -32,6 +35,120 @@ from pyqenc.constants import (
 from pyqenc.utils.naming import sanitize_filesystem_text
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Fingerprint — the standard identity-comparison value (spec 2026-10-07, Req 10)
+# ---------------------------------------------------------------------------
+
+class Fingerprint(BaseModel):
+    """An opaque identity token plus an optional belt magnitude.
+
+    THE standard identity-comparison mechanism: one value type for everything
+    whose identity is opaque (file content, resolved config objects, id sets).
+    ``token`` is authoritative — a hash of the owner-declared canonical form,
+    REQUIRED at construction (derivations are total; an unreadable source is
+    a fatal at the computing site, never a carried ``None``).
+    ``Fingerprint(None, None)`` is unconstructible.
+
+    ``size`` is a cheap pre-check magnitude (bytes for files, cardinality for
+    sets): it participates only when present on BOTH sides of a comparison —
+    differing sizes are a mismatch (collision enforcement) and equal sizes
+    fall through to the token — and contributes nothing when absent (owners
+    with no meaningful check). "Unknown" never occurs INSIDE the type: it
+    lives one level up, at the missing-sidecar-field layer (an absent key on
+    a sidecar is unknown, never a mismatch).
+
+    Data is separate from means: this type knows nothing about derivations;
+    each owning entity declares its own (e.g. ``Strategy.fingerprint``) and
+    consumers persist and compare with no knowledge of either. Tokens are
+    idempotency markers, never re-validated into the model they summarize
+    (a fingerprint may omit required fields by construction) and never
+    user-facing data.
+
+    Attributes:
+        token: The opaque hash token (hex string) — REQUIRED, non-empty.
+        size:  Optional belt magnitude; omitted when the owner has no
+               meaningful pre-check.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    token: str
+    size:  int | None = None
+
+    @field_validator("token")
+    @classmethod
+    def _token_present(cls, v: str) -> str:
+        """Reject empty tokens — the token is the identity; absent means unset."""
+        if not v:
+            raise ValueError(
+                "Fingerprint token is required — derivations are total; an "
+                "unreadable source is a fatal at the computing site."
+            )
+        return v
+
+    def matches(self, other: Fingerprint) -> bool:
+        """Uniform identity comparison: token authoritative, size a belt.
+
+        Args:
+            other: The fingerprint to compare against.
+
+        Returns:
+            ``True`` when the tokens are equal and no belt contradiction
+            exists — differing sizes with both present are a mismatch even
+            for equal tokens (collision enforcement); an absent size on
+            either side contributes nothing.
+        """
+        if (
+            self.size is not None
+            and other.size is not None
+            and self.size != other.size
+        ):
+            return False
+        return self.token == other.token
+
+
+def fingerprint_token(canonical: str) -> str:
+    """Hash a canonical serialization into an opaque fingerprint token.
+
+    The one primitive every fingerprint derivation builds on: blake2b-128
+    over the canonical form's UTF-8 bytes. Canonical dumps themselves are
+    never persisted anywhere — debug reads the config / source of truth, not
+    the sidecar.
+
+    Args:
+        canonical: The owner-declared canonical serialization (deterministic
+                   for the same value by construction).
+
+    Returns:
+        The hex token.
+    """
+    return hashlib.blake2b(
+        canonical.encode("utf-8"), digest_size=FINGERPRINT_DIGEST_SIZE_BYTES,
+    ).hexdigest()
+
+
+def id_set_fingerprint(ids: Iterable[str]) -> Fingerprint:
+    """The identity of a set of ids: hash over the sorted ids, ``size`` = count.
+
+    ONE derivation, two vantages (spec 2026-10-07, Req 19/11a): optimization
+    persists it as the chunk-set key (mismatch ⇒ wipe winners), and each
+    merged output's provenance carries it as the winner-set fingerprint.
+    Order-independent by construction (sorted before hashing).
+
+    Args:
+        ids: The member ids in any order (chunk ids / winner ids).
+
+    Returns:
+        The set's fingerprint (``size`` = member count).
+    """
+    ordered = sorted(ids)
+    return Fingerprint(
+        token = fingerprint_token("\n".join(ordered)),
+        size  = len(ordered),
+    )
+
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +220,44 @@ class Strategy(BaseModel):
     profile:      str
     codec:        CodecConfig
     profile_args: list[str]
+
+    FINGERPRINT_EXCLUDED_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {"codec.default_quality"},
+    )
+    """Model fields excluded from the identity fingerprint (dotted paths).
+
+    ``codec.default_quality`` is the search's STARTING POINT, not product
+    identity — attempts at every quality value are products of the same
+    strategy. The set is declared here, next to what it excludes; every
+    other field participates by default (fail-safe: future fields
+    over-invalidate rather than slip through)."""
+
+    @property
+    def fingerprint(self) -> Fingerprint:
+        """The strategy's resolved-args identity: hash of the canonical dump
+        minus :attr:`FINGERPRINT_EXCLUDED_FIELDS`.
+
+        Opaque — the dump itself is never persisted, and the token is never
+        re-validated into a ``Strategy`` (it omits ``default_quality``, a
+        required field, by construction). Consumers persist it and compare
+        with :meth:`Fingerprint.matches` — no model-shape knowledge at any
+        comparison site. Joining the name family: display/safe/fingerprint.
+        """
+        return Fingerprint(
+            token=fingerprint_token(
+                self.model_dump_json(exclude=self._fingerprint_exclude_spec()),
+            ),
+        )
+
+    @classmethod
+    def _fingerprint_exclude_spec(cls) -> dict[str, set[str]]:
+        """Translate the dotted exclusion paths into pydantic's nested form."""
+        spec: dict[str, set[str]] = {}
+        for path in cls.FINGERPRINT_EXCLUDED_FIELDS:
+            parent, _, leaf = path.rpartition(".")
+            assert parent, f"only dotted paths are declared: {path!r}"
+            spec.setdefault(parent, set()).add(leaf)
+        return spec
 
     @field_validator("preset", "profile", mode="before")
     @classmethod

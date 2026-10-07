@@ -9,6 +9,9 @@ THRESHOLD_ATTEMPTS_WARNING = 10
 TEMP_SUFFIX = ".tmp"
 """A suffix to append to temporary files during processing. This helps avoid confusion with final output files and allows for easy cleanup of incomplete files."""
 
+FINGERPRINT_DIGEST_SIZE_BYTES = 16
+"""blake2b digest size (bytes) for every fingerprint token — 128-bit opaque identity."""
+
 # Disk space estimation constants
 OVERHEAD_TIGHT_MARGIN = 1.2
 """Multiplier applied to the max estimated space to derive the recommended space threshold.

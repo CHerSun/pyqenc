@@ -19,9 +19,10 @@ from typing import TYPE_CHECKING, Self
 
 from pydantic import BaseModel, Field, model_serializer
 
-from pyqenc.audio.chain import ResolvedChain, chain_signature
+from pyqenc.audio.chain import ResolvedChain
 from pyqenc.models import (
     CropParams,
+    Fingerprint,
 )
 from pyqenc.stream_model import DecimalYaml, LongPathYaml
 from pyqenc.utils.yaml_utils import load_model, save_model
@@ -354,53 +355,55 @@ class MeasureSidecar(BaseModel):
 class AudioSidecar(BaseModel):
     """Sidecar model for the audio phase (``audio.yaml``).
 
-    Records ONLY a compact, per-chain **signature** for each chain this work-dir
-    is committed to, keyed by chain name. ``select`` is deliberately
+    Records ONLY a compact, per-chain **fingerprint** for each chain this
+    work-dir is committed to, keyed by chain name. ``select`` is deliberately
     NOT persisted: selection is a pure function of the current extracted tracks
     plus the current ``select`` config, recomputed for free every run, so there
     is nothing to track across runs.
 
-    Each signature is the canonical :func:`~pyqenc.audio.chain.chain_signature`
-    string (``ResolvedChain.model_dump_json()``) — one deterministic, compact
-    line per chain. The sidecar stores these strings verbatim and never
-    reconstructs a :class:`~pyqenc.audio.chain.ResolvedChain` from them: that is
-    the whole point of the compact form. Invalidation compares the CURRENT
-    chain's signature against the persisted one for the same name (equality of
-    strings), so the sidecar stays cheap and stable while duplicating none of the
-    config's nested structure on disk.
+    Each value is the chain's :attr:`~pyqenc.audio.chain.ResolvedChain.fingerprint`
+    — an opaque hash TOKEN, not the full chain JSON (the former signature;
+    spec 2026-10-07, Req 10b). The canonical chain dump is never persisted;
+    debugging a fingerprint mismatch reads the config, not the sidecar. The
+    sidecar never reconstructs a :class:`~pyqenc.audio.chain.ResolvedChain`
+    from a token: that is the whole point of the opaque form. Invalidation
+    compares the CURRENT chain's fingerprint against the persisted one for
+    the same name (equality of tokens), so the sidecar stays cheap and stable
+    while duplicating none of the config's nested structure on disk.
 
     The sidecar records committed **intent**, decoupled from completion —
     completion is always read from the presence of output files on disk, never
     inferred from this sidecar. A differing or removed chain (detected
-    by signature comparison) triggers invalidation of that chain's on-disk
+    by fingerprint comparison) triggers invalidation of that chain's on-disk
     outputs.
 
     On-disk shape (``audio.yaml``)::
 
         chains:
-          normal: '{"name":"normal","filters":[...],"encode":{...}}'
-          night:  '{"name":"night","filters":[...],"encode":{...}}'
+          normal: {token: "9f2c…"}
+          night:  {token: "1ab7…"}
 
     Attributes:
-        chains: Map of chain name → its canonical signature string.
+        chains: Map of chain name → its fingerprint.
     """
 
-    chains: dict[str, str]
+    chains: dict[str, Fingerprint]
 
     @classmethod
     def from_resolved(cls, resolved: dict[str, ResolvedChain]) -> Self:
-        """Build an ``AudioSidecar`` from resolved chains, computing each signature.
+        """Build an ``AudioSidecar`` from resolved chains, computing each fingerprint.
 
-        Each signature is the canonical :func:`~pyqenc.audio.chain.chain_signature`
-        — the SAME canonical function the audio phase uses (DRY).
+        Each fingerprint is the chain's own
+        :attr:`~pyqenc.audio.chain.ResolvedChain.fingerprint` — the SAME
+        derivation the phase compares with (DRY).
 
         Args:
             resolved: Map of chain name → :class:`ResolvedChain`.
 
         Returns:
-            The sidecar holding one signature string per chain.
+            The sidecar holding one fingerprint per chain.
         """
-        return cls(chains={name: chain_signature(chain) for name, chain in resolved.items()})
+        return cls(chains={name: chain.fingerprint for name, chain in resolved.items()})
 
     @classmethod
     def load(cls, path: Path) -> Self | None:

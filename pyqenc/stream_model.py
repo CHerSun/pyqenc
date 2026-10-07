@@ -35,11 +35,13 @@ are declared once on the annotated types below.
 """
 # CHerSun 2026
 
+import hashlib
 from abc import abstractmethod
 from dataclasses import replace
 from decimal import Decimal
 from fractions import Fraction
-from typing import Annotated, Self
+from pathlib import Path
+from typing import Annotated, ClassVar, Self
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer
 
@@ -49,6 +51,7 @@ from pyqenc.constants import (
     CHUNK_NAME_PATTERN,
     ENCODED_ATTEMPT_NAME_PATTERN,
     FFMPEG_SELECTOR_PREFIX,
+    FINGERPRINT_DIGEST_SIZE_BYTES,
     RANGE_SEPARATOR,
     SELECTOR_KEY_CH,
     SELECTOR_KEY_LANG,
@@ -57,7 +60,7 @@ from pyqenc.constants import (
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
-from pyqenc.models import CropParams, Strategy
+from pyqenc.models import CropParams, Fingerprint, Strategy
 from pyqenc.utils.ffmpeg_runner import FFmpegInput
 from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.naming import sanitize_filesystem_text
@@ -112,16 +115,72 @@ class File(BaseModel):
     and sidecar source-identity checks compare the persisted path +
     ``file_size_bytes`` against live values.
 
+    ``fingerprint`` carries the source's sampled-content identity when the
+    file IS the run's source (populated by JobPhase via
+    :meth:`sampled_fingerprint`; attempt files and other ordinary files leave
+    it unset — nothing compares their content identity).
+
     Attributes:
         path:            Link to the file on disk.
         file_size_bytes: File size in bytes, or ``None`` when unavailable
                          (e.g. the file is a pipe or the stat failed).
+        fingerprint:     Sampled-content identity — present on the run's
+                         source ``File`` only.
     """
 
     model_config = ConfigDict(frozen=True)
 
     path:            LongPathYaml
     file_size_bytes: int | None = None
+    fingerprint:     Fingerprint | None = None
+
+    _FINGERPRINT_WINDOW_BYTES: ClassVar[int] = 1_048_576
+    """Sampled-window size (~1 MiB): head + tail + two interior windows."""
+
+    @classmethod
+    def sampled_fingerprint(cls, path: Path) -> Fingerprint:
+        """Derive the source's sampled-content fingerprint (spec Req 30).
+
+        Reads head + tail + two interior windows (~1 MiB each, deterministic
+        offsets), hashing the concatenation with blake2b-128; ``size`` is the
+        file size. Threat model — accident only: the digest guards against
+        accidental wholesale replacement (re-mux/re-download of a same-named
+        file) and in-window corruption; it does NOT promise detection of
+        isolated mid-file bit rot (coverage is too thin) and NOT adversarial
+        tampering (fixed windows are trivially preserved by an attacker).
+
+        Args:
+            path: The file to sample.
+
+        Returns:
+            The fingerprint (``size`` = file size in bytes).
+
+        Raises:
+            OSError: When the file cannot be read — a fatal at the computing
+                     site (Job), never a carried ``None``.
+        """
+        size = path.stat().st_size
+        digest = hashlib.blake2b(digest_size=FINGERPRINT_DIGEST_SIZE_BYTES)
+        with open(path, "rb") as fh:
+            for offset in cls._fingerprint_window_offsets(size):
+                fh.seek(offset)
+                digest.update(fh.read(cls._FINGERPRINT_WINDOW_BYTES))
+        return Fingerprint(size=size, token=digest.hexdigest())
+
+    @classmethod
+    def _fingerprint_window_offsets(cls, size: int) -> list[int]:
+        """The four deterministic sample offsets: head, 1/3, 2/3, tail.
+
+        For files smaller than the windows the reads simply overlap or come
+        up empty (seeks past EOF read zero bytes) — the derivation stays
+        total and deterministic for every size, including zero.
+        """
+        return sorted({
+            0,
+            size // 3,
+            (size * 2) // 3,
+            max(0, size - cls._FINGERPRINT_WINDOW_BYTES),
+        })
 
 
 # ---------------------------------------------------------------------------

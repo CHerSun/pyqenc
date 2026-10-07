@@ -326,14 +326,28 @@ class JobPhase(Phase[JobPhaseResult]):
     def _probe_file(self) -> File:
         """Construct the run's single :class:`File`, eagerly from the filesystem.
 
+        The source's sampled-content fingerprint is derived here (Req 30) —
+        computed once per run and carried by the live ``File``, so downstream
+        phases compare their persisted identity key against it without ever
+        re-hashing the source.
+
         Returns:
-            The source ``File`` (path + size; size is ``None`` when the stat
-            fails).
+            The source ``File`` (path + size + fingerprint; size is ``None``
+            when the stat fails).
+
+        Raises:
+            OSError: When the source cannot be read for the fingerprint —
+                     a fatal at this computing site, never a carried ``None``
+                     (Req 10).
         """
         file_size_bytes = safe_stat_size(self._source)
         if file_size_bytes is None:
             logger.warning("Could not stat source file: %s", self._source)
-        return File(path=self._source, file_size_bytes=file_size_bytes)
+        return File(
+            path            = self._source,
+            file_size_bytes = file_size_bytes,
+            fingerprint     = File.sampled_fingerprint(self._source),
+        )
 
     def _find_source_mismatches(
         self,
