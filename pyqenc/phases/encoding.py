@@ -2168,6 +2168,18 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _invalidate(self) -> None:
+        """Deliberately EMPTY — the split's case study (Req 38/54).
+
+        The shared attempt/winner namespace's keys all live at optimization
+        (identity, facet, fingerprints, mode, targets/pinned, sampling,
+        chunk-set); winner currency is certified cross-phase by
+        ``optimization.yaml``. Encoding carries no key of its own, so this
+        hook performs nothing — recovery is classification plus the
+        consumption-triggered winner-layer curation.
+        """
+        return
+
     def _recover(self) -> Recovery:
         """Classification-only recovery over the shared namespace.
 

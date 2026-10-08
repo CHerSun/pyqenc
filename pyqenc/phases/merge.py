@@ -430,6 +430,47 @@ class MergePhase(Phase[MergePhaseResult]):
 
         return None
 
+    def _invalidate(self) -> None:
+        """The ONE deliverable-layer invalidation: the identity condition.
+
+        Reads the PER-OUTPUT records (they are the acceptance keys —
+        ``merge.yaml`` carries no identity; an empty ``merged/`` carries no
+        identity and nothing to invalidate, Req 27/60/M-7): any output's
+        recorded source identity contradicting the live source is
+        catastrophic — fatal without the ``--force`` permission; with it,
+        wipe ``merged/`` and ``merge.yaml``. Every other production-basis
+        change is a per-file provenance mismatch handled by the
+        classification (re-merge in place — deliverables are retained until
+        replaced, Req 60).
+
+        Raises:
+            RecoveryError: On an identity mismatch without ``--force``.
+        """
+        job_result = self._deps[JobPhase]
+        merged_dir = job_result.work_dir / MERGED_OUTPUT_DIR
+        merge_yaml = job_result.work_dir / MergePhase.SIDECAR_NAME
+
+        merged_dir.mkdir(parents=True, exist_ok=True)
+        for existing in sorted(merged_dir.glob("*.yaml")):
+            record = MergePhase._load_merge_sidecar(existing)
+            if record is not None and identity_changed(
+                record.provenance.source, job_result.source_fingerprint,
+            ):
+                if not job_result.force:
+                    raise RecoveryError(
+                        "Source content identity mismatch (a merged output's "
+                        "provenance) — the deliverables belong to a different source.  "
+                        "Re-run with --force to grant permission to wipe merged/ and "
+                        "re-merge the new source."
+                    )
+                logger.warning(
+                    "Source identity mismatch (--force granted — wiping merged/ "
+                    "and merge.yaml)"
+                )
+                shutil.rmtree(merged_dir, ignore_errors=True)
+                merge_yaml.unlink(missing_ok=True)
+                return
+
     def _recover(self) -> Recovery:
         """Per-file acceptance over the merged outputs (Req 49).
 
@@ -458,41 +499,14 @@ class MergePhase(Phase[MergePhaseResult]):
         job_result = self._deps[JobPhase]
         work_dir   = job_result.work_dir
         merged_dir = work_dir / MERGED_OUTPUT_DIR
-        merge_yaml = work_dir / MergePhase.SIDECAR_NAME
 
-        # Step 1 — identity key (Req 27/60): the one permission-gated
-        # deliverable wipe, read from the PER-OUTPUT records (they are the
-        # acceptance keys — merge.yaml carries no identity). An empty
-        # merged/ carries no identity and nothing to invalidate.
+        # The identity scan lives in _invalidate (disk effects); the
+        # classification below reads post-invalidation disk truth.
         merged_dir.mkdir(parents=True, exist_ok=True)
-        identity_mismatch = False
-        for existing in sorted(merged_dir.glob("*.yaml")):
-            record = MergePhase._load_merge_sidecar(existing)
-            if record is not None and identity_changed(
-                record.provenance.source, job_result.source_fingerprint,
-            ):
-                identity_mismatch = True
-                break
-        if identity_mismatch:
-            if not job_result.force:
-                raise RecoveryError(
-                    "Source content identity mismatch (a merged output's "
-                    "provenance) — the deliverables belong to a different source.  "
-                    "Re-run with --force to grant permission to wipe merged/ and "
-                    "re-merge the new source."
-                )
-            logger.warning(
-                "Source identity mismatch (--force granted — wiping merged/ "
-                "and merge.yaml)"
-            )
-            shutil.rmtree(merged_dir, ignore_errors=True)
-            merge_yaml.unlink(missing_ok=True)
-
-        # Step 3: clean up .tmp files
         remove_stale_tmp_files(merged_dir)
 
-        # Step 4: determine expected strategies from the typed winners field —
-        # the already-cached EncodingPhase winners, distinct by safe name, in
+        # Expected strategies from the typed winners field — the
+        # already-cached EncodingPhase winners, distinct by safe name, in
         # first-seen order.
         winners = self._deps[EncodingPhase].winners
         seen: dict[str, Strategy] = {}

@@ -228,38 +228,25 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         logger.info("Scene threshold:       %s", self._config.chunking.scene_threshold)
         logger.info("Min scene length:      %s frames", self._config.chunking.min_scene_length)
 
-    def _recover(self) -> Recovery:
-        """Determine ``chunking.yaml`` currency: absent boundaries or current.
+    def _invalidate(self) -> None:
+        """Key-triggered effects over ``chunking.yaml`` (disk effects only).
 
-        Steps:
-        1. Identity key (Req 33, C-2): a persisted identity contradicting the
-           live source is catastrophic — fatal without the ``--force``
-           permission; with it the sidecar is wiped (boundaries of the old
-           source's timeline are never current). An absent key (legacy
-           sidecar) is unknown, never a mismatch.
-        2. Detection params (Req 26/45, C-1): a ``scene_threshold`` or
-           ``min_scene_length`` change discards the persisted boundaries —
-           automatic re-detect (user-initiated config edit, non-destructive:
-           chunking owns no artifacts; the sidecar is overwritten in place).
-        3. Load scene boundaries; pending when absent or empty (detection
-           must run), current otherwise.
-
-        The set-flip ledger: with current boundaries the chunk windows are
-        fully derivable and every row is ``COMPLETE`` (the set flips
-        together — chunks derive wholly from the sidecar); with absent
-        boundaries the chunk set is unknowable, so the ledger is empty.
-
-        Returns:
-            The :class:`Recovery` single source of truth.
+        Identity key (Req 33, C-2): a persisted identity contradicting the
+        live source is catastrophic — fatal without the ``--force``
+        permission; with it the sidecar is wiped (boundaries of the old
+        source's timeline are never current). Detection params (Req 26/45,
+        C-1): a ``scene_threshold`` / ``min_scene_length`` change discards
+        the persisted boundaries — automatic re-detect (user-initiated
+        config edit, non-destructive: chunking owns no artifacts; the
+        sidecar is overwritten in place). Absent keys are unknown, never a
+        mismatch (Req 32).
 
         Raises:
             RecoveryError: On an identity mismatch without permission.
         """
         job_result = self._deps[JobPhase]
-        work_dir   = job_result.work_dir
-        yaml_path  = work_dir / ChunkingPhase.SIDECAR_NAME
+        yaml_path  = job_result.work_dir / ChunkingPhase.SIDECAR_NAME
 
-        # Step 1: identity key.
         sidecar = self._load_sidecar(yaml_path)
         if sidecar is not None and identity_changed(sidecar.source, job_result.source_fingerprint):
             if not job_result.force:
@@ -276,7 +263,6 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
             yaml_path.unlink(missing_ok=True)
             sidecar = None
 
-        # Step 2: detection-params keys — automatic re-detect.
         if sidecar is not None and self._params_changed(sidecar):
             logger.info(
                 "Scene detection parameters changed (threshold %s→%s, min length %s→%s) "
@@ -285,9 +271,23 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
                 sidecar.min_scene_length, self._config.chunking.min_scene_length,
             )
             yaml_path.unlink(missing_ok=True)
-            sidecar = None
 
-        # Step 3: load boundaries.
+    def _recover(self) -> Recovery:
+        """Classify the persisted boundaries (the set-flip ledger).
+
+        Runs after :meth:`_invalidate` settled the sidecar on disk. With
+        current boundaries the chunk windows are fully derivable and every
+        row is ``COMPLETE`` (the set flips together — chunks derive wholly
+        from the sidecar); with absent boundaries the chunk set is
+        unknowable, so the ledger is empty.
+
+        Returns:
+            The :class:`Recovery` single source of truth.
+        """
+        work_dir = self._deps[JobPhase].work_dir
+        yaml_path = work_dir / ChunkingPhase.SIDECAR_NAME
+
+        sidecar = self._load_sidecar(yaml_path)
         if sidecar is not None and sidecar.scenes:
             self._recovered_scenes = [
                 SceneBoundary(frame=record.frame or 0, timestamp_seconds=record.timestamp_seconds)

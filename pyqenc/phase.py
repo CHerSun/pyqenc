@@ -490,13 +490,19 @@ class Phase[ResultT: PhaseResult](ABC):
             emit_phase_start(self.name, self._logger)
         self._log_key_params()
 
-        # 6. Timed recovery — the single source of truth.
+        # 6. Timed invalidation + classification. ``_invalidate()`` runs the
+        #    key-triggered effects FIRST (disk-only: wipes, own-sidecar
+        #    rewrites, fatals via :class:`RecoveryError`); the
+        #    classification-only ``_recover()`` then re-reads disk truth —
+        #    no state passes between the hooks in memory (spec 2026-10-07,
+        #    Req 54; the load-bearing invariant of the split).
         try:
             with self._collector.time(MetricKey.RECOVERY):
+                self._invalidate()
                 recovery = self._recover()
         except RecoveryError as exc:
-            # Fatal recover-time invalidation — a hard stop (same severity the
-            # phases already used for mode/probe/source mismatches).
+            # Fatal invalidation — a hard stop (same severity the phases
+            # already used for mode/probe/source mismatches).
             self._logger.critical(exc.message)
             self.result = self._make_result(PhaseOutcome.FAILED, [], exc.message)
             return self.result
@@ -663,16 +669,36 @@ class Phase[ResultT: PhaseResult](ABC):
             message or f"all {self._recovery_unit()}s reused",
         )
 
+    def _invalidate(self) -> None:
+        """Key-triggered invalidation effects — always DISK effects only.
+
+        Compares the phase's own persisted keys against the current inputs
+        and applies effects from the fixed vocabulary (fatal via
+        :class:`RecoveryError` / wipe-own / conservative re-derive /
+        rewrite-own-sidecar) plus the consumption-triggered curation that
+        belongs to the invalidation domain. The template sequences this
+        BEFORE :meth:`_recover`; effects are disk effects so classification
+        re-reads disk truth with no in-memory coupling between the hooks
+        (spec 2026-10-07, Req 54/37). The default is a no-op — a phase with
+        no keys of its own (encoding) keeps it empty.
+
+        Raises:
+            RecoveryError: On a fatal-band condition without permission.
+        """
+        return
+
     @abstractmethod
     def _recover(self) -> Recovery:
-        """Scan disk and build the single source of truth for this run.
+        """Classify the phase's artifacts from disk truth (presence only).
 
-        Owns force-wipe, invalidation, ``.tmp`` pre-clean, and classification.
-        Completeness is presence-based only (a present file is never
-        incomplete — atomic writes guarantee it); invalidation MAY read
-        persisted settings and raises :class:`RecoveryError` on fatal
-        mismatch. The returned artifact list must include unwanted-but-present
-        entries; ``wanted`` is derived from external input, never mutated here.
+        Runs AFTER :meth:`_invalidate` settled every key-triggered effect on
+        disk: this hook is classification-only — consume payload-owned
+        expected names out of listings, build the ledger rows, surface
+        leftovers per the layer policy, and raise :class:`RecoveryError`
+        only for conditions that preclude classification entirely (e.g. no
+        video stream). It must not mutate anything the classification then
+        re-reads. Completeness is presence-based only; ``wanted`` derives
+        from external input, never mutated here.
 
         Returns:
             The :class:`Recovery` single source of truth.

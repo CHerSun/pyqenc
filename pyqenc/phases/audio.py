@@ -227,39 +227,19 @@ class AudioPhase(Phase[AudioPhaseResult]):
     # Recovery + invalidation
     # ------------------------------------------------------------------
 
-    def _recover(self) -> Recovery:
-        """Resolve the plan, invalidate changed chains, classify from ONE listing.
+    def _invalidate(self) -> None:
+        """Key-triggered effects over the audio outputs (disk effects only).
 
-        Steps (in execution order):
-
-        1. Resolve the working track set (``resolve_selection`` — select is
-           never persisted) and every configured chain (``resolve_chain``).
-        2. Identity key (Req 33): a persisted identity contradicting the live
-           source is catastrophic — fatal without the ``--force`` permission;
-           with it, wipe the audio dir and the sidecar (the outputs are
-           functions of the old source).
-        3. Unknown currency (Req 47, A-1): a MISSING sidecar while the audio
-           dir holds files means nothing proves what produced them — the
-           conservative treatment is a wipe + reproduce (the wipe is vacuous
-           when nothing exists).
-        4. Clean up leftover ``.tmp`` files.
-        5. Invalidate by COMPOSED names (Req 15/46): each resolved chain is
-           compared against the persisted record of the same name. A
-           **differing** chain's outputs are deleted by their exact composed
-           names (current track set × the entity composer, both extensions);
-           a chain **removed** from config likewise (cleanup). No directory
-           parsing, no listing.
-        6. Commit the updated sidecar (current chains) **before producing
-           anything** when it differs from what is on disk.
-        7. ONE listing of the audio dir feeds BOTH classification and the
-           surplus scan (Req 15, §103): each expected (track, chain) output
-           is COMPLETE iff its composed name is in the listing; names no row
-           consumed surface as present-but-unwanted surplus (retained).
-
-        Returns:
-            The :class:`Recovery` single source of truth (internal artifact
-            list: wanted expected outputs plus any present-but-unwanted
-            surplus files).
+        Identity key (Req 33): a persisted identity contradicting the live
+        source is catastrophic — fatal without permission; with it, wipe the
+        audio dir and the sidecar. Unknown currency (Req 47, A-1): a MISSING
+        sidecar while the audio dir holds files means nothing proves what
+        produced them — the conservative wipe is automatic (vacuous when
+        nothing exists). Chain invalidation (Req 15/46, nuance 4): differing
+        and removed chains' outputs are deleted by their exact COMPOSED
+        names (current track set x the entity composer — no directory
+        parsing, no listing), and the sidecar is committed BEFORE producing
+        when it differs.
 
         Raises:
             RecoveryError: On an identity mismatch without ``--force``.
@@ -269,16 +249,11 @@ class AudioPhase(Phase[AudioPhaseResult]):
         sidecar_path = work_dir / AudioPhase.SIDECAR_NAME
         audio_cfg    = job_result.config.audio
 
-        # Step 1 — resolve the working plan (selection is recomputed every run).
         tracks   = self._selected_tracks()
         resolved = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
-
-        # The phase-owned audio output dir — created up front so producing
-        # can write into it.
         audio_dir = self._output_dir(tracks, work_dir)
         audio_dir.mkdir(parents=True, exist_ok=True)
 
-        # Steps 2-3 — identity key / unknown currency.
         persisted_audio = AudioSidecar.load(sidecar_path)
         if (
             persisted_audio is not None
@@ -295,7 +270,6 @@ class AudioPhase(Phase[AudioPhaseResult]):
                 "dir and audio.yaml)"
             )
             self._wipe_audio_dir(audio_dir, sidecar_path)
-            persisted_audio = None
         elif persisted_audio is None and any(audio_dir.iterdir()):
             logger.info(
                 "audio.yaml missing — chain-output currency unknown; wiping "
@@ -303,15 +277,28 @@ class AudioPhase(Phase[AudioPhaseResult]):
             )
             self._wipe_audio_dir(audio_dir, sidecar_path)
 
-        # Step 4 — clear leftover .tmp files.
-        remove_stale_tmp_files(audio_dir)
-
-        # Steps 5-6 — invalidate differing/removed chains by composed names
-        #             and rewrite the sidecar BEFORE producing anything.
         self._invalidate_and_commit(audio_dir, sidecar_path, resolved, tracks)
 
-        # Step 7 — ONE listing before the rows: membership classification
-        #           and the surplus scan both read it.
+    def _recover(self) -> Recovery:
+        """Classification from ONE listing of the audio dir (Req 15, §103).
+
+        Runs after :meth:`_invalidate` settled the outputs on disk: the
+        single listing feeds BOTH the per-(track, chain) membership
+        classification and the surplus scan (present names no row consumed —
+        retained deliverables). Selection (``select``) is recomputed live
+        every run and never persists.
+        """
+        job_result = self._deps[JobPhase]
+        work_dir    = job_result.work_dir
+        audio_cfg   = job_result.config.audio
+
+        tracks   = self._selected_tracks()
+        resolved = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
+        audio_dir = self._output_dir(tracks, work_dir)
+        audio_dir.mkdir(parents=True, exist_ok=True)
+
+        remove_stale_tmp_files(audio_dir)
+
         listing = {f.name for f in audio_dir.iterdir() if f.is_file()}
         return Recovery.from_artifacts(self._classify(audio_dir, tracks, resolved, listing))
 

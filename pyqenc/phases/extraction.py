@@ -488,43 +488,24 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             if extraction_cfg.exclude:
                 logger.info("  Exclude:  %s", extraction_cfg.exclude)
 
-    def _recover(self) -> Recovery:
-        """Build the stream inventory and classify the extractable artifacts.
+    def _invalidate(self) -> None:
+        """Key-triggered effects over ``extraction.yaml`` and ``extracted/``.
 
-        Steps:
-
-        1. Identity-key invalidation (Req 33/47): a ``extraction.yaml``
-           identity mismatch against the live source is catastrophic —
-           fatal without the ``--force`` permission; with it, wipe
-           ``extracted/`` and the sidecar, then re-derive. A missing sidecar
-           is the unknown-currency condition (X-1): the artifacts' currency
-           is unknown, so they are conservatively wiped (the wipe is vacuous
-           when nothing exists — no existence probe) and re-extracted.
-        2. Clean up leftover ``.tmp`` files.
-        3. Resolve the inventory: load ``extraction.yaml`` when present (its
-           identity was just verified — no re-probe); otherwise enumerate via
-           ffprobe and mark the sidecar dirty.
-        4. Produce one artifact per subtitle/attachment (name owned by the
-           stream class), plus chapters and timestamps artifacts. ``wanted``
-           comes from the current include/exclude filter and ``video_required``;
-           ``state`` from the single on-disk listing — the two are orthogonal,
-           and a filter change never needs a STALE state.
-
-        Returns:
-            The :class:`Recovery` single source of truth; the artifact list
-            contains every extractable component (including ``wanted=False``).
+        Disk effects only (Req 33/47): an identity-key mismatch against the
+        live source is catastrophic — fatal without the ``--force``
+        permission; with it, wipe ``extracted/`` and the sidecar. A MISSING
+        sidecar is the unknown-currency condition (X-1): the artifacts'
+        currency is unknown, so they are conservatively wiped (the wipe is
+        vacuous when nothing exists — no existence probe) — automatic, no
+        permission (everything here re-derives from the source).
 
         Raises:
-            RecoveryError: When the source cannot be analysed at all, or on
-                an identity mismatch without permission.
+            RecoveryError: On an identity mismatch without permission.
         """
         job_result    = self._deps[JobPhase]
-        work_dir      = job_result.work_dir
-        extracted_dir = work_dir / EXTRACTED_DIR
-        sidecar_path  = work_dir / ExtractionPhase.SIDECAR_NAME
+        extracted_dir = job_result.work_dir / EXTRACTED_DIR
+        sidecar_path  = job_result.work_dir / ExtractionPhase.SIDECAR_NAME
 
-        # Step 1: identity key — catastrophic / unknown-currency (the sidecar
-        # load happens once, here; both branches end with it cleared).
         sidecar = self._load_sidecar(sidecar_path)
         if identity_changed(sidecar.source if sidecar else None,
                             job_result.source_fingerprint):
@@ -540,12 +521,10 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
                 "and re-extracting)"
             )
             self._wipe_extracted(extracted_dir, sidecar_path)
-            sidecar = None
         elif sidecar is None:
             # Unknown currency (Req 47): no record of what produced the
             # files; everything here re-derives from the source itself, so
-            # the conservative treatment is automatic (no permission — the
-            # investment band is never touched).
+            # the conservative treatment is automatic.
             if extracted_dir.exists():
                 logger.info(
                     "extraction.yaml missing — extracted/ currency unknown; "
@@ -553,11 +532,39 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
                 )
             shutil.rmtree(extracted_dir, ignore_errors=True)
 
-        # Step 2: clean up .tmp files.
+    def _recover(self) -> Recovery:
+        """Build the stream inventory and classify the extractable artifacts.
+
+        Runs after :meth:`_invalidate` settled the sidecar on disk. Steps:
+
+        1. Clean up leftover ``.tmp`` files.
+        2. Resolve the inventory: load ``extraction.yaml`` when present (its
+           identity was verified by the invalidation — no re-probe);
+           otherwise enumerate via ffprobe and mark the sidecar dirty.
+        3. Produce one artifact per subtitle/attachment (name owned by the
+           stream class), plus chapters and timestamps artifacts. ``wanted``
+           comes from the current include/exclude filter and ``video_required``;
+           ``state`` from the single on-disk listing — the two are orthogonal,
+           and a filter change never needs a STALE state.
+
+        Returns:
+            The :class:`Recovery` single source of truth; the artifact list
+            contains every extractable component (including ``wanted=False``).
+
+        Raises:
+            RecoveryError: When the source cannot be analysed at all.
+        """
+        job_result    = self._deps[JobPhase]
+        work_dir      = job_result.work_dir
+        extracted_dir = work_dir / EXTRACTED_DIR
+        sidecar_path  = work_dir / ExtractionPhase.SIDECAR_NAME
+
+        # Step 1: clean up .tmp files.
         remove_stale_tmp_files(extracted_dir)
 
-        # Step 3: resolve the stream inventory (sidecar first, no re-probe).
+        # Step 2: resolve the stream inventory (sidecar first, no re-probe).
         self._source_file = job_result.file.payload
+        sidecar = self._load_sidecar(sidecar_path)
         self._load_or_enumerate(job_result.file.payload, sidecar)
         self._normalize_extracted_paths(work_dir)
 

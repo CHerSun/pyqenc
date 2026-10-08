@@ -424,6 +424,23 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         """The recovery summary counts winning attempts (one per pair)."""
         return "attempt"
 
+    def _invalidate(self) -> None:
+        """Run the shared-namespace invalidation ladder (disk effects only).
+
+        Delegates to :meth:`_invalidate_shared_namespace` — identity /
+        probe facet / strategy-args fingerprints (fatal or permission-gated
+        wipes), the winner-band keys (automatic wipe-winners + sidecar
+        rewrite), and the §99 conservative wipe for a missing sidecar.
+        Every effect lands on disk; the classification re-reads the sidecar
+        afterwards (no in-memory handoff).
+
+        Raises:
+            RecoveryError: On a fatal-band condition without ``--force``.
+        """
+        plan     = self._deps[ProbePhase].plan
+        work_dir = self._deps[JobPhase].work_dir
+        self._invalidate_shared_namespace(work_dir, plan)
+
     def _recover(self) -> Recovery:
         """Resolve optimization state currency: invalidations first, then the ledger.
 
@@ -457,17 +474,17 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             RecoveryError: On an identity or probe change without ``--force``,
                 or when ChunkingPhase produced no chunks.
         """
-        job_result   = self._deps[JobPhase]
-        work_dir     = job_result.work_dir
-        tolerance    = self._config.encoding.optimize_tolerance
-        plan         = self._deps[ProbePhase].plan
+        work_dir  = self._deps[JobPhase].work_dir
+        tolerance = self._config.encoding.optimize_tolerance
+        plan      = self._deps[ProbePhase].plan
 
-        strategies   = plan.strategies
+        strategies = plan.strategies
 
-        # Steps 1-5 — the shared-namespace invalidation ladder (one helper
-        # with the all-strategies path; also stashes the live facet and the
-        # chunk-set fingerprint for the execute-path saves).
-        persisted = self._invalidate_shared_namespace(work_dir, plan)
+        # The invalidation ladder settled the sidecar on disk; the
+        # classification re-reads it (current keys, or absent).
+        persisted = load_optimization_sidecar(
+            work_dir / OptimizationPhase.SIDECAR_NAME,
+        )
 
         # Step 6 — the per-pair ledger. The to-test set is a projection of
         # the ledger (presence-based, both modes): a strategy with any

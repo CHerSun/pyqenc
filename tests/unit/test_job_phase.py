@@ -239,8 +239,10 @@ class TestJobPhaseLocatorUpdate:
 
         result = phase.run(dry_run=False)
 
+        # The rewrite is an invalidation disk effect (Req 54): the record is
+        # current by classification time — nothing remains to execute.
         assert result.is_complete is True
-        assert result.outcome == PhaseOutcome.COMPLETED  # the rewrite ran
+        assert result.outcome == PhaseOutcome.REUSED
         data = yaml.safe_load((work_dir / "job.yaml").read_text(encoding="utf-8"))
         assert data["source"]["path"] == str(src)
 

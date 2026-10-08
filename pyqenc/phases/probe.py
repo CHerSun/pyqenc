@@ -152,57 +152,26 @@ class ProbePhase(Phase[ProbePhaseResult]):
     # Phase hooks
     # ------------------------------------------------------------------
 
-    def _recover(self) -> Recovery:
-        """Determine ``probe.yaml`` currency: absent, invalidated, or current.
+    def _invalidate(self) -> None:
+        """Key-triggered effects over ``probe.yaml`` (disk effects only).
 
-        Steps:
-
-        1. Fail fast when the source has no video stream — a fatal
-           invalidation for every downstream video phase.
-        2. Remove a leftover ``probe.yaml.tmp`` from an interrupted write.
-        3. Identity-key invalidation (Req 33, P-1): a persisted identity that
-           contradicts the live source is catastrophic — fatal without the
-           ``--force`` permission; with it, ``probe.yaml`` is wiped and the
-           facet re-probed. An absent key (legacy sidecar) is unknown, never
-           a mismatch.
-        4. Manual ``--crop`` override (Req 43, P-2): an override EQUAL to the
-           committed crop is a no-op (the workdir is already committed to
-           it); a DIFFERING one invalidates the cached crop only (cheap
-           rewrite — the frame count stays cached). The investment
-           consequence of a real facet change is handled downstream by the
-           probe-facet keys, not here.
-
-        Returns:
-            The :class:`Recovery` single source of truth — one
-            ``Artifact[ExtendedVideoStream]`` row (``ABSENT`` with the
-            unknown-sentinel composition while pending; ``COMPLETE`` with the
-            resolved slow facet when current, stashed on ``self._resolved``).
+        The .tmp pre-clean; then the identity key (Req 33, P-1): a persisted
+        identity contradicting the live source is catastrophic — fatal
+        without the ``--force`` permission; with it, ``probe.yaml`` is wiped
+        and the facet re-probed. An absent key (legacy sidecar) is unknown,
+        never a mismatch (Req 32).
 
         Raises:
-            RecoveryError: When the source has no video stream, or on an
-                identity mismatch without permission.
+            RecoveryError: On an identity mismatch without permission.
         """
-        job_result        = self._deps[JobPhase]
-        extraction_result = self._deps[ExtractionPhase]
-        probe_yaml        = job_result.work_dir / ProbePhase.SIDECAR_NAME
+        job_result = self._deps[JobPhase]
+        probe_yaml = job_result.work_dir / ProbePhase.SIDECAR_NAME
 
-        # Step 1 — no video stream: fatal for all downstream video phases.
-        video_artifact = extraction_result.video_stream
-        if video_artifact is None:
-            raise RecoveryError(
-                "No video stream in the source — video processing cannot continue"
-            )
-        self._video_stream = video_artifact.payload
-
-        # Step 2 — .tmp pre-clean (probe.yaml is written via .tmp-then-rename).
+        # .tmp pre-clean (probe.yaml is written via .tmp-then-rename).
         remove_stale_tmp_file(probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX))
 
-        # Step 3 — identity key.
-        self._probe_state = ProbeState.load(probe_yaml)
-        if (
-            self._probe_state is not None
-            and identity_changed(self._probe_state.source, job_result.source_fingerprint)
-        ):
+        state = ProbeState.load(probe_yaml)
+        if state is not None and identity_changed(state.source, job_result.source_fingerprint):
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (probe.yaml) — the committed "
@@ -214,10 +183,33 @@ class ProbePhase(Phase[ProbePhaseResult]):
                 "and re-probing)"
             )
             probe_yaml.unlink(missing_ok=True)
-            self._probe_state = None
 
-        # Step 4 — manual crop override: equal is a no-op, differing is a
-        # cheap crop-only rewrite (frame count stays cached).
+    def _recover(self) -> Recovery:
+        """Classify ``probe.yaml`` currency: absent, invalidated, or current.
+
+        Runs after :meth:`_invalidate`. The manual ``--crop`` override is
+        classification input (Req 43, P-2): an override EQUAL to the
+        committed crop is a no-op; a DIFFERING one leaves the row pending
+        (a cheap crop-only rewrite at execute — the frame count stays
+        cached). The investment consequence of a real facet change is
+        handled downstream by the probe-facet keys, not here.
+
+        Raises:
+            RecoveryError: When the source has no video stream.
+        """
+        job_result        = self._deps[JobPhase]
+        extraction_result = self._deps[ExtractionPhase]
+        probe_yaml        = job_result.work_dir / ProbePhase.SIDECAR_NAME
+
+        # No video stream: fatal for all downstream video phases.
+        video_artifact = extraction_result.video_stream
+        if video_artifact is None:
+            raise RecoveryError(
+                "No video stream in the source — video processing cannot continue"
+            )
+        self._video_stream = video_artifact.payload
+
+        self._probe_state = ProbeState.load(probe_yaml)
         crop_override_active = (
             self._crop_params is not None
             and (

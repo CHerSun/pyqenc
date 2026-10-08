@@ -163,57 +163,36 @@ class JobPhase(Phase[JobPhaseResult]):
     # Phase hooks
     # ------------------------------------------------------------------
 
-    def _recover(self) -> Recovery:
-        """Determine ``job.yaml`` currency against the live source identity.
+    def _invalidate(self) -> None:
+        """Key-triggered effects over the persisted ``job.yaml`` record.
 
-        Steps:
-
-        1. Remove a leftover ``job.yaml.tmp`` from an interrupted write.
-        2. Probe the live source eagerly — path, size, and the sampled
-           content fingerprint (computed once per run, Req 30).
-        3. Load the persisted :class:`~pyqenc.stream_model.JobSidecar`;
-           when absent or unparseable the phase is pending (must write). A
-           ``job.yaml`` written by an older version does not parse as this
-           schema — it is treated as absent and rebuilt (pre-alpha policy:
-           no mid-work upgrades).
-        4. Compare identities (Req 33/34): a fingerprint mismatch is the
-           catastrophic condition — fatal without ``--force``; with the
-           permission granted, Job merely rewrites its own record (each
-           downstream phase's identity key re-detects the change and wipes
-           its own artifacts — no propagated wipe order exists). A
-           path-only difference with matching content is a LOCATOR UPDATE:
-           ``job.yaml`` is rewritten with no fatal and no invalidation.
-
-        The ledger carries one ``Artifact[File]`` row — ``COMPLETE`` by
-        construction once the identity is verified; the rewrite paths leave
-        it ``ABSENT`` with the freshly probed identity as the payload.
-
-        Returns:
-            The :class:`Recovery` single source of truth (one row).
+        Disk effects only (Req 54): the .tmp pre-clean; the identity
+        comparison (fatal without ``--force``); and the two rewrite-own-
+        sidecar effects — the permission-granted identity rewrite (Job
+        rewrites its own record; each downstream phase's identity key
+        re-detects the change and wipes its own artifacts — no propagated
+        wipe order exists) and the locator update (a path-only difference
+        with matching content rewrites the record with no fatal and no
+        invalidation, Req 34).
 
         Raises:
             RecoveryError: On a content-identity mismatch without ``--force``.
         """
         job_yaml = self._work_dir / JobPhase.SIDECAR_NAME
 
-        # Step 1 — .tmp pre-clean (job.yaml is written via .tmp-then-rename).
+        # .tmp pre-clean (job.yaml is written via .tmp-then-rename).
         remove_stale_tmp_file(job_yaml.with_name(job_yaml.name + TEMP_SUFFIX))
 
-        # Step 2 — the live identity, probed eagerly every run (the identity
-        # owner; downstream phases compare against this, never re-hash).
+        # The live identity, probed eagerly every run (the identity owner;
+        # downstream phases compare against this, never re-hash).
         self._file = self._probe_file()
-
-        # Step 3 — load the persisted record; absent/unparseable → must write.
-        existing = self._load_job_sidecar(job_yaml)
-        if existing is None:
-            self._stale = True
-            return Recovery.from_artifacts([
-                Artifact(payload=self._file, state=ArtifactState.ABSENT),
-            ])
-
-        # Step 4 — identity comparison: content first, path second.
         live_fingerprint = self._file.fingerprint
         assert live_fingerprint is not None, "the probed File carries its fingerprint"
+
+        existing = self._load_job_sidecar(job_yaml)
+        if existing is None:
+            return
+
         if not existing.source.fingerprint.matches(live_fingerprint):
             if not self._force:
                 raise RecoveryError(
@@ -226,10 +205,8 @@ class JobPhase(Phase[JobPhaseResult]):
                 "Source content identity mismatch (--force granted — each phase "
                 "wipes its own artifacts via its own identity key)"
             )
-            self._stale = True
-            return Recovery.from_artifacts([
-                Artifact(payload=self._file, state=ArtifactState.ABSENT),
-            ])
+            self._rewrite_record(job_yaml)
+            return
 
         if existing.source.path.resolve() != self._source.resolve():
             # Locator update (Req 34): the content is unchanged — only the
@@ -239,13 +216,54 @@ class JobPhase(Phase[JobPhaseResult]):
                 "(content identity unchanged)",
                 existing.source.path, self._source,
             )
-            self._stale = True
-            return Recovery.from_artifacts([
-                Artifact(payload=self._file, state=ArtifactState.ABSENT),
-            ])
+            self._rewrite_record(job_yaml)
 
+    def _rewrite_record(self, job_yaml: Path) -> None:
+        """Rewrite ``job.yaml`` with the live identity (a disk effect)."""
+        assert self._file is not None, "the invalidation probe stashes the File"
+        fingerprint = self._file.fingerprint
+        assert fingerprint is not None, "the probed File carries its fingerprint"
+        write_yaml_atomic(
+            job_yaml,
+            JobSidecar(source=JobSourceRecord(
+                path       = self._source,
+                fingerprint = fingerprint,
+            )).model_dump(exclude_none=True),
+        )
+
+    def _recover(self) -> Recovery:
+        """Classify the ``job.yaml`` record from disk truth (one row).
+
+        Runs after :meth:`_invalidate` settled the record on disk — the
+        classification re-reads it: a record matching the live identity and
+        locator is COMPLETE; anything else (absent, or a rewrite the
+        invalidation could not apply — e.g. a dry-run skips writes) leaves
+        the row ABSENT with the freshly probed identity as the payload.
+
+        Returns:
+            The :class:`Recovery` single source of truth (one row).
+        """
+        job_yaml = self._work_dir / JobPhase.SIDECAR_NAME
+
+        # The live identity (probed by _invalidate; re-derive defensively —
+        # classification re-reads truth, it never trusts in-memory handoff).
+        if self._file is None:
+            self._file = self._probe_file()
+        live_fingerprint = self._file.fingerprint
+        assert live_fingerprint is not None, "the probed File carries its fingerprint"
+
+        existing = self._load_job_sidecar(job_yaml)
+        current = (
+            existing is not None
+            and existing.source.fingerprint.matches(live_fingerprint)
+            and existing.source.path.resolve() == self._source.resolve()
+        )
+        self._stale = not current
         return Recovery.from_artifacts([
-            Artifact(payload=self._file, state=ArtifactState.COMPLETE),
+            Artifact(
+                payload = self._file,
+                state   = ArtifactState.COMPLETE if current else ArtifactState.ABSENT,
+            ),
         ])
 
     def _execute(self, wanted: list[Artifact], dry_run: bool) -> JobPhaseResult:
@@ -265,8 +283,8 @@ class JobPhase(Phase[JobPhaseResult]):
         """
         job_yaml = self._work_dir / JobPhase.SIDECAR_NAME
 
-        # Fresh/stale identity — recovery already probed it eagerly for the
-        # ledger row.
+        # The invalidation (or its dry-run skip) left the classification
+        # truth on disk; recovery stashed the probed File.
         assert self._file is not None, "file guaranteed by the _recover pending branches"
         fingerprint = self._file.fingerprint
         assert fingerprint is not None, "the probed File carries its fingerprint"
