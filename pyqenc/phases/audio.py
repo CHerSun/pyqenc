@@ -45,6 +45,7 @@ from pyqenc.phase import (
     PhaseResult,
     Recovery,
     RecoveryError,
+    claim_expected_name,
 )
 from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
@@ -79,35 +80,37 @@ class AudioPhaseResult(PhaseResult):
 # ---------------------------------------------------------------------------
 
 class AudioChainRecord(BaseModel):
-    """One committed chain: its identity fingerprint + output extension.
+    """One committed chain: its identity token + output extension.
 
-    The fingerprint is the invalidation key (Req 10b); the extension is the
-    name-composition fact composed-name deletions need (the fingerprint
-    alone cannot rebuild an output's name).
+    The token is the chain fingerprint's opaque hash (the invalidation key,
+    Req 10b — compared by equality only); the extension is the
+    name-composition fact composed-name deletions need (the token alone
+    cannot rebuild an output's name). Field names follow the design layout
+    (Req 61: named for what they identify, never for the mechanism).
     """
 
     model_config = ConfigDict(frozen=True)
 
-    fingerprint: Fingerprint
-    extension:   str
+    token:     str
+    extension: str
 
 
 class AudioSidecar(BaseModel):
     """Sidecar model for ``audio.yaml``.
 
-    Records the committed **intent** per chain (identity + naming fact),
-    keyed by chain name, plus the source identity key. ``select`` is
+    Records the committed **intent** per chain (identity token + naming
+    fact), keyed by chain name, plus the source identity key. ``select`` is
     deliberately NOT persisted: selection is a pure function of the current
     extracted tracks plus the current ``select`` config, recomputed for free
     every run. The sidecar never reconstructs a
     :class:`~pyqenc.audio.chain.ResolvedChain` from a record — the token is
-    opaque by design; invalidation compares fingerprints, deletions compose
-    names from the live chain or the record's extension.
+    opaque by design; invalidation compares tokens, deletions compose names
+    from the live chain or the record's extension.
 
     On-disk shape (``audio.yaml``)::
 
         chains:
-          normal: {fingerprint: {token: "9f2c…"}, extension: flac}
+          normal: {token: "9f2c…", extension: flac}
         source: {size: …, token: "…"}
 
     Attributes:
@@ -127,8 +130,9 @@ class AudioSidecar(BaseModel):
     ) -> Self:
         """Build an ``AudioSidecar`` from resolved chains.
 
-        Each record carries the chain's own fingerprint (the SAME derivation
-        the phase compares with — DRY) and its effective output extension.
+        Each record carries the chain's own fingerprint token (the SAME
+        derivation the phase compares with — DRY) and its effective output
+        extension.
 
         Args:
             resolved: Map of chain name → :class:`ResolvedChain`.
@@ -140,8 +144,8 @@ class AudioSidecar(BaseModel):
         return cls(
             chains = {
                 name: AudioChainRecord(
-                    fingerprint = chain.fingerprint,
-                    extension   = chain.encode.extension,
+                    token     = chain.fingerprint.token,
+                    extension = chain.encode.extension,
                 )
                 for name, chain in resolved.items()
             },
@@ -389,7 +393,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
         for chain_name, record in current_records.items():
             if chain_name not in prior:
                 continue
-            if prior[chain_name].fingerprint == record.fingerprint:
+            if prior[chain_name].token == record.token:
                 continue
             logger.info(
                 "Chain %r changed — invalidating its outputs for reprocessing",
@@ -449,11 +453,14 @@ class AudioPhase(Phase[AudioPhaseResult]):
 
         rows: list[Artifact] = []
         expected_names: set[str] = set()
+        claimed: dict[str, str] = {}
+        """The listing's claim registry — the Req 5 collision guard."""
 
         for stream in tracks:
             assert stream.info.layout is not None, "layout guaranteed by ExtractionPhase"
             for name, chain in resolved.items():
                 out = chain_output_path(stream, name, chain.encode.extension, audio_dir)
+                claim_expected_name(claimed, out.name, f"{stream.display_name()} × chain {name!r}")
                 expected_names.add(out.name)
                 rows.append(Artifact(
                     payload = AudioOutput(stream=stream, chain_name=name, output_path=out),

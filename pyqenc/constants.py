@@ -126,8 +126,8 @@ CHAPTERS_FILENAME = "chapters.xml"
 CHUNK_NAME_PATTERN = re.compile(
     r"^(?:\d{2,}꞉\d{2}꞉\d{2}․\d{3})-(?:\d{2,}꞉\d{2}꞉\d{2}․\d{3})$"
 )
-"""Regex that validates and matches timestamp-based chunk file stems produced by
-``_chunk_name_duration``.  A stem has the form
+"""Regex that validates and matches timestamp-based chunk ids composed by
+``VideoStreamChunk.format_chunk_id``.  A stem has the form
 ``HH꞉MM꞉SS․mmm-HH꞉MM꞉SS․mmm`` where ``꞉`` is ``TIME_SEPARATOR_SAFE`` and
 ``․`` is ``TIME_SEPARATOR_MS``."""
 

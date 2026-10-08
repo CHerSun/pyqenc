@@ -442,28 +442,18 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         self._invalidate_shared_namespace(work_dir, plan)
 
     def _recover(self) -> Recovery:
-        """Resolve optimization state currency: invalidations first, then the ledger.
+        """Classify the pair ledger from post-invalidation disk truth.
 
-        Steps:
+        Runs after :meth:`_invalidate` settled the sidecar on disk; the
+        classification re-reads it. Steps:
 
-        1. Identity key (Req 33): a persisted identity contradicting the live
-           source is catastrophic for the whole shared namespace — fatal
-           without the ``--force`` permission; with it, wipe attempts,
-           winners, and the sidecar. An absent key (legacy sidecar) is
-           unknown, never a mismatch.
-        2. Probe mismatch against ``optimization.yaml`` — fatal without
-           ``--force``.
-        3. Quality-target / metrics-sampling change → wipe ``encoded/``
-           result dirs and treat all cached strategy results as stale.
-        4. Missing sidecar with winners present → wipe ``encoded/``: no file
-           proves which parameters produced those winners, so they re-derive
-           from the attempt workspace (near-free replay via attempt
-           cache-hits).
-        5. The per-pair ledger (one ``Artifact[EncodedChunk]`` row per
+        1. The per-pair ledger (one ``Artifact[EncodedChunk]`` row per
            (test chunk, strategy) winning attempt, presence-based). The
            to-test set is its projection: any strategy with a non-``COMPLETE``
            pair has work pending; complete pairs are the reuse substrate.
-        6. Nothing to test and a persisted table covering the plan → the
+        2. The test-chunk selection: the persisted set reused only when it
+           fully survives in the current chunking output (O-6).
+        3. Nothing to test and a persisted table covering the plan → the
            fast exit seeds the display from the persisted rows (plan-scoped)
            and computes the selection live.
 
@@ -471,8 +461,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             The :class:`Recovery` single source of truth.
 
         Raises:
-            RecoveryError: On an identity or probe change without ``--force``,
-                or when ChunkingPhase produced no chunks.
+            RecoveryError: When ChunkingPhase produced no chunks.
         """
         work_dir  = self._deps[JobPhase].work_dir
         tolerance = self._config.encoding.optimize_tolerance
@@ -565,9 +554,6 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         namespace) → strategy-args fingerprints (catastrophic, per
         strategy) → winner-band keys (automatic: mode, chunk-set,
         mode-key, sampling) → missing sidecar (§99 conservative).
-
-        Requires ``self._current_probe`` / ``self._chunks_fingerprint`` to
-        be stashed first.
 
         Args:
             work_dir: The run's work dir.
@@ -663,9 +649,13 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                         "Strategy args changed (--force granted — wiping %s's "
                         "attempts and winners)", name,
                     )
+                # ONLY the changed strategies' trees go (Req 39's letter).
+                # The sidecar is rewritten immediately, so the §99
+                # unknown-currency branch below must NOT fire: other
+                # strategies' winners stay (their keys are current now).
                 self._wipe_strategies(work_dir, plan, changed_strategies)
                 save_optimization_sidecar(opt_yaml, current)
-                persisted = None
+                persisted = current
 
         # Step 4 — winner-band keys: automatic wipe-winners + sidecar rewrite
         # (a disk effect — no in-memory table clearing, Req 37-42). Mode,

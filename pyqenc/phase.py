@@ -264,6 +264,34 @@ class RecoveryError(Exception):
         self.message = message
 
 
+def claim_expected_name(claimed: dict[str, str], name: str, owner: str) -> None:
+    """Register one row's claim on an on-disk name; fail loudly on collision.
+
+    The consumption protocol's collision guard (spec 2026-10-07, Req 5): a
+    name claimed by two rows within one listing is a naming bug (or two
+    identities that sanitize to one name) — never silently accepted. Each
+    listing-consuming recovery passes a per-directory ``claimed`` map and
+    claims every expected name as it builds rows.
+
+    Args:
+        claimed: The directory's claim registry (name → owner description);
+                 one map per owned directory listing.
+        name:    The on-disk name the row consumes.
+        owner:   Human-readable description of the claiming row (for the
+                 error message).
+
+    Raises:
+        RecoveryError: When *name* was already claimed by another row.
+    """
+    prior = claimed.get(name)
+    if prior is not None:
+        raise RecoveryError(
+            f"Naming collision: '{name}' is consumed by both '{prior}' and "
+            f"'{owner}' — two artifacts claim one on-disk name."
+        )
+    claimed[name] = owner
+
+
 class PhaseContractError(RuntimeError):
     """A phase violated the Phase run contract — a programming error.
 

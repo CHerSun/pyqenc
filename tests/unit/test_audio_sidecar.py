@@ -89,7 +89,7 @@ class TestRoundTrip:
 
         restored = AudioSidecar.load(path)
         assert restored is not None
-        assert restored.chains["normal"].fingerprint == _resolved("normal", ["dyn"]).fingerprint
+        assert restored.chains["normal"].token == _resolved("normal", ["dyn"]).fingerprint.token
 
     def test_sidecar_stores_opaque_tokens_not_chain_json(self, tmp_path: Path) -> None:
         """The persisted file holds a short hash token, never the chain dump.
@@ -106,6 +106,7 @@ class TestRoundTrip:
         text = path.read_text(encoding="utf-8")
         assert "bitrate_per_channel" not in text
         assert "dynaudnorm" not in text
+        assert "token:" in text
 
 
 class TestInvalidationFingerprints:
@@ -129,7 +130,7 @@ class TestInvalidationFingerprints:
         changed_palette["peak"] = _fi("peaknorm", target_dbfs=-3.0)
         current_fp = _resolved("night", ["peak", "aac"], changed_palette).fingerprint
 
-        assert current_fp != persisted.chains["night"].fingerprint
+        assert current_fp.token != persisted.chains["night"].token
 
     def test_removed_chain_drops_from_fingerprint_map(self, tmp_path: Path) -> None:
         """Removing a chain drops its entry from the persisted fingerprint map.
@@ -166,7 +167,7 @@ class TestInvalidationFingerprints:
         assert persisted is not None
 
         current_fp = _resolved("night", ["peak", "down", "aac"]).fingerprint
-        assert current_fp == persisted.chains["night"].fingerprint
+        assert current_fp.token == persisted.chains["night"].token
 
 
 class TestAtomicWriteAndRecovery:

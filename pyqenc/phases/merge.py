@@ -94,33 +94,34 @@ class MergedProvenance(BaseModel):
 
     Every dimension is compared per-file at recovery (Req 49) except
     ``source`` — the one dimension that escalates to the phase-level
-    catastrophic condition (Req 60).
+    catastrophic condition (Req 60). Field names follow the design layout:
+    named for WHAT they identify, never for the fingerprint mechanism
+    (Req 61) — ``strategy`` IS the strategy's resolved-args fingerprint;
+    the strategy's name is already the output's own file name.
 
     Attributes:
-        source:      The source content identity — ESCALATES on mismatch.
-        strategy:    The producing strategy's display name.
-        strategy_fp: The strategy's resolved-args fingerprint.
-        mode:        The run mode tag (``fixed`` | ``search``).
-        pinned:      Fixed runs: the strategy's quantized pinned quality.
-        targets:     Search runs: the targets basis (serialised strings).
-        anchor:      Fixed compared runs: the anchor (ruler) basis.
-        probe:       The probe facet the concat was produced under.
-        sampling:    The measurement sampling factor.
-        winners:     The winner-set fingerprint (count + hash over sorted ids).
+        source:   The source content identity — ESCALATES on mismatch.
+        strategy: The producing strategy's resolved-args fingerprint.
+        mode:     The run mode tag (``fixed`` | ``search``).
+        pinned:   Fixed runs: the strategy's quantized pinned quality.
+        targets:  Search runs: the targets basis (serialised strings).
+        anchor:   Fixed compared runs: the anchor (ruler) basis.
+        probe:    The probe facet the concat was produced under.
+        sampling: The measurement sampling factor.
+        winners:  The winner-set fingerprint (count + hash over sorted ids).
     """
 
     model_config = ConfigDict(frozen=True)
 
-    source:      Fingerprint
-    strategy:    str
-    strategy_fp: Fingerprint
-    mode:        Literal["fixed", "search"]
-    pinned:      DecimalYaml | None = None
-    targets:     list[str]          = Field(default_factory=list)
-    anchor:      str | None         = None
-    probe:       ProbeFacet
-    sampling:    int
-    winners:     Fingerprint
+    source:   Fingerprint
+    strategy: Fingerprint
+    mode:     Literal["fixed", "search"]
+    pinned:   DecimalYaml | None = None
+    targets:  list[str]          = Field(default_factory=list)
+    anchor:   str | None         = None
+    probe:    ProbeFacet
+    sampling: int
+    winners:  Fingerprint
 
 
 class MergedOutputSidecar(BaseModel):
@@ -255,28 +256,26 @@ class _ProvenanceBuilder:
         collapsed = codec.quality_better == codec.quality_worse
         if self._plan.fixed_quality:
             return MergedProvenance(
-                source      = self._source,
-                strategy    = strategy.display_name(),
-                strategy_fp = strategy.fingerprint,
-                mode        = "fixed",
-                pinned      = (
+                source   = self._source,
+                strategy = strategy.fingerprint,
+                mode     = "fixed",
+                pinned   = (
                     codec.quality_better.quantize(codec.quality_granularity)
                     if collapsed else None
                 ),
-                anchor  = self._anchor,
-                probe   = self._probe,
+                anchor   = self._anchor,
+                probe    = self._probe,
                 sampling = self._sampling,
-                winners = self._winners,
+                winners  = self._winners,
             )
         return MergedProvenance(
-            source      = self._source,
-            strategy    = strategy.display_name(),
-            strategy_fp = strategy.fingerprint,
-            mode        = "search",
-            targets     = targets_as_strings(self._plan.targets),
-            probe       = self._probe,
-            sampling    = self._sampling,
-            winners     = self._winners,
+            source   = self._source,
+            strategy = strategy.fingerprint,
+            mode     = "search",
+            targets  = targets_as_strings(self._plan.targets),
+            probe    = self._probe,
+            sampling = self._sampling,
+            winners  = self._winners,
         )
 
     def acceptance_mismatch(
@@ -292,7 +291,7 @@ class _ProvenanceBuilder:
         as a mismatch (conservative).
         """
         expected = self.for_strategy(strategy)
-        if not recorded.strategy_fp.matches(expected.strategy_fp):
+        if not recorded.strategy.matches(expected.strategy):
             return "strategy fingerprint"
         if recorded.mode != expected.mode:
             return "mode"
@@ -507,11 +506,23 @@ class MergePhase(Phase[MergePhaseResult]):
 
         # Expected strategies from the typed winners field — the
         # already-cached EncodingPhase winners, distinct by safe name, in
-        # first-seen order.
+        # first-seen order. Two DISTINCT strategies claiming one safe name
+        # would consume one output name — a naming collision, failed loudly
+        # at the site (Req 5); the identical strategy appearing twice is one
+        # expected output (deduplicated).
         winners = self._deps[EncodingPhase].winners
         seen: dict[str, Strategy] = {}
         for row in winners:
-            seen.setdefault(row.payload.strategy.safe_name(), row.payload.strategy)
+            strategy = row.payload.strategy
+            existing = seen.get(strategy.safe_name())
+            if existing is not None and existing != strategy:
+                raise RecoveryError(
+                    f"Naming collision: merged output name for "
+                    f"'{strategy.safe_name()}' is claimed by two distinct "
+                    f"strategies ({existing.display_name()} and "
+                    f"{strategy.display_name()})."
+                )
+            seen[strategy.safe_name()] = strategy
         strategies = list(seen.values())
         if not strategies:
             return Recovery()
@@ -700,9 +711,10 @@ class MergePhase(Phase[MergePhaseResult]):
         (merge is not a readonly-execute phase; the template previews
         instead).
 
-        PARTIAL rows (final present, sidecar missing) skip concatenation
-        entirely — the rename-first contract makes them complete by
-        construction — and only re-measure.
+        Every pending row re-merges from the current winners — ABSENT,
+        provenance-mismatched, and the sidecar-less PARTIAL alike (the
+        unverifiable case, Req 49/50) — EXCEPT the sampling-only difference,
+        which keeps the concat and re-measures in place.
 
         Args:
             wanted:  Wanted merged-output rows from ``_recover()``.
@@ -753,17 +765,20 @@ class MergePhase(Phase[MergePhaseResult]):
                     # Sampling-only difference (Req 49): the concat is
                     # current — re-measure in place, never re-merge.
                     logger.info("Re-measuring (sampling changed): %s", strategy_name)
-                elif artifact.state == ArtifactState.PARTIAL and reason is None:
-                    # Rename-first contract: a sidecar-less final is complete
-                    # by construction — concat and propedit already succeeded,
-                    # only measurement and the sidecar are missing.
-                    logger.info("Re-measuring: %s", strategy_name)
                 elif not self._concat_and_promote(
                     strategy        = strategy,
                     output_file     = output_file,
                     source_stream   = source_stream,
                     encoded_chunks  = encoded_chunks,
                 ):
+                    # Everything else re-merges — ABSENT rows, provenance
+                    # mismatches (M-8: a targets/anchor change re-searched
+                    # winners upstream; the old concat is never current),
+                    # and the UNVERIFIABLE case (file present, sidecar
+                    # missing — Req 49/50): nothing vouches for what
+                    # produced the file, so it is re-concatenated from the
+                    # current winners in place; a crash leaves the old
+                    # output present until the promotion rename replaces it.
                     failed_strategies.append(strategy_name)
                     continue
 

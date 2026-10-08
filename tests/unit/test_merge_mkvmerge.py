@@ -710,16 +710,17 @@ class TestStaleTmpTwinSwept:
 # ---------------------------------------------------------------------------
 
 class TestPartialSalvage:
-    """A PARTIAL output (final present, sidecar missing) is completed by
-    re-measuring the existing file — no re-concatenation.
+    """A PARTIAL output (final present, sidecar missing) is UNVERIFIABLE —
+    nothing vouches for what produced the file, so it is RE-MERGED in place
+    (Req 49/50; the 2026-10-08 audit's F3: the old rename-first re-measure
+    accepted a stale concat as current after an input change between crash
+    and rerun). The old file stays present until the promotion rename.
 
-    Bug guarded: the rename-first contract guarantees a sidecar-less final
-    is complete by construction, so re-running mkvmerge over it would burn
-    the concat investment for nothing — and is impossible once cleanup has
-    removed the encoded chunks.
+    The sampling-ONLY difference keeps the concat and re-measures — that
+    case is pinned in TestPerFileAcceptance.
     """
 
-    def test_partial_is_remeasured_without_concat(self) -> None:
+    def test_partial_is_remerged_with_concat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             work_dir = tmp_path / "work"
@@ -741,20 +742,37 @@ class TestPartialSalvage:
             merged_dir.mkdir(parents=True, exist_ok=True)
             output_file = merged_dir / f"{source.stem} {_SAFE_NAME}.mkv"
             output_file.write_bytes(b"\x00" * 128)
-            # Cleanup may have removed the encoded chunks — salvage must not care.
-            chunk.unlink()
+
+            def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
+                result = MagicMock()
+                result.returncode = 0
+                result.stderr = ""
+                if cmd[0] == "mkvmerge":
+                    # mkvmerge reads its args from the options file —
+                    # materialize the tmp twin it names.
+                    import json as _json
+
+                    options_path = Path(str(cmd[1])[1:])
+                    args = _json.loads(options_path.read_text(encoding="utf-8"))
+                    tmp_out = Path(args[args.index("-o") + 1])
+                    tmp_out.parent.mkdir(parents=True, exist_ok=True)
+                    tmp_out.write_bytes(b"\x00" * 128)
+                return result
 
             with (
-                patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
+                patch(
+                    "pyqenc.phases.merge.subprocess.run",
+                    side_effect=fake_subprocess_run,
+                ) as mock_subprocess,
                 patch("pyqenc.phases.merge.get_frame_count", return_value=100),
             ):
                 result = merge.run(dry_run=False)
 
-            mock_subprocess.assert_not_called()
+            mock_subprocess.assert_called(), "unverifiable sidecar must re-merge"
             assert result.outcome == PhaseOutcome.COMPLETED, (
                 f"Expected COMPLETED, got {result.outcome} (message={result.message!r})"
             )
-            assert output_file.exists(), "Salvage must keep the existing output"
+            assert output_file.exists(), "re-merge promotes to the same final name"
             assert output_file.with_suffix(".yaml").exists(), (
                 "Sidecar must be written — the artifact completes"
             )
@@ -1198,10 +1216,9 @@ class TestPerOutputSidecarShape:
         assert data["metrics"]["vmaf_max"] == 99.0
         prov = data["provenance"]
         assert prov["mode"] == "fixed"
-        assert prov["strategy"] == "h265-aq+slow"
+        assert prov["strategy"]["token"], "strategy IS the args fingerprint (Req 61)"
         assert prov["pinned"] == "18.0"
         assert prov["anchor"] == "h265-aq+slow"
-        assert prov["strategy_fp"]["token"]
         assert prov["winners"]["size"] == 1
         assert not prov.get("targets")
 
@@ -1370,3 +1387,79 @@ class TestPerFileAcceptance:
         assert result.outcome is PhaseOutcome.FAILED
         assert "identity mismatch" in result.message.lower()
         assert "--force" in result.message
+
+
+class TestNamingCollisionLoud:
+    """Req 5: two artifacts consuming one on-disk name fail loudly — never
+    the silent setdefault coalesce the 2026-10-08 audit found."""
+
+    def test_two_distinct_strategies_with_one_safe_name_fail_loudly(
+        self, tmp_path: Path,
+    ) -> None:
+        from decimal import Decimal
+
+        from pyqenc.models import CodecConfig, Strategy
+        from pyqenc.phases.encoding import EncodingPhase as _EncodingPhase
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        chunk = work_dir / "chunk1.mkv"
+        chunk.write_bytes(b"\x00" * 64)
+        ts_file = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+        ts_file.parent.mkdir(parents=True, exist_ok=True)
+        ts_file.write_text("0\n", encoding="utf-8")
+
+        merge = _make_merge_phase(work_dir, tmp_path / "test.mkv", chunk, timestamps_path=ts_file)
+
+        codec = CodecConfig(
+            name="h265-10bit", default_quality=Decimal("20"), default_preset="slow",
+            quality_range=(Decimal("0"), Decimal("51")), presets=["slow"],
+        )
+        same_name = Strategy(preset="slow", profile="h265", codec=codec, profile_args=[])
+        other_args = Strategy(
+            preset="slow", profile="h265", codec=codec, profile_args=["-tune", "grain"],
+        )
+        assert same_name.safe_name() == other_args.safe_name()
+        assert same_name != other_args
+
+        payload = _encoded_chunk(chunk, "chunk1", "h265+slow")
+        encoding = merge._phases[_EncodingPhase]
+        encoding.result = EncodingPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="encoding complete",
+            winners=[
+                Artifact(payload=payload.model_copy(update={"strategy": same_name}), state=ArtifactState.COMPLETE),
+                Artifact(payload=payload.model_copy(update={"strategy": other_args}), state=ArtifactState.COMPLETE),
+            ],
+        )
+
+        result = merge.run(dry_run=False)
+        assert result.outcome is PhaseOutcome.FAILED
+        assert "naming collision" in result.message.lower()
+
+    def test_identical_strategy_twice_is_one_expected_output(self, tmp_path: Path) -> None:
+        """The same strategy on two winner rows (duplicate rows) deduplicates
+        silently — one identity, one output name, no collision."""
+        from pyqenc.phases.encoding import EncodingPhase as _EncodingPhase
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        chunk = work_dir / "chunk1.mkv"
+        chunk.write_bytes(b"\x00" * 64)
+        ts_file = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+        ts_file.parent.mkdir(parents=True, exist_ok=True)
+        ts_file.write_text("0\n", encoding="utf-8")
+
+        merge = _make_merge_phase(work_dir, tmp_path / "test.mkv", chunk, timestamps_path=ts_file)
+        payload = _encoded_chunk(chunk, "chunk1", "h265+slow")
+        encoding = merge._phases[_EncodingPhase]
+        encoding.result = EncodingPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="encoding complete",
+            winners=[
+                Artifact(payload=payload, state=ArtifactState.COMPLETE),
+                Artifact(payload=payload, state=ArtifactState.COMPLETE),
+            ],
+        )
+
+        recovery = merge._recover()
+        wanted = [r for r in recovery.artifacts if r.wanted]
+        assert len(wanted) == 1, "identical strategy rows collapse to one output"

@@ -29,6 +29,7 @@ from pyqenc.models import (
     Strategy,
 )
 from pyqenc.phase import Artifact, PhaseRegistry
+from pyqenc.phases.encoding import EncodingResultSidecar
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.optimization import (
     OptimizationPhase,
@@ -191,7 +192,6 @@ def _seed_winner(
 ) -> None:
     """Fabricate a COMPLETE winner pair (file + result sidecar) on disk."""
     from pyqenc.constants import ENCODED_OUTPUT_DIR
-    from pyqenc.phases.encoding import EncodingResultSidecar
     from pyqenc.stream_model import EncodedChunk as _EC
 
     strategy_dir = work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
@@ -645,7 +645,6 @@ class TestPairLedger:
         from decimal import Decimal
 
         from pyqenc.constants import ENCODED_OUTPUT_DIR
-        from pyqenc.phases.encoding import EncodingResultSidecar
         from pyqenc.stream_model import EncodedChunk as _EC
         from pyqenc.utils.yaml_utils import write_yaml_atomic
 
@@ -843,6 +842,70 @@ class TestWinnerWipeSemantics:
         phase.run(dry_run=True)
         # A dry run changes nothing — the wipe waits for the executing run.
         assert seeded.exists()
+
+
+class TestStrategyFingerprintWipe:
+    """Req 39's letter: the permission-gated args wipe removes ONLY the
+    changed strategies' attempts and winners — the §99 cascade must not
+    fire afterwards (2026-10-08 audit minor, promoted to a fix)."""
+
+    def test_only_changed_strategy_wiped(self, tmp_path: Path) -> None:
+        from pyqenc.models import Fingerprint, id_set_fingerprint
+        from pyqenc.phases.job import JobPhase as _JP
+        from pyqenc.phases.optimization import (
+            SearchOptimizationSidecar,
+            current_optimization_sidecar,
+        )
+        from pyqenc.state import ProbeFacet
+
+        # force=True grants the permission the fatal band demands.
+        phase, work_dir = _make_phase(
+            tmp_path, [_S1, _S2], optimize=True, force=True,
+        )
+        chunks = [_make_chunk(0.0, 10.0, tmp_path), _make_chunk(10.0, 20.0, tmp_path)]
+        _wire_chunks(phase, chunks)
+        for strategy in (_S1, _S2):
+            for chunk in chunks:
+                _seed_winner(work_dir, strategy, chunk)
+
+        # Persist a sidecar whose keys match the run EXCEPT S1's args
+        # fingerprint (simulating S1's codec args having changed since).
+        job      = phase._phases[_JP]
+        probe    = next(
+            ph for cls, ph in phase._phases.items() if cls.__name__ == "ProbePhase"
+        )
+        chunking = next(
+            ph for cls, ph in phase._phases.items() if cls.__name__ == "ChunkingPhase"
+        )
+        assert job.result is not None and probe.result is not None
+        assert chunking.result is not None
+        stale = current_optimization_sidecar(
+            plan        = probe.result.plan,
+            source      = job.result.source_fingerprint,
+            chunks      = id_set_fingerprint(
+                a.payload.safe_name() for a in chunking.result.chunks
+            ),
+            probe       = ProbeFacet.from_probe(probe.result),
+            sampling    = phase._config.measurement.sampling,
+            test_chunks = [c.safe_name() for c in chunks],
+            summary     = [],
+        )
+        data = stale.model_dump()
+        data["strategies"][_S1.display_name()] = Fingerprint(token="f" * 32).model_dump()
+        SearchOptimizationSidecar.model_validate(data).save(
+            work_dir / "optimization.yaml",
+        )
+
+        s1_dir = work_dir / "encoded" / _S1.safe_name()
+        s2_dir = work_dir / "encoded" / _S2.safe_name()
+        assert s1_dir.exists() and s2_dir.exists()
+
+        phase.run(dry_run=False)  # encode of S1's pairs fails on fake media
+
+        assert not s1_dir.exists(), "changed strategy's winners must be wiped"
+        assert s2_dir.exists(), "unchanged strategy's winners must SURVIVE (Req 39)"
+        for path in s2_dir.glob("*.mkv"):
+            assert path.exists()
 
 
 class TestFixedQualityBanner:

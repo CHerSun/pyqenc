@@ -56,13 +56,14 @@ from pyqenc.phase import (
     PhaseResult,
     Recovery,
     RecoveryError,
+    claim_expected_name,
 )
 from pyqenc.phases.chunking import ChunkingPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.quality import QualitySearchBase, QualitySearchV3, flatten_metric_stats
-from pyqenc.state import ArtifactState, EncodingResultSidecar, MetricsSidecar
+from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
     DecimalYaml,
     EncodedChunk,
@@ -91,6 +92,89 @@ from pyqenc.utils.yaml_utils import load_model, save_model, write_yaml_atomic
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
+
+# ---------------------------------------------------------------------------
+# Per-attempt / winner sidecars (re-homed, Req 21)
+# ---------------------------------------------------------------------------
+
+class MetricsSidecar(BaseModel):
+    """Per-attempt sidecar (``<chunk>.q<quality>.yaml`` — the attempt stem swap).
+
+    Stores ALL measured metric values — not filtered to current targets.
+    Facts of the attempt only: pass/fail against quality targets is a
+    comparison with foreign state (which targets, which sampling) and is
+    always re-evaluated from ``metrics`` where it is decided — never stored
+    here (the WINNING attempt's conclusion is recorded on
+    :class:`EncodingResultSidecar`). This is the re-judging substrate:
+    cache-hits re-judge under new targets without re-encoding.
+
+    ``resolution`` is the attempt's actual output dimensions (``'WxH'``) —
+    a fact probed after the encode (the attempt's name carries no
+    resolution, Req 9/9b); ``None`` for sidecars written before the field.
+
+    ``sampling`` records the frame subsampling factor used when the metrics
+    were measured.  On recovery, if this differs from the current config the
+    sidecar is treated as stale and the attempt is re-measured (without
+    re-encoding).  ``None`` for sidecars written before this field was added
+    — treated as unknown, no staleness check triggered.
+
+    The ``metrics`` field uses the flat ``{metric_stat: value}`` format
+    (e.g. ``vmaf_min``, ``ssim_median``) consistent with ``ChunkQualityStats``
+    serialisation.
+
+    ``frame_count`` is a fact of the attempt file, from the encode run that
+    produced it — measurement passes never change it (a re-measured attempt
+    carries its previously persisted count over).  ``0`` is the sentinel for
+    "could not be determined" (no valid video has zero frames): the attempt
+    was re-measured with no prior count on record, or the sidecar predates
+    the field.
+    """
+
+    crf:         DecimalYaml         # exact string round-trip (no float drift)
+    resolution:  str | None = None   # actual output dimensions ("WxH")
+    sampling:    int | None = None   # subsampling factor used when metrics were measured
+    frame_count: int         = 0     # frames of the attempt file (0 = unknown)
+    metrics:     dict[str, float]    # all measured values, e.g. vmaf_min, ssim_median
+
+
+class EncodingResultSidecar(BaseModel):
+    """Winner result sidecar (``<chunk_id>.yaml`` — the winner stem swap).
+
+    Written when the quality search for a ``(chunk_id, strategy)`` pair
+    concludes and the winning attempt is promoted to the static winner name.
+    Its presence means the pair is ``COMPLETE``.  ``chunk_id`` and
+    ``strategy`` are derived from the file name and directory — not stored
+    here; the winning attempt's identity is fully derivable from the pair,
+    so no back-pointer to the attempt is persisted (Req 25).
+
+    Quality-target tracking is owned exclusively by ``OptimizationPhase`` via
+    ``optimization.yaml``.  ``OptimizationPhase`` deletes stale result sidecars
+    before ``EncodingPhase`` runs, so ``EncodingPhase._recover()`` simply sees
+    ``PARTIAL`` pairs naturally when targets change.
+
+    ``metrics`` carries the TARGETED subset only — the keys the judging
+    targets read (full measured sets live on attempt sidecars, the re-judging
+    substrate, and on merged-output sidecars; phase-sidecar summaries carry
+    targeted metrics as well).
+
+    ``frame_count`` is the winning attempt's frame count carried over from
+    its attempt sidecar at finalize — the durable per-pair record the
+    end-of-run scan sums into the frame-preservation invariant.  ``0`` is
+    the "could not be determined" sentinel (the winner was accepted from a
+    re-measured attempt with no count on record).
+
+    ``crf`` and ``resolution`` are facts of this winner; recovery-time
+    classification and composition never read them — only processing-path
+    consumers (the re-merge CRF graph, the winner scan, the fixed ruler)
+    may.
+    """
+
+    crf:         DecimalYaml        # exact string round-trip (no float drift)
+    resolution:  str | None = None  # actual output dimensions ("WxH")
+    metrics:     dict[str, float]   # the TARGETED metric subset
+    frame_count: int         = 0    # frames of the winning attempt (0 = unknown)
+    targets_met: bool        = True # False when search exhausted without a passing attempt
+
 
 logger = logging.getLogger(__name__)
 
@@ -427,13 +511,13 @@ def _pair_rows(
 
 
 def _orphan_strategy_rows(work_dir: Path, strategies: list[Strategy]) -> list[Artifact[StreamFile]]:
-    """Rows for orphaned ``encoded/<strategy>/`` directories.
+    """Rows for orphaned ``encoded/<strategy>/`` directories (surfaced at optimization).
 
-    A strategy directory absent from the current selection has no
-    reconstructible entity (its Strategy object is gone) — the on-disk
-    product itself is the only identity left. Ledger-only rows (``wanted=
-    False``): retained in place, never pending; deletion only via explicit
-    cleanup.
+    A strategy directory absent from the current plan has no reconstructible
+    entity (its Strategy object is gone) — the on-disk product itself is the
+    only identity left. Ledger-only rows (``wanted=False``), surfaced by
+    optimization's pair ledger for honest reporting; encoding's winner-layer
+    curation deletes the directories themselves on its recovery (Req 17).
     """
     out_dir = work_dir / ENCODED_OUTPUT_DIR
     if not out_dir.exists():
@@ -520,7 +604,13 @@ def _recover_encoding_attempts(
         if encoded_dir.exists():
             present_names = {f.name for f in encoded_dir.iterdir() if f.is_file()}
 
+        claimed: dict[str, str] = {}
+        """This strategy dir's claim registry — the Req 5 collision guard."""
         for chunk_id in chunk_ids:
+            claim_expected_name(
+                claimed, EncodedChunk.format_winner_file_name(chunk_id),
+                f"pair {chunk_id}/{name}",
+            )
             complete = (
                 EncodedChunk.format_winner_file_name(chunk_id) in present_names
                 and EncodedChunk.format_winner_sidecar_name(chunk_id) in present_names
@@ -1765,9 +1855,9 @@ def _scan_winner_sidecars(
     """Scan every winner's result sidecar once: limiter tallies + frame counts.
 
     Derived from the encoding-phase result artifacts
-    (``encoded/<strategy>/<chunk_id>.<res>.yaml``), written for every
-    concluded pair — so the scan is identical on fresh, resumed, and
-    recovered runs, and survives intermediate cleanup of the attempt
+    (``encoded/<strategy>/<chunk_id>.yaml`` — the winner stem swap), written
+    for every concluded pair — so the scan is identical on fresh, resumed,
+    and recovered runs, and survives intermediate cleanup of the attempt
     workspace.  Winners with a missing
     sidecar, or no persisted frame count are excluded from the affected
     output and mark ``frames_known=False`` (skip semantics).

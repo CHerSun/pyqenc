@@ -36,12 +36,37 @@ from pyqenc.phase import (
     PhaseResult,
     Recovery,
     RecoveryError,
+    claim_expected_name,
 )
 from pyqenc.runner import Runner
 from pyqenc.state import ArtifactState
 from tests.test_metrics_integration import _recorded_metrics, _top_level_keys
 
 _APP_CONFIG: AppConfig = load_app_config(default_only=True)
+
+
+class TestClaimExpectedName:
+    """The Req 5 collision guard: two rows claiming one on-disk name fail loudly."""
+
+    def test_distinct_names_claim_cleanly(self) -> None:
+        claimed: dict[str, str] = {}
+        claim_expected_name(claimed, "a.mkv", "row A")
+        claim_expected_name(claimed, "b.mkv", "row B")
+        assert claimed == {"a.mkv": "row A", "b.mkv": "row B"}
+
+    def test_double_claim_raises_loudly(self) -> None:
+        claimed: dict[str, str] = {}
+        claim_expected_name(claimed, "a.mkv", "row A")
+        with pytest.raises(RecoveryError, match="Naming collision.*row A.*row B"):
+            claim_expected_name(claimed, "a.mkv", "row B")
+
+    def test_same_row_reclaiming_own_name_is_a_collision(self) -> None:
+        """Even the same owner twice is a bug — two rows built from one
+        identity would double-consume the file."""
+        claimed: dict[str, str] = {}
+        claim_expected_name(claimed, "a.mkv", "row A")
+        with pytest.raises(RecoveryError, match="Naming collision"):
+            claim_expected_name(claimed, "a.mkv", "row A")
 
 
 @dataclass
