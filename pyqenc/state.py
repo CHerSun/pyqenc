@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Self
 
 from pydantic import BaseModel, Field, model_serializer
 
-from pyqenc.audio.chain import ResolvedChain
 from pyqenc.models import (
     CropParams,
     Fingerprint,
@@ -281,97 +280,6 @@ class MeasureSidecar(BaseModel):
     sampling:                   int
     crop_params:                dict[str, int] | None = None
     metrics:                    dict[str, float]      = Field(default_factory=dict)
-
-
-class AudioSidecar(BaseModel):
-    """Sidecar model for the audio phase (``audio.yaml``).
-
-    Records ONLY a compact, per-chain **fingerprint** for each chain this
-    work-dir is committed to, keyed by chain name. ``select`` is deliberately
-    NOT persisted: selection is a pure function of the current extracted tracks
-    plus the current ``select`` config, recomputed for free every run, so there
-    is nothing to track across runs.
-
-    Each value is the chain's :attr:`~pyqenc.audio.chain.ResolvedChain.fingerprint`
-    — an opaque hash TOKEN, not the full chain JSON (the former signature;
-    spec 2026-10-07, Req 10b). The canonical chain dump is never persisted;
-    debugging a fingerprint mismatch reads the config, not the sidecar. The
-    sidecar never reconstructs a :class:`~pyqenc.audio.chain.ResolvedChain`
-    from a token: that is the whole point of the opaque form. Invalidation
-    compares the CURRENT chain's fingerprint against the persisted one for
-    the same name (equality of tokens), so the sidecar stays cheap and stable
-    while duplicating none of the config's nested structure on disk.
-
-    The sidecar records committed **intent**, decoupled from completion —
-    completion is always read from the presence of output files on disk, never
-    inferred from this sidecar. A differing or removed chain (detected
-    by fingerprint comparison) triggers invalidation of that chain's on-disk
-    outputs.
-
-    On-disk shape (``audio.yaml``)::
-
-        chains:
-          normal: {token: "9f2c…"}
-          night:  {token: "1ab7…"}
-
-    Attributes:
-        chains: Map of chain name → its fingerprint.
-        source: The source identity key (fingerprint pair, no path) — a
-                mismatch against the live source is catastrophic (Req 33);
-                ``None`` for legacy files is unknown, never a mismatch
-                (Req 32).
-    """
-
-    chains: dict[str, Fingerprint]
-    source: Fingerprint | None = None
-
-    @classmethod
-    def from_resolved(
-        cls,
-        resolved: dict[str, ResolvedChain],
-        source:   Fingerprint | None = None,
-    ) -> Self:
-        """Build an ``AudioSidecar`` from resolved chains, computing each fingerprint.
-
-        Each fingerprint is the chain's own
-        :attr:`~pyqenc.audio.chain.ResolvedChain.fingerprint` — the SAME
-        derivation the phase compares with (DRY).
-
-        Args:
-            resolved: Map of chain name → :class:`ResolvedChain`.
-            source:   The source identity key (the live fingerprint at the
-                      writing site).
-
-        Returns:
-            The sidecar holding one fingerprint per chain.
-        """
-        return cls(
-            chains = {name: chain.fingerprint for name, chain in resolved.items()},
-            source = source,
-        )
-
-    @classmethod
-    def load(cls, path: Path) -> Self | None:
-        """Load ``AudioSidecar`` from *path*.
-
-        Signatures are read back as-is (they stay strings — never reconstructed
-        into :class:`ResolvedChain` objects).
-
-        Returns:
-            ``AudioSidecar`` if the file exists and is valid, ``None`` otherwise.
-        """
-        return load_model(path, cls)
-
-    def save(self, path: Path) -> None:
-        """Write this ``AudioSidecar`` to *path* atomically.
-
-        Uses the ``.tmp``-then-rename protocol. Creates parent
-        directories as needed.
-
-        Args:
-            path: Destination YAML file path.
-        """
-        save_model(path, self)
 
 
 class MergeStrategySummary(BaseModel):

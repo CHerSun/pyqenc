@@ -31,8 +31,7 @@ from pyqenc.audio.chain import ResolvedChain, chain_output_path
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import AUDIO_OUTPUT_DIR
 from pyqenc.models import Fingerprint, PhaseOutcome
-from pyqenc.phases.audio import AudioPhase
-from pyqenc.state import AudioSidecar
+from pyqenc.phases.audio import AudioPhase, AudioSidecar
 from pyqenc.stream_model import AudioStream, AudioStreamInfo, File
 from pyqenc.utils.long_path import LongPath
 

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from pyqenc.app_config import ChainSpec, FilterInstance
 from pyqenc.audio.chain import resolve_chain
-from pyqenc.state import AudioSidecar
+from pyqenc.phases.audio import AudioSidecar
 
 
 def _fi(type_id: str, **params) -> FilterInstance:
@@ -89,7 +89,7 @@ class TestRoundTrip:
 
         restored = AudioSidecar.load(path)
         assert restored is not None
-        assert restored.chains["normal"] == _resolved("normal", ["dyn"]).fingerprint
+        assert restored.chains["normal"].fingerprint == _resolved("normal", ["dyn"]).fingerprint
 
     def test_sidecar_stores_opaque_tokens_not_chain_json(self, tmp_path: Path) -> None:
         """The persisted file holds a short hash token, never the chain dump.
@@ -129,7 +129,7 @@ class TestInvalidationFingerprints:
         changed_palette["peak"] = _fi("peaknorm", target_dbfs=-3.0)
         current_fp = _resolved("night", ["peak", "aac"], changed_palette).fingerprint
 
-        assert current_fp != persisted.chains["night"]
+        assert current_fp != persisted.chains["night"].fingerprint
 
     def test_removed_chain_drops_from_fingerprint_map(self, tmp_path: Path) -> None:
         """Removing a chain drops its entry from the persisted fingerprint map.
@@ -166,7 +166,7 @@ class TestInvalidationFingerprints:
         assert persisted is not None
 
         current_fp = _resolved("night", ["peak", "down", "aac"]).fingerprint
-        assert current_fp == persisted.chains["night"]
+        assert current_fp == persisted.chains["night"].fingerprint
 
 
 class TestAtomicWriteAndRecovery:
