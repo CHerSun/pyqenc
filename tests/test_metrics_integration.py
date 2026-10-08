@@ -320,8 +320,8 @@ class TestJobPhaseTiming:
 
         Validates: Requirements 6.5
         """
-        from pyqenc.phases.job import JobPhase
-        from pyqenc.stream_model import File, JobSidecar, JobSourceRecord
+        from pyqenc.phases.job import JobPhase, JobSidecar, JobSourceRecord
+        from pyqenc.stream_model import File
 
         config   = _make_config(tmp_path)
         volatile = _make_volatile(tmp_path)
@@ -646,8 +646,8 @@ class TestChunkingPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.stream_model import ChunkingSidecar as _CS
-        from pyqenc.stream_model import SceneRecord
+        from pyqenc.phases.chunking import ChunkingSidecar as _CS
+        from pyqenc.phases.chunking import SceneRecord
 
         outcome: dict[str, str] = {}
         work_dir = tmp_path / "work"
@@ -713,8 +713,8 @@ class TestChunkingPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.stream_model import ChunkingSidecar as _CS
-        from pyqenc.stream_model import SceneRecord
+        from pyqenc.phases.chunking import ChunkingSidecar as _CS
+        from pyqenc.phases.chunking import SceneRecord
 
         work_dir = tmp_path / "work"
         work_dir.mkdir(parents=True, exist_ok=True)

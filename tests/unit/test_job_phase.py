@@ -26,9 +26,9 @@ from pyqenc.models import (
     PhaseOutcome,
     QualityTarget,
 )
-from pyqenc.phases.job import JobPhase
+from pyqenc.phases.job import JobPhase, JobSidecar, JobSourceRecord
 from pyqenc.state import ArtifactState
-from pyqenc.stream_model import File, JobSidecar, JobSourceRecord
+from pyqenc.stream_model import File
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 # ---------------------------------------------------------------------------

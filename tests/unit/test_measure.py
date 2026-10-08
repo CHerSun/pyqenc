@@ -107,8 +107,9 @@ class TestParseDuration:
 # ---------------------------------------------------------------------------
 
 from pyqenc.models import CropParams, Fingerprint
+from pyqenc.phases.job import JobSidecar, JobSourceRecord
 from pyqenc.phases.measure import _resolve_crop
-from pyqenc.stream_model import File, JobSidecar, JobSourceRecord
+from pyqenc.stream_model import File
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 
@@ -153,7 +154,7 @@ class TestResolveCrop:
 
     def test_none_probe_yaml_with_crop_returns_crop(self, tmp_path: Path) -> None:
         """None with a probe.yaml containing crop returns that crop without reading job.yaml."""
-        from pyqenc.state import ProbeState
+        from pyqenc.phases.probe import ProbeState
 
         expected_crop = CropParams(top=138, bottom=138, left=0, right=0)
         probe = ProbeState(frame_count=1000, crop=expected_crop)
@@ -168,7 +169,7 @@ class TestResolveCrop:
         """None with probe.yaml whose crop is empty returns empty CropParams
         immediately — an empty crop is a concrete resolution, never a reason
         to keep probing the job.yaml fallback."""
-        from pyqenc.state import ProbeState
+        from pyqenc.phases.probe import ProbeState
 
         probe = ProbeState(frame_count=500)
         probe.save(tmp_path / "probe.yaml")

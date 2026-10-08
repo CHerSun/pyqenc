@@ -17,10 +17,11 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar
 
+from pydantic import BaseModel
 from scenedetect import ContentDetector, detect
 
 from pyqenc.metrics import MetricKey
-from pyqenc.models import PhaseOutcome, SceneBoundary, identity_changed
+from pyqenc.models import Fingerprint, PhaseOutcome, SceneBoundary, identity_changed
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -34,9 +35,7 @@ from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
-    ChunkingSidecar,
     ExtendedVideoStream,
-    SceneRecord,
     VideoStreamChunk,
 )
 from pyqenc.utils.alive import alive_bar
@@ -45,6 +44,51 @@ from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
+
+# ---------------------------------------------------------------------------
+# chunking.yaml — the boundaries sidecar (re-homed, Req 21)
+# ---------------------------------------------------------------------------
+
+class SceneRecord(BaseModel):
+    """One persisted scene boundary.
+
+    Attributes:
+        timestamp_seconds: The boundary's timestamp on the source timeline.
+        frame:             The detector-reported frame index — informational
+                           only; no code path depends on it.
+    """
+
+    timestamp_seconds: float
+    frame:             int | None = None
+
+
+class ChunkingSidecar(BaseModel):
+    """The ``chunking.yaml`` slice: scene boundaries + the detection keys.
+
+    Chunk windows are derived from these boundaries plus the stream duration
+    at load time — no per-chunk records, no per-chunk sidecars.
+
+    Keys (spec 2026-10-07, Req 26/31): the source identity (fingerprint
+    only) and the two detection parameters — a change in either invalidates
+    the persisted boundaries (identity: catastrophic per Req 33; params:
+    automatic re-detect, Req 45). An absent key (legacy sidecar) is unknown,
+    never a mismatch (Req 32).
+
+    Attributes:
+        scenes:           Scene boundaries in order; the first is the stream
+                          start.
+        source:           The source identity key (fingerprint only).
+        scene_threshold:  The ContentDetector threshold the boundaries were
+                          detected under.
+        min_scene_length: The minimum scene length (frames) in force at
+                          detection.
+    """
+
+    scenes:           list[SceneRecord]
+    source:           Fingerprint | None = None
+    scene_threshold:  float | None       = None
+    min_scene_length: int | None         = None
+
 
 logger = logging.getLogger(__name__)
 

@@ -4,7 +4,7 @@
 from pathlib import Path
 
 from pyqenc.models import CropParams
-from pyqenc.state import ProbeState
+from pyqenc.phases.probe import ProbeState
 
 
 class TestProbeStateRoundTrip:

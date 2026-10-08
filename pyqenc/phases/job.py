@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
+from pydantic import BaseModel, ConfigDict
+
 from pyqenc.constants import TEMP_SUFFIX
 from pyqenc.metrics import MetricKey, MetricsCollector
 from pyqenc.models import (
@@ -40,12 +42,42 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
-from pyqenc.stream_model import File, JobSidecar, JobSourceRecord
+from pyqenc.stream_model import File, LongPathYaml
 from pyqenc.utils.fs import remove_stale_tmp_file, safe_stat_size
 from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
+
+# ---------------------------------------------------------------------------
+# job.yaml — the human-facing identity record (re-homed sidecar, Req 21)
+# ---------------------------------------------------------------------------
+
+class JobSourceRecord(BaseModel):
+    """The ``job.yaml`` identity record: the locator beside the content.
+
+    Path is the RUNTIME LOCATOR (a move rewrites ``job.yaml`` and nothing
+    else — no fatal, no invalidation, Req 34); the fingerprint is the
+    identity every phase key compares against (Req 31). The file size lives
+    inside the fingerprint as its belt — it is not duplicated as a field.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    path:       LongPathYaml
+    fingerprint: Fingerprint
+
+
+class JobSidecar(BaseModel):
+    """The ``job.yaml`` slice — the one human-facing sidecar.
+
+    ``source`` names what this workdir works with (the locator + content
+    identity); it is also the standalone ``measure`` command's source
+    discovery (the sanctioned cross-sidecar read).
+    """
+
+    source: JobSourceRecord
+
 
 logger = logging.getLogger(__name__)
 

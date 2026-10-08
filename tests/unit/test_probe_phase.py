@@ -35,8 +35,8 @@ from pyqenc.models import (
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
-from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
-from pyqenc.state import ArtifactState, ProbeState
+from pyqenc.phases.probe import ProbePhase, ProbePhaseResult, ProbeState
+from pyqenc.state import ArtifactState
 from pyqenc.stream_model import File, VideoStream, VideoStreamInfo
 from tests.test_metrics_integration import (
     _dotted_groups,
@@ -293,6 +293,20 @@ class TestProbePhaseCompleted:
         assert loaded.crop is not None
         assert loaded.crop.top    == self._DETECTED_CROP.top
         assert loaded.crop.bottom == self._DETECTED_CROP.bottom
+
+    def test_probe_yaml_persists_identity_key_and_provenance(self, tmp_path: Path):
+        """Bug guarded (spec Req 23/31, found by the 2026-10-08 audit): the
+        stale custom serializer silently dropped ``source`` and
+        ``crop_source`` — probe's identity fatal was dead code from disk and
+        a manual crop's provenance always reloaded as "detected"."""
+        _, work_dir = self._run_with_mocks(tmp_path)
+
+        loaded = ProbeState.load(work_dir / "probe.yaml")
+        assert loaded is not None
+        job = _make_job_result(work_dir, tmp_path / "source.mkv")
+        assert loaded.source is not None
+        assert loaded.source.matches(job.source_fingerprint)
+        assert loaded.crop_source == "detected"
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, TypeIs, assert_never
 
+from pydantic import BaseModel
+
 from pyqenc.constants import (
     CHAPTERS_FILENAME,
     EXTRACTED_DIR,
@@ -40,7 +42,7 @@ from pyqenc.constants import (
     TIMESTAMPS_FILENAME,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import PhaseOutcome, identity_changed
+from pyqenc.models import Fingerprint, PhaseOutcome, identity_changed
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -49,6 +51,7 @@ from pyqenc.phase import (
     PhaseResult,
     Recovery,
     RecoveryError,
+    claim_expected_name,
 )
 from pyqenc.phases.job import JobPhase
 from pyqenc.state import ArtifactState
@@ -58,10 +61,8 @@ from pyqenc.stream_model import (
     AudioStream,
     AudioStreamInfo,
     Chapters,
-    ExtractionSidecar,
     File,
     StreamInfo,
-    StreamsInventory,
     SubtitleStream,
     SubtitleStreamInfo,
     VideoStream,
@@ -75,6 +76,51 @@ from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
+
+# ---------------------------------------------------------------------------
+# extraction.yaml — the stream inventory sidecar (re-homed, Req 21)
+# ---------------------------------------------------------------------------
+
+class StreamsInventory(BaseModel):
+    """The per-type stream inventory of :class:`ExtractionSidecar`.
+
+    Each entry is the stream's own info slice — the composed :class:`File` is
+    never part of a dump.
+
+    Attributes:
+        video:       The (first) video stream info, or ``None`` when absent.
+        audio:       Audio stream infos in track order.
+        subtitles:   Subtitle stream infos in track order.
+        attachments: Attachment stream infos in track order.
+    """
+
+    video:       VideoStreamInfo | None    = None
+    audio:       list[AudioStreamInfo]     = []
+    subtitles:   list[SubtitleStreamInfo]  = []
+    attachments: list[AttachmentStreamInfo] = []
+
+
+class ExtractionSidecar(BaseModel):
+    """The ``extraction.yaml`` slice: stream inventory, chapters presence,
+    source identity.
+
+    Owned by ExtractionPhase; a reuse run loads it instead of re-probing.
+    ``source`` is the identity key (the fingerprint pair, no path — Req 31):
+    a mismatch against the live source is the phase's catastrophic condition;
+    an absent key (legacy sidecar) is unknown, never a mismatch (Req 32).
+
+    Attributes:
+        source:   The source identity key (fingerprint only).
+        streams:  The per-type stream inventory (info slices).
+        chapters: Whether the source carries a chapter edition (the extracted
+                  location is the fixed ``chapters.xml`` convention — nothing
+                  per-run to record).
+    """
+
+    source:   Fingerprint | None = None
+    streams:  StreamsInventory
+    chapters: bool = False
+
 
 logger = logging.getLogger(__name__)
 
@@ -584,6 +630,8 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         on_disk_names = _on_disk_file_names(extracted_dir)
 
         rows: list[_ExtractionRow] = []
+        claimed: dict[str, str] = {}
+        """The listing's claim registry — the Req 5 collision guard."""
 
         if self._video is not None:
             # The video artifact's material components: the per-frame PTS
@@ -597,6 +645,8 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
                 container = self._video.info.extracted_path
                 assert container is not None, "materialization sets the expected location"
                 expected_video_files.add(container.name)
+            for name in expected_video_files:
+                claim_expected_name(claimed, name, self._video.display_name())
             rows.append(Artifact(
                 payload = self._video,
                 state   = _row_state(expected_video_files, on_disk_names),
@@ -613,6 +663,9 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         for stream in self._audio:
             if self._materialize:
                 assert stream.info.extracted_path is not None, "materialization sets the expected location"
+                claim_expected_name(
+                    claimed, stream.info.extracted_path.name, stream.display_name(),
+                )
                 audio_state: ArtifactState = _row_state(
                     {stream.info.extracted_path.name}, on_disk_names,
                 )
@@ -625,6 +678,9 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             ))
         for stream in self._subtitles:
             assert stream.info.extracted_path is not None
+            claim_expected_name(
+                claimed, stream.info.extracted_path.name, stream.display_name(),
+            )
             rows.append(Artifact(
                 payload = stream,
                 state   = _row_state({stream.info.extracted_path.name}, on_disk_names),
@@ -632,6 +688,9 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             ))
         for stream in self._attachments:
             assert stream.info.extracted_path is not None
+            claim_expected_name(
+                claimed, stream.info.extracted_path.name, stream.display_name(),
+            )
             rows.append(Artifact(
                 payload = stream,
                 state   = _row_state({stream.info.extracted_path.name}, on_disk_names),
@@ -640,6 +699,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
         if self._has_chapters:
             assert self._source_file is not None, "inventory resolution sets the File before rows are built"
+            claim_expected_name(claimed, CHAPTERS_FILENAME, CHAPTERS_FILENAME)
             rows.append(Artifact(
                 payload = Chapters(file=self._source_file),
                 state   = _row_state({CHAPTERS_FILENAME}, on_disk_names),

@@ -14,6 +14,7 @@ from fractions import Fraction
 from pathlib import Path
 
 import yaml
+from pydantic import BaseModel, Field
 
 from pyqenc.constants import (
     DEFAULT_SCREENSHOT_COUNT,
@@ -26,14 +27,42 @@ from pyqenc.constants import (
 )
 from pyqenc.models import CropParams
 from pyqenc.phases.extraction import _probe_streams_json
+from pyqenc.phases.job import JobSidecar
+from pyqenc.phases.probe import ProbeState
 from pyqenc.quality import ChunkQualityStats, MetricType, flatten_metric_stats
-from pyqenc.state import MeasureSidecar, ProbeState
-from pyqenc.stream_model import File, JobSidecar, VideoStream, VideoStreamInfo
+from pyqenc.stream_model import File, LongPathYaml, VideoStream, VideoStreamInfo
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg_async
 from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.log_format import fmt_key_value_table, fmt_metric_value, fmt_size_mb
 from pyqenc.utils.visualization import QualityEvaluator
 from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
+
+# ---------------------------------------------------------------------------
+# The standalone-measure sidecar (re-homed, Req 21)
+# ---------------------------------------------------------------------------
+
+class MeasureSidecar(BaseModel):
+    """Standalone measure sidecar (``<target_stem>.yaml``).
+
+    Written by the ``measure`` command alongside the quality graph and
+    screenshots.  Records source/target paths, durations, crop parameters,
+    the frame subsampling factor, and per-metric statistics.
+
+    The ``metrics`` field uses the same flat ``{metric_stat: value}`` format
+    as ``MetricsSidecar`` (e.g. ``vmaf_min``, ``ssim_median``), with all
+    ten statistics: min, p05, p10, p25, median, p75, p90, p95, max, std.
+    The YAML key for the sampling factor is ``sampling``.
+    """
+
+    source_video:               LongPathYaml
+    target_video:               LongPathYaml
+    source_duration_seconds:    float | None          = None
+    target_duration_seconds:    float | None          = None
+    effective_duration_seconds: float | None          = None
+    sampling:                   int
+    crop_params:                dict[str, int] | None = None
+    metrics:                    dict[str, float]      = Field(default_factory=dict)
+
 
 logger = logging.getLogger(__name__)
 

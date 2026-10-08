@@ -20,13 +20,17 @@ subsequent runs skip re-probing.
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar
+from pathlib import Path
+from typing import TYPE_CHECKING, ClassVar, Self
+
+from pydantic import BaseModel, model_serializer
 
 from pyqenc.constants import CROP_SOURCE_DETECTED, CROP_SOURCE_MANUAL, TEMP_SUFFIX, THICK_LINE
 from pyqenc.metrics import MetricKey
 from pyqenc.models import (
     CropParams,
     EncodingPlan,
+    Fingerprint,
     PhaseOutcome,
     identity_changed,
 )
@@ -41,17 +45,83 @@ from pyqenc.phase import (
 )
 from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
-from pyqenc.state import ProbeState
 from pyqenc.stream_model import ExtendedVideoStream, VideoStream
 from pyqenc.utils.crop import detect_crop_parameters
 from pyqenc.utils.disk_space import log_disk_space_info
 from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
 from pyqenc.utils.fs import remove_stale_tmp_file
 from pyqenc.utils.timestamps import count_frames
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
+
+# ---------------------------------------------------------------------------
+# probe.yaml — the slow-facet sidecar (re-homed, Req 21)
+# ---------------------------------------------------------------------------
+
+class ProbeState(BaseModel):
+    """Sidecar model for ``probe.yaml`` (the slow facet).
+
+    Written by ``ProbePhase`` after resolving frame count and crop.  Contains
+    only the delta over the extraction inventory: ``frame_count``, ``crop``,
+    the crop's provenance, and the source identity key.
+
+    ``frame_count=0`` is the sentinel for "could not be determined" — no valid
+    video has zero frames.  ``crop`` is non-optional: an empty
+    :class:`CropParams` means "no crop" and the key is omitted from the file
+    when empty (serialization compactness only); loading always materializes
+    a concrete crop — ``None`` ("auto") never appears past config.
+
+    ``crop_source`` is HUMAN-FACING provenance (was the committed crop a
+    manual override or a detection?) — it never participates in any
+    comparison (Req 23); downstream facet keys compare the frame count and
+    the crop values only. ``None`` for sidecars written before the field.
+
+    ``source`` is the identity key (the fingerprint pair, no path — Req 31);
+    ``None`` for legacy sidecars is unknown, never a mismatch (Req 32).
+    """
+
+    frame_count: int
+    crop:        CropParams = CropParams()
+    source:      Fingerprint | None = None
+    crop_source: str | None         = None
+
+    @model_serializer
+    def _serialize(self) -> dict:
+        """Dump with the empty crop omitted (compactness only).
+
+        Every other field persists: ``source`` (the identity key, Req 31) and
+        ``crop_source`` (the human-facing provenance, Req 23) are omitted only
+        when unset — never silently dropped.
+        """
+        data: dict = {"frame_count": self.frame_count}
+        if not self.crop.is_empty():
+            data["crop"] = self.crop.model_dump()
+        if self.source is not None:
+            data["source"] = self.source.model_dump()
+        if self.crop_source is not None:
+            data["crop_source"] = self.crop_source
+        return data
+
+    @classmethod
+    def load(cls, path: Path) -> Self | None:
+        """Load ``ProbeState`` from *path* (an absent crop materializes empty).
+
+        Returns:
+            ``ProbeState`` if the file exists and is valid, ``None`` otherwise.
+        """
+        return load_model(path, cls)
+
+    def save(self, path: Path) -> None:
+        """Write this ``ProbeState`` to *path* atomically.
+
+        Args:
+            path: Destination YAML file path.
+        """
+        save_model(path, self)
+
 
 logger = logging.getLogger(__name__)
 

@@ -16,19 +16,17 @@ from yaml import safe_dump, safe_load
 
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.models import CodecConfig, CropParams, Fingerprint, Strategy
+from pyqenc.phases.chunking import ChunkingSidecar, SceneRecord
+from pyqenc.phases.extraction import ExtractionSidecar
+from pyqenc.phases.job import JobSidecar, JobSourceRecord
 from pyqenc.stream_model import (
     AttachmentStreamInfo,
     AudioStream,
     AudioStreamInfo,
-    ChunkingSidecar,
     EncodedChunk,
     ExtendedVideoStream,
-    ExtractionSidecar,
     File,
-    JobSidecar,
-    JobSourceRecord,
     MergedVideo,
-    SceneRecord,
     SubtitleStreamInfo,
     VideoStream,
     VideoStreamChunk,
