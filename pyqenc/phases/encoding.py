@@ -18,9 +18,10 @@ from dataclasses import dataclass, field
 from dataclasses import replace as _dc_replace
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Self
 
 import yaml
+from pydantic import BaseModel, Field
 
 from pyqenc.constants import (
     APPROXIMATE_INDICATOR_SYMBOL,
@@ -33,6 +34,7 @@ from pyqenc.constants import (
     METRIC_KEY_QUALITY_MEASURE,
     NEUTRAL_INDICATOR_SYMBOL,
     SUCCESS_SYMBOL_MINOR,
+    TEMP_SUFFIX,
     THRESHOLD_ATTEMPTS_WARNING,
     WARNING_SYMBOL,
 )
@@ -41,6 +43,7 @@ from pyqenc.models import (
     AttemptMetadata,
     CleanupLevel,
     CropParams,
+    EncodingPlan,
     PhaseOutcome,
     QualityTarget,
     Strategy,
@@ -56,19 +59,12 @@ from pyqenc.phase import (
 )
 from pyqenc.phases.chunking import ChunkingPhase
 from pyqenc.phases.job import JobPhase
-from pyqenc.phases.optimization import OptimizationPhase
+from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.quality import QualitySearchBase, QualitySearchV3, flatten_metric_stats
-from pyqenc.state import (
-    ArtifactState,
-    EncodingParams,
-    EncodingResultSidecar,
-    LimiterSummary,
-    LimiterSummaryRow,
-    MetricsSidecar,
-    ProbeState,
-)
+from pyqenc.state import ArtifactState, EncodingResultSidecar, MetricsSidecar
 from pyqenc.stream_model import (
+    DecimalYaml,
     EncodedChunk,
     ExtendedVideoStream,
     VideoStream,
@@ -91,12 +87,75 @@ from pyqenc.utils.log_format import (
 )
 from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.visualization import QualityEvaluator
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.utils.yaml_utils import load_model, save_model, write_yaml_atomic
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# encoding.yaml — the replay aggregate (no keys; Req 24/61)
+# ---------------------------------------------------------------------------
+
+class LimiterSummaryRow(BaseModel):
+    """One winning-limiter row of the encoding summary table (persisted form).
+
+    Purely presentational data for ``encoding.yaml`` — rebuilt from the
+    winner sidecars on every concluded encoding pass, shown verbatim on
+    fully-reused runs.
+    """
+
+    limiter:     str                 # "<metric>_<statistic>" of the worst target
+    passed:      int
+    missed:      int
+    med_deficit: float | None = None  # median deficit among the misses
+    med_surplus: float | None = None  # median surplus among the passes (worst-target surplus)
+    med_crf:     DecimalYaml         # median winning CRF of the row's chunks
+
+
+class LimiterSummary(BaseModel):
+    """One strategy group of the encoding summary table (persisted form)."""
+
+    strategy: str
+    chunks:   int
+    rows:     list[LimiterSummaryRow]
+
+
+class EncodingSummary(BaseModel):
+    """The replay aggregate under ``encoding.yaml``'s single ``summary`` key.
+
+    ``limiter`` is the winning-limiter table (presentational — target-gated);
+    ``frames`` is the per-strategy Σ winner frame totals backing the
+    frame-preservation re-assertion on fully-reused runs. Empty ``frames``
+    holds only positive totals; empty (``{}``) marks unknown/skip semantics.
+    """
+
+    limiter: list[LimiterSummary] | None = None
+    frames:  dict[str, int]              = Field(default_factory=dict)
+
+
+class EncodingSidecar(BaseModel):
+    """``encoding.yaml`` — the ONE ``summary`` block, nothing else.
+
+    Winner currency is certified cross-phase by ``optimization.yaml``'s keys
+    (Req 24): this file carries no invalidation key, so a missing file costs
+    replay aggregates only and never invalidates anything. Freshness of the
+    summary is guaranteed by the pending gate — any invalidated pair routes
+    the run through the processing path, which rebuilds and re-saves it.
+    """
+
+    summary: EncodingSummary | None = None
+
+    @classmethod
+    def load(cls, path: Path) -> Self | None:
+        """Load ``encoding.yaml``; ``None`` when absent or unparseable."""
+        return load_model(path, cls)
+
+    def save(self, path: Path) -> None:
+        """Write this sidecar to *path* atomically."""
+        save_model(path, self)
 
 
 def _probe_resolution(path: Path) -> str | None:
@@ -1950,10 +2009,16 @@ class EncodingPhaseResult(PhaseResult):
                         per (chunk, selected strategy); consumed by Merge.
         quality_labels: Strategy display name -> quality label (settings —
                         consumed by Merge to label plots).
+        presentation_anchor: The fixed-mode presentation anchor's display
+                        name (deltas basis) — optimization's due anchor, or
+                        the scan-elected fallback on uncompared runs. NEVER
+                        a persisted key, a selection input, or merge's
+                        anchor basis (Req 59).
     """
 
-    winners:        list[Artifact[EncodedChunk]] = field(default_factory=list)
-    quality_labels: dict[str, str]               = field(default_factory=dict)
+    winners:             list[Artifact[EncodedChunk]] = field(default_factory=list)
+    quality_labels:      dict[str, str]               = field(default_factory=dict)
+    presentation_anchor: str | None                   = None
 
     @property
     def encoded_chunks(self) -> dict[str, list[EncodedChunk]]:
@@ -1996,10 +2061,9 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
     ) -> None:
         super().__init__(config, phases, collector=collector)
 
-        self.params:        EncodingParams | None     = None
-        self._persisted:    EncodingParams | None     = None
-        """Params loaded from ``encoding.yaml`` during recovery (``None`` when
-        absent) — the fast-exit source for the persisted limiter summary."""
+        self._persisted:    EncodingSidecar | None    = None
+        """The replay aggregate loaded from ``encoding.yaml`` during recovery
+        (``None`` when absent) — the fast-exit source for the summary."""
         self.quality_labels: dict[str, str]           = {}
         """Maps strategy name → quality_label (e.g. ``'CRF'``, ``'CQ'``) for all
         strategies resolved during the last ``run()`` call.  Empty until ``run()``
@@ -2103,46 +2167,44 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
     # ------------------------------------------------------------------
 
     def _recover(self) -> Recovery:
-        """Classify ``(chunk, strategy)`` pairs and check the crop snapshot.
+        """Classification-only recovery over the shared namespace.
 
         Steps:
-        1. Check crop mismatch against ``encoding.yaml`` — a probe change
-           without ``--force`` is a fatal invalidation.
-        2. Clean up leftover ``.tmp`` files.
-        3. Classify all (chunk, strategy) pairs via the shared pair-ledger
-           builders; orphaned ``encoded/<strategy>/`` directories surface as
-           ``wanted=False`` rows (kept in place; deletion only via explicit
-           cleanup).
+        1. Clean up leftover ``.tmp`` files.
+        2. Classify all (chunk, strategy) pairs via the shared pair-ledger
+           builders (static-name consumption over one listing per strategy
+           dir).
+        3. Consumption-triggered curation (winner-layer policy): orphaned
+           ``encoded/<strategy>/`` directories (strategy no longer selected)
+           and names no pair consumed (old-chunk-id winners, stray sidecars)
+           are DELETED automatically — ``encoded/`` stays merge-ready and
+           human-clean (Req 13/16/17). The attempt workspace ``encoding/``
+           is the investment layer: never classified, never auto-deleted.
+
+        Encoding carries NO invalidation of its own (Req 38): the shared
+        namespace's keys all live at optimization; winner currency is
+        certified cross-phase by ``optimization.yaml``.
 
         Returns:
             The :class:`Recovery` single source of truth.
 
         Raises:
-            RecoveryError: On a probe change without ``--force``, or when
-                chunking/optimization produced no chunks / strategies.
+            RecoveryError: When chunking/optimization produced no chunks /
+                strategies.
         """
         job_result = self._deps[JobPhase]
         work_dir   = job_result.work_dir
         enc_dir    = work_dir / ENCODING_WORKSPACE_DIR
         yaml_path  = work_dir / EncodingPhase.SIDECAR_NAME
 
-        # Step 1: probe mismatch check.
-        persisted_enc = EncodingParams.load(yaml_path)
-        self._persisted = persisted_enc
-        current_probe = ProbeState.from_probe(self._deps[ProbePhase])
-        self.params   = EncodingParams(probe=current_probe)
+        # The replay aggregate — loaded here for the fast-exit resurface;
+        # its absence costs display only, never invalidation (Req 24).
+        self._persisted = EncodingSidecar.load(yaml_path)
 
-        if persisted_enc is not None and persisted_enc.probe != current_probe:
-            raise RecoveryError(
-                "Probe params changed since last encoding run "
-                f"(persisted={persisted_enc.probe}, current={current_probe}). "
-                "Re-run with --force to delete stale encoding artifacts and continue."
-            )
-
-        # Step 2: clean up .tmp files
+        # Step 1: clean up .tmp files
         remove_stale_tmp_files(enc_dir)
 
-        # Step 3: get chunks and strategies from dependencies
+        # Step 2: get chunks and strategies from dependencies
         chunking_result     = self._deps[ChunkingPhase]
         optimization_result = self._deps[OptimizationPhase]
 
@@ -2154,14 +2216,76 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         if not strategies:
             raise RecoveryError("No strategies available from OptimizationPhase")
 
-        # Step 4: the per-pair ledger (winning attempt per chunk x strategy,
-        # presence-based) plus the orphaned-strategy rows. COMPLETE rows carry
-        # the composed winners — a REUSED run's result carries them (merge
-        # derives its expected strategies from the winners; without this, a
-        # reuse run with deleted finals finds nothing to re-merge).
+        # Step 3: the per-pair ledger (winning attempt per chunk x strategy,
+        # presence-based) plus the winner-layer curation.
         rows: list[Artifact] = _pair_rows(work_dir, chunks, strategies)
-        rows += _orphan_strategy_rows(work_dir, strategies)
+        rows += self._curate_winner_layer(work_dir, strategies, chunks)
         return Recovery.from_artifacts(rows)
+
+    def _curate_winner_layer(
+        self,
+        work_dir:   Path,
+        strategies: list[Strategy],
+        chunks:     list[VideoStreamChunk],
+    ) -> list[Artifact]:
+        """Winner-layer curation: delete what no pair consumed (Req 13/17).
+
+        Two leftovers classes, both deleted automatically (the winner layer
+        re-derives from the attempt substrate):
+
+        - orphan strategy directories (a strategy removed from the
+          selection — its attempts stay in ``encoding/``);
+        - names inside selected strategy dirs that no expected pair
+          consumed (old-chunk-id winners after a re-chunk, stray sidecars).
+
+        Curation rows (``wanted=False``) surface what was deleted for the
+        recovery line; nothing is retained in place — that policy belongs
+        to the deliverable layer.
+        """
+        curated: list[Artifact] = []
+        expected_dirs = {s.safe_name() for s in strategies}
+        chunk_ids     = {c.safe_name() for c in chunks}
+
+        out_dir = work_dir / ENCODED_OUTPUT_DIR
+        if not out_dir.exists():
+            return curated
+
+        for strategy_dir in sorted(out_dir.iterdir()):
+            if not strategy_dir.is_dir():
+                continue
+            if strategy_dir.name not in expected_dirs:
+                logger.info(
+                    "encoded/%s is orphaned (strategy no longer selected) — "
+                    "deleting the winner directory (attempts stay in encoding/)",
+                    strategy_dir.name,
+                )
+                shutil.rmtree(strategy_dir, ignore_errors=True)
+                curated.append(Artifact(
+                    payload = StreamFile(path=LongPath(strategy_dir)),
+                    state   = ArtifactState.ABSENT,
+                    wanted  = False,
+                ))
+                continue
+
+            expected_names = set()
+            for chunk_id in chunk_ids:
+                expected_names.add(EncodedChunk.format_winner_file_name(chunk_id))
+                expected_names.add(EncodedChunk.format_winner_sidecar_name(chunk_id))
+                expected_names.add(f"{chunk_id}.png")
+            for path in sorted(strategy_dir.iterdir()):
+                if path.name.endswith(TEMP_SUFFIX) or path.name in expected_names:
+                    continue
+                try:
+                    path.unlink()
+                    logger.debug("Deleted unconsumed winner-layer name: %s", path.name)
+                    curated.append(Artifact(
+                        payload = StreamFile(path=LongPath(path)),
+                        state   = ArtifactState.ABSENT,
+                        wanted  = False,
+                    ))
+                except OSError as exc:
+                    logger.warning("Could not delete %s: %s", path, exc)
+        return curated
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> EncodingPhaseResult:
         """Resurface the persisted aggregates on a fully-reused run.
@@ -2181,26 +2305,30 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             The reused ``EncodingPhaseResult``.
         """
         result = super()._reused_result(wanted, message)
-        if self._persisted is not None and self._persisted.limiter_summary is not None:
-            self._log_limiter_summary(self._persisted.limiter_summary)
+        if (
+            self._persisted is not None
+            and self._persisted.summary is not None
+            and self._persisted.summary.limiter is not None
+        ):
+            self._log_limiter_summary(self._persisted.summary.limiter)
         else:
             logger.debug("No persisted limiter summary — table skipped on reused run")
         self._reassert_frame_preservation(self._persisted)
         return result
 
-    def _reassert_frame_preservation(self, persisted: EncodingParams | None) -> None:
+    def _reassert_frame_preservation(self, persisted: EncodingSidecar | None) -> None:
         """Re-assert frame preservation from the persisted aggregate (fast exit).
 
-        Reads the single ``winners_frame_totals`` property — never per-winner
-        sidecars — and compares each strategy's total against the probe's
-        in-memory frame count.  A disagreement is surfaced as a warning (the
-        hook contract keeps the REUSED outcome); the merge-time frame
-        verification remains the hard backstop.  Empty totals (unknown)
-        keep the skip semantics and stay silent.
+        Reads the single ``summary.frames`` map — never per-winner sidecars —
+        and compares each strategy's total against the probe's in-memory
+        frame count.  A disagreement is surfaced as a warning (the hook
+        contract keeps the REUSED outcome); the merge-time frame verification
+        remains the hard backstop.  Empty totals (unknown) keep the skip
+        semantics and stay silent.
         """
-        if persisted is None:
+        if persisted is None or persisted.summary is None:
             return
-        totals = persisted.winners_frame_totals
+        totals = persisted.summary.frames
         if not totals:
             return
         probe_stream = self._deps[ProbePhase].stream
@@ -2221,27 +2349,31 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         outcome:   PhaseOutcome,
         artifacts: list[Artifact[EncodedChunk]],
         message:   str,
+        presentation_anchor: str | None = None,
     ) -> EncodingPhaseResult:
         """Assemble an ``EncodingPhaseResult`` from the pair rows.
 
         Args:
-            outcome:   The phase outcome.
+        outcome:   The phase outcome.
             artifacts: The wanted pair rows (the winners field takes the
                        complete ones).
             message:   Human-readable summary — on ``FAILED``, the error
                        description (count plus identifiers).
+            presentation_anchor: The elected presentation anchor (execute
+                       path only).
 
         Returns:
             The populated result.
         """
         return EncodingPhaseResult(
-            outcome        = outcome,
-            message        = message,
-            winners        = [
+            outcome             = outcome,
+            message             = message,
+            winners             = [
                 r for r in artifacts
                 if isinstance(r.payload, EncodedChunk) and r.state == ArtifactState.COMPLETE
             ],
-            quality_labels = dict(self.quality_labels),
+            quality_labels      = dict(self.quality_labels),
+            presentation_anchor = presentation_anchor,
         )
 
     def _execute(
@@ -2301,12 +2433,10 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         else:
             presentation_targets = plan.targets
 
-        # Persist encoding.yaml with current probe state
+        # encoding.yaml carries the replay aggregate ONLY (no keys — Req 24):
+        # a single post-success write; there is no crash-safe early write
+        # because there is no key to certify mid-run.
         encoding_yaml = work_dir / EncodingPhase.SIDECAR_NAME
-        if self.params is None:
-            self.params = EncodingParams(probe=ProbeState.from_probe(probe_result))
-        self.params.save(encoding_yaml)
-        logger.debug("Wrote encoding.yaml (crop=%s)", crop)
 
         # Run encoding via the existing encode_all_chunks function
         enc_result = encode_all_chunks(
@@ -2319,7 +2449,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             force            = False,  # attempt reuse is never bypassed by --force (permission, not a command)
             dry_run          = False,
             crop_params      = crop,
-            encoding_yaml    = None,  # already persisted above with ProbeState
+            encoding_yaml    = None,
             cleanup_level    = self._deps[JobPhase].cleanup,
             visual_hash      = self._config.encoding.visual_hash,
             metrics_sampling = self._config.measurement.sampling,
@@ -2405,27 +2535,93 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
                     source_total,
                 )
 
-        # Second post-success write (the probe-only write above stays the
-        # crash-safe early one): the winning-limiter table and the winners
-        # frame totals are persisted so fully-reused runs resurface both
+        # Anchor presentation (Req 59): optimization's due anchor is the
+        # ruler basis; when NONE was due (the all-strategies path — no test
+        # work, no measurements at optimization), the concluded scan elects
+        # a presentation anchor here: the smallest-total-size strategy with
+        # measured metrics. Presentation-only — never persisted as a key,
+        # never a selection input, never merge's anchor basis. When an
+        # anchor WAS due but no strategy carried measurements, the
+        # optimization error surfaces loudly instead of a silent election.
+        presentation_anchor = self._resolve_presentation_anchor(
+            optimization_result, scan, plan,
+            winner_sizes={
+                name: sum(
+                    p.stream.stream.file.file_size_bytes or 0
+                    for p in payloads
+                )
+                for name, payloads in enc_result.encoded_chunks.items()
+            },
+        )
+
+        # The single post-success write: the winning-limiter table and the
+        # winners frame totals persist so fully-reused runs resurface both
         # without re-reading every winner sidecar.  Only on full success — a
         # failed pair leaves the phase pending on rerun, which rebuilds them
         # via the processing path.
         if scan is not None:
-            assert self.params is not None, "params persisted before encode"
             if scan.summaries is not None:
                 self._log_limiter_summary(scan.summaries)
-            self.params = EncodingParams(
-                probe                = self.params.probe,
-                limiter_summary      = scan.summaries,
-                winners_frame_totals = scan.frame_totals() if scan.frames_known else {},
-            )
-            self.params.save(encoding_yaml)
+            EncodingSidecar(summary=EncodingSummary(
+                limiter = scan.summaries,
+                frames  = scan.frame_totals() if scan.frames_known else {},
+            )).save(encoding_yaml)
 
         outcome = PhaseOutcome.COMPLETED if enc_result.encoded_count > 0 else PhaseOutcome.REUSED
         return self._make_result(
             outcome, winners, f"{complete_count} pair(s) complete",
+            presentation_anchor=presentation_anchor,
         )
+
+    def _resolve_presentation_anchor(
+        self,
+        optimization_result: OptimizationPhaseResult,
+        scan:                _WinnerScan | None,
+        plan:                EncodingPlan,
+        winner_sizes:        dict[str, int],
+    ) -> str | None:
+        """The presentation anchor for delta display (Req 59) — never a key.
+
+        Args:
+            optimization_result: The optimization phase's result (the due
+                                anchor, when one was elected).
+            scan:                The concluded winner scan (the measured
+                                population for the fallback election).
+            plan:                The run's encoding plan (compared-vs-not).
+            winner_sizes:        Per-strategy Σ winner file sizes (the
+                                election's ordering basis).
+
+        Returns:
+            The presentation anchor's display name, or ``None`` (searched
+            runs elect nothing — their reference row is the config targets).
+        """
+        if not plan.fixed_quality:
+            return None
+        if optimization_result.anchor is not None:
+            return optimization_result.anchor
+
+        # No anchor from optimization: DUE only when the run was compared
+        # (optimize on, more than one strategy) — then a missing anchor with
+        # no measured strategy is an optimization error surfaced loudly,
+        # never silently elected around. The uncompared case (all-strategies
+        # path — no test work, no measurements at optimization) elects here:
+        # the smallest-total-size strategy with measured metrics.
+        compared = self._config.encoding.optimize and len(plan.strategies) > 1
+        measured = [
+            name for name, rows in (scan.frames if scan is not None else {}).items()
+            if rows
+        ]
+        if not measured:
+            if compared:
+                logger.error(
+                    "An anchor was due (compared fixed run) but no strategy "
+                    "carried measurements — the ruler is missing (optimization "
+                    "error); no silent election."
+                )
+            return None
+        anchor = min(measured, key=lambda name: winner_sizes.get(name, 0))
+        logger.info("Presentation anchor (elected at the winner scan): %s", anchor)
+        return anchor
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
