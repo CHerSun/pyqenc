@@ -1178,7 +1178,6 @@ class ChunkEncoder:
                         encoded              = output_file,
                         reference            = chunk.as_input(),
                         ref_crop             = self._crop_params or CropParams(),
-                        targets              = quality_targets,
                         output_dir           = output_file.parent,
                         duration_seconds     = chunk.duration_seconds,
                         fps_value            = chunk.stream.stream.info.fps_fraction,
@@ -1187,9 +1186,12 @@ class ChunkEncoder:
                         chunk_start_seconds  = chunk.start_timestamp,
                     )
                 all_metrics         = flatten_metric_stats(evaluation.metrics)
-                # Live comparator verdict — logs this attempt's pass/miss;
-                # never persisted (the attempt sidecar stores facts only).
-                attempt_targets_met = evaluation.targets_met
+                # Live comparator verdict — a DECISION after measurement
+                # (Req 53), never persisted (the attempt sidecar stores
+                # facts only).
+                attempt_targets_met = not QualitySearchBase.failed_targets(
+                    all_metrics, quality_targets,
+                )
             else:
                 all_metrics         = {}
                 attempt_targets_met = True

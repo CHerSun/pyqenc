@@ -318,8 +318,8 @@ async def _run_metrics(
 ) -> ChunkQualityStats:
     """Run quality metric computation for one source/target pair.
 
-    Delegates to ``QualityEvaluator.evaluate_chunk_async`` with ``targets=[]`` so
-    no pass/fail evaluation is performed — only metric statistics are returned.
+    Delegates to ``QualityEvaluator.evaluate_chunk_async`` (measurement only —
+    the evaluator takes no targets, Req 51-53); metric statistics are returned.
 
     Args:
         source_video:     Reference (original) video path.
@@ -342,7 +342,6 @@ async def _run_metrics(
         encoded          = target_video,
         reference        = FFmpegInput(path=source_video),
         ref_crop         = crop_params,
-        targets          = [],
         output_dir       = metrics_dir,
         duration_seconds = duration_seconds,
         fps_value        = fps_value,

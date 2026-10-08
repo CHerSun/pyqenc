@@ -19,7 +19,7 @@ from pyqenc.constants import (
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
-from pyqenc.models import CropParams, QualityTarget
+from pyqenc.models import CropParams
 from pyqenc.quality import (
     ChunkQualityStats,
     FullMetricStatistics,
@@ -1115,7 +1115,7 @@ def create_crf_plot(
 
 
 class QualityEvaluator:
-    """Evaluates encoded chunks against quality targets.
+    """Measures encoded chunks against a reference (measurement only).
 
     This class integrates with the metric runner for metric generation and
     metrics_visualization for parsing and plotting.
@@ -1243,7 +1243,6 @@ class QualityEvaluator:
         encoded:             Path,
         reference:           FFmpegInput,
         ref_crop:            CropParams,
-        targets:             list[QualityTarget],
         output_dir:          Path,
         duration_seconds:    float,
         fps_value:           Fraction | None,
@@ -1269,7 +1268,8 @@ class QualityEvaluator:
             (all other args same as ``evaluate_chunk``)
 
         Returns:
-            QualityEvaluation with metrics and target evaluation results.
+            QualityEvaluation with the measured metrics (no verdict —
+            Req 51-53: verdicts are pure functions applied by callers).
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         cwd = metrics_output_dir if metrics_output_dir is not None else output_dir
@@ -1307,7 +1307,6 @@ class QualityEvaluator:
             encoded             = encoded,
             artifacts           = artifacts,
             output_dir          = output_dir,
-            targets             = targets,
             subsample_factor    = subsample_factor,
             plot_path           = plot_path,
             fps_value           = fps_value,
@@ -1319,7 +1318,6 @@ class QualityEvaluator:
         encoded:             Path,
         reference:           FFmpegInput,
         ref_crop:            CropParams,
-        targets:             list[QualityTarget],
         output_dir:          Path,
         duration_seconds:    float,
         fps_value:           Fraction | None,
@@ -1330,7 +1328,7 @@ class QualityEvaluator:
         width:               int               = 0,
         metrics_output_dir:  Path | None       = None,
     ) -> QualityEvaluation:
-        """Evaluate encoded chunk against reference and quality targets.
+        """Measure encoded chunk against a reference (no verdict - Req 51-53).
 
         Thin sync wrapper over :meth:`evaluate_chunk_async` (the single
         implementation): runs the coroutine on a fresh event loop.  Use only
@@ -1342,7 +1340,6 @@ class QualityEvaluator:
             reference:           The reference as a runner input — a chunk
                                  window arrives as ``chunk.as_input()``.
             ref_crop:            Crop parameters for the reference input.
-            targets:             List of quality targets to evaluate against.
             output_dir:          Directory for the plot PNG.
             duration_seconds:    The comparison window's duration — supplied by
                                  the caller from the chunk window, never probed.
@@ -1358,14 +1355,14 @@ class QualityEvaluator:
                                  ``None``, uses ``output_dir``.
 
         Returns:
-            QualityEvaluation with metrics and target evaluation results.
+            QualityEvaluation with the measured metrics (no verdict —
+            Req 51-53: verdicts are pure functions applied by callers).
         """
         return asyncio.run(
             self.evaluate_chunk_async(
                 encoded             = encoded,
                 reference           = reference,
                 ref_crop            = ref_crop,
-                targets             = targets,
                 output_dir          = output_dir,
                 duration_seconds    = duration_seconds,
                 fps_value           = fps_value,
@@ -1383,13 +1380,12 @@ class QualityEvaluator:
         encoded:             Path,
         artifacts:           QualityLogs,
         output_dir:          Path,
-        targets:             list[QualityTarget],
         subsample_factor:    int,
         plot_path:           Path | None,
         fps_value:           Fraction | None,
         chunk_start_seconds: float,
     ) -> QualityEvaluation:
-        """Parse metric files, generate plot, and evaluate targets.
+        """Parse metric files, generate the plot (measurement completion).
 
         Shared post-processing used by both ``evaluate_chunk`` and
         ``evaluate_chunk_async`` after metric files have been produced.
@@ -1398,7 +1394,6 @@ class QualityEvaluator:
             encoded:             Path to the encoded video (used for plot title/path).
             artifacts:           ``QualityLogs`` returned by ``_generate_metrics``.
             output_dir:          Directory for the plot PNG.
-            targets:             Quality targets to evaluate.
             subsample_factor:    Frame subsampling factor.
             plot_path:           Explicit plot path override; auto-derived when ``None``.
             fps_value:           Frames per second for x-axis labelling.
@@ -1454,30 +1449,7 @@ class QualityEvaluator:
 
         artifacts.plot = resolved_plot_path
 
-        failed_targets: list[QualityTarget] = []
-        for target in targets:
-            metric_stats = metrics.get(MetricType(target.metric))
-            if metric_stats is None:
-                logger.warning("Target metric '%s' not available in results", target.metric)
-                failed_targets.append(target)
-                continue
-            actual_value = metric_stats.get(target.statistic)
-            if actual_value is None:
-                logger.warning(
-                    "Target statistic '%s' not available for metric '%s'",
-                    target.statistic, target.metric,
-                )
-                failed_targets.append(target)
-                continue
-            if not MetricType(target.metric).info.passes(actual_value, target.value):
-                logger.debug("Target not met: %s-%s:%s (actual: %.2f)", target.metric, target.statistic, target.value, actual_value)
-                failed_targets.append(target)
-            else:
-                logger.debug("Target met: %s-%s:%s (actual: %.2f)", target.metric, target.statistic, target.value, actual_value)
-
         return QualityEvaluation(
-            metrics        = metrics,
-            targets_met    = len(failed_targets) == 0,
-            failed_targets = failed_targets,
-            logs           = artifacts,
+            metrics = metrics,
+            logs    = artifacts,
         )

@@ -493,19 +493,19 @@ class QualityLogs:
 
 @dataclass
 class QualityEvaluation:
-    """Result of quality evaluation against targets.
+    """The measured facts of one quality evaluation (no verdict — Req 51-53).
+
+    Verdicts are decisions computed live from ``metrics`` against whatever
+    bar the caller holds (e.g. :meth:`QualitySearchBase.failed_targets`);
+    nothing here compares against foreign state.
 
     Attributes:
         metrics: Parsed quality metrics with statistics
-        targets_met: Whether all quality targets were met
-        failed_targets: List of targets that were not met
         logs: The transient metric logs/paths (``QualityLogs``)
     """
 
-    metrics:        ChunkQualityStats
-    targets_met:    bool
-    failed_targets: list[QualityTarget]
-    logs:           QualityLogs
+    metrics: ChunkQualityStats
+    logs:    QualityLogs
 
 
 # ---------------------------------------------------------------------------
@@ -854,6 +854,37 @@ class QualitySearchBase(ABC):
         if worst_target is None:
             return None
         return worst_target, worst_deficit, worst_actual
+
+    @staticmethod
+    def failed_targets(
+        metrics:         dict[str, float],
+        quality_targets: list[QualityTarget],
+    ) -> list[QualityTarget]:
+        """The pure verdict function: which targets the measured stats fail.
+
+        Measurement and verdict are separate steps (spec 2026-10-07,
+        Req 52-53): the evaluator measures; callers apply this function (or
+        their own bar) to the measured facts. A target whose metric or
+        statistic is missing from *metrics* counts as failed (never silently
+        passed).
+
+        Args:
+            metrics:         Measured quality metrics keyed by
+                             ``"<metric>_<statistic>"``.
+            quality_targets: The targets to judge against.
+
+        Returns:
+            The failing targets (empty = all met).
+        """
+        failed: list[QualityTarget] = []
+        for target in quality_targets:
+            actual = metrics.get(f"{target.metric}_{target.statistic}")
+            if actual is None:
+                failed.append(target)
+                continue
+            if not MetricType(target.metric).info.passes(actual, target.value):
+                failed.append(target)
+        return failed
 
     def _next_or_exhaust(
         self,

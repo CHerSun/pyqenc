@@ -1084,16 +1084,11 @@ class TestFixedMergeRecoveryNaming:
         assert stale.exists()  # kept in place — no blind deletion
 
 # ---------------------------------------------------------------------------
-# Mode-honest merge sidecars (unified-summaries spec, interim landing)
+# Per-output acceptance records + merge.yaml replay aggregate (G8)
 # ---------------------------------------------------------------------------
-
-from pyqenc.state import MergeParams
 
 _STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
 """Stub source identity — phases read the job File's fingerprint."""
-
-
-
 
 
 def _run_full_merge(
@@ -1105,7 +1100,7 @@ def _run_full_merge(
     """Drive MergePhase through run() with external shells mocked.
 
     Returns ``(merge_phase, merged_dir)``. One strategy's output is produced
-    with measurement mocked to a full-ish metric dict, so both sidecars land
+    with measurement mocked to a full metric dict, so both sidecars land
     on disk.
     """
     work_dir = tmp_path / "work"
@@ -1180,63 +1175,94 @@ def _run_full_merge(
     with (
         patch("pyqenc.phases.merge.subprocess.run", side_effect=fake_subprocess_run),
         patch("pyqenc.phases.merge.get_frame_count", return_value=100),
-        patch.object(MergePhase, "_measure_quality", return_value=(measured, True, None)),
+        patch.object(MergePhase, "_measure_quality", return_value=(measured, None)),
     ):
         result = merge.run(dry_run=False)
     assert result.outcome == PhaseOutcome.COMPLETED, result.message
     return merge, merged_dir
 
 
-class TestModeHonestMergeSidecars:
-    """Both merge sidecars carry mode-honest content and keys."""
+class TestPerOutputSidecarShape:
+    """The acceptance record: facts + provenance, no verdict (Req 27)."""
 
-    def test_fixed_per_video_sidecar_holds_knob_anchor_full_metrics(self, tmp_path: Path) -> None:
+    def test_fixed_record_carries_provenance_and_full_metrics(self, tmp_path: Path) -> None:
         import yaml as _yaml
 
         _merge, merged_dir = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
         data = _yaml.safe_load(next(merged_dir.glob("*.yaml")).read_text(encoding="utf-8"))
-        assert data["quality"] == {"label": "CRF", "value": 18.0}
-        assert data["anchor"] == "h265-aq+slow"
-        assert "targets" not in data and "targets_met" not in data
-        # Retention: the full measured set (incl. stats outside any target set).
+        assert set(data) == {"frame_count", "metrics", "provenance"}
+        # No verdict anywhere (Req 51).
+        assert "targets_met" not in data
+        # Retention: the FULL measured set (incl. stats outside any target set).
         assert data["metrics"]["vmaf_std"] == 1.2
         assert data["metrics"]["vmaf_max"] == 99.0
+        prov = data["provenance"]
+        assert prov["mode"] == "fixed"
+        assert prov["strategy"] == "h265-aq+slow"
+        assert prov["pinned"] == "18.0"
+        assert prov["anchor"] == "h265-aq+slow"
+        assert prov["strategy_fp"]["token"]
+        assert prov["winners"]["size"] == 1
+        assert not prov.get("targets")
 
-    def test_search_per_video_sidecar_unchanged(self, tmp_path: Path) -> None:
+    def test_search_record_carries_targets_basis(self, tmp_path: Path) -> None:
         import yaml as _yaml
 
         _merge, merged_dir = _run_full_merge(tmp_path, fixed=False)
         data = _yaml.safe_load(next(merged_dir.glob("*.yaml")).read_text(encoding="utf-8"))
-        assert "targets" in data and "targets_met" in data
-        assert "quality" not in data and "anchor" not in data
+        prov = data["provenance"]
+        assert prov["mode"] == "search"
+        assert prov["targets"], "search runs carry the targets basis"
+        assert not prov.get("pinned") and not prov.get("anchor")
 
-    def test_merge_yaml_keys_and_summaries_mode_honest_fixed(self, tmp_path: Path) -> None:
+
+class TestMergeYamlReplayAggregate:
+    """merge.yaml = summary + basis marker only (Req 28/61)."""
+
+    def test_summary_and_basis_only(self, tmp_path: Path) -> None:
+        from pyqenc.phases.merge import MergeSidecar
+
         merge, _ = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
-        persisted = MergeParams.load(merge._deps[JobPhase].work_dir / "merge.yaml")
+        persisted = MergeSidecar.load(merge._deps[JobPhase].work_dir / "merge.yaml")
         assert persisted is not None
-        # Fixed-run key: the ruler basis; no configured-targets key.
-        assert persisted.anchor == "h265-aq+slow"
-        assert persisted.quality_targets == []
-        # Replay-leak fields are gone.
-        assert "source_stem" not in persisted.model_dump()
-        assert "source_size_bytes" not in persisted.model_dump()
-        # Summaries carry only the rendered (config-target) stats — the
-        # measured-but-unrendered stability stats stay out.
-        [summary] = persisted.strategy_summaries
-        assert "vmaf_std" not in summary.metrics
-        assert "vmaf_max" not in summary.metrics
+        assert persisted.basis is not None
+        assert persisted.basis.mode == "fixed"
+        assert persisted.basis.anchor == "h265-aq+slow"
+        assert [row.strategy_name for row in persisted.summary] == ["h265-aq+slow"]
+        # No verdict on the replay rows (marks render live).
+        assert "targets_met" not in persisted.summary[0].model_dump()
 
-    def test_merge_yaml_search_mode_keys(self, tmp_path: Path) -> None:
+    def test_search_basis_carries_targets(self, tmp_path: Path) -> None:
+        from pyqenc.phases.merge import MergeSidecar
+
         merge, _ = _run_full_merge(tmp_path, fixed=False)
-        persisted = MergeParams.load(merge._deps[JobPhase].work_dir / "merge.yaml")
+        persisted = MergeSidecar.load(merge._deps[JobPhase].work_dir / "merge.yaml")
         assert persisted is not None
-        assert persisted.anchor is None
-        assert persisted.quality_targets, "search run keys on configured targets"
+        assert persisted.basis is not None
+        assert persisted.basis.mode == "search"
+        assert persisted.basis.targets, "search basis names the targets"
 
-    def test_fixed_target_change_does_not_invalidate(self, tmp_path: Path) -> None:
-        """Config targets drive nothing in fixed mode: changing them between
-        fixed runs must NOT delete merge sidecars (anchor/sampling/probe are
-        the only fixed-run keys)."""
+
+class TestPerFileAcceptance:
+    """Per-file provenance compare decides COMPLETE vs re-merge (Req 49)."""
+
+    def _recover_state(self, merge, strategy_name: str):
+        recovery = merge._recover()
+        row = next(
+            r for r in recovery.artifacts
+            if r.wanted and r.payload.strategy.display_name() == strategy_name
+        )
+        return recovery, row
+
+    def test_matching_provenance_accepts(self, tmp_path: Path) -> None:
+        merge, _ = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
+        _recovery, row = self._recover_state(merge, "h265-aq+slow")
+        assert row.state is ArtifactState.COMPLETE
+
+    def test_fixed_config_target_change_does_not_invalidate(self, tmp_path: Path) -> None:
+        """Config targets drive nothing in fixed mode (Req 40 lineage): a
+        change between fixed runs must NOT reject the output — the record
+        carries the pinned map + anchor basis, never config targets."""
         merge, merged_dir = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
         sidecar = next(merged_dir.glob("*.yaml"))
         sidecar_before = sidecar.read_text(encoding="utf-8")
@@ -1250,14 +1276,14 @@ class TestModeHonestMergeSidecars:
             quality    = (Decimal("18"), Decimal("18")),
         )
 
-        merge._recover()
-        assert sidecar.read_text(encoding="utf-8") == sidecar_before, (
-            "fixed merge must not be invalidated by a config-target change"
-        )
+        _recovery, row = self._recover_state(merge, "h265-aq+slow")
+        assert row.state is ArtifactState.COMPLETE
+        assert sidecar.read_text(encoding="utf-8") == sidecar_before
 
-    def test_fixed_anchor_change_invalidates(self, tmp_path: Path) -> None:
-        merge, merged_dir = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
-        sidecar = next(merged_dir.glob("*.yaml"))
+    def test_anchor_change_means_remerge_not_remeasure(self, tmp_path: Path) -> None:
+        """M-8: an anchor change always re-searched winners upstream — the
+        old concat is never current; recovery must NOT accept it."""
+        merge, _ = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
 
         from pyqenc.phases.optimization import OptimizationPhase as _OptPhase
 
@@ -1267,5 +1293,80 @@ class TestModeHonestMergeSidecars:
             anchor="h264+ultrafast",
         )
 
-        merge._recover()
-        assert not sidecar.exists(), "anchor change is the fixed-run key: sidecars deleted"
+        _recovery, row = self._recover_state(merge, "h265-aq+slow")
+        assert row.state is not ArtifactState.COMPLETE, "anchor mismatch must not accept"
+
+    def test_search_targets_change_means_remerge(self, tmp_path: Path) -> None:
+        merge, _ = _run_full_merge(tmp_path, fixed=False)
+        config = merge._config
+        probe_result = merge._phases[ProbePhase].result
+        assert probe_result is not None
+        probe_result.plan = config.resolve_encoding(
+            strategies = ["h265-aq+slow"],
+            targets    = ["vmaf-min:99.0"],
+        )
+
+        _recovery, row = self._recover_state(merge, "h265+slow")
+        assert row.state is not ArtifactState.COMPLETE, "targets mismatch must not accept"
+
+    def test_winner_set_change_means_remerge(self, tmp_path: Path) -> None:
+        """M-2/§86: re-searched winners under identical static names must
+        reject the stale output — only the winner-set fingerprint catches it."""
+        from pyqenc.phases.encoding import EncodingPhase as _EncodingPhase
+
+        merge, _ = _run_full_merge(tmp_path, fixed=False)
+        work_dir = merge._deps[JobPhase].work_dir
+        extra_chunk = work_dir / "chunk2.q18.0.mkv"
+        extra_chunk.write_bytes(b"\x00" * 64)
+        encoding = merge._phases[_EncodingPhase]
+        assert encoding.result is not None
+        strategy = encoding.result.winners[0].payload.strategy
+        encoding.result = EncodingPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="encoding complete",
+            winners=list(encoding.result.winners) + [Artifact(
+                payload=_encoded_chunk(extra_chunk, "chunk2", "h265-aq").model_copy(
+                    deep=True, update={"strategy": strategy},
+                ),
+                state=ArtifactState.COMPLETE,
+            )],
+        )
+
+        _recovery, row = self._recover_state(merge, "h265+slow")
+        assert row.state is not ArtifactState.COMPLETE, "winner-set drift must not accept"
+
+    def test_sampling_only_difference_remeasures_in_place(self, tmp_path: Path) -> None:
+        """Req 49: a sampling-only difference keeps the concat — the row is
+        pending with the re-measure reason (never re-merged)."""
+        merge, _ = _run_full_merge(tmp_path, fixed=False)
+        merge._config.measurement.sampling = 5
+
+        _recovery, row = self._recover_state(merge, "h265+slow")
+        assert row.state is ArtifactState.PARTIAL, "file present, not accepted"
+        assert merge._pending_reasons["h265+slow"] == "sampling"
+
+    def test_missing_merge_yaml_still_decides_via_per_output_records(self, tmp_path: Path) -> None:
+        """M-7: merge.yaml is replay-only — its absence never skips the
+        per-file acceptance checks."""
+        merge, _ = _run_full_merge(tmp_path, fixed=False)
+        (merge._deps[JobPhase].work_dir / "merge.yaml").unlink()
+
+        _recovery, row = self._recover_state(merge, "h265+slow")
+        assert row.state is ArtifactState.COMPLETE, "per-output records decide"
+
+    def test_identity_mismatch_fatal_without_permission(self, tmp_path: Path) -> None:
+        merge, _ = _run_full_merge(tmp_path, fixed=False)
+        merge.result = None  # clear the memoized result for the rerun
+        job = merge._phases[JobPhase]
+        assert job.result is not None
+        job.result.file = Artifact(
+            payload=File(
+                fingerprint=Fingerprint(token="f" * 32, size=64),
+                path=job.result.source, file_size_bytes=64,
+            ),
+            state=ArtifactState.COMPLETE,
+        )
+
+        result = merge.run(dry_run=False)
+        assert result.outcome is PhaseOutcome.FAILED
+        assert "identity mismatch" in result.message.lower()
+        assert "--force" in result.message
