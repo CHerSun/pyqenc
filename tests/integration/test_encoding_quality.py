@@ -195,7 +195,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         target   = QualityTarget(metric="vmaf", statistic="min", value=95.0)
 
         # Build a real AttemptMetadata so .crf is a proper Decimal.
-        attempt_path = tmp_path / "chunk_001.1920x1080.q18.0.mkv"
+        attempt_path = tmp_path / "chunk_001.q18.0.mkv"
         attempt_path.write_bytes(b"fake mkv")
         fake_attempt = AttemptMetadata(
             path            = attempt_path,
@@ -285,7 +285,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         reference.path = tmp_path / "ref.mkv"
 
         # Pre-create the output file so stat() succeeds.
-        fake_out = tmp_path / "encoding" / "test_strategy" / "chunk_001.1920x1080.q18.0.mkv"
+        fake_out = tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.mkv"
         fake_out.parent.mkdir(parents=True, exist_ok=True)
         fake_out.write_bytes(b"fake mkv")
 

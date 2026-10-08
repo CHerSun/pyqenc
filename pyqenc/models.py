@@ -715,15 +715,18 @@ class CodecConfig(BaseModel):
 class AttemptMetadata(BaseModel):
     """Metadata about a completed encoded chunk attempt artifact on disk.
 
-    All fields are recoverable from the filename and filesystem alone —
-    no progress tracker lookup is required.
+    Facts of the attempt as known at its exact cache address: the path is
+    the statically composed attempt name (``<chunk>.q<q>.mkv`` — Req 9),
+    and ``resolution`` is a sidecar fact populated by the post-encode probe
+    (the name carries no resolution — Req 9b).
 
     Attributes:
         path:            Path to the encoded attempt file.
-        chunk_id:        Chunk identifier (parsed from filename stem).
-        strategy:        Encoding strategy name (inferred from parent directory).
-        crf:             CRF value used for this attempt.
-        resolution:      Resolution string (e.g. ``'1920x800'``).
+        chunk_id:        Chunk identifier (the composed name's identity part).
+        strategy:        Encoding strategy display name.
+        crf:             Quality value used for this attempt.
+        resolution:      Resolution string (e.g. ``'1920x800'``) — a sidecar
+                         fact, empty until probed on the reuse path.
         file_size_bytes: File size in bytes.
     """
 
