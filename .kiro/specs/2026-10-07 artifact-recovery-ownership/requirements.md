@@ -3,7 +3,7 @@
 <!-- markdownlint-disable MD024 -->
 
 - Created: 2026-10-07
-- Completed:
+- Completed: 2026-10-08
 
 Basis: the grounding documents in this folder (`logical-vs-code.md`, `per-phase-audit.md`, `sidecar-models.md`, `naming-and-consumption.md`, `invalidation-matrix.md`, `spec-plan.md` — every requirement below traces to a ruling recorded there during the 2026-10-06/07 validation sessions).
 

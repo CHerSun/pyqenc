@@ -270,7 +270,11 @@ class AudioPhase(Phase[AudioPhaseResult]):
                 "dir and audio.yaml)"
             )
             self._wipe_audio_dir(audio_dir, sidecar_path)
-        elif persisted_audio is None and any(audio_dir.iterdir()):
+        elif persisted_audio is None:
+            # Unknown currency (Req 47, A-1): no record of what produced the
+            # files — the conservative wipe fires on the missing sidecar
+            # ALONE (vacuous when nothing exists; no existence probe, no
+            # listing — spec nuance 2).
             logger.info(
                 "audio.yaml missing — chain-output currency unknown; wiping "
                 "the audio dir (outputs reproduce from the source)"

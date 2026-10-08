@@ -73,10 +73,12 @@ flowchart TD
 ```
 
 Every `DEPENDS_ON` declaration is audited against the phase's actual
-dependency reads (`_dep_result` sites) — an undeclared read would be a silent
-absence once the registry is derived from the declarations (2026-10-05
-`cli-intent-commands` spec, Req 13). Audit result: every declared dependency
-is read; whole-result assignment reads are summarized as "run context".
+dependency reads (`self._deps[...]` sites — the typed result view over the
+registry, scoped to the declared dependencies) — an undeclared read would be
+a silent absence once the registry is derived from the declarations
+(2026-10-05 `cli-intent-commands` spec, Req 13). Audit result: every declared
+dependency is read; whole-result assignment reads are summarized as "run
+context".
 
 | Phase | Declared `DEPENDS_ON` | Consumed from each dependency |
 | --- | --- | --- |
@@ -85,9 +87,9 @@ is read; whole-result assignment reads are summarized as "run context".
 | **Probe** | Job, Extraction | Job: run context (`work_dir`, source); Extraction: stream inventory rows, `timestamps_path` |
 | **Chunking** | Job, Probe | Job: run context (`work_dir`); Probe: `stream` |
 | **Optimization** | Job, Probe, Chunking | Job: run context (`work_dir`, `config`); Probe: `plan`; Chunking: `chunks` |
-| **Encoding** | Job, Probe, Chunking, Optimization | Job: run context (`work_dir`, `force_wipe`, `cleanup`); Probe: `plan`, `stream`; Chunking: `chunks`; Optimization: `selected_strategies` |
+| **Encoding** | Job, Probe, Chunking, Optimization | Job: run context (`work_dir`, `force`, `cleanup`); Probe: `plan`, `stream`; Chunking: `chunks`; Optimization: `selected_strategies`, `synthetic_targets`, `anchor` |
 | **Audio** | Job, Extraction | Job: run context (`config.audio`, `work_dir`, source); Extraction: audio stream rows |
-| **Merge** | Job, Extraction, Probe, Optimization, Encoding | Job: run context (`source`, `work_dir`, `cleanup`); Extraction: `timestamps_path`; Probe: `plan`; Optimization: `anchor`; Encoding: `winners`, `quality_labels`, `encoded_chunks` |
+| **Merge** | Job, Extraction, Probe, Optimization, Encoding | Job: run context (`source`, `work_dir`, `force`); Extraction: `timestamps_path`; Probe: `plan`, facet; Optimization: `anchor`, `synthetic_targets`; Encoding: `winners`, `quality_labels`, `encoded_chunks` |
 
 ### Phase descriptions
 
@@ -108,14 +110,15 @@ is read; whole-result assignment reads are summarized as "run context".
 
 Every phase inherits `Phase`, whose single concrete `run()` owns the uniform
 footprint — memoization guard, skip check, dependency walk, banner, timed
-`_recover()`, the recovery summary line, dry-run / no-pending branches, and
-timed `_execute()`:
+`_invalidate()` + `_recover()`, the recovery summary line, dry-run /
+no-pending branches, and timed `_execute()`:
 
 ```mermaid
 classDiagram
     direction LR
     class Phase {
         +run(dry_run) PhaseResult
+        _invalidate() None
         _recover() Recovery
         _execute(wanted, dry_run) PhaseResult
     }
@@ -127,9 +130,15 @@ classDiagram
     Phase --> PhaseResult
 ```
 
-- `_recover()` — scans disk and builds the phase's complete internal ledger
-  (one `Artifact[PayloadT]` row per owned artifact, wanted or not); derives
-  whether work is pending
+- `_invalidate()` — key-triggered invalidation effects, always DISK
+  effects (fatal via `RecoveryError` / wipe-own / conservative re-derive /
+  rewrite-own-sidecar); may be empty (encoding's is — the shared namespace's
+  keys all live at optimization)
+- `_recover()` — classification only: consumes payload-owned expected names
+  out of listings, builds the complete internal ledger (one
+  `Artifact[PayloadT]` row per owned artifact, wanted or not), applies the
+  consumption-triggered curation of the invalidation domain (e.g. encoding's
+  winner-layer auto-cleanup), and derives whether work is pending
 - `_execute(wanted)` — produces every wanted row not already `COMPLETE`
 
 The runner is a thin, phase-agnostic driver: it runs the run's *terminal*
@@ -162,6 +171,45 @@ aggregate is rebuilt and re-saved before it can go stale. This makes
 exit" a safe pattern for any phase — its one rule is that everything the
 aggregate reflects must itself be a ledger artifact, so invalidating that
 work reopens the gate.
+
+### Invalidation and recovery ownership
+
+Recovery runs on two state axes that never blur:
+
+- **Parameter currency** (invalidation): were these artifacts produced under
+  the current inputs? Detected by comparing the phase's own persisted keys
+  against current inputs; effects come from a fixed vocabulary (fatal /
+  wipe-own / conservative re-derive / rewrite-own-sidecar) and are always
+  DISK effects, sequenced by the template in `_invalidate()` ahead of the
+  classification-only `_recover()` — no state passes between the hooks in
+  memory.
+- **Presence completeness** (`ABSENT` / `PARTIAL` / `COMPLETE`): are the
+  expected files here? Classified by consuming payload-owned expected names
+  out of directory listings — name families (compose and parse) are owned by
+  the entities (`EncodedChunk`, `MergedVideo`, the chain module), and
+  lookups are exact-name, never globbed or parsed.
+
+The axes meet only at the pending gate. Permission (`--force`) gates only
+the deletion of investments (`encoding/` attempts, whole-workdir source
+changes); winner wipes, re-derivation, re-measurement, and reproduction are
+automatic.
+
+Layered retention: the investment layer (`encoding/` attempts) is never
+auto-deleted; the winner layer (`encoded/`) is auto-curated (consumption
+leftovers deleted — it stays merge-ready); the deliverable layer (`merged/`,
+materialized `extracted/`) is retained in place, with deletion only via
+permission-gated identity wipes or explicit cleanup.
+
+Identity is content-based: every phase sidecar carries a source
+**fingerprint** (`{size, token}` — blake2b-128 over sampled source windows,
+computed once per run at Job). A mismatch is catastrophic everywhere (fatal
+without `--force`; wipe-own with it); a path-only move is a locator update.
+Strategy and chain identities are fingerprints of their canonical forms —
+hash tokens only, never persisted dumps. Optimization owns every key-based
+invalidation over the shared attempt/winner namespace; encoding owns none
+(its `_invalidate` is deliberately empty). Merge accepts each output per-file
+by provenance (strategy fingerprint, mode/q or targets/anchor, probe facet,
+sampling, winner-set fingerprint) — verdicts are always computed live.
 
 ### Chunking
 
@@ -236,19 +284,21 @@ Sidecars persist payload info slices and phase parameters — never artifact
 wrappers. Each phase owns exactly one parameter sidecar (one phase, one
 sidecar); per-attempt and per-output sidecars mark pair/output completeness.
 
-| File                 | Contents                                                                |
-| -------------------- | ----------------------------------------------------------------------- |
-| `job.yaml`           | Source identity (path + size)                                           |
-| `extraction.yaml`    | Stream inventory (info slices) + chapters presence                      |
-| `probe.yaml`         | Frame count, crop params                                                |
-| `chunking.yaml`      | Scene boundaries (frame index + timestamp)                              |
-| `optimization.yaml`  | Test chunk IDs, per-strategy results, tolerance, selection, targets     |
-| `encoding.yaml`      | Probe state (crop params + frame count) active during encoding, winning-limiter summary, per-strategy winners frame totals |
-| `audio.yaml`         | Per-chain signatures (resolved definitions)                             |
-| `merge.yaml`         | Targets/sampling/probe + per-strategy summary rows                      |
-| `<attempt>.yaml`     | Quality value, targets met, measured metrics, frame count             |
-| `<chunk>.<res>.yaml` | Winning attempt name, quality value, targeted metrics, frame count    |
-| `metrics.yaml`       | Pipeline execution metrics (time/space distribution, convergence stats) |
+| File                  | Contents                                                                                     |
+| --------------------- | -------------------------------------------------------------------------------------------- |
+| `job.yaml`            | Source locator + content identity: `{path, fingerprint {size, token}}`                       |
+| `extraction.yaml`     | Stream inventory (info slices), chapters presence, source identity key                       |
+| `probe.yaml`          | Frame count, crop, crop provenance, source identity key                                      |
+| `chunking.yaml`       | Scene boundaries + detection-param keys (`scene_threshold`, `min_scene_length`) + identity   |
+| `optimization.yaml`   | Per-mode union (tag `mode: fixed\|search`): mode key (pinned map / targets) + common keys    |
+|                       | (source, chunk-set, per-strategy args fingerprints, probe facet, sampling) + `summary` table |
+| `encoding.yaml`       | ONE `summary` block (winning-limiter table + winners frame totals) — no keys                 |
+| `audio.yaml`          | Per-chain records (identity fingerprint + output extension) + source identity key            |
+| `merge.yaml`          | Summary replay rows + basis marker ONLY (per-output sidecars are the acceptance records)     |
+| `<chunk>.q<q>.yaml`   | Attempt facts: quality, resolution, full measured metrics, sampling, frame count             |
+| `<chunk>.yaml`        | Winner facts: quality, resolution, targeted metrics subset, frame count, `targets_met`       |
+| `<output>.yaml`       | Merged-output facts (frame count, FULL metrics) + provenance — no verdict                    |
+| `metrics.yaml`        | Pipeline execution metrics (time/space distribution, convergence stats)                      |
 
 ### What this enables
 
@@ -323,7 +373,7 @@ flowchart TD
     class A,Z terminal
 ```
 
-Attempt files are named `<chunk>.<resolution>.q<value>.mkv` — codec-agnostic naming.
+Attempt files are named `<chunk>.q<value>.mkv` — the quality value is the search's cache key (exact-name lookup, no resolution component: the name is fully known before encoding begins). Winners are promoted to the static `<chunk>.mkv` / `<chunk>.yaml` names — pure functions of the chunk identity.
 
 ---
 
@@ -450,9 +500,10 @@ All models are Pydantic.
 | `Stream` family | `VideoStream` / `AudioStream` / `SubtitleStream` / `AttachmentStream` — a `File` composed with its typed info slice |
 | `ExtendedVideoStream` | The slow facet (frame count + crop) over the base video stream |
 | `VideoStreamChunk` | An extended stream bounded by a `[start, end)` timestamp window; owns the chunk-id name family |
-| `EncodedChunk` | A winning attempt as a stream, composed with its chunk, strategy and quality value; owns the attempt-file name family |
-| `Chapters` / `AudioOutput` / `MergedVideo` | Artifact payloads: the chapter edition, one (track, chain) audio output, one merged output with measured facts |
-| `Strategy` | Encoding strategy (`display_name()`/`safe_name()` pair, codec config, resolved ffmpeg args) |
+| `Fingerprint` | The identity-comparison value type: `{size, token}` — token REQUIRED, authoritative; size an optional belt. Hash tokens only; canonical dumps are never persisted |
+| `EncodedChunk` | A winning attempt as a stream, composed with its chunk and strategy; owns both compose-only name families (attempt `<chunk>.q<q>.*`, winner `<chunk>.*`) — the quality value is a sidecar fact, never a payload field |
+| `Chapters` / `AudioOutput` / `MergedVideo` | Artifact payloads: the chapter edition, one (track, chain) audio output, one merged output — `MergedVideo` owns its output-name family incl. the per-strategy pinned-quality suffix |
+| `Strategy` | Encoding strategy (`display_name()`/`safe_name()`/`fingerprint` triple, codec config, resolved ffmpeg args) |
 | `QualityTarget` | Quality constraint (metric, statistic, threshold value) |
 | `CodecConfig` | Encoder configuration (quality range, granularity, max_step, label, profiles) |
 | `CropParams` | Crop geometry (top, bottom, left, right pixel offsets) |
