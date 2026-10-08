@@ -72,6 +72,39 @@ class ArtifactState(Enum):
 # Phase parameter / sidecar data models
 # ---------------------------------------------------------------------------
 
+class ProbeFacet(BaseModel):
+    """The probe facet as a structured comparison key (spec Req 23/10c).
+
+    Exactly the two fields downstream identity depends on — the source frame
+    count and the crop values — compared field-wise, never by whole-model
+    equality (human-facing provenance like ``crop_source`` must never leak
+    into a key). ``frame_count=0`` is the unknown sentinel: unknown on
+    either side contributes nothing (unknown-not-mismatch, Req 32).
+
+    Attributes:
+        frame_count: Frames of the source (0 = unknown).
+        crop:        The committed crop values.
+    """
+
+    frame_count: int = 0
+    crop:        CropParams = CropParams()
+
+    @classmethod
+    def from_probe(cls, probe_result: ProbePhaseResult) -> Self:
+        """Snapshot the live facet from the probe phase's result."""
+        frame_count = (
+            probe_result.stream.payload.frame_count
+            if probe_result.stream is not None else 0
+        )
+        return cls(frame_count=frame_count, crop=probe_result.crop)
+
+    def matches(self, other: ProbeFacet) -> bool:
+        """Field-wise facet comparison: frame count (0 = unknown) and crop."""
+        if self.frame_count and other.frame_count and self.frame_count != other.frame_count:
+            return False
+        return self.crop == other.crop
+
+
 class ProbeState(BaseModel):
     """Sidecar model for ``probe.yaml`` (the slow facet).
 
@@ -141,78 +174,6 @@ class ProbeState(BaseModel):
 
     def save(self, path: Path) -> None:
         """Write this ``ProbeState`` to *path* atomically.
-
-        Args:
-            path: Destination YAML file path.
-        """
-        save_model(path, self)
-
-
-class StrategyTestResult(BaseModel):
-    """Per-strategy test result stored in ``optimization.yaml``.
-
-    Attributes:
-        strategy:    Display name of the strategy that was tested (e.g. ``'h265-aq+slow'``).
-        total_size:  Total encoded size across all test chunks in bytes.
-        metrics:     Min-across-test-chunks value for every measured
-                     ``(metric, statistic)`` key — the fixed-mode dominance and
-                     anchor inputs. Empty when nothing was measured (failed
-                     strategies, or files written before this field existed).
-    """
-
-    strategy:   str
-    total_size: int
-    metrics:    dict[str, float] = Field(default_factory=dict)
-
-
-class OptimizationParams(BaseModel):
-    """Phase parameter file model for optimization (``optimization.yaml``).
-
-    Stores the probe state active when optimization ran, selected test chunk
-    IDs, per-strategy test results, the quality targets, and the metrics
-    sampling factor active when the last run wrote this file.
-
-    Selection is NOT persisted: selected strategies and the fixed-mode
-    anchor are derivations over ``strategy_results`` (tolerance band /
-    dominance pruning) and are computed live from the current configuration
-    at read time — a persisted decision could only go stale.
-
-    Attributes:
-        probe:            Probe state (crop + frame count) active when optimization ran.
-        test_chunks:      Chunk IDs used for test encodes.
-        strategy_results: Per-strategy test results ordered by increasing total size.
-        quality_targets:  Quality targets active when test encodes ran, serialised as
-                          ``"metric-statistic:value"`` strings (e.g. ``"vmaf-min:93.0"``).
-                          Written in both optimization mode and all-strategies mode so
-                          ``OptimizationPhase`` can detect target changes on the next run
-                          regardless of mode.
-        sampling:          Frame subsampling factor used when test encodes ran.
-                          ``None`` for files written before this field was added
-                          (treated as unknown — no mismatch triggered).
-        source:           The source identity key (fingerprint pair, no path) —
-                          a mismatch against the live source is catastrophic
-                          for the whole shared namespace (Req 33). ``None``
-                          for legacy files: unknown, never a mismatch (Req 32).
-    """
-
-    probe:            ProbeState | None       = None
-    test_chunks:      list[str]                = Field(default_factory=list)
-    strategy_results: list[StrategyTestResult] = Field(default_factory=list)
-    quality_targets:  list[str]                = Field(default_factory=list)
-    sampling:         int | None               = None
-    source:           Fingerprint | None       = None
-
-    @classmethod
-    def load(cls, path: Path) -> Self | None:
-        """Load ``OptimizationParams`` from *path*.
-
-        Returns:
-            ``OptimizationParams`` if the file exists and is valid, ``None`` otherwise.
-        """
-        return load_model(path, cls)
-
-    def save(self, path: Path) -> None:
-        """Write this ``OptimizationParams`` to *path* atomically.
 
         Args:
             path: Destination YAML file path.

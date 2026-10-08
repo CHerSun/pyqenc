@@ -52,6 +52,35 @@ if TYPE_CHECKING:
 # Internal shared driver
 # ---------------------------------------------------------------------------
 
+def _validate_run_configuration(plan: EncodingPlan | None, cleanup: CleanupLevel) -> None:
+    """Plan-boundary construction validation: run-configuration contradictions.
+
+    A fixed-quality run under ``--cleanup`` is a contradiction, not a phase
+    skip (Req 55): the attempts in ``encoding/`` are the re-derivation
+    substrate for fixed re-runs — cleanup deletes them, and winners alone
+    cannot re-derive after a value change or interruption, so an interrupted
+    run resumed under cleanup would re-encode completed chunks. Stopped at
+    the run boundary, before any work.
+
+    Args:
+        plan:    The run's resolved encoding plan (``None`` for audio-only
+                 closures — no fixed run exists there).
+        cleanup: The requested artifact retention policy.
+
+    Raises:
+        ValueError: On a contradicting (plan, cleanup) combination.
+    """
+    if plan is not None and plan.fixed_quality and cleanup >= CleanupLevel.INTERMEDIATE:
+        raise ValueError(
+            f"Fixed-quality run refuses cleanup level {cleanup.name} "
+            f"(>= INTERMEDIATE): attempts in encoding/ are the re-derivation "
+            f"substrate for fixed re-runs — cleanup deletes them, and winners "
+            f"alone cannot re-derive after a value change or interruption, so "
+            f"an interrupted run resumed under cleanup would re-encode "
+            f"completed chunks. Re-run without --cleanup."
+        )
+
+
 def _drive(
     config:   AppConfig,
     plan:     EncodingPlan | None,
@@ -98,6 +127,8 @@ def _drive(
     """
     if not source.exists():
         raise FileNotFoundError(f"Source video not found: {source}")
+
+    _validate_run_configuration(plan, cleanup)
 
     work_dir = LongPath(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)

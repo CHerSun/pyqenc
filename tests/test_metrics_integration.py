@@ -1007,6 +1007,49 @@ class TestOptimizationPhaseTiming:
                 "crf: 18.0\n", encoding="utf-8",
             )
 
+    def _persist_current_sidecar(
+        self,
+        phase:      OptimizationPhase,
+        tmp_path:   Path,
+    ) -> None:
+        """Persist an optimization.yaml whose keys MATCH the phase's live inputs.
+
+        Built through the production composer from the stub registry's own
+        results, with a summary covering the plan — the run then takes the
+        no-pending fast exit (no invalidation, no encodes)."""
+        from pyqenc.models import id_set_fingerprint
+        from pyqenc.phases.chunking import ChunkingPhase
+        from pyqenc.phases.job import JobPhase
+        from pyqenc.phases.optimization import (
+            StrategySummaryRow,
+            current_optimization_sidecar,
+        )
+        from pyqenc.phases.probe import ProbePhase
+        from pyqenc.state import ProbeFacet
+
+        job      = phase._phases[JobPhase]
+        probe    = phase._phases[ProbePhase]
+        chunking = phase._phases[ChunkingPhase]
+        assert job.result is not None and probe.result is not None
+        assert chunking.result is not None
+        strategy = _STRATEGY_SLOW_H265
+        current_optimization_sidecar(
+            plan        = probe.result.plan,
+            source      = job.result.source_fingerprint,
+            chunks      = id_set_fingerprint(
+                a.payload.safe_name() for a in chunking.result.chunks
+            ),
+            probe       = ProbeFacet.from_probe(probe.result),
+            sampling    = phase._config.measurement.sampling,
+            test_chunks = [a.payload.safe_name() for a in chunking.result.chunks],
+            summary     = [
+                StrategySummaryRow(strategy=strategy.display_name(), total_size=1024),
+                StrategySummaryRow(
+                    strategy=_STRATEGY_H265_AQ.display_name(), total_size=512,
+                ),
+            ],
+        ).save(tmp_path / "work" / "optimization.yaml")
+
     def test_recovery_recorded_with_cached_optimization_params(self, tmp_path: Path) -> None:
         """An optimization run with persisted results must report its recovery scan.
 
@@ -1019,27 +1062,11 @@ class TestOptimizationPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.models import CropParams
-        from pyqenc.state import OptimizationParams, ProbeState, StrategyTestResult
-
-        strategy = _STRATEGY_SLOW_H265
-        # sampling must match the config default so no invalidation fires.
-        persisted = OptimizationParams(
-            probe            = ProbeState(frame_count=0, crop=CropParams()),
-            test_chunks      = ["chunk_0"],
-            strategy_results = [
-                StrategyTestResult(strategy=strategy.display_name(), total_size=1024),
-                StrategyTestResult(strategy=_STRATEGY_H265_AQ.display_name(), total_size=512),
-            ],
-            quality_targets  = [],
-            sampling = 1,     # matches AppConfig.encoding.sampling default
-        )
-
         def run(collector: MetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector, optimize=True)
             self._seed_winner_pairs(tmp_path)
-            with patch.object(OptimizationParams, "load", return_value=persisted):
-                phase.run()
+            self._persist_current_sidecar(phase, tmp_path)
+            phase.run()
 
         metrics   = _recorded_metrics(tmp_path, run)
         top_level = _top_level_keys(metrics)
@@ -1121,27 +1148,12 @@ class TestOptimizationPhaseTiming:
 
         Validates: Requirements 6.4, 6.5
         """
-        from pyqenc.models import CropParams
-        from pyqenc.state import OptimizationParams, ProbeState, StrategyTestResult
-
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector, optimize=True)
         self._seed_winner_pairs(tmp_path)
+        self._persist_current_sidecar(phase, tmp_path)
 
-        strategy = _STRATEGY_SLOW_H265
-        persisted = OptimizationParams(
-            probe            = ProbeState(frame_count=0, crop=CropParams()),
-            test_chunks      = ["chunk_0"],
-            strategy_results = [
-                StrategyTestResult(strategy=strategy.display_name(), total_size=1024),
-                StrategyTestResult(strategy=_STRATEGY_H265_AQ.display_name(), total_size=512),
-            ],
-            quality_targets  = [],
-            sampling = 1,
-        )
-
-        with patch.object(OptimizationParams, "load", return_value=persisted):
-            result = phase.run()
+        result = phase.run()
 
         assert result is not None
 
