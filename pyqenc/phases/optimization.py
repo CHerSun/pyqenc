@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, TypeAdapter
 from pyqenc.constants import (
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
+    FIXED_COMPARISON_STATS,
     WARNING_SYMBOL,
 )
 from pyqenc.metrics import MetricKey
@@ -213,20 +214,6 @@ def current_optimization_sidecar(
     )
 
 
-_FIXED_COMPARISON_STATS: tuple[str, ...] = ("p10", "median")
-"""The fixed-mode comparison statistic set per metric.
-
-The single definition of what fixed-mode comparison consumes: the anchor's
-synthetic target set (the ruler), the dominance pruning input, and the
-comparison-table columns. ``p10`` guards the worst decile, ``median`` the
-central tendency; the remaining stats are stability/shape indicators
-(``std``, ``min``, ``max``, other percentiles), not quality bars — comparing
-or ruling on them silently skews selection. The full measured set stays
-aggregated in ``StrategySummaryRow.metrics`` / sidecars (data retention), so
-re-selecting the comparison set never re-measures.
-"""
-
-
 def _comparison_metrics(metrics: dict[str, float]) -> dict[str, float]:
     """Project measured metrics onto the fixed-mode comparison stat set.
 
@@ -234,11 +221,11 @@ def _comparison_metrics(metrics: dict[str, float]) -> dict[str, float]:
         metrics: ``{metric_statistic: value}`` — the aggregated measurement.
 
     Returns:
-        The subset restricted to :data:`_FIXED_COMPARISON_STATS` statistics.
+        The subset restricted to :data:`FIXED_COMPARISON_STATS` statistics.
     """
     return {
         key: value for key, value in metrics.items()
-        if key.rsplit("_", 1)[1] in _FIXED_COMPARISON_STATS
+        if key.rsplit("_", 1)[1] in FIXED_COMPARISON_STATS
     }
 
 
@@ -1164,7 +1151,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         """Whether *a* Pareto-dominates *b* (the pruning predicate).
 
         Evaluated over the fixed-mode comparison statistics only
-        (:data:`_FIXED_COMPARISON_STATS`) — stability/shape statistics are not
+        (:data:`FIXED_COMPARISON_STATS`) — stability/shape statistics are not
         quality bars and must not sway selection. Requires ``size(a) ≤
         size(b)``, ``a ≥ b`` on every compared statistic, at least one strict
         inequality (exact duplicates coexist), and identical non-empty
@@ -1248,7 +1235,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         """The anchor's aggregated metrics as the synthetic target set.
 
         Restricted to the fixed-mode comparison statistics
-        (:data:`_FIXED_COMPARISON_STATS`) — the ruler pipes straight into the
+        (:data:`FIXED_COMPARISON_STATS`) — the ruler pipes straight into the
         presentation machinery, so its breadth also bounds the chunk log
         lines and the winner-limiter table. Min-across-test-chunks values
         match search-mode per-chunk strictness. Presentation data only —
@@ -1266,7 +1253,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         metrics_present = sorted({key.rsplit("_", 1)[0] for key in compared})
         targets: list[QualityTarget] = []
         for metric in metrics_present:
-            for statistic in _FIXED_COMPARISON_STATS:
+            for statistic in FIXED_COMPARISON_STATS:
                 key = f"{metric}_{statistic}"
                 if key in compared:
                     targets.append(QualityTarget(
@@ -1547,7 +1534,7 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
 def _headline_metric_keys(metric_maps: list[dict[str, float]]) -> list[str]:
     """The fixed-mode comparison-table column set.
 
-    Exactly what the ruler judges (:data:`_FIXED_COMPARISON_STATS` — the
+    Exactly what the ruler judges (:data:`FIXED_COMPARISON_STATS` — the
     table must not imply a different comparison basis than pruning used): for
     every distinct metric, its ``p10`` and ``median`` statistics when
     measured, ordered metric-major. Full statistics live in
@@ -1565,7 +1552,7 @@ def _headline_metric_keys(metric_maps: list[dict[str, float]]) -> list[str]:
     return [
         f"{metric}_{statistic}"
         for metric in sorted({key.rsplit("_", 1)[0] for key in present})
-        for statistic in _FIXED_COMPARISON_STATS
+        for statistic in FIXED_COMPARISON_STATS
         if f"{metric}_{statistic}" in present
     ]
 

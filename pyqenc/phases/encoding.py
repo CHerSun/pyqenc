@@ -31,6 +31,7 @@ from pyqenc.constants import (
     ENCODING_WORKSPACE_DIR,
     FAILURE_SYMBOL_MAJOR,
     FAILURE_SYMBOL_MINOR,
+    FIXED_COMPARISON_STATS,
     METRIC_KEY_QUALITY_MEASURE,
     NEUTRAL_INDICATOR_SYMBOL,
     SUCCESS_SYMBOL_MINOR,
@@ -152,10 +153,13 @@ class EncodingResultSidecar(BaseModel):
     before ``EncodingPhase`` runs, so ``EncodingPhase._recover()`` simply sees
     ``PARTIAL`` pairs naturally when targets change.
 
-    ``metrics`` carries the TARGETED subset only — the keys the judging
-    targets read (full measured sets live on attempt sidecars, the re-judging
-    substrate, and on merged-output sidecars; phase-sidecar summaries carry
-    targeted metrics as well).
+    ``metrics`` carries the TARGETED subset only, mode-aware: search runs
+    persist the judging targets' keys; fixed runs persist the fixed
+    comparison stat set (``p10``/``median`` of every measured metric — the
+    anchor ruler derives FROM these, so without them the fixed chain runs
+    dataless). Full measured sets live on attempt sidecars (the re-judging
+    substrate) and on merged-output sidecars; phase-sidecar summaries carry
+    targeted metrics as well.
 
     ``frame_count`` is the winning attempt's frame count carried over from
     its attempt sidecar at finalize — the durable per-pair record the
@@ -379,6 +383,37 @@ def _hardlink_or_copy(src: Path, dst: Path) -> None:
         # Cross-device link or other OS restriction — fall back to copy
         shutil.copy2(src, dst)
         logger.debug("Copied (cross-device fallback) %s → %s", src.name, dst)
+
+
+def _winner_targeted_metrics(
+    metrics:        dict[str, float],
+    quality_targets: list[QualityTarget],
+) -> dict[str, float]:
+    """The winner sidecar's targeted subset (Req 25), mode-aware.
+
+    Search: the judging targets' keys. Fixed (``quality_targets`` empty —
+    searched runs always carry targets by the plan invariant, so empty
+    ⟺ fixed): the fixed comparison stat set — the anchor ruler is DERIVED
+    from winner metrics, and dominance, the comparison table, and the
+    winner-limiter scan all consume ``p10``/``median``, so those keys must
+    reach the winner sidecar or the whole fixed chain runs dataless (found
+    live 2026-10-09: every fixed winner persisted ``metrics: {}`` → "ruler:
+    none — no strategy carried measurements" → Pareto pruned nothing, the
+    limiter table empty). Full measured sets stay on attempt sidecars.
+
+    Args:
+        metrics:        All measured metric values of the winning attempt.
+        quality_targets: The targets that judged the pair (empty in fixed
+                         mode).
+
+    Returns:
+        The targeted subset for the winner result sidecar.
+    """
+    if quality_targets:
+        keys = {f"{t.metric}_{t.statistic}" for t in quality_targets}
+    else:
+        keys = {k for k in metrics if k.rsplit("_", 1)[1] in FIXED_COMPARISON_STATS}
+    return {k: v for k, v in metrics.items() if k in keys}
 
 
 def _write_encoding_result_sidecar(
@@ -922,14 +957,12 @@ class ChunkEncoder:
             if not dst_graph.exists():
                 _hardlink_or_copy(src_graph, dst_graph)
 
-        targeted_keys = {f"{t.metric}_{t.statistic}" for t in quality_targets}
-        targeted_metrics = {k: v for k, v in metrics.items() if k in targeted_keys}
         _write_encoding_result_sidecar(
             output_dir  = encoded_dir,
             chunk_id    = chunk_id,
             resolution  = resolution,
             crf         = crf,
-            metrics     = targeted_metrics,
+            metrics     = _winner_targeted_metrics(metrics, quality_targets),
             frame_count = frame_count,
             targets_met = targets_met,
         )

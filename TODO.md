@@ -1098,7 +1098,66 @@ Extra human input: maybe make final lines uniform, like recovery line, based on 
 
 ---
 
-## Last known = 108
+## 109. Fixed-mode merge presentation judges against search targets, not the anchor
+
+**Status:** needs thinking (bug confirmed on the 2026-10-09 fixed `-q 18`
+e2e run; presentation-layer fix belongs with the unified-summaries spec)
+
+Spec: search mode = quality targets; fixed mode = anchor + deltas from it.
+In the fixed run, merge judged and displayed against the CONFIG targets:
+
+- The per-output inline metrics line marks ✘/✔ per plan.targets
+  (`_fmt_inline_metrics`, merge.py — reads `plan.targets` unconditionally).
+- The merge summary table renders config targets as the "Quality" bar and
+  the miss-detail table (`Targets: vmaf-median ≥ 96.00, ...` + `⚠ ...`
+  blocks) uses them (`_log_merge_summary(..., quality_targets=plan.targets)`
+  at both call sites).
+- `_live_verdict` already picks the right bar (synthetic targets when
+  fixed) — but its basis was EMPTY on that run because no ruler existed
+  (that half is fixed separately: fixed winner sidecars now carry the
+  p10+median comparison stats, so the ruler derives).
+
+Fix direction: fixed-mode merge presentation consumes the synthetic ruler
+(anchor-relative deltas — absolute values only where no ruler exists), the
+same basis `_live_verdict` uses. This IS the unified-summaries spec's core
+deliverable (the anchor-relative table) — land it there, with a small
+interim alignment of the inline/summary bars if that spec is far off.
+
+---
+
+## 110. Winner/attempt sidecar field diet — `resolution` has no winner-side consumers; `crf` unconsumed on attempts
+
+**Status:** needs thinking (consumer census done 2026-10-09; code unchanged per instruction)
+
+From the same run's sidecar review:
+
+- **Winner sidecar `resolution`: ZERO consumers.** Project-wide, the only
+  sidecar `resolution` read is the ATTEMPT sidecar's (encoding.py:1197,
+  re-measure carry). Winner sidecar fields actually consumed: `crf` (merge
+  CRF plot, winner-scan med CRF), `metrics`, `frame_count`,
+  `targets_met`. Resolution was a legacy crop-invalidation-via-filename
+  mechanism; the proper key is the probe facet (crop) — as everywhere
+  else. Candidate: drop from the winner sidecar.
+- **Attempt sidecar `resolution`: one consumer** — the re-measure path
+  carries it so promotion metadata stays populated without a re-probe
+  (fresh encodes re-probe anyway). Droppable if we accept one ffprobe on
+  the rare re-measured-accept path, or if winner resolution goes entirely.
+- **Attempt sidecar `crf`: zero consumers.** The attempt NAME is the
+  quality cache key (exact-name lookup); pick-up metadata carries the
+  proposed q; nothing reads the attempt sidecar's crf. Candidate: drop.
+- **Hypothesis to consider (user):** attempt sidecar = `sampling` +
+  `frame_count` + `metrics` ONLY; the full investment gates on the phase
+  sidecar (optimization's keys + `--force`). Per-attempt strategy
+  fingerprints / probe facets add nothing: attempts are wholesale-affected
+  effects, never individually inspected (Req 9a) — the design already
+  rejected heavy per-attempt validation.
+- **Nicety (user):** the PROBE phase could surface the source resolution
+  (info line + probe.yaml) alongside crop — end-user-facing fact, not a
+  key.
+
+---
+
+## Last known = 110
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

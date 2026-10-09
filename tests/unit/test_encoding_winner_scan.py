@@ -9,6 +9,7 @@ aggregate round-trip, and the fast-exit re-assertion.
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import MagicMock
 
 import yaml
@@ -132,6 +133,38 @@ class TestSidecarFrameCount:
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 0
+
+
+class TestWinnerTargetedSubset:
+    """The winner sidecar's metrics subset is mode-aware (Req 25; found empty
+    in fixed mode on the 2026-10-09 real run — "ruler: none")."""
+
+    _FULL: ClassVar[dict[str, float]] = {
+        "vmaf_min": 91.0, "vmaf_p10": 95.0, "vmaf_median": 96.5, "vmaf_max": 99.0,
+        "vmaf_std": 1.2, "psnr_p10": 45.0, "psnr_median": 48.0, "ssim_min": 97.0,
+    }
+
+    def test_search_persists_the_target_keys_only(self) -> None:
+        from pyqenc.phases.encoding import _winner_targeted_metrics
+
+        targets = [
+            QualityTarget(metric="vmaf", statistic="median", value=96.0),
+            QualityTarget(metric="psnr", statistic="p10", value=43.0),
+        ]
+        subset = _winner_targeted_metrics(self._FULL, targets)
+        assert sorted(subset) == ["psnr_p10", "vmaf_median"]
+
+    def test_fixed_persists_the_comparison_stat_set(self) -> None:
+        """Bug guarded: fixed mode judges with no target set (the ruler is
+        derived FROM winner metrics) — the old filter wrote ``{}`` and the
+        whole fixed chain ran dataless (no ruler, no Pareto data, no
+        limiter table)."""
+        from pyqenc.phases.encoding import _winner_targeted_metrics
+
+        subset = _winner_targeted_metrics(self._FULL, [])
+        assert sorted(subset) == [
+            "psnr_median", "psnr_p10", "vmaf_median", "vmaf_p10",
+        ]
 
     def test_result_sidecar_persists_frame_count(self, tmp_path: Path) -> None:
         """The winner result sidecar carries the winning attempt's count."""

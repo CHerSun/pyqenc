@@ -12,6 +12,18 @@ TEMP_SUFFIX = ".tmp"
 FINGERPRINT_DIGEST_SIZE_BYTES = 16
 """blake2b digest size (bytes) for every fingerprint token — 128-bit opaque identity."""
 
+FIXED_COMPARISON_STATS: tuple[str, ...] = ("p10", "median")
+"""The fixed-mode comparison statistic set per metric.
+
+The single definition of what fixed-mode comparison consumes — the anchor's
+synthetic target set (the ruler), the dominance pruning input, the
+comparison-table columns, and the winner sidecars' targeted subset: ``p10``
+guards the worst decile, ``median`` the central tendency; the remaining
+stats are stability/shape indicators (``std``, ``min``, ``max``, other
+percentiles), not quality bars — comparing or ruling on them silently
+skews selection. The full measured set stays on attempt/merged sidecars
+(data retention), so re-selecting the comparison set never re-measures."""
+
 CROP_SOURCE_MANUAL = "manual"
 """``probe.yaml`` crop provenance: the value came from a ``--crop`` override."""
 
