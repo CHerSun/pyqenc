@@ -870,7 +870,9 @@ Looks more concise, with distinct steps. Single progress bar for full phase too 
 
 ## 97. Pareto dominance with tolerance — ignore small positive deltas
 
-**Status:** needs thinking (needs testing; sharpens §82's epsilon-dominance angle)
+**Status:** landing home ruled 2026-10-09 — folds into the
+unified-quality-summaries window (TODO §111, third bullet); mechanics
+questions below carry over to that spec's tasks stage
 
 - Dominance pruning compares metric stats strictly: A dominates B iff
   `size(A) ≤ size(B)` and A ≥ B on every compared stat. The 2026-10-03
@@ -1157,7 +1159,7 @@ From the same run's sidecar review:
 
 ---
 
-## 111. Unified summaries — spec exists, NOT implemented; 2026-10-09 table sketch adds two details
+## 111. Unified summaries — spec exists, NOT implemented; 2026-10-09 sketch adds four details
 
 **Status:** needs thinking (state check 2026-10-09; no code changed)
 
@@ -1170,9 +1172,9 @@ landed via artifact-recovery-ownership.
 
 The 2026-10-09 user sketch (unified optimization + merge table) is mostly
 ALREADY in the spec — source row merge-only (Req 2.4), search targets /
-fixed anchor as the top row (Req 2.1-2.2), quality glyph search-mode-only
-(Req 4.2), full table at both phases (Req 1.5). Two details are NEW and
-should fold into the spec at its tasks-authoring stage:
+fixed anchor as the top row (Req 2.1-2.2), full table at both phases
+(Req 1.5). Four details are NEW and should fold into the spec at its
+tasks-authoring stage:
 
 - **Size-column numeric format:** ratio to source with exactly 2 decimals,
   expected not to exceed `9.99`; on exceed — either ignore the ratio or
@@ -1185,6 +1187,24 @@ should fold into the spec at its tasks-authoring stage:
   stat set — true targets in search mode, the synthetic ruler's stats in
   fixed (today's fixed table hardcodes `p10..median`; a p10/med/p90
   target set would render `p10…p90`).
+- **Epsilon-dominance lands in this window (§97's disposition, ruled
+  2026-10-09):** Pareto dominance ignores minor positive deltas, reusing
+  the acceptable-delta already defined per metric in metric info — a stat
+  win only counts when it beats the other by more than that bar. §97's
+  open mechanics questions (per-metric vs global source, size symmetry
+  vs `optimize_tolerance`, anchor-election effect) carry over; the
+  2026-10-09 fixed run (0/4 pruned, two strategies within 0.01 MB and
+  ±0.1 stats) is now the second real-data case for it.
+- **Quality mark column uniform across modes (amends spec Req 4.2):**
+  both modes carry the mark column — search: pass/miss glyphs (miss =
+  failure against true targets, as today); fixed: Pareto-dominance /
+  recommendation glyphs (what the pipeline recommends using — dominated
+  strategies visibly cut). Req 4.2's principle stands (the anchor is a
+  baseline, never a target — no target-style verdicts in fixed rows);
+  what changes is the glyph SET per mode, not the column's presence. Note
+  the coupling: epsilon-dominance is what makes the recommendation glyph
+  meaningful — without tolerance, dominance rarely prunes (0/4 twice on
+  real data) and every row would carry the same "winner" mark.
 
 ---
 
