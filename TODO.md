@@ -1134,28 +1134,38 @@ interim alignment of the inline/summary bars if that spec is far off.
 From the same run's sidecar review:
 
 - **Winner sidecar `resolution`: ZERO consumers.** Project-wide, the only
-  sidecar `resolution` read is the ATTEMPT sidecar's (encoding.py:1197,
+  sidecar `resolution` read is the ATTEMPT sidecar's (encoding.py:1230,
   re-measure carry). Winner sidecar fields actually consumed: `crf` (merge
   CRF plot, winner-scan med CRF), `metrics`, `frame_count`,
   `targets_met`. Resolution was a legacy crop-invalidation-via-filename
   mechanism; the proper key is the probe facet (crop) — as everywhere
   else. Candidate: drop from the winner sidecar.
-- **Attempt sidecar `resolution`: one consumer** — the re-measure path
-  carries it so promotion metadata stays populated without a re-probe
-  (fresh encodes re-probe anyway). Droppable if we accept one ffprobe on
-  the rare re-measured-accept path, or if winner resolution goes entirely.
+- **Resolution is fully DERIVABLE — no probe needed anywhere (user
+  correction 2026-10-09).** The encode's only dimension-changing filter is
+  `crop=iw-{l+r}:ih-{t+b}` — output dims = source dims − crop margins BY
+  CONSTRUCTION. Source resolution lives in Extraction's
+  `VideoStreamInfo.resolution`; crop in Probe's facet. (Live check:
+  1920×1080 − ↑22↓22 = 1920×1036 — exactly what the ffprobe returned.)
+  The post-encode `_probe_resolution` call is a relic of
+  resolution-in-filename days (file-stream-model Req 14.2: "resolution
+  drives the attempt filename") — static names (Req 9) killed its reason.
+  The attempt sidecar's `resolution` "consumer" is a copy-forward into
+  the unread winner-sidecar field — a void chain. The whole chain can
+  go: post-encode probe, attempt-sidecar field, winner-sidecar field,
+  `AttemptMetadata.resolution`. (Any encoder-side dimension deviation
+  would fail loudly, not drift silently — no belt value in probing.)
 - **Attempt sidecar `crf`: zero consumers.** The attempt NAME is the
   quality cache key (exact-name lookup); pick-up metadata carries the
   proposed q; nothing reads the attempt sidecar's crf. Candidate: drop.
+- **Human-facing home (user):** surface the derived resolution on the
+  PROBE phase (info line + probe.yaml) alongside crop — an end-user fact,
+  never a key.
 - **Hypothesis to consider (user):** attempt sidecar = `sampling` +
   `frame_count` + `metrics` ONLY; the full investment gates on the phase
   sidecar (optimization's keys + `--force`). Per-attempt strategy
   fingerprints / probe facets add nothing: attempts are wholesale-affected
   effects, never individually inspected (Req 9a) — the design already
   rejected heavy per-attempt validation.
-- **Nicety (user):** the PROBE phase could surface the source resolution
-  (info line + probe.yaml) alongside crop — end-user-facing fact, not a
-  key.
 
 ---
 
