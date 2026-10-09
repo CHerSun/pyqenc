@@ -95,7 +95,7 @@ summary: {limiter: [ … ], frames: {"h265+slow": 172000}}
 # chunking.yaml → {scenes: […], scene_threshold: 0.27, min_scene_length: 15}  # params = keys
 # audio.yaml → {chains: {normal: {token: "…"}}}   # CHANGE vs today: hash tokens, not full chain JSON
 
-# attempt sidecar <chunk>.q<q>.yaml → {crf, metrics: FULL, sampling, frame_count}  # re-judging substrate (resolution dropped 2026-10-09)
+# attempt sidecar <chunk>.q<q>.yaml → {metrics: FULL, sampling, frame_count}  # re-judging substrate (resolution dropped 2026-10-09; crf dropped same day — the quality is the attempt's address/name, zero consumers)
 # winner sidecar <chunk>.yaml       → {crf, metrics: TARGETED, frame_count, targets_met}
 # merged output sidecar  <stem> <strategy>.yaml →
 #   {frame_count, metrics: {…FULL…},                        # facts (no verdict; full — re-judgeable)

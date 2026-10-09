@@ -118,16 +118,17 @@ class TestSidecarFrameCount:
         """The per-attempt sidecar carries the attempt's frame count."""
         attempt = tmp_path / "chunk.q18.0.mkv"
         _write_metrics_sidecar(
-            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 2400,
+            attempt, {"vmaf_min": 94.5}, 3, 2400,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 2400
+        assert "crf" not in data, "the quality is the attempt's name, not a sidecar fact"
 
     def test_metrics_sidecar_writes_zero_for_unknown_frame_count(self, tmp_path: Path) -> None:
         """An unknown count is persisted as the 0 sentinel (no None in yaml)."""
         attempt = tmp_path / "chunk.q18.0.mkv"
         _write_metrics_sidecar(
-            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 0,
+            attempt, {"vmaf_min": 94.5}, 3, 0,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 0

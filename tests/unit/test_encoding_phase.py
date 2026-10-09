@@ -475,7 +475,6 @@ class TestAttemptFrameCountSourcing:
         attempt.write_bytes(b"fake mkv")
         attempt.with_suffix(".yaml").write_text(
             _yaml.safe_dump({
-                "crf": "18.0",
                 "metrics": {"vmaf_min": 95.0},
                 "sampling": 10,
                 "frame_count": frame_count,

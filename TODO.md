@@ -1127,10 +1127,10 @@ interim alignment of the inline/summary bars if that spec is far off.
 
 ---
 
-## 110. Winner/attempt sidecar field diet — `resolution` REMOVED 2026-10-09; `crf` unconsumed on attempts
+## 110. Winner/attempt sidecar field diet — CONSUMED 2026-10-09 (`resolution` and attempt `crf` dropped)
 
-**Status:** partially consumed (resolution half implemented 2026-10-09;
-crf half + the minimal-attempt hypothesis still open)
+**Status:** consumed (both halves implemented 2026-10-09; the
+minimal-attempt hypothesis realized: `metrics + sampling + frame_count`)
 
 From the same run's sidecar review:
 
@@ -1158,9 +1158,13 @@ From the same run's sidecar review:
   **DONE 2026-10-09**: whole chain removed; the derivation is the
   `Resolution` value type with the `- CropParams` operator (models.py,
   single ownership); measure's `_effective_resolution` re-homed onto it.
-- **Attempt sidecar `crf`: zero consumers.** The attempt NAME is the
-  quality cache key (exact-name lookup); pick-up metadata carries the
-  proposed q; nothing reads the attempt sidecar's crf. Candidate: drop.
+- **Attempt sidecar `crf`: zero consumers → DROPPED (2026-10-09).** The
+  attempt NAME is the quality cache key (exact-name lookup); pick-up
+  metadata carries the proposed q; nothing reads the attempt sidecar's
+  crf (consumption re-verified 2026-10-09 after the 0.20.0 changes —
+  the single reader, the pick-up, consumes metrics/sampling/frame_count
+  only). The attempt sidecar is now the §110-hypothesis shape:
+  `metrics + sampling + frame_count`.
 - **Human-facing home (user): DONE 2026-10-09** — the derived resolution
   lives on the PROBE phase ("Probe: done" info line + `probe.yaml`
   `resulting_resolution`, derived `source − crop` at write time) — an

@@ -295,7 +295,7 @@ sidecar); per-attempt and per-output sidecars mark pair/output completeness.
 | `encoding.yaml`       | ONE `summary` block (winning-limiter table + winners frame totals) — no keys                 |
 | `audio.yaml`          | Per-chain records (identity fingerprint + output extension) + source identity key            |
 | `merge.yaml`          | Summary replay rows + basis marker ONLY (per-output sidecars are the acceptance records)     |
-| `<chunk>.q<q>.yaml`   | Attempt facts: quality, full measured metrics, sampling, frame count                         |
+| `<chunk>.q<q>.yaml`   | Attempt facts: full measured metrics, sampling, frame count (the quality is the name)       |
 | `<chunk>.yaml`        | Winner facts: quality, targeted metrics subset, frame count, `targets_met`                   |
 | `<output>.yaml`       | Merged-output facts (frame count, FULL metrics) + provenance — no verdict                    |
 | `metrics.yaml`        | Pipeline execution metrics (time/space distribution, convergence stats)                      |

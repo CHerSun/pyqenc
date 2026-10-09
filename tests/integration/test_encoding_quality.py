@@ -207,9 +207,9 @@ class TestEncodeChunkQualitySearchV2Integration:
         from pyqenc.quality import MetricType
         vmaf_delta = MetricType.VMAF.info.acceptance_delta
         fake_sidecar = {
-            "crf":      "18.0",
-            "sampling": 10,
-            "metrics":  {"vmaf_min": 95.0 + vmaf_delta * 0.5},
+            "sampling":    10,
+            "frame_count": 8,
+            "metrics":     {"vmaf_min": 95.0 + vmaf_delta * 0.5},
         }
 
         evaluator = MagicMock(spec=QualityEvaluator)

@@ -131,9 +131,13 @@ class MetricsSidecar(BaseModel):
     filter) and was never read — the legacy per-attempt ffprobe and the
     sidecar fact were relics of resolution-in-filename days (removed
     2026-10-09; the human-facing derivation lives on ``probe.yaml``).
+
+    ``crf`` is likewise deliberately NOT a field (dropped 2026-10-09):
+    the quality is the attempt's ADDRESS — the file name is the cache
+    key, the search's proposed q rides the pick-up metadata, and no
+    consumer ever read the persisted value back.
     """
 
-    crf:         DecimalYaml         # exact string round-trip (no float drift)
     sampling:    int | None = None   # subsampling factor used when metrics were measured
     frame_count: int         = 0     # frames of the attempt file (0 = unknown)
     metrics:     dict[str, float]    # all measured values, e.g. vmaf_min, ssim_median
@@ -305,7 +309,6 @@ def read_winner_sidecar(work_dir: Path, winner: EncodedChunk) -> dict | None:
 
 def _write_metrics_sidecar(
     attempt_path:     Path,
-    crf:              Decimal,
     metrics:          dict[str, float],
     metrics_sampling: int,
     frame_count:      int,
@@ -316,19 +319,19 @@ def _write_metrics_sidecar(
     sidecar.  Stores ALL measured metric values (not filtered to current targets)
     so the quality history is reusable when quality targets change — facts of the
     attempt only; pass/fail is re-evaluated from ``metrics`` where decided.
+    No ``crf`` fact: the quality is the attempt's ADDRESS (the file name is
+    the cache key), and no consumer ever read it back (dropped 2026-10-09).
 
     Args:
         attempt_path:     Path to the encoded attempt ``.mkv`` file.
-        crf:              Quality value used.
         metrics:          ALL measured quality metrics dict (not filtered to targets).
         metrics_sampling: Frame subsampling factor used when metrics were measured.
-        frame_count:      Frames of the attempt file from its encode run — a fact
-                          of the file, carried over unchanged on re-measure;
+        frame_count:      Frames of the attempt file — a fact of the file from
+                          whoever last decoded it whole (encode or measure run);
                           ``0`` = could not be determined.
     """
     sidecar = attempt_path.with_suffix(".yaml")
     data    = MetricsSidecar(
-        crf         = crf,
         metrics     = metrics,
         sampling    = metrics_sampling,
         frame_count = frame_count,
@@ -1300,7 +1303,7 @@ class ChunkEncoder:
             frame_counts[output_file] = attempt_frames
             all_metrics_by_path[output_file] = all_metrics
             _write_metrics_sidecar(
-                output_file, current_q, all_metrics,
+                output_file, all_metrics,
                 self._metrics_sampling, attempt_frames,
             )
 
