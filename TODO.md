@@ -1157,7 +1157,64 @@ From the same run's sidecar review:
 
 ---
 
-## Last known = 110
+## 111. Unified summaries — spec exists, NOT implemented; 2026-10-09 table sketch adds two details
+
+**Status:** needs thinking (state check 2026-10-09; no code changed)
+
+The `2026-10-03 unified-quality-summaries` spec sits at requirements +
+design (its tasks stage was never authored — two-stage rule, gated on
+approval). Nothing of it is implemented; TODO §109's fixed-mode
+presentation bug points at it as the landing home, and its SUBSTRATE
+(per-mode sidecars, `summary` key, fingerprints, anchor lifecycle) already
+landed via artifact-recovery-ownership.
+
+The 2026-10-09 user sketch (unified optimization + merge table) is mostly
+ALREADY in the spec — source row merge-only (Req 2.4), search targets /
+fixed anchor as the top row (Req 2.1-2.2), quality glyph search-mode-only
+(Req 4.2), full table at both phases (Req 1.5). Two details are NEW and
+should fold into the spec at its tasks-authoring stage:
+
+- **Size-column numeric format:** ratio to source with exactly 2 decimals,
+  expected not to exceed `9.99`; on exceed — either ignore the ratio or
+  dynamically re-align ALL values in the size column; ratio + absolute
+  size right-aligned inside ONE column (source row fills its ratio cell
+  with a placeholder for alignment — the spec left the glyph, not the
+  numeric rules, to the variant review).
+- **Metric-range endpoints generalize to the presentation basis:** the
+  `min…max` range endpoints are the min/max STATISTICS of the targeted
+  stat set — true targets in search mode, the synthetic ruler's stats in
+  fixed (today's fixed table hardcodes `p10..median`; a p10/med/p90
+  target set would render `p10…p90`).
+
+---
+
+## 112. Anchor provenance None→elected forces full re-merges of provably identical outputs
+
+**Status:** needs thinking (observed live in the 2026-10-09 rerun2; no code
+changed)
+
+The dataless-ruler run (2026-10-09 fixed `-q 18`, before the §109/2f9d9c2
+fix) recorded `anchor: None` in every merged output's provenance. The next
+healthy run elected a real anchor → per-file acceptance sees an anchor
+mismatch → **all four outputs re-merged** (~50 min each: re-concat of
+identical winners + re-measure of identical bytes).
+
+Per the letter this is spec-correct (Req 49/50: anchor mismatch ⇒
+re-merge, never re-measure a stale concat — "the anchor change implies the
+table re-ran implies winners re-searched"). But here the winner-set
+fingerprint — the actual input identity — MATCHED: the files were provably
+produced from the same winners, and only the verdict basis changed. Design
+question: should an anchor-basis mismatch still force the re-concat when
+the winner-set fingerprint already matches (re-measure or even
+re-derive-verdicts would suffice), and/or should a ruler-less
+(uncompared/dataless) run record its outputs' anchor basis as something
+other than a comparable `None`? Note the symmetric cost: verdict bases
+genuinely change on every re-election, so loosening this trades safety for
+~O(strategies) concat time.
+
+---
+
+## Last known = 112
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
