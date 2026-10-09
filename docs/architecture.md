@@ -288,15 +288,15 @@ sidecar); per-attempt and per-output sidecars mark pair/output completeness.
 | --------------------- | -------------------------------------------------------------------------------------------- |
 | `job.yaml`            | Source locator + content identity: `{path, fingerprint {size, token}}`                       |
 | `extraction.yaml`     | Stream inventory (info slices), chapters presence, source identity key                       |
-| `probe.yaml`          | Frame count, crop, crop provenance, source identity key                                      |
+| `probe.yaml`          | Frame count, crop, crop provenance, resulting resolution (human-facing, derived `source − crop`), source identity key |
 | `chunking.yaml`       | Scene boundaries + detection-param keys (`scene_threshold`, `min_scene_length`) + identity   |
 | `optimization.yaml`   | Per-mode union (tag `mode: fixed\|search`): mode key (pinned map / targets) + common keys    |
 |                       | (source, chunk-set, per-strategy args fingerprints, probe facet, sampling) + `summary` table |
 | `encoding.yaml`       | ONE `summary` block (winning-limiter table + winners frame totals) — no keys                 |
 | `audio.yaml`          | Per-chain records (identity fingerprint + output extension) + source identity key            |
 | `merge.yaml`          | Summary replay rows + basis marker ONLY (per-output sidecars are the acceptance records)     |
-| `<chunk>.q<q>.yaml`   | Attempt facts: quality, resolution, full measured metrics, sampling, frame count             |
-| `<chunk>.yaml`        | Winner facts: quality, resolution, targeted metrics subset, frame count, `targets_met`       |
+| `<chunk>.q<q>.yaml`   | Attempt facts: quality, full measured metrics, sampling, frame count                         |
+| `<chunk>.yaml`        | Winner facts: quality, targeted metrics subset, frame count, `targets_met`                   |
 | `<output>.yaml`       | Merged-output facts (frame count, FULL metrics) + provenance — no verdict                    |
 | `metrics.yaml`        | Pipeline execution metrics (time/space distribution, convergence stats)                      |
 

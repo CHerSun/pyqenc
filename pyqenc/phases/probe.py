@@ -32,6 +32,7 @@ from pyqenc.models import (
     EncodingPlan,
     Fingerprint,
     PhaseOutcome,
+    Resolution,
     identity_changed,
 )
 from pyqenc.phase import (
@@ -81,20 +82,31 @@ class ProbeState(BaseModel):
 
     ``source`` is the identity key (the fingerprint pair, no path — Req 31);
     ``None`` for legacy sidecars is unknown, never a mismatch (Req 32).
+
+    ``resulting_resolution`` is the HUMAN-FACING output dimensions
+    (``"<w>x<h>"``), derived at write time via the mathematical operator
+    ``Resolution(source) - crop`` — the encode's only dimension-changing
+    filter is the crop, so the value holds by construction. A display
+    fact only: never an invalidation key, never a completeness input
+    (removed from attempt/winner sidecars 2026-10-09); ``None`` when the
+    source resolution is unknown or for sidecars written before the
+    field.
     """
 
     frame_count: int
     crop:        CropParams = CropParams()
     source:      Fingerprint | None = None
     crop_source: str | None         = None
+    resulting_resolution: str | None = None
 
     @model_serializer
     def _serialize(self) -> dict:
         """Dump with the empty crop omitted (compactness only).
 
-        Every other field persists: ``source`` (the identity key, Req 31) and
-        ``crop_source`` (the human-facing provenance, Req 23) are omitted only
-        when unset — never silently dropped.
+        Every other field persists: ``source`` (the identity key, Req 31),
+        ``crop_source`` (the human-facing provenance, Req 23) and
+        ``resulting_resolution`` (the human-facing derived dimensions) are
+        omitted only when unset — never silently dropped.
         """
         data: dict = {"frame_count": self.frame_count}
         if not self.crop.is_empty():
@@ -103,6 +115,8 @@ class ProbeState(BaseModel):
             data["source"] = self.source.model_dump()
         if self.crop_source is not None:
             data["crop_source"] = self.crop_source
+        if self.resulting_resolution is not None:
+            data["resulting_resolution"] = self.resulting_resolution
         return data
 
     @classmethod
@@ -124,6 +138,19 @@ class ProbeState(BaseModel):
 
 
 logger = logging.getLogger(__name__)
+
+
+def _derive_resulting_resolution(video: VideoStream, crop: CropParams) -> str | None:
+    """The output dimensions (``source - crop``, the single derivation).
+
+    Human-facing display fact (the "Probe: done" line, ``probe.yaml``) —
+    nothing keys on it. ``None`` when the source resolution is unknown;
+    a malformed source string raises (it is an ffprobe-built fact —
+    loud is correct there).
+    """
+    if not video.info.resolution:
+        return None
+    return str(Resolution.parse(video.info.resolution) - crop)
 
 
 
@@ -362,14 +389,17 @@ class ProbePhase(Phase[ProbePhaseResult]):
         else:
             frame_count = self._count_source_frames()
 
-        # Persist and stash the payload. crop_source is human-facing
-        # provenance only — never a key (Req 23); source is the identity key.
+        # Persist and stash the payload. crop_source and
+        # resulting_resolution are human-facing facts only — never keys
+        # (Req 23); source is the identity key.
         job_result = self._deps[JobPhase]
+        resulting_resolution = _derive_resulting_resolution(video, crop)
         ProbeState(
-            frame_count = frame_count,
-            crop        = crop,
-            source      = job_result.source_fingerprint,
-            crop_source = crop_source,
+            frame_count          = frame_count,
+            crop                 = crop,
+            source               = job_result.source_fingerprint,
+            crop_source          = crop_source,
+            resulting_resolution = resulting_resolution,
         ).save(probe_yaml)
         self._resolved = ExtendedVideoStream(
             stream      = video,
@@ -391,8 +421,8 @@ class ProbePhase(Phase[ProbePhaseResult]):
         )
 
         logger.info(
-            "Probe: done — frame_count=%d, crop=%s",
-            frame_count, crop.display(),
+            "Probe: done — frame_count=%d, crop=%s, resolution=%s",
+            frame_count, crop.display(), resulting_resolution or "unknown",
         )
         return self._make_result(PhaseOutcome.COMPLETED, [], "probe resolved")
 

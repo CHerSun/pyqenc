@@ -1127,16 +1127,17 @@ interim alignment of the inline/summary bars if that spec is far off.
 
 ---
 
-## 110. Winner/attempt sidecar field diet — `resolution` has no winner-side consumers; `crf` unconsumed on attempts
+## 110. Winner/attempt sidecar field diet — `resolution` REMOVED 2026-10-09; `crf` unconsumed on attempts
 
-**Status:** needs thinking (consumer census done 2026-10-09; code unchanged per instruction)
+**Status:** partially consumed (resolution half implemented 2026-10-09;
+crf half + the minimal-attempt hypothesis still open)
 
 From the same run's sidecar review:
 
-- **Winner sidecar `resolution`: ZERO consumers.** Project-wide, the only
-  sidecar `resolution` read is the ATTEMPT sidecar's (encoding.py:1230,
-  re-measure carry). Winner sidecar fields actually consumed: `crf` (merge
-  CRF plot, winner-scan med CRF), `metrics`, `frame_count`,
+- **Winner sidecar `resolution`: ZERO consumers → DROPPED (2026-10-09).**
+  Project-wide, the only sidecar `resolution` read was the ATTEMPT
+  sidecar's (re-measure carry). Winner sidecar fields actually consumed:
+  `crf` (merge CRF plot, winner-scan med CRF), `metrics`, `frame_count`,
   `targets_met`. Resolution was a legacy crop-invalidation-via-filename
   mechanism; the proper key is the probe facet (crop) — as everywhere
   else. Candidate: drop from the winner sidecar.
@@ -1154,12 +1155,16 @@ From the same run's sidecar review:
   go: post-encode probe, attempt-sidecar field, winner-sidecar field,
   `AttemptMetadata.resolution`. (Any encoder-side dimension deviation
   would fail loudly, not drift silently — no belt value in probing.)
+  **DONE 2026-10-09**: whole chain removed; the derivation is the
+  `Resolution` value type with the `- CropParams` operator (models.py,
+  single ownership); measure's `_effective_resolution` re-homed onto it.
 - **Attempt sidecar `crf`: zero consumers.** The attempt NAME is the
   quality cache key (exact-name lookup); pick-up metadata carries the
   proposed q; nothing reads the attempt sidecar's crf. Candidate: drop.
-- **Human-facing home (user):** surface the derived resolution on the
-  PROBE phase (info line + probe.yaml) alongside crop — an end-user fact,
-  never a key.
+- **Human-facing home (user): DONE 2026-10-09** — the derived resolution
+  lives on the PROBE phase ("Probe: done" info line + `probe.yaml`
+  `resulting_resolution`, derived `source − crop` at write time) — an
+  end-user fact, never a key.
 - **Hypothesis to consider (user):** attempt sidecar = `sampling` +
   `frame_count` + `metrics` ONLY; the full investment gates on the phase
   sidecar (optimization's keys + `--force`). Per-attempt strategy
@@ -1244,7 +1249,50 @@ genuinely change on every re-election, so loosening this trades safety for
 
 ---
 
-## Last known = 112
+## 113. All tests must run at lowered process priority (pipeline parity)
+
+**Status:** needs thinking (user ruling 2026-10-09)
+
+The pipeline lowers its process priority in code as one of its first
+steps — encoding work must never starve the user's other work. Test
+processes MUST do the same whenever they spawn real work (e2e runs,
+integration tests driving ffmpeg/ffprobe): pytest and every child it
+starts should run at the same lowered priority as a normal pipeline
+run. (2026-10-09 session: e2e tests spun ffmpeg at normal priority and
+starved the machine while "hanging".)
+
+Related, same session: e2e tests should also run rather fast, on a
+premeditated source (per the standing speed rule) — not on whatever
+sample happens to be around.
+
+## 114. e2e intent tests hang: ffmpeg 9.0.2 spins encoding the sample's chunk-3 region
+
+**Status:** needs thinking (reproduced standalone 2026-10-09; no code
+changed)
+
+`tests/e2e/test_intent_commands.py` never completes: the encode of the
+sample's third chunk region hangs. Reproduced STANDALONE — the exact
+ffmpeg command alone, no Python involved:
+
+```
+ffmpeg -ss 14.181 -t 13.847 -i samples\sample-e2e.mkv -map 0:0 \
+  -c:v libx265 -preset ultrafast -crf 18.0 -pix_fmt yuv420p10le \
+  -f matroska <out>
+```
+
+ffmpeg 9.0.2 (`9.0.2-full_build-www.gyan.dev`) burns CPU indefinitely
+with a 0-byte output on this region; the first two chunk regions of
+the same file encode in seconds. Points at the ffmpeg build (or its
+interaction with that region's HEVC 10-bit content) — not at pyqenc:
+the same command shape works elsewhere, and the real-source e2e
+(test.mkv) was unaffected the same day. Candidate: pin/switch the
+scoop ffmpeg version or regenerate the sample; re-verify the intent
+e2e suite after. Also blocks any full-suite gate run that includes
+`tests/e2e/`.
+
+---
+
+## Last known = 114
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

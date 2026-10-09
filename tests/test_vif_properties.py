@@ -279,7 +279,7 @@ def test_generate_metrics_vif_shares_vmaf_path(tmp_path: Path) -> None:
         return FFmpegRunResult(returncode=0, success=True, stderr_lines=[], frame_count=0)
 
     with patch("pyqenc.utils.visualization.run_metrics", side_effect=_fake_run_metrics):
-        artifacts = asyncio.run(
+        artifacts, run_frames = asyncio.run(
             evaluator._generate_metrics(
                 encoded          = tmp_path / "encoded.mkv",
                 reference        = FFmpegInput(path=tmp_path / "reference.mkv"),
@@ -289,6 +289,7 @@ def test_generate_metrics_vif_shares_vmaf_path(tmp_path: Path) -> None:
                 cwd              = tmp_path,
             )
         )
+    assert run_frames == 0
 
     # All paths end with .tmp
     for attr in ("psnr_log", "ssim_log", "vmaf_json", "vif_log"):

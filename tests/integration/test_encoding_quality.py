@@ -164,8 +164,6 @@ class TestEncodeChunkQualitySearchV2Integration:
         chunk = MagicMock()
         chunk.safe_name.return_value = "chunk_001"
         chunk.path            = chunk_file
-        chunk._resolution     = "1920x1080"
-        chunk.resolution      = "1920x1080"
         chunk.start_timestamp = 0.0
         chunk.end_timestamp   = 5.0
         return cast(VideoStreamChunk, chunk)
@@ -202,7 +200,6 @@ class TestEncodeChunkQualitySearchV2Integration:
             chunk_id        = "chunk_001",
             strategy        = "test-strategy",
             crf             = Decimal("18.0"),
-            resolution      = "1920x1080",
             file_size_bytes = 8,
         )
 
@@ -266,6 +263,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         fake_eval.targets_met    = True
         fake_eval.failed_targets = []
         fake_eval.logs           = QualityLogs()
+        fake_eval.frame_count    = 120
         fake_eval.metrics        = {
             MetricType.VMAF: {"min": 95.1, "median": 96.0, "p05": 94.0, "p10": 94.5, "p25": 95.0,
                               "p75": 97.0, "p90": 97.5, "p95": 98.0, "max": 99.0, "std": 1.0},
@@ -292,7 +290,6 @@ class TestEncodeChunkQualitySearchV2Integration:
         with (
             patch.object(encoder, "_check_existing_encoding", return_value=None),
             patch.object(encoder, "_encode_with_ffmpeg", return_value=True),
-            patch("pyqenc.phases.encoding._probe_resolution", return_value="1920x1080"),
             patch("pyqenc.phases.encoding._write_metrics_sidecar"),
             patch.object(encoder, "_finalize_winning_attempt") as mock_finalize,
         ):

@@ -729,17 +729,14 @@ class AttemptMetadata(BaseModel):
     """Metadata about a completed encoded chunk attempt artifact on disk.
 
     Facts of the attempt as known at its exact cache address: the path is
-    the statically composed attempt name (``<chunk>.q<q>.mkv`` — Req 9),
-    and ``resolution`` is a sidecar fact populated by the post-encode probe
-    (the name carries no resolution — Req 9b).
+    the statically composed attempt name (``<chunk>.q<q>.mkv`` — Req 9; no
+    resolution component ever — Req 9b).
 
     Attributes:
         path:            Path to the encoded attempt file.
         chunk_id:        Chunk identifier (the composed name's identity part).
         strategy:        Encoding strategy display name.
         crf:             Quality value used for this attempt.
-        resolution:      Resolution string (e.g. ``'1920x800'``) — a sidecar
-                         fact, empty until probed on the reuse path.
         file_size_bytes: File size in bytes.
     """
 
@@ -747,8 +744,80 @@ class AttemptMetadata(BaseModel):
     chunk_id:        str
     strategy:        str
     crf:             Decimal
-    resolution:      str
     file_size_bytes: int
+
+
+# ---------------------------------------------------------------------------
+# Resolution — the derivable dimension value
+# ---------------------------------------------------------------------------
+
+class Resolution(BaseModel):
+    """Pixel dimensions as a mathematical value: ``width x height``.
+
+    The output resolution of any encoded product is fully DERIVABLE — the
+    encode's only dimension-changing filter is the crop
+    (``crop=iw-{l+r}:ih-{t+b}``), so ``output = source - crop`` BY
+    CONSTRUCTION (found live 2026-10-09: 1920x1080 − ↑22↓22 = 1920x1036,
+    exactly what the legacy post-encode ffprobe returned). Nothing probes
+    or persists per-attempt resolutions anymore; the source fact lives in
+    Extraction's ``VideoStreamInfo.resolution``, the crop in Probe's facet,
+    and this operator is the single derivation.
+
+    Human-facing only: derived for display (probe info line,
+    ``probe.yaml``) — never an invalidation key, never a completeness
+    input.
+
+    Attributes:
+        width:  Pixel width.
+        height: Pixel height.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    width:  int
+    height: int
+
+    @classmethod
+    def parse(cls, value: str) -> Self:
+        """Parse a ``'WxH'`` string (the stream-info convention).
+
+        Args:
+            value: The resolution string (e.g. ``'1920x1080'``).
+
+        Returns:
+            The parsed dimensions.
+
+        Raises:
+            ValueError: If the string is not ``WxH`` with positive ints.
+        """
+        width_s, _, height_s = value.partition("x")
+        try:
+            width, height = int(width_s), int(height_s)
+        except ValueError as exc:
+            raise ValueError(f"Not a resolution string: {value!r}") from exc
+        if width <= 0 or height <= 0:
+            raise ValueError(f"Not a resolution string: {value!r}")
+        return cls(width=width, height=height)
+
+    def __sub__(self, crop: CropParams) -> Resolution:
+        """Apply crop margins: ``source - crop = output dimensions``.
+
+        The mathematical form of the crop filter's dimension arithmetic —
+        margins subtract from the corresponding axis.
+
+        Args:
+            crop: The crop margins to subtract.
+
+        Returns:
+            The cropped dimensions.
+        """
+        return Resolution(
+            width  = self.width - crop.left - crop.right,
+            height = self.height - crop.top - crop.bottom,
+        )
+
+    def __str__(self) -> str:
+        return f"{self.width}x{self.height}"
 
 
 # ---------------------------------------------------------------------------

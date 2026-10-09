@@ -1141,7 +1141,7 @@ class QualityEvaluator:
         width:            int                            = 0,
         cwd:              Path | None                    = None,
         fps_value:        Fraction | None                = None,
-    ) -> QualityLogs:
+    ) -> tuple[QualityLogs, int]:
         """Generate metric log files for quality comparison.
 
         Runs all four metrics (PSNR, SSIM, VMAF, VIF) in a single ffmpeg pass
@@ -1166,8 +1166,11 @@ class QualityEvaluator:
                               ``None``, derived from ``output_prefix``'s parent.
 
         Returns:
-            ``QualityLogs`` with ``.tmp`` paths for all four metrics
-            (``plot`` is ``None`` — filled in by ``_finish_evaluation``).
+            ``(QualityLogs, frame_count)`` — the ``.tmp`` paths for all four
+            metrics (``plot`` is ``None`` — filled in by ``_finish_evaluation``)
+            and the measured file's frame count from the run's progress (the
+            distorted input is decoded whole; subsampling reduces scoring
+            only, so the count is exact; ``0`` = not determined).
         """
         uuid_hex   = uuid.uuid4().hex
         output_dir = cwd if cwd is not None else Path(output_prefix).parent
@@ -1236,7 +1239,8 @@ class QualityEvaluator:
                 if not path.exists():
                     logger.warning("Expected metric tmp file not found: %s", path)
 
-        return artifacts
+        # None → 0 (the unknown sentinel) at the typed boundary.
+        return artifacts, result.frame_count or 0
 
     async def evaluate_chunk_async(
         self,
@@ -1280,7 +1284,7 @@ class QualityEvaluator:
 
         if show_progress:
             with ProgressBar(_total_complexity, title=f"Metrics: {resolved_title}", show_counters=False) as advance:
-                artifacts = await self._generate_metrics(
+                artifacts, run_frames = await self._generate_metrics(
                     encoded, reference, ref_crop,
                     output_prefix    = str(cwd / f"{encoded.stem}."),
                     metrics_sampling = subsample_factor,
@@ -1292,7 +1296,7 @@ class QualityEvaluator:
                 )
                 advance(0, AdvanceState.COMPLETE)
         else:
-            artifacts = await self._generate_metrics(
+            artifacts, run_frames = await self._generate_metrics(
                 encoded, reference, ref_crop,
                 output_prefix    = str(cwd / f"{encoded.stem}."),
                 metrics_sampling = subsample_factor,
@@ -1311,6 +1315,7 @@ class QualityEvaluator:
             plot_path           = plot_path,
             fps_value           = fps_value,
             chunk_start_seconds = chunk_start_seconds,
+            frame_count         = run_frames,
         )
 
     def evaluate_chunk(
@@ -1384,6 +1389,7 @@ class QualityEvaluator:
         plot_path:           Path | None,
         fps_value:           Fraction | None,
         chunk_start_seconds: float,
+        frame_count:         int = 0,
     ) -> QualityEvaluation:
         """Parse metric files, generate the plot (measurement completion).
 
@@ -1395,9 +1401,11 @@ class QualityEvaluator:
             artifacts:           ``QualityLogs`` returned by ``_generate_metrics``.
             output_dir:          Directory for the plot PNG.
             subsample_factor:    Frame subsampling factor.
-            plot_path:           Explicit plot path override; auto-derived when ``None``.
+            plot_path:           Explicit path override; auto-derived when ``None``.
             fps_value:           Frames per second for x-axis labelling.
             chunk_start_seconds: Chunk start offset for x-axis.
+            frame_count:         The measured file's frame count from the
+                                 metric run's progress (``0`` = not determined).
 
         Returns:
             ``QualityEvaluation`` with metrics, target results, and artifact paths.
@@ -1450,6 +1458,7 @@ class QualityEvaluator:
         artifacts.plot = resolved_plot_path
 
         return QualityEvaluation(
-            metrics = metrics,
-            logs    = artifacts,
+            metrics     = metrics,
+            logs        = artifacts,
+            frame_count = frame_count,
         )

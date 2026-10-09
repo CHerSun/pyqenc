@@ -86,8 +86,8 @@ def _make_winner(
     """Materialize a winner on disk (mkv + result sidecar) and compose it.
 
     The composed payload mirrors the recovery composition (frame_count=0
-    sentinel, resolution unknown) — the scan reads counts from the sidecar,
-    never the payload. ``frames=0`` persists the unknown sentinel.
+    sentinel) — the scan reads counts from the sidecar, never the payload.
+    ``frames=0`` persists the unknown sentinel.
     """
     strategy_dir = work_dir / "encoded" / strategy.safe_name()
     strategy_dir.mkdir(parents=True, exist_ok=True)
@@ -95,7 +95,6 @@ def _make_winner(
     winner.write_bytes(b"x" * 16)
     sidecar: dict = {
         "crf": str(crf),
-        "resolution": _RESOLUTION,
         "metrics": {"vmaf_min": 94.5},
         "targets_met": True,
         "frame_count": frames,
@@ -105,7 +104,7 @@ def _make_winner(
     )
     return build_encoded_chunk(
         chunk=chunk, strategy=strategy,
-        path=winner, resolution=None, frame_count=0,
+        path=winner, frame_count=0,
     )
 
 
@@ -119,17 +118,16 @@ class TestSidecarFrameCount:
         """The per-attempt sidecar carries the attempt's frame count."""
         attempt = tmp_path / "chunk.q18.0.mkv"
         _write_metrics_sidecar(
-            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 2400, resolution=_RESOLUTION,
+            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 2400,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 2400
-        assert data["resolution"] == _RESOLUTION
 
     def test_metrics_sidecar_writes_zero_for_unknown_frame_count(self, tmp_path: Path) -> None:
         """An unknown count is persisted as the 0 sentinel (no None in yaml)."""
         attempt = tmp_path / "chunk.q18.0.mkv"
         _write_metrics_sidecar(
-            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 0, resolution=None,
+            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 0,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 0
@@ -169,7 +167,7 @@ class TestWinnerTargetedSubset:
     def test_result_sidecar_persists_frame_count(self, tmp_path: Path) -> None:
         """The winner result sidecar carries the winning attempt's count."""
         _write_encoding_result_sidecar(
-            tmp_path, "chunk", _RESOLUTION,
+            tmp_path, "chunk",
             Decimal("18.0"), {"vmaf_min": 94.5}, 2400,
         )
         data = yaml.safe_load(

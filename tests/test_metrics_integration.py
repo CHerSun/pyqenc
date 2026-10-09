@@ -1109,7 +1109,7 @@ class TestOptimizationPhaseTiming:
             success      = True,
             final_crf    = Decimal("28.0"),
             attempts     = 2,
-            encoded_file = MagicMock(path=encoded_path, resolution="1920x1080"),
+            encoded_file = MagicMock(path=encoded_path),
             reused       = False,
         )
 
@@ -1349,7 +1349,7 @@ class TestEncodingPhaseTiming:
             success      = True,
             final_crf    = Decimal("28.0"),
             attempts     = 3,
-            encoded_file = MagicMock(path=encoded_path, resolution="1920x1080"),
+            encoded_file = MagicMock(path=encoded_path),
             reused       = False,
         )
 
@@ -1405,7 +1405,7 @@ class TestEncodingPhaseTiming:
             success      = True,
             final_crf    = Decimal("28.0"),
             attempts     = 1,
-            encoded_file = MagicMock(path=encoded_path, resolution="1920x1080"),
+            encoded_file = MagicMock(path=encoded_path),
             reused       = True,
         )
 

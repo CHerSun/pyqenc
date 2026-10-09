@@ -7,12 +7,10 @@ quality targets, including parallel execution and artifact-based resumption.
 # CHerSun 2026
 
 import asyncio
-import json
 import logging
 import os
 import shutil
 import statistics
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from dataclasses import replace as _dc_replace
@@ -109,10 +107,6 @@ class MetricsSidecar(BaseModel):
     :class:`EncodingResultSidecar`). This is the re-judging substrate:
     cache-hits re-judge under new targets without re-encoding.
 
-    ``resolution`` is the attempt's actual output dimensions (``'WxH'``) —
-    a fact probed after the encode (the attempt's name carries no
-    resolution, Req 9/9b); ``None`` for sidecars written before the field.
-
     ``sampling`` records the frame subsampling factor used when the metrics
     were measured.  On recovery, if this differs from the current config the
     sidecar is treated as stale and the attempt is re-measured (without
@@ -129,10 +123,15 @@ class MetricsSidecar(BaseModel):
     "could not be determined" (no valid video has zero frames): the attempt
     was re-measured with no prior count on record, or the sidecar predates
     the field.
+
+    The attempt's output resolution is deliberately NOT a field: it is
+    derivable (source dimensions − crop, by construction of the crop
+    filter) and was never read — the legacy per-attempt ffprobe and the
+    sidecar fact were relics of resolution-in-filename days (removed
+    2026-10-09; the human-facing derivation lives on ``probe.yaml``).
     """
 
     crf:         DecimalYaml         # exact string round-trip (no float drift)
-    resolution:  str | None = None   # actual output dimensions ("WxH")
     sampling:    int | None = None   # subsampling factor used when metrics were measured
     frame_count: int         = 0     # frames of the attempt file (0 = unknown)
     metrics:     dict[str, float]    # all measured values, e.g. vmaf_min, ssim_median
@@ -167,14 +166,14 @@ class EncodingResultSidecar(BaseModel):
     the "could not be determined" sentinel (the winner was accepted from a
     re-measured attempt with no count on record).
 
-    ``crf`` and ``resolution`` are facts of this winner; recovery-time
-    classification and composition never read them — only processing-path
-    consumers (the re-merge CRF graph, the winner scan, the fixed ruler)
-    may.
+    ``crf`` is a fact of this winner; recovery-time classification and
+    composition never read it — only processing-path consumers (the re-merge
+    CRF graph, the winner scan, the fixed ruler) may. The winner's output
+    resolution is deliberately NOT a field: derivable (source − crop) and
+    never read (removed 2026-10-09).
     """
 
     crf:         DecimalYaml        # exact string round-trip (no float drift)
-    resolution:  str | None = None  # actual output dimensions ("WxH")
     metrics:     dict[str, float]   # the TARGETED metric subset
     frame_count: int         = 0    # frames of the winning attempt (0 = unknown)
     targets_met: bool        = True # False when search exhausted without a passing attempt
@@ -246,28 +245,6 @@ class EncodingSidecar(BaseModel):
         save_model(path, self)
 
 
-def _probe_resolution(path: Path) -> str | None:
-    """Return the video resolution of *path* as ``'WxH'``, or ``None`` on failure."""
-    cmd: list[str | os.PathLike] = [
-        "ffprobe", "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=width,height",
-        "-of", "json",
-        path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
-        data = json.loads(result.stdout)
-        streams = data.get("streams", [])
-        if streams:
-            w, h = streams[0].get("width"), streams[0].get("height")
-            if w and h:
-                return f"{w}x{h}"
-    except (OSError, subprocess.SubprocessError, ValueError) as e:
-        logger.debug("Failed to probe resolution of %s: %s", path.name, e)
-    return None
-
-
 def _read_sidecar_yaml(sidecar_path: Path) -> dict | None:
     """Read a metrics/result sidecar YAML next to an encoded attempt.
 
@@ -307,7 +284,7 @@ def read_winner_sidecar(work_dir: Path, winner: EncodedChunk) -> dict | None:
     """Read a winner's result sidecar by its static name (processing paths).
 
     The single sanctioned composition site for consumers that need a
-    winner's facts (crf, resolution, targeted metrics, frame count,
+    winner's facts (crf, targeted metrics, frame count,
     ``targets_met``) — recovery never calls this (Req 3); processing paths
     (the winner scan, the merge CRF graph, the fixed ruler) do.
 
@@ -330,7 +307,6 @@ def _write_metrics_sidecar(
     metrics:          dict[str, float],
     metrics_sampling: int,
     frame_count:      int,
-    resolution:       str | None,
 ) -> None:
     """Atomically write a per-attempt sidecar alongside an encoded attempt.
 
@@ -347,15 +323,10 @@ def _write_metrics_sidecar(
         frame_count:      Frames of the attempt file from its encode run — a fact
                           of the file, carried over unchanged on re-measure;
                           ``0`` = could not be determined.
-        resolution:       The attempt's actual output dimensions (``'WxH'``),
-                          probed after the encode — the name carries no
-                          resolution, so the sidecar is its durable home
-                          (Req 9b).
     """
     sidecar = attempt_path.with_suffix(".yaml")
     data    = MetricsSidecar(
         crf         = crf,
-        resolution  = resolution,
         metrics     = metrics,
         sampling    = metrics_sampling,
         frame_count = frame_count,
@@ -419,7 +390,6 @@ def _winner_targeted_metrics(
 def _write_encoding_result_sidecar(
     output_dir:      Path,
     chunk_id:        str,
-    resolution:      str | None,
     crf:             Decimal,
     metrics:         dict[str, float],
     frame_count:     int,
@@ -436,7 +406,6 @@ def _write_encoding_result_sidecar(
     Args:
         output_dir:      Strategy output directory.
         chunk_id:        Chunk identifier.
-        resolution:      The winner's actual output resolution (``'WxH'``).
         crf:             Winning quality value.
         metrics:         The targeted metric subset for the winning attempt.
         frame_count:     Frames of the winning attempt (``0`` = could not be
@@ -447,7 +416,6 @@ def _write_encoding_result_sidecar(
     sidecar_path = output_dir / EncodedChunk.format_winner_sidecar_name(chunk_id)
     data = EncodingResultSidecar(
         crf         = crf,
-        resolution  = resolution,
         metrics     = metrics,
         frame_count = frame_count,
         targets_met = targets_met,
@@ -473,7 +441,7 @@ def _pair_placeholder(work_dir: Path, chunk: VideoStreamChunk, strategy: Strateg
     """A placeholder payload for a pair row with no winner on disk.
 
     The pair identity (chunk + strategy) is real; the attempt-specific facts
-    (file, resolution) are unknown until a winner exists — the row's
+    (the file) are unknown until a winner exists — the row's
     ``ABSENT``/``PARTIAL`` state says so. Consumers read attempt facts from
     ``COMPLETE`` rows only. The placeholder file path uses the static winner
     name (the identity-derived destination the promotion writes to).
@@ -532,7 +500,6 @@ def _pair_rows(
                         chunk      = chunk_by_id[chunk_id],
                         strategy   = strategy_by_name[name],
                         path       = pair.winning_file,
-                        resolution = None,  # a sidecar fact — never read at recovery (Req 3)
                         frame_count= 0,     # unknown on recovery
                     ),
                     state   = ArtifactState.COMPLETE,
@@ -901,7 +868,6 @@ class ChunkEncoder:
             chunk_id        = chunk_id,
             strategy        = strategy.display_name(),
             crf             = crf,
-            resolution      = "",
             file_size_bytes = size,
         )
 
@@ -909,7 +875,6 @@ class ChunkEncoder:
         self,
         strategy:        Strategy,
         chunk_id:        str,
-        resolution:      str | None,
         winning_attempt: Path,
         crf:             Decimal,
         metrics:         dict[str, float],
@@ -933,7 +898,6 @@ class ChunkEncoder:
         Args:
             strategy:        Encoding strategy.
             chunk_id:        Chunk identifier.
-            resolution:      The winner's actual output resolution (``'WxH'``).
             winning_attempt: Path to the winning attempt ``.mkv`` in ``encoding/``.
             crf:             Winning quality value.
             metrics:         All measured metric values for the winning attempt.
@@ -960,7 +924,6 @@ class ChunkEncoder:
         _write_encoding_result_sidecar(
             output_dir  = encoded_dir,
             chunk_id    = chunk_id,
-            resolution  = resolution,
             crf         = crf,
             metrics     = _winner_targeted_metrics(metrics, quality_targets),
             frame_count = frame_count,
@@ -1130,7 +1093,8 @@ class ChunkEncoder:
             # The attempt's final name is fully known before encoding begins
             # (quality = the cache key; no resolution component — Req 9b), so
             # there is no post-encode rename: the encoded output lands at its
-            # final address and the probed resolution becomes a sidecar fact.
+            # final address. The output resolution is derivable (source −
+            # crop) and never probed or persisted per attempt.
             output_dir = self._get_output_dir(strategy)
             output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1139,7 +1103,6 @@ class ChunkEncoder:
             goto_eval   = False
             output_file: Path | None = None
             attempt_frames: int = 0
-            attempt_resolution: str = ""
             if not force:
                 existing = self._check_existing_encoding(
                     chunk.safe_name(), strategy, current_q
@@ -1154,15 +1117,19 @@ class ChunkEncoder:
                         sidecar_sampling is not None
                         and sidecar_sampling != self._metrics_sampling
                     )
+                    # The file's frame count survives regardless of sidecar
+                    # staleness — re-measure never changes the encoded file
+                    # (0 = not on record). A 0 count marks the sidecar
+                    # incomplete (Req 9a: frame count present) — the re-measure
+                    # below re-derives it from the metric run's whole-file
+                    # decode.
+                    file_frames = int(sidecar.get("frame_count") or 0) if sidecar is not None else 0
                     sidecar_valid = (
                         sidecar is not None
                         and not sampling_stale
+                        and file_frames > 0
                         and required_keys.issubset(sidecar.get("metrics", {}).keys())
                     )
-                    # The file's frame count survives regardless of sidecar
-                    # staleness — re-measure never changes the encoded file
-                    # (0 = not on record).
-                    file_frames = int(sidecar.get("frame_count") or 0) if sidecar is not None else 0
                     if sidecar_valid and sidecar is not None:
                         # Full cache hit — no real work performed.
                         frame_counts[existing.path] = file_frames
@@ -1227,7 +1194,6 @@ class ChunkEncoder:
                         _any_real_work  = True
                         output_file     = existing.path
                         attempt_frames  = file_frames
-                        attempt_resolution = str(sidecar.get("resolution") or "") if sidecar is not None else ""
                         goto_eval       = True
 
             if not goto_eval:
@@ -1284,11 +1250,6 @@ class ChunkEncoder:
                             chunk.start_timestamp, chunk.end_timestamp,
                         )
 
-                # Probe the actual output resolution (crop may change the
-                # dimensions) — a sidecar fact; the file's name is already
-                # final, so there is no rename (Req 9b).
-                attempt_resolution = _probe_resolution(output_file) or ""
-
             assert output_file is not None
 
             # Evaluate quality — raw metric logs/stats go into a per-attempt subfolder;
@@ -1309,6 +1270,13 @@ class ChunkEncoder:
                         chunk_start_seconds  = chunk.start_timestamp,
                     )
                 all_metrics         = flatten_metric_stats(evaluation.metrics)
+                # The metric run decoded the attempt whole — its progress
+                # count IS the file's frame count (the most recent authority;
+                # subsampling reduces scoring, not the frame flow). Replaces
+                # the encode-run / carried-sidecar count on every measured
+                # attempt; 0 = the run did not determine it.
+                if evaluation.frame_count > 0:
+                    attempt_frames = evaluation.frame_count
                 # Live comparator verdict — a DECISION after measurement
                 # (Req 53), never persisted (the attempt sidecar stores
                 # facts only).
@@ -1326,13 +1294,12 @@ class ChunkEncoder:
             metrics_dict = {k: v for k, v in all_metrics.items() if k in targets_set}
 
             # Record the attempt's facts and write the per-attempt sidecar
-            # atomically (resolution included — the name carries none).
+            # atomically.
             frame_counts[output_file] = attempt_frames
             all_metrics_by_path[output_file] = all_metrics
             _write_metrics_sidecar(
                 output_file, current_q, all_metrics,
                 self._metrics_sampling, attempt_frames,
-                resolution=attempt_resolution or None,
             )
 
             # Build AttemptMetadata for this attempt.
@@ -1341,7 +1308,6 @@ class ChunkEncoder:
                 chunk_id        = chunk.safe_name(),
                 strategy        = strategy.display_name(),
                 crf             = current_q,
-                resolution      = attempt_resolution,
                 file_size_bytes = output_file.stat().st_size,
             )
 
@@ -1395,7 +1361,6 @@ class ChunkEncoder:
             self._finalize_winning_attempt(
                 strategy        = strategy,
                 chunk_id        = chunk.safe_name(),
-                resolution      = final_attempt.resolution,
                 winning_attempt = final_attempt.path,
                 crf             = search.best_quality,
                 metrics         = all_metrics_by_path.get(final_attempt.path, {}),
@@ -1438,7 +1403,6 @@ class ChunkEncoder:
             self._finalize_winning_attempt(
                 strategy        = strategy,
                 chunk_id        = chunk.safe_name(),
-                resolution      = best_fail_attempt.resolution,
                 winning_attempt = best_fail_attempt.path,
                 crf             = search.best_quality,
                 metrics         = all_metrics_by_path.get(best_fail_attempt.path, {}),
@@ -1503,24 +1467,22 @@ def build_encoded_chunk(
     chunk:        VideoStreamChunk,
     strategy:     Strategy,
     path:         Path,
-    resolution:   str | None,
     frame_count:  int,
 ) -> EncodedChunk:
     """Compose the winning attempt as an :class:`EncodedChunk`.
 
     The attempt's own video stream: crop empty by construction (applied
-    during the encode), frame count from the encode run, info from the
-    post-encode probe (resolution) plus the source fps — path and size are
-    read through ``stream.file``, never duplicated. The winning quality is
-    deliberately NOT composed: it lives on the winner sidecar as a fact for
-    processing-path consumers only (Req 4).
+    during the encode), frame count from the encode run, fps from the
+    source — path and size are read through ``stream.file``, never
+    duplicated. The winning quality is deliberately NOT composed: it lives
+    on the winner sidecar as a fact for processing-path consumers only
+    (Req 4). The output resolution is likewise not composed — derivable
+    (source − crop, by construction of the crop filter) and never carried.
 
     Args:
         chunk:        The source window the attempt encodes.
         strategy:     The strategy used.
         path:         The winner file.
-        resolution:   The winner's actual output resolution (``None`` when
-                      unknown — e.g. recovery-composed rows).
         frame_count:  Frames from the winning encode run (0 = unknown).
 
     Returns:
@@ -1530,7 +1492,6 @@ def build_encoded_chunk(
     source_info = chunk.stream.stream.info
     attempt_info = VideoStreamInfo(
         track_id     = 0,
-        resolution   = resolution or None,
         fps          = source_info.fps,
         fps_fraction = source_info.fps_fraction,
     )
@@ -1717,7 +1678,6 @@ async def _encode_chunks_parallel(
                         chunk        = chunk,
                         strategy     = strategy,
                         path         = pair_recovery.winning_file,
-                        resolution   = None,  # a sidecar fact — never read at recovery (Req 3)
                         frame_count  = 0,     # unknown on recovery
                     ))
                     result.reused_count += 1
@@ -1767,7 +1727,6 @@ async def _encode_chunks_parallel(
                         chunk        = chunk,
                         strategy     = strategy,
                         path         = chunk_result.encoded_file.path,
-                        resolution   = chunk_result.encoded_file.resolution or None,
                         frame_count  = chunk_result.frame_count,
                     ))
 

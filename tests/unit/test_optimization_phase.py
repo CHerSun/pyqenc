@@ -201,7 +201,7 @@ def _seed_winner(
     write_yaml_atomic(
         strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
         EncodingResultSidecar(
-            resolution="1920x1080", crf=Decimal(20),
+            crf=Decimal(20),
             metrics={}, targets_met=True,
         ).model_dump(exclude_none=True),
     )
@@ -657,7 +657,7 @@ class TestPairLedger:
         write_yaml_atomic(
             strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
             EncodingResultSidecar(
-                resolution="1920x1080", crf=Decimal(20),
+                crf=Decimal(20),
                 metrics={}, targets_met=True,
             ).model_dump(exclude_none=True),
         )
@@ -1193,7 +1193,7 @@ class TestAggregateStrategyMetrics:
             encoded_chunks.setdefault(strategy.display_name(), []).append(
                 build_encoded_chunk(
                     chunk=chunk, strategy=strategy,
-                    path=strategy_dir / name, resolution="1920x1080",
+                    path=strategy_dir / name,
                     frame_count=24,
                 )
             )
@@ -1219,7 +1219,7 @@ class TestAggregateStrategyMetrics:
             strategy.display_name(): [
                 build_encoded_chunk(
                     chunk=chunk, strategy=strategy,
-                    path=mkv, resolution="1920x1080", frame_count=24,
+                    path=mkv, frame_count=24,
                 ),
             ],
         }
@@ -1300,7 +1300,7 @@ class TestFixedComparedExecute:
                     result.encoded_chunks.setdefault(display, []).append(
                         build_encoded_chunk(
                             chunk=chunk, strategy=strategy,
-                            path=mkv, resolution="1920x1080", frame_count=24,
+                            path=mkv, frame_count=24,
                         )
                     )
             return result

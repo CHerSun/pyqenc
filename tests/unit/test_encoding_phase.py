@@ -198,17 +198,18 @@ def _run_encode(
 ) -> tuple[ChunkEncodingResult, _MM]:
     """encode_chunk over a fixed single-point domain with a fake encoder.
 
-    ffmpeg encode, resolution probe, and existing-encoding check are patched;
-    the evaluator is a mock so the measurement call itself is observable.
+    ffmpeg encode and the existing-encoding check are patched; the
+    evaluator is a mock so the measurement call itself is observable.
     Returns (ChunkEncodingResult, evaluator_mock).
     """
     strategy = _fixed_strategy()
     chunk    = _chunk_mock(tmp_path)
 
     fake_eval = _MM(spec=_QE)
-    fake_eval.targets_met = True
-    fake_eval.logs        = _QL()
-    fake_eval.metrics     = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
+    fake_eval.targets_met  = True
+    fake_eval.logs         = _QL()
+    fake_eval.metrics      = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
+    fake_eval.frame_count  = 120
 
     evaluator = _MM(spec=_QEvaluator)
     evaluator.work_dir = tmp_path
@@ -238,7 +239,6 @@ def _run_encode(
     with (
         _patch.object(encoder, "_check_existing_encoding", return_value=None),
         _patch.object(encoder, "_encode_with_ffmpeg", return_value=run_result),
-        _patch("pyqenc.phases.encoding._probe_resolution", return_value="1920x1080"),
     ):
         result = encoder.encode_chunk(
             chunk           = chunk,
@@ -427,6 +427,7 @@ def _run_encode_with_targets(
     )
     fake_eval.logs = _QL()
     fake_eval.metrics = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
+    fake_eval.frame_count = 120
 
     evaluator = _MM(spec=_QEvaluator)
     evaluator.work_dir = tmp_path
@@ -448,13 +449,108 @@ def _run_encode_with_targets(
     with (
         _patch.object(encoder, "_check_existing_encoding", return_value=None),
         _patch.object(encoder, "_encode_with_ffmpeg", return_value=run_result),
-        _patch("pyqenc.phases.encoding._probe_resolution", return_value="1920x1080"),
     ):
         result = encoder.encode_chunk(
             chunk=chunk, strategy=strategy, quality_targets=targets,
             initial_crf=_D("18.0"), force=False,
         )
     return result, evaluator
+
+
+class TestAttemptFrameCountSourcing:
+    """The attempt sidecar's frame count comes from the last whole-file decode.
+
+    Live finding 2026-10-09: re-measured attempts (sidecar missing or
+    incomplete) carried the incoming sidecar's count — 0 when absent — and
+    the zeros propagated into winner sidecars, darkening the
+    frame-preservation chain. The metric run decodes the attempt whole, so
+    its progress count IS the file's count; a 0-count sidecar is incomplete
+    (Req 9a: frame count present) and re-measure heals it.
+    """
+
+    def _seed_attempt(self, tmp_path: Path, *, frame_count: int) -> Path:
+        """A real attempt on disk with complete metrics and a given count."""
+        attempt = tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.mkv"
+        attempt.parent.mkdir(parents=True, exist_ok=True)
+        attempt.write_bytes(b"fake mkv")
+        attempt.with_suffix(".yaml").write_text(
+            _yaml.safe_dump({
+                "crf": "18.0",
+                "metrics": {"vmaf_min": 95.0},
+                "sampling": 10,
+                "frame_count": frame_count,
+            }),
+            encoding="utf-8",
+        )
+        return attempt
+
+    def _encoder(self, tmp_path: Path, evaluator) -> _ChunkEncoder:
+        return _ChunkEncoder(
+            quality_evaluator = evaluator,
+            work_dir          = tmp_path,
+            collector         = _MM(spec=_MetricsCollector),
+            metrics_sampling  = 10,
+        )
+
+    def _target(self):
+        from pyqenc.models import QualityTarget
+
+        return [QualityTarget(metric="vmaf", statistic="min", value=95.0)]
+
+    def test_zero_count_sidecar_remeasures_and_heals_the_count(self, tmp_path: Path) -> None:
+        """A complete-metrics sidecar with frame_count 0 is NOT a cache hit;
+        the re-measure writes the metric run's own count back."""
+        attempt = self._seed_attempt(tmp_path, frame_count=0)
+
+        fake_eval = _MM(spec=_QE)
+        fake_eval.targets_met  = True
+        fake_eval.logs         = _QL()
+        fake_eval.metrics      = {_MetricType.VMAF: {"min": 95.0, "median": 96.5}}
+        fake_eval.frame_count  = 120
+        evaluator = _MM(spec=_QEvaluator)
+        evaluator.work_dir = tmp_path
+        evaluator.evaluate_chunk.return_value = fake_eval
+        encoder = self._encoder(tmp_path, evaluator)
+
+        with _patch.object(encoder, "_encode_with_ffmpeg") as mock_encode:
+            result = encoder.encode_chunk(
+                chunk           = _chunk_mock(tmp_path),
+                strategy        = _fixed_strategy(),
+                quality_targets = self._target(),
+                initial_crf     = _D("18.0"),
+                force           = False,
+            )
+
+        assert result.success is True
+        mock_encode.assert_not_called()          # the file existed — measure-only
+        evaluator.evaluate_chunk.assert_called_once()
+        data = _yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
+        assert data["frame_count"] == 120
+
+    def test_counted_sidecar_is_a_pure_cache_hit(self, tmp_path: Path) -> None:
+        """Metrics + a real count = complete: no encode, no measure."""
+        attempt = self._seed_attempt(tmp_path, frame_count=120)
+
+        evaluator = _MM(spec=_QEvaluator)
+        evaluator.work_dir = tmp_path
+        encoder = self._encoder(tmp_path, evaluator)
+
+        with (
+            _patch.object(encoder, "_encode_with_ffmpeg") as mock_encode,
+        ):
+            result = encoder.encode_chunk(
+                chunk           = _chunk_mock(tmp_path),
+                strategy        = _fixed_strategy(),
+                quality_targets = self._target(),
+                initial_crf     = _D("18.0"),
+                force           = False,
+            )
+
+        assert result.success is True
+        mock_encode.assert_not_called()
+        evaluator.evaluate_chunk.assert_not_called()
+        data = _yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
+        assert data["frame_count"] == 120
 
 
 class TestEncodingPresentationTargets:
@@ -551,7 +647,7 @@ class TestEncodingPresentationTargets:
         winner_path.write_bytes(b"x" * 32)
         winner = build_encoded_chunk(
             chunk=chunk, strategy=strategy,
-            path=winner_path, resolution="1920x1080", frame_count=240,
+            path=winner_path, frame_count=240,
         )
 
         captured: dict[str, object] = {}
@@ -663,7 +759,7 @@ class TestOneWinnerPerChunkGuard:
         mkv.write_bytes(b"x" * 64)
         return build_encoded_chunk(
             chunk=chunk, strategy=_STRATEGY_OBJ,
-            path=mkv, resolution="1920x1080", frame_count=24,
+            path=mkv, frame_count=24,
         )
 
     def test_exact_match_passes(self, tmp_path: Path) -> None:

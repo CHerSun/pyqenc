@@ -57,7 +57,7 @@ One concept, per Req 10: **`Fingerprint {size: int|None = None, token: str}`** �
 | Family | Form | Owner | Notes |
 | --- | --- | --- | --- |
 | chunk id | `HH꞉MM꞉SS․mmm-HH꞉MM꞉SS․mmm` | `VideoStreamChunk` | inverse pair pinned (unchanged) |
-| attempt | `<chunk>.q<q>.mkv` + `<chunk>.q<q>.yaml` | `EncodedChunk` | q = the search's cache key; no res; exact-name lookup, no glob/parse; the post-encode resolution rename dies. Attempts have NO recovery presence — no classification, no invalidation pass; consulted lazily per pending pair at execution, verified complete-by-sidecar (a completeness check, not invalidation — the two-axis rule applied to the last layer) |
+| attempt | `<chunk>.q<q>.mkv` + `<chunk>.q<q>.yaml` | `EncodedChunk` | q = the search's cache key; no res; exact-name lookup, no glob/parse; the post-encode resolution rename dies. Attempts have NO recovery presence — no classification, no invalidation pass; consulted lazily per pending pair at execution, verified complete-by-sidecar (a completeness check, not invalidation — the two-axis rule applied to the last layer). Amended 2026-10-09: attempt sidecars carry no `resolution` at all — derivable (`source − crop`) and unconsumed (Req 9a/9b amendments) |
 | **winner** | **`<chunk>.mkv` + `<chunk>.yaml`** | `EncodedChunk` | pure input-derived; no q/res |
 | audio output | `<stream safe> chain=<name>.<ext>` | one owner (entity or chain module) | compose+parse inverse pair |
 | merged output | `<stem> <strategy>[ <LABEL>=<q>].mkv` | `MergedVideo` | suffix per-strategy whenever collapsed; search: no distinguisher |
@@ -67,7 +67,7 @@ One concept, per Req 10: **`Fingerprint {size: int|None = None, token: str}`** �
 
 **Fingerprint** is the standard identity-comparison mechanism (Req 10): one value type `{size, token}`, class-owned, **hash tokens only — canonical dumps are never persisted anywhere** (debug reads the config / source of truth, not the sidecar); consumers compare equality only. Deliberately NOT fingerprints: the probe facet and the per-mode keys — structured, field-wise comparisons where fields are individually meaningful and diffable (Req 10c boundary; the former content-identity entity retired INTO the fingerprint family).
 
-Winner sidecar: `{crf, resolution, metrics, frame_count, targets_met}` — `winning_attempt` dropped; the `EncodedChunk` payload carries no quality field at all (crf/res are disk facts, consumed on processing paths only; recovery never reads winner sidecar contents — high-N, listing-only).
+Winner sidecar: `{crf, metrics, frame_count, targets_met}` — `winning_attempt` dropped (amended 2026-10-09: `resolution` dropped too — derivable `source − crop` via the `Resolution` operator, human-facing on the probe facet only); the `EncodedChunk` payload carries no quality field at all (crf is a disk fact, consumed on processing paths only; recovery never reads winner sidecar contents — high-N, listing-only).
 
 ## 5. Sidecar layouts
 
@@ -91,12 +91,12 @@ summary: [ … ]                             # per-strategy rows (sizes [+ compa
 # encoding.yaml — aggregates only (no keys); ONE summary block, typed by the sidecar class
 summary: {limiter: [ … ], frames: {"h265+slow": 172000}}
 
-# probe.yaml  → {frame_count, crop, crop_source: manual|detected}   # crop_source human-only
+# probe.yaml  → {frame_count, crop, crop_source: manual|detected, resulting_resolution}   # crop_source + resulting_resolution human-only (the derived dims, source − crop)
 # chunking.yaml → {scenes: […], scene_threshold: 0.27, min_scene_length: 15}  # params = keys
 # audio.yaml → {chains: {normal: {token: "…"}}}   # CHANGE vs today: hash tokens, not full chain JSON
 
-# attempt sidecar <chunk>.q<q>.yaml → {crf, resolution, metrics: FULL, sampling, frame_count}  # re-judging substrate
-# winner sidecar <chunk>.yaml       → {crf, resolution, metrics: TARGETED, frame_count, targets_met}
+# attempt sidecar <chunk>.q<q>.yaml → {crf, metrics: FULL, sampling, frame_count}  # re-judging substrate (resolution dropped 2026-10-09)
+# winner sidecar <chunk>.yaml       → {crf, metrics: TARGETED, frame_count, targets_met}
 # merged output sidecar  <stem> <strategy>.yaml →
 #   {frame_count, metrics: {…FULL…},                        # facts (no verdict; full — re-judgeable)
 #    provenance: {source: {size, token},                    # identity — escalates (Req 27)

@@ -500,12 +500,18 @@ class QualityEvaluation:
     nothing here compares against foreign state.
 
     Attributes:
-        metrics: Parsed quality metrics with statistics
-        logs: The transient metric logs/paths (``QualityLogs``)
+        metrics:     Parsed quality metrics with statistics.
+        logs:        The transient metric logs/paths (``QualityLogs``).
+        frame_count: Frames of the measured (encoded) file, from the measure
+                     run's own progress — the file's count observed by its
+                     most recent whole-file decode. The measure run reads the
+                     attempt whole and subsampling only reduces scoring, so
+                     this is exact; ``0`` = not determined by this run.
     """
 
-    metrics: ChunkQualityStats
-    logs:    QualityLogs
+    metrics:     ChunkQualityStats
+    logs:        QualityLogs
+    frame_count: int = 0
 
 
 # ---------------------------------------------------------------------------

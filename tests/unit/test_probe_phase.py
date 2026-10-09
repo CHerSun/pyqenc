@@ -308,6 +308,40 @@ class TestProbePhaseCompleted:
         assert loaded.source.matches(job.source_fingerprint)
         assert loaded.crop_source == "detected"
 
+    def test_probe_yaml_persists_resulting_resolution(self, tmp_path: Path):
+        """The human-facing output dimensions persist: source − crop.
+
+        1920x1080 − ↑140↓140 = 1920x800 — the single place a human inspects
+        the crop's dimensional effect. Bug guarded: a dropped field would
+        leave probe.yaml without the derivation's display home.
+        """
+        _, work_dir = self._run_with_mocks(tmp_path)
+
+        loaded = ProbeState.load(work_dir / "probe.yaml")
+        assert loaded is not None
+        assert loaded.resulting_resolution == "1920x800"
+
+
+class TestDeriveResultingResolution:
+    """The derivation helper: source facts in, display string out."""
+
+    def test_derives_source_minus_crop(self, tmp_path: Path):
+        from pyqenc.phases.probe import _derive_resulting_resolution
+
+        video = _make_video_stream(tmp_path / "source.mkv")
+        result = _derive_resulting_resolution(video, CropParams(top=22, bottom=22))
+        assert result == "1920x1036"
+
+    def test_unknown_source_resolution_gives_none(self, tmp_path: Path):
+        """A stream without probed dimensions yields None, never a guess."""
+        from pyqenc.phases.probe import _derive_resulting_resolution
+
+        video = VideoStream(
+            file = File(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "s.mkv", file_size_bytes=64),
+            info = VideoStreamInfo(track_id=0),
+        )
+        assert _derive_resulting_resolution(video, CropParams()) is None
+
 
 # ---------------------------------------------------------------------------
 # Timing instrumentation — top-level probe + dotted crop_detect / frame_count

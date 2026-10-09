@@ -9,6 +9,7 @@ from pyqenc.models import (
     CodecConfig,
     CropParams,
     QualityTarget,
+    Resolution,
     Strategy,
 )
 
@@ -105,6 +106,62 @@ class TestCropParams:
         """Test string representation uses comma-separated format."""
         crop = CropParams(top=140, bottom=140, left=10, right=10)
         assert str(crop) == "140,140,10,10"
+
+
+class TestResolution:
+    """Tests for the Resolution value type (the derivable dimensions)."""
+
+    def test_parse_valid(self):
+        """Test parsing a 'WxH' string."""
+        res = Resolution.parse("1920x1080")
+        assert res.width == 1920
+        assert res.height == 1080
+
+    def test_parse_rejects_missing_separator(self):
+        """A string without 'x' is not a resolution."""
+        with pytest.raises(ValueError, match="Not a resolution string"):
+            Resolution.parse("19201080")
+
+    def test_parse_rejects_non_integers(self):
+        """Non-integer parts are not resolutions."""
+        with pytest.raises(ValueError, match="Not a resolution string"):
+            Resolution.parse("1920x1080.5")
+
+    def test_parse_rejects_non_positive(self):
+        """Zero/negative dimensions are not resolutions (positive by meaning)."""
+        for bad in ("0x1080", "1920x0", "-10x100"):
+            with pytest.raises(ValueError, match="Not a resolution string"):
+                Resolution.parse(bad)
+
+    def test_subtraction_applies_crop_margins(self):
+        """source - crop subtracts margins per axis (the live-found case)."""
+        source = Resolution.parse("1920x1080")
+        crop   = CropParams(top=22, bottom=22, left=0, right=0)
+        assert str(source - crop) == "1920x1036"
+
+    def test_subtraction_all_sides(self):
+        """All four margins subtract from their corresponding axis."""
+        source = Resolution.parse("3840x2160")
+        crop   = CropParams(top=140, bottom=140, left=10, right=30)
+        result = source - crop
+        assert (result.width, result.height) == (3800, 1880)
+
+    def test_subtraction_empty_crop_is_identity(self):
+        """An empty crop leaves the dimensions unchanged."""
+        source = Resolution.parse("1280x720")
+        assert str(source - CropParams()) == "1280x720"
+
+    def test_str_form(self):
+        """The string form is the stream-info 'WxH' convention."""
+        assert str(Resolution(width=640, height=360)) == "640x360"
+
+    def test_frozen(self):
+        """Resolution is immutable (a value type)."""
+        from pydantic import ValidationError
+
+        res = Resolution.parse("1920x1080")
+        with pytest.raises(ValidationError):
+            res.width = 3840  # ty: ignore[invalid-assignment] — rejection is the test's subject
 
 
 class TestStrategy:

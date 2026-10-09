@@ -3,6 +3,8 @@
 
 from pathlib import Path
 
+import yaml
+
 from pyqenc.models import CropParams
 from pyqenc.phases.probe import ProbeState
 
@@ -123,12 +125,46 @@ class TestProbeStateRoundTrip:
         returning a different default on restore.
         """
         original = ProbeState(frame_count=0)
-        path     = tmp_path / "probe.yaml"
+        path = tmp_path / "probe.yaml"
         original.save(path)
 
         restored = ProbeState.load(path)
         assert restored is not None
         assert restored.frame_count == 0
+
+    def test_round_trip_resulting_resolution(self, tmp_path: Path):
+        """The human-facing derived dimensions persist and restore.
+
+        Bug: a display fact set at write time (source − crop) could be
+        silently dropped by the serializer, leaving probe.yaml without
+        the single human inspection point for the crop's effect.
+        """
+        original = ProbeState(
+            frame_count=72000, crop=CropParams(top=22, bottom=22),
+            crop_source="detected", resulting_resolution="1920x1036",
+        )
+        path = tmp_path / "probe.yaml"
+        original.save(path)
+
+        restored = ProbeState.load(path)
+        assert restored is not None
+        assert restored.resulting_resolution == "1920x1036"
+
+    def test_resulting_resolution_omitted_when_unset(self, tmp_path: Path):
+        """An unset resulting_resolution writes no key; loading gives None.
+
+        Legacy sidecars (written before the field) must load with None —
+        unknown-not-mismatch, like crop_source and source.
+        """
+        path = tmp_path / "probe.yaml"
+        ProbeState(frame_count=100, crop=CropParams(top=22, bottom=22)).save(path)
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert "resulting_resolution" not in data
+
+        restored = ProbeState.load(path)
+        assert restored is not None
+        assert restored.resulting_resolution is None
 
     # ------------------------------------------------------------------
     # load() — graceful handling of corrupt/invalid files

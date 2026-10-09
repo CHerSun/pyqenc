@@ -25,7 +25,7 @@ from pyqenc.constants import (
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
-from pyqenc.models import CropParams
+from pyqenc.models import CropParams, Resolution
 from pyqenc.phases.extraction import _probe_streams_json
 from pyqenc.phases.job import JobSidecar
 from pyqenc.phases.probe import ProbeState
@@ -431,25 +431,15 @@ def _effective_resolution(
     Raises:
         ValueError: If the stream's resolution is unavailable or unparseable.
     """
-    resolution = stream.info.resolution
-    if not resolution:
+    if not stream.info.resolution:
         raise ValueError(f"Resolution unavailable for {stream.file.path}")
-
-    parts = resolution.split("x")
-    if len(parts) != 2:
-        raise ValueError(f"Unexpected resolution format: {resolution!r}")
-
-    raw_w = int(parts[0])
-    raw_h = int(parts[1])
-
-    cropped_w = raw_w - crop_params.left - crop_params.right
-    cropped_h = raw_h - crop_params.top  - crop_params.bottom
+    cropped = Resolution.parse(stream.info.resolution) - crop_params
 
     if width is None:
-        return cropped_w, cropped_h
+        return cropped.width, cropped.height
 
     # Scale preserving aspect ratio: scale=width:-1 (height rounded to even)
-    scale_h = round(cropped_h * width / cropped_w)
+    scale_h = round(cropped.height * width / cropped.width)
     # ffmpeg scale=-1 rounds to nearest even
     if scale_h % 2 != 0:
         scale_h += 1
