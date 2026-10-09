@@ -1045,9 +1045,60 @@ Should we move them into separate file, to be readily available for both optimiz
 
 ---
 
-## Last known = 106
+## 107. Phase sidecars: uniform layout — execution-order fields + job.yaml flattening
 
-Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
+**Status:** feasible, design settled by user (2026-10-09, from the real e2e run's sidecar review); not yet implemented
+
+Two uniformity gaps observed across the eight phase sidecars on a true run:
+
+- **Field ordering is not uniform.** Want a stable, execution-order layout in
+  every phase YAML: (1) deps/inputs used for invalidation first — `source`
+  (the identity key) always first; (2) config params next (audio chains,
+  scene thresholds, targets/pinned map, sampling); (3) own phase results
+  (chunking scenes, test_chunks, summary-relevant facts); (4) preserved
+  summaries (`summary`) last. Mechanically free: pydantic v2 serializes in
+  field-declaration order, so this is a declaration reorder per sidecar
+  model — no custom serializers needed. Applies to all phase sidecars + the
+  per-output merged sidecar (provenance before facts there, same principle).
+- **job.yaml folds its two values unnecessarily**: `{source: {path,
+  fingerprint}}` today. Flatten to top-level `{path, source}` — `source`
+  then means the identity fingerprint everywhere (uniform with other
+  phases), `path` is the human-facing locator. Pre-alpha break: existing
+  workdirs' job.yaml stops parsing → identity rebuilds on first run (fatal
+  only if the rebuilt identity then mismatches a phase sidecar).
+
+---
+
+## 108. Run-log polish — phase banners and uniform final status lines
+
+**Status:** feasible, design settled by user (2026-10-09, from the real e2e run's log review); not yet implemented
+
+Every phase's LAST line should carry a status emoji; from the real run:
+
+- **Probe banner back on.** `BANNER = False` (probe.py:198) leaves the
+  phase jumping in right after audio with only the soft separator — toggle
+  back to the thick banner.
+- **Missing status emoji on final lines** (extraction/audio/merge/encoding
+  already conform):
+  - job: `Initialized job.yaml for new pipeline run` (job.py:331) — prefix
+    e.g. `✔ Job complete: ...`;
+  - probe: `Probe: done — frame_count=…, crop=…` (probe.py:394) — prefix
+    `✔`;
+  - chunking: `107 chunk window(s) — no files produced
+    (direct-from-source)` (chunking.py:426) — prefix `✔`. Also: the
+    preceding `Scene detection: 107 scene(s)` (chunking.py:156) is now a
+    duplicate — the two lines made sense when extraction wrote files, the
+    final windows line alone suffices.
+- **Optimization has no concise final line** (summary table, then
+  nothing). Add e.g. `✔ Tested {len(test_chunks)} chunk(s) for
+  {len(strategies)} strategie(s), selected {len(selected)} strategie(s).`
+  — the strategies list itself is already visible in the summary table.
+
+---
+
+## Last known = 108
+
+Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
 
 ---
