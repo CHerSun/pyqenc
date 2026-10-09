@@ -117,12 +117,14 @@ class MetricsSidecar(BaseModel):
     (e.g. ``vmaf_min``, ``ssim_median``) consistent with ``ChunkQualityStats``
     serialisation.
 
-    ``frame_count`` is a fact of the attempt file, from the encode run that
-    produced it — measurement passes never change it (a re-measured attempt
-    carries its previously persisted count over).  ``0`` is the sentinel for
-    "could not be determined" (no valid video has zero frames): the attempt
-    was re-measured with no prior count on record, or the sidecar predates
-    the field.
+    ``frame_count`` is a fact of the attempt file, from whoever last decoded
+    it whole: the encode run that produced it, or the measure run on a
+    re-measured attempt (the metric run reads the attempt whole, so its
+    progress count IS the file's count — found live 2026-10-09, when
+    re-measured sidecars carried 0 and darkened the frame-preservation
+    chain).  ``0`` is the sentinel for "could not be determined" (no valid
+    video has zero frames) and marks the sidecar incomplete at pick-up
+    (Req 9a) — the next re-measure heals it.
 
     The attempt's output resolution is deliberately NOT a field: it is
     derivable (source dimensions − crop, by construction of the crop
