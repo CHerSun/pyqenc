@@ -1094,6 +1094,8 @@ Every phase's LAST line should carry a status emoji; from the real run:
   {len(strategies)} strategie(s), selected {len(selected)} strategie(s).`
   — the strategies list itself is already visible in the summary table.
 
+Extra human input: maybe make final lines uniform, like recovery line, based on phase result, its status and message?
+
 ---
 
 ## Last known = 108

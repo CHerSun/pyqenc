@@ -43,7 +43,7 @@ One concept, per Req 10: **`Fingerprint {size: int|None = None, token: str}`** �
 | Owner | Means (derivation) | size |
 | --- | --- | --- |
 | source file (Job) | sampled windows: head + tail + two interior ~1 MiB | file size |
-| `Strategy` | canonical dump minus declared exclusions (`codec.default_quality`) | — |
+| `Strategy` | canonical dump minus declared exclusions — the quality-proposal domain (`default_quality`, `quality_range`, `quality_granularity`, `quality_max_step`; amended 2026-10-09 after the live `-q` toggle fired the fatal band) | — |
 | `ResolvedChain` | canonical dump (today's chain signature, now hashed) | — |
 | id-set (chunk-set / winner-set) | hash over the sorted chunk ids — ONE derivation, two vantages: the **chunk-set fingerprint** is optimization's common-base key (mismatch ⇒ wipe winners at `_invalidate`, uniform with merge); the **winner-set fingerprint** rides each merged output's provenance | count |
 

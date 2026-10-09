@@ -240,16 +240,29 @@ class Strategy(BaseModel):
     codec:        CodecConfig
     profile_args: list[str]
 
-    FINGERPRINT_EXCLUDED_FIELDS: ClassVar[frozenset[str]] = frozenset(
-        {"codec.default_quality"},
-    )
+    FINGERPRINT_EXCLUDED_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "codec.default_quality",
+        "codec.quality_range",
+        "codec.quality_granularity",
+        "codec.quality_max_step",
+    })
     """Model fields excluded from the identity fingerprint (dotted paths).
 
-    ``codec.default_quality`` is the search's STARTING POINT, not product
-    identity — attempts at every quality value are products of the same
-    strategy. The set is declared here, next to what it excludes; every
-    other field participates by default (fail-safe: future fields
-    over-invalidate rather than slip through)."""
+    The exclusion set is the quality-PROPOSAL domain — the search's steering
+    parameters, not product identity: ``default_quality`` is the starting
+    point, ``quality_range`` / ``quality_granularity`` /
+    ``quality_max_step`` bound and quantize which quality values get
+    PROPOSED. An attempt at a given quality is the same product whatever
+    proposals produced it (the quality value is the attempt's cache key),
+    so a proposal-domain change — notably the ``-q`` CLI override, which
+    rewrites the effective range — must not flip the fingerprint into the
+    fatal band; the pinned-quality map (fixed mode's key) and the mode tag
+    own quality-change invalidation. Found live 2026-10-09: a search→fixed
+    ``-q`` toggle fired the per-strategy catastrophic fatal and demanded
+    ``--force`` to wipe attempts that were perfectly valid products. The
+    set is declared here, next to what it excludes; every other field
+    participates by default (fail-safe: future fields over-invalidate
+    rather than slip through)."""
 
     @property
     def fingerprint(self) -> Fingerprint:

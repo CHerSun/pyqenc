@@ -162,6 +162,41 @@ class TestStrategyFingerprint:
         tuned = _strategy(default_quality=Decimal(28))
         assert base.fingerprint.matches(tuned.fingerprint)
 
+    def test_quality_proposal_domain_is_excluded(self) -> None:
+        """The whole quality-PROPOSAL domain is excluded (Req 10a, amended
+        2026-10-09): range, granularity, and max step steer which quality
+        values get proposed — an attempt at a given quality is the same
+        product whatever proposals produced it.
+
+        Bug guarded (found live on a real ``search → -q 18`` toggle): the
+        ``-q`` override rewrites the effective range; with the range in the
+        fingerprint, every strategy flipped into the per-strategy
+        catastrophic fatal — demanding ``--force`` to wipe attempts that
+        were valid products. Quality-change invalidation is owned by the
+        mode tag and the pinned-quality map, never the fingerprint.
+        """
+        base = _strategy()
+        steered = _strategy(
+            quality_range=(Decimal("18"), Decimal("18")),
+            quality_granularity=Decimal("1"),
+            quality_max_step=Decimal("4"),
+        )
+        assert base.fingerprint.matches(steered.fingerprint)
+
+    def test_q_toggle_keeps_fingerprint_via_resolve_encoding(self) -> None:
+        """End-to-end over the real resolution path: resolving the same
+        strategy with vs without the ``-q`` override yields the SAME
+        fingerprint (the live e2e scenario, pinned at the source of the
+        2026-10-09 fatal)."""
+        from pyqenc.app_config import load_app_config
+
+        cfg = load_app_config(default_only=True)
+        search = cfg.resolve_encoding(strategies=["h265+slow"], targets=["vmaf-min:93.0"])
+        fixed = cfg.resolve_encoding(
+            strategies=["h265+slow"], quality=(Decimal("18"), Decimal("18")),
+        )
+        assert search.strategies[0].fingerprint.matches(fixed.strategies[0].fingerprint)
+
     def test_encoder_args_change_is_detected(self) -> None:
         """A deep codec-args edit changes the token (Req 39: catastrophic
         per-strategy invalidation keys off this).
