@@ -1265,6 +1265,15 @@ the same identity: underscore (`vmaf_min` — sidecar keys, metric dicts)
 and dash (`vmaf-min` — CLI/config/`QualityTarget.parse` targets). Nothing
 type-checks that a key is well-formed; nothing owns the pair.
 
+Related uniformity gap (user, 2026-10-10): **the full measured set vs the
+targeted subset** — deriving one from the other is hand-rolled at several
+sites (`_winner_targeted_metrics`' mode-aware subset for winner sidecars,
+the pick-up's `targets_set_reused` filter, merge's
+`_summary_rendered_keys`, the search's target-key projection). ONE
+uniform method should own full→targeted (mode-aware: search = the
+targets' keys; fixed = the comparison stat set), expressed over the key
+class — every consumer asks it, nobody re-implements the filter.
+
 Direction: a value class for the metric+stat identity —
 
 - frozen, **hashable + comparable** → usable directly as the dict key of
