@@ -54,12 +54,18 @@ class SceneRecord(BaseModel):
 
     Attributes:
         timestamp_seconds: The boundary's timestamp on the source timeline.
-        frame:             The detector-reported frame index — informational
-                           only; no code path depends on it.
+        frame:             The boundary's frame index — always reported by
+                           the detector (PySceneDetect's FrameTimecode
+                           carries frames and seconds together; the
+                           zero-scenes fallback synthesizes frame 0).
+                           Consecutive index differences ARE the chunk
+                           frame counts (telescoping to the source total
+                           by construction) — load-bearing on the reload
+                           path, not informational.
     """
 
     timestamp_seconds: float
-    frame:             int | None = None
+    frame:             int
 
 
 class ChunkingSidecar(BaseModel):
@@ -334,7 +340,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         sidecar = load_model(yaml_path, ChunkingSidecar)
         if sidecar is not None and sidecar.scenes:
             self._recovered_scenes = [
-                SceneBoundary(frame=record.frame or 0, timestamp_seconds=record.timestamp_seconds)
+                SceneBoundary(frame=record.frame, timestamp_seconds=record.timestamp_seconds)
                 for record in sidecar.scenes
             ]
             logger.info("Scenes:  %d (from chunking.yaml)", len(self._recovered_scenes))
