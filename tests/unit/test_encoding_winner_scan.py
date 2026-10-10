@@ -99,6 +99,7 @@ def _make_winner(
         "metrics": {"vmaf_min": 94.5},
         "targets_met": True,
         "frame_count": frames,
+        "sampling": 10,
     }
     (strategy_dir / EncodedChunk.format_winner_sidecar_name(chunk.safe_name())).write_text(
         yaml.safe_dump(sidecar), encoding="utf-8",
@@ -170,6 +171,7 @@ class TestWinnerTargetedSubset:
         _write_encoding_result_sidecar(
             tmp_path, "chunk",
             Decimal("18.0"), {"vmaf_min": 94.5}, 2400,
+            metrics_sampling=10,
         )
         data = yaml.safe_load(
             (tmp_path / EncodedChunk.format_winner_sidecar_name("chunk")).read_text(encoding="utf-8"),

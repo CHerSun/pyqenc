@@ -96,7 +96,7 @@ summary: {limiter: [ … ], frames: {"h265+slow": 172000}}
 # audio.yaml → {chains: {normal: {token: "…"}}}   # CHANGE vs today: hash tokens, not full chain JSON
 
 # attempt sidecar <chunk>.q<q>.yaml → {metrics: FULL, sampling, frame_count}  # re-judging substrate (resolution dropped 2026-10-09; crf dropped same day — the quality is the attempt's address/name, zero consumers)
-# winner sidecar <chunk>.yaml       → {crf, metrics: TARGETED, frame_count, targets_met}
+# winner sidecar <chunk>.yaml       → {crf, metrics: TARGETED, sampling, frame_count, targets_met}  # inherits the attempt facts (MetricsSidecar base); sampling added 2026-10-10 — the targeted subset is measured data, interpretable only against its sampling
 # merged output sidecar  <stem> <strategy>.yaml →
 #   {frame_count, metrics: {…FULL…},                        # facts (no verdict; full — re-judgeable)
 #    provenance: {source: {size, token},                    # identity — escalates (Req 27)
