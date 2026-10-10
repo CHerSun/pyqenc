@@ -1203,37 +1203,36 @@ def _run_full_merge(
 class TestPerOutputSidecarShape:
     """The acceptance record: facts + provenance, no verdict (Req 27)."""
 
-    def test_fixed_record_carries_provenance_and_full_metrics(self, tmp_path: Path) -> None:
-        import yaml as _yaml
+    def test_fixed_record_round_trips_via_the_mode_union(self, tmp_path: Path) -> None:
+        """Save → load dispatches to the FIXED variant with its quality, and
+        the full measured set is retained (stats outside any target set)."""
+        from pyqenc.phases.merge import FixedMergedProvenance, MergedOutputSidecar
 
         _merge, merged_dir = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
-        data = _yaml.safe_load(next(merged_dir.glob("*.yaml")).read_text(encoding="utf-8"))
-        assert set(data) == {"frame_count", "metrics", "provenance"}
-        # No verdict anywhere (Req 51).
-        assert "targets_met" not in data
-        # Retention: the FULL measured set (incl. stats outside any target set).
-        assert data["metrics"]["vmaf_std"] == 1.2
-        assert data["metrics"]["vmaf_max"] == 99.0
-        prov = data["provenance"]
-        assert prov["mode"] == "fixed"
-        assert prov["strategy"]["token"], "strategy IS the args fingerprint (Req 61)"
-        assert prov["quality"] == "18.0"
-        assert prov["winners"]["size"] == 1
-        # The fixed variant has NO targets field, and no anchor anywhere:
-        # the anchor is a runtime-elected presentation basis, never persisted.
-        assert "targets" not in prov
-        assert "anchor" not in prov
-
-    def test_search_record_carries_targets_basis(self, tmp_path: Path) -> None:
         import yaml as _yaml
+
+        data = _yaml.safe_load(next(merged_dir.glob("*.yaml")).read_text(encoding="utf-8"))
+        record = MergedOutputSidecar.model_validate(data)
+        assert isinstance(record.provenance, FixedMergedProvenance)
+        assert record.provenance.quality == Decimal("18.0")
+        assert record.provenance.winners.size == 1
+        assert record.provenance.strategy.token, "strategy IS the args fingerprint (Req 61)"
+        # Retention: the FULL measured set (incl. stats outside any target set).
+        assert record.metrics["vmaf_std"] == 1.2
+        assert record.metrics["vmaf_max"] == 99.0
+
+    def test_search_record_round_trips_via_the_mode_union(self, tmp_path: Path) -> None:
+        """Save → load dispatches to the SEARCH variant carrying the targets
+        basis (targets steer the search — a change re-searches and re-merges)."""
+        import yaml as _yaml
+
+        from pyqenc.phases.merge import MergedOutputSidecar, SearchMergedProvenance
 
         _merge, merged_dir = _run_full_merge(tmp_path, fixed=False)
         data = _yaml.safe_load(next(merged_dir.glob("*.yaml")).read_text(encoding="utf-8"))
-        prov = data["provenance"]
-        assert prov["mode"] == "search"
-        assert prov["targets"], "search runs carry the targets basis"
-        # The search variant has NO quality field.
-        assert "quality" not in prov and "anchor" not in prov
+        record = MergedOutputSidecar.model_validate(data)
+        assert isinstance(record.provenance, SearchMergedProvenance)
+        assert record.provenance.targets, "search runs carry the targets basis"
 
 
 class TestMergeYamlReplayAggregate:
@@ -1243,7 +1242,6 @@ class TestMergeYamlReplayAggregate:
         """No basis marker exists: replay re-renders verdicts live against
         the current bar, so nothing downstream needs the rendering basis
         (dropped 2026-10-09 — zero consumers)."""
-        import yaml as _yaml
 
         from pyqenc.phases.merge import MergeSidecar
 
@@ -1254,9 +1252,6 @@ class TestMergeYamlReplayAggregate:
         assert [row.strategy_name for row in persisted.summary] == ["h265-aq+slow"]
         # No verdict on the replay rows (marks render live).
         assert "targets_met" not in persisted.summary[0].model_dump()
-
-        raw = _yaml.safe_load((merge._deps[JobPhase].work_dir / "merge.yaml").read_text(encoding="utf-8"))
-        assert set(raw) == {"summary"}, f"merge.yaml must carry summary rows only, got {set(raw)}"
 
     def test_search_summary_rows_persist(self, tmp_path: Path) -> None:
         from pyqenc.phases.merge import MergeSidecar

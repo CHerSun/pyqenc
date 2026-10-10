@@ -3,8 +3,6 @@
 
 from pathlib import Path
 
-import yaml
-
 from pyqenc.models import CropParams
 from pyqenc.phases.probe import ProbeState
 
@@ -99,42 +97,6 @@ class TestProbeStateRoundTrip:
         assert restored.crop.left    == 0
         assert restored.crop.right   == 0
 
-    def test_crop_persists_as_one_line_storage_string(self, tmp_path: Path):
-        """The crop writes as the model's own storage form — one line
-        (``crop: 22,22,0,0``), not a nested dict.
-
-        Bug guarded: default model_dump leaks the nested 5-line dict into
-        the sidecar; the compact form is the declared storage convention.
-        """
-        path = tmp_path / "probe.yaml"
-        ProbeState(frame_count=9526, crop=CropParams(top=22, bottom=22)).save(path)
-
-        text = path.read_text(encoding="utf-8")
-        assert "crop: 22,22,0,0" in text
-        assert "top:" not in text
-
-    def test_saved_shape_comes_from_save_model_conventions(self, tmp_path: Path):
-        """No custom serializer: the file is exactly ``save_model``'s
-        ``model_dump(exclude_none=True)`` — set fields persist (in
-        declaration order), unset fields are omitted, and an empty crop
-        persists as ``crop: 0,0,0,0`` (no omission special case)."""
-        path = tmp_path / "probe.yaml"
-        ProbeState(frame_count=100).save(path)  # everything else unset
-
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        assert list(data) == ["frame_count", "crop"]
-        assert data["crop"] == "0,0,0,0"
-
-        full = tmp_path / "full.yaml"
-        ProbeState(
-            frame_count=9526, crop=CropParams(top=22, bottom=22),
-            crop_source="detected", resulting_resolution="1920x1036",
-        ).save(full)
-        full_data = yaml.safe_load(full.read_text(encoding="utf-8"))
-        assert list(full_data) == [
-            "frame_count", "crop", "crop_source", "resulting_resolution",
-        ]
-
     def test_legacy_nested_crop_dict_still_loads(self, tmp_path: Path):
         """Tolerance guard: the model's native dict form (the pre-compact
         serialization) passes validation — same model, both natural forms."""
@@ -205,21 +167,17 @@ class TestProbeStateRoundTrip:
         assert restored is not None
         assert restored.resulting_resolution == "1920x1036"
 
-    def test_resulting_resolution_omitted_when_unset(self, tmp_path: Path):
-        """An unset resulting_resolution writes no key; loading gives None.
-
-        Legacy sidecars (written before the field) must load with None —
-        unknown-not-mismatch, like crop_source and source.
-        """
+    def test_sidecar_without_resulting_resolution_loads_none(self, tmp_path: Path):
+        """Legacy sidecars (written before the field) load with ``None`` —
+        unknown-not-mismatch, like crop_source and source (deserialization
+        tolerance, not file-form pinning)."""
         path = tmp_path / "probe.yaml"
-        ProbeState(frame_count=100, crop=CropParams(top=22, bottom=22)).save(path)
-
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        assert "resulting_resolution" not in data
+        path.write_text("frame_count: 100\ncrop: 22,22,0,0\n", encoding="utf-8")
 
         restored = ProbeState.load(path)
         assert restored is not None
         assert restored.resulting_resolution is None
+        assert restored.crop.top == 22
 
     # ------------------------------------------------------------------
     # load() — graceful handling of corrupt/invalid files

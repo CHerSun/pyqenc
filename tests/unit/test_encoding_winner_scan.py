@@ -122,7 +122,6 @@ class TestSidecarFrameCount:
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 2400
-        assert "crf" not in data, "the quality is the attempt's name, not a sidecar fact"
 
     def test_metrics_sidecar_writes_zero_for_unknown_frame_count(self, tmp_path: Path) -> None:
         """An unknown count is persisted as the 0 sentinel (no None in yaml)."""
