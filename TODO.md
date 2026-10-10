@@ -1251,7 +1251,48 @@ running at all until the ffmpeg version question is settled.
 
 ---
 
-## Last known = 115
+## 116. Metric+stat value class — retarget every stringly `"{metric}_{stat}"` / `"{metric}-{stat}"` site
+
+**Status:** needs thinking (user direction 2026-10-10; explicit-typing rule)
+
+Measured metrics flow through the system as `dict[str, float]` keyed by
+convention strings, flattened/selected/compared at every layer — and every
+site re-derives the key by hand: `f"{t.metric}_{t.statistic}"` in the
+attempt pick-up, the targeted-subset filter, `_score_attempt`,
+`failed_targets`, the winner-limiter tallies, optimization's synthetic
+ruler, merge's rendered-keys/presentation bar. Two vocabularies exist for
+the same identity: underscore (`vmaf_min` — sidecar keys, metric dicts)
+and dash (`vmaf-min` — CLI/config/`QualityTarget.parse` targets). Nothing
+type-checks that a key is well-formed; nothing owns the pair.
+
+Direction: a value class for the metric+stat identity —
+
+- frozen, **hashable + comparable** → usable directly as the dict key of
+  measured-metrics maps (replacing `dict[str, float]` with
+  `dict[MetricStat, float]` or an annotated alias at the boundary);
+- **strict canonical serialization** (its yaml/storage form) and
+  **tolerant parsing** (both vocabularies + display), the `CropYaml`
+  pattern applied to a key type — pydantic dict keys need the annotated
+  boundary (canonical string on disk, class in memory);
+- `QualityTarget` re-targeted onto it (fields `metric: str` +
+  `statistic: str` fold into the class) and gains its own strict
+  serialization / tolerant parse (`"vmaf-min:95"` config vocabulary
+  included);
+- retarget sites: quality.py (`MetricType`/`flatten_metric_stats`/
+  search steering), encoding pick-up + winner targeting, optimization
+  (synthetic targets, summaries), merge (rendered keys, replay bar),
+  measure/visualization stats plumbing.
+
+Open design questions: naming (`MetricKey` is TAKEN — the perf-metrics
+timing enum in `pyqenc/metrics.py`); whether the stat half becomes its
+own typed set (today a free-form string — `min`/`p10`/`median`…);
+interplay with §111's summary-table rendering (the dash vocabulary is its
+display form); sequencing vs the QualitySearch V4 spec (§78 rides that
+same refactor wave — do the record type and the key type together?).
+
+---
+
+## Last known = 116
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
