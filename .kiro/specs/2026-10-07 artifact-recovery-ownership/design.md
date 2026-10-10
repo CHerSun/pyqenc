@@ -101,7 +101,7 @@ summary: {limiter: [ … ], frames: {"h265+slow": 172000}}
 #   {frame_count, metrics: {…FULL…},                        # facts (no verdict; full — re-judgeable)
 #    provenance: {source: {size, token},                    # identity — escalates (Req 27)
 #                 strategy: {token: "…"},                   # args fingerprint
-#                 mode, q|targets/anchor, probe, sampling,  # structured keys
+#                 mode, quality|targets, probe, sampling,  # structured keys (amended 2026-10-09: mode-union, anchor never persisted)
 #                 winners: {size: 107, token: "…"}}}        # winner-set fingerprint
 
 # merge.yaml → summary replay rows only (basis marker dropped 2026-10-09 — zero consumers; replay re-renders verdicts live)
@@ -115,7 +115,7 @@ Comparison mechanics: facet checks compare frame count + crop values explicitly 
 
 **Merge owns `merged/` by per-file acceptance**: each output's sidecar IS its flag (provenance vs current inputs, single-digit files ⇒ direct reads). Transitivity completes the flag: every intentional winner mutation routes through a recorded param or the winner-set hash. `merge.yaml` demotes to summary replay + basis marker. Residual, accepted: a rot-triggered re-encode drifting crfs under matching params (content identity not worth it).
 
-**Measurement is unconditional** (M-6 root fix): the evaluator measures (file + reference + sampling — no bar in the signature); verdicts are pure functions applied by callers (search steering, summary verdict columns). The anchor is presentation-only (deltas), never persisted, never a measurement gate. **Anchor fallback (Req 59):** all-strategies runs (no test work → no ruler — e.g. the common fixed single-strategy `-q` run) get a presentation anchor elected at the encoding winner-limiter scan (smallest-total-size strategy with measured metrics); presentation-only — not a key, not a selection input, not merge's anchor basis (merge's fixed key stays optimization's anchor; in these runs it is legitimately absent and the winner-set fingerprint + mode + q cover acceptance). Due-but-missing anchors (compared runs without measurements) surface as optimization errors — no silent downstream election.
+**Measurement is unconditional** (M-6 root fix): the evaluator measures (file + reference + sampling — no bar in the signature); verdicts are pure functions applied by callers (search steering, summary verdict columns). The anchor is presentation-only (deltas), never persisted, never a measurement gate. **Anchor fallback (Req 59):** all-strategies runs (no test work → no ruler — e.g. the common fixed single-strategy `-q` run) get a presentation anchor elected at the encoding winner-limiter scan (smallest-total-size strategy with measured metrics); presentation-only — not a key, not a selection input (amended 2026-10-09: not merge's basis either — merge's fixed key is the QUALITY; the anchor is runtime-elected and re-derived from the persisted summary on fast exits, so the winner-set fingerprint + mode + quality cover acceptance everywhere). Due-but-missing anchors (compared runs without measurements) surface as optimization errors — no silent downstream election.
 
 ## 7. Per-phase key/effect summary
 

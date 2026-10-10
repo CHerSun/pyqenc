@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Literal, Self
+from typing import TYPE_CHECKING, Annotated, ClassVar, Literal, Self
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -89,8 +89,9 @@ from pyqenc.utils.yaml_utils import load_model, save_model
 # merge.yaml replay aggregate
 # ---------------------------------------------------------------------------
 
-class MergedProvenance(BaseModel):
-    """What exactly one merged output was produced from (Req 27).
+class _MergedProvenanceBase(BaseModel):
+    """The common provenance dimensions of both merged-output variants
+    (Req 27).
 
     Every dimension is compared per-file at recovery (Req 49) except
     ``source`` — the one dimension that escalates to the phase-level
@@ -99,29 +100,46 @@ class MergedProvenance(BaseModel):
     (Req 61) — ``strategy`` IS the strategy's resolved-args fingerprint;
     the strategy's name is already the output's own file name.
 
-    Attributes:
-        source:   The source content identity — ESCALATES on mismatch.
-        strategy: The producing strategy's resolved-args fingerprint.
-        mode:     The run mode tag (``fixed`` | ``search``).
-        pinned:   Fixed runs: the strategy's quantized pinned quality.
-        targets:  Search runs: the targets basis (serialised strings).
-        anchor:   Fixed compared runs: the anchor (ruler) basis.
-        probe:    The probe facet the concat was produced under.
-        sampling: The measurement sampling factor.
-        winners:  The winner-set fingerprint (count + hash over sorted ids).
+    The anchor is deliberately NOT a dimension (dropped 2026-10-09): it is
+    a runtime-elected presentation basis (the least-size strategy with
+    measurements), re-derived per run by optimization — never persisted,
+    never compared (this resolves TODO §112: anchor re-elections used to
+    re-merge outputs whose winner-set fingerprint — the actual input
+    identity — matched).
     """
 
     model_config = ConfigDict(frozen=True)
 
     source:   Fingerprint
     strategy: Fingerprint
-    mode:     Literal["fixed", "search"]
-    pinned:   DecimalYaml | None = None
-    targets:  list[str]          = Field(default_factory=list)
-    anchor:   str | None         = None
     probe:    ProbeFacet
     sampling: int
     winners:  Fingerprint
+
+
+class FixedMergedProvenance(_MergedProvenanceBase):
+    """Fixed runs: the strategy's quantized quality is the mode key.
+
+    A quality change re-merges automatically — the collapsed range puts
+    the value in the output's own name (``<LABEL>=<q>``), so a different
+    quality means a different expected file. Fixed runs carry NO targets:
+    the judging ruler is the anchor-derived synthetic set, computed live.
+    """
+
+    mode:    Literal["fixed"] = "fixed"
+    quality: DecimalYaml
+
+
+class SearchMergedProvenance(_MergedProvenanceBase):
+    """Search runs: the targets basis is the mode key (targets steer the
+    search — a change re-searches and re-merges; Req 50)."""
+
+    mode:    Literal["search"] = "search"
+    targets: list[str]         = Field(default_factory=list)
+
+
+MergedProvenance = FixedMergedProvenance | SearchMergedProvenance
+"""The per-mode provenance union; loading dispatches on the ``mode`` tag."""
 
 
 class MergedOutputSidecar(BaseModel):
@@ -141,7 +159,7 @@ class MergedOutputSidecar(BaseModel):
 
     frame_count: int | None               = None
     metrics:     dict[str, float]         = Field(default_factory=dict)
-    provenance:  MergedProvenance
+    provenance:  Annotated[MergedProvenance, Field(discriminator="mode")]
 
 
 class MergeSummaryRow(BaseModel):
@@ -216,7 +234,8 @@ class _ProvenanceBuilder:
     """The current run's provenance template + the per-file acceptance rule.
 
     One builder per recovery; ``for_strategy`` composes the expected
-    provenance of one output, ``acceptance_mismatch`` names the first
+    provenance of one output (the mode's own variant — fixed carries the
+    quality, search the targets), ``acceptance_mismatch`` names the first
     recorded dimension that contradicts it (``None`` = accepted).
     """
 
@@ -225,39 +244,30 @@ class _ProvenanceBuilder:
         source:   Fingerprint,
         probe:    ProbeFacet,
         plan:     EncodingPlan,
-        anchor:   str | None,
         sampling: int,
         winners:  Fingerprint,
     ) -> None:
         self._source   = source
         self._probe    = probe
         self._plan     = plan
-        self._anchor   = anchor
         self._sampling = sampling
         self._winners  = winners
 
     def for_strategy(self, strategy: Strategy) -> MergedProvenance:
-        """Compose the expected provenance for one output."""
+        """Compose the expected provenance for one output (the mode's variant)."""
         codec = strategy.codec
-        collapsed = codec.quality_better == codec.quality_worse
         if self._plan.fixed_quality:
-            return MergedProvenance(
+            return FixedMergedProvenance(
                 source   = self._source,
                 strategy = strategy.fingerprint,
-                mode     = "fixed",
-                pinned   = (
-                    codec.quality_better.quantize(codec.quality_granularity)
-                    if collapsed else None
-                ),
-                anchor   = self._anchor,
+                quality  = codec.quality_better.quantize(codec.quality_granularity),
                 probe    = self._probe,
                 sampling = self._sampling,
                 winners  = self._winners,
             )
-        return MergedProvenance(
+        return SearchMergedProvenance(
             source   = self._source,
             strategy = strategy.fingerprint,
-            mode     = "search",
             targets  = targets_as_strings(self._plan.targets),
             probe    = self._probe,
             sampling = self._sampling,
@@ -272,21 +282,24 @@ class _ProvenanceBuilder:
         """The first recorded dimension contradicting the current inputs.
 
         Returns ``None`` when the output is accepted; the mismatching
-        dimension's name otherwise (``"sampling"` re-measures in place;
+        dimension's name otherwise (``"sampling"`` re-measures in place;
         everything else re-merges — M-8). An unverifiable dimension counts
-        as a mismatch (conservative).
+        as a mismatch (conservative). The variant kinds must agree — a
+        mode switch between runs is itself a mismatch.
         """
         expected = self.for_strategy(strategy)
         if not recorded.strategy.matches(expected.strategy):
             return "strategy fingerprint"
-        if recorded.mode != expected.mode:
-            return "mode"
-        if recorded.mode == "fixed" and recorded.pinned != expected.pinned:
-            return "pinned quality"
-        if recorded.mode == "fixed" and recorded.anchor != expected.anchor:
-            return "anchor"
-        if recorded.mode == "search" and recorded.targets != expected.targets:
-            return "targets"
+        if isinstance(expected, FixedMergedProvenance):
+            if not isinstance(recorded, FixedMergedProvenance):
+                return "mode"
+            if recorded.quality != expected.quality:
+                return "quality"
+        else:
+            if not isinstance(recorded, SearchMergedProvenance):
+                return "mode"
+            if recorded.targets != expected.targets:
+                return "targets"
         if not recorded.probe.matches(expected.probe):
             return "probe facet"
         # The winner-set fingerprint is compared as a whole (Req 11a):
@@ -468,13 +481,15 @@ class MergePhase(Phase[MergePhaseResult]):
         3. Determine expected strategies from the encoding winners.
         4. Per-file acceptance: an output is COMPLETE only when the file is
            present AND its sidecar's provenance matches the current inputs
-           on every recorded dimension (strategy fingerprint, mode/q or
-           targets/anchor basis, probe facet, sampling, winner-set
-           fingerprint); any mismatch or an unverifiable winner-set means
-           re-merge — never a silent acceptance, never a re-measure of a
-           stale concat (M-8: a targets/anchor change always re-searched
-           winners upstream). A sampling-ONLY difference re-measures in
-           place (the concat is current). File present without a sidecar is
+           on every recorded dimension (strategy fingerprint, mode + the
+           mode's key — quality (fixed) / targets (search) —, probe facet,
+           sampling, winner-set fingerprint); any mismatch or an
+           unverifiable winner-set means re-merge — never a silent
+           acceptance, never a re-measure of a stale concat (M-8: a
+           key change always re-searched winners upstream; the anchor is
+           runtime-only and never compared). A sampling-ONLY difference
+           re-measures in place (the concat is current). File present
+           without a sidecar is
            PARTIAL (re-merge in place — a crash leaves old outputs present).
         5. Output files not matching any expected strategy surface as
            ``wanted=False`` rows (retained deliverables; deletion only via
@@ -597,18 +612,26 @@ class MergePhase(Phase[MergePhaseResult]):
 
         return Recovery.from_artifacts(rows)
 
+    def _presentation_bar(self) -> list[QualityTarget]:
+        """The CURRENT verdict bar both the live path and the replay use.
+
+        Fixed runs judge against the anchor-derived synthetic ruler (config
+        targets are search-tuned vocabulary and would read as all-miss
+        noise); searched runs against the config targets. The same live
+        basis on the fast-exit replay — no persisted marker involved.
+        """
+        plan = self._deps[ProbePhase].plan
+        if plan.fixed_quality:
+            return self._deps[OptimizationPhase].synthetic_targets
+        return plan.targets
+
     def _live_verdict(self, metrics: dict[str, float]) -> bool:
         """The live pass/fail against the CURRENT presentation targets (Req 51).
 
         Fixed runs without a ruler (uncompared) carry no verdict basis —
         ``True`` with empty targets is the vacuous truth.
         """
-        plan = self._deps[ProbePhase].plan
-        bar = (
-            self._deps[OptimizationPhase].synthetic_targets
-            if plan.fixed_quality else plan.targets
-        )
-        return not QualitySearchBase.failed_targets(metrics, bar)
+        return not QualitySearchBase.failed_targets(metrics, self._presentation_bar())
 
     def _current_provenance_builder(self) -> _ProvenanceBuilder:
         """The current run's provenance template for per-file acceptance."""
@@ -616,7 +639,6 @@ class MergePhase(Phase[MergePhaseResult]):
             source    = self._deps[JobPhase].source_fingerprint,
             probe     = ProbeFacet.from_probe(self._deps[ProbePhase]),
             plan      = self._deps[ProbePhase].plan,
-            anchor    = self._deps[OptimizationPhase].anchor,
             sampling  = self._config.measurement.sampling,
             winners   = id_set_fingerprint(
                 row.payload.chunk.safe_name()
@@ -641,7 +663,6 @@ class MergePhase(Phase[MergePhaseResult]):
     def _reused_result(self, wanted: list[Artifact], message: str) -> MergePhaseResult:
         """Build the reused result, replaying the persisted merge summary."""
         job_result = self._deps[JobPhase]
-        plan = self._deps[ProbePhase].plan
         merge_yaml = job_result.work_dir / MergePhase.SIDECAR_NAME
         persisted  = MergeSidecar.load(merge_yaml)
         if persisted is not None:
@@ -650,7 +671,10 @@ class MergePhase(Phase[MergePhaseResult]):
             logger.info(THICK_LINE)
             MergePhase._log_merge_summary_from_sidecar(
                 sidecar           = persisted,
-                quality_targets   = plan.targets,
+                # The replay judges against the same LIVE bar the producing
+                # run used — the ruler in fixed mode (optimization re-derives
+                # it on its own fast path), the config targets in search.
+                quality_targets   = self._presentation_bar(),
                 source_stem       = job_result.source.stem,
                 source_size_bytes = safe_stat_size(job_result.source) or 0,
                 metrics_sampling  = self._config.measurement.sampling,
@@ -758,7 +782,7 @@ class MergePhase(Phase[MergePhaseResult]):
                     encoded_chunks  = encoded_chunks,
                 ):
                     # Everything else re-merges — ABSENT rows, provenance
-                    # mismatches (M-8: a targets/anchor change re-searched
+                    # mismatches (M-8: a mode-key change re-searched
                     # winners upstream; the old concat is never current),
                     # and the UNVERIFIABLE case (file present, sidecar
                     # missing — Req 49/50): nothing vouches for what

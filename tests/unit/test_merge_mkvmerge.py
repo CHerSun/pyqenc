@@ -1217,10 +1217,12 @@ class TestPerOutputSidecarShape:
         prov = data["provenance"]
         assert prov["mode"] == "fixed"
         assert prov["strategy"]["token"], "strategy IS the args fingerprint (Req 61)"
-        assert prov["pinned"] == "18.0"
-        assert prov["anchor"] == "h265-aq+slow"
+        assert prov["quality"] == "18.0"
         assert prov["winners"]["size"] == 1
-        assert not prov.get("targets")
+        # The fixed variant has NO targets field, and no anchor anywhere:
+        # the anchor is a runtime-elected presentation basis, never persisted.
+        assert "targets" not in prov
+        assert "anchor" not in prov
 
     def test_search_record_carries_targets_basis(self, tmp_path: Path) -> None:
         import yaml as _yaml
@@ -1230,7 +1232,8 @@ class TestPerOutputSidecarShape:
         prov = data["provenance"]
         assert prov["mode"] == "search"
         assert prov["targets"], "search runs carry the targets basis"
-        assert not prov.get("pinned") and not prov.get("anchor")
+        # The search variant has NO quality field.
+        assert "quality" not in prov and "anchor" not in prov
 
 
 class TestMergeYamlReplayAggregate:
@@ -1283,7 +1286,7 @@ class TestPerFileAcceptance:
     def test_fixed_config_target_change_does_not_invalidate(self, tmp_path: Path) -> None:
         """Config targets drive nothing in fixed mode (Req 40 lineage): a
         change between fixed runs must NOT reject the output — the record
-        carries the pinned map + anchor basis, never config targets."""
+        carries the quality only, never config targets."""
         merge, merged_dir = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
         sidecar = next(merged_dir.glob("*.yaml"))
         sidecar_before = sidecar.read_text(encoding="utf-8")
@@ -1301,10 +1304,15 @@ class TestPerFileAcceptance:
         assert row.state is ArtifactState.COMPLETE
         assert sidecar.read_text(encoding="utf-8") == sidecar_before
 
-    def test_anchor_change_means_remerge_not_remeasure(self, tmp_path: Path) -> None:
-        """M-8: an anchor change always re-searched winners upstream — the
-        old concat is never current; recovery must NOT accept it."""
-        merge, _ = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
+    def test_anchor_change_does_not_remerge(self, tmp_path: Path) -> None:
+        """§112 resolved (2026-10-09): the anchor is a runtime-elected
+        presentation basis, never a provenance dimension — its re-election
+        must accept an output whose winner-set fingerprint (the actual
+        input identity) matches. The old behavior re-merged provably
+        identical outputs (~50 min each) on every anchor re-election."""
+        merge, merged_dir = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
+        sidecar = next(merged_dir.glob("*.yaml"))
+        sidecar_before = sidecar.read_text(encoding="utf-8")
 
         from pyqenc.phases.optimization import OptimizationPhase as _OptPhase
 
@@ -1315,7 +1323,10 @@ class TestPerFileAcceptance:
         )
 
         _recovery, row = self._recover_state(merge, "h265-aq+slow")
-        assert row.state is not ArtifactState.COMPLETE, "anchor mismatch must not accept"
+        assert row.state is ArtifactState.COMPLETE, (
+            "anchor re-election must not reject an input-identical output"
+        )
+        assert sidecar.read_text(encoding="utf-8") == sidecar_before
 
     def test_search_targets_change_means_remerge(self, tmp_path: Path) -> None:
         merge, _ = _run_full_merge(tmp_path, fixed=False)

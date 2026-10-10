@@ -1229,27 +1229,23 @@ tasks-authoring stage:
 
 ## 112. Anchor provenance None→elected forces full re-merges of provably identical outputs
 
-**Status:** needs thinking (observed live in the 2026-10-09 rerun2; no code
-changed)
+**Status:** RESOLVED 2026-10-09 (the anchor left persistence entirely —
+see §110's neighbor change, Req 27/49/50 amendments)
 
 The dataless-ruler run (2026-10-09 fixed `-q 18`, before the §109/2f9d9c2
 fix) recorded `anchor: None` in every merged output's provenance. The next
-healthy run elected a real anchor → per-file acceptance sees an anchor
+healthy run elected a real anchor → per-file acceptance saw an anchor
 mismatch → **all four outputs re-merged** (~50 min each: re-concat of
 identical winners + re-measure of identical bytes).
 
-Per the letter this is spec-correct (Req 49/50: anchor mismatch ⇒
-re-merge, never re-measure a stale concat — "the anchor change implies the
-table re-ran implies winners re-searched"). But here the winner-set
-fingerprint — the actual input identity — MATCHED: the files were provably
-produced from the same winners, and only the verdict basis changed. Design
-question: should an anchor-basis mismatch still force the re-concat when
-the winner-set fingerprint already matches (re-measure or even
-re-derive-verdicts would suffice), and/or should a ruler-less
-(uncompared/dataless) run record its outputs' anchor basis as something
-other than a comparable `None`? Note the symmetric cost: verdict bases
-genuinely change on every re-election, so loosening this trades safety for
-~O(strategies) concat time.
+Resolution: the anchor was never a persistence thing — it is a
+runtime-elected presentation basis (the least-size strategy with
+measurements), re-derived per run by optimization (including fast exits,
+from the persisted summary). It is no longer a provenance dimension
+anywhere; merged-output acceptance keys on mode + quality (fixed) /
+targets (search) + the fingerprints. (The original design question —
+loosen the anchor comparison vs. record ruler-less runs differently —
+was mooted by removing the dimension.)
 
 ---
 
