@@ -1127,57 +1127,6 @@ interim alignment of the inline/summary bars if that spec is far off.
 
 ---
 
-## 110. Winner/attempt sidecar field diet — CONSUMED 2026-10-09 (`resolution` and attempt `crf` dropped)
-
-**Status:** consumed (both halves implemented 2026-10-09; the
-minimal-attempt hypothesis realized: `metrics + sampling + frame_count`)
-
-From the same run's sidecar review:
-
-- **Winner sidecar `resolution`: ZERO consumers → DROPPED (2026-10-09).**
-  Project-wide, the only sidecar `resolution` read was the ATTEMPT
-  sidecar's (re-measure carry). Winner sidecar fields actually consumed:
-  `crf` (merge CRF plot, winner-scan med CRF), `metrics`, `frame_count`,
-  `targets_met`. Resolution was a legacy crop-invalidation-via-filename
-  mechanism; the proper key is the probe facet (crop) — as everywhere
-  else. Candidate: drop from the winner sidecar.
-- **Resolution is fully DERIVABLE — no probe needed anywhere (user
-  correction 2026-10-09).** The encode's only dimension-changing filter is
-  `crop=iw-{l+r}:ih-{t+b}` — output dims = source dims − crop margins BY
-  CONSTRUCTION. Source resolution lives in Extraction's
-  `VideoStreamInfo.resolution`; crop in Probe's facet. (Live check:
-  1920×1080 − ↑22↓22 = 1920×1036 — exactly what the ffprobe returned.)
-  The post-encode `_probe_resolution` call is a relic of
-  resolution-in-filename days (file-stream-model Req 14.2: "resolution
-  drives the attempt filename") — static names (Req 9) killed its reason.
-  The attempt sidecar's `resolution` "consumer" is a copy-forward into
-  the unread winner-sidecar field — a void chain. The whole chain can
-  go: post-encode probe, attempt-sidecar field, winner-sidecar field,
-  `AttemptMetadata.resolution`. (Any encoder-side dimension deviation
-  would fail loudly, not drift silently — no belt value in probing.)
-  **DONE 2026-10-09**: whole chain removed; the derivation is the
-  `Resolution` value type with the `- CropParams` operator (models.py,
-  single ownership); measure's `_effective_resolution` re-homed onto it.
-- **Attempt sidecar `crf`: zero consumers → DROPPED (2026-10-09).** The
-  attempt NAME is the quality cache key (exact-name lookup); pick-up
-  metadata carries the proposed q; nothing reads the attempt sidecar's
-  crf (consumption re-verified 2026-10-09 after the 0.20.0 changes —
-  the single reader, the pick-up, consumes metrics/sampling/frame_count
-  only). The attempt sidecar is now the §110-hypothesis shape:
-  `metrics + sampling + frame_count`.
-- **Human-facing home (user): DONE 2026-10-09** — the derived resolution
-  lives on the PROBE phase ("Probe: done" info line + `probe.yaml`
-  `resulting_resolution`, derived `source − crop` at write time) — an
-  end-user fact, never a key.
-- **Hypothesis to consider (user):** attempt sidecar = `sampling` +
-  `frame_count` + `metrics` ONLY; the full investment gates on the phase
-  sidecar (optimization's keys + `--force`). Per-attempt strategy
-  fingerprints / probe facets add nothing: attempts are wholesale-affected
-  effects, never individually inspected (Req 9a) — the design already
-  rejected heavy per-attempt validation.
-
----
-
 ## 111. Unified summaries — spec exists, NOT implemented; 2026-10-09 sketch adds four details
 
 **Status:** needs thinking (state check 2026-10-09; no code changed)
@@ -1224,28 +1173,6 @@ tasks-authoring stage:
   the coupling: epsilon-dominance is what makes the recommendation glyph
   meaningful — without tolerance, dominance rarely prunes (0/4 twice on
   real data) and every row would carry the same "winner" mark.
-
----
-
-## 112. Anchor provenance None→elected forces full re-merges of provably identical outputs
-
-**Status:** RESOLVED 2026-10-09 (the anchor left persistence entirely —
-see §110's neighbor change, Req 27/49/50 amendments)
-
-The dataless-ruler run (2026-10-09 fixed `-q 18`, before the §109/2f9d9c2
-fix) recorded `anchor: None` in every merged output's provenance. The next
-healthy run elected a real anchor → per-file acceptance saw an anchor
-mismatch → **all four outputs re-merged** (~50 min each: re-concat of
-identical winners + re-measure of identical bytes).
-
-Resolution: the anchor was never a persistence thing — it is a
-runtime-elected presentation basis (the least-size strategy with
-measurements), re-derived per run by optimization (including fast exits,
-from the persisted summary). It is no longer a provenance dimension
-anywhere; merged-output acceptance keys on mode + quality (fixed) /
-targets (search) + the fingerprints. (The original design question —
-loosen the anchor comparison vs. record ruler-less runs differently —
-was mooted by removing the dimension.)
 
 ---
 
