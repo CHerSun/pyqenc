@@ -203,7 +203,7 @@ def _seed_winner(
         strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
         EncodingResultSidecar(
             crf=Decimal(20),
-            sampling=1, metrics={}, targets_met=True,
+            metrics={}, targets_met=True,
         ).model_dump(exclude_none=True),
     )
 
@@ -659,7 +659,7 @@ class TestPairLedger:
             strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
             EncodingResultSidecar(
                 crf=Decimal(20),
-                sampling=1, metrics={}, targets_met=True,
+                metrics={}, targets_met=True,
             ).model_dump(exclude_none=True),
         )
 
@@ -1192,7 +1192,6 @@ class TestAggregateStrategyMetrics:
                 strategy_dir / EncodedChunk.format_winner_sidecar_name(chunk.safe_name()),
                 EncodingResultSidecar(
                     crf     = Decimal(20),
-                    sampling = 1,
                     metrics = {"vmaf_median": 91.0 + i, "vif_median": 84.0 - i},
                 ),
             )
@@ -1301,7 +1300,7 @@ class TestFixedComparedExecute:
                     mkv.write_bytes(b"x" * per_chunk)
                     write_yaml_atomic(
                         strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
-                        {"crf": "18.0", "targets_met": True, "sampling": 1, "metrics": metrics[display]},
+                        {"crf": "18.0", "targets_met": True, "metrics": metrics[display]},
                     )
                     result.encoded_chunks.setdefault(display, []).append(
                         build_encoded_chunk(

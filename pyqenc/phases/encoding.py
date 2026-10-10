@@ -95,7 +95,25 @@ if TYPE_CHECKING:
 # Per-attempt / winner sidecars (re-homed, Req 21)
 # ---------------------------------------------------------------------------
 
-class MetricsSidecar(BaseModel):
+class _MeasuredSidecarBase(BaseModel):
+    """The measured facts shared by the attempt and winner sidecars.
+
+    ``frame_count`` is a fact of the encoded file, from whoever last
+    decoded it whole: the encode run that produced it, or the measure run
+    on a re-measured attempt (the metric run reads the file whole, so its
+    progress count IS the file's count — found live 2026-10-09, when
+    re-measured sidecars carried 0 and darkened the frame-preservation
+    chain).  ``0`` is the sentinel for "could not be determined" (no valid
+    video has zero frames).  ``metrics`` uses the flat
+    ``{metric_stat: value}`` format (e.g. ``vmaf_min``, ``ssim_median``)
+    consistent with ``ChunkQualityStats`` serialisation.
+    """
+
+    frame_count: int                = 0    # frames of the encoded file (0 = unknown)
+    metrics:     dict[str, float]          # measured values, e.g. vmaf_min, ssim_median
+
+
+class MetricsSidecar(_MeasuredSidecarBase):
     """Per-attempt sidecar (``<chunk>.q<quality>.yaml`` — the attempt stem swap).
 
     Stores ALL measured metric values — not filtered to current targets.
@@ -107,25 +125,11 @@ class MetricsSidecar(BaseModel):
     cache-hits re-judge under new targets without re-encoding.
 
     ``sampling`` records the frame subsampling factor used when the metrics
-    were measured.  On recovery, if this differs from the current config the
-    sidecar is treated as stale and the attempt is re-measured (without
-    re-encoding).  REQUIRED — every write path carries it (the run that
-    measured knows its sampling); a sidecar missing it fails validation →
-    absent → re-measure (the pre-field ``None`` tolerance retired with the
-    0.21.0 required-keys ruling).
-
-    The ``metrics`` field uses the flat ``{metric_stat: value}`` format
-    (e.g. ``vmaf_min``, ``ssim_median``) consistent with ``ChunkQualityStats``
-    serialisation.
-
-    ``frame_count`` is a fact of the attempt file, from whoever last decoded
-    it whole: the encode run that produced it, or the measure run on a
-    re-measured attempt (the metric run reads the attempt whole, so its
-    progress count IS the file's count — found live 2026-10-09, when
-    re-measured sidecars carried 0 and darkened the frame-preservation
-    chain).  ``0`` is the sentinel for "could not be determined" (no valid
-    video has zero frames) and marks the sidecar incomplete at pick-up
-    (Req 9a) — the next re-measure heals it.
+    were measured — LOAD-BEARING here and only here: attempts survive a
+    sampling change (winners are wholesale-wiped by the optimization band
+    key) and are lazily re-measured at pick-up when this differs from the
+    current config. REQUIRED — every write path carries it; a sidecar
+    missing it fails validation → absent → re-measure.
 
     The attempt's output resolution is deliberately NOT a field: it is
     derivable (source dimensions − crop, by construction of the crop
@@ -139,12 +143,10 @@ class MetricsSidecar(BaseModel):
     consumer ever read the persisted value back.
     """
 
-    sampling:    int                # subsampling factor used when metrics were measured
-    frame_count: int         = 0    # frames of the attempt file (0 = unknown)
-    metrics:     dict[str, float]   # all measured values, e.g. vmaf_min, ssim_median
+    sampling: int  # subsampling factor used when the metrics were measured
 
 
-class EncodingResultSidecar(MetricsSidecar):
+class EncodingResultSidecar(_MeasuredSidecarBase):
     """Winner result sidecar (``<chunk_id>.yaml`` — the winner stem swap).
 
     Written when the quality search for a ``(chunk_id, strategy)`` pair
@@ -153,13 +155,6 @@ class EncodingResultSidecar(MetricsSidecar):
     ``strategy`` are derived from the file name and directory — not stored
     here; the winning attempt's identity is fully derivable from the pair,
     so no back-pointer to the attempt is persisted (Req 25).
-
-    Inherits the attempt-fact fields (``sampling``/``frame_count``/
-    ``metrics``) from :class:`MetricsSidecar` — the winner's targeted
-    subset is measured facts too, interpretable only against the sampling
-    that produced them (added 2026-10-10: a different sampling gives
-    different measuring results, so the winner record carries it like the
-    attempt record does).
 
     Quality-target tracking is owned exclusively by ``OptimizationPhase`` via
     ``optimization.yaml``.  ``OptimizationPhase`` deletes stale result sidecars
@@ -179,6 +174,14 @@ class EncodingResultSidecar(MetricsSidecar):
     end-of-run scan sums into the frame-preservation invariant.  ``0`` is
     the "could not be determined" sentinel (the winner was accepted from a
     re-measured attempt with no count on record).
+
+    ``sampling`` is deliberately NOT a field (challenged out 2026-10-10):
+    the optimization band key already holds sampling run-level and wipes
+    ALL winners wholesale on a change — a readable winner was necessarily
+    produced under the current sampling, and any reader can consult the
+    co-existing ``optimization.yaml`` (a winner never outlives a matching
+    one — §99). Attempts DO carry it: they survive the wipe and re-measure
+    lazily.
 
     ``crf`` is a fact of this winner; recovery-time classification and
     composition never read it — only processing-path consumers (the re-merge
@@ -368,7 +371,6 @@ def _write_encoding_result_sidecar(
     crf:             Decimal,
     metrics:         dict[str, float],
     frame_count:     int,
-    metrics_sampling: int,
     targets_met:     bool = True,
 ) -> None:
     """Atomically write the winner result sidecar when the search converges.
@@ -377,10 +379,8 @@ def _write_encoding_result_sidecar(
     output directory.  Its presence marks the ``(chunk_id, strategy)`` pair
     as ``COMPLETE``.  ``metrics`` must be the TARGETED subset (the caller
     filters against the judging targets — full sets live on attempt
-    sidecars); ``metrics_sampling`` records the factor the targeted subset
-    was measured under (a different sampling gives different results — the
-    winner record interprets its metrics against it, like the attempt
-    record).
+    sidecars); no ``sampling`` fact — the optimization band key guarantees
+    winner/sampling consistency run-level (see the model docstring).
 
     Args:
         output_dir:      Strategy output directory.
@@ -389,7 +389,6 @@ def _write_encoding_result_sidecar(
         metrics:         The targeted metric subset for the winning attempt.
         frame_count:     Frames of the winning attempt (``0`` = could not be
                          determined).
-        metrics_sampling: The measurement sampling factor in force.
         targets_met:     Whether quality targets were met; ``False`` when the
                          search was exhausted without a passing attempt.
     """
@@ -398,7 +397,6 @@ def _write_encoding_result_sidecar(
         crf         = crf,
         metrics     = metrics,
         frame_count = frame_count,
-        sampling    = metrics_sampling,
         targets_met = targets_met,
     ))
     logger.debug(
@@ -896,13 +894,12 @@ class ChunkEncoder:
                 _hardlink_or_copy(src_graph, dst_graph)
 
         _write_encoding_result_sidecar(
-            output_dir       = encoded_dir,
-            chunk_id         = chunk_id,
-            crf              = crf,
-            metrics          = _winner_targeted_metrics(metrics, quality_targets),
-            frame_count      = frame_count,
-            metrics_sampling = self._metrics_sampling,
-            targets_met      = targets_met,
+            output_dir  = encoded_dir,
+            chunk_id    = chunk_id,
+            crf         = crf,
+            metrics     = _winner_targeted_metrics(metrics, quality_targets),
+            frame_count = frame_count,
+            targets_met = targets_met,
         )
 
         # Intermediate cleanup: delete all attempt files for this pair from
