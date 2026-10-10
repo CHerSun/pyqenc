@@ -1219,7 +1219,34 @@ e2e suite after. Also blocks any full-suite gate run that includes
 
 ---
 
-## Last known = 114
+## 115. Full test-suite assessment against the QA & testing rules
+
+**Status:** needs thinking (rules landed 2026-10-10 in
+`.kiro/steering/agent-testing.md`; no tests assessed yet)
+
+Sweep the entire `tests/` tree against the steering QA rules and produce
+a findings report (then a fix plan, gated on user review):
+
+- **Pinning/characterization tests** — anything asserting file cosmetics
+  (yaml text, field order, key sets/presence), internal stash state, or
+  serialized forms where a round-trip/tolerance test is the honest
+  contract. Drop or convert to behavior tests.
+- **Internal mocking** — patches of private helpers that couple tests to
+  the "how"; patch only at the process boundary (ffmpeg/mkvmerge runners,
+  external shells).
+- **Coverage-type gaps** — features/modifications missing the mandatory
+  happy-path / edge-case / adversarial layers.
+- **Dead tests** — tests that pass no matter what (the failure-assertion
+  check) and tests guarding bugs that no longer exist.
+
+Note: the suite is large; the sweep is an audit, not a rewrite — group
+findings by file with evidence, and let the user rule on each group
+before mass changes. The §114 ffmpeg hang blocks `tests/e2e/` from
+running at all until the ffmpeg version question is settled.
+
+---
+
+## Last known = 115
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
