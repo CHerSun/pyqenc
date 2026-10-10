@@ -152,15 +152,6 @@ class AudioSidecar(BaseModel):
             source = source,
         )
 
-    @classmethod
-    def load(cls, path: Path) -> Self | None:
-        """Load ``audio.yaml``; ``None`` when absent or unparseable."""
-        return load_model(path, cls)
-
-    def save(self, path: Path) -> None:
-        """Write this ``AudioSidecar`` to *path* atomically."""
-        save_model(path, self)
-
 
 def _composed_output_names(
     tracks:      list[AudioStream],
@@ -258,7 +249,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
         audio_dir = self._output_dir(tracks, work_dir)
         audio_dir.mkdir(parents=True, exist_ok=True)
 
-        persisted_audio = AudioSidecar.load(sidecar_path)
+        persisted_audio = load_model(sidecar_path, AudioSidecar)
         if (
             persisted_audio is not None
             and identity_changed(persisted_audio.source, job_result.source_fingerprint)
@@ -371,7 +362,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
             resolved:     Current resolved chains, keyed by name.
             tracks:       The working track set (deletion scope).
         """
-        persisted = AudioSidecar.load(sidecar_path)
+        persisted = load_model(sidecar_path, AudioSidecar)
         prior     = persisted.chains if persisted is not None else {}
 
         current = AudioSidecar.from_resolved(
@@ -421,7 +412,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
         # Commit the current chain records before producing. Skip the rewrite
         # when the sidecar already matches exactly.
         if prior != current_records:
-            current.save(sidecar_path)
+            save_model(sidecar_path, current)
             logger.debug("Committed audio sidecar (%d chain(s)) before producing", len(resolved))
 
     def _classify(

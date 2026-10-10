@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pyqenc.models import CropParams
 from pyqenc.phases.probe import ProbeState
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 
 class TestProbeStateRoundTrip:
@@ -15,12 +16,12 @@ class TestProbeStateRoundTrip:
     # ------------------------------------------------------------------
 
     def test_load_returns_none_when_file_absent(self, tmp_path: Path):
-        """ProbeState.load() must return None when the file does not exist.
+        """load_model(, ProbeState) must return None when the file does not exist.
 
         Bug: a missing file could raise an exception instead of returning None,
         breaking the recovery protocol that uses None to mean 'not yet probed'.
         """
-        result = ProbeState.load(tmp_path / "probe.yaml")
+        result = load_model(tmp_path / "probe.yaml", ProbeState)
         assert result is None
 
     # ------------------------------------------------------------------
@@ -28,14 +29,14 @@ class TestProbeStateRoundTrip:
     # ------------------------------------------------------------------
 
     def test_save_creates_file(self, tmp_path: Path):
-        """ProbeState.save() must create the YAML file at the target path.
+        """save_model() must create the YAML file at the target path.
 
         Bug: if the atomic write failed silently, the file would be absent
         on the next run and the probe would re-run unnecessarily.
         """
         state = ProbeState(frame_count=1440)
         path  = tmp_path / "probe.yaml"
-        state.save(path)
+        save_model(path, state)
         assert path.exists()
 
     def test_save_no_tmp_file_left_behind(self, tmp_path: Path):
@@ -46,17 +47,17 @@ class TestProbeStateRoundTrip:
         """
         state = ProbeState(frame_count=1440)
         path  = tmp_path / "probe.yaml"
-        state.save(path)
+        save_model(path, state)
         tmp_files = list(tmp_path.glob("*.tmp"))
         assert tmp_files == []
 
     def test_save_creates_parent_dirs(self, tmp_path: Path):
-        """ProbeState.save() must create missing parent directories.
+        """save_model() must create missing parent directories.
 
         Bug: saving to a non-existent sub-directory would raise FileNotFoundError.
         """
         nested = tmp_path / "job_dir" / "probe.yaml"
-        ProbeState(frame_count=100).save(nested)
+        save_model(nested, ProbeState(frame_count=100))
         assert nested.exists()
 
     # ------------------------------------------------------------------
@@ -71,9 +72,9 @@ class TestProbeStateRoundTrip:
         """
         original = ProbeState(frame_count=1440)
         path = tmp_path / "probe.yaml"
-        original.save(path)
+        save_model(path, original)
 
-        restored = ProbeState.load(path)
+        restored = load_model(path, ProbeState)
         assert restored is not None
         assert restored.frame_count == 1440
         assert restored.crop is not None and restored.crop.is_empty()
@@ -86,9 +87,9 @@ class TestProbeStateRoundTrip:
         crop     = CropParams(top=140, bottom=140, left=0, right=0)
         original = ProbeState(frame_count=72000, crop=crop)
         path = tmp_path / "probe.yaml"
-        original.save(path)
+        save_model(path, original)
 
-        restored = ProbeState.load(path)
+        restored = load_model(path, ProbeState)
         assert restored is not None
         assert restored.frame_count  == 72000
         assert restored.crop         is not None
@@ -111,7 +112,7 @@ class TestProbeStateRoundTrip:
             encoding="utf-8",
         )
 
-        restored = ProbeState.load(path)
+        restored = load_model(path, ProbeState)
         assert restored is not None
         assert restored.crop.top == 5
         assert restored.crop.bottom == 6
@@ -125,9 +126,9 @@ class TestProbeStateRoundTrip:
         crop     = CropParams(top=10, bottom=20, left=30, right=40)
         original = ProbeState(frame_count=500, crop=crop)
         path     = tmp_path / "probe.yaml"
-        original.save(path)
+        save_model(path, original)
 
-        restored = ProbeState.load(path)
+        restored = load_model(path, ProbeState)
         assert restored is not None
         assert restored.crop is not None
         assert restored.crop.top    == 10
@@ -143,9 +144,9 @@ class TestProbeStateRoundTrip:
         """
         original = ProbeState(frame_count=0)
         path = tmp_path / "probe.yaml"
-        original.save(path)
+        save_model(path, original)
 
-        restored = ProbeState.load(path)
+        restored = load_model(path, ProbeState)
         assert restored is not None
         assert restored.frame_count == 0
 
@@ -161,9 +162,9 @@ class TestProbeStateRoundTrip:
             crop_source="detected", resulting_resolution="1920x1036",
         )
         path = tmp_path / "probe.yaml"
-        original.save(path)
+        save_model(path, original)
 
-        restored = ProbeState.load(path)
+        restored = load_model(path, ProbeState)
         assert restored is not None
         assert restored.resulting_resolution == "1920x1036"
 
@@ -174,7 +175,7 @@ class TestProbeStateRoundTrip:
         path = tmp_path / "probe.yaml"
         path.write_text("frame_count: 100\ncrop: 22,22,0,0\n", encoding="utf-8")
 
-        restored = ProbeState.load(path)
+        restored = load_model(path, ProbeState)
         assert restored is not None
         assert restored.resulting_resolution is None
         assert restored.crop.top == 22
@@ -184,7 +185,7 @@ class TestProbeStateRoundTrip:
     # ------------------------------------------------------------------
 
     def test_load_returns_none_for_invalid_yaml(self, tmp_path: Path):
-        """ProbeState.load() must return None (not raise) for an invalid file.
+        """load_model() must return None (not raise, ProbeState) for an invalid file.
 
         Bug: a corrupt probe.yaml could abort the entire pipeline run with an
         unhandled exception instead of triggering a fresh probe.
@@ -192,5 +193,5 @@ class TestProbeStateRoundTrip:
         path = tmp_path / "probe.yaml"
         path.write_text("not: valid: yaml: [unclosed", encoding="utf-8")
 
-        result = ProbeState.load(path)
+        result = load_model(path, ProbeState)
         assert result is None

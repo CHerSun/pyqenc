@@ -110,7 +110,7 @@ from pyqenc.models import CropParams, Fingerprint
 from pyqenc.phases.job import JobSidecar, JobSourceRecord
 from pyqenc.phases.measure import _resolve_crop
 from pyqenc.stream_model import File
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic
 
 
 def _seed_job_yaml(work_dir: Path, source: Path) -> None:
@@ -158,7 +158,7 @@ class TestResolveCrop:
 
         expected_crop = CropParams(top=138, bottom=138, left=0, right=0)
         probe = ProbeState(frame_count=1000, crop=expected_crop)
-        probe.save(tmp_path / "probe.yaml")
+        save_model(tmp_path / "probe.yaml", probe)
 
         result = _resolve_crop(None, tmp_path, tmp_path / "source.mkv")
         assert result == expected_crop
@@ -172,7 +172,7 @@ class TestResolveCrop:
         from pyqenc.phases.probe import ProbeState
 
         probe = ProbeState(frame_count=500)
-        probe.save(tmp_path / "probe.yaml")
+        save_model(tmp_path / "probe.yaml", probe)
 
         source = tmp_path / "source.mkv"
         _seed_job_yaml(tmp_path, tmp_path / "other.mkv")
@@ -227,15 +227,19 @@ class TestWriteSidecar:
         stats: MetricStats = {"min": 90.0, "p05": 91.0, "p10": 91.5, "p25": 93.0, "median": 95.0, "p75": 97.0, "p90": 98.0, "p95": 98.5, "max": 99.0, "std": 1.5}
         return {MetricType.VMAF: stats}
 
-    def test_write_failure_logs_warning_and_does_not_raise(
-        self, tmp_path: Path, caplog
+    def test_write_failure_raises_loudly(
+        self, tmp_path: Path,
     ) -> None:
-        """OSError from write_yaml_atomic must be caught; warning logged; no exception."""
+        """Sidecar write failures are disk-level emergencies — they raise.
+
+        Ruling 2026-10-10: phase sidecars are critical for work; the old
+        swallow-to-warning behavior is gone (a failed write leaves an
+        attempt without its record; crash-idempotency self-heals via one
+        re-measure on the next run)."""
         with patch(
-            "pyqenc.phases.measure.write_yaml_atomic",
+            "pyqenc.phases.measure.save_model",
             side_effect=OSError("disk full"),
-        ), caplog.at_level(logging.WARNING, logger="pyqenc.phases.measure"):
-            # Must not raise
+        ), pytest.raises(OSError, match="disk full"):
             _write_sidecar(
                 path                       = tmp_path / "target.yaml",
                 source_video               = tmp_path / "source.mkv",
@@ -247,8 +251,6 @@ class TestWriteSidecar:
                 target_duration_seconds    = 98.0,
                 effective_duration_seconds = 98.0,
             )
-
-        assert any("Failed to write metrics sidecar" in r.message for r in caplog.records)
 
     def test_write_success_creates_no_tmp_file(self, tmp_path: Path) -> None:
         """On success the final file exists and no .tmp file is left behind."""

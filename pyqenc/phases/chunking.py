@@ -39,7 +39,7 @@ from pyqenc.stream_model import (
     VideoStreamChunk,
 )
 from pyqenc.utils.alive import alive_bar
-from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -291,7 +291,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         job_result = self._deps[JobPhase]
         yaml_path  = job_result.work_dir / ChunkingPhase.SIDECAR_NAME
 
-        sidecar = self._load_sidecar(yaml_path)
+        sidecar = load_model(yaml_path, ChunkingSidecar)
         if sidecar is not None and identity_changed(sidecar.source, job_result.source_fingerprint):
             if not job_result.force:
                 raise RecoveryError(
@@ -331,7 +331,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         work_dir = self._deps[JobPhase].work_dir
         yaml_path = work_dir / ChunkingPhase.SIDECAR_NAME
 
-        sidecar = self._load_sidecar(yaml_path)
+        sidecar = load_model(yaml_path, ChunkingSidecar)
         if sidecar is not None and sidecar.scenes:
             self._recovered_scenes = [
                 SceneBoundary(frame=record.frame or 0, timestamp_seconds=record.timestamp_seconds)
@@ -415,7 +415,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
                 scene_threshold  = self._config.chunking.scene_threshold,
                 min_scene_length = self._config.chunking.min_scene_length,
             )
-            write_yaml_atomic(sidecar_path, sidecar.model_dump(exclude_none=True))
+            save_model(sidecar_path, sidecar)
             logger.debug("Wrote scene boundaries: %s", sidecar_path.name)
 
         try:
@@ -484,8 +484,3 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _load_sidecar(path) -> ChunkingSidecar | None:
-        """Load ``chunking.yaml``; ``None`` when absent or unparseable."""
-        return load_model(path, ChunkingSidecar)

@@ -39,7 +39,7 @@ from pyqenc.phases.optimization import (
     load_optimization_sidecar,
 )
 from pyqenc.state import ArtifactState, ProbeFacet
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -170,7 +170,7 @@ def _persist_optimization(
     assert job.result is not None
     work_dir = job.result.work_dir
     work_dir.mkdir(parents=True, exist_ok=True)
-    current_optimization_sidecar(
+    sidecar = current_optimization_sidecar(
         plan        = probe.result.plan,
         source      = job.result.source_fingerprint,
         chunks      = id_set_fingerprint(
@@ -180,7 +180,8 @@ def _persist_optimization(
         sampling    = phase._config.measurement.sampling,
         test_chunks = test_chunks if test_chunks is not None else ["chunk-001", "chunk-002"],
         summary     = summary,
-    ).save(work_dir / "optimization.yaml")
+    )
+    save_model(work_dir / "optimization.yaml", sidecar)
 
 
 def _seed_winner(
@@ -892,8 +893,9 @@ class TestStrategyFingerprintWipe:
         )
         data = stale.model_dump()
         data["strategies"][_S1.display_name()] = Fingerprint(token="f" * 32).model_dump()
-        SearchOptimizationSidecar.model_validate(data).save(
+        save_model(
             work_dir / "optimization.yaml",
+            SearchOptimizationSidecar.model_validate(data),
         )
 
         s1_dir = work_dir / "encoded" / _S1.safe_name()

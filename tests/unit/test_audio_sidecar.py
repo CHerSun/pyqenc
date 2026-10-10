@@ -22,6 +22,7 @@ from pathlib import Path
 from pyqenc.app_config import ChainSpec, FilterInstance
 from pyqenc.audio.chain import resolve_chain
 from pyqenc.phases.audio import AudioSidecar
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 
 def _fi(type_id: str, **params) -> FilterInstance:
@@ -68,9 +69,9 @@ class TestRoundTrip:
             ("normal", ["dyn"]),
         )
         path = tmp_path / "audio.yaml"
-        original.save(path)
+        save_model(path, original)
 
-        restored = AudioSidecar.load(path)
+        restored = load_model(path, AudioSidecar)
         assert restored is not None
         assert restored == original
         assert restored.chains == original.chains
@@ -85,9 +86,9 @@ class TestRoundTrip:
         """
         original = _sidecar(("normal", ["dyn"]))
         path = tmp_path / "audio.yaml"
-        original.save(path)
+        save_model(path, original)
 
-        restored = AudioSidecar.load(path)
+        restored = load_model(path, AudioSidecar)
         assert restored is not None
         assert restored.chains["normal"].token == _resolved("normal", ["dyn"]).fingerprint.token
 
@@ -101,7 +102,7 @@ class TestRoundTrip:
         """
         original = _sidecar(("night", ["peak", "down", "aac"]))
         path = tmp_path / "audio.yaml"
-        original.save(path)
+        save_model(path, original)
 
         text = path.read_text(encoding="utf-8")
         assert "bitrate_per_channel" not in text
@@ -121,8 +122,8 @@ class TestInvalidationFingerprints:
         """
         saved = _sidecar(("night", ["peak", "aac"]))
         path = tmp_path / "audio.yaml"
-        saved.save(path)
-        persisted = AudioSidecar.load(path)
+        save_model(path, saved)
+        persisted = load_model(path, AudioSidecar)
         assert persisted is not None
 
         # Same chain name, one filter param changed.
@@ -144,8 +145,8 @@ class TestInvalidationFingerprints:
             ("normal", ["dyn"]),
         )
         path = tmp_path / "audio.yaml"
-        saved.save(path)
-        persisted = AudioSidecar.load(path)
+        save_model(path, saved)
+        persisted = load_model(path, AudioSidecar)
         assert persisted is not None
 
         current = _sidecar(("normal", ["dyn"]))
@@ -162,8 +163,8 @@ class TestInvalidationFingerprints:
         """
         saved = _sidecar(("night", ["peak", "down", "aac"]))
         path = tmp_path / "audio.yaml"
-        saved.save(path)
-        persisted = AudioSidecar.load(path)
+        save_model(path, saved)
+        persisted = load_model(path, AudioSidecar)
         assert persisted is not None
 
         current_fp = _resolved("night", ["peak", "down", "aac"]).fingerprint
@@ -179,7 +180,7 @@ class TestAtomicWriteAndRecovery:
         Bug: a missing sidecar could raise instead of returning None, breaking
         first-run recovery which uses None to mean "nothing committed yet".
         """
-        assert AudioSidecar.load(tmp_path / "audio.yaml") is None
+        assert load_model(tmp_path / "audio.yaml", AudioSidecar) is None
 
     def test_save_leaves_no_tmp_file(self, tmp_path: Path) -> None:
         """After save() no ``.tmp`` file remains (Req 9.7 atomic write).
@@ -187,7 +188,7 @@ class TestAtomicWriteAndRecovery:
         Bug: a leftover ``.tmp`` from a non-atomic write would corrupt recovery
         on the next run.
         """
-        _sidecar(("night", ["peak", "aac"])).save(tmp_path / "audio.yaml")
+        save_model(tmp_path / "audio.yaml", _sidecar(("night", ["peak", "aac"])))
         assert list(tmp_path.glob("*.tmp")) == []
 
     def test_save_creates_parent_dirs(self, tmp_path: Path) -> None:
@@ -197,7 +198,7 @@ class TestAtomicWriteAndRecovery:
         FileNotFoundError.
         """
         nested = tmp_path / "work" / "audio.yaml"
-        _sidecar(("normal", ["dyn"])).save(nested)
+        save_model(nested, _sidecar(("normal", ["dyn"])))
         assert nested.exists()
 
     def test_load_returns_none_for_invalid_yaml(self, tmp_path: Path) -> None:
@@ -208,4 +209,4 @@ class TestAtomicWriteAndRecovery:
         """
         path = tmp_path / "audio.yaml"
         path.write_text("not: valid: yaml: [unclosed", encoding="utf-8")
-        assert AudioSidecar.load(path) is None
+        assert load_model(path, AudioSidecar) is None

@@ -45,7 +45,7 @@ from pyqenc.phases.merge import MergePhase
 from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import ExtendedVideoStream, File, VideoStreamChunk
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic
 
 _STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
 """Stub source identity — phases read the job File's fingerprint."""
@@ -1033,7 +1033,7 @@ class TestOptimizationPhaseTiming:
         assert job.result is not None and probe.result is not None
         assert chunking.result is not None
         strategy = _STRATEGY_SLOW_H265
-        current_optimization_sidecar(
+        sidecar = current_optimization_sidecar(
             plan        = probe.result.plan,
             source      = job.result.source_fingerprint,
             chunks      = id_set_fingerprint(
@@ -1048,7 +1048,8 @@ class TestOptimizationPhaseTiming:
                     strategy=_STRATEGY_H265_AQ.display_name(), total_size=512,
                 ),
             ],
-        ).save(tmp_path / "work" / "optimization.yaml")
+        )
+        save_model(tmp_path / "work" / "optimization.yaml", sidecar)
 
     def test_recovery_recorded_with_cached_optimization_params(self, tmp_path: Path) -> None:
         """An optimization run with persisted results must report its recovery scan.

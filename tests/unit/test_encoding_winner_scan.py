@@ -35,6 +35,7 @@ from pyqenc.stream_model import (
     VideoStreamChunk,
     VideoStreamInfo,
 )
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -335,11 +336,11 @@ class TestEncodingSidecarTotals:
     def test_round_trip(self, tmp_path: Path) -> None:
         """summary.frames persists into encoding.yaml and loads back."""
         path = tmp_path / "encoding.yaml"
-        EncodingSidecar(summary=EncodingSummary(
+        save_model(path, EncodingSidecar(summary=EncodingSummary(
             frames={_STRATEGY.display_name(): 9526},
-        )).save(path)
+        )))
 
-        loaded = EncodingSidecar.load(path)
+        loaded = load_model(path, EncodingSidecar)
 
         assert loaded is not None
         assert loaded.summary is not None
@@ -351,7 +352,7 @@ class TestEncodingSidecarTotals:
         path = tmp_path / "encoding.yaml"
         path.write_text("{}", encoding="utf-8")
 
-        loaded = EncodingSidecar.load(path)
+        loaded = load_model(path, EncodingSidecar)
 
         assert loaded is not None
         assert loaded.summary is None

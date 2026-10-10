@@ -114,10 +114,6 @@ class _OptimizationSidecarBase(BaseModel):
     test_chunks: list[str]                     = Field(default_factory=list)
     summary:     list[StrategySummaryRow]      = Field(default_factory=list)
 
-    def save(self, path: Path) -> None:
-        """Write this sidecar to *path* atomically."""
-        save_model(path, self)
-
 
 class SearchOptimizationSidecar(_OptimizationSidecarBase):
     """The search variant: the quality-target set is the mode key."""

@@ -71,7 +71,7 @@ from pyqenc.stream_model import (
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg
 from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.log_format import fmt_size_mb
-from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -552,7 +552,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         extracted_dir = job_result.work_dir / EXTRACTED_DIR
         sidecar_path  = job_result.work_dir / ExtractionPhase.SIDECAR_NAME
 
-        sidecar = self._load_sidecar(sidecar_path)
+        sidecar = load_model(sidecar_path, ExtractionSidecar)
         if identity_changed(sidecar.source if sidecar else None,
                             job_result.source_fingerprint):
             if not job_result.force:
@@ -610,7 +610,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
         # Step 2: resolve the stream inventory (sidecar first, no re-probe).
         self._source_file = job_result.file.payload
-        sidecar = self._load_sidecar(sidecar_path)
+        sidecar = load_model(sidecar_path, ExtractionSidecar)
         self._load_or_enumerate(job_result.file.payload, sidecar)
         self._normalize_extracted_paths(work_dir)
 
@@ -824,11 +824,6 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         self._subtitles, self._attachments, self._has_chapters = subtitles, attachments, has_chapters
         self._sidecar_dirty = True
 
-    @staticmethod
-    def _load_sidecar(path: Path) -> ExtractionSidecar | None:
-        """Load ``extraction.yaml``; ``None`` when absent or unparseable."""
-        return load_model(path, ExtractionSidecar)
-
     def _wipe_extracted(self, extracted_dir: Path, sidecar_path: Path) -> None:
         """Delete ``extracted/`` and the sidecar (the catastrophic effect)."""
         shutil.rmtree(extracted_dir, ignore_errors=True)
@@ -851,7 +846,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             ),
             chapters = self._has_chapters,
         )
-        write_yaml_atomic(sidecar_path, sidecar.model_dump(exclude_none=True))
+        save_model(sidecar_path, sidecar)
         self._sidecar_dirty = False
         logger.debug("Wrote stream inventory: %s", sidecar_path.name)
 

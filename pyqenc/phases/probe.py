@@ -20,8 +20,7 @@ subsequent runs skip re-probing.
 
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Self
+from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel
 
@@ -102,23 +101,6 @@ class ProbeState(BaseModel):
     source:      Fingerprint | None = None
     crop_source: str | None         = None
     resulting_resolution: str | None = None
-
-    @classmethod
-    def load(cls, path: Path) -> Self | None:
-        """Load ``ProbeState`` from *path* (an absent crop materializes empty).
-
-        Returns:
-            ``ProbeState`` if the file exists and is valid, ``None`` otherwise.
-        """
-        return load_model(path, cls)
-
-    def save(self, path: Path) -> None:
-        """Write this ``ProbeState`` to *path* atomically.
-
-        Args:
-            path: Destination YAML file path.
-        """
-        save_model(path, self)
 
 
 logger = logging.getLogger(__name__)
@@ -251,7 +233,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         # .tmp pre-clean (probe.yaml is written via .tmp-then-rename).
         remove_stale_tmp_file(probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX))
 
-        state = ProbeState.load(probe_yaml)
+        state = load_model(probe_yaml, ProbeState)
         if state is not None and identity_changed(state.source, job_result.source_fingerprint):
             if not job_result.force:
                 raise RecoveryError(
@@ -290,7 +272,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
             )
         self._video_stream = video_artifact.payload
 
-        self._probe_state = ProbeState.load(probe_yaml)
+        self._probe_state = load_model(probe_yaml, ProbeState)
         crop_override_active = (
             self._crop_params is not None
             and (
@@ -378,13 +360,13 @@ class ProbePhase(Phase[ProbePhaseResult]):
         # (Req 23); source is the identity key.
         job_result = self._deps[JobPhase]
         resulting_resolution = _derive_resulting_resolution(video, crop)
-        ProbeState(
+        save_model(probe_yaml, ProbeState(
             frame_count          = frame_count,
             crop                 = crop,
             source               = job_result.source_fingerprint,
             crop_source          = crop_source,
             resulting_resolution = resulting_resolution,
-        ).save(probe_yaml)
+        ))
         self._resolved = ExtendedVideoStream(
             stream      = video,
             frame_count = frame_count,

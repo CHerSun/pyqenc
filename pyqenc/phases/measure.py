@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
-import yaml
 from pydantic import BaseModel, Field
 
 from pyqenc.constants import (
@@ -35,7 +34,7 @@ from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg_as
 from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.log_format import fmt_key_value_table, fmt_metric_value, fmt_size_mb
 from pyqenc.utils.visualization import QualityEvaluator
-from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 # ---------------------------------------------------------------------------
 # The standalone-measure sidecar (re-homed, Req 21)
@@ -288,7 +287,7 @@ def _resolve_crop(
     # Prefer probe.yaml — crop is owned by ProbePhase. Loading materializes
     # an empty CropParams when the key is absent, and an empty crop is a
     # concrete resolution ("no crop") — never a reason to keep probing.
-    probe = ProbeState.load(work_dir / "probe.yaml")
+    probe = load_model(work_dir / "probe.yaml", ProbeState)
     if probe is not None:
         logger.debug("Loaded crop from probe.yaml: %s", probe.crop)
         return probe.crop
@@ -604,12 +603,8 @@ def _write_sidecar(
         crop_params                = crop_dict,
         metrics                    = flat_metrics,
     )
-
-    try:
-        write_yaml_atomic(path, sidecar.model_dump(exclude_none=True))
-        logger.debug("Wrote metrics sidecar: %s", path)
-    except (OSError, ValueError, yaml.YAMLError) as exc:
-        logger.warning("Failed to write metrics sidecar %s: %s", path, exc)
+    save_model(path, sidecar)
+    logger.debug("Wrote metrics sidecar: %s", path)
 
 
 # ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from dataclasses import replace as _dc_replace
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Self
+from typing import TYPE_CHECKING, ClassVar
 
 import yaml
 from pydantic import BaseModel, Field
@@ -87,7 +87,7 @@ from pyqenc.utils.log_format import (
 )
 from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.visualization import QualityEvaluator
-from pyqenc.utils.yaml_utils import load_model, save_model, write_yaml_atomic
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -241,15 +241,6 @@ class EncodingSidecar(BaseModel):
 
     summary: EncodingSummary | None = None
 
-    @classmethod
-    def load(cls, path: Path) -> Self | None:
-        """Load ``encoding.yaml``; ``None`` when absent or unparseable."""
-        return load_model(path, cls)
-
-    def save(self, path: Path) -> None:
-        """Write this sidecar to *path* atomically."""
-        save_model(path, self)
-
 
 def _read_sidecar_yaml(sidecar_path: Path) -> dict | None:
     """Read a metrics/result sidecar YAML next to an encoded attempt.
@@ -331,15 +322,11 @@ def _write_metrics_sidecar(
                           ``0`` = could not be determined.
     """
     sidecar = attempt_path.with_suffix(".yaml")
-    data    = MetricsSidecar(
+    save_model(sidecar, MetricsSidecar(
         metrics     = metrics,
         sampling    = metrics_sampling,
         frame_count = frame_count,
-    )
-    try:
-        write_yaml_atomic(sidecar, data.model_dump(exclude_none=True))
-    except (OSError, ValueError, yaml.YAMLError) as e:
-        logger.warning("Failed to write metrics sidecar for %s: %s", attempt_path.name, e)
+    ))
 
 
 def _hardlink_or_copy(src: Path, dst: Path) -> None:
@@ -419,23 +406,16 @@ def _write_encoding_result_sidecar(
                          search was exhausted without a passing attempt.
     """
     sidecar_path = output_dir / EncodedChunk.format_winner_sidecar_name(chunk_id)
-    data = EncodingResultSidecar(
+    save_model(sidecar_path, EncodingResultSidecar(
         crf         = crf,
         metrics     = metrics,
         frame_count = frame_count,
         targets_met = targets_met,
+    ))
+    logger.debug(
+        "Wrote winner result sidecar: %s (crf=%s, targets_met=%s)",
+        sidecar_path.name, crf, targets_met,
     )
-    try:
-        write_yaml_atomic(sidecar_path, data.model_dump(exclude_none=True))
-        logger.debug(
-            "Wrote winner result sidecar: %s (crf=%s, targets_met=%s)",
-            sidecar_path.name, crf, targets_met,
-        )
-    except (OSError, ValueError, yaml.YAMLError) as e:
-        logger.warning(
-            "Failed to write winner result sidecar for %s: %s",
-            chunk_id, e,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -2300,7 +2280,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
 
         # The replay aggregate — loaded here for the fast-exit resurface;
         # its absence costs display only, never invalidation (Req 24).
-        self._persisted = EncodingSidecar.load(yaml_path)
+        self._persisted = load_model(yaml_path, EncodingSidecar)
 
         # Step 1: clean up .tmp files
         remove_stale_tmp_files(enc_dir)
@@ -2663,10 +2643,10 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         if scan is not None:
             if scan.summaries is not None:
                 self._log_limiter_summary(scan.summaries)
-            EncodingSidecar(summary=EncodingSummary(
+            save_model(encoding_yaml, EncodingSidecar(summary=EncodingSummary(
                 limiter = scan.summaries,
                 frames  = scan.frame_totals() if scan.frames_known else {},
-            )).save(encoding_yaml)
+            )))
 
         outcome = PhaseOutcome.COMPLETED if enc_result.encoded_count > 0 else PhaseOutcome.REUSED
         return self._make_result(

@@ -34,6 +34,7 @@ from pyqenc.models import Fingerprint, PhaseOutcome
 from pyqenc.phases.audio import AudioPhase, AudioSidecar
 from pyqenc.stream_model import AudioStream, AudioStreamInfo, File
 from pyqenc.utils.long_path import LongPath
+from pyqenc.utils.yaml_utils import load_model
 
 _STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
 """Stub source identity — phases read the job File's fingerprint."""
@@ -321,7 +322,7 @@ class TestResumability:
             phase.run()
 
         # Sidecar was committed in _recover, BEFORE the crashing production.
-        sidecar = AudioSidecar.load(LongPath(tmp_path) / _AUDIO_YAML)
+        sidecar = load_model(LongPath(tmp_path) / _AUDIO_YAML, AudioSidecar)
         assert sidecar is not None
         assert "normal" in sidecar.chains
 

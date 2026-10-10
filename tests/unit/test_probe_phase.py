@@ -38,6 +38,7 @@ from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult, ProbeState
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import File, VideoStream, VideoStreamInfo
+from pyqenc.utils.yaml_utils import load_model, save_model
 from tests.test_metrics_integration import (
     _dotted_groups,
     _dotted_keys,
@@ -144,7 +145,7 @@ def _make_probe_phase(
 
 def _write_probe_yaml(work_dir: Path, *, frame_count: int, crop: CropParams) -> None:
     """Persist a valid probe.yaml with the given frame count and crop."""
-    ProbeState(frame_count=frame_count, crop=crop).save(work_dir / "probe.yaml")
+    save_model(work_dir / "probe.yaml", ProbeState(frame_count=frame_count, crop=crop))
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +288,7 @@ class TestProbePhaseCompleted:
         """
         _, work_dir = self._run_with_mocks(tmp_path)
 
-        loaded = ProbeState.load(work_dir / "probe.yaml")
+        loaded = load_model(work_dir / "probe.yaml", ProbeState)
         assert loaded is not None
         assert loaded.frame_count == self._DETECTED_FRAME_COUNT
         assert loaded.crop is not None
@@ -301,7 +302,7 @@ class TestProbePhaseCompleted:
         a manual crop's provenance always reloaded as "detected"."""
         _, work_dir = self._run_with_mocks(tmp_path)
 
-        loaded = ProbeState.load(work_dir / "probe.yaml")
+        loaded = load_model(work_dir / "probe.yaml", ProbeState)
         assert loaded is not None
         job = _make_job_result(work_dir, tmp_path / "source.mkv")
         assert loaded.source is not None
@@ -317,7 +318,7 @@ class TestProbePhaseCompleted:
         """
         _, work_dir = self._run_with_mocks(tmp_path)
 
-        loaded = ProbeState.load(work_dir / "probe.yaml")
+        loaded = load_model(work_dir / "probe.yaml", ProbeState)
         assert loaded is not None
         assert loaded.resulting_resolution == "1920x800"
 

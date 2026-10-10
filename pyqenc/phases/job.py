@@ -44,7 +44,7 @@ from pyqenc.phase import (
 )
 from pyqenc.stream_model import File, LongPathYaml
 from pyqenc.utils.fs import remove_stale_tmp_file, safe_stat_size
-from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -221,7 +221,7 @@ class JobPhase(Phase[JobPhaseResult]):
         live_fingerprint = self._file.fingerprint
         assert live_fingerprint is not None, "the probed File carries its fingerprint"
 
-        existing = self._load_job_sidecar(job_yaml)
+        existing = load_model(job_yaml, JobSidecar)
         if existing is None:
             return
 
@@ -252,16 +252,7 @@ class JobPhase(Phase[JobPhaseResult]):
 
     def _rewrite_record(self, job_yaml: Path) -> None:
         """Rewrite ``job.yaml`` with the live identity (a disk effect)."""
-        assert self._file is not None, "the invalidation probe stashes the File"
-        fingerprint = self._file.fingerprint
-        assert fingerprint is not None, "the probed File carries its fingerprint"
-        write_yaml_atomic(
-            job_yaml,
-            JobSidecar(source=JobSourceRecord(
-                path       = self._source,
-                fingerprint = fingerprint,
-            )).model_dump(exclude_none=True),
-        )
+        self._write_record(job_yaml)
 
     def _recover(self) -> Recovery:
         """Classify the ``job.yaml`` record from disk truth (one row).
@@ -284,7 +275,7 @@ class JobPhase(Phase[JobPhaseResult]):
         live_fingerprint = self._file.fingerprint
         assert live_fingerprint is not None, "the probed File carries its fingerprint"
 
-        existing = self._load_job_sidecar(job_yaml)
+        existing = load_model(job_yaml, JobSidecar)
         current = (
             existing is not None
             and existing.source.fingerprint.matches(live_fingerprint)
@@ -316,18 +307,10 @@ class JobPhase(Phase[JobPhaseResult]):
         job_yaml = self._work_dir / JobPhase.SIDECAR_NAME
 
         # The invalidation (or its dry-run skip) left the classification
-        # truth on disk; recovery stashed the probed File.
-        assert self._file is not None, "file guaranteed by the _recover pending branches"
-        fingerprint = self._file.fingerprint
-        assert fingerprint is not None, "the probed File carries its fingerprint"
+        # truth on disk; recovery stashed the probed File (_write_record
+        # re-states the stash contract at the write).
         if not dry_run:
-            write_yaml_atomic(
-                job_yaml,
-                JobSidecar(source=JobSourceRecord(
-                    path       = self._source,
-                    fingerprint = fingerprint,
-                )).model_dump(exclude_none=True),
-            )
+            self._write_record(job_yaml)
             logger.info("Initialized job.yaml for new pipeline run")
         return self._make_result(
             PhaseOutcome.COMPLETED, [],
@@ -400,17 +383,21 @@ class JobPhase(Phase[JobPhaseResult]):
     # Internals
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _load_job_sidecar(path: Path) -> JobSidecar | None:
-        """Load ``job.yaml`` as the :class:`JobSidecar`.
+    def _write_record(self, job_yaml: Path) -> None:
+        """Write ``job.yaml`` — the live locator + identity record.
 
-        Args:
-            path: The ``job.yaml`` path.
-
-        Returns:
-            The loaded sidecar, or ``None`` when absent or unparseable.
+        The single construction site of the record (initial write and
+        locator rewrites share it); the asserts re-state the stash
+        contract: the invalidation/recovery hooks guarantee the File and
+        its fingerprint by the time any write happens.
         """
-        return load_model(path, JobSidecar)
+        assert self._file is not None, "the invalidation probe stashes the File"
+        fingerprint = self._file.fingerprint
+        assert fingerprint is not None, "the probed File carries its fingerprint"
+        save_model(job_yaml, JobSidecar(source=JobSourceRecord(
+            path       = self._source,
+            fingerprint = fingerprint,
+        )))
 
     def _probe_file(self) -> File:
         """Construct the run's single :class:`File`, eagerly from the filesystem.

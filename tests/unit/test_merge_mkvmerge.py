@@ -67,6 +67,7 @@ from pyqenc.stream_model import (
 )
 from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.long_path import LongPath
+from pyqenc.utils.yaml_utils import load_model
 
 
 def _extended_stream(path: Path, frame_count: int) -> ExtendedVideoStream:
@@ -1246,7 +1247,7 @@ class TestMergeYamlReplayAggregate:
         from pyqenc.phases.merge import MergeSidecar
 
         merge, _ = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
-        persisted = MergeSidecar.load(merge._deps[JobPhase].work_dir / "merge.yaml")
+        persisted = load_model(merge._deps[JobPhase].work_dir / "merge.yaml", MergeSidecar)
         assert persisted is not None
         assert not hasattr(persisted, "basis")
         assert [row.strategy_name for row in persisted.summary] == ["h265-aq+slow"]
@@ -1257,7 +1258,7 @@ class TestMergeYamlReplayAggregate:
         from pyqenc.phases.merge import MergeSidecar
 
         merge, _ = _run_full_merge(tmp_path, fixed=False)
-        persisted = MergeSidecar.load(merge._deps[JobPhase].work_dir / "merge.yaml")
+        persisted = load_model(merge._deps[JobPhase].work_dir / "merge.yaml", MergeSidecar)
         assert persisted is not None
         assert persisted.summary, "search runs persist their summary rows"
 

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, ClassVar, Literal, Self
+from typing import TYPE_CHECKING, Annotated, ClassVar, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -196,15 +196,6 @@ class MergeSidecar(BaseModel):
     """
 
     summary: list[MergeSummaryRow] = Field(default_factory=list)
-
-    @classmethod
-    def load(cls, path: Path) -> Self | None:
-        """Load ``merge.yaml``; ``None`` when absent or unparseable."""
-        return load_model(path, cls)
-
-    def save(self, path: Path) -> None:
-        """Write this sidecar to *path* atomically."""
-        save_model(path, self)
 
 
 if TYPE_CHECKING:
@@ -664,7 +655,7 @@ class MergePhase(Phase[MergePhaseResult]):
         """Build the reused result, replaying the persisted merge summary."""
         job_result = self._deps[JobPhase]
         merge_yaml = job_result.work_dir / MergePhase.SIDECAR_NAME
-        persisted  = MergeSidecar.load(merge_yaml)
+        persisted  = load_model(merge_yaml, MergeSidecar)
         if persisted is not None:
             logger.info(THICK_LINE)
             logger.info("MERGE SUMMARY")
@@ -923,9 +914,10 @@ class MergePhase(Phase[MergePhaseResult]):
                 source_stream.stream.file.path,
                 rendered_keys,
             )
-            MergeSidecar(
-                summary = strategy_summaries,
-            ).save(self._deps[JobPhase].work_dir / MergePhase.SIDECAR_NAME)
+            save_model(
+                self._deps[JobPhase].work_dir / MergePhase.SIDECAR_NAME,
+                MergeSidecar(summary=strategy_summaries),
+            )
 
         if failed_strategies:
             return self._make_result(
