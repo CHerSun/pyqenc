@@ -1301,7 +1301,45 @@ same refactor wave — do the record type and the key type together?).
 
 ---
 
-## Last known = 116
+## 117. Observability research — traces/metrics for a CLI-first tool; replace the app-metrics stub
+
+**Status:** needs thinking (user direction 2026-10-10; research task)
+
+The current app-metrics (`metrics.yaml`, `MetricsCollector`) is a
+temporary stub, and it shows. Industry standard observability has three
+pillars — **traces, metrics, logs**. We have logs. Our metrics suck. We
+have no traces. And nothing is collectible externally (no
+Prometheus/OpenTelemetry export).
+
+Constraint: pyqenc stays **CLI-first** (potential web UI later). Full
+OTel/Prometheus adoption is justified only if it ever becomes a service;
+while CLI, it must still be observable — with a local dump like today's
+`metrics.yaml`.
+
+What the observability must answer (granular, of course):
+
+- **how long** things work (durations), and
+- **how many times** (convergence counts),
+- per action (phase: audio/encoding/merge/probe…), per strategy/chain,
+  per subaction (encode, recovery, optimize…),
+- with a clear distinction between **actual wall time** (top-level
+  metrics) and **sub-time** (parallelized flows — parts of the full
+  time, never summable against it),
+- all safely dumpable, **crash-resistant with minor allowed delta loss**
+  (see the current `metrics.yaml` implementation).
+
+Task: research best industry practices for standalone CLI tooling —
+hierarchical span/task timing (inclusive vs exclusive time is exactly the
+wall-vs-sub-time problem), OTel SDK in offline/local-file-export modes,
+what a trace-shaped local dump would look like vs the current flat
+dotted-key metrics — and their applicability to a local `metrics.yaml`
+dump. §2 (parallelism field / spec reconciliation), §12 (per-chain
+dotted audio metrics) and §59 (concurrent dumps) all ride under this
+umbrella and should be re-evaluated against whatever shape lands.
+
+---
+
+## Last known = 117
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
