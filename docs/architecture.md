@@ -293,7 +293,7 @@ sidecar); per-attempt and per-output sidecars mark pair/output completeness.
 | `optimization.yaml`   | Per-mode union (tag `mode: fixed\|search`): mode key (pinned map / targets) + common keys    |
 |                       | (source, chunk-set, per-strategy args fingerprints, probe facet, sampling) + `summary` table |
 | `encoding.yaml`       | ONE `summary` block (winning-limiter table + winners frame totals) — no keys                 |
-| `audio.yaml`          | Per-chain records (identity fingerprint + output extension) + source identity key            |
+| `audio.yaml`          | Per-chain identity fingerprints + source identity key (stale outputs swept by listing)         |
 | `merge.yaml`          | Summary replay rows ONLY (per-output sidecars are the acceptance records)                     |
 | `<chunk>.q<q>.yaml`   | Attempt facts: full measured metrics, sampling, frame count (the quality is the name)       |
 | `<chunk>.yaml`        | Winner facts: quality, targeted metrics subset, frame count, `targets_met`                   |

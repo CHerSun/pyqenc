@@ -282,6 +282,61 @@ class TestInvalidation:
         assert nightlong_out.exists()                     # NOT deleted by substring
         assert rec2 == [("night", "t1")]                  # only 'night' reproduced
 
+    def test_extension_change_old_output_swept(self, tmp_path: Path) -> None:
+        """Bug guarded (listing protocol, 2026-10-10): a chain change that
+        flips the output extension must sweep the OLD-extension file —
+        the sweep works from the listing + live expected names, with no
+        persisted extension fact to remember the old name."""
+        tracks = [_track(tmp_path, "t1")]
+
+        cfg_v1 = _audio_config([ChainSpec(name="norm", filters=["peaknorm"])])
+        phase1 = _make_phase(tmp_path, cfg_v1, tracks)
+        with patch("pyqenc.phases.audio.execute_chain", _fake_execute_chain_factory([])):
+            phase1.run()
+        old_out = _chain_out(tmp_path, tracks[0], "norm")
+        assert old_out.exists()
+
+        # Simulate the extension flip: the same track×chain output name,
+        # different extension — what a changed encode would leave behind.
+        stale = old_out.with_suffix(".mka")
+        stale.write_bytes(b"stale old-extension bytes")
+
+        cfg_v2 = _audio_config([ChainSpec(name="norm", filters=["peaknorm2"])])
+        phase2 = _make_phase(tmp_path, cfg_v2, tracks)
+        with patch("pyqenc.phases.audio.execute_chain", _fake_execute_chain_factory([])):
+            phase2.run()
+
+        assert not stale.exists(), "old-extension leftover must be swept"
+        assert old_out.exists(), "the reproduced (current-extension) output stays"
+
+    def test_deselected_track_output_swept(self, tmp_path: Path) -> None:
+        """Bug guarded (uniform leftover policy, 2026-10-10): outputs of a
+        track that left the selection are leftovers of the same class as
+        removed chains' outputs — swept, not retained (previously they
+        lingered only because the old mechanism could not name them)."""
+        eng = _track(tmp_path, "t_eng", track_id=1, language="eng")
+        rus = _track(tmp_path, "t_rus", track_id=2, language="rus")
+
+        cfg_all = _audio_config(
+            [ChainSpec(name="normal", filters=["peaknorm"])],
+        )
+        phase1 = _make_phase(tmp_path, cfg_all, [eng, rus])
+        with patch("pyqenc.phases.audio.execute_chain", _fake_execute_chain_factory([])):
+            phase1.run()
+        rus_out = _chain_out(tmp_path, rus, "normal")
+        assert rus_out.exists()
+
+        cfg_eng = _audio_config(
+            [ChainSpec(name="normal", filters=["peaknorm"])],
+            select=[SelectEntry.model_validate({"for": "lang=eng"})],
+        )
+        phase2 = _make_phase(tmp_path, cfg_eng, [eng, rus])
+        with patch("pyqenc.phases.audio.execute_chain", _fake_execute_chain_factory([])):
+            phase2.run()
+
+        assert not rus_out.exists(), "deselected-track output must be swept"
+        assert _chain_out(tmp_path, eng, "normal").exists()
+
 
 class TestSelection:
     def test_selection_recomputed_picks_right_tracks(self, tmp_path: Path) -> None:

@@ -127,7 +127,7 @@ Comparison mechanics: facet checks compare frame count + crop values explicitly 
 | Chunking | content identity + detection params | identity ⇒ catastrophic; params ⇒ auto re-detect |
 | Optimization | union keys (mode/targets|q, sampling, facet, content, fingerprints, test-chunk set) | wipes winners (auto); catastrophic per-strategy (fingerprint) and whole-namespace (facet); table rewrite = disk effect; §99 conservative wipe on missing sidecar |
 | Encoding | none (empty invalidate) | classification + winner-layer curation |
-| Audio | chain signatures | differing ⇒ reproduce; removed ⇒ cleanup; missing sidecar ⇒ conservative reproduce |
+| Audio | chain signatures | differing ⇒ reproduce; removed ⇒ cleanup; missing sidecar ⇒ conservative reproduce. Amended 2026-10-10: cleanup is the listing protocol (Req 12-13) — one listing, expected names of the live (tracks × chains), leftovers swept; changed chains delete their live-composed names (what presence-based classification reads as reproduce). No persisted extension fact — the record is the bare chain fingerprint |
 | Merge | per-output provenance (incl. probe facet — the flag) | mismatch ⇒ re-merge that output in place — NO wholesale deliverable wipe (the only `merged/` wipe is the permission-gated identity condition, Req 60); sampling ⇒ re-measure; missing `merge.yaml` ⇒ per-output records still decide (M-7 structural) |
 
 ## 8. Implementation order (tasks.md will expand)

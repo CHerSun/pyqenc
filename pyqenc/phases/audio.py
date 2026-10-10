@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -34,6 +34,7 @@ from pyqenc.audio.select import resolve_selection
 from pyqenc.constants import (
     AUDIO_OUTPUT_DIR,
     SUCCESS_SYMBOL_MINOR,
+    TEMP_SUFFIX,
     THICK_LINE,
 )
 from pyqenc.metrics import MetricKey
@@ -76,51 +77,38 @@ class AudioPhaseResult(PhaseResult):
 
 
 # ---------------------------------------------------------------------------
-# audio.yaml — the committed chain records (re-homed sidecar, Req 21)
+# audio.yaml — the committed chain fingerprints (re-homed sidecar, Req 21)
 # ---------------------------------------------------------------------------
-
-class AudioChainRecord(BaseModel):
-    """One committed chain: its identity token + output extension.
-
-    The token is the chain fingerprint's opaque hash (the invalidation key,
-    Req 10b — compared by equality only); the extension is the
-    name-composition fact composed-name deletions need (the token alone
-    cannot rebuild an output's name). Field names follow the design layout
-    (Req 61: named for what they identify, never for the mechanism).
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    token:     str
-    extension: str
-
 
 class AudioSidecar(BaseModel):
     """Sidecar model for ``audio.yaml``.
 
-    Records the committed **intent** per chain (identity token + naming
-    fact), keyed by chain name, plus the source identity key. ``select`` is
+    Records the committed **intent** per chain (its identity token), keyed
+    by chain name, plus the source identity key. ``select`` is
     deliberately NOT persisted: selection is a pure function of the current
     extracted tracks plus the current ``select`` config, recomputed for free
     every run. The sidecar never reconstructs a
     :class:`~pyqenc.audio.chain.ResolvedChain` from a record — the token is
-    opaque by design; invalidation compares tokens, deletions compose names
-    from the live chain or the record's extension.
+    opaque by design; invalidation compares tokens. No output-extension
+    fact is persisted (dropped 2026-10-10): stale outputs are swept by the
+    listing protocol (one listing, expected names of the live chains,
+    leftovers deleted — Req 12-13), so nothing needs to remember how old
+    files were named.
 
     On-disk shape (``audio.yaml``)::
 
         chains:
-          normal: {token: "9f2c…", extension: flac}
+          normal: {token: "9f2c…"}
         source: {size: …, token: "…"}
 
     Attributes:
-        chains: Map of chain name → its committed record.
+        chains: Map of chain name → its committed chain fingerprint.
         source: The source identity key (mismatch = catastrophic, Req 33;
                 ``None`` on legacy files is unknown, never a mismatch).
     """
 
-    chains: dict[str, AudioChainRecord] = Field(default_factory=dict)
-    source: Fingerprint | None          = None
+    chains: dict[str, Fingerprint] = Field(default_factory=dict)
+    source:  Fingerprint | None     = None
 
     @classmethod
     def from_resolved(
@@ -130,52 +118,43 @@ class AudioSidecar(BaseModel):
     ) -> Self:
         """Build an ``AudioSidecar`` from resolved chains.
 
-        Each record carries the chain's own fingerprint token (the SAME
-        derivation the phase compares with — DRY) and its effective output
-        extension.
+        Each entry carries the chain's own fingerprint (the SAME derivation
+        the phase compares with — DRY).
 
         Args:
             resolved: Map of chain name → :class:`ResolvedChain`.
             source:   The source identity key at the writing site.
 
         Returns:
-            The sidecar holding one record per chain.
+            The sidecar holding one fingerprint per chain.
         """
         return cls(
-            chains = {
-                name: AudioChainRecord(
-                    token     = chain.fingerprint.token,
-                    extension = chain.encode.extension,
-                )
-                for name, chain in resolved.items()
-            },
+            chains = {name: chain.fingerprint for name, chain in resolved.items()},
             source = source,
         )
 
 
-def _composed_output_names(
-    tracks:      list[AudioStream],
-    chain_name:  str,
-    extensions:  set[str],
+def _expected_output_names(
+    tracks:  list[AudioStream],
+    resolved: dict[str, ResolvedChain],
 ) -> set[str]:
-    """The exact output names for (track set x chain x extensions).
+    """The exact expected output names for (track set x live chains).
 
-    Deletions' name-composition helper: composed through the entity composer
-    (:func:`chain_output_path`) — the single naming site (no manual joins).
+    The single composition site for both the orphan sweep and the row
+    classification: composed through the entity composer
+    (:func:`chain_output_path`) — the naming site, no manual joins.
 
     Args:
-        tracks:     The working track set.
-        chain_name: The chain whose outputs are addressed.
-        extensions: The output extensions to cover (a changed chain deletes
-                    under both its old and new extension).
+        tracks:   The working track set.
+        resolved: Current resolved chains, keyed by name.
 
     Returns:
         The composed bare file names.
     """
     return {
-        chain_output_path(stream, chain_name, ext, Path()).name
+        chain_output_path(stream, name, chain.encode.extension, Path()).name
         for stream in tracks
-        for ext in extensions
+        for name, chain in resolved.items()
     }
 
 
@@ -345,22 +324,23 @@ class AudioPhase(Phase[AudioPhaseResult]):
         resolved:     dict[str, ResolvedChain],
         tracks:       list[AudioStream],
     ) -> None:
-        """Delete outputs of differing/removed chains BY COMPOSED NAME, then commit.
+        """Commit the current chain fingerprints, sweeping orphaned outputs.
 
-        Comparisons are per-chain fingerprint; deletions compose the exact
-        expected output names from the current track set through the entity
-        composer (``chain_output_path``) — never a directory listing, never
-        name parsing (spec nuance 4). A changed chain deletes under BOTH its
-        persisted and current extension (the outputs on disk were named by
-        the old chain); a removed chain under its persisted one. The updated
-        sidecar is written **before any output is produced**; when nothing
-        differs the rewrite is skipped.
+        The listing protocol (Req 12-13): ONE directory listing, expected
+        names composed from the live (tracks × chains), every leftover
+        deleted — outputs of changed chains (any extension they carried),
+        removed chains, and deselected tracks alike; nothing needs to
+        remember how stale files were named. Comparisons stay per-chain
+        fingerprint (changed chains log their reprocessing; a same-name
+        change is reproduced in place via the atomic .tmp→rename
+        promotion). The updated sidecar is written **before any output is
+        produced**; when nothing differs the rewrite is skipped.
 
         Args:
             audio_dir:    The dedicated audio output directory.
             sidecar_path: The ``audio.yaml`` path.
             resolved:     Current resolved chains, keyed by name.
-            tracks:       The working track set (deletion scope).
+            tracks:       The working track set (expected-name scope).
         """
         persisted = load_model(sidecar_path, AudioSidecar)
         prior     = persisted.chains if persisted is not None else {}
@@ -370,44 +350,48 @@ class AudioPhase(Phase[AudioPhaseResult]):
         )
         current_records = current.chains
 
-        def _delete(names: set[str], reason: str) -> None:
-            for name in sorted(names):
-                path = audio_dir / name
-                try:
-                    path.unlink()
-                    logger.debug("Deleted invalidated output: %s (%s)", name, reason)
-                except OSError as exc:
-                    logger.warning("Could not delete %s: %s", path, exc)
-
-        # Chains whose fingerprint changed → invalidate (reproduce) — delete
-        # under both the persisted and the current extension.
-        for chain_name, record in current_records.items():
-            if chain_name not in prior:
-                continue
-            if prior[chain_name].token == record.token:
-                continue
+        changed = [
+            name for name, record in current_records.items()
+            if name in prior and prior[name].token != record.token
+        ]
+        removed = [name for name in prior if name not in current_records]
+        for chain_name in changed:
             logger.info(
                 "Chain %r changed — invalidating its outputs for reprocessing",
                 chain_name,
             )
-            _delete(
-                _composed_output_names(tracks, chain_name, {
-                    prior[chain_name].extension, record.extension,
-                }),
-                reason="chain changed",
-            )
-
-        # Chains removed from config → invalidate (cleanup, now unwanted).
-        for chain_name, record in prior.items():
-            if chain_name in current_records:
-                continue
+        for chain_name in removed:
             logger.info(
                 "Chain %r removed from config — cleaning up its outputs", chain_name,
             )
-            _delete(
-                _composed_output_names(tracks, chain_name, {record.extension}),
-                reason="chain removed",
-            )
+
+        def _unlink(name: str) -> None:
+            path = audio_dir / name
+            try:
+                path.unlink()
+                logger.debug("Deleted invalidated audio output: %s", name)
+            except OSError as exc:
+                logger.warning("Could not delete %s: %s", path, exc)
+
+        # Disk effect 1 — a changed chain's stale bytes under its CURRENT
+        # (live-composed) name: deletion is what presence-based classification
+        # reads as "reproduce" (Req 12 keeps classification sidecar-blind).
+        # An extension change renames the outputs — the old names fall to the
+        # sweep below; no persisted fact names them.
+        for chain_name in changed:
+            for name in _expected_output_names(tracks, {chain_name: resolved[chain_name]}):
+                _unlink(name)
+
+        # Disk effect 2 — the orphan sweep (Req 12-13): one listing minus the
+        # live expected names; every leftover deleted (old extensions,
+        # removed chains, deselected tracks).
+        if audio_dir.is_dir():
+            expected = _expected_output_names(tracks, resolved)
+            listing  = {p.name for p in audio_dir.iterdir()}
+            for name in sorted(listing - expected):
+                if name.endswith(TEMP_SUFFIX):
+                    continue  # stale .tmp pre-clean owns those
+                _unlink(name)
 
         # Commit the current chain records before producing. Skip the rewrite
         # when the sidecar already matches exactly.
