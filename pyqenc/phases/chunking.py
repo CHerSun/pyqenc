@@ -83,7 +83,9 @@ class ChunkingSidecar(BaseModel):
     Attributes:
         scenes:           Scene boundaries in order; the first is the stream
                           start.
-        source:           The source identity key (fingerprint only).
+        source:           The source identity key (fingerprint only) —
+                          required; a sidecar missing it fails validation →
+                          absent → re-detection (Req 32 amended 2026-10-10).
         scene_threshold:  The ContentDetector threshold the boundaries were
                           detected under.
         min_scene_length: The minimum scene length (frames) in force at
@@ -91,9 +93,9 @@ class ChunkingSidecar(BaseModel):
     """
 
     scenes:           list[SceneRecord]
-    source:           Fingerprint | None = None
-    scene_threshold:  float | None       = None
-    min_scene_length: int | None         = None
+    source:           Fingerprint
+    scene_threshold:  float
+    min_scene_length: int
 
 
 logger = logging.getLogger(__name__)
@@ -358,18 +360,12 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
     def _params_changed(self, sidecar: ChunkingSidecar) -> bool:
         """Whether a detection parameter differs from the persisted key.
 
-        Absent keys (legacy sidecars) are unknown, never a mismatch
-        (Req 32).
+        The detection parameters are required on the loaded sidecar (a
+        missing key never loaded — the sidecar is absent and re-detected).
         """
         return (
-            (
-                sidecar.scene_threshold is not None
-                and sidecar.scene_threshold != self._config.chunking.scene_threshold
-            )
-            or (
-                sidecar.min_scene_length is not None
-                and sidecar.min_scene_length != self._config.chunking.min_scene_length
-            )
+            sidecar.scene_threshold != self._config.chunking.scene_threshold
+            or sidecar.min_scene_length != self._config.chunking.min_scene_length
         )
 
     def _execute(

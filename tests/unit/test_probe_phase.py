@@ -145,7 +145,7 @@ def _make_probe_phase(
 
 def _write_probe_yaml(work_dir: Path, *, frame_count: int, crop: CropParams) -> None:
     """Persist a valid probe.yaml with the given frame count and crop."""
-    save_model(work_dir / "probe.yaml", ProbeState(frame_count=frame_count, crop=crop))
+    save_model(work_dir / "probe.yaml", ProbeState(source=_STUB_SOURCE_FP, frame_count=frame_count, crop=crop))
 
 
 # ---------------------------------------------------------------------------

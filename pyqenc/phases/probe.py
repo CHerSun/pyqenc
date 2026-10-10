@@ -83,8 +83,9 @@ class ProbeState(BaseModel):
     comparison (Req 23); downstream facet keys compare the frame count and
     the crop values only. ``None`` for sidecars written before the field.
 
-    ``source`` is the identity key (the fingerprint pair, no path — Req 31);
-    ``None`` for legacy sidecars is unknown, never a mismatch (Req 32).
+    ``source`` is the identity key (the fingerprint pair, no path — Req 31) —
+    REQUIRED: every write path carries it; a sidecar missing it fails
+    validation → absent → the facet re-probes (Req 32 amended 2026-10-10).
 
     ``resulting_resolution`` is the HUMAN-FACING output dimensions
     (``"<w>x<h>"``), derived at write time via the mathematical operator
@@ -98,7 +99,7 @@ class ProbeState(BaseModel):
 
     frame_count: int
     crop:        CropYaml = CropParams()
-    source:      Fingerprint | None = None
+    source:      Fingerprint
     crop_source: str | None         = None
     resulting_resolution: str | None = None
 

@@ -100,17 +100,20 @@ class _OptimizationSidecarBase(BaseModel):
     content identity, ``chunks`` the chunk-set fingerprint (a re-chunk wipes
     winners), ``strategies`` each strategy's resolved-args fingerprint,
     ``probe`` the structured facet, ``sampling`` the measurement factor.
-    Every absent key is unknown, never a mismatch (Req 32). ``summary`` is
-    the replay aggregate (freshness guaranteed by the pending gate), and
-    ``test_chunks`` the persisted selection basis (checked for full-set
-    presence at read — Req 44).
+    The key block is REQUIRED (every write path populates it) — a sidecar
+    missing keys fails validation and loads as absent: the phase redoes its
+    work (Req 32 amended 2026-10-10; per-key unknown semantics remain for
+    the ``strategies`` map only). ``summary`` is the replay aggregate
+    (freshness guaranteed by the pending gate), and ``test_chunks`` the
+    persisted selection basis (checked for full-set presence at read —
+    Req 44).
     """
 
-    source:      Fingerprint | None            = None
-    chunks:      Fingerprint | None            = None
+    source:      Fingerprint
+    chunks:      Fingerprint
     strategies:  dict[str, Fingerprint]        = Field(default_factory=dict)
-    probe:       ProbeFacet | None             = None
-    sampling:    int | None                    = None
+    probe:       ProbeFacet
+    sampling:    int
     test_chunks: list[str]                     = Field(default_factory=list)
     summary:     list[StrategySummaryRow]      = Field(default_factory=list)
 
@@ -571,8 +574,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         # Step 1 — identity key: catastrophic for the shared namespace.
         persisted: OptimizationSidecar | None = load_optimization_sidecar(opt_yaml)
-        if identity_changed(persisted.source if persisted is not None else None,
-                            job_result.source_fingerprint):
+        if persisted is not None and identity_changed(persisted.source,
+                                                      job_result.source_fingerprint):
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (optimization.yaml) — the "
@@ -591,7 +594,6 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         # (explicit field-wise comparison — Req 23; human fields never leak).
         if (
             persisted is not None
-            and persisted.probe is not None
             and not persisted.probe.matches(current_probe)
         ):
             if not job_result.force:
@@ -679,19 +681,17 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
     ) -> list[str]:
         """Why winners must be wiped (the automatic band's condition list).
 
-        Every absent key is unknown, never a mismatch (Req 32). An equal
-        fixed pinned map contributes nothing (O-2).
+        The key block is required on both sides (a sidecar missing keys
+        never loaded); per-key unknown semantics remain for the
+        ``strategies`` map only. An equal fixed pinned map contributes
+        nothing (O-2).
         """
         reasons: list[str] = []
         if persisted.mode != current.mode:
             reasons.append(
                 f"mode changed ({persisted.mode} → {current.mode})"
             )
-        if (
-            persisted.chunks is not None
-            and current.chunks is not None
-            and not persisted.chunks.matches(current.chunks)
-        ):
+        if not persisted.chunks.matches(current.chunks):
             reasons.append("chunk set changed (re-chunk)")
         if (
             persisted.mode == "search"
@@ -706,10 +706,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             and persisted.pinned != current.pinned
         ):
             reasons.append("pinned quality map changed")
-        if (
-            persisted.sampling is not None
-            and persisted.sampling != current.sampling
-        ):
+        if persisted.sampling != current.sampling:
             reasons.append(
                 f"metrics sampling changed ({persisted.sampling} → {current.sampling})"
             )

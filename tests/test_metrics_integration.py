@@ -646,6 +646,7 @@ class TestChunkingPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
+        from pyqenc.models import Fingerprint
         from pyqenc.phases.chunking import ChunkingSidecar as _CS
         from pyqenc.phases.chunking import SceneRecord
 
@@ -654,7 +655,11 @@ class TestChunkingPhaseTiming:
         work_dir.mkdir(parents=True, exist_ok=True)
         write_yaml_atomic(
             work_dir / "chunking.yaml",
-            _CS(scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)]).model_dump(),
+            _CS(
+                source=Fingerprint(token="0" * 32),
+                scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)],
+                scene_threshold=27.0, min_scene_length=24,
+            ).model_dump(),
         )
 
         def run(collector: MetricsCollector) -> None:
@@ -713,6 +718,7 @@ class TestChunkingPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
+        from pyqenc.models import Fingerprint
         from pyqenc.phases.chunking import ChunkingSidecar as _CS
         from pyqenc.phases.chunking import SceneRecord
 
@@ -720,7 +726,11 @@ class TestChunkingPhaseTiming:
         work_dir.mkdir(parents=True, exist_ok=True)
         write_yaml_atomic(
             work_dir / "chunking.yaml",
-            _CS(scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)]).model_dump(),
+            _CS(
+                source=Fingerprint(token="0" * 32),
+                scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)],
+                scene_threshold=27.0, min_scene_length=24,
+            ).model_dump(),
         )
 
         def run(collector: MetricsCollector) -> None:

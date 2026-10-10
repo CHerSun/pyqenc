@@ -52,7 +52,9 @@ def _sidecar(*chains: tuple[str, list[str]]) -> AudioSidecar:
         name: resolve_chain(ChainSpec(name=name, filters=order), palette)
         for name, order in chains
     }
-    return AudioSidecar.from_resolved(resolved)
+    from pyqenc.models import Fingerprint
+
+    return AudioSidecar.from_resolved(resolved, source=Fingerprint(token="0" * 32))
 
 
 class TestRoundTrip:

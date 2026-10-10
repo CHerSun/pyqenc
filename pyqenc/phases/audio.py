@@ -76,10 +76,6 @@ class AudioPhaseResult(PhaseResult):
     outputs: list[Artifact[AudioOutput]] = field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
-# audio.yaml — the committed chain fingerprints (re-homed sidecar, Req 21)
-# ---------------------------------------------------------------------------
-
 class AudioSidecar(BaseModel):
     """Sidecar model for ``audio.yaml``.
 
@@ -103,18 +99,19 @@ class AudioSidecar(BaseModel):
 
     Attributes:
         chains: Map of chain name → its committed chain fingerprint.
-        source: The source identity key (mismatch = catastrophic, Req 33;
-                ``None`` on legacy files is unknown, never a mismatch).
+        source: The source identity key (mismatch = catastrophic, Req 33) —
+                required: every write path carries it, and a sidecar missing
+                it fails validation → absent → the phase redoes its work.
     """
 
     chains: dict[str, Fingerprint] = Field(default_factory=dict)
-    source:  Fingerprint | None     = None
+    source:  Fingerprint
 
     @classmethod
     def from_resolved(
         cls,
         resolved: dict[str, ResolvedChain],
-        source:   Fingerprint | None = None,
+        source: Fingerprint,
     ) -> Self:
         """Build an ``AudioSidecar`` from resolved chains.
 
@@ -129,13 +126,13 @@ class AudioSidecar(BaseModel):
             The sidecar holding one fingerprint per chain.
         """
         return cls(
-            chains = {name: chain.fingerprint for name, chain in resolved.items()},
-            source = source,
+            chains={name: chain.fingerprint for name, chain in resolved.items()},
+            source=source,
         )
 
 
 def _expected_output_names(
-    tracks:  list[AudioStream],
+    tracks: list[AudioStream],
     resolved: dict[str, ResolvedChain],
 ) -> set[str]:
     """The exact expected output names for (track set x live chains).
@@ -172,15 +169,15 @@ class AudioPhase(Phase[AudioPhaseResult]):
         phases: Phase registry; used to resolve typed dependency references.
     """
 
-    name:        str       = "audio"
+    name: str = "audio"
     SIDECAR_NAME = "audio.yaml"
-    DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase)
+    DEPENDS_ON: ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase)
     _METRIC_KEY: MetricKey = MetricKey.AUDIO
 
     def __init__(
         self,
-        config:    AppConfig,
-        phases:    PhaseRegistry,
+        config: AppConfig,
+        phases: PhaseRegistry,
         *,
         collector: MetricsCollector,
     ) -> None:
@@ -218,31 +215,25 @@ class AudioPhase(Phase[AudioPhaseResult]):
         Raises:
             RecoveryError: On an identity mismatch without ``--force``.
         """
-        job_result  = self._deps[JobPhase]
-        work_dir     = job_result.work_dir
+        job_result = self._deps[JobPhase]
+        work_dir = job_result.work_dir
         sidecar_path = work_dir / AudioPhase.SIDECAR_NAME
-        audio_cfg    = job_result.config.audio
+        audio_cfg = job_result.config.audio
 
-        tracks   = self._selected_tracks()
+        tracks = self._selected_tracks()
         resolved = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
         audio_dir = self._output_dir(tracks, work_dir)
         audio_dir.mkdir(parents=True, exist_ok=True)
 
         persisted_audio = load_model(sidecar_path, AudioSidecar)
-        if (
-            persisted_audio is not None
-            and identity_changed(persisted_audio.source, job_result.source_fingerprint)
-        ):
+        if persisted_audio is not None and identity_changed(persisted_audio.source, job_result.source_fingerprint):
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (audio.yaml) — the chain "
                     "outputs belong to a different source.  Re-run with --force "
                     "to grant permission to wipe them and reprocess the new source."
                 )
-            logger.warning(
-                "Source identity mismatch (--force granted — wiping the audio "
-                "dir and audio.yaml)"
-            )
+            logger.warning("Source identity mismatch (--force granted — wiping the audio dir and audio.yaml)")
             self._wipe_audio_dir(audio_dir, sidecar_path)
         elif persisted_audio is None:
             # Unknown currency (Req 47, A-1): no record of what produced the
@@ -267,10 +258,10 @@ class AudioPhase(Phase[AudioPhaseResult]):
         every run and never persists.
         """
         job_result = self._deps[JobPhase]
-        work_dir    = job_result.work_dir
-        audio_cfg   = job_result.config.audio
+        work_dir = job_result.work_dir
+        audio_cfg = job_result.config.audio
 
-        tracks   = self._selected_tracks()
+        tracks = self._selected_tracks()
         resolved = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
         audio_dir = self._output_dir(tracks, work_dir)
         audio_dir.mkdir(parents=True, exist_ok=True)
@@ -311,18 +302,16 @@ class AudioPhase(Phase[AudioPhaseResult]):
     def _selected_tracks(self) -> list[AudioStream]:
         """Resolve the working track set from extraction + ``audio.select``."""
         extraction_result = self._deps[ExtractionPhase]
-        audio_streams: list[AudioStream] = [
-            a.payload for a in extraction_result.audio_streams
-        ]
+        audio_streams: list[AudioStream] = [a.payload for a in extraction_result.audio_streams]
         audio_cfg = self._deps[JobPhase].config.audio
         return resolve_selection(audio_streams, audio_cfg.select)
 
     def _invalidate_and_commit(
         self,
-        audio_dir:    Path,
+        audio_dir: Path,
         sidecar_path: Path,
-        resolved:     dict[str, ResolvedChain],
-        tracks:       list[AudioStream],
+        resolved: dict[str, ResolvedChain],
+        tracks: list[AudioStream],
     ) -> None:
         """Commit the current chain fingerprints, sweeping orphaned outputs.
 
@@ -343,16 +332,16 @@ class AudioPhase(Phase[AudioPhaseResult]):
             tracks:       The working track set (expected-name scope).
         """
         persisted = load_model(sidecar_path, AudioSidecar)
-        prior     = persisted.chains if persisted is not None else {}
+        prior = persisted.chains if persisted is not None else {}
 
         current = AudioSidecar.from_resolved(
-            resolved, source=self._deps[JobPhase].source_fingerprint,
+            resolved,
+            source=self._deps[JobPhase].source_fingerprint,
         )
         current_records = current.chains
 
         changed = [
-            name for name, record in current_records.items()
-            if name in prior and prior[name].token != record.token
+            name for name, record in current_records.items() if name in prior and prior[name].token != record.token
         ]
         removed = [name for name in prior if name not in current_records]
         for chain_name in changed:
@@ -362,7 +351,8 @@ class AudioPhase(Phase[AudioPhaseResult]):
             )
         for chain_name in removed:
             logger.info(
-                "Chain %r removed from config — cleaning up its outputs", chain_name,
+                "Chain %r removed from config — cleaning up its outputs",
+                chain_name,
             )
 
         def _unlink(name: str) -> None:
@@ -387,7 +377,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
         # removed chains, deselected tracks).
         if audio_dir.is_dir():
             expected = _expected_output_names(tracks, resolved)
-            listing  = {p.name for p in audio_dir.iterdir()}
+            listing = {p.name for p in audio_dir.iterdir()}
             for name in sorted(listing - expected):
                 if name.endswith(TEMP_SUFFIX):
                     continue  # stale .tmp pre-clean owns those
@@ -402,9 +392,9 @@ class AudioPhase(Phase[AudioPhaseResult]):
     def _classify(
         self,
         audio_dir: Path,
-        tracks:    list[AudioStream],
-        resolved:  dict[str, ResolvedChain],
-        listing:   set[str],
+        tracks: list[AudioStream],
+        resolved: dict[str, ResolvedChain],
+        listing: set[str],
     ) -> list[Artifact]:
         """Build one row per expected (track, chain) from the single listing.
 
@@ -437,23 +427,24 @@ class AudioPhase(Phase[AudioPhaseResult]):
                 out = chain_output_path(stream, name, chain.encode.extension, audio_dir)
                 claim_expected_name(claimed, out.name, f"{stream.display_name()} × chain {name!r}")
                 expected_names.add(out.name)
-                rows.append(Artifact(
-                    payload = AudioOutput(stream=stream, chain_name=name, output_path=out),
-                    state   = (
-                        ArtifactState.COMPLETE
-                        if out.name in listing else ArtifactState.ABSENT
-                    ),
-                ))
+                rows.append(
+                    Artifact(
+                        payload=AudioOutput(stream=stream, chain_name=name, output_path=out),
+                        state=(ArtifactState.COMPLETE if out.name in listing else ArtifactState.ABSENT),
+                    )
+                )
 
         # Surface present-but-unwanted surplus files (the same listing minus
         # every consumed name).
         for name in sorted(listing - expected_names):
             path = audio_dir / name
-            rows.append(Artifact(
-                payload = File(path=path, file_size_bytes=safe_stat_size(path)),
-                state   = ArtifactState.COMPLETE,
-                wanted  = False,
-            ))
+            rows.append(
+                Artifact(
+                    payload=File(path=path, file_size_bytes=safe_stat_size(path)),
+                    state=ArtifactState.COMPLETE,
+                    wanted=False,
+                )
+            )
 
         return rows
 
@@ -482,18 +473,18 @@ class AudioPhase(Phase[AudioPhaseResult]):
             failures), FAILED only when nothing could be produced and failures
             occurred.
         """
-        artifacts  = wanted
-        pending    = [a for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)]
+        artifacts = wanted
+        pending = [a for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)]
         job_result = self._deps[JobPhase]
-        audio_cfg  = job_result.config.audio
-        resolved   = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
-        audio_dir  = job_result.work_dir / AUDIO_OUTPUT_DIR
+        audio_cfg = job_result.config.audio
+        resolved = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
+        audio_dir = job_result.work_dir / AUDIO_OUTPUT_DIR
 
         if pending:
             logger.info("Sources: %d (track, chain) output(s) to produce", len(pending))
 
         produced = 0
-        failed   = 0
+        failed = 0
         with ProgressBar(total=len(pending), title="AUDIO", total_count=len(pending)) as advance:
             for art in pending:
                 output = art.payload
@@ -518,7 +509,10 @@ class AudioPhase(Phase[AudioPhaseResult]):
         reused = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE) - produced
         logger.info(
             "%s Audio complete: %d produced, %d reused, %d failed",
-            SUCCESS_SYMBOL_MINOR, produced, max(reused, 0), failed,
+            SUCCESS_SYMBOL_MINOR,
+            produced,
+            max(reused, 0),
+            failed,
         )
         logger.info(THICK_LINE)
 
@@ -553,9 +547,9 @@ class AudioPhase(Phase[AudioPhaseResult]):
 
     def _make_result(
         self,
-        outcome:   PhaseOutcome,
+        outcome: PhaseOutcome,
         artifacts: list[Artifact],
-        message:   str,
+        message: str,
     ) -> AudioPhaseResult:
         """Assemble an ``AudioPhaseResult`` from the wanted rows.
 
@@ -572,12 +566,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
         """
         outputs = [r for r in artifacts if isinstance(r.payload, AudioOutput)]
         return AudioPhaseResult(
-            outcome   = outcome,
-            message   = message,
-            outputs   = outputs,
+            outcome=outcome,
+            message=message,
+            outputs=outputs,
         )
-
-
-# ---------------------------------------------------------------------------
-# AudioPhase module-level helpers
-# ---------------------------------------------------------------------------

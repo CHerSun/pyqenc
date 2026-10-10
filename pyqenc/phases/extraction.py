@@ -106,8 +106,9 @@ class ExtractionSidecar(BaseModel):
 
     Owned by ExtractionPhase; a reuse run loads it instead of re-probing.
     ``source`` is the identity key (the fingerprint pair, no path — Req 31):
-    a mismatch against the live source is the phase's catastrophic condition;
-    an absent key (legacy sidecar) is unknown, never a mismatch (Req 32).
+    a mismatch against the live source is the phase's catastrophic condition.
+    Required: a sidecar missing it fails validation, loads as absent, and
+    the inventory re-probes (Req 32 amended 2026-10-10).
 
     Attributes:
         source:   The source identity key (fingerprint only).
@@ -117,7 +118,7 @@ class ExtractionSidecar(BaseModel):
                   per-run to record).
     """
 
-    source:   Fingerprint | None = None
+    source:   Fingerprint
     streams:  StreamsInventory
     chapters: bool = False
 
@@ -553,7 +554,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         sidecar_path  = job_result.work_dir / ExtractionPhase.SIDECAR_NAME
 
         sidecar = load_model(sidecar_path, ExtractionSidecar)
-        if identity_changed(sidecar.source if sidecar else None,
+        if sidecar is not None and identity_changed(sidecar.source,
                             job_result.source_fingerprint):
             if not job_result.force:
                 raise RecoveryError(
