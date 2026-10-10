@@ -1426,9 +1426,9 @@ class MergePhase(Phase[MergePhaseResult]):
             if payload.strategy.display_name() != strategy:
                 continue
             sidecar = read_winner_sidecar(work_dir, payload)
-            if sidecar is None or sidecar.get("crf") is None:
+            if sidecar is None:
                 logger.warning(
-                    "Winner %s has no readable crf on its sidecar — excluded "
+                    "Winner %s has no readable sidecar — excluded "
                     "from the CRF plot",
                     payload.chunk.safe_name(),
                 )
@@ -1436,7 +1436,7 @@ class MergePhase(Phase[MergePhaseResult]):
             result.append((
                 payload.chunk.start_timestamp,
                 payload.chunk.end_timestamp,
-                Decimal(str(sidecar["crf"])),
+                sidecar.crf,
             ))
         result.sort(key=lambda t: t[0])
         return result

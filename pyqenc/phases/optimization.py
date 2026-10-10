@@ -149,7 +149,7 @@ def load_optimization_sidecar(path: Path) -> OptimizationSidecar | None:
         path: The ``optimization.yaml`` path.
 
     Returns:
-        The tagged sidecar, or ``None`` when absent or unparseable.
+        The tagged sidecar, or ``None`` when absent or unparsable.
     """
     if not path.exists():
         return None
@@ -1296,8 +1296,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             sidecar = read_winner_sidecar(work_dir, winner)
             if sidecar is None:
                 continue
-            for key, value in sidecar.get("metrics", {}).items():
-                measured = float(value)
+            for key, measured in sidecar.metrics.items():
                 mins[key] = min(mins[key], measured) if key in mins else measured
         return mins
 

@@ -18,7 +18,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
-import yaml
 from pydantic import BaseModel, Field
 
 from pyqenc.constants import (
@@ -242,32 +241,6 @@ class EncodingSidecar(BaseModel):
     summary: EncodingSummary | None = None
 
 
-def _read_sidecar_yaml(sidecar_path: Path) -> dict | None:
-    """Read a metrics/result sidecar YAML next to an encoded attempt.
-
-    Both sidecar kinds share the core schema (keys: ``crf``, ``metrics``,
-    ``frame_count``): the per-attempt metrics sidecar in the workspace
-    (attempt facts only) and the encoding result sidecar in ``encoded/``
-    (additionally carries ``targets_met`` — the winning attempt's recorded
-    conclusion).
-
-    Args:
-        sidecar_path: Exact path to the sidecar ``.yaml`` file.
-
-    Returns:
-        Parsed sidecar dict, or ``None`` if it does not exist or cannot be
-        parsed.
-    """
-    if sidecar_path.exists():
-        try:
-            with sidecar_path.open("r", encoding="utf-8") as fh:
-                return yaml.safe_load(fh)
-        except (OSError, yaml.YAMLError) as e:
-            logger.debug("Failed to read metrics sidecar %s: %s", sidecar_path.name, e)
-
-    return None
-
-
 def _encoded_dir(work_dir: Path, strategy: Strategy) -> Path:
     """Finalized winners directory for *strategy*.
 
@@ -277,24 +250,27 @@ def _encoded_dir(work_dir: Path, strategy: Strategy) -> Path:
     return work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
 
 
-def read_winner_sidecar(work_dir: Path, winner: EncodedChunk) -> dict | None:
+def read_winner_sidecar(work_dir: Path, winner: EncodedChunk) -> EncodingResultSidecar | None:
     """Read a winner's result sidecar by its static name (processing paths).
 
     The single sanctioned composition site for consumers that need a
     winner's facts (crf, targeted metrics, frame count,
     ``targets_met``) — recovery never calls this (Req 3); processing paths
-    (the winner scan, the merge CRF graph, the fixed ruler) do.
+    (the winner scan, the merge CRF graph, the fixed ruler) do. Typed like
+    every sidecar: an unparseable/invalid file loads as ``None``.
 
     Args:
         work_dir: The run's work dir (locates ``encoded/<strategy>/``).
         winner:   The winner payload whose sidecar to read.
 
     Returns:
-        Parsed sidecar dict, or ``None`` when absent or unparseable.
+        The parsed :class:`EncodingResultSidecar`, or ``None`` when absent
+        or unparseable.
     """
-    return _read_sidecar_yaml(
+    return load_model(
         _encoded_dir(work_dir, winner.strategy)
-        / EncodedChunk.format_winner_sidecar_name(winner.chunk.safe_name())
+        / EncodedChunk.format_winner_sidecar_name(winner.chunk.safe_name()),
+        EncodingResultSidecar,
     )
 
 
@@ -1093,14 +1069,13 @@ class ChunkEncoder:
                     chunk.safe_name(), strategy, current_q
                 )
                 if existing is not None:
-                    sidecar = _read_sidecar_yaml(existing.path.with_suffix(".yaml"))
+                    sidecar = load_model(existing.path.with_suffix(".yaml"), MetricsSidecar)
                     # Validate sidecar contains all required metric keys.
-                    required_keys        = {f"{t.metric}_{t.statistic}" for t in quality_targets}
-                    raw_sidecar_sampling = sidecar.get("sampling") if sidecar is not None else None
-                    sidecar_sampling     = int(raw_sidecar_sampling) if raw_sidecar_sampling is not None else None
-                    sampling_stale       = (
-                        sidecar_sampling is not None
-                        and sidecar_sampling != self._metrics_sampling
+                    required_keys  = {f"{t.metric}_{t.statistic}" for t in quality_targets}
+                    sampling_stale = (
+                        sidecar is not None
+                        and sidecar.sampling is not None
+                        and sidecar.sampling != self._metrics_sampling
                     )
                     # The file's frame count survives regardless of sidecar
                     # staleness — re-measure never changes the encoded file
@@ -1108,19 +1083,17 @@ class ChunkEncoder:
                     # incomplete (Req 9a: frame count present) — the re-measure
                     # below re-derives it from the metric run's whole-file
                     # decode.
-                    file_frames = int(sidecar.get("frame_count") or 0) if sidecar is not None else 0
+                    file_frames  = sidecar.frame_count if sidecar is not None else 0
                     sidecar_valid = (
                         sidecar is not None
                         and not sampling_stale
                         and file_frames > 0
-                        and required_keys.issubset(sidecar.get("metrics", {}).keys())
+                        and required_keys.issubset(sidecar.metrics)
                     )
                     if sidecar_valid and sidecar is not None:
                         # Full cache hit — no real work performed.
                         frame_counts[existing.path] = file_frames
-                        all_sidecar_metrics: dict[str, float] = {
-                            k: float(v) for k, v in sidecar.get("metrics", {}).items()
-                        }
+                        all_sidecar_metrics: dict[str, float] = dict(sidecar.metrics)
                         all_metrics_by_path[existing.path] = all_sidecar_metrics
                         targets_set_reused = {f"{t.metric}_{t.statistic}" for t in quality_targets}
                         metrics_dict: dict[str, float] = {
@@ -1167,7 +1140,7 @@ class ChunkEncoder:
                     else:
                         # File exists but sidecar is missing, incomplete, or stale — re-measure.
                         reason = (
-                            f"sampling changed ({sidecar_sampling} → {self._metrics_sampling})"
+                            f"sampling changed ({sidecar.sampling if sidecar is not None else '?'} → {self._metrics_sampling})"
                             if sampling_stale
                             else "sidecar missing or incomplete"
                         )
@@ -1870,7 +1843,7 @@ def _scan_winner_sidecars(
                 frames_known = False
                 continue
 
-            frames_value = int(sidecar.get("frame_count") or 0)
+            frames_value = sidecar.frame_count
             if frames_value > 0:
                 frames.setdefault(strategy_name, []).append(
                     (chunk_id, frames_value)
@@ -1880,15 +1853,15 @@ def _scan_winner_sidecars(
 
             if not quality_targets:
                 continue
-            metrics     = {k: float(v) for k, v in sidecar.get("metrics", {}).items()}
-            targets_met = bool(sidecar.get("targets_met", False))
+            metrics     = dict(sidecar.metrics)
+            targets_met = sidecar.targets_met
             worst       = QualitySearchBase.find_worst_target(metrics, quality_targets)
             if worst is None:
                 continue
             tally = tallies.setdefault(strategy_name, {}).setdefault(
                 f"{worst[0].metric}_{worst[0].statistic}", _LimiterTally(),
             )
-            tally.crfs.append(Decimal(str(sidecar.get("crf"))))
+            tally.crfs.append(sidecar.crf)
             if targets_met:
                 tally.passed += 1
                 tally.surpluses.append(worst[1])

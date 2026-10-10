@@ -1188,9 +1188,12 @@ class TestAggregateStrategyMetrics:
             strategy_dir.mkdir(parents=True, exist_ok=True)
             (strategy_dir / name).write_bytes(b"x" * (100 * (i + 1)))
             # Result sidecar naming: the winner stem swap.
-            write_yaml_atomic(
+            save_model(
                 strategy_dir / EncodedChunk.format_winner_sidecar_name(chunk.safe_name()),
-                {"metrics": {"vmaf_median": 91.0 + i, "vif_median": 84.0 - i}},
+                EncodingResultSidecar(
+                    crf     = Decimal(20),
+                    metrics = {"vmaf_median": 91.0 + i, "vif_median": 84.0 - i},
+                ),
             )
             encoded_chunks.setdefault(strategy.display_name(), []).append(
                 build_encoded_chunk(
