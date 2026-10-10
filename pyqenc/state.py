@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from pyqenc.models import (
     CropParams,
+    CropYaml,
 )
 
 if TYPE_CHECKING:
@@ -75,11 +76,12 @@ class ProbeFacet(BaseModel):
 
     Attributes:
         frame_count: Frames of the source (0 = unknown).
-        crop:        The committed crop values.
+        crop:        The committed crop values (persists as the compact
+                     storage string — ``crop: 22,22,0,0``).
     """
 
     frame_count: int = 0
-    crop:        CropParams = CropParams()
+    crop:        CropYaml = CropParams()
 
     @classmethod
     def from_probe(cls, probe_result: ProbePhaseResult) -> Self:

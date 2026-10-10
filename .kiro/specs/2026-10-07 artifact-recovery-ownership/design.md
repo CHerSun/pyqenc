@@ -82,7 +82,7 @@ mode: search
 source:     {size: …, token: "…"}          # what: the source  (a fingerprint)
 chunks:     {size: 107, token: "…"}        # what: the chunk set (re-chunk → wipe winners)
 strategies: {"h265+slow": {token: "…"}}    # what: each strategy (args fingerprints; size-less)
-probe:  {frame_count: 172000, crop: {top: 140, …}}   # structured key (explicit field compare)
+probe:  {frame_count: 172000, crop: '140,140,0,0'}   # structured key (explicit field compare; crop = the model's one-line storage string)
 sampling: 3
 targets: ["vmaf-min:93.0"]                 # search key
 summary: [ … ]                             # per-strategy rows (sizes [+ comparison metrics])

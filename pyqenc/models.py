@@ -13,12 +13,14 @@ from collections.abc import Iterable
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import Enum, IntEnum
 from pathlib import Path
-from typing import ClassVar, Self
+from typing import Annotated, ClassVar, Self
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
+    PlainSerializer,
     PrivateAttr,
     field_validator,
     model_validator,
@@ -901,3 +903,21 @@ class CropParams(BaseModel):
                 f"Invalid crop format: '{crop_str}'. Expected 2 or 4 comma-separated values "
                 f"(e.g., '140,140' or '140,140,0,0')"
             )
+
+
+def _crop_from_yaml(value: object) -> object:
+    """Accept the model's storage string wherever a CropParams loads from yaml.
+
+    ``str(CropParams)`` is the declared storage form ("top,bottom,left,right"
+    — always canonical four values); a native dict (the model's own default
+    dump) passes through to normal validation unchanged.
+    """
+    if isinstance(value, str):
+        return CropParams.parse(value)
+    return value
+
+
+CropYaml = Annotated[CropParams, BeforeValidator(_crop_from_yaml), PlainSerializer(str)]
+"""``CropParams`` as it persists: the compact one-line storage string
+(``crop: 22,22,0,0``), parsed back via ``CropParams.parse`` — the class
+stays explicitly typed; only the yaml boundary changes form."""

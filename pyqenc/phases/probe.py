@@ -29,6 +29,7 @@ from pyqenc.constants import CROP_SOURCE_DETECTED, CROP_SOURCE_MANUAL, TEMP_SUFF
 from pyqenc.metrics import MetricKey
 from pyqenc.models import (
     CropParams,
+    CropYaml,
     EncodingPlan,
     Fingerprint,
     PhaseOutcome,
@@ -73,7 +74,9 @@ class ProbeState(BaseModel):
     video has zero frames.  ``crop`` is non-optional: an empty
     :class:`CropParams` means "no crop" and the key is omitted from the file
     when empty (serialization compactness only); loading always materializes
-    a concrete crop — ``None`` ("auto") never appears past config.
+    a concrete crop — ``None`` ("auto") never appears past config. The
+    persisted crop is the model's own storage string (``crop: 22,22,0,0`` —
+    one line; the legacy nested-dict form still loads).
 
     ``crop_source`` is HUMAN-FACING provenance (was the committed crop a
     manual override or a detection?) — it never participates in any
@@ -94,7 +97,7 @@ class ProbeState(BaseModel):
     """
 
     frame_count: int
-    crop:        CropParams = CropParams()
+    crop:        CropYaml = CropParams()
     source:      Fingerprint | None = None
     crop_source: str | None         = None
     resulting_resolution: str | None = None
@@ -106,11 +109,12 @@ class ProbeState(BaseModel):
         Every other field persists: ``source`` (the identity key, Req 31),
         ``crop_source`` (the human-facing provenance, Req 23) and
         ``resulting_resolution`` (the human-facing derived dimensions) are
-        omitted only when unset — never silently dropped.
+        omitted only when unset — never silently dropped. The crop writes
+        as its one-line storage string (``crop: 22,22,0,0``).
         """
         data: dict = {"frame_count": self.frame_count}
         if not self.crop.is_empty():
-            data["crop"] = self.crop.model_dump()
+            data["crop"] = str(self.crop)
         if self.source is not None:
             data["source"] = self.source.model_dump()
         if self.crop_source is not None:

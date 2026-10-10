@@ -87,7 +87,7 @@ class TestProbeStateRoundTrip:
         """
         crop     = CropParams(top=140, bottom=140, left=0, right=0)
         original = ProbeState(frame_count=72000, crop=crop)
-        path     = tmp_path / "probe.yaml"
+        path = tmp_path / "probe.yaml"
         original.save(path)
 
         restored = ProbeState.load(path)
@@ -98,6 +98,39 @@ class TestProbeStateRoundTrip:
         assert restored.crop.bottom  == 140
         assert restored.crop.left    == 0
         assert restored.crop.right   == 0
+
+    def test_crop_persists_as_one_line_storage_string(self, tmp_path: Path):
+        """The crop writes as the model's own storage form — one line
+        (``crop: 22,22,0,0``), not a nested dict.
+
+        Bug guarded: default model_dump leaks the nested 5-line dict into
+        the sidecar; the compact form is the declared storage convention.
+        """
+        path = tmp_path / "probe.yaml"
+        ProbeState(frame_count=9526, crop=CropParams(top=22, bottom=22)).save(path)
+
+        text = path.read_text(encoding="utf-8")
+        assert "crop: 22,22,0,0" in text
+        assert "top:" not in text
+
+    def test_legacy_nested_crop_dict_still_loads(self, tmp_path: Path):
+        """Tolerance guard: the model's native dict form (the pre-compact
+        serialization) passes validation — same model, both natural forms."""
+        path = tmp_path / "probe.yaml"
+        path.write_text(
+            "frame_count: 10\n"
+            "crop:\n"
+            "  top: 5\n"
+            "  bottom: 6\n"
+            "  left: 0\n"
+            "  right: 0\n",
+            encoding="utf-8",
+        )
+
+        restored = ProbeState.load(path)
+        assert restored is not None
+        assert restored.crop.top == 5
+        assert restored.crop.bottom == 6
 
     def test_round_trip_all_sides_crop(self, tmp_path: Path):
         """Round-trip with all four crop sides non-zero must preserve every value.
