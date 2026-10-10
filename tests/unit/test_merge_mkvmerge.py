@@ -1234,30 +1234,34 @@ class TestPerOutputSidecarShape:
 
 
 class TestMergeYamlReplayAggregate:
-    """merge.yaml = summary + basis marker only (Req 28/61)."""
+    """merge.yaml = the summary replay rows only (Req 28/61)."""
 
-    def test_summary_and_basis_only(self, tmp_path: Path) -> None:
+    def test_summary_only_no_basis(self, tmp_path: Path) -> None:
+        """No basis marker exists: replay re-renders verdicts live against
+        the current bar, so nothing downstream needs the rendering basis
+        (dropped 2026-10-09 — zero consumers)."""
+        import yaml as _yaml
+
         from pyqenc.phases.merge import MergeSidecar
 
         merge, _ = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
         persisted = MergeSidecar.load(merge._deps[JobPhase].work_dir / "merge.yaml")
         assert persisted is not None
-        assert persisted.basis is not None
-        assert persisted.basis.mode == "fixed"
-        assert persisted.basis.anchor == "h265-aq+slow"
+        assert not hasattr(persisted, "basis")
         assert [row.strategy_name for row in persisted.summary] == ["h265-aq+slow"]
         # No verdict on the replay rows (marks render live).
         assert "targets_met" not in persisted.summary[0].model_dump()
 
-    def test_search_basis_carries_targets(self, tmp_path: Path) -> None:
+        raw = _yaml.safe_load((merge._deps[JobPhase].work_dir / "merge.yaml").read_text(encoding="utf-8"))
+        assert set(raw) == {"summary"}, f"merge.yaml must carry summary rows only, got {set(raw)}"
+
+    def test_search_summary_rows_persist(self, tmp_path: Path) -> None:
         from pyqenc.phases.merge import MergeSidecar
 
         merge, _ = _run_full_merge(tmp_path, fixed=False)
         persisted = MergeSidecar.load(merge._deps[JobPhase].work_dir / "merge.yaml")
         assert persisted is not None
-        assert persisted.basis is not None
-        assert persisted.basis.mode == "search"
-        assert persisted.basis.targets, "search basis names the targets"
+        assert persisted.summary, "search runs persist their summary rows"
 
 
 class TestPerFileAcceptance:

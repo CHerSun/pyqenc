@@ -163,35 +163,21 @@ class MergeSummaryRow(BaseModel):
     metrics:         dict[str, float] = Field(default_factory=dict)
 
 
-class MergeBasis(BaseModel):
-    """The basis marker of the persisted summary (Req 28): what the table
-    was rendered under.
-
-    Attributes:
-        mode:    The run mode tag.
-        targets: Search runs: the targets the table judged against.
-        anchor:  Fixed compared runs: the anchor basis.
-    """
-
-    mode:    Literal["fixed", "search"] = "search"
-    targets: list[str]                  = Field(default_factory=list)
-    anchor:  str | None                 = None
-
-
 class MergeSidecar(BaseModel):
-    """``merge.yaml`` — the summary-replay aggregate and its basis ONLY.
+    """``merge.yaml`` — the summary-replay aggregate ONLY.
 
     The per-output sidecars are the acceptance records (Req 28): this file
     carries no identity and no invalidation keys; its absence costs summary
-    replay only, never correctness (M-7 made structural).
+    replay only, never correctness (M-7 made structural). No basis marker:
+    verdict marks re-render live at replay against the current bar, so
+    nothing downstream ever needed to know what the table was rendered
+    under (dropped 2026-10-09 — zero consumers).
 
     Attributes:
         summary: Per-strategy replay rows (empty until a processing pass).
-        basis:   The marker of what the summary was rendered under.
     """
 
     summary: list[MergeSummaryRow] = Field(default_factory=list)
-    basis:   MergeBasis | None     = None
 
     @classmethod
     def load(cls, path: Path) -> Self | None:
@@ -904,8 +890,9 @@ class MergePhase(Phase[MergePhaseResult]):
         if failed_strategies and not final_rows:
             return self._make_result(PhaseOutcome.FAILED, [], "All strategy merges failed")
 
-        # Persist merge.yaml: the summary replay aggregate + its basis marker
-        # ONLY (Req 28) — the per-output sidecars are the acceptance records.
+        # Persist merge.yaml: the summary replay aggregate ONLY (Req 28) —
+        # the per-output sidecars are the acceptance records; replay
+        # re-renders verdicts live, so no basis marker exists.
         if complete_count > 0:
             _, strategy_summaries = MergePhase._build_strategy_summaries(
                 final_rows,
@@ -914,11 +901,6 @@ class MergePhase(Phase[MergePhaseResult]):
             )
             MergeSidecar(
                 summary = strategy_summaries,
-                basis   = MergeBasis(
-                    mode    = "fixed" if plan.fixed_quality else "search",
-                    targets = [] if plan.fixed_quality else targets_as_strings(plan.targets),
-                    anchor  = self._deps[OptimizationPhase].anchor if plan.fixed_quality else None,
-                ),
             ).save(self._deps[JobPhase].work_dir / MergePhase.SIDECAR_NAME)
 
         if failed_strategies:

@@ -104,7 +104,7 @@ summary: {limiter: [ … ], frames: {"h265+slow": 172000}}
 #                 mode, q|targets/anchor, probe, sampling,  # structured keys
 #                 winners: {size: 107, token: "…"}}}        # winner-set fingerprint
 
-# merge.yaml → summary rows + basis marker only
+# merge.yaml → summary replay rows only (basis marker dropped 2026-10-09 — zero consumers; replay re-renders verdicts live)
 ```
 
 Comparison mechanics: facet checks compare frame count + crop values explicitly (never whole-model equality — human fields like `crop_source` must not leak into keys, the lesson `merge.yaml` already learned). Per-mode variants own `matches(current)`; unknown key fields never mismatch (Req 32).
