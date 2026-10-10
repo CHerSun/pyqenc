@@ -1287,6 +1287,15 @@ Direction: a value class for the metric+stat identity —
   `statistic: str` fold into the class) and gains its own strict
   serialization / tolerant parse (`"vmaf-min:95"` config vocabulary
   included);
+- **parsing included** (user, 2026-10-10): each metric becomes its own
+  class (PSNR / SSIM / VIF / VMAF — MetricInfo-shaped) that KNOWS how to
+  parse its own logs (`.log` stats files, VMAF JSON), emitting explicitly
+  typed results — replacing the generic file-type-keyed parser in the
+  visualization/metrics plumbing. The metric identity itself is an
+  enum-like STATIC thing (one instance, never re-instantiated per parsed
+  line — today `MetricType(...).info` constructs on access), and the
+  static identity is what the new metric-stat keying, the old
+  `MetricInfo` and `QualityTarget` all attach to via explicit typing;
 - retarget sites: quality.py (`MetricType`/`flatten_metric_stats`/
   search steering), encoding pick-up + winner targeting, optimization
   (synthetic targets, summaries), merge (rendered keys, replay bar),
@@ -1295,6 +1304,8 @@ Direction: a value class for the metric+stat identity —
 Open design questions: naming (`MetricKey` is TAKEN — the perf-metrics
 timing enum in `pyqenc/metrics.py`); whether the stat half becomes its
 own typed set (today a free-form string — `min`/`p10`/`median`…);
+whether per-metric classes carry the MetricInfo descriptor data
+(normalize/deficit/comparison_range/acceptance_delta) or compose with it;
 interplay with §111's summary-table rendering (the dash vocabulary is its
 display form); sequencing vs the QualitySearch V4 spec (§78 rides that
 same refactor wave — do the record type and the key type together?).
