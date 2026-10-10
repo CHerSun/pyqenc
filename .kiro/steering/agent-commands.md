@@ -21,7 +21,7 @@
 - Don't use pipes when running pipeline - this ruins alive_progress bar display for the end-user.
 - Use `steering/environment.md` for local environment details, like workdir, sample target, etc.
 - When writing tests - public (external) behavior or expected behavior must be tested, not internal implementation. For each test there must be a bug we are trying to eliminate (write the bug conditions inside the function).
-- **Before writing, modifying, or assessing ANY test, read [`agent-testing.md`](agent-testing.md)** — the QA & testing rules (black-box behavior-driven; pinning/characterization tests forbidden; required coverage types; the verification loop; pyqenc-specific translation).
+- **Before writing, modifying, or assessing ANY test, read [`agent-testing.md`](agent-testing.md)** — the QA & testing rules (PyTest + Hypothesis: property-based testing first, public-surface black-box testing only, no pinning/characterization tests, no internal mocking; mandatory happy-path/properties/error-handling structure; pyqenc-specific translation).
 
 ## Project Backlog
 

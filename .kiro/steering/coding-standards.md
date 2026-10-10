@@ -83,9 +83,10 @@ Use our `ProgressBar` for progress display to the end user for long tasks.
 - Tests should never check internal state, only observable behavior.
 - **Mandatory read before writing, modifying, or assessing any test:**
   [`agent-testing.md`](agent-testing.md) — the QA & testing rules
-  (black-box behavior-driven; pinning/characterization tests forbidden;
-  required coverage types; the red-green-refactor verification loop;
-  pyqenc-specific translation).
+  (PyTest + Hypothesis; property-based first; black-box public-surface
+  testing, pinning/characterization tests and internal mocking forbidden;
+  mandatory happy-path/properties/error-handling structure; the
+  red-green-refactor verification loop; pyqenc-specific translation).
 
 ## ffmpeg Execution
 

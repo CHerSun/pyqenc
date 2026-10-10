@@ -1222,7 +1222,8 @@ e2e suite after. Also blocks any full-suite gate run that includes
 ## 115. Full test-suite assessment against the QA & testing rules
 
 **Status:** needs thinking (rules landed 2026-10-10 in
-`.kiro/steering/agent-testing.md`; no tests assessed yet)
+`.kiro/steering/agent-testing.md` — PyTest + Hypothesis edition; no tests
+assessed yet)
 
 Sweep the entire `tests/` tree against the steering QA rules and produce
 a findings report (then a fix plan, gated on user review):
@@ -1231,11 +1232,15 @@ a findings report (then a fix plan, gated on user review):
   (yaml text, field order, key sets/presence), internal stash state, or
   serialized forms where a round-trip/tolerance test is the honest
   contract. Drop or convert to behavior tests.
-- **Internal mocking** — patches of private helpers that couple tests to
-  the "how"; patch only at the process boundary (ffmpeg/mkvmerge runners,
-  external shells).
+- **Underscore-surface violations** — tests importing or patching
+  `_private` helpers (functions or methods); the rules allow only the
+  process boundary (ffmpeg/mkvmerge runners, external shells) as the
+  mock seam. Includes `patch.object(..., "_method", ...)`.
+- **Property coverage gaps** — features with invariants but no
+  Hypothesis `@given()` tests (happy-path/error-handling are the PyTest
+  layers; properties are the search layer).
 - **Coverage-type gaps** — features/modifications missing the mandatory
-  happy-path / edge-case / adversarial layers.
+  happy-path / properties / error-handling structure.
 - **Dead tests** — tests that pass no matter what (the failure-assertion
   check) and tests guarding bugs that no longer exist.
 

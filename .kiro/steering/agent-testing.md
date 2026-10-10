@@ -1,36 +1,54 @@
-# Agent Testing Rules — Quality Assurance
+# Agent Testing Rules — QA (PyTest + Hypothesis)
 
 Mandatory reading when writing, modifying, or assessing tests. Referenced
-from `coding-standards.md` (## Tests).
+from `coding-standards.md` (## Tests) and `agent-commands.md`.
 
-## Quality Assurance & Testing Rules
+## QA & Testing Rules (PyTest + Hypothesis)
 
-You are strictly forbidden from writing "pinning" or "characterization"
-tests that freeze implementation details, internal states, or private
-methods. Instead, you must follow a black-box, behavior-driven testing
-strategy.
+You must use PyTest for test structuring and Hypothesis for property-based
+testing. Writing rigid "pinning" tests that lock down internal
+implementation details or mock private methods is strictly forbidden.
+Focus on black-box verification and system invariants.
 
-### 1. Test the "What", Not the "How"
-* **Target Public Surfaces Only:** Write tests exclusively against public
-  APIs, public functions, component interfaces, or user workflows.
-* **No Internal Mocking:** Do not mock internal module behaviors, private
-  functions, or local variables. If you change the internal logic but the
-  output remains the same, the tests must still pass.
-* **Avoid Brittle Selectors:** When writing UI/E2E tests, use accessible
-  roles (e.g., `getByRole('button', { name: /save/i })`) or
-  data-attributes (`data-testid`). Never rely on fragile CSS class
-  hierarchies or strict DOM nesting.
+### 1. Property-Based Testing (Hypothesis) First
+* **Define Invariants:** Write Hypothesis tests to validate core
+  properties that must always hold true, regardless of the input values
+  (e.g., `encoder(decoder(x)) == x`, or `total_price >= 0`).
+* **Use Proper Strategies:** Utilize built-in Hypothesis strategies
+  (`st.integers()`, `st.text()`, `st.lists()`, `st.builds()`) to generate
+  diverse input data. Do not hardcode arbitrary test values if they can be
+  randomized within a valid domain.
+* **Define Bounds Generously:** Use `.filter()` or `assume()` to filter
+  out completely invalid states, but let Hypothesis explore edge cases
+  (empty strings, huge numbers, special characters) to find unexpected
+  crashes.
 
-### 2. Mandatory Test Coverage Types
-For every feature or modification, you must provide:
-* **Happy Path:** 1-2 tests validating the standard, expected user outcome.
-* **Edge Cases:** At least 2 tests exploring boundary conditions (e.g.,
-  empty strings, null values, maximum limits, out-of-bounds inputs).
-* **Adversarial / Error Handling:** At least 1 test ensuring the system
-  fails gracefully, catches exceptions, and returns user-friendly error
-  states instead of crashing.
+### 2. PyTest Best Practices
+* **Test the Public Interface Only:** Write tests against public
+  functions, modules, and API endpoints. Never import or test functions
+  starting with a single underscore `_private_func`.
+* **Pure Fixtures:** Use PyTest fixtures only for state setup (e.g.,
+  database sessions, client instances, clean temp directories via
+  `tmp_path`). Do not use fixtures to mock internal logic of the module
+  under test.
+* **No Brittle Mocking:** Forbid `unittest.mock.patch` on internal
+  functions of the target module. If an external service must be mocked,
+  mock it at the network layer or infrastructure boundary (e.g., using
+  `pytest-mock` on third-party SDK clients only).
 
-### 3. The "Red-Green-Refactor" Verification Loop
+### 3. Mandatory Test Suite Structure
+For any new or modified feature, your test file must include:
+* **`test_happy_path` (PyTest standard):** 1-2 explicit, readable
+  examples using standard `@pytest.mark` or fixtures to demonstrate
+  expected behavior for a standard developer reading the code.
+* **`test_properties_...` (Hypothesis):** At least 1-2 property tests
+  using `@given()` to actively search for edge-case crashes, overflows,
+  or logic boundary violations.
+* **`test_error_handling` (PyTest):** Tests using
+  `with pytest.raises(...)` ensuring the code fails gracefully with
+  precise, expected exceptions when given invalid inputs.
+
+### 4. The "Red-Green-Refactor" Verification Loop
 Before declaring a task finished, you must mentally or explicitly verify
 your tests using these steps:
 1. **Requirement Check:** Does this test reflect a real business
@@ -38,29 +56,35 @@ your tests using these steps:
 2. **Failure Assertion:** If the underlying implementation logic changes
    or breaks, will this specific test fail? (If a test passes no matter
    what, delete it).
-3. **Self-Documenting Tests:** Write clear, descriptive test names using
-   the `should [do something] when [condition occurs]` pattern.
+3. **Self-Documenting Tests:** Write clear, descriptive test names
+   stating the guaranteed behavior (the `should [do something] when
+   [condition occurs]` shape or an equivalent descriptive sentence).
 
 ## pyqenc specifics
 
-This is a CLI pipeline — no UI/DOM. The rules translate to this codebase
-as follows (2026-10-10 ruling, enforced in review):
+This is a CLI pipeline — no UI/DOM, no network services. The rules
+translate to this codebase as follows (2026-10-10 ruling):
 
 - **"Brittle selectors" here means file cosmetics:** never assert yaml
-  text, field order, key sets, key presence/absence, or one-line-vs-nested
-  serialized forms. For persistence code, test save→load value
-  preservation (round-trips), load tolerance for legacy/natural alternate
-  forms, and discriminated-union dispatch via `model_validate` +
-  `isinstance`. Class-level field existence is guarded by `ty`, not by
-  yaml-key assertions.
-- **Public surfaces:** phase behavior through `Phase.run()` and the
-  sidecar models' save/load contracts; pure functions directly (they may
-  be module-internal by name — test the function's deterministic contract,
-  never incidental internals around it); the API/CLI entry points.
-- **No mocking of private internals:** patch at the process boundary
-  (ffmpeg/mkvmerge runners, external shells) — patching private helpers
-  couples the test to the "how".
-- **Naming:** descriptive sentence names stating the guaranteed behavior
-  (`test_anchor_change_does_not_remerge`); docstrings state the guarded
-  behavior and its origin (bug/spec requirement), never narrate the test's
-  mechanics.
+  text, field order, key sets, key presence/absence, or
+  one-line-vs-nested serialized forms. For persistence code, test
+  save→load value preservation (round-trips), load tolerance for
+  legacy/natural alternate forms, and discriminated-union dispatch via
+  `model_validate` + `isinstance`. Class-level field existence is
+  guarded by `ty`, not by yaml-key assertions.
+- **Public surfaces:** the API entry points (`pyqenc.api`, the CLI),
+  `Phase.run()` behavior, sidecar models' save/load contracts, and
+  PUBLIC module functions. Underscore-prefixed helpers are not test
+  surfaces — the §115 suite assessment reconciles existing tests that
+  import or patch them.
+- **Infrastructure boundary to mock:** the process boundary — ffmpeg /
+  ffprobe / mkvmerge runners and external shells (`subprocess.run` at
+  the runner seam). Never `patch` private methods or module-internal
+  functions of the code under test.
+- **Hypothesis is established here:** exemplars to follow —
+  `tests/test_pts_preservation_properties.py`,
+  `tests/test_app_config_properties.py`,
+  `tests/test_vif_properties.py` (invariants over strategies; the
+  frame-preservation invariant is the canonical system property).
+- **Docstrings state the guarded behavior** and its origin (bug/spec
+  requirement), never narrate the test's mechanics.
