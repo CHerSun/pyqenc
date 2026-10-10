@@ -239,9 +239,9 @@ def chain_output_path(
     is supplied by the caller (the phase owns its dedicated audio dir) rather
     than derived from the source's parent, so chain outputs never land next
     to the source tracks (Phase Contract: each phase owns its own folder).
-
-    The parsing half of this inverse pair is :func:`parse_chain_name` — one
-    owner holds both.
+    Composition-only: the parsing half of the former inverse pair was
+    deleted with its last consumer — recovery classifies by composed
+    expected names, never by parsing found ones (Req 8 amended 2026-10-10).
 
     Args:
         stream:     The source audio stream (its safe name names the output).
@@ -255,33 +255,6 @@ def chain_output_path(
     """
     name = f"{stream.safe_name()}{CHAIN_FILENAME_SUFFIX}{chain_name}.{extension}"
     return output_dir / name
-
-
-def parse_chain_name(filename: str) -> str | None:
-    """Return the exact chain name from a ``<stream safe name> chain=<name>.<ext>`` filename.
-
-    The parsing half of the output-name family :func:`chain_output_path`
-    composes — one owner (this module) holds both directions of the pair.
-
-    Splits on the ``chain=`` suffix delimiter and strips the extension,
-    returning the chain name verbatim for exact-match invalidation.
-    Returns ``None`` when the filename carries no ``chain=`` token (not a
-    chain output).
-
-    Args:
-        filename: A bare filename (no directory component).
-
-    Returns:
-        The chain name, or ``None`` when the file is not a chain output.
-    """
-    idx = filename.rfind(CHAIN_FILENAME_SUFFIX)
-    if idx == -1:
-        return None
-    tail = filename[idx + len(CHAIN_FILENAME_SUFFIX):]
-    # Strip the extension (single trailing suffix) — chain names are filesystem
-    # safe and contain no dot in practice, but rsplit is robust to a dotted stem.
-    dot = tail.rfind(".")
-    return tail[:dot] if dot != -1 else tail
 
 
 # ---------------------------------------------------------------------------
