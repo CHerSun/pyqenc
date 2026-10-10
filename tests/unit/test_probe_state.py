@@ -113,6 +113,28 @@ class TestProbeStateRoundTrip:
         assert "crop: 22,22,0,0" in text
         assert "top:" not in text
 
+    def test_saved_shape_comes_from_save_model_conventions(self, tmp_path: Path):
+        """No custom serializer: the file is exactly ``save_model``'s
+        ``model_dump(exclude_none=True)`` — set fields persist (in
+        declaration order), unset fields are omitted, and an empty crop
+        persists as ``crop: 0,0,0,0`` (no omission special case)."""
+        path = tmp_path / "probe.yaml"
+        ProbeState(frame_count=100).save(path)  # everything else unset
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert list(data) == ["frame_count", "crop"]
+        assert data["crop"] == "0,0,0,0"
+
+        full = tmp_path / "full.yaml"
+        ProbeState(
+            frame_count=9526, crop=CropParams(top=22, bottom=22),
+            crop_source="detected", resulting_resolution="1920x1036",
+        ).save(full)
+        full_data = yaml.safe_load(full.read_text(encoding="utf-8"))
+        assert list(full_data) == [
+            "frame_count", "crop", "crop_source", "resulting_resolution",
+        ]
+
     def test_legacy_nested_crop_dict_still_loads(self, tmp_path: Path):
         """Tolerance guard: the model's native dict form (the pre-compact
         serialization) passes validation — same model, both natural forms."""
