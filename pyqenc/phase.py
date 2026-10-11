@@ -7,6 +7,8 @@ This module defines the structural backbone of the phase object model:
                         its recovery/selection facts (the only artifact class).
 - ``PhaseOutcome``    — re-exported from ``models`` for convenience.
 - ``PhaseResult``     — result returned by every phase's ``run()``.
+- ``PhaseDependencies`` — typed result view (``self._deps[DepPhase]``) over
+                        the registry, scoped to the phase's ``DEPENDS_ON``.
 - ``FinalizeContext`` — pre-resolved end-of-run decisions passed to ``finalize``.
 - ``Recovery``        — single source of truth produced by ``Phase._recover()``.
 - ``RecoveryError``   — fatal recover-time invalidation signal.
@@ -55,6 +57,7 @@ __all__ = [
     "FinalizeContext",
     "Phase",
     "PhaseContractError",
+    "PhaseDependencies",
     "PhaseOutcome",
     "PhaseRegistry",
     "PhaseResult",
@@ -261,6 +264,34 @@ class RecoveryError(Exception):
         self.message = message
 
 
+def claim_expected_name(claimed: dict[str, str], name: str, owner: str) -> None:
+    """Register one row's claim on an on-disk name; fail loudly on collision.
+
+    The consumption protocol's collision guard (spec 2026-10-07, Req 5): a
+    name claimed by two rows within one listing is a naming bug (or two
+    identities that sanitize to one name) — never silently accepted. Each
+    listing-consuming recovery passes a per-directory ``claimed`` map and
+    claims every expected name as it builds rows.
+
+    Args:
+        claimed: The directory's claim registry (name → owner description);
+                 one map per owned directory listing.
+        name:    The on-disk name the row consumes.
+        owner:   Human-readable description of the claiming row (for the
+                 error message).
+
+    Raises:
+        RecoveryError: When *name* was already claimed by another row.
+    """
+    prior = claimed.get(name)
+    if prior is not None:
+        raise RecoveryError(
+            f"Naming collision: '{name}' is consumed by both '{prior}' and "
+            f"'{owner}' — two artifacts claim one on-disk name."
+        )
+    claimed[name] = owner
+
+
 class PhaseContractError(RuntimeError):
     """A phase violated the Phase run contract — a programming error.
 
@@ -273,6 +304,81 @@ class PhaseContractError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# PhaseDependencies — typed result view over the registry
+# ---------------------------------------------------------------------------
+
+class PhaseDependencies:
+    """Typed view over the phase registry: dependency-class subscript to result.
+
+    One instance hangs off every phase as ``self._deps`` (built in
+    ``Phase.__init__``); ``self._deps[DepPhase]`` returns that dependency's
+    cached typed result. The view is LIVE over the shared registry dict —
+    each access resolves fresh, no construction-time snapshot — because the
+    registry is populated incrementally and tests attach stub dependencies
+    after construction.
+
+    The key domain is the owning phase's ``DEPENDS_ON`` declaration: a class
+    not declared there trips an assert (a programming error — undeclared
+    dependencies are invisible to the dependency walk, so their results are
+    not guaranteed). Instance access (calling ``run()`` on a dependency)
+    stays with the template's ``_ensure_dependencies``, which reads the
+    registry directly.
+    """
+
+    def __init__(
+        self,
+        registry: PhaseRegistry,
+        owner:    Phase,
+    ) -> None:
+        """Store the live registry link and the owning phase.
+
+        The key domain is read live from ``owner.DEPENDS_ON`` — the owner
+        IS its declaration; nothing is copied.
+
+        Args:
+            registry: The shared phase registry (fetched from per access).
+            owner:    The phase whose ``DEPENDS_ON`` scopes the key domain.
+        """
+        self._registry = registry
+        self._owner    = owner
+
+    def __getitem__[R: PhaseResult](self, dep_cls: type[Phase[R]]) -> R:
+        """Return the dependency's cached typed result.
+
+        Args:
+            dep_cls: The dependency's phase class (must be in the owner's
+                     ``DEPENDS_ON``).
+
+        Returns:
+            The dependency's typed result.
+
+        Raises:
+            AssertionError: When ``dep_cls`` is not declared in the owner's
+                ``DEPENDS_ON`` (undeclared dependency — a programming error).
+            AssertionError: When the declared dependency is missing from the
+                registry (mis-wired registry — a programming error).
+            AssertionError: When the dependency has no cached result — a
+                phase hook ran before the dependency walk (a programming
+                error, never a runtime condition to handle).
+        """
+        assert dep_cls in self._owner.DEPENDS_ON, (
+            f"{type(self._owner).__name__} reads {dep_cls.__name__} "
+            "without declaring it in DEPENDS_ON (dependency access is "
+            "scoped to declared dependencies)"
+        )
+        instance = self._registry.get(dep_cls)
+        assert instance is not None, (
+            f"{type(self._owner).__name__} requires {dep_cls.__name__} "
+            "in the phase registry (declared in DEPENDS_ON)"
+        )
+        result = instance.result
+        assert result is not None, (
+            f"{dep_cls.__name__}.result guaranteed by the dependency walk"
+        )
+        return result
+
+
+# ---------------------------------------------------------------------------
 # Phase — template-method base implementing the uniform run()
 # ---------------------------------------------------------------------------
 
@@ -282,9 +388,10 @@ class Phase[ResultT: PhaseResult](ABC):
     Type parameter:
         ResultT: The phase's typed result class — declared by subclassing
                  (``class JobPhase(Phase[JobPhaseResult])``), which links the
-                 class to its result type through inheritance: ``_dep_result``
-                 and ``.result`` then carry the concrete type with no casts,
-                 overloads, or base-module imports (no circular dependencies).
+                 class to its result type through inheritance: the
+                 ``_deps`` view's subscript and ``.result`` then carry the
+                 concrete type with no casts, overloads, or base-module
+                 imports (no circular dependencies).
 
         The single concrete ``run()`` owns the run footprint shared by every
         phase, in exact order: memoization guard → dependency resolution →
@@ -351,49 +458,14 @@ class Phase[ResultT: PhaseResult](ABC):
         self._config:    AppConfig        = config
         self._collector: MetricsCollector = collector
         self._phases:    PhaseRegistry    = phases
+        self._deps:      PhaseDependencies = PhaseDependencies(phases, self)
         self.result:     ResultT | None  = None
 
     # ------------------------------------------------------------------
     # Dependency resolution — DEPENDS_ON is the declaration, the registry
-    # link is the source of truth, fetched fresh at run time.
+    # link is the source of truth, fetched fresh at run time. Typed result
+    # access is `self._deps[DepPhase]` (PhaseDependencies view).
     # ------------------------------------------------------------------
-
-    def _dep_result[R: PhaseResult](self, dep_cls: type[Phase[R]]) -> R:
-        """Return the dependency's cached typed result — the dependency accessor.
-
-        Fetches the ``dep_cls`` instance from the registry fresh on every call
-        (the registry is the single source of truth, and it may have been
-        populated after this phase's construction). The shared dependency walk
-        guarantees every declared dependency has run (and cached its result)
-        before this phase's hooks execute, so consumers read dependency facts
-        through this typed getter instead of re-narrowing ``Phase.result`` at
-        every call site. The declared ``Phase[R]`` parametrization is what
-        recovers the concrete result type from the phase class at each call
-        site.
-
-        Args:
-            dep_cls: The dependency's phase class.
-
-        Returns:
-            The dependency's typed result.
-
-        Raises:
-            AssertionError: When the declared dependency is missing from the
-                registry (mis-wired registry — a programming error).
-            AssertionError: When the dependency has no cached result — a
-                phase hook ran before the dependency walk (a programming
-                error, never a runtime condition to handle).
-        """
-        instance = self._phases.get(dep_cls)
-        assert instance is not None, (
-            f"{type(self).__name__} requires {dep_cls.__name__} "
-            "in the phase registry (declared in DEPENDS_ON)"
-        )
-        result = instance.result
-        assert result is not None, (
-            f"{dep_cls.__name__}.result guaranteed by the dependency walk"
-        )
-        return result
 
     # ------------------------------------------------------------------
     # Public Phase interface — the template run() and default finalize
@@ -444,13 +516,19 @@ class Phase[ResultT: PhaseResult](ABC):
             emit_phase_start(self.name, self._logger)
         self._log_key_params()
 
-        # 6. Timed recovery — the single source of truth.
+        # 6. Timed invalidation + classification. ``_invalidate()`` runs the
+        #    key-triggered effects FIRST (disk-only: wipes, own-sidecar
+        #    rewrites, fatals via :class:`RecoveryError`); the
+        #    classification-only ``_recover()`` then re-reads disk truth —
+        #    no state passes between the hooks in memory (spec 2026-10-07,
+        #    Req 54; the load-bearing invariant of the split).
         try:
             with self._collector.time(MetricKey.RECOVERY):
+                self._invalidate()
                 recovery = self._recover()
         except RecoveryError as exc:
-            # Fatal recover-time invalidation — a hard stop (same severity the
-            # phases already used for mode/probe/source mismatches).
+            # Fatal invalidation — a hard stop (same severity the phases
+            # already used for mode/probe/source mismatches).
             self._logger.critical(exc.message)
             self.result = self._make_result(PhaseOutcome.FAILED, [], exc.message)
             return self.result
@@ -576,7 +654,7 @@ class Phase[ResultT: PhaseResult](ABC):
         """Phase-specific skip decision, made after dependencies resolved.
 
         Dependencies are already run (and their results cached) when this
-        hook executes — the hook may read ``self._dep_result(...)`` freely.
+        hook executes — the hook may read ``self._deps[...]`` freely.
         The decision itself still reads constructor state (config) plus
         dependency results; no banner is emitted on this path, and returning
         a result short-circuits before recovery/execution.
@@ -617,16 +695,36 @@ class Phase[ResultT: PhaseResult](ABC):
             message or f"all {self._recovery_unit()}s reused",
         )
 
+    def _invalidate(self) -> None:
+        """Key-triggered invalidation effects — always DISK effects only.
+
+        Compares the phase's own persisted keys against the current inputs
+        and applies effects from the fixed vocabulary (fatal via
+        :class:`RecoveryError` / wipe-own / conservative re-derive /
+        rewrite-own-sidecar) plus the consumption-triggered curation that
+        belongs to the invalidation domain. The template sequences this
+        BEFORE :meth:`_recover`; effects are disk effects so classification
+        re-reads disk truth with no in-memory coupling between the hooks
+        (spec 2026-10-07, Req 54/37). The default is a no-op — a phase with
+        no keys of its own (encoding) keeps it empty.
+
+        Raises:
+            RecoveryError: On a fatal-band condition without permission.
+        """
+        return
+
     @abstractmethod
     def _recover(self) -> Recovery:
-        """Scan disk and build the single source of truth for this run.
+        """Classify the phase's artifacts from disk truth (presence only).
 
-        Owns force-wipe, invalidation, ``.tmp`` pre-clean, and classification.
-        Completeness is presence-based only (a present file is never
-        incomplete — atomic writes guarantee it); invalidation MAY read
-        persisted settings and raises :class:`RecoveryError` on fatal
-        mismatch. The returned artifact list must include unwanted-but-present
-        entries; ``wanted`` is derived from external input, never mutated here.
+        Runs AFTER :meth:`_invalidate` settled every key-triggered effect on
+        disk: this hook is classification-only — consume payload-owned
+        expected names out of listings, build the ledger rows, surface
+        leftovers per the layer policy, and raise :class:`RecoveryError`
+        only for conditions that preclude classification entirely (e.g. no
+        video stream). It must not mutate anything the classification then
+        re-reads. Completeness is presence-based only; ``wanted`` derives
+        from external input, never mutated here.
 
         Returns:
             The :class:`Recovery` single source of truth.
@@ -760,7 +858,7 @@ def _build_registry(
     ``JobPhase`` receives all volatile per-run parameters (``source``,
     ``work_dir``, ``force``, ``cleanup``, ``no_metrics``) as plain kwargs and
     stores them on ``JobPhaseResult`` so all downstream phases can read them
-    via ``self._dep_result(JobPhase)``.  ``ProbePhase`` — constructed only
+    via ``self._deps[JobPhase]``.  ``ProbePhase`` — constructed only
     when the closure reaches it — additionally receives the run's ``plan``,
     carrying it on its result as the video chain's entry context; an
     audio-only closure contains no Probe and needs no plan at all.  All other
@@ -815,7 +913,7 @@ def _build_registry(
         if cls is JobPhase:
             # JobPhase receives all volatile kwargs — it stores them on
             # JobPhaseResult so downstream phases can access them via
-            # _dep_result(JobPhase).
+            # _deps[JobPhase].
             registry[cls] = JobPhase(
                 config,
                 registry,

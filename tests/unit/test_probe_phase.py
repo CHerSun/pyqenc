@@ -30,19 +30,25 @@ from pyqenc.models import (
     CleanupLevel,
     CropParams,
     PhaseOutcome,
+    SizedFingerprint,
 )
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
-from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
-from pyqenc.state import ArtifactState, ProbeState
-from pyqenc.stream_model import File, VideoStream, VideoStreamInfo
+from pyqenc.phases.probe import ProbePhase, ProbePhaseResult, ProbeState
+from pyqenc.state import ArtifactState
+from pyqenc.stream_model import ProbedFile, VideoStream, VideoStreamInfo
+from pyqenc.utils.yaml_utils import load_model, save_model
 from tests.test_metrics_integration import (
     _dotted_groups,
     _dotted_keys,
     _recorded_metrics,
     _top_level_keys,
 )
+
+_STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
+"""Stub source identity — phases read the job File's fingerprint."""
+
 
 # ---------------------------------------------------------------------------
 # Helpers — build REAL typed results and a REAL registry
@@ -57,17 +63,19 @@ def _make_job_result(work_dir: Path, source: Path) -> JobPhaseResult:
     return JobPhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
         message   = "job complete",
-        file      = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+        file      = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
         config    = _APP_CONFIG,
         work_dir  = work_dir,
-        source    = source,
+        force     = False,
+        cleanup   = CleanupLevel.NONE,
+        no_metrics= True,
     )
 
 
 def _make_video_stream(path: Path) -> VideoStream:
     """A video stream with the fast facet pre-populated (no probing)."""
     return VideoStream(
-        file = File(path=path, file_size_bytes=64),
+        file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path),
         info = VideoStreamInfo(
             track_id=0, codec_name="hevc", fps=24.0,
             fps_fraction=Fraction(24, 1), resolution="1920x1080",
@@ -114,7 +122,7 @@ def _make_probe_phase(
 
     job = JobPhase(
         _APP_CONFIG, {},
-        source     = job_result.source,
+        source     = job_result.file.payload.path,
         work_dir   = job_result.work_dir,
         force      = False,
         cleanup    = CleanupLevel.NONE,
@@ -139,7 +147,7 @@ def _make_probe_phase(
 
 def _write_probe_yaml(work_dir: Path, *, frame_count: int, crop: CropParams) -> None:
     """Persist a valid probe.yaml with the given frame count and crop."""
-    ProbeState(frame_count=frame_count, crop=crop).save(work_dir / "probe.yaml")
+    save_model(work_dir / "probe.yaml", ProbeState(source=_STUB_SOURCE_FP, frame_count=frame_count, crop=crop))
 
 
 # ---------------------------------------------------------------------------
@@ -282,12 +290,60 @@ class TestProbePhaseCompleted:
         """
         _, work_dir = self._run_with_mocks(tmp_path)
 
-        loaded = ProbeState.load(work_dir / "probe.yaml")
+        loaded = load_model(work_dir / "probe.yaml", ProbeState)
         assert loaded is not None
         assert loaded.frame_count == self._DETECTED_FRAME_COUNT
         assert loaded.crop is not None
         assert loaded.crop.top    == self._DETECTED_CROP.top
         assert loaded.crop.bottom == self._DETECTED_CROP.bottom
+
+    def test_probe_yaml_persists_identity_key_and_provenance(self, tmp_path: Path):
+        """Bug guarded (spec Req 23/31, found by the 2026-10-08 audit): the
+        stale custom serializer silently dropped ``source`` and
+        ``crop_source`` — probe's identity fatal was dead code from disk and
+        a manual crop's provenance always reloaded as "detected"."""
+        _, work_dir = self._run_with_mocks(tmp_path)
+
+        loaded = load_model(work_dir / "probe.yaml", ProbeState)
+        assert loaded is not None
+        job = _make_job_result(work_dir, tmp_path / "source.mkv")
+        assert loaded.source is not None
+        assert loaded.source.matches(job.file.payload.fingerprint)
+        assert loaded.crop_source == "detected"
+
+    def test_probe_yaml_persists_resulting_resolution(self, tmp_path: Path):
+        """The human-facing output dimensions persist: source − crop.
+
+        1920x1080 − ↑140↓140 = 1920x800 — the single place a human inspects
+        the crop's dimensional effect. Bug guarded: a dropped field would
+        leave probe.yaml without the derivation's display home.
+        """
+        _, work_dir = self._run_with_mocks(tmp_path)
+
+        loaded = load_model(work_dir / "probe.yaml", ProbeState)
+        assert loaded is not None
+        assert loaded.resulting_resolution == "1920x800"
+
+
+class TestDeriveResultingResolution:
+    """The derivation helper: source facts in, display string out."""
+
+    def test_derives_source_minus_crop(self, tmp_path: Path):
+        from pyqenc.phases.probe import _derive_resulting_resolution
+
+        video = _make_video_stream(tmp_path / "source.mkv")
+        result = _derive_resulting_resolution(video, CropParams(top=22, bottom=22))
+        assert result == "1920x1036"
+
+    def test_unknown_source_resolution_gives_none(self, tmp_path: Path):
+        """A stream without probed dimensions yields None, never a guess."""
+        from pyqenc.phases.probe import _derive_resulting_resolution
+
+        video = VideoStream(
+            file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "s.mkv"),
+            info = VideoStreamInfo(track_id=0),
+        )
+        assert _derive_resulting_resolution(video, CropParams()) is None
 
 
 # ---------------------------------------------------------------------------

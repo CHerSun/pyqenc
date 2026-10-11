@@ -127,27 +127,29 @@ class TestVideoRowComponents:
     def test_partial_row_completes_its_missing_component(self, tmp_path: Path) -> None:
         """A pre-existing index with a missing container (a PARTIAL row) is
         completed by producing only the container — the index producer is
-        not re-run."""
+        not re-run. (The pre-existing files are trusted because a CURRENT
+        sidecar vouches for them — a missing sidecar wipes conservatively.)"""
         work_dir, source = _make_work_and_source(tmp_path)
         extracted = work_dir / EXTRACTED_DIR
-        extracted.mkdir(parents=True)
-        (extracted / TIMESTAMPS_FILENAME).write_bytes(b"0\n0\n")
 
-        phase = _make_extraction_phase(
-            work_dir, source, video_required=False, materialize=True,
-        )
         ffmpeg_cmds: list[list[str]] = []
         index_calls: list[Path] = []
 
         def fake_index(*args: Path) -> None:
             index_calls.append(args[2])
+            args[2].write_bytes(b"0\n0\n")
 
         def fake_run_ffmpeg(request: FFmpegRequest, **kwargs: object) -> MagicMock:
             ffmpeg_cmds.append([str(a) for a in compose_command(request)[0]])
             if request.output is not None:
+                request.output.parent.mkdir(parents=True, exist_ok=True)
                 request.output.write_bytes(b"x" * 16)
             return MagicMock(success=True, returncode=0, stderr_lines=[], frame_count=None)
 
+        # First run: a complete materialization (sidecar + both components).
+        phase = _make_extraction_phase(
+            work_dir, source, video_required=False, materialize=True,
+        )
         with (
             patch("pyqenc.phases.extraction._probe_streams_json",
                   return_value=_ffprobe_json(_video_json(), _audio_json())),
@@ -155,7 +157,26 @@ class TestVideoRowComponents:
             patch("pyqenc.phases.extraction._extract_timestamps", side_effect=fake_index),
             patch("subprocess.run"),
         ):
-            result = phase.run(dry_run=False)
+            first = phase.run(dry_run=False)
+        assert first.outcome is PhaseOutcome.COMPLETED
+
+        # Break the row: delete the container only (index stays present).
+        container = next(f for f in extracted.iterdir() if f.name.endswith(".mkv"))
+        container.unlink()
+        index_calls.clear()
+        ffmpeg_cmds.clear()
+
+        phase2 = _make_extraction_phase(
+            work_dir, source, video_required=False, materialize=True,
+        )
+        with (
+            patch("pyqenc.phases.extraction._probe_streams_json",
+                  return_value=_ffprobe_json(_video_json(), _audio_json())),
+            patch("pyqenc.phases.extraction.run_ffmpeg", side_effect=fake_run_ffmpeg),
+            patch("pyqenc.phases.extraction._extract_timestamps", side_effect=fake_index),
+            patch("subprocess.run"),
+        ):
+            result = phase2.run(dry_run=False)
 
         assert result.outcome is PhaseOutcome.COMPLETED
         assert index_calls == []  # the index component was already present

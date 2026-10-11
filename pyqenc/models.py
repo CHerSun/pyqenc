@@ -7,16 +7,20 @@ All models use Pydantic BaseModel for validation and serialisation.
 """
 # CHerSun 2026
 
+import hashlib
 import logging
+from collections.abc import Iterable
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import Enum, IntEnum
 from pathlib import Path
-from typing import Self
+from typing import Annotated, ClassVar, Self
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
+    PlainSerializer,
     PrivateAttr,
     field_validator,
     model_validator,
@@ -24,6 +28,7 @@ from pydantic import (
 
 from pyqenc.constants import (
     DOWN_ARROW,
+    FINGERPRINT_DIGEST_SIZE_BYTES,
     LEFT_ARROW,
     RIGHT_ARROW,
     TIME_SEPARATOR_MS,
@@ -32,6 +37,207 @@ from pyqenc.constants import (
 from pyqenc.utils.naming import sanitize_filesystem_text
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Fingerprint — the standard identity-comparison value (spec 2026-10-07, Req 10)
+# ---------------------------------------------------------------------------
+
+class Fingerprint(BaseModel):
+    """An opaque identity token plus an optional belt magnitude.
+
+    THE standard identity-comparison mechanism: one value type for everything
+    whose identity is opaque (file content, resolved config objects, id sets).
+    ``token`` is authoritative — a hash of the owner-declared canonical form,
+    REQUIRED at construction (derivations are total; an unreadable source is
+    a fatal at the computing site, never a carried ``None``).
+    ``Fingerprint(None, None)`` is unconstructible.
+
+    ``size`` is a cheap pre-check magnitude (bytes for files, cardinality for
+    sets): it participates only when present on BOTH sides of a comparison —
+    differing sizes are a mismatch (collision enforcement) and equal sizes
+    fall through to the token — and contributes nothing when absent (owners
+    with no meaningful check). "Unknown" never occurs INSIDE the type: it
+    lives one level up, at the missing-sidecar-field layer (an absent key on
+    a sidecar is unknown, never a mismatch).
+
+    Data is separate from means: this type knows nothing about derivations;
+    each owning entity declares its own (e.g. ``Strategy.fingerprint``) and
+    consumers persist and compare with no knowledge of either. Tokens are
+    idempotency markers, never re-validated into the model they summarize
+    (a fingerprint may omit required fields by construction) and never
+    user-facing data.
+
+    Attributes:
+        token: The opaque hash token (hex string) — REQUIRED, non-empty.
+        size:  Optional belt magnitude; omitted when the owner has no
+               meaningful pre-check.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    token: str
+    size:  int | None = None
+
+    @field_validator("token")
+    @classmethod
+    def _token_present(cls, v: str) -> str:
+        """Reject empty tokens — the token is the identity; absent means unset."""
+        if not v:
+            raise ValueError(
+                "Fingerprint token is required — derivations are total; an "
+                "unreadable source is a fatal at the computing site."
+            )
+        return v
+
+    def matches(self, other: Fingerprint) -> bool:
+        """Uniform identity comparison: token authoritative, size a belt.
+
+        THE identity comparison callers use directly (Req 32/33): the key
+        is required on every sidecar that carries it — a sidecar missing
+        it fails validation and loads as absent, so the caller's
+        sidecar-presence guard is the only unknown state left, and a
+        present key that does not match the live identity is the phase's
+        catastrophic condition. NOT ``__eq__``: belt-tolerant equality is
+        not transitive (``{t, 64}`` matches ``{t}`` matches ``{t, 128}``,
+        but the outer two mismatch) — value equality stays pydantic's.
+
+        Args:
+            other: The fingerprint to compare against.
+
+        Returns:
+            ``True`` when the tokens are equal and no belt contradiction
+            exists — differing sizes with both present are a mismatch even
+            for equal tokens (collision enforcement); an absent size on
+            either side contributes nothing.
+        """
+        if (
+            self.size is not None
+            and other.size is not None
+            and self.size != other.size
+        ):
+            return False
+        return self.token == other.token
+
+
+class SizedFingerprint(Fingerprint):
+    """A fingerprint whose belt is guaranteed — the file identity.
+
+    The type-level statement of a producer's guarantee: derivations whose
+    belt is structural (``BlakeFingerprinter.of_file`` always stats the
+    file) return this, so consumers read ``.size`` as a plain ``int``
+    with no dead None-handling. Comparison semantics are unchanged —
+    this is-a :class:`Fingerprint`, the belt participates via
+    :meth:`Fingerprint.matches` exactly as before.
+    """
+
+    size: int  # narrowed from int | None — the belt is total for these derivations
+
+
+class BlakeFingerprinter:
+    """The single owner of ``Fingerprint`` derivations — the means (Req 10).
+
+    ``Fingerprint`` stays a dumb value record; every token in the system is
+    derived HERE: blake2b-128 over each thing's canonical form (Req 10d:
+    canonical dumps are never persisted — debug reads the config / source
+    of truth, not the sidecar). One method per input kind — no uniform
+    ``from_payload``: the file derivation is sampled windows, not a
+    canonical-form hash, and pretending otherwise would lie about it.
+    """
+
+    @staticmethod
+    def _token(canonical: str) -> str:
+        """blake2b-128 over the canonical form's UTF-8 bytes."""
+        return hashlib.blake2b(
+            canonical.encode("utf-8"), digest_size=FINGERPRINT_DIGEST_SIZE_BYTES,
+        ).hexdigest()
+
+    @classmethod
+    def of_text(cls, canonical: str) -> Fingerprint:
+        """A canonical serialization's fingerprint (token only).
+
+        Args:
+            canonical: The owner-declared canonical serialization
+                       (deterministic for the same value by construction).
+
+        Returns:
+            The fingerprint (no belt — text has no meaningful magnitude).
+        """
+        return Fingerprint(token=cls._token(canonical))
+
+    @classmethod
+    def of_ids(cls, ids: Iterable[str]) -> SizedFingerprint:
+        """The identity of a set of ids: hash over the sorted ids, ``size`` = count.
+
+        ONE derivation, two vantages (spec 2026-10-07, Req 19/11a): optimization
+        persists it as the chunk-set key (mismatch ⇒ wipe winners), and each
+        merged output's provenance carries it as the winner-set fingerprint.
+        Order-independent by construction (sorted before hashing).
+
+        Args:
+            ids: The member ids in any order (chunk ids / winner ids).
+
+        Returns:
+            The set's fingerprint (``size`` = member count — structurally
+            guaranteed, hence :class:`SizedFingerprint`).
+        """
+        ordered = sorted(ids)
+        return SizedFingerprint(token=cls._token("\n".join(ordered)), size=len(ordered))
+
+    _FILE_WINDOW_BYTES: ClassVar[int] = 1_048_576
+    """Sampled-window size (~1 MiB): head + tail + two interior windows."""
+
+    @classmethod
+    def of_file(cls, path: Path) -> SizedFingerprint:
+        """The source file's sampled-content fingerprint (spec Req 30).
+
+        Reads head + tail + two interior windows (~1 MiB each, deterministic
+        offsets), hashing the concatenation with blake2b-128; ``size`` is the
+        file size — structurally guaranteed, hence the
+        :class:`SizedFingerprint` return. Threat model — accident only: the
+        digest guards against accidental wholesale replacement
+        (re-mux/re-download of a same-named file) and in-window corruption;
+        it does NOT promise detection of isolated mid-file bit rot
+        (coverage is too thin) and NOT adversarial tampering (fixed windows
+        are trivially preserved by an attacker).
+
+        Args:
+            path: The file to sample.
+
+        Returns:
+            The fingerprint (``size`` = file size in bytes).
+
+        Raises:
+            OSError: When the file cannot be read — a fatal at the computing
+                     site (Job), never a carried ``None``.
+        """
+        size = path.stat().st_size
+        digest = hashlib.blake2b(digest_size=FINGERPRINT_DIGEST_SIZE_BYTES)
+        with open(path, "rb") as fh:
+            for offset in cls._file_window_offsets(size):
+                fh.seek(offset)
+                digest.update(fh.read(cls._FILE_WINDOW_BYTES))
+        return SizedFingerprint(size=size, token=digest.hexdigest())
+
+    @classmethod
+    def _file_window_offsets(cls, size: int) -> list[int]:
+        """The four deterministic sample offsets: head, 1/3, 2/3, tail.
+
+        For files smaller than the windows the reads simply overlap or come
+        up empty (seeks past EOF read zero bytes) — the derivation stays
+        total and deterministic for every size, including zero.
+        """
+        return sorted({
+            0,
+            size // 3,
+            (size * 2) // 3,
+            max(0, size - cls._FILE_WINDOW_BYTES),
+        })
+
+
+fingerprinter = BlakeFingerprinter()
+"""The derivation surface callers use — ``fingerprinter.of_text/of_ids/of_file``."""
+
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +309,55 @@ class Strategy(BaseModel):
     profile:      str
     codec:        CodecConfig
     profile_args: list[str]
+
+    FINGERPRINT_EXCLUDED_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "codec.default_quality",
+        "codec.quality_range",
+        "codec.quality_granularity",
+        "codec.quality_max_step",
+    })
+    """Model fields excluded from the identity fingerprint (dotted paths).
+
+    The exclusion set is the quality-PROPOSAL domain — the search's steering
+    parameters, not product identity: ``default_quality`` is the starting
+    point, ``quality_range`` / ``quality_granularity`` /
+    ``quality_max_step`` bound and quantize which quality values get
+    PROPOSED. An attempt at a given quality is the same product whatever
+    proposals produced it (the quality value is the attempt's cache key),
+    so a proposal-domain change — notably the ``-q`` CLI override, which
+    rewrites the effective range — must not flip the fingerprint into the
+    fatal band; the pinned-quality map (fixed mode's key) and the mode tag
+    own quality-change invalidation. Found live 2026-10-09: a search→fixed
+    ``-q`` toggle fired the per-strategy catastrophic fatal and demanded
+    ``--force`` to wipe attempts that were perfectly valid products. The
+    set is declared here, next to what it excludes; every other field
+    participates by default (fail-safe: future fields over-invalidate
+    rather than slip through)."""
+
+    @property
+    def fingerprint(self) -> Fingerprint:
+        """The strategy's resolved-args identity: hash of the canonical dump
+        minus :attr:`FINGERPRINT_EXCLUDED_FIELDS`.
+
+        Opaque — the dump itself is never persisted, and the token is never
+        re-validated into a ``Strategy`` (it omits ``default_quality``, a
+        required field, by construction). Consumers persist it and compare
+        with :meth:`Fingerprint.matches` — no model-shape knowledge at any
+        comparison site. Joining the name family: display/safe/fingerprint.
+        """
+        return fingerprinter.of_text(
+            self.model_dump_json(exclude=self._fingerprint_exclude_spec()),
+        )
+
+    @classmethod
+    def _fingerprint_exclude_spec(cls) -> dict[str, set[str]]:
+        """Translate the dotted exclusion paths into pydantic's nested form."""
+        spec: dict[str, set[str]] = {}
+        for path in cls.FINGERPRINT_EXCLUDED_FIELDS:
+            parent, _, leaf = path.rpartition(".")
+            assert parent, f"only dotted paths are declared: {path!r}"
+            spec.setdefault(parent, set()).add(leaf)
+        return spec
 
     @field_validator("preset", "profile", mode="before")
     @classmethod
@@ -541,15 +796,15 @@ class CodecConfig(BaseModel):
 class AttemptMetadata(BaseModel):
     """Metadata about a completed encoded chunk attempt artifact on disk.
 
-    All fields are recoverable from the filename and filesystem alone —
-    no progress tracker lookup is required.
+    Facts of the attempt as known at its exact cache address: the path is
+    the statically composed attempt name (``<chunk>.q<q>.mkv`` — Req 9; no
+    resolution component ever — Req 9b).
 
     Attributes:
         path:            Path to the encoded attempt file.
-        chunk_id:        Chunk identifier (parsed from filename stem).
-        strategy:        Encoding strategy name (inferred from parent directory).
-        crf:             CRF value used for this attempt.
-        resolution:      Resolution string (e.g. ``'1920x800'``).
+        chunk_id:        Chunk identifier (the composed name's identity part).
+        strategy:        Encoding strategy display name.
+        crf:             Quality value used for this attempt.
         file_size_bytes: File size in bytes.
     """
 
@@ -557,8 +812,80 @@ class AttemptMetadata(BaseModel):
     chunk_id:        str
     strategy:        str
     crf:             Decimal
-    resolution:      str
     file_size_bytes: int
+
+
+# ---------------------------------------------------------------------------
+# Resolution — the derivable dimension value
+# ---------------------------------------------------------------------------
+
+class Resolution(BaseModel):
+    """Pixel dimensions as a mathematical value: ``width x height``.
+
+    The output resolution of any encoded product is fully DERIVABLE — the
+    encode's only dimension-changing filter is the crop
+    (``crop=iw-{l+r}:ih-{t+b}``), so ``output = source - crop`` BY
+    CONSTRUCTION (found live 2026-10-09: 1920x1080 − ↑22↓22 = 1920x1036,
+    exactly what the legacy post-encode ffprobe returned). Nothing probes
+    or persists per-attempt resolutions anymore; the source fact lives in
+    Extraction's ``VideoStreamInfo.resolution``, the crop in Probe's facet,
+    and this operator is the single derivation.
+
+    Human-facing only: derived for display (probe info line,
+    ``probe.yaml``) — never an invalidation key, never a completeness
+    input.
+
+    Attributes:
+        width:  Pixel width.
+        height: Pixel height.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    width:  int
+    height: int
+
+    @classmethod
+    def parse(cls, value: str) -> Self:
+        """Parse a ``'WxH'`` string (the stream-info convention).
+
+        Args:
+            value: The resolution string (e.g. ``'1920x1080'``).
+
+        Returns:
+            The parsed dimensions.
+
+        Raises:
+            ValueError: If the string is not ``WxH`` with positive ints.
+        """
+        width_s, _, height_s = value.partition("x")
+        try:
+            width, height = int(width_s), int(height_s)
+        except ValueError as exc:
+            raise ValueError(f"Not a resolution string: {value!r}") from exc
+        if width <= 0 or height <= 0:
+            raise ValueError(f"Not a resolution string: {value!r}")
+        return cls(width=width, height=height)
+
+    def __sub__(self, crop: CropParams) -> Resolution:
+        """Apply crop margins: ``source - crop = output dimensions``.
+
+        The mathematical form of the crop filter's dimension arithmetic —
+        margins subtract from the corresponding axis.
+
+        Args:
+            crop: The crop margins to subtract.
+
+        Returns:
+            The cropped dimensions.
+        """
+        return Resolution(
+            width  = self.width - crop.left - crop.right,
+            height = self.height - crop.top - crop.bottom,
+        )
+
+    def __str__(self) -> str:
+        return f"{self.width}x{self.height}"
 
 
 # ---------------------------------------------------------------------------
@@ -642,3 +969,21 @@ class CropParams(BaseModel):
                 f"Invalid crop format: '{crop_str}'. Expected 2 or 4 comma-separated values "
                 f"(e.g., '140,140' or '140,140,0,0')"
             )
+
+
+def _crop_from_yaml(value: object) -> object:
+    """Accept the model's storage string wherever a CropParams loads from yaml.
+
+    ``str(CropParams)`` is the declared storage form ("top,bottom,left,right"
+    — always canonical four values); a native dict (the model's own default
+    dump) passes through to normal validation unchanged.
+    """
+    if isinstance(value, str):
+        return CropParams.parse(value)
+    return value
+
+
+CropYaml = Annotated[CropParams, BeforeValidator(_crop_from_yaml), PlainSerializer(str)]
+"""``CropParams`` as it persists: the compact one-line storage string
+(``crop: 22,22,0,0``), parsed back via ``CropParams.parse`` — the class
+stays explicitly typed; only the yaml boundary changes form."""

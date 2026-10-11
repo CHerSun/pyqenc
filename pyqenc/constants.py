@@ -9,6 +9,27 @@ THRESHOLD_ATTEMPTS_WARNING = 10
 TEMP_SUFFIX = ".tmp"
 """A suffix to append to temporary files during processing. This helps avoid confusion with final output files and allows for easy cleanup of incomplete files."""
 
+FINGERPRINT_DIGEST_SIZE_BYTES = 16
+"""blake2b digest size (bytes) for every fingerprint token — 128-bit opaque identity."""
+
+FIXED_COMPARISON_STATS: tuple[str, ...] = ("p10", "median")
+"""The fixed-mode comparison statistic set per metric.
+
+The single definition of what fixed-mode comparison consumes — the anchor's
+synthetic target set (the ruler), the dominance pruning input, the
+comparison-table columns, and the winner sidecars' targeted subset: ``p10``
+guards the worst decile, ``median`` the central tendency; the remaining
+stats are stability/shape indicators (``std``, ``min``, ``max``, other
+percentiles), not quality bars — comparing or ruling on them silently
+skews selection. The full measured set stays on attempt/merged sidecars
+(data retention), so re-selecting the comparison set never re-measures."""
+
+CROP_SOURCE_MANUAL = "manual"
+"""``probe.yaml`` crop provenance: the value came from a ``--crop`` override."""
+
+CROP_SOURCE_DETECTED = "detected"
+"""``probe.yaml`` crop provenance: the value came from black-border detection."""
+
 # Disk space estimation constants
 OVERHEAD_TIGHT_MARGIN = 1.2
 """Multiplier applied to the max estimated space to derive the recommended space threshold.
@@ -117,17 +138,10 @@ CHAPTERS_FILENAME = "chapters.xml"
 CHUNK_NAME_PATTERN = re.compile(
     r"^(?:\d{2,}꞉\d{2}꞉\d{2}․\d{3})-(?:\d{2,}꞉\d{2}꞉\d{2}․\d{3})$"
 )
-"""Regex that validates and matches timestamp-based chunk file stems produced by
-``_chunk_name_duration``.  A stem has the form
+"""Regex that validates and matches timestamp-based chunk ids composed by
+``VideoStreamChunk.format_chunk_id``.  A stem has the form
 ``HH꞉MM꞉SS․mmm-HH꞉MM꞉SS․mmm`` where ``꞉`` is ``TIME_SEPARATOR_SAFE`` and
 ``․`` is ``TIME_SEPARATOR_MS``."""
-
-ENCODED_ATTEMPT_NAME_PATTERN = re.compile(
-    r"^(?P<chunk_id>.+)\.(?P<resolution>\d+x\d+)\.q(?P<quality>[\d.]+)\.mkv$"
-)
-"""Regex that parses encoded attempt filenames produced by the quality-based naming
-scheme.  Named groups: ``chunk_id``, ``resolution`` (e.g. ``1920x800``),
-``quality`` (e.g. ``18.0``)."""
 
 # Audio processing — filename conventions
 CHAIN_FILENAME_SUFFIX = " chain="

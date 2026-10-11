@@ -2,7 +2,7 @@
 
 Covers the spec's model-family guarantees: static info concretization (no
 casts at use sites), unique-slice dumps (no composed references leak),
-``dump → load → dump`` byte-identity, source-identity validation, the
+``dump → load → dump`` byte-identity, identity keys, the
 ``as_input()`` adapters, chunk-id naming round-trips, and the shared
 filesystem-name primitives.
 """
@@ -15,19 +15,18 @@ from pydantic import ValidationError
 from yaml import safe_dump, safe_load
 
 from pyqenc.audio.layout import ChannelLayout
-from pyqenc.models import CodecConfig, CropParams, Strategy
+from pyqenc.models import CodecConfig, CropParams, Fingerprint, Strategy
+from pyqenc.phases.chunking import ChunkingSidecar, SceneRecord
+from pyqenc.phases.extraction import ExtractionSidecar
+from pyqenc.phases.job import JobSidecar
 from pyqenc.stream_model import (
     AttachmentStreamInfo,
     AudioStream,
     AudioStreamInfo,
-    ChunkingSidecar,
     EncodedChunk,
     ExtendedVideoStream,
-    ExtractionSidecar,
     File,
-    JobSidecar,
-    SceneRecord,
-    SourceMismatchError,
+    MergedVideo,
     SubtitleStreamInfo,
     VideoStream,
     VideoStreamChunk,
@@ -40,8 +39,12 @@ from pyqenc.utils.long_path import LongPath
 # Fixtures
 # ---------------------------------------------------------------------------
 
+_STUB_FINGERPRINT = Fingerprint(token="a" * 32, size=8_123_498_745)
+"""A source identity key stub — the same shape every phase sidecar persists."""
+
+
 def _file() -> File:
-    return File(path=LongPath("D:/media/source.mkv"), file_size_bytes=8_123_498_745)
+    return File(path=LongPath("D:/media/source.mkv"))
 
 
 def _video_stream() -> VideoStream:
@@ -75,7 +78,7 @@ def _extended() -> ExtendedVideoStream:
 class TestFile:
     def test_plain_path_string_is_coerced_to_long_path(self) -> None:
         """A str/pathlib input validates into a LongPath (long-path-safe I/O)."""
-        f = File.model_validate({"path": "D:/media/source.mkv", "file_size_bytes": 1})
+        f = File.model_validate({"path": "D:/media/source.mkv"})
         assert isinstance(f.path, LongPath)
 
     def test_size_is_optional(self) -> None:
@@ -172,7 +175,10 @@ class TestExtendedVideoStream:
 
 
 class TestEncodedChunk:
-    def test_composes_attempt_stream_chunk_strategy_crf(self) -> None:
+    def test_composes_attempt_stream_chunk_strategy(self) -> None:
+        """The payload is identity-only: stream + chunk + strategy. The
+        winning quality is NOT a field (Req 4) — it lives on the winner
+        sidecar as a fact for processing-path consumers."""
         codec = CodecConfig(
             name            = "h265-10bit",
             default_quality = Decimal(28),
@@ -182,11 +188,55 @@ class TestEncodedChunk:
         )
         strategy = Strategy(preset="fast", profile="h265", codec=codec, profile_args=[])
         chunk = VideoStreamChunk(stream=_extended(), start_timestamp=0.0, end_timestamp=10.0)
-        attempt = EncodedChunk(stream=_extended(), chunk=chunk, strategy=strategy, crf=Decimal("22.5"))
-        assert attempt.crf == Decimal("22.5")
+        attempt = EncodedChunk(stream=_extended(), chunk=chunk, strategy=strategy)
         # The attempt's path/size are read through its composed stream chain —
         # never duplicated as fields (Req 14.1).
         assert attempt.stream.stream.file.path == _file().path
+
+    def test_name_families_are_compose_only(self) -> None:
+        """Both encoding name families are pure functions of identity — the
+        attempt keyed by quality (the search's cache address), the winner by
+        chunk alone; sidecars are stem swaps (Req 1/9)."""
+        chunk_id = "00꞉00꞉00․000-00꞉00꞉13․330"
+        assert EncodedChunk.format_attempt_file_name(chunk_id, Decimal("20.5")) == (
+            f"{chunk_id}.q20.5.mkv"
+        )
+        assert EncodedChunk.format_attempt_sidecar_name(chunk_id, Decimal("20.5")) == (
+            f"{chunk_id}.q20.5.yaml"
+        )
+        assert EncodedChunk.format_winner_file_name(chunk_id) == f"{chunk_id}.mkv"
+        assert EncodedChunk.format_winner_sidecar_name(chunk_id) == f"{chunk_id}.yaml"
+
+
+class TestMergedVideoNames:
+    def test_output_name_carries_per_strategy_pinned_suffix(self) -> None:
+        """Req 6 / M-2b: the suffix is per-strategy whenever its range is a
+        single point — uniformity across the run is never a gate."""
+        collapsed = Strategy(
+            preset="fast", profile="h265",
+            codec=CodecConfig(
+                name="h265", default_quality=Decimal("18.5"), default_preset="fast",
+                quality_range=(Decimal("18.5"), Decimal("18.5")), presets=["fast"],
+            ),
+            profile_args=[],
+        )
+        ranged = Strategy(
+            preset="fast", profile="h265",
+            codec=CodecConfig(
+                name="h265", default_quality=Decimal("18.5"), default_preset="fast",
+                quality_range=(Decimal(0), Decimal(51)), presets=["fast"],
+            ),
+            profile_args=[],
+        )
+        assert MergedVideo.output_file_name("movie", collapsed) == "movie h265+fast CRF=18.5.mkv"
+        assert MergedVideo.output_file_name("movie", ranged) == "movie h265+fast.mkv"
+        # Two different collapsed values never share a name.
+        other = collapsed.model_copy(update={
+            "codec": collapsed.codec.model_copy(update={
+                "quality_range": (Decimal("20.0"), Decimal("20.0")),
+            }),
+        })
+        assert MergedVideo.output_file_name("movie", other) != MergedVideo.output_file_name("movie", collapsed)
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +297,7 @@ def _reload(model):
 
 def _extraction_sidecar() -> ExtractionSidecar:
     return ExtractionSidecar(
-        source = _file(),
+        source = _STUB_FINGERPRINT,
         streams = {
             "video": _video_stream().info,
             "audio": [AudioStreamInfo(
@@ -294,7 +344,9 @@ class TestSidecarByteIdentity:
     """dump → load → dump is byte-identical for every new sidecar (Req 5.3)."""
 
     def test_job_sidecar(self) -> None:
-        sidecar = JobSidecar(source=_file())
+        sidecar = JobSidecar(
+            path=_file().path, source=_STUB_FINGERPRINT,
+        )
         assert _yaml(_reload(sidecar)) == _yaml(sidecar)
 
     def test_extraction_sidecar(self) -> None:
@@ -302,39 +354,30 @@ class TestSidecarByteIdentity:
         assert _yaml(_reload(sidecar)) == _yaml(sidecar)
 
     def test_chunking_sidecar(self) -> None:
-        sidecar = ChunkingSidecar(scenes=[
-            SceneRecord(timestamp_seconds=0.0, frame=0),
-            SceneRecord(timestamp_seconds=584.917, frame=14012),
-        ])
+        sidecar = ChunkingSidecar(
+            scenes = [
+                SceneRecord(timestamp_seconds=0.0, frame=0),
+                SceneRecord(timestamp_seconds=584.917, frame=14012),
+            ],
+            source           = _STUB_FINGERPRINT,
+            scene_threshold  = 0.27,
+            min_scene_length = 15,
+        )
         assert _yaml(_reload(sidecar)) == _yaml(sidecar)
 
 
 # ---------------------------------------------------------------------------
-# Source-identity validation (Req 5.2)
+# Identity keys on sidecars (Req 31/32 — the fingerprint, no path)
 # ---------------------------------------------------------------------------
 
-class TestSourceIdentityValidation:
-    def test_matching_identity_passes(self) -> None:
-        _extraction_sidecar().validate_source(_file())
-
-    def test_size_mismatch_raises(self) -> None:
-        """Bug prevented: a sidecar from a different (re-created) source file
-        being trusted as a valid inventory."""
-        live = File(path=_file().path, file_size_bytes=999)
-        with pytest.raises(SourceMismatchError, match="identity mismatch"):
-            _extraction_sidecar().validate_source(live)
-
-    def test_path_mismatch_raises(self) -> None:
-        live = File(path=LongPath("D:/media/other.mkv"), file_size_bytes=_file().file_size_bytes)
-        with pytest.raises(SourceMismatchError):
-            _extraction_sidecar().validate_source(live)
-
-    def test_job_sidecar_validates_too(self) -> None:
-        JobSidecar(source=_file()).validate_source(_file())
-        with pytest.raises(SourceMismatchError):
-            JobSidecar(source=_file()).validate_source(
-                File(path=_file().path, file_size_bytes=None),
-            )
+class TestSidecarIdentityKeys:
+    def test_extraction_sidecar_persists_fingerprint_only(self) -> None:
+        """Bug prevented: a sidecar key carrying the source PATH — the path is
+        a runtime locator (a move must not invalidate anything); the key is
+        the fingerprint pair alone (Req 31)."""
+        dumped = _extraction_sidecar().model_dump(exclude_none=True)
+        assert set(dumped["source"]) == {"token", "size"}
+        assert "path" not in dumped["source"]
 
 
 # ---------------------------------------------------------------------------

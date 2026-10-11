@@ -31,8 +31,11 @@ from pyqenc.metrics import (
 )
 from pyqenc.models import (
     CleanupLevel,
+    Fingerprint,
     PhaseOutcome,
+    SizedFingerprint,
     Strategy,
+    fingerprinter,
 )
 from pyqenc.phase import Artifact, PhaseRegistry, Recovery
 from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
@@ -43,8 +46,12 @@ from pyqenc.phases.job import JobPhaseResult
 from pyqenc.phases.merge import MergePhase
 from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.state import ArtifactState
-from pyqenc.stream_model import ExtendedVideoStream, File, VideoStreamChunk
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.stream_model import ExtendedVideoStream, ProbedFile, VideoStreamChunk
+from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic
+
+_STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
+"""Stub source identity — phases read the job File's fingerprint."""
+
 
 _SHARED_APP_CONFIG: AppConfig = load_app_config(default_only=True)
 
@@ -78,7 +85,6 @@ def _make_chunk_window(source: Path, start: float, end: float) -> VideoStreamChu
 
 def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
     """An EncodedChunk payload over a one-window chunk of the named strategy."""
-    from decimal import Decimal
 
     from pyqenc.stream_model import EncodedChunk
 
@@ -87,7 +93,6 @@ def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
         stream=_make_extended_stream(path, frame_count=24, duration=1.0),
         chunk=_make_chunk_window(path.parent / "source.mkv", 0.0, 1.0),
         strategy=strategy,
-        crf=Decimal(20),
     )
 
 
@@ -98,7 +103,7 @@ def _audio_output(out_path: Path):
 
     return AudioOutput(
         stream=AudioStream(
-            file=File(path=out_path.parent.parent / "source.mkv", file_size_bytes=64),
+            file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=out_path.parent.parent / "source.mkv"),
             info=AudioStreamInfo(
                 track_id=1, codec_name="flac", language="eng",
                 layout=ChannelLayout.parse("stereo"), duration_seconds=100.0,
@@ -148,7 +153,7 @@ def _make_video_stream_fixture(path: Path):
     from pyqenc.stream_model import VideoStream, VideoStreamInfo
 
     return VideoStream(
-        file=File(path=path, file_size_bytes=64),
+        file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path),
         info=VideoStreamInfo(
             track_id=0, codec_name="hevc", fps=24.0,
             fps_fraction=Fraction(24, 1), resolution="1920x1080",
@@ -183,7 +188,7 @@ def _make_extended_stream(path: Path, frame_count: int, duration: float) -> Exte
 
     return ExtendedVideoStream(
         stream=VideoStream(
-            file=File(path=path, file_size_bytes=64),
+            file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path),
             info=VideoStreamInfo(
                 track_id=0, codec_name="hevc", fps=25.0,
                 fps_fraction=Fraction(25, 1), resolution="1920x1080",
@@ -317,8 +322,7 @@ class TestJobPhaseTiming:
 
         Validates: Requirements 6.5
         """
-        from pyqenc.phases.job import JobPhase
-        from pyqenc.stream_model import File, JobSidecar
+        from pyqenc.phases.job import JobPhase, JobSidecar
 
         config   = _make_config(tmp_path)
         volatile = _make_volatile(tmp_path)
@@ -327,13 +331,13 @@ class TestJobPhaseTiming:
             config, {}, collector=collector, **volatile,
         )
 
-        # Pre-create a valid job.yaml (the File dump) so the phase takes the
-        # REUSED path.
+        # Pre-create a valid job.yaml (the identity record) so the phase
+        # takes the REUSED path.
         volatile["work_dir"].mkdir(parents=True, exist_ok=True)
-        sidecar = JobSidecar(source=File(
-            path            = volatile["source"],
-            file_size_bytes = volatile["source"].stat().st_size,
-        ))
+        sidecar = JobSidecar(
+            path   = volatile["source"],
+            source = fingerprinter.of_file(volatile["source"]),
+        )
         job_yaml = volatile["work_dir"] / "job.yaml"
         write_yaml_atomic(job_yaml, sidecar.model_dump(exclude_none=True))
         before = job_yaml.read_bytes()
@@ -391,14 +395,15 @@ class TestExtractionPhaseTiming:
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
-            force_wipe = False,
-            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
-            source     = source,
+            force  = False,
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
             work_dir   = source.parent / "work",
             config     = config,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
         )
         result.file     = Artifact(
-            payload=File(path=source, file_size_bytes=source.stat().st_size),
+            payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source),
             state=ArtifactState.COMPLETE,
         )
         return result
@@ -434,7 +439,6 @@ class TestExtractionPhaseTiming:
         from pyqenc.phases.extraction import ExtractionPhase
         from pyqenc.state import ArtifactState
         from pyqenc.stream_model import (
-            File,
             SubtitleStream,
             SubtitleStreamInfo,
         )
@@ -442,7 +446,7 @@ class TestExtractionPhaseTiming:
         # A complete subtitle row so _recover returns all-complete → REUSED path
         stub_artifact = Artifact(
             payload = SubtitleStream(
-                file = File(path=tmp_path / "source.mkv"),
+                file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
                 info = SubtitleStreamInfo(
                     track_id=3, codec_name="subrip",
                     extracted_path=tmp_path / "work" / "extracted" / "sub.srt",
@@ -482,7 +486,6 @@ class TestExtractionPhaseTiming:
         from pyqenc.phases.extraction import ExtractionPhase
         from pyqenc.state import ArtifactState
         from pyqenc.stream_model import (
-            File,
             SubtitleStream,
             SubtitleStreamInfo,
         )
@@ -494,7 +497,7 @@ class TestExtractionPhaseTiming:
 
         stub_artifact = Artifact(
             payload = SubtitleStream(
-                file = File(path=tmp_path / "source.mkv"),
+                file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
                 info = SubtitleStreamInfo(
                     track_id=3, codec_name="subrip",
                     extracted_path=absent_path,
@@ -537,7 +540,6 @@ class TestExtractionPhaseTiming:
         from pyqenc.phases.extraction import ExtractionPhase
         from pyqenc.state import ArtifactState
         from pyqenc.stream_model import (
-            File,
             SubtitleStream,
             SubtitleStreamInfo,
         )
@@ -547,7 +549,7 @@ class TestExtractionPhaseTiming:
 
         stub_artifact = Artifact(
             payload = SubtitleStream(
-                file = File(path=tmp_path / "source.mkv"),
+                file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
                 info = SubtitleStreamInfo(
                     track_id=3, codec_name="subrip",
                     extracted_path=tmp_path / "work" / "extracted" / "sub.srt",
@@ -585,11 +587,12 @@ class TestChunkingPhaseTiming:
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
-            force_wipe = False,
-            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
-            source     = source,
+            force  = False,
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
             work_dir   = tmp_path / "work",
             config     = config,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
         )
         return result
 
@@ -643,15 +646,19 @@ class TestChunkingPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.stream_model import ChunkingSidecar as _CS
-        from pyqenc.stream_model import SceneRecord
+        from pyqenc.phases.chunking import ChunkingSidecar as _CS
+        from pyqenc.phases.chunking import SceneRecord
 
         outcome: dict[str, str] = {}
         work_dir = tmp_path / "work"
         work_dir.mkdir(parents=True, exist_ok=True)
         write_yaml_atomic(
             work_dir / "chunking.yaml",
-            _CS(scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)]).model_dump(),
+            _CS(
+                source=Fingerprint(token="0" * 32),
+                scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)],
+                scene_threshold=27.0, min_scene_length=24,
+            ).model_dump(),
         )
 
         def run(collector: MetricsCollector) -> None:
@@ -710,14 +717,18 @@ class TestChunkingPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.stream_model import ChunkingSidecar as _CS
-        from pyqenc.stream_model import SceneRecord
+        from pyqenc.phases.chunking import ChunkingSidecar as _CS
+        from pyqenc.phases.chunking import SceneRecord
 
         work_dir = tmp_path / "work"
         work_dir.mkdir(parents=True, exist_ok=True)
         write_yaml_atomic(
             work_dir / "chunking.yaml",
-            _CS(scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)]).model_dump(),
+            _CS(
+                source=Fingerprint(token="0" * 32),
+                scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)],
+                scene_threshold=27.0, min_scene_length=24,
+            ).model_dump(),
         )
 
         def run(collector: MetricsCollector) -> None:
@@ -777,11 +788,12 @@ class TestAudioPhaseTiming:
         job_result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
-            force_wipe = False,
-            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
-            source     = source,
+            force  = False,
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
             work_dir   = work_dir,
             config     = config,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
         )
 
         extraction_result = ExtractionPhaseResult(
@@ -913,11 +925,12 @@ class TestOptimizationPhaseTiming:
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
-            force_wipe = False,
-            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
-            source     = source,
+            force  = False,
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
             work_dir   = tmp_path / "work",
             config     = config,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
         )
         return result
 
@@ -993,15 +1006,60 @@ class TestOptimizationPhaseTiming:
         no-pending fast exit instead of spawning real encodes.
         """
         from pyqenc.constants import ENCODED_OUTPUT_DIR
+        from pyqenc.stream_model import EncodedChunk
 
         chunk = _make_chunk_window(tmp_path / "source.mkv", 0.0, 1.0)
         for strategy in (_STRATEGY_SLOW_H265, _STRATEGY_H265_AQ):
             strategy_dir = tmp_path / "work" / ENCODED_OUTPUT_DIR / strategy.safe_name()
             strategy_dir.mkdir(parents=True, exist_ok=True)
-            (strategy_dir / f"{chunk.safe_name()}.1920x1080.q18.0.mkv").write_bytes(b"x" * 64)
-            (strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml").write_text(
+            (strategy_dir / EncodedChunk.format_winner_file_name(chunk.safe_name())).write_bytes(b"x" * 64)
+            (strategy_dir / EncodedChunk.format_winner_sidecar_name(chunk.safe_name())).write_text(
                 "crf: 18.0\n", encoding="utf-8",
             )
+
+    def _persist_current_sidecar(
+        self,
+        phase:      OptimizationPhase,
+        tmp_path:   Path,
+    ) -> None:
+        """Persist an optimization.yaml whose keys MATCH the phase's live inputs.
+
+        Built through the production composer from the stub registry's own
+        results, with a summary covering the plan — the run then takes the
+        no-pending fast exit (no invalidation, no encodes)."""
+        from pyqenc.models import fingerprinter
+        from pyqenc.phases.chunking import ChunkingPhase
+        from pyqenc.phases.job import JobPhase
+        from pyqenc.phases.optimization import (
+            StrategySummaryRow,
+            current_optimization_sidecar,
+        )
+        from pyqenc.phases.probe import ProbePhase
+        from pyqenc.state import ProbeFacet
+
+        job      = phase._phases[JobPhase]
+        probe    = phase._phases[ProbePhase]
+        chunking = phase._phases[ChunkingPhase]
+        assert job.result is not None and probe.result is not None
+        assert chunking.result is not None
+        strategy = _STRATEGY_SLOW_H265
+        sidecar = current_optimization_sidecar(
+            plan        = probe.result.plan,
+            source      = job.result.file.payload.fingerprint,
+            chunks      = fingerprinter.of_ids(
+                a.payload.safe_name() for a in chunking.result.chunks
+            ),
+            probe       = ProbeFacet.from_probe(probe.result),
+            sampling    = phase._config.measurement.sampling,
+            test_chunks = [a.payload.safe_name() for a in chunking.result.chunks],
+            summary     = [
+                StrategySummaryRow(strategy=strategy.display_name(), total_size=1024),
+                StrategySummaryRow(
+                    strategy=_STRATEGY_H265_AQ.display_name(), total_size=512,
+                ),
+            ],
+        )
+        save_model(tmp_path / "work" / "optimization.yaml", sidecar)
 
     def test_recovery_recorded_with_cached_optimization_params(self, tmp_path: Path) -> None:
         """An optimization run with persisted results must report its recovery scan.
@@ -1015,27 +1073,11 @@ class TestOptimizationPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.models import CropParams
-        from pyqenc.state import OptimizationParams, ProbeState, StrategyTestResult
-
-        strategy = _STRATEGY_SLOW_H265
-        # sampling must match the config default so no invalidation fires.
-        persisted = OptimizationParams(
-            probe            = ProbeState(frame_count=0, crop=CropParams()),
-            test_chunks      = ["chunk_0"],
-            strategy_results = [
-                StrategyTestResult(strategy=strategy.display_name(), total_size=1024),
-                StrategyTestResult(strategy=_STRATEGY_H265_AQ.display_name(), total_size=512),
-            ],
-            quality_targets  = [],
-            sampling = 1,     # matches AppConfig.encoding.sampling default
-        )
-
         def run(collector: MetricsCollector) -> None:
             phase = self._make_phase(tmp_path, collector, optimize=True)
             self._seed_winner_pairs(tmp_path)
-            with patch.object(OptimizationParams, "load", return_value=persisted):
-                phase.run()
+            self._persist_current_sidecar(phase, tmp_path)
+            phase.run()
 
         metrics   = _recorded_metrics(tmp_path, run)
         top_level = _top_level_keys(metrics)
@@ -1078,7 +1120,7 @@ class TestOptimizationPhaseTiming:
             success      = True,
             final_crf    = Decimal("28.0"),
             attempts     = 2,
-            encoded_file = MagicMock(path=encoded_path, resolution="1920x1080"),
+            encoded_file = MagicMock(path=encoded_path),
             reused       = False,
         )
 
@@ -1117,27 +1159,12 @@ class TestOptimizationPhaseTiming:
 
         Validates: Requirements 6.4, 6.5
         """
-        from pyqenc.models import CropParams
-        from pyqenc.state import OptimizationParams, ProbeState, StrategyTestResult
-
         collector = NoOpMetricsCollector()
         phase     = self._make_phase(tmp_path, collector, optimize=True)
         self._seed_winner_pairs(tmp_path)
+        self._persist_current_sidecar(phase, tmp_path)
 
-        strategy = _STRATEGY_SLOW_H265
-        persisted = OptimizationParams(
-            probe            = ProbeState(frame_count=0, crop=CropParams()),
-            test_chunks      = ["chunk_0"],
-            strategy_results = [
-                StrategyTestResult(strategy=strategy.display_name(), total_size=1024),
-                StrategyTestResult(strategy=_STRATEGY_H265_AQ.display_name(), total_size=512),
-            ],
-            quality_targets  = [],
-            sampling = 1,
-        )
-
-        with patch.object(OptimizationParams, "load", return_value=persisted):
-            result = phase.run()
+        result = phase.run()
 
         assert result is not None
 
@@ -1162,11 +1189,12 @@ class TestEncodingPhaseTiming:
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
-            force_wipe = False,
-            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
-            source     = source,
+            force  = False,
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
             work_dir   = tmp_path / "work",
             config     = config,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
         )
         return result
 
@@ -1333,7 +1361,7 @@ class TestEncodingPhaseTiming:
             success      = True,
             final_crf    = Decimal("28.0"),
             attempts     = 3,
-            encoded_file = MagicMock(path=encoded_path, resolution="1920x1080"),
+            encoded_file = MagicMock(path=encoded_path),
             reused       = False,
         )
 
@@ -1389,7 +1417,7 @@ class TestEncodingPhaseTiming:
             success      = True,
             final_crf    = Decimal("28.0"),
             attempts     = 1,
-            encoded_file = MagicMock(path=encoded_path, resolution="1920x1080"),
+            encoded_file = MagicMock(path=encoded_path),
             reused       = True,
         )
 
@@ -1454,11 +1482,12 @@ class TestMergePhaseTiming:
         result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
-            force_wipe = False,
-            file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
-            source     = source,
+            force  = False,
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
             work_dir   = tmp_path / "work",
             config     = config,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
         )
         return result
 
@@ -1527,9 +1556,6 @@ class TestMergePhaseTiming:
         from pyqenc.phase import Artifact as _Artifact
         from pyqenc.state import ArtifactState as _ArtifactState
         from pyqenc.stream_model import (
-            File as _File,
-        )
-        from pyqenc.stream_model import (
             VideoStream as _VideoStream,
         )
         from pyqenc.stream_model import (
@@ -1538,7 +1564,7 @@ class TestMergePhaseTiming:
 
         video_row = _Artifact(
             payload = _VideoStream(
-                file = _File(path=work_dir / "source.mkv"),
+                file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=work_dir / "source.mkv"),
                 info = _VideoStreamInfo(track_id=0),
             ),
             state   = _ArtifactState.COMPLETE,

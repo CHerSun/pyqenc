@@ -12,16 +12,12 @@ pattern.
 
 import asyncio
 import logging
-from pathlib import Path
-
-logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# AudioPhase — Phase object
-# ---------------------------------------------------------------------------
-
+import shutil
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar
+from pathlib import Path
+from typing import TYPE_CHECKING, ClassVar, Self
+
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -37,26 +33,30 @@ from pyqenc.audio.chain import (
 from pyqenc.audio.select import resolve_selection
 from pyqenc.constants import (
     AUDIO_OUTPUT_DIR,
-    CHAIN_FILENAME_SUFFIX,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
     THICK_LINE,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import PhaseOutcome
+from pyqenc.models import Fingerprint, PhaseOutcome
 from pyqenc.phase import (
     Artifact,
     Phase,
     PhaseRegistry,
     PhaseResult,
     Recovery,
+    RecoveryError,
+    claim_expected_name,
 )
 from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
-from pyqenc.state import ArtifactState, AudioSidecar
+from pyqenc.state import ArtifactState
 from pyqenc.stream_model import AudioOutput, AudioStream, File
 from pyqenc.utils.alive import AdvanceState, ProgressBar
-from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
+from pyqenc.utils.fs import remove_stale_tmp_files
+from pyqenc.utils.yaml_utils import load_model, save_model
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -76,6 +76,85 @@ class AudioPhaseResult(PhaseResult):
     outputs: list[Artifact[AudioOutput]] = field(default_factory=list)
 
 
+class AudioSidecar(BaseModel):
+    """Sidecar model for ``audio.yaml``.
+
+    Records the committed **intent** per chain (its identity token), keyed
+    by chain name, plus the source identity key. ``select`` is
+    deliberately NOT persisted: selection is a pure function of the current
+    extracted tracks plus the current ``select`` config, recomputed for free
+    every run. The sidecar never reconstructs a
+    :class:`~pyqenc.audio.chain.ResolvedChain` from a record — the token is
+    opaque by design; invalidation compares tokens. No output-extension
+    fact is persisted (dropped 2026-10-10): stale outputs are swept by the
+    listing protocol (one listing, expected names of the live chains,
+    leftovers deleted — Req 12-13), so nothing needs to remember how old
+    files were named.
+
+    On-disk shape (``audio.yaml``)::
+
+        chains:
+          normal: {token: "9f2c…"}
+        source: {size: …, token: "…"}
+
+    Attributes:
+        chains: Map of chain name → its committed chain fingerprint.
+        source: The source identity key (mismatch = catastrophic, Req 33) —
+                required: every write path carries it, and a sidecar missing
+                it fails validation → absent → the phase redoes its work.
+    """
+
+    chains: dict[str, Fingerprint] = Field(default_factory=dict)
+    source:  Fingerprint
+
+    @classmethod
+    def from_resolved(
+        cls,
+        resolved: dict[str, ResolvedChain],
+        source: Fingerprint,
+    ) -> Self:
+        """Build an ``AudioSidecar`` from resolved chains.
+
+        Each entry carries the chain's own fingerprint (the SAME derivation
+        the phase compares with — DRY).
+
+        Args:
+            resolved: Map of chain name → :class:`ResolvedChain`.
+            source:   The source identity key at the writing site.
+
+        Returns:
+            The sidecar holding one fingerprint per chain.
+        """
+        return cls(
+            chains={name: chain.fingerprint for name, chain in resolved.items()},
+            source=source,
+        )
+
+
+def _expected_output_names(
+    tracks: list[AudioStream],
+    resolved: dict[str, ResolvedChain],
+) -> set[str]:
+    """The exact expected output names for (track set x live chains).
+
+    The single composition site for both the orphan sweep and the row
+    classification: composed through the entity composer
+    (:func:`chain_output_path`) — the naming site, no manual joins.
+
+    Args:
+        tracks:   The working track set.
+        resolved: Current resolved chains, keyed by name.
+
+    Returns:
+        The composed bare file names.
+    """
+    return {
+        chain_output_path(stream, name, chain.encode.extension, Path()).name
+        for stream in tracks
+        for name, chain in resolved.items()
+    }
+
+
 class AudioPhase(Phase[AudioPhaseResult]):
     """Phase object for audio stream processing.
 
@@ -90,15 +169,15 @@ class AudioPhase(Phase[AudioPhaseResult]):
         phases: Phase registry; used to resolve typed dependency references.
     """
 
-    name:        str       = "audio"
+    name: str = "audio"
     SIDECAR_NAME = "audio.yaml"
-    DEPENDS_ON:  ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase)
+    DEPENDS_ON: ClassVar[tuple[type[Phase], ...]] = (JobPhase, ExtractionPhase)
     _METRIC_KEY: MetricKey = MetricKey.AUDIO
 
     def __init__(
         self,
-        config:    AppConfig,
-        phases:    PhaseRegistry,
+        config: AppConfig,
+        phases: PhaseRegistry,
         *,
         collector: MetricsCollector,
     ) -> None:
@@ -119,58 +198,78 @@ class AudioPhase(Phase[AudioPhaseResult]):
     # Recovery + invalidation
     # ------------------------------------------------------------------
 
-    def _recover(self) -> Recovery:
-        """Resolve the plan, invalidate changed chains, classify on-disk outputs.
+    def _invalidate(self) -> None:
+        """Key-triggered effects over the audio outputs (disk effects only).
 
-        Steps (in execution order):
+        Identity key (Req 33): a persisted identity contradicting the live
+        source is catastrophic — fatal without permission; with it, wipe the
+        audio dir and the sidecar. Unknown currency (Req 47, A-1): a MISSING
+        sidecar while the audio dir holds files means nothing proves what
+        produced them — the conservative wipe is automatic (vacuous when
+        nothing exists). Chain invalidation (Req 15/46, nuance 4): differing
+        and removed chains' outputs are deleted by their exact COMPOSED
+        names (current track set x the entity composer — no directory
+        parsing, no listing), and the sidecar is committed BEFORE producing
+        when it differs.
 
-        1. Resolve the working track set (``resolve_selection`` — select is
-           never persisted) and every configured chain (``resolve_chain``).
-        2. ``force_wipe`` → delete every chain output and the sidecar.
-        3. Clean up leftover ``.tmp`` files.
-        4. Compare each resolved chain against the persisted sidecar entry of the
-           same name. For a **differing** chain, delete its on-disk
-           outputs for ALL tracks by exact chain-name match so they are
-           reproduced. For a chain **removed** from config, delete its persisted
-           outputs (cleanup — unwanted now).
-        5. Write the updated sidecar (current resolved chains) **before producing
-           anything** when it differs from what is on disk.
-        6. Classify each expected (track, chain) output COMPLETE (file present) /
-           ABSENT (missing) — completion is read from disk only.
-
-        Returns:
-            The :class:`Recovery` single source of truth (internal artifact
-            list: wanted expected outputs plus any present-but-unwanted
-            surplus files).
+        Raises:
+            RecoveryError: On an identity mismatch without ``--force``.
         """
-        job_result = self._dep_result(JobPhase)
-        work_dir    = job_result.work_dir
+        job_result = self._deps[JobPhase]
+        work_dir = job_result.work_dir
         sidecar_path = work_dir / AudioPhase.SIDECAR_NAME
-        audio_cfg   = job_result.config.audio
-        force_wipe  = job_result.force_wipe
+        audio_cfg = job_result.config.audio
 
-        # Step 1 — resolve the working plan (selection is recomputed every run).
-        tracks   = self._selected_tracks()
+        tracks = self._selected_tracks()
         resolved = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
-
-        # The phase-owned audio output dir — created up front so producing
-        # can write into it.
         audio_dir = self._output_dir(tracks, work_dir)
         audio_dir.mkdir(parents=True, exist_ok=True)
 
-        # Step 2 — force wipe.
-        if force_wipe:
-            self._force_wipe(audio_dir, sidecar_path, resolved)
+        persisted_audio = load_model(sidecar_path, AudioSidecar)
+        if persisted_audio is not None and not persisted_audio.source.matches(job_result.file.payload.fingerprint):
+            if not job_result.force:
+                raise RecoveryError(
+                    "Source content identity mismatch (audio.yaml) — the chain "
+                    "outputs belong to a different source.  Re-run with --force "
+                    "to grant permission to wipe them and reprocess the new source."
+                )
+            logger.warning("Source identity mismatch (--force granted — wiping the audio dir and audio.yaml)")
+            self._wipe_audio_dir(audio_dir, sidecar_path)
+        elif persisted_audio is None:
+            # Unknown currency (Req 47, A-1): no record of what produced the
+            # files — the conservative wipe fires on the missing sidecar
+            # ALONE (vacuous when nothing exists; no existence probe, no
+            # listing — spec nuance 2).
+            logger.info(
+                "audio.yaml missing — chain-output currency unknown; wiping "
+                "the audio dir (outputs reproduce from the source)"
+            )
+            self._wipe_audio_dir(audio_dir, sidecar_path)
 
-        # Step 3 — clear leftover .tmp files.
+        self._invalidate_and_commit(audio_dir, sidecar_path, resolved, tracks)
+
+    def _recover(self) -> Recovery:
+        """Classification from ONE listing of the audio dir (Req 15, §103).
+
+        Runs after :meth:`_invalidate` settled the outputs on disk: the
+        single listing feeds BOTH the per-(track, chain) membership
+        classification and the surplus scan (present names no row consumed —
+        retained deliverables). Selection (``select``) is recomputed live
+        every run and never persists.
+        """
+        job_result = self._deps[JobPhase]
+        work_dir = job_result.work_dir
+        audio_cfg = job_result.config.audio
+
+        tracks = self._selected_tracks()
+        resolved = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
+        audio_dir = self._output_dir(tracks, work_dir)
+        audio_dir.mkdir(parents=True, exist_ok=True)
+
         remove_stale_tmp_files(audio_dir)
 
-        # Step 4 + 5 — invalidate differing/removed chains and rewrite the sidecar
-        #              BEFORE producing anything.
-        self._invalidate_and_commit(audio_dir, sidecar_path, resolved)
-
-        # Step 6 — classify expected outputs (completion from disk only).
-        return Recovery.from_artifacts(self._classify(audio_dir, tracks, resolved))
+        listing = {f.name for f in audio_dir.iterdir() if f.is_file()}
+        return Recovery.from_artifacts(self._classify(audio_dir, tracks, resolved, listing))
 
     def _output_dir(self, tracks: list[AudioStream], work_dir: Path) -> Path:
         """Return the phase's dedicated audio output directory (``work_dir/audio``).
@@ -188,134 +287,130 @@ class AudioPhase(Phase[AudioPhaseResult]):
         """
         return work_dir / AUDIO_OUTPUT_DIR
 
-    def _force_wipe(
-        self,
-        audio_dir:    Path,
-        sidecar_path: Path,
-        resolved:     dict[str, ResolvedChain],
-    ) -> None:
-        """Delete every chain output and the sidecar.
+    @staticmethod
+    def _wipe_audio_dir(audio_dir: Path, sidecar_path: Path) -> None:
+        """Wipe the phase's own output dir and the sidecar.
 
-        Only files carrying the ``chain=<name>`` token are removed, so any
-        unrelated file dropped into the dedicated audio dir survives.
-
-        Args:
-            audio_dir:    The dedicated audio output directory.
-            sidecar_path: The ``audio.yaml`` path.
-            resolved:     Current resolved chains (unused for the wipe; kept for a
-                          uniform invalidation signature).
+        Used by the catastrophic identity branch and the conservative
+        unknown-currency branch — both end in a full reproduce from the
+        source, so nothing in the dir is worth keeping. The wipe is vacuous
+        when the dir is empty.
         """
-        if audio_dir.exists():
-            for path in audio_dir.iterdir():
-                if path.is_file() and _parse_chain_name(path.name) is not None:
-                    path.unlink(missing_ok=True)
-                    logger.debug("force_wipe: deleted %s", path.name)
-        if sidecar_path.exists():
-            sidecar_path.unlink(missing_ok=True)
-            logger.debug("force_wipe: deleted %s", sidecar_path.name)
+        shutil.rmtree(audio_dir, ignore_errors=True)
+        sidecar_path.unlink(missing_ok=True)
 
     def _selected_tracks(self) -> list[AudioStream]:
         """Resolve the working track set from extraction + ``audio.select``."""
-        extraction_result = self._dep_result(ExtractionPhase)
-        audio_streams: list[AudioStream] = [
-            a.payload for a in extraction_result.audio_streams
-        ]
-        audio_cfg = self._dep_result(JobPhase).config.audio
+        extraction_result = self._deps[ExtractionPhase]
+        audio_streams: list[AudioStream] = [a.payload for a in extraction_result.audio_streams]
+        audio_cfg = self._deps[JobPhase].config.audio
         return resolve_selection(audio_streams, audio_cfg.select)
 
     def _invalidate_and_commit(
         self,
-        audio_dir:    Path,
+        audio_dir: Path,
         sidecar_path: Path,
-        resolved:     dict[str, ResolvedChain],
+        resolved: dict[str, ResolvedChain],
+        tracks: list[AudioStream],
     ) -> None:
-        """Delete outputs of differing/removed chains, then commit the sidecar.
+        """Commit the current chain fingerprints, sweeping orphaned outputs.
 
-        Compares each resolved chain to the persisted sidecar. A
-        differing chain's outputs are deleted for all tracks (reproduced);
-        a removed chain's persisted outputs are deleted (cleanup). The
-        updated sidecar is written **before any output is produced**;
-        when nothing differs the rewrite is skipped (the sidecar is
-        already correct).
+        The listing protocol (Req 12-13): ONE directory listing, expected
+        names composed from the live (tracks × chains), every leftover
+        deleted — outputs of changed chains (any extension they carried),
+        removed chains, and deselected tracks alike; nothing needs to
+        remember how stale files were named. Comparisons stay per-chain
+        fingerprint (changed chains log their reprocessing; a same-name
+        change is reproduced in place via the atomic .tmp→rename
+        promotion). The updated sidecar is written **before any output is
+        produced**; when nothing differs the rewrite is skipped.
 
         Args:
             audio_dir:    The dedicated audio output directory.
             sidecar_path: The ``audio.yaml`` path.
             resolved:     Current resolved chains, keyed by name.
+            tracks:       The working track set (expected-name scope).
         """
-        persisted   = AudioSidecar.load(sidecar_path)
-        prior_sigs  = persisted.chains if persisted is not None else {}
+        persisted = load_model(sidecar_path, AudioSidecar)
+        prior = persisted.chains if persisted is not None else {}
 
-        # Current chain signatures (the same canonical string the sidecar stores).
-        current      = AudioSidecar.from_resolved(resolved)
-        current_sigs = current.chains
+        current = AudioSidecar.from_resolved(
+            resolved,
+            source=self._deps[JobPhase].file.payload.fingerprint,
+        )
+        current_records = current.chains
 
-        # Chains whose signature changed → invalidate (reproduce).
-        changed = {
-            name for name, sig in current_sigs.items()
-            if name in prior_sigs and prior_sigs[name] != sig
-        }
-        # Chains removed from config → invalidate (cleanup, now unwanted).
-        removed = set(prior_sigs) - set(current_sigs)
+        changed = [
+            name for name, record in current_records.items() if name in prior and prior[name].token != record.token
+        ]
+        removed = [name for name in prior if name not in current_records]
+        for chain_name in changed:
+            logger.info(
+                "Chain %r changed — invalidating its outputs for reprocessing",
+                chain_name,
+            )
+        for chain_name in removed:
+            logger.info(
+                "Chain %r removed from config — cleaning up its outputs",
+                chain_name,
+            )
 
-        for name in sorted(changed):
-            logger.info("Chain %r changed — invalidating its outputs for reprocessing", name)
-            self._delete_chain_outputs(audio_dir, name)
-        for name in sorted(removed):
-            logger.info("Chain %r removed from config — cleaning up its outputs", name)
-            self._delete_chain_outputs(audio_dir, name)
+        def _unlink(name: str) -> None:
+            path = audio_dir / name
+            try:
+                path.unlink()
+                logger.debug("Deleted invalidated audio output: %s", name)
+            except OSError as exc:
+                logger.warning("Could not delete %s: %s", path, exc)
 
-        # Commit the current signatures before producing. Skip the rewrite
+        # Disk effect 1 — a changed chain's stale bytes under its CURRENT
+        # (live-composed) name: deletion is what presence-based classification
+        # reads as "reproduce" (Req 12 keeps classification sidecar-blind).
+        # An extension change renames the outputs — the old names fall to the
+        # sweep below; no persisted fact names them.
+        for chain_name in changed:
+            for name in _expected_output_names(tracks, {chain_name: resolved[chain_name]}):
+                _unlink(name)
+
+        # Disk effect 2 — the orphan sweep (Req 12-13): one listing minus the
+        # live expected names; every leftover deleted (old extensions,
+        # removed chains, deselected tracks).
+        if audio_dir.is_dir():
+            expected = _expected_output_names(tracks, resolved)
+            listing = {p.name for p in audio_dir.iterdir()}
+            for name in sorted(listing - expected):
+                if name.endswith(TEMP_SUFFIX):
+                    continue  # stale .tmp pre-clean owns those
+                _unlink(name)
+
+        # Commit the current chain records before producing. Skip the rewrite
         # when the sidecar already matches exactly.
-        if prior_sigs != current_sigs:
-            current.save(sidecar_path)
+        if prior != current_records:
+            save_model(sidecar_path, current)
             logger.debug("Committed audio sidecar (%d chain(s)) before producing", len(resolved))
-
-    def _delete_chain_outputs(self, audio_dir: Path, chain_name: str) -> None:
-        """Delete on-disk outputs of ``chain_name`` by EXACT chain-name.
-
-        Output files are ``<stream safe name> chain=<name>.<ext>``. The trailing
-        ``chain=<name>`` token is parsed from each candidate and compared for
-        equality — never a substring/prefix match — so ``chain=nightlong`` is not
-        deleted when invalidating ``night``.
-
-        Args:
-            audio_dir:  The directory holding chain outputs.
-            chain_name: The exact chain name whose outputs must be removed.
-        """
-        if not audio_dir.exists():
-            return
-        for path in audio_dir.iterdir():
-            if not path.is_file():
-                continue
-            if _parse_chain_name(path.name) == chain_name:
-                try:
-                    path.unlink()
-                    logger.debug("Deleted invalidated output: %s", path.name)
-                except OSError as exc:
-                    logger.warning("Could not delete %s: %s", path, exc)
 
     def _classify(
         self,
         audio_dir: Path,
-        tracks:    list[AudioStream],
-        resolved:  dict[str, ResolvedChain],
+        tracks: list[AudioStream],
+        resolved: dict[str, ResolvedChain],
+        listing: set[str],
     ) -> list[Artifact]:
-        """Build one row per expected (track, chain), classified from disk.
+        """Build one row per expected (track, chain) from the single listing.
 
-        Completion is read solely from output-file presence: present →
-        COMPLETE, missing → ABSENT. Expected rows carry an
-        :class:`~pyqenc.stream_model.AudioOutput` payload composed at the
-        chain-output materialization site. Any present file that is not an
-        expected output of a configured chain is surfaced as present-but-
-        unwanted (``COMPLETE``, ``wanted=False``) — its chain is gone from
-        the config, so the on-disk product itself (a
-        :class:`~pyqenc.stream_model.File`) is the payload.
+        Completion is membership of the composed name in the listing (Req 15,
+        §103 — one listing before the rows, no per-output ``.exists()``).
+        Expected rows carry an :class:`~pyqenc.stream_model.AudioOutput`
+        payload composed at the chain-output materialization site. Any listed
+        name that is not an expected output surfaces as present-but-unwanted
+        (``COMPLETE``, ``wanted=False``, retained in place) — its chain is
+        gone from the config or its track no longer selected.
 
         Args:
             audio_dir: The dedicated audio output directory.
             tracks:    The working track set.
             resolved:  Current resolved chains, keyed by name.
+            listing:   The ONE directory listing (final names, no ``.tmp``).
 
         Returns:
             The internal ledger (expected outputs + surplus files).
@@ -323,32 +418,33 @@ class AudioPhase(Phase[AudioPhaseResult]):
 
         rows: list[Artifact] = []
         expected_names: set[str] = set()
+        claimed: dict[str, str] = {}
+        """The listing's claim registry — the Req 5 collision guard."""
 
         for stream in tracks:
             assert stream.info.layout is not None, "layout guaranteed by ExtractionPhase"
             for name, chain in resolved.items():
                 out = chain_output_path(stream, name, chain.encode.extension, audio_dir)
+                claim_expected_name(claimed, out.name, f"{stream.display_name()} × chain {name!r}")
                 expected_names.add(out.name)
-                rows.append(Artifact(
-                    payload = AudioOutput(stream=stream, chain_name=name, output_path=out),
-                    state   = ArtifactState.COMPLETE if out.exists() else ArtifactState.ABSENT,
-                ))
+                rows.append(
+                    Artifact(
+                        payload=AudioOutput(stream=stream, chain_name=name, output_path=out),
+                        state=(ArtifactState.COMPLETE if out.name in listing else ArtifactState.ABSENT),
+                    )
+                )
 
-        # Surface present-but-unwanted surplus files (a stale output whose chain
-        # was removed and whose deletion failed, or an unrelated file).
-        if audio_dir.exists():
-            for path in audio_dir.iterdir():
-                if (
-                    path.is_file()
-                    and not path.name.endswith(TEMP_SUFFIX)
-                    and _parse_chain_name(path.name) is not None
-                    and path.name not in expected_names
-                ):
-                    rows.append(Artifact(
-                        payload = File(path=path, file_size_bytes=safe_stat_size(path)),
-                        state   = ArtifactState.COMPLETE,
-                        wanted  = False,
-                    ))
+        # Surface present-but-unwanted surplus files (the same listing minus
+        # every consumed name).
+        for name in sorted(listing - expected_names):
+            path = audio_dir / name
+            rows.append(
+                Artifact(
+                    payload=File(path=path),
+                    state=ArtifactState.COMPLETE,
+                    wanted=False,
+                )
+            )
 
         return rows
 
@@ -377,18 +473,18 @@ class AudioPhase(Phase[AudioPhaseResult]):
             failures), FAILED only when nothing could be produced and failures
             occurred.
         """
-        artifacts  = wanted
-        pending    = [a for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)]
-        job_result = self._dep_result(JobPhase)
-        audio_cfg  = job_result.config.audio
-        resolved   = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
-        audio_dir  = job_result.work_dir / AUDIO_OUTPUT_DIR
+        artifacts = wanted
+        pending = [a for a in artifacts if a.state in (ArtifactState.ABSENT, ArtifactState.PARTIAL)]
+        job_result = self._deps[JobPhase]
+        audio_cfg = job_result.config.audio
+        resolved = {spec.name: resolve_chain(spec, audio_cfg.filters) for spec in audio_cfg.chains}
+        audio_dir = job_result.work_dir / AUDIO_OUTPUT_DIR
 
         if pending:
             logger.info("Sources: %d (track, chain) output(s) to produce", len(pending))
 
         produced = 0
-        failed   = 0
+        failed = 0
         with ProgressBar(total=len(pending), title="AUDIO", total_count=len(pending)) as advance:
             for art in pending:
                 output = art.payload
@@ -413,7 +509,10 @@ class AudioPhase(Phase[AudioPhaseResult]):
         reused = sum(1 for a in artifacts if a.state == ArtifactState.COMPLETE) - produced
         logger.info(
             "%s Audio complete: %d produced, %d reused, %d failed",
-            SUCCESS_SYMBOL_MINOR, produced, max(reused, 0), failed,
+            SUCCESS_SYMBOL_MINOR,
+            produced,
+            max(reused, 0),
+            failed,
         )
         logger.info(THICK_LINE)
 
@@ -448,9 +547,9 @@ class AudioPhase(Phase[AudioPhaseResult]):
 
     def _make_result(
         self,
-        outcome:   PhaseOutcome,
+        outcome: PhaseOutcome,
         artifacts: list[Artifact],
-        message:   str,
+        message: str,
     ) -> AudioPhaseResult:
         """Assemble an ``AudioPhaseResult`` from the wanted rows.
 
@@ -467,34 +566,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
         """
         outputs = [r for r in artifacts if isinstance(r.payload, AudioOutput)]
         return AudioPhaseResult(
-            outcome   = outcome,
-            message   = message,
-            outputs   = outputs,
+            outcome=outcome,
+            message=message,
+            outputs=outputs,
         )
-
-
-# ---------------------------------------------------------------------------
-# AudioPhase module-level helpers
-# ---------------------------------------------------------------------------
-
-def _parse_chain_name(filename: str) -> str | None:
-    """Return the exact chain name from a ``<stream safe name> chain=<name>.<ext>`` filename.
-
-    Splits on the ``chain=`` suffix delimiter and strips the extension, returning
-    the chain name verbatim for exact-match invalidation. Returns
-    ``None`` when the filename carries no ``chain=`` token (not a chain output).
-
-    Args:
-        filename: A bare filename (no directory component).
-
-    Returns:
-        The chain name, or ``None`` when the file is not a chain output.
-    """
-    idx = filename.rfind(CHAIN_FILENAME_SUFFIX)
-    if idx == -1:
-        return None
-    tail = filename[idx + len(CHAIN_FILENAME_SUFFIX):]
-    # Strip the extension (single trailing suffix) — chain names are filesystem
-    # safe and contain no dot in practice, but rsplit is robust to a dotted stem.
-    dot = tail.rfind(".")
-    return tail[:dot] if dot != -1 else tail

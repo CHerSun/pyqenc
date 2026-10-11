@@ -73,53 +73,7 @@ Warning is enough, but maybe make it log rarer, like exponential delay (first fa
 
 ## Correctness / invalidation
 
-## 🤔 9. AudioPhase doesn't invalidate when its sidecar is deleted
-
-**Status:** needs thinking (bug-ish, verified in code)
-
-- Missing sidecar loads as `None` → `prior_sigs = {}` → nothing invalidated,
-  sidecar silently rewritten (`_invalidate_and_commit`,
-  `pyqenc/phases/audio.py:417-443`); `_classify` judges completion solely
-  from output-file presence (`audio.py:477-499`) → stale outputs produced
-  under an old chain config survive a sidecar deletion as "COMPLETE".
-
-**Questions to think about:** detect sidecar-missing-with-outputs and
-re-verify (chain signature embedded in output names?) or force re-run?
-
 ---
-
-## 🤔 11. Per-phase invalidation is unvalidated
-
-**Status:** needs thinking (review)
-
-- Each phase hand-lists its invalidation criteria, effects and sidecar
-  fields. Review them from a logical perspective — per phase: which criteria
-  and effects invalidation SHOULD have, and which sidecar fields that really
-  requires — versus what the code does today. Refresh
-  `parameters-phases-invalidation.md` from the result (it is stale).
-
-**Questions to think about:** rebuild the matrix from first principles;
-drop stale rows and fields; is config-fingerprint-based invalidation
-warranted anywhere?
-
-Need to build first the inputs per phase (what it consumes from user/cli, config, dependencies phases).
-Then we need to articulate what changes on each input change. Does that really affect our invesment and needs a new investment? Or is that just an instant selection change for example?
-Say, tolerance for optimization phase - its change - does it really need reinvestment, if we previously fully completed optimization? My best guess is - no - we have all previous results on sidecar, it is instant re-evaluation.
-
-After that we need to check code to see which invalidations are actually in-place (only after logical part, not to interfere with logical thinking).
-Cross-check results from logical vs code.
-
-One thing to note here. We must reuse existing objects. I don't want introduction of custom objects. So if tolerance is part of that - it's ok to keep it for example. But if it is just a standalone field on the sidecar - definitely worth assesment.
-After that we must stop and validate with human the reasoning.
-
-This is also a chance to reestablish sidecars using class model introduced in file-stream-model and artifact-model recent specs, or the prior config rework spec - to use standard objects on sidecars.
-
-DIRECTLY RELATED: §100 + §101 (artifact-owned recovery + static winner
-names). In particular WINNERS invalidation (`encoded/`): consumption-based
-recovery makes staleness structural — leftover names after all wanted rows
-consumed are stale rows, so a winner whose identity no longer matches the
-wanted chunk set surfaces immediately instead of surviving as "COMPLETE". Settle the §100/§101 mechanics first, then this audit
-checks the remaining invalidation logic against them.
 
 ---
 
@@ -353,19 +307,6 @@ Need to check footprints and adjust accordingly for explicitly required values (
 
 ---
 
-## 39. 🤔 Forced wipe idempotency
-
-Currently forced run is a flag on Job phase result, which must be respected by each phase. Problem is, if we don't run till the end and exit in the middle,
-but we've already written new job.yaml sidecar - on rerun we won't know there was a source mismatch. Later phases which didn't reach running on previous
-correctly flagged run - won't have this extra bit of info to invalidate artifacts and we will get inconsistent output.
-
-The right approach is probably something like `finalize` but reversed (finalize runs after succesfully finishing the job) - `invalidate` maybe or something like that.
-Explicitly triggered once in reversed order (from end). And only after that is triggered - the forced wipe flag becomes unneeded and we can write new job.yaml sidecar.
-
-Or... should we remove it completely?
-- The only true usecase is when crop changed between runs. And here it works as a safeguard against accidentally deleting a lot of work (all attempts become invalid; not detectable with current light invalidation checks; don't want per-attempt sidecar reading for heavy invalidation checks for this usecase as that will affect all runs).
-- If user wants another file - he can either use new dir or purge current dir. So this one isn't a true usecase.
-
 ---
 
 ## 45. Summary table for audio
@@ -521,11 +462,6 @@ Ideally, internal things shouldn't log anything but debug messages and propagate
 
 ---
 
-## 62. Sidecars - are owned by the Phase
-
-Phase sidecars and internal machinery of the phase. Not part of model or stream_model. No1 else by their respected phase should ever be accessing them.
-Probably worth moving to the phase. Adjacent (model types, not module home): §90's typed per-mode params models.
-
 ---
 
 ## 64. Audio chain as flt
@@ -567,21 +503,6 @@ or at least better understand it. It often affects min or max statistics, making
 Investigation needed.
 
 ---
-
-## 68. Support invalidation of encoding/optimization results on config change for strategy
-
-**Status:** enabled 2026-10-05 (config-resolution, PR #26) — the comparable
-snapshot exists: `EncodingPlan` rides `ProbePhaseResult` (resolved strategies
-+ targets, frozen, directly comparable/serializable). The invalidation
-wiring itself remains open.
-
-We already support config changes for audio chain via a full-string preservation and per-chain comparisson. This allows end-user to change the chain and get proper results still, even if previous outputs exist.
-
-We should consider similar approach for encoding/optimization phases, where we use strategy name alone currently. Should we also support for params change invalidation (needs force wipe flag).
-
----
-
-===
 
 ## 75. Flaky: test_pts_conversion_correctness under load — needs thinking
 
@@ -778,36 +699,6 @@ band).
 
 ---
 
-## 86. Merge-phase invalidation is incomplete — general design needed — needs thinking
-
-Found by the 2026-10-03 fixed-quality smoke test on real data. The quick fix for
-the common case LANDED the same day: uniform pinned-value fixed runs (the `-q`
-workflow) name their outputs `<stem> <strategy> <label>=<value>.mkv` (label
-sanitized, value quantized to the strategy's granularity), so q changes and
-search↔fixed mode switches produce a different output name — stale merges are
-never reused as current, no blind wipes, and same-q reruns keep their
-measurements.
-
-Still open (the general problem — related to phase invalidation broadly and to
-§68 config-change invalidation):
-
-- Searched runs: winner sets can change under the same strategy name (tolerance
-  change re-selection, target changes producing different winners) while merge
-  params (targets/sampling/probe) stay constant → stale merge reused as
-  COMPLETE. Same mechanism the smoke test exposed.
-- Non-uniform fixed runs (collapsed profiles of different values, no `-q`): no
-  suffix is possible from a single value; need a different identity.
-- Is naming the right mechanism in general, or a winners-identity fingerprint
-  persisted in merge.yaml (per-output invalidation without deletion)? Naming
-  preserves measurements across back-and-forth switches; fingerprints re-merge
-  and re-measure on any change. Mixed design possible: name carries the
-  coarse identity (mode + q), fingerprint catches the rest.
-- The merge summary table showed wrong numbers during the smoke test precisely
-  because of this stale reuse — any fix must also make the summary trustworthy.
-- Do NOT copy the `encoded/` unconditional-wipe approach: merge measurement is
-  expensive (full-file VMAF/etc. per output); the user explicitly rejected
-  blind deletion here.
-
 ---
 
 ## 89. Check the code for `str` usages
@@ -824,53 +715,26 @@ Legitimate usages for `str` do exist, like messages. But if it masks object usag
 
 ---
 
-## 90. Sidecar content round 2 — optimization.yaml metrics, per-video extras, typed per-mode models — needs thinking
+## 90. Sidecar content round 2 — summary-content narrowing stays open
 
-Findings from inspecting the 2026-10-04 recovered-run artifacts (follow-up to
-the mode-honest sidecar landing):
+**Status:** needs thinking (remainder; the typed per-mode models + the
+per-output merged sidecar typing landed with the `2026-10-07
+artifact-recovery-ownership` spec — optimization/merge are discriminated
+unions, the merged sidecar is a typed facts+provenance model, `plot`/`anchor`
+dropped, `quality_targets` mode-omitted)
 
-- **Per-video merged sidecar extras**: `plot` is redundant — the plots
-  (`<stem>.png`, `<stem>.crf.png`) are discoverable by the merged file's stem
-  alone; drop the path. `anchor` is a fleeting election artifact — it lives
-  at the optimization phase (fast-exit re-derivation); a merge-phase
-  per-video record has no consumer for it; drop it.
-- **`optimization.yaml` has the metrics problem `merge.yaml` had**:
-  `strategy_results[].metrics` dumps ALL stats — narrow to the comparison set
-  (p10 + median), like the merge summaries were narrowed. Tension to resolve
-  while at it: the full set on strategy_results is the current re-derivation
-  substrate for the "changed comparison stat set re-projects old
-  measurements" property; narrowing moves retention to the attempt sidecars
-  (where it already lives) and makes re-derivation read them — acceptable,
-  but the reuse path then re-reads sidecars (or re-derives within p10/med
-  only). Decide explicitly.
-- **`quality_targets` on fixed runs is misleading in BOTH files**: an empty
-  list reads as "no targets configured". Omit the key entirely for fixed
-  runs (mode-conditional serialization) in `optimization.yaml` and
-  `merge.yaml`.
-- **Typed per-mode sidecar models**: fixed and search runs now carry
-  genuinely different data on both params sidecars (fixed: anchor/ruler
-  basis; search: quality_targets) — replace mode-conditional optional fields
-  with type-explicit classes: a common base + `Fixed…Params` / `Search…Params`
-  derivatives for both `OptimizationParams` and `MergeParams`, so the schema
-  itself states the mode's shape. Confirmed from the code side 2026-10-05
-  (user, reading the `MergeParams` construction split): difference should be
-  by TYPE, not by construction — the None-guards work but the schema lies.
-  Mechanics: pydantic discriminated union (`mode: Literal["fixed"]` /
-  `Literal["search"]` + `Field(discriminator="mode")` — same shape as §79's
-  FilterInstance idea); the discriminator is what persisted models need and
-  in-memory objects get for free (the config layer's analog was solved
-  2026-10-05 by splitting resolved state into `EncodingPlan`). Mode-specific
-  invalidation-key comparison rehomes onto the variants. Full census of the
-  pattern: `MergeParams` (anchor vs quality_targets optionals),
-  `OptimizationParams` (anchor optional; strategy_results.metrics
-  fixed-only), and the per-video merged sidecar (mode-honest but as an
-  untyped dict — candidate for a typed model in the same pass).
+Still open here (owns the summary-content narrowing; builds on the landed
+substrate — see `2026-10-03 unified-quality-summaries`):
 
-Supersedes parts of the interim sidecar landing (88975c7); fold into the
-`2026-10-03 unified-quality-summaries` implementation or land standalone
-before it — recommended FIRST in that window: the spec's prepared-table
-data lands ON these models, so building it onto the honest types beats
-retrofitting (splitting now and again at spec time would churn twice).
+- `optimization.yaml` `summary[].metrics` still dumps ALL stats — narrow to
+  the comparison set (p10 + median)? Tension: the full set is the current
+  re-derivation substrate for the "changed comparison stat set re-projects
+  old measurements" property; narrowing moves retention to the attempt
+  sidecars (where it already lives) and makes re-derivation read them — the
+  reuse path then re-reads sidecars (or re-derives within p10/med only).
+  Decide explicitly with the unified-summaries spec.
+
+---
 
 ---
 
@@ -912,43 +776,6 @@ Effort shape (continuation of the 2026-09-30 cleanup lineage):
   (inputs → outputs) can be stated in one sentence.
 
 ---
-
-## 93. PhaseDependencies — typed deps view replacing `_dep_result` — design agreed, implementation parked
-
-Born from the 2026-10-05 config-resolution review (91 `self._dep_result(...)`
-call sites; 62 of them `JobPhase`; merge 29 + optimization 27 the hotspots).
-Design agreed in discussion (user-driven):
-
-- `PhaseRegistry` STAYS the dict alias — it already is the registry; no class.
-- New `PhaseDependencies` view, held by `Phase` as `self._deps`, built at
-  init from the registry reference + the phase's own `DEPENDS_ON` (its key
-  domain = declared deps only, so indexing an undeclared phase is
-  structurally out of vocabulary).
-- `__getitem__[R: PhaseResult](dep_cls: type[Phase[R]]) -> R` — generic
-  subscript returning the asserted typed result. Subscript semantics are
-  honest here (the view stores nothing — it IS a result map over declared
-  deps) and directly answer the original objection: function-call form
-  implies cost, subscript reads as near-instant data access.
-- Per-dep property layer (`job_result` etc.) evaluated and DROPPED — with a
-  typed subscript, properties are redundant indirection (no-dumb-wrappers;
-  `_deps[JobPhase]` and `self.job_result` are the same length).
-- `_dep_result` retires; all 91 sites become `self._deps[X]`.
-
-Implementation notes:
-
-- The view is a LIVE view over the real registry — reference only, no object
-  copies and no init-time class→instance binding. It carries the registry
-  reference + the frozen key domain (`DEPENDS_ON`); every `__getitem__`
-  resolves against the live registry per access, so results populating
-  during the dependency walk are seen exactly as today (late binding kept).
-  Both asserts stay at access time.
-- Still to settle: `_ensure_dependencies` needs phase INSTANCES
-  (`dep.run()`) — either `Phase` keeps the raw registry reference for
-  framework use, or the view gains a minimal instance accessor.
-
-Sequencing: the sweep rewrites merge.py + optimization.py — the
-unified-summaries spec-window files — so land it at that implementation's
-start, alongside §90's typed per-mode sidecar models.
 
 ---
 
@@ -1043,7 +870,9 @@ Looks more concise, with distinct steps. Single progress bar for full phase too 
 
 ## 97. Pareto dominance with tolerance — ignore small positive deltas
 
-**Status:** needs thinking (needs testing; sharpens §82's epsilon-dominance angle)
+**Status:** landing home ruled 2026-10-09 — folds into the
+unified-quality-summaries window (TODO §111, third bullet); mechanics
+questions below carry over to that spec's tasks stage
 
 - Dominance pruning compares metric stats strictly: A dominates B iff
   `size(A) ≤ size(B)` and A ≥ B on every compared stat. The 2026-10-03
@@ -1095,137 +924,7 @@ auto / video / audio / extract (+ `measure_quality` unchanged) — or a single
 
 ---
 
-## 100. Artifact-owned recovery classification — mass/individual ownership split
-
-**Status:** 🤔 needs thinking (user sketch 2026-10-05, verified against code
-same day — feasible; a candidate refactor, nothing broken today)
-
-The idea: the phase owns its ARTIFACT SET and the mass/orchestration side of
-recovery (produce the directory listing ONCE — or once per strategy — build
-the rows with their externally-derived `wanted`, decide what to do next).
-The INDIVIDUAL side — "which files constitute my COMPLETE/PARTIAL/ABSENT,
-given the listing" — moves to the artifact/payload itself, which already
-owns name composition (two-name doctrine). A row gets the listing, consumes
-its own names out of it, sets its state.
-
-What recovery classification looks like TODAY (verified — same concept,
-five hand-rolled mechanics, all phase-local):
-
-- Extraction: ONE `on_disk_names` listing + inline per-kind membership
-  checks in `_recover` (~130 lines; every kind is "expected name in set",
-  with the video row's expected name being MODE-dependent: timestamps file
-  in processing runs, materialized container in extract runs).
-- Encoding `_recover_encoding_attempts`: per-strategy ONE listing, TWO
-  indexes (pattern-matched winning `.mkv` — name embeds the discovered
-  `q<N>` — plus sidecar chunk-ids); pair COMPLETE iff BOTH exist. A genuine
-  multi-file, PATTERN-shaped footprint — a naive `set[str]` interface
-  cannot express it; the rule owns regex + pairing. Plus
-  `_orphan_strategy_rows` (surplus detection) and `_scan_winner_sidecars`
-  (fact-loading/aggregation — the §92 seed example).
-- Audio `_classify`: per-row `Path.exists()` (N stats, NOT one listing) +
-  one iterdir for surplus rows.
-- Merge: per-output glob discovery; optimization shares the pair-ledger
-  builders with encoding.
-
-Why it looks right:
-
-- Single-ownership rule applied honestly: name composition already lives on
-  entities; completeness-from-names is the same fact family — today it is
-  re-derived in phase code instead.
-- Structural fix for §92's recovery bloat: every `_recover` shrinks to
-  orchestration (build rows → classify via listing → aggregate facts), the
-  per-kind rules become small entity-owned methods with one-sentence
-  contracts; per-kind classification becomes testable without a phase.
-- The listing-only recovery invariant is preserved trivially (the listing is
-  the INPUT); sidecar fact-loads (winner scan) stay a separate phase-owned
-  mass step — reinforcing exactly the §92 load-one/aggregate split.
-
-Design questions for the spec:
-
-- Protocol shape: minimal `SupportsRecovery`-style protocol on file-backed
-  payloads vs a `classify(listing)` hook on the `Artifact` wrapper (which is
-  deliberately thin today — its docstring already says "file-backed
-  locations derive from the payload" but nothing structures it).
-- Pattern footprints (encoding): a TRANSITIONAL shape — it exists only
-  because winners keep attempt names (§101, DIRECTLY RELATED). With §101's
-  static winner names every footprint in the codebase is a static name set
-  and the design question dissolves. End-state doctrine (user, 2026-10-05):
-  NO pattern-matching anywhere — naming (composition AND parsing) is owned
-  by the entity classes, and recovery is direct matching of wanted
-  artifacts to on-disk files.
-- Mode-dependent rows (extraction video): the phase picks the footprint at
-  ROW CONSTRUCTION (run-mode knowledge stays phase-side); classification
-  stays artifact-side.
-- PARTIAL: nothing uses it in classification today (all-or-nothing rules);
-  decide whether the design keeps binary or makes PARTIAL expressible
-  (mkv-without-sidecar → PARTIAL?).
-- Audio's per-row exists() gets unified under the one-listing protocol.
-
-Consumption semantics (user, 2026-10-05): classification should CONSUME its
-expected names out of the shared listing rather than test membership — two
-free invariants: whatever is left over after all rows consumed is stale
-(surfaced immediately as present-but-unwanted rows), and a double
-consumption (two artifacts composing the same name — a naming bug) is
-caught structurally at the collision. Audio's `_classify` surplus scan is
-the partial precedent.
-
-DIRECTLY RELATED: §101 (static winner names). §101 dissolves this item's
-pattern-shaped-footprint question — with static winner names every
-footprint in the codebase becomes a static name set; land them as one
-motion.
-
-Sequencing thought: natural companion to §92's long-function pass (same
-files, same split); the unified-summaries window also rewrites merge +
-optimization recovery — landing this first or folding it there both work.
-
-Human: Extra consideration: status recovery only? or actual artifact producing too? Could save on clarity for partial re-producing.
-I.e. phase owns mass processing of specific type artifacts and another specific type artifacts, like `list[Artifact[Chunk]]` into `list[Artifact[EncodedChunk]]` per strategy.
-But how to recover its state from disk (persistence) and how to produce itself - are not phase concerns, rather individual artifacts (or its playload type). While
-the phase takes care of scheduling, aggregation, process tracking, etc. Feasible? I.e. File can give products - its streams/attachments/etc. Video stream can give product - scenes.
-Scenes are basically chunks (maybe skipping scenes as internal; going directly VideoStream - Chunks). Chunks -> EncodedChunk (EncodedChunk as election from attempts). EncodedChunks -> MergedVideo.
-As either a producer or consumer? (consumer for many to one; producer for one-to-one or one-to-many?). This is hypothesis only.
-
 ---
-
-## 101. Winner promotion keeps the ATTEMPT's q-bearing name — winners must be statically named per chunk
-
-**Status:** 🤔 bug (design doctrine violation; user finding from a live
-optimization run 2026-10-05; pre-existing on main). DIRECTLY RELATED: §100
-(artifact-owned recovery) — static winner names are what makes §100's
-direct artifact↔on-disk-file matching possible; land as one motion. Also
-DIRECTLY RELATED: §11 (invalidation logic check) — winners invalidation
-(`encoded/`) becomes structural under the §100 consumption protocol
-(leftovers = stale), which is the baseline §11's audit should check
-against.
-
-Doctrine: attempts (the `encoding/` search workspace) are named WITH quality
-— they are search artifacts. Winners (`encoded/<strategy>/`) map 1:1 to
-chunks — their naming must be STATIC (chunk identity + resolution, no
-quality), so they are directly discoverable from the chunk set: direct
-matching of wanted artifacts to on-disk files, owned by the artifacts
-(payloads). End state: NO pattern-matching anywhere — naming (composition
-AND parsing) is owned by the entity classes. Live evidence
-(`D:\_encoding\pyqenc_cp\encoded\h264+ultrafast`): winners present as
-`<chunk>.<res>.q15.5.mkv` + `.q15.5.png`, only the result sidecar is
-correctly static (`<chunk>.<res>.yaml`).
-
-Root cause: `phases/encoding.py:775` — promotion hard-links the winning
-attempt keeping `winning_attempt.name` (same for the graph at `:781`);
-only `_write_encoding_result_sidecar` composes the static name.
-
-Fix surface:
-
-- Promotion site: name the destination `<chunk_id>.<res>.mkv` / `.png`.
-- Consumers parsing winner filenames through the ATTEMPT pattern for chunk
-  identity: the pair-ledger placeholder (`:326`), the replay path (`:1547`),
-  the winner scan (`:1755`) — with static names these become static-name
-  lookups (and `_recover_encoding_attempts`' mkv index drops the regex).
-- CRF: the winner-limiter scan already reads sidecars (crf included) — the
-  result sidecar is the live crf source; under static naming every
-  EncodedChunk composition reads crf from there, never from a filename.
-- Pre-alpha, no migration: existing q-bearing winners stop matching the
-  static footprint — pairs re-derive as ABSENT (re-encode) or the workdir
-  gets a force-wipe; note it in the fix commit.
 
 ---
 
@@ -1307,31 +1006,6 @@ x265 docs (https://x265.readthedocs.io — `q=`/`b=` only).
 
 ---
 
-## 103. AudioPhase recovery stats every row separately — listing-first violated
-
-**Status:** 🤔 bug (verified from code 2026-10-05; found in review of the
-cli-intent-commands window)
-
-`AudioPhase._classify` (`pyqenc/phases/audio.py:327-335`) classifies every
-expected (track × chain) row with its own `.exists()` call — N×M stat
-syscalls per recovery — and then runs the `audio_dir.iterdir()` listing
-ANYWAY five lines below (`:339-346`) for the present-but-unwanted surplus
-scan. The single listing the canonical approach needs already happens, just
-AFTER the redundant per-row stats instead of before them.
-
-Recovery classification is listing-only by design (one dir scan → name set
-→ membership; no per-file reads) — extraction already owns the canonical
-shape after the cli-intent-commands consolidation: `_on_disk_file_names()`
-+ `_row_state(expected, on_disk)` (`pyqenc/phases/extraction.py`). The
-single `sidecar_path.exists()` is fine — one file, O(1).
-
-**Questions to think about:** fix = hoist the surplus listing above the row
-loop, classify rows by name-membership; decide whether
-`_on_disk_file_names`/`_row_state` re-home to a shared home (utils or the
-phase base) so phases stop re-inventing the pattern — check the other
-phases' recovery loops for the same shape while at it (§92's
-per-item-loader-vs-aggregator split is the natural umbrella).
-
 ---
 
 ## 104. too many `str` usages as attributes with convention
@@ -1363,12 +1037,455 @@ How to understand on load which type to use for sidecar? Just try both (with man
 
 ## 106. Encoding/optimization phases share a lot of mechanics
 
+**Status:** partial (2026-10-07) — the shared pair-ledger machinery
+(`_pair_rows` static-name consumption, winner curation) re-homed under the
+`2026-10-07 artifact-recovery-ownership` rework; the import-cycle break
+itself (circular `optimization <-> encoding` deferred imports) stays open
+here.
+
 Should we move them into separate file, to be readily available for both optimization and encoding phases (not circular imports optimization <--> encoding).
 
+---
 
-## Last known = 106
+## 107. Phase sidecars: uniform layout — execution-order fields
 
-Keep this updated, so that we can keep continuous numbering even on last todo item deletion.
+**Status:** feasible, design settled by user (2026-10-09, from the real e2e
+run's sidecar review); job.yaml half LANDED 2026-10-10 (b78790f follow-up,
+`JobSidecar` flattened to top-level `{path, source}` with `source` = the
+identity fingerprint everywhere; `JobSourceRecord` deleted); field-order
+half not yet implemented
+
+The remaining uniformity gap observed across the phase sidecars on a true
+run:
+
+- **Field ordering is not uniform.** Want a stable, execution-order layout in
+  every phase YAML: (1) deps/inputs used for invalidation first — `source`
+  (the identity key) always first; (2) config params next (audio chains,
+  scene thresholds, targets/pinned map, sampling); (3) own phase results
+  (chunking scenes, test_chunks, summary-relevant facts); (4) preserved
+  summaries (`summary`) last. Mechanically free: pydantic v2 serializes in
+  field-declaration order, so this is a declaration reorder per sidecar
+  model — no custom serializers needed. Applies to all phase sidecars + the
+  per-output merged sidecar (provenance before facts there, same principle).
+
+---
+
+## 108. Run-log polish — phase banners and uniform final status lines
+
+**Status:** feasible, design settled by user (2026-10-09, from the real e2e run's log review); not yet implemented
+
+Every phase's LAST line should carry a status emoji; from the real run:
+
+- **Probe banner back on.** `BANNER = False` (probe.py:198) leaves the
+  phase jumping in right after audio with only the soft separator — toggle
+  back to the thick banner.
+- **Missing status emoji on final lines** (extraction/audio/merge/encoding
+  already conform):
+  - job: `Initialized job.yaml for new pipeline run` (job.py:331) — prefix
+    e.g. `✔ Job complete: ...`;
+  - probe: `Probe: done — frame_count=…, crop=…` (probe.py:394) — prefix
+    `✔`;
+  - chunking: `107 chunk window(s) — no files produced
+    (direct-from-source)` (chunking.py:426) — prefix `✔`. Also: the
+    preceding `Scene detection: 107 scene(s)` (chunking.py:156) is now a
+    duplicate — the two lines made sense when extraction wrote files, the
+    final windows line alone suffices.
+- **Optimization has no concise final line** (summary table, then
+  nothing). Add e.g. `✔ Tested {len(test_chunks)} chunk(s) for
+  {len(strategies)} strategie(s), selected {len(selected)} strategie(s).`
+  — the strategies list itself is already visible in the summary table.
+
+Extra human input: maybe make final lines uniform, like recovery line, based on phase result, its status and message?
+
+---
+
+## 109. Fixed-mode merge presentation judges against search targets, not the anchor
+
+**Status:** needs thinking (bug confirmed on the 2026-10-09 fixed `-q 18`
+e2e run; presentation-layer fix belongs with the unified-summaries spec)
+
+Spec: search mode = quality targets; fixed mode = anchor + deltas from it.
+In the fixed run, merge judged and displayed against the CONFIG targets:
+
+- The per-output inline metrics line marks ✘/✔ per plan.targets
+  (`_fmt_inline_metrics`, merge.py — reads `plan.targets` unconditionally).
+- The merge summary table renders config targets as the "Quality" bar and
+  the miss-detail table (`Targets: vmaf-median ≥ 96.00, ...` + `⚠ ...`
+  blocks) uses them (`_log_merge_summary(..., quality_targets=plan.targets)`
+  at both call sites).
+- `_live_verdict` already picks the right bar (synthetic targets when
+  fixed) — but its basis was EMPTY on that run because no ruler existed
+  (that half is fixed separately: fixed winner sidecars now carry the
+  p10+median comparison stats, so the ruler derives).
+
+Fix direction: fixed-mode merge presentation consumes the synthetic ruler
+(anchor-relative deltas — absolute values only where no ruler exists), the
+same basis `_live_verdict` uses. This IS the unified-summaries spec's core
+deliverable (the anchor-relative table) — land it there, with a small
+interim alignment of the inline/summary bars if that spec is far off.
+
+---
+
+## 111. Unified summaries — spec exists, NOT implemented; 2026-10-09 sketch adds four details
+
+**Status:** needs thinking (state check 2026-10-09; no code changed)
+
+The `2026-10-03 unified-quality-summaries` spec sits at requirements +
+design (its tasks stage was never authored — two-stage rule, gated on
+approval). Nothing of it is implemented; TODO §109's fixed-mode
+presentation bug points at it as the landing home, and its SUBSTRATE
+(per-mode sidecars, `summary` key, fingerprints, anchor lifecycle) already
+landed via artifact-recovery-ownership.
+
+The 2026-10-09 user sketch (unified optimization + merge table) is mostly
+ALREADY in the spec — source row merge-only (Req 2.4), search targets /
+fixed anchor as the top row (Req 2.1-2.2), full table at both phases
+(Req 1.5). Four details are NEW and should fold into the spec at its
+tasks-authoring stage:
+
+- **Size-column numeric format:** ratio to source with exactly 2 decimals,
+  expected not to exceed `9.99`; on exceed — either ignore the ratio or
+  dynamically re-align ALL values in the size column; ratio + absolute
+  size right-aligned inside ONE column (source row fills its ratio cell
+  with a placeholder for alignment — the spec left the glyph, not the
+  numeric rules, to the variant review).
+- **Metric-range endpoints generalize to the presentation basis:** the
+  `min…max` range endpoints are the min/max STATISTICS of the targeted
+  stat set — true targets in search mode, the synthetic ruler's stats in
+  fixed (today's fixed table hardcodes `p10..median`; a p10/med/p90
+  target set would render `p10…p90`).
+- **Epsilon-dominance lands in this window (§97's disposition, ruled
+  2026-10-09):** Pareto dominance ignores minor positive deltas, reusing
+  the acceptable-delta already defined per metric in metric info — a stat
+  win only counts when it beats the other by more than that bar. §97's
+  open mechanics questions (per-metric vs global source, size symmetry
+  vs `optimize_tolerance`, anchor-election effect) carry over; the
+  2026-10-09 fixed run (0/4 pruned, two strategies within 0.01 MB and
+  ±0.1 stats) is now the second real-data case for it.
+- **Quality mark column uniform across modes (amends spec Req 4.2):**
+  both modes carry the mark column — search: pass/miss glyphs (miss =
+  failure against true targets, as today); fixed: Pareto-dominance /
+  recommendation glyphs (what the pipeline recommends using — dominated
+  strategies visibly cut). Req 4.2's principle stands (the anchor is a
+  baseline, never a target — no target-style verdicts in fixed rows);
+  what changes is the glyph SET per mode, not the column's presence. Note
+  the coupling: epsilon-dominance is what makes the recommendation glyph
+  meaningful — without tolerance, dominance rarely prunes (0/4 twice on
+  real data) and every row would carry the same "winner" mark.
+
+---
+
+## 113. All tests must run at lowered process priority (pipeline parity)
+
+**Status:** needs thinking (user ruling 2026-10-09)
+
+The pipeline lowers its process priority in code as one of its first
+steps — encoding work must never starve the user's other work. Test
+processes MUST do the same whenever they spawn real work (e2e runs,
+integration tests driving ffmpeg/ffprobe): pytest and every child it
+starts should run at the same lowered priority as a normal pipeline
+run. (2026-10-09 session: e2e tests spun ffmpeg at normal priority and
+starved the machine while "hanging".)
+
+Related, same session: e2e tests should also run rather fast, on a
+premeditated source (per the standing speed rule) — not on whatever
+sample happens to be around.
+
+## 114. e2e intent tests hang: ffmpeg 9.0.2 spins encoding the sample's chunk-3 region
+
+**Status:** needs thinking (reproduced standalone 2026-10-09; no code
+changed)
+
+`tests/e2e/test_intent_commands.py` never completes: the encode of the
+sample's third chunk region hangs. Reproduced STANDALONE — the exact
+ffmpeg command alone, no Python involved:
+
+```
+ffmpeg -ss 14.181 -t 13.847 -i samples\sample-e2e.mkv -map 0:0 \
+  -c:v libx265 -preset ultrafast -crf 18.0 -pix_fmt yuv420p10le \
+  -f matroska <out>
+```
+
+ffmpeg 9.0.2 (`9.0.2-full_build-www.gyan.dev`) burns CPU indefinitely
+with a 0-byte output on this region; the first two chunk regions of
+the same file encode in seconds. Points at the ffmpeg build (or its
+interaction with that region's HEVC 10-bit content) — not at pyqenc:
+the same command shape works elsewhere, and the real-source e2e
+(test.mkv) was unaffected the same day. Candidate: pin/switch the
+scoop ffmpeg version or regenerate the sample; re-verify the intent
+e2e suite after. Also blocks any full-suite gate run that includes
+`tests/e2e/`.
+
+---
+
+## 115. Full test-suite assessment against the QA & testing rules
+
+**Status:** needs thinking (rules landed 2026-10-10 in
+`.kiro/steering/agent-testing.md` — PyTest + Hypothesis edition; no tests
+assessed yet)
+
+Sweep the entire `tests/` tree against the steering QA rules and produce
+a findings report (then a fix plan, gated on user review):
+
+- **Pinning/characterization tests** — anything asserting file cosmetics
+  (yaml text, field order, key sets/presence), internal stash state, or
+  serialized forms where a round-trip/tolerance test is the honest
+  contract. Drop or convert to behavior tests.
+- **Underscore-surface violations** — tests importing or patching
+  `_private` helpers (functions or methods); the rules allow only the
+  process boundary (ffmpeg/mkvmerge runners, external shells) as the
+  mock seam. Includes `patch.object(..., "_method", ...)`.
+- **Property coverage gaps** — features with invariants but no
+  Hypothesis `@given()` tests (happy-path/error-handling are the PyTest
+  layers; properties are the search layer).
+- **Coverage-type gaps** — features/modifications missing the mandatory
+  happy-path / properties / error-handling structure.
+- **Dead tests** — tests that pass no matter what (the failure-assertion
+  check) and tests guarding bugs that no longer exist.
+
+Note: the suite is large; the sweep is an audit, not a rewrite — group
+findings by file with evidence, and let the user rule on each group
+before mass changes. The §114 ffmpeg hang blocks `tests/e2e/` from
+running at all until the ffmpeg version question is settled.
+
+---
+
+## 116. Metric+stat value class — retarget every stringly `"{metric}_{stat}"` / `"{metric}-{stat}"` site
+
+**Status:** needs thinking (user direction 2026-10-10; explicit-typing rule)
+
+Measured metrics flow through the system as `dict[str, float]` keyed by
+convention strings, flattened/selected/compared at every layer — and every
+site re-derives the key by hand: `f"{t.metric}_{t.statistic}"` in the
+attempt pick-up, the targeted-subset filter, `_score_attempt`,
+`failed_targets`, the winner-limiter tallies, optimization's synthetic
+ruler, merge's rendered-keys/presentation bar. Two vocabularies exist for
+the same identity: underscore (`vmaf_min` — sidecar keys, metric dicts)
+and dash (`vmaf-min` — CLI/config/`QualityTarget.parse` targets). Nothing
+type-checks that a key is well-formed; nothing owns the pair.
+
+Related uniformity gap (user, 2026-10-10): **the full measured set vs the
+targeted subset** — deriving one from the other is hand-rolled at several
+sites (`_winner_targeted_metrics`' mode-aware subset for winner sidecars,
+the pick-up's `targets_set_reused` filter, merge's
+`_summary_rendered_keys`, the search's target-key projection). ONE
+uniform method should own full→targeted (mode-aware: search = the
+targets' keys; fixed = the comparison stat set), expressed over the key
+class — every consumer asks it, nobody re-implements the filter.
+
+Direction: a value class for the metric+stat identity —
+
+- frozen, **hashable + comparable** → usable directly as the dict key of
+  measured-metrics maps (replacing `dict[str, float]` with
+  `dict[MetricStat, float]` or an annotated alias at the boundary);
+- **strict canonical serialization** (its yaml/storage form) and
+  **tolerant parsing** (both vocabularies + display), the `CropYaml`
+  pattern applied to a key type — pydantic dict keys need the annotated
+  boundary (canonical string on disk, class in memory);
+- `QualityTarget` re-targeted onto it (fields `metric: str` +
+  `statistic: str` fold into the class) and gains its own strict
+  serialization / tolerant parse (`"vmaf-min:95"` config vocabulary
+  included);
+- **parsing included** (user, 2026-10-10): each metric becomes its own
+  class (PSNR / SSIM / VIF / VMAF — MetricInfo-shaped) that KNOWS how to
+  parse its own logs (`.log` stats files, VMAF JSON), emitting explicitly
+  typed results — replacing the generic file-type-keyed parser in the
+  visualization/metrics plumbing. The metric identity itself is an
+  enum-like STATIC thing (one instance, never re-instantiated per parsed
+  line — today `MetricType(...).info` constructs on access), and the
+  static identity is what the new metric-stat keying, the old
+  `MetricInfo` and `QualityTarget` all attach to via explicit typing;
+- retarget sites: quality.py (`MetricType`/`flatten_metric_stats`/
+  search steering), encoding pick-up + winner targeting, optimization
+  (synthetic targets, summaries), merge (rendered keys, replay bar),
+  measure/visualization stats plumbing.
+
+Open design questions: naming (`MetricKey` is TAKEN — the perf-metrics
+timing enum in `pyqenc/metrics.py`); whether the stat half becomes its
+own typed set (today a free-form string — `min`/`p10`/`median`…);
+whether per-metric classes carry the MetricInfo descriptor data
+(normalize/deficit/comparison_range/acceptance_delta) or compose with it;
+interplay with §111's summary-table rendering (the dash vocabulary is its
+display form); sequencing vs the QualitySearch V4 spec (§78 rides that
+same refactor wave — do the record type and the key type together?).
+
+`FIXED_COMPARISON_STATS` should also become explicit targets?
+
+and need a distinction between full metrics set and targeted metrics set at typing level, so that we don't have to guess.
+
+---
+
+## 117. Observability research — traces/metrics for a CLI-first tool; replace the app-metrics stub
+
+**Status:** needs thinking (user direction 2026-10-10; research task)
+
+The current app-metrics (`metrics.yaml`, `MetricsCollector`) is a
+temporary stub, and it shows. Industry standard observability has three
+pillars — **traces, metrics, logs**. We have logs. Our metrics suck. We
+have no traces. And nothing is collectible externally (no
+Prometheus/OpenTelemetry export).
+
+Constraint: pyqenc stays **CLI-first** (potential web UI later). Full
+OTel/Prometheus adoption is justified only if it ever becomes a service;
+while CLI, it must still be observable — with a local dump like today's
+`metrics.yaml`.
+
+What the observability must answer (granular, of course):
+
+- **how long** things work (durations), and
+- **how many times** (convergence counts),
+- per action (phase: audio/encoding/merge/probe…), per strategy/chain,
+  per subaction (encode, recovery, optimize…),
+- with a clear distinction between **actual wall time** (top-level
+  metrics) and **sub-time** (parallelized flows — parts of the full
+  time, never summable against it),
+- all safely dumpable, **crash-resistant with minor allowed delta loss**
+  (see the current `metrics.yaml` implementation).
+
+Task: research best industry practices for standalone CLI tooling —
+hierarchical span/task timing (inclusive vs exclusive time is exactly the
+wall-vs-sub-time problem), OTel SDK in offline/local-file-export modes,
+what a trace-shaped local dump would look like vs the current flat
+dotted-key metrics — and their applicability to a local `metrics.yaml`
+dump. §2 (parallelism field / spec reconciliation), §12 (per-chain
+dotted audio metrics) and §59 (concurrent dumps) all ride under this
+umbrella and should be re-evaluated against whatever shape lands.
+
+---
+
+## 119. Table formatting is hand-aligned everywhere — unify the mechanism (mini-research)
+
+**Status:** needs thinking (user direction 2026-10-10)
+
+The summary/comparison tables (optimization's select table, the fixed
+comparison table, merge's summary + miss-detail tables, the limiter table,
+`fmt_key_value_table` call sites) each hand-roll column alignment —
+`%-30s %12s %8s` format strings, manual padding constants, per-site width
+tuning. The LOOK is right (neat, aligned, terminal-friendly); the
+repetition is the problem: every new table re-implements alignment,
+width-fitting, and unit suffixing.
+
+Research the options:
+
+- **External**: `rich.table` / `tabulate` / `wcwidth`-based helpers — do
+  they render the same aesthetic (plain text, aligned columns, no color
+  dependency in logs), and what do they pull in as dependencies
+  (CLI-first, minimal-deps preference)?
+- **Internal**: one common formatter (e.g. a `format_table(headers, rows,
+  aligns)` util) with the current visual conventions encoded once —
+  probably the default answer given the aesthetic is already ours; the
+  research should confirm an external lib buys nothing we don't have.
+
+Constraint: the output must stay byte-identical-ish to today's tables
+(the user likes them); logs go through the plain logger (no ANSI color
+assumptions in `metrics.yaml`-adjacent output).
+
+---
+
+---
+
+## 120. PhaseResult redesign — base artifacts field, frozen results, naming pass
+
+**Status:** needs thinking (user direction 2026-10-12; investigate before
+implementing)
+
+`PhaseResult.artifacts` is a derived property — dataclass introspection
+re-concatenating the subclass's declared `Artifact` fields on EVERY access
+(no cache), sanctioned as "the one dynamic access". Re-investigate the
+design:
+
+- **At minimum**: cache the construction (results are never modified in
+  flight — phases build them right before exiting), or back the property
+  with a base private field.
+- **Better — invert the storage**: a base `artifacts` field on ALL phase
+  results (it is already baked into `.run`'s decision and the external
+  contract). Explicit typing stays, but reversed: `__init__` accepts the
+  base artifacts list and SPLITS it into the typed fields/views per phase
+  (extraction: video/audio/subtitle rows; chunking: chunks; etc.).
+  Typed views can be static properties over the frozen base.
+- **Frozen**: consumers should not modify results; phases construct at
+  exit. A frozen dataclass base + statically-constructed typed views;
+  the generic `artifacts` (or `_artifacts`) lives on the base for
+  `.run`/the runner.
+- **Naming pass**: streamlining across all `*PhaseResult` classes
+  (`chunks:` vs `outputs:` vs `winners:` vs `merged:` vs `file:` —
+  one convention, named per-phase but shaped uniformly).
+
+Open questions: does the "derived, never storage" doctrine (internal
+ledger rows can't leak into results) survive the inversion — the split
+must reject unwanted rows at construction; do partial-failure paths
+(FAILED with some rows) fit the frozen-at-exit model; interplay with
+`wanted`-derivation in the template.
+
+---
+
+## 121. Docstring audit — bring every docstring to the universal Google-style format
+
+**Status:** needs thinking (rule added to coding-standards.md 2026-10-12;
+audit pending)
+
+Rule: ALL docstrings Google-style — one-line summary, prose, then
+structured `Args:`/`Returns:`/`Raises:`/`Yields:`/`Attributes:` sections
+(the LSP parses these for hover/parameter help). The codebase is mostly
+there already (the house style evolved toward it), but the sweep must
+find and fix:
+
+- Missing sections (functions with args but no `Args:`; classes with
+  fields but no `Attributes:`).
+- reST-style fields (`:param x:`, `:rtype:`) or NumPy-style underlined
+  headers that predate the convention.
+- **De-archaeologize**: dated reasoning ("dropped 2026-10-09"), discovery
+  stories ("found live when…"), and tombstones of deliberately-absent
+  fields ("X is deliberately NOT a field…") — contract only in the
+  docstring; the history is in commits/specs. The 2026-10-10/11
+  sidecar-diet cycles wrote a lot of this in.
+- **De-duplicate**: field inline trailing comments repeating an
+  `Attributes:` entry — one home; the docstring section wins when the
+  class has a docstring.
+- Stale sections (parameters renamed/removed but the docstring still
+  lists them) — the LSP surfaces mismatches; fix as found.
+- Docstrings that narrate mechanics instead of contract (summary +
+  why/constraints, not line-by-line retelling).
+
+Mechanics: per-file pass, no behavior changes; Pylance/Pyright hover on
+each symbol is the verification tool.
+
+---
+
+---
+
+## 122. Names audit — public/private surface + project vocabulary
+
+**Status:** needs thinking (user direction 2026-10-12; TABLE FIRST, then
+implementation on approval)
+
+Two dimensions:
+
+- **Public/private surface.** Module top-levels are the main concern —
+  they form each module's external contract, and the project wants a
+  MINIMAL contract (coding-standards: "only truly necessary functions
+  should be public"). Many top-levels look internal/implementation-
+  specific but carry no underscore (e.g. `LimiterSummaryRow` — a
+  persisted-form row of one phase's summary table; who outside the
+  module would ever import it?). Per-class members are a lesser
+  concern — same treatment, lower priority.
+- **Vocabulary.** The project has an established vocabulary
+  (attempt/winner, probe facet, fingerprint, sidecar, measure vs
+  evaluate→measure, presence/listing, encoding workspace vs encoded
+  dir, …) — names should USE it. Drifted synonyms and generic names
+  (record, item, result, info where a domain word exists) are the
+  smell.
+
+Process (explicit): produce a TABLE first — current name, proposed name
+(public→`_private` or rename or unchanged), reasoning — one row per
+symbol, grouped by module; the user audits and approves; only then the
+implementation sweep. No drive-by renames.
+
+---
+
+## Last known = 122
+
+Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
 
 ---

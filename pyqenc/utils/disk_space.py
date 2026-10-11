@@ -14,7 +14,7 @@ from pyqenc.constants import (
     OVERHEAD_TIGHT_MARGIN,
     SUCCESS_SYMBOL_MINOR,
 )
-from pyqenc.stream_model import VideoStream
+from pyqenc.stream_model import ProbedFile, VideoStream
 from pyqenc.utils.log_format import fmt_key_value_table
 
 logger = logging.getLogger(__name__)
@@ -92,7 +92,10 @@ def estimate_required_space(
     Returns:
         Estimated required space in GB.
     """
-    size_bytes = stream.file.file_size_bytes
+    size_bytes = (
+        stream.file.fingerprint.size
+        if isinstance(stream.file, ProbedFile) else None
+    )
     if size_bytes is None:
         logger.warning("Cannot determine source file size for %s", stream.file.path)
         return 0.0
@@ -140,7 +143,11 @@ def check_disk_space(
     """
     min_required_gb = estimate_required_space(stream, min_strategies)
     max_required_gb = estimate_required_space(stream, max_strategies)
-    source_size_gb  = (stream.file.file_size_bytes or 0) / (1024 ** 3)
+    source_size = (
+        stream.file.fingerprint.size
+        if isinstance(stream.file, ProbedFile) else 0
+    )
+    source_size_gb  = source_size / (1024 ** 3)
     recommended_gb  = max_required_gb * OVERHEAD_TIGHT_MARGIN
 
     work_dir.mkdir(parents=True, exist_ok=True)

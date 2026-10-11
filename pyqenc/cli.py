@@ -208,9 +208,10 @@ def _add_pipeline_arguments(parser: argparse.ArgumentParser, *, cleanup: bool = 
         "--force",
         action="store_true",
         help=(
-            "When a source-file mismatch is detected in execute mode (-y), "
-            "delete all intermediate artifacts and reset state, then continue "
-            "with the new source file. Has no effect without -y."
+            "Grant permission for destructive invalidation effects this run "
+            "(e.g. wiping the attempt workspace when the source content "
+            "changed). Without it such conditions stop the run with a fatal "
+            "error; the flag alone wipes nothing."
         ),
     )
     parser.add_argument(

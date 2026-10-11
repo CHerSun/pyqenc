@@ -17,10 +17,11 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar
 
+from pydantic import BaseModel
 from scenedetect import ContentDetector, detect
 
 from pyqenc.metrics import MetricKey
-from pyqenc.models import PhaseOutcome, SceneBoundary
+from pyqenc.models import Fingerprint, PhaseOutcome, SceneBoundary
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -34,25 +35,68 @@ from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
-    ChunkingSidecar,
     ExtendedVideoStream,
-    SceneRecord,
     VideoStreamChunk,
 )
 from pyqenc.utils.alive import alive_bar
-from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
 
+
+class SceneRecord(BaseModel):
+    """One persisted scene boundary.
+
+    Attributes:
+        timestamp_seconds: The boundary's timestamp on the source timeline.
+        frame:             The boundary's frame index — always reported by
+                           the detector (PySceneDetect's FrameTimecode
+                           carries frames and seconds together; the
+                           zero-scenes fallback synthesizes frame 0).
+                           Consecutive index differences ARE the chunk
+                           frame counts (telescoping to the source total
+                           by construction) — load-bearing on the reload
+                           path, not informational.
+    """
+
+    timestamp_seconds: float
+    frame:             int
+
+
+class ChunkingSidecar(BaseModel):
+    """The ``chunking.yaml`` slice: scene boundaries + the detection keys.
+
+    Chunk windows are derived from these boundaries plus the stream duration
+    at load time — no per-chunk records, no per-chunk sidecars.
+
+    Keys (spec 2026-10-07, Req 26/31): the source identity (fingerprint
+    only) and the two detection parameters — a change in either invalidates
+    the persisted boundaries (identity: catastrophic per Req 33; params:
+    automatic re-detect, Req 45). An absent key (legacy sidecar) is unknown,
+    never a mismatch (Req 32).
+
+    Attributes:
+        scenes:           Scene boundaries in order; the first is the stream
+                          start.
+        source:           The source identity key (fingerprint only) —
+                          required; a sidecar missing it fails validation →
+                          absent → re-detection (Req 32 amended 2026-10-10).
+        scene_threshold:  The ContentDetector threshold the boundaries were
+                          detected under.
+        min_scene_length: The minimum scene length (frames) in force at
+                          detection.
+    """
+
+    scenes:           list[SceneRecord]
+    source:           Fingerprint
+    scene_threshold:  float
+    min_scene_length: int
+
+
 logger = logging.getLogger(__name__)
 
-
-
-# ---------------------------------------------------------------------------
-# Scene detection
-# ---------------------------------------------------------------------------
 
 def detect_scenes(
     stream:           ExtendedVideoStream,
@@ -228,40 +272,73 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         logger.info("Scene threshold:       %s", self._config.chunking.scene_threshold)
         logger.info("Min scene length:      %s frames", self._config.chunking.min_scene_length)
 
+    def _invalidate(self) -> None:
+        """Key-triggered effects over ``chunking.yaml`` (disk effects only).
+
+        Identity key (Req 33, C-2): a persisted identity contradicting the
+        live source is catastrophic — fatal without the ``--force``
+        permission; with it the sidecar is wiped (boundaries of the old
+        source's timeline are never current). Detection params (Req 26/45,
+        C-1): a ``scene_threshold`` / ``min_scene_length`` change discards
+        the persisted boundaries — automatic re-detect (user-initiated
+        config edit, non-destructive: chunking owns no artifacts; the
+        sidecar is overwritten in place). Absent keys are unknown, never a
+        mismatch (Req 32).
+
+        Raises:
+            RecoveryError: On an identity mismatch without permission.
+        """
+        job_result = self._deps[JobPhase]
+        yaml_path  = job_result.work_dir / ChunkingPhase.SIDECAR_NAME
+
+        sidecar = load_model(yaml_path, ChunkingSidecar)
+        if sidecar is not None and not sidecar.source.matches(job_result.file.payload.fingerprint):
+            if not job_result.force:
+                raise RecoveryError(
+                    "Source content identity mismatch (chunking.yaml) — the "
+                    "persisted boundaries belong to a different source's timeline.  "
+                    "Re-run with --force to grant permission to discard them "
+                    "and re-detect on the new source."
+                )
+            logger.warning(
+                "Source identity mismatch (--force granted — discarding "
+                "chunking.yaml and re-detecting)"
+            )
+            yaml_path.unlink(missing_ok=True)
+            sidecar = None
+
+        if sidecar is not None and self._params_changed(sidecar):
+            logger.info(
+                "Scene detection parameters changed (threshold %s→%s, min length %s→%s) "
+                "— re-detecting boundaries",
+                sidecar.scene_threshold, self._config.chunking.scene_threshold,
+                sidecar.min_scene_length, self._config.chunking.min_scene_length,
+            )
+            yaml_path.unlink(missing_ok=True)
+
     def _recover(self) -> Recovery:
-        """Determine ``chunking.yaml`` currency: absent boundaries or current.
+        """Classify the persisted boundaries (the set-flip ledger).
 
-        Steps:
-        1. If ``force_wipe``: delete ``chunking.yaml``.
-        2. Load scene boundaries from ``chunking.yaml``; pending when absent
-           or empty (detection must run), current otherwise.
-
-        The set-flip ledger: with current boundaries the chunk windows are
-        fully derivable and every row is ``COMPLETE`` (the set flips
-        together — chunks derive wholly from the sidecar); with absent
-        boundaries the chunk set is unknowable, so the ledger is empty.
+        Runs after :meth:`_invalidate` settled the sidecar on disk. With
+        current boundaries the chunk windows are fully derivable and every
+        row is ``COMPLETE`` (the set flips together — chunks derive wholly
+        from the sidecar); with absent boundaries the chunk set is
+        unknowable, so the ledger is empty.
 
         Returns:
             The :class:`Recovery` single source of truth.
         """
-        job_result = self._dep_result(JobPhase)
-        work_dir   = job_result.work_dir
-        yaml_path  = work_dir / ChunkingPhase.SIDECAR_NAME
-        force_wipe = job_result.force_wipe
+        work_dir = self._deps[JobPhase].work_dir
+        yaml_path = work_dir / ChunkingPhase.SIDECAR_NAME
 
-        # Step 1: force-wipe.
-        if force_wipe:
-            yaml_path.unlink(missing_ok=True)
-
-        # Step 2: load boundaries.
-        sidecar = self._load_sidecar(yaml_path)
+        sidecar = load_model(yaml_path, ChunkingSidecar)
         if sidecar is not None and sidecar.scenes:
             self._recovered_scenes = [
-                SceneBoundary(frame=record.frame or 0, timestamp_seconds=record.timestamp_seconds)
+                SceneBoundary(frame=record.frame, timestamp_seconds=record.timestamp_seconds)
                 for record in sidecar.scenes
             ]
             logger.info("Scenes:  %d (from chunking.yaml)", len(self._recovered_scenes))
-            stream = self._dep_result(ProbePhase).stream
+            stream = self._deps[ProbePhase].stream
             assert stream is not None, "probe guaranteed complete by the dependency walk"
             # RecoveryError (unknown duration) propagates — the template
             # converts it to the typed FAILED result.
@@ -271,6 +348,17 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
 
         logger.debug("Chunking recovery: chunking.yaml absent or empty — scene detection needed")
         return Recovery(pending=True)
+
+    def _params_changed(self, sidecar: ChunkingSidecar) -> bool:
+        """Whether a detection parameter differs from the persisted key.
+
+        The detection parameters are required on the loaded sidecar (a
+        missing key never loaded — the sidecar is absent and re-detected).
+        """
+        return (
+            sidecar.scene_threshold != self._config.chunking.scene_threshold
+            or sidecar.min_scene_length != self._config.chunking.min_scene_length
+        )
 
     def _execute(
         self,
@@ -289,8 +377,8 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         Returns:
             ``ChunkingPhaseResult`` with the chunk-window rows.
         """
-        work_dir = self._dep_result(JobPhase).work_dir
-        stream   = self._dep_result(ProbePhase).stream
+        work_dir = self._deps[JobPhase].work_dir
+        stream   = self._deps[ProbePhase].stream
         assert stream is not None, "probe guaranteed complete by the dependency walk"
         extended = stream.payload
 
@@ -312,11 +400,16 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
                 logger.exception("Scene detection failed")
                 return self._make_result(PhaseOutcome.FAILED, [], str(exc))
             sidecar_path = work_dir / ChunkingPhase.SIDECAR_NAME
-            sidecar = ChunkingSidecar(scenes=[
-                SceneRecord(timestamp_seconds=b.timestamp_seconds, frame=b.frame)
-                for b in boundaries
-            ])
-            write_yaml_atomic(sidecar_path, sidecar.model_dump(exclude_none=True))
+            sidecar = ChunkingSidecar(
+                scenes = [
+                    SceneRecord(timestamp_seconds=b.timestamp_seconds, frame=b.frame)
+                    for b in boundaries
+                ],
+                source           = self._deps[JobPhase].file.payload.fingerprint,
+                scene_threshold  = self._config.chunking.scene_threshold,
+                min_scene_length = self._config.chunking.min_scene_length,
+            )
+            save_model(sidecar_path, sidecar)
             logger.debug("Wrote scene boundaries: %s", sidecar_path.name)
 
         try:
@@ -334,7 +427,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
 
     def _reused_result(self, wanted: list, message: str) -> ChunkingPhaseResult:
         """Build the reused result from the cached boundaries."""
-        stream = self._dep_result(ProbePhase).stream
+        stream = self._deps[ProbePhase].stream
         assert stream is not None, "probe guaranteed complete by the dependency walk"
         try:
             chunks = build_chunks(self._recovered_scenes, stream.payload)
@@ -381,12 +474,3 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
             ctx: Pre-resolved end-of-run decisions from the runner.
         """
         return
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _load_sidecar(path) -> ChunkingSidecar | None:
-        """Load ``chunking.yaml``; ``None`` when absent or unparseable."""
-        return load_model(path, ChunkingSidecar)

@@ -61,7 +61,7 @@ def _make_strategy() -> Strategy:
 def _make_chunk() -> VideoStreamChunk:
     stream = ExtendedVideoStream(
         stream = VideoStream(
-            file = File(path="/tmp/source.mkv", file_size_bytes=64),
+            file = File(path="/tmp/source.mkv"),
             info = VideoStreamInfo(
                 track_id=0, codec_name="hevc", fps=25.0,
                 fps_fraction=__import__("fractions").Fraction(25, 1),

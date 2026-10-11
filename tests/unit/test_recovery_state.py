@@ -1,12 +1,13 @@
 """Unit tests for recovery state classification and yaml_utils.
 
 Covers:
-- 10.1  ArtifactState classification in _recover_encoding_attempts
-         (ABSENT / COMPLETE) based on encoded/ directory presence only.
-         PARTIAL is no longer a recovery state — pairs with attempt
-         files in encoding/ but no result sidecar in encoded/ are ABSENT.
+- 10.1  ArtifactState classification in _recover_encoding_attempts — the
+        static-name consumption over one listing per strategy dir: COMPLETE
+        iff both ``<chunk_id>.mkv`` and ``<chunk_id>.yaml`` are present;
+        PARTIAL when only the winner file exists (the conclusion record is
+        missing); ABSENT when neither is.
 - 10.2  write_yaml_atomic: .tmp cleanup on failure; _resolve_tmp_paths
-         ValueError when output path not in cmd.
+        ValueError when output path not in cmd.
 """
 
 from decimal import Decimal
@@ -18,6 +19,7 @@ import yaml
 from pyqenc.app_config import load_app_config
 from pyqenc.phases.encoding import _recover_encoding_attempts as recover_attempts
 from pyqenc.state import ArtifactState
+from pyqenc.stream_model import EncodedChunk
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 _STRATEGY_OBJ = next(
@@ -27,7 +29,6 @@ _STRATEGY_OBJ = next(
 _CHUNK_ID   = "00꞉00꞉00․000-00꞉00꞉13․330"
 _STRATEGY   = _STRATEGY_OBJ.display_name()
 _SAFE_STRAT = _STRATEGY_OBJ.safe_name()
-_RESOLUTION = "1920x800"
 _CRF        = Decimal("20.5")
 
 
@@ -40,15 +41,15 @@ def _make_complete_pair(
     chunk_id:    str     = _CHUNK_ID,
     crf:         Decimal = _CRF,
 ) -> Path:
-    """Write a winning .mkv + result sidecar into encoded_dir.
+    """Write a winner .mkv + result sidecar into encoded_dir.
 
-    Layout mirrors the real encoded/ directory:
-      <chunk_id>.<res>.q<N>.mkv   — winning attempt
-      <chunk_id>.<res>.yaml        — result sidecar (no quality in name)
+    Layout mirrors the real encoded/ directory (static names):
+      <chunk_id>.mkv   — the promoted winner
+      <chunk_id>.yaml  — the winner result sidecar (stem swap)
     """
     encoded_dir.mkdir(parents=True, exist_ok=True)
-    mkv     = encoded_dir / f"{chunk_id}.{_RESOLUTION}.q{crf}.mkv"
-    sidecar = encoded_dir / f"{chunk_id}.{_RESOLUTION}.yaml"
+    mkv     = encoded_dir / EncodedChunk.format_winner_file_name(chunk_id)
+    sidecar = encoded_dir / EncodedChunk.format_winner_sidecar_name(chunk_id)
     mkv.write_bytes(b"\x00" * 64)
     sidecar.write_text(
         yaml.dump({"crf": str(crf), "targets_met": True, "metrics": {"vmaf_min": 95.0}}),
@@ -62,7 +63,7 @@ def _make_complete_pair(
 # ---------------------------------------------------------------------------
 
 class TestRecoverAttemptsAbsent:
-    """ABSENT: no winning mkv+yaml in encoded/."""
+    """ABSENT: no winner mkv+yaml in encoded/."""
 
     def test_absent_when_no_encoded_dir(self, tmp_path: Path) -> None:
         result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
@@ -73,21 +74,25 @@ class TestRecoverAttemptsAbsent:
         result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
         assert (_CHUNK_ID, _STRATEGY) in result.pending
 
-    def test_absent_when_mkv_present_but_no_sidecar(self, tmp_path: Path) -> None:
-        """A .mkv without a .yaml sidecar is not COMPLETE."""
+    def test_partial_when_mkv_present_but_no_sidecar(self, tmp_path: Path) -> None:
+        """A winner .mkv without its .yaml sidecar is PARTIAL — the product
+        exists but the conclusion record (which makes presence trustworthy)
+        is missing."""
         out_dir = _encoded_dir(tmp_path)
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / f"{_CHUNK_ID}.{_RESOLUTION}.q{_CRF}.mkv").write_bytes(b"\x00" * 64)
+        (out_dir / EncodedChunk.format_winner_file_name(_CHUNK_ID)).write_bytes(b"\x00" * 64)
 
         result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
-        assert pair.state == ArtifactState.ABSENT
+        assert pair.state == ArtifactState.PARTIAL
+        assert (_CHUNK_ID, _STRATEGY) in result.pending
 
     def test_absent_when_only_encoding_dir_has_attempts(self, tmp_path: Path) -> None:
-        """Attempt files in encoding/ (no result sidecar in encoded/) → ABSENT."""
+        """Attempt files in encoding/ (no winner in encoded/) → ABSENT —
+        attempts are the substrate, never classified."""
         enc_dir = tmp_path / "encoding" / _SAFE_STRAT
         enc_dir.mkdir(parents=True, exist_ok=True)
-        (enc_dir / f"{_CHUNK_ID}.{_RESOLUTION}.q{_CRF}.mkv").write_bytes(b"\x00" * 64)
+        (enc_dir / EncodedChunk.format_attempt_file_name(_CHUNK_ID, _CRF)).write_bytes(b"\x00" * 64)
 
         result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
@@ -95,7 +100,7 @@ class TestRecoverAttemptsAbsent:
 
 
 class TestRecoverAttemptsComplete:
-    """COMPLETE: winning .mkv + .yaml sidecar present in encoded/."""
+    """COMPLETE: winner .mkv + .yaml sidecar present in encoded/."""
 
     def test_complete_with_mkv_and_sidecar(self, tmp_path: Path) -> None:
         out_dir = _encoded_dir(tmp_path)
@@ -121,6 +126,19 @@ class TestRecoverAttemptsComplete:
         pair = result.pairs[(_CHUNK_ID, _STRATEGY)]
         assert pair.winning_file is not None
         assert pair.winning_file.exists()
+
+    def test_legacy_q_bearing_winner_name_is_not_complete(self, tmp_path: Path) -> None:
+        """Pre-alpha break (Req 1): a q-bearing winner file from an old
+        workdir matches NO static expected name — the pair re-derives."""
+        out_dir = _encoded_dir(tmp_path)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / EncodedChunk.format_attempt_file_name(_CHUNK_ID, _CRF)).write_bytes(b"\x00" * 64)
+        (out_dir / EncodedChunk.format_attempt_sidecar_name(_CHUNK_ID, _CRF)).write_text(
+            yaml.dump({"crf": str(_CRF)}), encoding="utf-8",
+        )
+
+        result = recover_attempts(tmp_path, [_CHUNK_ID], [_STRATEGY_OBJ])
+        assert result.pairs[(_CHUNK_ID, _STRATEGY)].state == ArtifactState.ABSENT
 
 
 class TestRecoverAttemptsMultiplePairs:

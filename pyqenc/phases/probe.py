@@ -22,12 +22,17 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar
 
-from pyqenc.constants import TEMP_SUFFIX, THICK_LINE
+from pydantic import BaseModel
+
+from pyqenc.constants import CROP_SOURCE_DETECTED, CROP_SOURCE_MANUAL, TEMP_SUFFIX, THICK_LINE
 from pyqenc.metrics import MetricKey
 from pyqenc.models import (
     CropParams,
+    CropYaml,
     EncodingPlan,
+    Fingerprint,
     PhaseOutcome,
+    Resolution,
 )
 from pyqenc.phase import (
     Artifact,
@@ -40,19 +45,78 @@ from pyqenc.phase import (
 )
 from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
-from pyqenc.state import ProbeState
 from pyqenc.stream_model import ExtendedVideoStream, VideoStream
 from pyqenc.utils.crop import detect_crop_parameters
 from pyqenc.utils.disk_space import log_disk_space_info
 from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
 from pyqenc.utils.fs import remove_stale_tmp_file
 from pyqenc.utils.timestamps import count_frames
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
 
+# ---------------------------------------------------------------------------
+# probe.yaml — the slow-facet sidecar (re-homed, Req 21)
+# ---------------------------------------------------------------------------
+
+class ProbeState(BaseModel):
+    """Sidecar model for ``probe.yaml`` (the slow facet).
+
+    Written by ``ProbePhase`` after resolving frame count and crop.  Contains
+    only the delta over the extraction inventory: ``frame_count``, ``crop``,
+    the crop's provenance, and the source identity key.
+
+    ``frame_count=0`` is the sentinel for "could not be determined" — no valid
+    video has zero frames.  ``crop`` is non-optional: an empty
+    :class:`CropParams` means "no crop" and persists as ``crop: 0,0,0,0``.
+    Loading always materializes a concrete crop — ``None`` ("auto") never
+    appears past config. The persisted crop is the model's own storage string
+    (``crop: 22,22,0,0`` — one line; the legacy nested-dict form still
+    loads). Unset optional fields are omitted by the ``save_model``
+    ``exclude_none`` convention (never silently dropped when set).
+
+    ``crop_source`` is HUMAN-FACING provenance (was the committed crop a
+    manual override or a detection?) — it never participates in any
+    comparison (Req 23); downstream facet keys compare the frame count and
+    the crop values only. ``None`` for sidecars written before the field.
+
+    ``source`` is the identity key (the fingerprint pair, no path — Req 31) —
+    REQUIRED: every write path carries it; a sidecar missing it fails
+    validation → absent → the facet re-probes (Req 32 amended 2026-10-10).
+
+    ``resulting_resolution`` is the HUMAN-FACING output dimensions
+    (``"<w>x<h>"``), derived at write time via the mathematical operator
+    ``Resolution(source) - crop`` — the encode's only dimension-changing
+    filter is the crop, so the value holds by construction. A display
+    fact only: never an invalidation key, never a completeness input
+    (removed from attempt/winner sidecars 2026-10-09); ``None`` when the
+    source resolution is unknown or for sidecars written before the
+    field.
+    """
+
+    frame_count: int
+    crop:        CropYaml = CropParams()
+    source:      Fingerprint
+    crop_source: str | None         = None
+    resulting_resolution: str | None = None
+
+
 logger = logging.getLogger(__name__)
+
+
+def _derive_resulting_resolution(video: VideoStream, crop: CropParams) -> str | None:
+    """The output dimensions (``source - crop``, the single derivation).
+
+    Human-facing display fact (the "Probe: done" line, ``probe.yaml``) —
+    nothing keys on it. ``None`` when the source resolution is unknown;
+    a malformed source string raises (it is an ffprobe-built fact —
+    loud is correct there).
+    """
+    if not video.info.resolution:
+        return None
+    return str(Resolution.parse(video.info.resolution) - crop)
 
 
 
@@ -151,34 +215,56 @@ class ProbePhase(Phase[ProbePhaseResult]):
     # Phase hooks
     # ------------------------------------------------------------------
 
+    def _invalidate(self) -> None:
+        """Key-triggered effects over ``probe.yaml`` (disk effects only).
+
+        The .tmp pre-clean; then the identity key (Req 33, P-1): a persisted
+        identity contradicting the live source is catastrophic — fatal
+        without the ``--force`` permission; with it, ``probe.yaml`` is wiped
+        and the facet re-probed. An absent key (legacy sidecar) is unknown,
+        never a mismatch (Req 32).
+
+        Raises:
+            RecoveryError: On an identity mismatch without permission.
+        """
+        job_result = self._deps[JobPhase]
+        probe_yaml = job_result.work_dir / ProbePhase.SIDECAR_NAME
+
+        # .tmp pre-clean (probe.yaml is written via .tmp-then-rename).
+        remove_stale_tmp_file(probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX))
+
+        state = load_model(probe_yaml, ProbeState)
+        if state is not None and not state.source.matches(job_result.file.payload.fingerprint):
+            if not job_result.force:
+                raise RecoveryError(
+                    "Source content identity mismatch (probe.yaml) — the committed "
+                    "facet belongs to a different source.  Re-run with --force to "
+                    "grant permission to wipe it and re-probe the new source."
+                )
+            logger.warning(
+                "Source identity mismatch (--force granted — wiping probe.yaml "
+                "and re-probing)"
+            )
+            probe_yaml.unlink(missing_ok=True)
+
     def _recover(self) -> Recovery:
-        """Determine ``probe.yaml`` currency: absent, invalidated, or current.
+        """Classify ``probe.yaml`` currency: absent, invalidated, or current.
 
-        Steps:
-
-        1. Fail fast when the source has no video stream — a fatal
-           invalidation for every downstream video phase.
-        2. Remove a leftover ``probe.yaml.tmp`` from an interrupted write.
-        3. Load ``probe.yaml``. Pending when absent (full probe needed) or
-           when a manual ``--crop`` override invalidates the cached crop
-           (cheap rewrite: the frame count stays cached). Current otherwise —
-           the sidecar is written atomically, so presence implies complete
-           data (no content peeking).
-
-        Returns:
-            The :class:`Recovery` single source of truth — one
-            ``Artifact[ExtendedVideoStream]`` row (``ABSENT`` with the
-            unknown-sentinel composition while pending; ``COMPLETE`` with the
-            resolved slow facet when current, stashed on ``self._resolved``).
+        Runs after :meth:`_invalidate`. The manual ``--crop`` override is
+        classification input (Req 43, P-2): an override EQUAL to the
+        committed crop is a no-op; a DIFFERING one leaves the row pending
+        (a cheap crop-only rewrite at execute — the frame count stays
+        cached). The investment consequence of a real facet change is
+        handled downstream by the probe-facet keys, not here.
 
         Raises:
             RecoveryError: When the source has no video stream.
         """
-        job_result        = self._dep_result(JobPhase)
-        extraction_result = self._dep_result(ExtractionPhase)
+        job_result        = self._deps[JobPhase]
+        extraction_result = self._deps[ExtractionPhase]
         probe_yaml        = job_result.work_dir / ProbePhase.SIDECAR_NAME
 
-        # Step 1 — no video stream: fatal for all downstream video phases.
+        # No video stream: fatal for all downstream video phases.
         video_artifact = extraction_result.video_stream
         if video_artifact is None:
             raise RecoveryError(
@@ -186,15 +272,19 @@ class ProbePhase(Phase[ProbePhaseResult]):
             )
         self._video_stream = video_artifact.payload
 
-        # Step 2 — .tmp pre-clean (probe.yaml is written via .tmp-then-rename).
-        remove_stale_tmp_file(probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX))
+        self._probe_state = load_model(probe_yaml, ProbeState)
+        crop_override_active = (
+            self._crop_params is not None
+            and (
+                self._probe_state is None
+                or self._crop_params != self._probe_state.crop
+            )
+        )
 
-        # Step 3 — load + currency.
-        self._probe_state = ProbeState.load(probe_yaml)
-        if self._probe_state is None or self._crop_params is not None:
-            # Absent (full probe needed), or a manual --crop override
-            # invalidates the cached crop (cheap rewrite: the frame count
-            # stays cached). The row is ABSENT with the unknown-sentinel
+        if self._probe_state is None or crop_override_active:
+            # Absent/wiped (full probe needed), or a differing manual --crop
+            # override invalidates the cached crop (cheap rewrite: the frame
+            # count stays cached). The row is ABSENT with the unknown-sentinel
             # composition — the slow facet is unresolved until probed.
             placeholder = ExtendedVideoStream(
                 stream      = self._video_stream,
@@ -230,7 +320,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         Returns:
             ``ProbePhaseResult`` with outcome ``COMPLETED``.
         """
-        probe_yaml = self._dep_result(JobPhase).work_dir / ProbePhase.SIDECAR_NAME
+        probe_yaml = self._deps[JobPhase].work_dir / ProbePhase.SIDECAR_NAME
         probe_state = self._probe_state
         video       = self._video_stream
         assert video is not None  # recovery guarantees a video stream
@@ -245,15 +335,18 @@ class ProbePhase(Phase[ProbePhaseResult]):
             )
 
         if self._crop_params is not None:
-            crop = self._crop_params
+            crop        = self._crop_params
+            crop_source = CROP_SOURCE_MANUAL
             logger.info("Crop: %s (manual)", crop.display())
         elif probe_state is not None:
-            crop = probe_state.crop
+            crop        = probe_state.crop
+            crop_source = probe_state.crop_source or CROP_SOURCE_DETECTED
             logger.info("Crop: %s (cached)", crop.display())
         else:
             logger.info("Detecting crop: %s", video.file.path.name)
             with self._collector.time(MetricKey.PROBE, "crop_detect"):
                 crop = detect_crop_parameters(video)
+            crop_source = CROP_SOURCE_DETECTED
 
         # Resolve frame count: cached → timestamps.txt count → null-count pass.
         if probe_state is not None and probe_state.frame_count > 0:
@@ -262,8 +355,18 @@ class ProbePhase(Phase[ProbePhaseResult]):
         else:
             frame_count = self._count_source_frames()
 
-        # Persist and stash the payload.
-        ProbeState(frame_count=frame_count, crop=crop).save(probe_yaml)
+        # Persist and stash the payload. crop_source and
+        # resulting_resolution are human-facing facts only — never keys
+        # (Req 23); source is the identity key.
+        job_result = self._deps[JobPhase]
+        resulting_resolution = _derive_resulting_resolution(video, crop)
+        save_model(probe_yaml, ProbeState(
+            frame_count          = frame_count,
+            crop                 = crop,
+            source               = job_result.file.payload.fingerprint,
+            crop_source          = crop_source,
+            resulting_resolution = resulting_resolution,
+        ))
         self._resolved = ExtendedVideoStream(
             stream      = video,
             frame_count = frame_count,
@@ -278,14 +381,14 @@ class ProbePhase(Phase[ProbePhaseResult]):
         n_strategies = len(self._plan.strategies)
         log_disk_space_info(
             stream         = video,
-            work_dir       = self._dep_result(JobPhase).work_dir,
+            work_dir       = self._deps[JobPhase].work_dir,
             min_strategies = 1 if (self._config.encoding.optimize or n_strategies == 0) else n_strategies,
             max_strategies = max(1, n_strategies),
         )
 
         logger.info(
-            "Probe: done — frame_count=%d, crop=%s",
-            frame_count, crop.display(),
+            "Probe: done — frame_count=%d, crop=%s, resolution=%s",
+            frame_count, crop.display(), resulting_resolution or "unknown",
         )
         return self._make_result(PhaseOutcome.COMPLETED, [], "probe resolved")
 
@@ -339,7 +442,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         """
         video = self._video_stream
         assert video is not None
-        timestamps_path = self._dep_result(ExtractionPhase).timestamps_path
+        timestamps_path = self._deps[ExtractionPhase].timestamps_path
 
         if timestamps_path is not None:
             counted = count_frames(timestamps_path)

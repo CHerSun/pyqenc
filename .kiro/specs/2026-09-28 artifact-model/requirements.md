@@ -23,6 +23,7 @@
 
 ### Related, not superseded
 
+- `2026-10-07 artifact-recovery-ownership` (later spec) — keeps this spec's ledger/result contracts and presence states; recovery classification mechanics become the consumption protocol (payload-owned expected names consumed out of ONE listing per owned directory; leftovers → layer policy; collisions loud), and invalidation is split from recovery into a template-sequenced disk-effects-only `_invalidate()` step. The derived `force_wipe` wipe-order propagation is deleted in favor of per-phase persisted identity keys plus the `--force` permission.
 - `2026-09-25 file-stream-model` — the entity layer this spec wraps. Stream/chunk/attempt composition, naming ownership (Req 15), unique-property dumps and sidecar schemas are unchanged; this spec adds the artifact layer above them and defines what flows between phases.
 - `2026-09-09 artifact-state-refactor` — retained in full: the completeness enum semantics (`ABSENT`/`PARTIAL`/`COMPLETE`, presence-based), the completeness × selection orthogonality, `wanted` as a value derived from external input, and the unified `log_recovery_line()` over the internal list.
 - Thin-template phase run contract (`Phase.run()` steps, `Recovery`, `Recovery.from_artifacts`, dependency walk, dry-run branches) — unchanged; no new template hooks are introduced.

@@ -8,7 +8,7 @@ import pytest
 from pyqenc.metrics import MetricsCollector
 from pyqenc.models import QualityTarget, Strategy
 from pyqenc.stream_model import VideoStreamChunk
-from pyqenc.utils.visualization import QualityEvaluator
+from pyqenc.utils.visualization import QualityMeasurer
 from tests.fixtures.metric_fixtures import (
     create_mock_psnr_file,
     create_mock_ssim_file,
@@ -125,7 +125,7 @@ class TestEncodingQualityWithRealVideo:
 
     def test_quality_evaluator_initialization(self, tmp_path):
         """Test quality evaluator can be initialized."""
-        evaluator = QualityEvaluator(tmp_path)
+        evaluator = QualityMeasurer(tmp_path)
         assert evaluator.work_dir == tmp_path
 
 
@@ -164,8 +164,6 @@ class TestEncodeChunkQualitySearchV2Integration:
         chunk = MagicMock()
         chunk.safe_name.return_value = "chunk_001"
         chunk.path            = chunk_file
-        chunk._resolution     = "1920x1080"
-        chunk.resolution      = "1920x1080"
         chunk.start_timestamp = 0.0
         chunk.end_timestamp   = 5.0
         return cast(VideoStreamChunk, chunk)
@@ -188,21 +186,20 @@ class TestEncodeChunkQualitySearchV2Integration:
 
         from pyqenc.models import AttemptMetadata, QualityTarget
         from pyqenc.phases.encoding import ChunkEncoder, ChunkEncodingResult
-        from pyqenc.utils.visualization import QualityEvaluator
+        from pyqenc.utils.visualization import QualityMeasurer
 
         strategy = self._make_strategy()
         chunk    = self._make_chunk(tmp_path)
         target   = QualityTarget(metric="vmaf", statistic="min", value=95.0)
 
         # Build a real AttemptMetadata so .crf is a proper Decimal.
-        attempt_path = tmp_path / "chunk_001.1920x1080.q18.0.mkv"
+        attempt_path = tmp_path / "chunk_001.q18.0.mkv"
         attempt_path.write_bytes(b"fake mkv")
         fake_attempt = AttemptMetadata(
             path            = attempt_path,
             chunk_id        = "chunk_001",
             strategy        = "test-strategy",
             crf             = Decimal("18.0"),
-            resolution      = "1920x1080",
             file_size_bytes = 8,
         )
 
@@ -210,12 +207,12 @@ class TestEncodeChunkQualitySearchV2Integration:
         from pyqenc.quality import MetricType
         vmaf_delta = MetricType.VMAF.info.acceptance_delta
         fake_sidecar = {
-            "crf":      "18.0",
-            "sampling": 10,
-            "metrics":  {"vmaf_min": 95.0 + vmaf_delta * 0.5},
+            "sampling":    10,
+            "frame_count": 8,
+            "metrics":     {"vmaf_min": 95.0 + vmaf_delta * 0.5},
         }
 
-        evaluator = MagicMock(spec=QualityEvaluator)
+        evaluator = MagicMock(spec=QualityMeasurer)
         evaluator.work_dir = tmp_path
 
         encoder = ChunkEncoder(
@@ -244,7 +241,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         assert result.reused is True, f"Expected reused=True, got: {result}"
         assert result.success is True
         # Quality evaluator must NOT have been called (pure cache hit).
-        evaluator.evaluate_chunk.assert_not_called()
+        evaluator.measure_chunk.assert_not_called()
 
     @pytest.mark.skip(reason="ChunkEncoder constructor signature changed (collector arg added); needs update")
     def test_encode_chunk_calls_finalize_on_convergence(self, tmp_path: Path) -> None:
@@ -254,26 +251,27 @@ class TestEncodeChunkQualitySearchV2Integration:
 
         from pyqenc.models import QualityTarget
         from pyqenc.phases.encoding import ChunkEncoder
-        from pyqenc.quality import MetricType, QualityEvaluation, QualityLogs
-        from pyqenc.utils.visualization import QualityEvaluator
+        from pyqenc.quality import MetricType, QualityLogs, QualityMeasurement
+        from pyqenc.utils.visualization import QualityMeasurer
 
         strategy = self._make_strategy()
         chunk    = self._make_chunk(tmp_path)
         target   = QualityTarget(metric="vmaf", statistic="min", value=95.0)
 
         # Fake evaluation result: passes with surplus within acceptance_delta → early acceptance.
-        fake_eval = MagicMock(spec=QualityEvaluation)
-        fake_eval.targets_met    = True
-        fake_eval.failed_targets = []
-        fake_eval.logs           = QualityLogs()
-        fake_eval.metrics        = {
+        fake_measurement = MagicMock(spec=QualityMeasurement)
+        fake_measurement.targets_met    = True
+        fake_measurement.failed_targets = []
+        fake_measurement.logs           = QualityLogs()
+        fake_measurement.frame_count    = 120
+        fake_measurement.metrics        = {
             MetricType.VMAF: {"min": 95.1, "median": 96.0, "p05": 94.0, "p10": 94.5, "p25": 95.0,
                               "p75": 97.0, "p90": 97.5, "p95": 98.0, "max": 99.0, "std": 1.0},
         }
 
-        evaluator = MagicMock(spec=QualityEvaluator)
+        evaluator = MagicMock(spec=QualityMeasurer)
         evaluator.work_dir        = tmp_path
-        evaluator.evaluate_chunk.return_value = fake_eval
+        evaluator.measure_chunk.return_value = fake_measurement
 
         encoder = ChunkEncoder(
             quality_evaluator = evaluator,
@@ -285,15 +283,14 @@ class TestEncodeChunkQualitySearchV2Integration:
         reference.path = tmp_path / "ref.mkv"
 
         # Pre-create the output file so stat() succeeds.
-        fake_out = tmp_path / "encoding" / "test_strategy" / "chunk_001.1920x1080.q18.0.mkv"
+        fake_out = tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.mkv"
         fake_out.parent.mkdir(parents=True, exist_ok=True)
         fake_out.write_bytes(b"fake mkv")
 
         with (
             patch.object(encoder, "_check_existing_encoding", return_value=None),
             patch.object(encoder, "_encode_with_ffmpeg", return_value=True),
-            patch("pyqenc.phases.encoding._probe_resolution", return_value="1920x1080"),
-            patch("pyqenc.phases.encoding._write_metrics_sidecar"),
+            patch("pyqenc.phases.encoding._write_attempt_sidecar"),
             patch.object(encoder, "_finalize_winning_attempt") as mock_finalize,
         ):
             result = encoder.encode_chunk(

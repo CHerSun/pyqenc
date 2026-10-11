@@ -9,6 +9,7 @@ aggregate round-trip, and the fast-exit re-assertion.
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import MagicMock
 
 import yaml
@@ -18,13 +19,13 @@ from pyqenc.models import CropParams, PhaseOutcome, QualityTarget
 from pyqenc.phase import Artifact, ArtifactState, PhaseRegistry
 from pyqenc.phases.encoding import (
     EncodingPhase,
+    EncodingSummary,
     _scan_winner_sidecars,
-    _write_encoding_result_sidecar,
-    _write_metrics_sidecar,
+    _write_attempt_sidecar,
+    _write_winner_sidecar,
     build_encoded_chunk,
 )
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
-from pyqenc.state import EncodingParams
 from pyqenc.stream_model import (
     EncodedChunk,
     ExtendedVideoStream,
@@ -33,6 +34,7 @@ from pyqenc.stream_model import (
     VideoStreamChunk,
     VideoStreamInfo,
 )
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -58,7 +60,7 @@ def _make_chunk(cid_start: float, cid_end: float, tmp_path: Path) -> VideoStream
     return VideoStreamChunk(
         stream = ExtendedVideoStream(
             stream = VideoStream(
-                file = File(path=tmp_path / "source.mkv", file_size_bytes=64),
+                file = File(path=tmp_path / "source.mkv"),
                 info = VideoStreamInfo(
                     track_id=0, codec_name="hevc", fps=24.0,
                     fps_fraction=Fraction(24, 1), resolution=_RESOLUTION,
@@ -89,22 +91,20 @@ def _make_winner(
     """
     strategy_dir = work_dir / "encoded" / strategy.safe_name()
     strategy_dir.mkdir(parents=True, exist_ok=True)
-    name = EncodedChunk.format_file_name(chunk.safe_name(), _RESOLUTION, crf)
-    winner = strategy_dir / name
+    winner = strategy_dir / EncodedChunk.format_winner_file_name(chunk.safe_name())
     winner.write_bytes(b"x" * 16)
     sidecar: dict = {
-        "winning_attempt": name,
         "crf": str(crf),
         "metrics": {"vmaf_min": 94.5},
         "targets_met": True,
         "frame_count": frames,
     }
-    (strategy_dir / f"{chunk.safe_name()}.{_RESOLUTION}.yaml").write_text(
+    (strategy_dir / EncodedChunk.format_winner_sidecar_name(chunk.safe_name())).write_text(
         yaml.safe_dump(sidecar), encoding="utf-8",
     )
     return build_encoded_chunk(
-        chunk=chunk, strategy=strategy, crf=crf,
-        path=winner, resolution=_RESOLUTION, frame_count=0,
+        chunk=chunk, strategy=strategy,
+        path=winner, frame_count=0,
     )
 
 
@@ -116,32 +116,62 @@ class TestSidecarFrameCount:
 
     def test_metrics_sidecar_persists_frame_count(self, tmp_path: Path) -> None:
         """The per-attempt sidecar carries the attempt's frame count."""
-        attempt = tmp_path / "chunk.1920x1080.q18.0.mkv"
-        _write_metrics_sidecar(
-            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 2400,
+        attempt = tmp_path / "chunk.q18.0.mkv"
+        _write_attempt_sidecar(
+            attempt, {"vmaf_min": 94.5}, 3, 2400,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 2400
 
     def test_metrics_sidecar_writes_zero_for_unknown_frame_count(self, tmp_path: Path) -> None:
         """An unknown count is persisted as the 0 sentinel (no None in yaml)."""
-        attempt = tmp_path / "chunk.1920x1080.q18.0.mkv"
-        _write_metrics_sidecar(
-            attempt, Decimal("18.0"), {"vmaf_min": 94.5}, 3, 0,
+        attempt = tmp_path / "chunk.q18.0.mkv"
+        _write_attempt_sidecar(
+            attempt, {"vmaf_min": 94.5}, 3, 0,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 0
 
+
+class TestWinnerTargetedSubset:
+    """The winner sidecar's metrics subset is mode-aware (Req 25; found empty
+    in fixed mode on the 2026-10-09 real run — "ruler: none")."""
+
+    _FULL: ClassVar[dict[str, float]] = {
+        "vmaf_min": 91.0, "vmaf_p10": 95.0, "vmaf_median": 96.5, "vmaf_max": 99.0,
+        "vmaf_std": 1.2, "psnr_p10": 45.0, "psnr_median": 48.0, "ssim_min": 97.0,
+    }
+
+    def test_search_persists_the_target_keys_only(self) -> None:
+        from pyqenc.phases.encoding import _winner_targeted_metrics
+
+        targets = [
+            QualityTarget(metric="vmaf", statistic="median", value=96.0),
+            QualityTarget(metric="psnr", statistic="p10", value=43.0),
+        ]
+        subset = _winner_targeted_metrics(self._FULL, targets)
+        assert sorted(subset) == ["psnr_p10", "vmaf_median"]
+
+    def test_fixed_persists_the_comparison_stat_set(self) -> None:
+        """Bug guarded: fixed mode judges with no target set (the ruler is
+        derived FROM winner metrics) — the old filter wrote ``{}`` and the
+        whole fixed chain ran dataless (no ruler, no Pareto data, no
+        limiter table)."""
+        from pyqenc.phases.encoding import _winner_targeted_metrics
+
+        subset = _winner_targeted_metrics(self._FULL, [])
+        assert sorted(subset) == [
+            "psnr_median", "psnr_p10", "vmaf_median", "vmaf_p10",
+        ]
+
     def test_result_sidecar_persists_frame_count(self, tmp_path: Path) -> None:
         """The winner result sidecar carries the winning attempt's count."""
-        winner = tmp_path / "chunk.1920x1080.q18.0.mkv"
-        winner.write_bytes(b"x" * 8)
-        _write_encoding_result_sidecar(
-            tmp_path, "chunk", _RESOLUTION, winner,
+        _write_winner_sidecar(
+            tmp_path, "chunk",
             Decimal("18.0"), {"vmaf_min": 94.5}, 2400,
         )
         data = yaml.safe_load(
-            (tmp_path / f"chunk.{_RESOLUTION}.yaml").read_text(encoding="utf-8"),
+            (tmp_path / EncodedChunk.format_winner_sidecar_name("chunk")).read_text(encoding="utf-8"),
         )
         assert data["frame_count"] == 2400
 
@@ -196,7 +226,7 @@ class TestScanWinnerSidecars:
         winner = _make_winner(tmp_path, chunk, _STRATEGY, Decimal("18.0"), 240)
         sidecar_path = (
             tmp_path / "encoded" / _STRATEGY.safe_name()
-            / f"{chunk.safe_name()}.{_RESOLUTION}.yaml"
+            / EncodedChunk.format_winner_sidecar_name(chunk.safe_name())
         )
         data = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
         del data["frame_count"]
@@ -214,7 +244,7 @@ class TestScanWinnerSidecars:
         winner = _make_winner(tmp_path, chunk, _STRATEGY, Decimal("18.0"), 100)
         # Remove the sidecar the helper wrote.
         (tmp_path / "encoded" / _STRATEGY.safe_name()
-         / f"{chunk.safe_name()}.{_RESOLUTION}.yaml").unlink()
+         / EncodedChunk.format_winner_sidecar_name(chunk.safe_name())).unlink()
         encoded = {_STRATEGY.display_name(): [winner]}
 
         scan = _scan_winner_sidecars(tmp_path, encoded, [_STRATEGY.display_name()], _TARGETS)
@@ -261,8 +291,7 @@ class TestScanWinnerSidecars:
         from decimal import Decimal as _Decimal
 
         from pyqenc.metrics import NoOpMetricsCollector
-        from pyqenc.phases.encoding import EncodingPhase
-        from pyqenc.state import LimiterSummary, LimiterSummaryRow
+        from pyqenc.phases.encoding import EncodingPhase, LimiterSummary, LimiterSummaryRow
 
         phase = EncodingPhase(
             load_app_config(default_only=True), {}, collector=NoOpMetricsCollector(),
@@ -301,29 +330,28 @@ class TestScanWinnerSidecars:
 # encoding.yaml aggregate round-trip
 # ---------------------------------------------------------------------------
 
-class TestEncodingParamsTotals:
+class TestEncodingSummaryTotals:
 
     def test_round_trip(self, tmp_path: Path) -> None:
-        """winners_frame_totals persists into encoding.yaml and loads back."""
+        """frames persists into encoding.yaml and loads back."""
         path = tmp_path / "encoding.yaml"
-        EncodingParams(
-            winners_frame_totals={_STRATEGY.display_name(): 9526},
-        ).save(path)
+        save_model(path, EncodingSummary(
+            limiter=[],
+            frames={_STRATEGY.display_name(): 9526},
+        ))
 
-        loaded = EncodingParams.load(path)
+        loaded = load_model(path, EncodingSummary)
 
         assert loaded is not None
-        assert loaded.winners_frame_totals == {_STRATEGY.display_name(): 9526}
+        assert loaded.frames == {_STRATEGY.display_name(): 9526}
 
-    def test_absent_totals_load_as_empty(self, tmp_path: Path) -> None:
-        """Files written before the field load as {} (unknown — no mismatch)."""
+    def test_file_missing_keys_loads_absent(self, tmp_path: Path) -> None:
+        """A file missing the aggregate keys fails validation → absent
+        (display degrades only — the file carries no keys, Req 24)."""
         path = tmp_path / "encoding.yaml"
-        path.write_text("probe:\n  frame_count: 2400\n", encoding="utf-8")
+        path.write_text("{}", encoding="utf-8")
 
-        loaded = EncodingParams.load(path)
-
-        assert loaded is not None
-        assert loaded.winners_frame_totals == {}
+        assert load_model(path, EncodingSummary) is None
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +371,7 @@ def _make_encoding_phase(tmp_path: Path, probe_frames: int) -> EncodingPhase:
         stream  = Artifact(
             payload = ExtendedVideoStream(
                 stream = VideoStream(
-                    file = File(path=tmp_path / "source.mkv", file_size_bytes=64),
+                    file = File(path=tmp_path / "source.mkv"),
                     info = VideoStreamInfo(
                         track_id=0, codec_name="hevc", fps=24.0,
                         fps_fraction=Fraction(24, 1), resolution=_RESOLUTION,
@@ -366,8 +394,9 @@ class TestReassertFramePreservation:
 
         phase = _make_encoding_phase(tmp_path, probe_frames=9526)
         with caplog.at_level(logging.WARNING):
-            phase._reassert_frame_preservation(EncodingParams(
-                winners_frame_totals={_STRATEGY.display_name(): 9526},
+            phase._reassert_frame_preservation(EncodingSummary(
+                limiter=[],
+                frames={_STRATEGY.display_name(): 9526},
             ))
         assert not [r for r in caplog.records if "disagree" in r.message]
 
@@ -376,8 +405,9 @@ class TestReassertFramePreservation:
 
         phase = _make_encoding_phase(tmp_path, probe_frames=9526)
         with caplog.at_level(logging.WARNING):
-            phase._reassert_frame_preservation(EncodingParams(
-                winners_frame_totals={_STRATEGY.display_name(): 9000},
+            phase._reassert_frame_preservation(EncodingSummary(
+                limiter=[],
+                frames={_STRATEGY.display_name(): 9000},
             ))
         assert any(
             "disagree" in r.message and "source=9526" in r.message
@@ -389,6 +419,8 @@ class TestReassertFramePreservation:
 
         phase = _make_encoding_phase(tmp_path, probe_frames=9526)
         with caplog.at_level(logging.WARNING):
-            phase._reassert_frame_preservation(EncodingParams(winners_frame_totals={}))
+            phase._reassert_frame_preservation(EncodingSummary(
+                limiter=[], frames={},
+            ))
             phase._reassert_frame_preservation(None)
         assert not [r for r in caplog.records if "disagree" in r.message]

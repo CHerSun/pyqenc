@@ -10,6 +10,8 @@
 - Annotations rely on PEP 649 lazy evaluation (3.14 default): NEVER write `from __future__ import annotations` (a deprecated no-op on 3.14) and NEVER quote annotations (`"AppConfig"`) — bare names work for forward references and `TYPE_CHECKING`-only imports.
 - For volatile things - try (not check).
 - All functions, classes and class members MUST BE type-hinted.
+- **Ambiguity elimination via explicit typing, where possible.** When a producer GUARANTEES something a broader type leaves optional (an always-present belt, an always-populated field), state it in the type: a narrowing subclass (e.g. `SizedFingerprint(Fingerprint)` with required `size` for derivations whose belt is structural) or a required field on the composing record. Consumers then read the fact with no dead `None`/default handling. Prefer the narrowing over duplicating the fact into a second field — one home, typed total.
+- **Docstrings are GOOGLE-STYLE, universally** (every function, class, and class member): one-line summary, extended prose paragraphs, then structured sections — `Args:` (or `Arguments:`), `Returns:`, `Raises:`, `Yields:`, `Attributes:` for classes — with `name: description` entries and indented continuations. This format is parsed by the LSP (Pylance/Pyright hover help and per-parameter info) — keep it exact so the tooling works. No reST fields (`:param x:`), no NumPy-style underlined headers. Docstrings state the CURRENT CONTRACT only — summary, role, field semantics, invariants and their non-obvious why; dated reasoning, tombstones of removed fields, and discovery history live in commits and specs, never in the docstring.
 - Type-hint using newer syntax: `int|None` instead of `Optional[int]`, newer generic classes without imports from `typing` where possible.
 - Use top-level imports. In-place (local) imports are only acceptable when top-level imports are not possible, e.g. to break circular dependencies.
 - Use vertical alignment between arguments/parameters where it improves readability.
@@ -81,6 +83,12 @@ Use our `ProgressBar` for progress display to the end user for long tasks.
 ## Tests
 
 - Tests should never check internal state, only observable behavior.
+- **Mandatory read before writing, modifying, or assessing any test:**
+  [`agent-testing.md`](agent-testing.md) — the QA & testing rules
+  (PyTest + Hypothesis; property-based first; black-box public-surface
+  testing, pinning/characterization tests and internal mocking forbidden;
+  mandatory happy-path/properties/error-handling structure; the
+  red-green-refactor verification loop; pyqenc-specific translation).
 
 ## ffmpeg Execution
 

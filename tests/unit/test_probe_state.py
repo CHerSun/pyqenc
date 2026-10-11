@@ -3,8 +3,12 @@
 
 from pathlib import Path
 
-from pyqenc.models import CropParams
-from pyqenc.state import ProbeState
+from pyqenc.models import CropParams, Fingerprint
+
+_STUB_FP = Fingerprint(token="0" * 32)
+
+from pyqenc.phases.probe import ProbeState
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 
 class TestProbeStateRoundTrip:
@@ -15,12 +19,12 @@ class TestProbeStateRoundTrip:
     # ------------------------------------------------------------------
 
     def test_load_returns_none_when_file_absent(self, tmp_path: Path):
-        """ProbeState.load() must return None when the file does not exist.
+        """load_model(, ProbeState) must return None when the file does not exist.
 
         Bug: a missing file could raise an exception instead of returning None,
         breaking the recovery protocol that uses None to mean 'not yet probed'.
         """
-        result = ProbeState.load(tmp_path / "probe.yaml")
+        result = load_model(tmp_path / "probe.yaml", ProbeState)
         assert result is None
 
     # ------------------------------------------------------------------
@@ -28,14 +32,14 @@ class TestProbeStateRoundTrip:
     # ------------------------------------------------------------------
 
     def test_save_creates_file(self, tmp_path: Path):
-        """ProbeState.save() must create the YAML file at the target path.
+        """save_model() must create the YAML file at the target path.
 
         Bug: if the atomic write failed silently, the file would be absent
         on the next run and the probe would re-run unnecessarily.
         """
-        state = ProbeState(frame_count=1440)
+        state = ProbeState(source=_STUB_FP, frame_count=1440)
         path  = tmp_path / "probe.yaml"
-        state.save(path)
+        save_model(path, state)
         assert path.exists()
 
     def test_save_no_tmp_file_left_behind(self, tmp_path: Path):
@@ -44,19 +48,19 @@ class TestProbeStateRoundTrip:
         Bug: if atomicity was not implemented, a .tmp file could be left behind
         after a crash, corrupting recovery on the next run.
         """
-        state = ProbeState(frame_count=1440)
+        state = ProbeState(source=_STUB_FP, frame_count=1440)
         path  = tmp_path / "probe.yaml"
-        state.save(path)
+        save_model(path, state)
         tmp_files = list(tmp_path.glob("*.tmp"))
         assert tmp_files == []
 
     def test_save_creates_parent_dirs(self, tmp_path: Path):
-        """ProbeState.save() must create missing parent directories.
+        """save_model() must create missing parent directories.
 
         Bug: saving to a non-existent sub-directory would raise FileNotFoundError.
         """
         nested = tmp_path / "job_dir" / "probe.yaml"
-        ProbeState(frame_count=100).save(nested)
+        save_model(nested, ProbeState(source=_STUB_FP, frame_count=100))
         assert nested.exists()
 
     # ------------------------------------------------------------------
@@ -69,11 +73,11 @@ class TestProbeStateRoundTrip:
         Bug: crop=None could be serialised as a dict key that breaks deserialization,
         or frame_count could be lost.
         """
-        original = ProbeState(frame_count=1440)
+        original = ProbeState(source=_STUB_FP, frame_count=1440)
         path = tmp_path / "probe.yaml"
-        original.save(path)
+        save_model(path, original)
 
-        restored = ProbeState.load(path)
+        restored = load_model(path, ProbeState)
         assert restored is not None
         assert restored.frame_count == 1440
         assert restored.crop is not None and restored.crop.is_empty()
@@ -84,11 +88,11 @@ class TestProbeStateRoundTrip:
         Bug: crop could be serialised incorrectly, losing top/bottom/left/right values.
         """
         crop     = CropParams(top=140, bottom=140, left=0, right=0)
-        original = ProbeState(frame_count=72000, crop=crop)
-        path     = tmp_path / "probe.yaml"
-        original.save(path)
+        original = ProbeState(source=_STUB_FP, frame_count=72000, crop=crop)
+        path = tmp_path / "probe.yaml"
+        save_model(path, original)
 
-        restored = ProbeState.load(path)
+        restored = load_model(path, ProbeState)
         assert restored is not None
         assert restored.frame_count  == 72000
         assert restored.crop         is not None
@@ -97,6 +101,35 @@ class TestProbeStateRoundTrip:
         assert restored.crop.left    == 0
         assert restored.crop.right   == 0
 
+    def test_legacy_nested_crop_dict_still_loads(self, tmp_path: Path):
+        """Tolerance guard: the model's native dict form (the pre-compact
+        serialization) passes validation — same model, both natural forms."""
+        path = tmp_path / "probe.yaml"
+        path.write_text(
+            "frame_count: 10\n"
+            f"source: {{token: \"{_STUB_FP.token}\"}}\n"
+            "crop:\n"
+            "  top: 5\n"
+            "  bottom: 6\n"
+            "  left: 0\n"
+            "  right: 0\n",
+            encoding="utf-8",
+        )
+
+        restored = load_model(path, ProbeState)
+        assert restored is not None
+        assert restored.crop.top == 5
+        assert restored.crop.bottom == 6
+
+    def test_sidecar_without_source_loads_absent(self, tmp_path: Path):
+        """The identity key is required: a sidecar missing it fails
+        validation and loads as absent — the facet re-probes (Req 32
+        amended 2026-10-10)."""
+        path = tmp_path / "probe.yaml"
+        path.write_text("frame_count: 10\ncrop: 5,6,0,0\n", encoding="utf-8")
+
+        assert load_model(path, ProbeState) is None
+
     def test_round_trip_all_sides_crop(self, tmp_path: Path):
         """Round-trip with all four crop sides non-zero must preserve every value.
 
@@ -104,11 +137,11 @@ class TestProbeStateRoundTrip:
         wrote top/bottom.
         """
         crop     = CropParams(top=10, bottom=20, left=30, right=40)
-        original = ProbeState(frame_count=500, crop=crop)
+        original = ProbeState(source=_STUB_FP, frame_count=500, crop=crop)
         path     = tmp_path / "probe.yaml"
-        original.save(path)
+        save_model(path, original)
 
-        restored = ProbeState.load(path)
+        restored = load_model(path, ProbeState)
         assert restored is not None
         assert restored.crop is not None
         assert restored.crop.top    == 10
@@ -122,20 +155,53 @@ class TestProbeStateRoundTrip:
         Bug: frame_count=0 could be treated as falsy and omitted from the YAML,
         returning a different default on restore.
         """
-        original = ProbeState(frame_count=0)
-        path     = tmp_path / "probe.yaml"
-        original.save(path)
+        original = ProbeState(source=_STUB_FP, frame_count=0)
+        path = tmp_path / "probe.yaml"
+        save_model(path, original)
 
-        restored = ProbeState.load(path)
+        restored = load_model(path, ProbeState)
         assert restored is not None
         assert restored.frame_count == 0
+
+    def test_round_trip_resulting_resolution(self, tmp_path: Path):
+        """The human-facing derived dimensions persist and restore.
+
+        Bug: a display fact set at write time (source − crop) could be
+        silently dropped by the serializer, leaving probe.yaml without
+        the single human inspection point for the crop's effect.
+        """
+        original = ProbeState(source=_STUB_FP, 
+            frame_count=72000, crop=CropParams(top=22, bottom=22),
+            crop_source="detected", resulting_resolution="1920x1036",
+        )
+        path = tmp_path / "probe.yaml"
+        save_model(path, original)
+
+        restored = load_model(path, ProbeState)
+        assert restored is not None
+        assert restored.resulting_resolution == "1920x1036"
+
+    def test_sidecar_without_resulting_resolution_loads_none(self, tmp_path: Path):
+        """Sidecars without the human-facing field load with ``None`` —
+        the field is optional (unlike the identity key); deserialization
+        tolerance, not file-form pinning."""
+        path = tmp_path / "probe.yaml"
+        path.write_text(
+            f"frame_count: 100\ncrop: 22,22,0,0\nsource: {{token: \"{_STUB_FP.token}\"}}\n",
+            encoding="utf-8",
+        )
+
+        restored = load_model(path, ProbeState)
+        assert restored is not None
+        assert restored.resulting_resolution is None
+        assert restored.crop.top == 22
 
     # ------------------------------------------------------------------
     # load() — graceful handling of corrupt/invalid files
     # ------------------------------------------------------------------
 
     def test_load_returns_none_for_invalid_yaml(self, tmp_path: Path):
-        """ProbeState.load() must return None (not raise) for an invalid file.
+        """load_model() must return None (not raise, ProbeState) for an invalid file.
 
         Bug: a corrupt probe.yaml could abort the entire pipeline run with an
         unhandled exception instead of triggering a fresh probe.
@@ -143,5 +209,5 @@ class TestProbeStateRoundTrip:
         path = tmp_path / "probe.yaml"
         path.write_text("not: valid: yaml: [unclosed", encoding="utf-8")
 
-        result = ProbeState.load(path)
+        result = load_model(path, ProbeState)
         assert result is None

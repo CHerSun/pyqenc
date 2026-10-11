@@ -19,6 +19,7 @@
 
 ### Related, not superseded
 
+- `2026-10-07 artifact-recovery-ownership` (predecessor spec) — TODO §90 is split across the two: the per-mode discriminated-union sidecar typing (`mode: fixed|search` tagged models for `optimization.yaml`/`merge.yaml`) and the single `summary` replay-aggregate key land THERE; the summary-content narrowing (metrics breadth, `strategy_results.metrics`, table shape) stays HERE. Unified-summaries re-forks from that spec's merge and builds on its fingerprint substrate (strategy/chunk-set/winner-set fingerprints).
 - TODO §82 (multi-metric scoring research) — the table is presentation; no composite score is introduced. Reduction-with-bite ideas stay parked there.
 - TODO §83 (metrics-absence tolerance) — adjacent via the merge measurement set (Req 8); no default flipping here.
 - TODO §86 (general merge invalidation) — adjacent via output naming; untouched here beyond the `Files named` line fix riding along.

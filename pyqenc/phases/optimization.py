@@ -23,20 +23,27 @@ import random
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Annotated, ClassVar, Literal
+
+import yaml
+from pydantic import BaseModel, Field, TypeAdapter
 
 from pyqenc.constants import (
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
+    FIXED_COMPARISON_STATS,
     WARNING_SYMBOL,
 )
 from pyqenc.metrics import MetricKey
 from pyqenc.models import (
     CleanupLevel,
     CropParams,
+    EncodingPlan,
+    Fingerprint,
     PhaseOutcome,
     QualityTarget,
     Strategy,
+    fingerprinter,
     targets_as_strings,
 )
 from pyqenc.phase import (
@@ -50,16 +57,13 @@ from pyqenc.phase import (
 from pyqenc.phases.chunking import ChunkingPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
-from pyqenc.state import (
-    ArtifactState,
-    OptimizationParams,
-    ProbeState,
-    StrategyTestResult,
-)
-from pyqenc.stream_model import EncodedChunk, VideoStreamChunk
+from pyqenc.state import ArtifactState, ProbeFacet
+from pyqenc.stream_model import DecimalYaml, EncodedChunk, VideoStreamChunk
 from pyqenc.utils.alive import AdvanceState, ProgressBar
+from pyqenc.utils.fs import safe_stat_size
 from pyqenc.utils.log_format import fmt_size_mb
-from pyqenc.utils.visualization import QualityEvaluator
+from pyqenc.utils.visualization import QualityMeasurer
+from pyqenc.utils.yaml_utils import save_model
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
@@ -69,18 +73,144 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_FIXED_COMPARISON_STATS: tuple[str, ...] = ("p10", "median")
-"""The fixed-mode comparison statistic set per metric.
+# ---------------------------------------------------------------------------
+# optimization.yaml — per-mode discriminated-union sidecars (Req 18-21, 61)
+# ---------------------------------------------------------------------------
 
-The single definition of what fixed-mode comparison consumes: the anchor's
-synthetic target set (the ruler), the dominance pruning input, and the
-comparison-table columns. ``p10`` guards the worst decile, ``median`` the
-central tendency; the remaining stats are stability/shape indicators
-(``std``, ``min``, ``max``, other percentiles), not quality bars — comparing
-or ruling on them silently skews selection. The full measured set stays
-aggregated in ``StrategyTestResult.metrics`` / sidecars (data retention), so
-re-selecting the comparison set never re-measures.
-"""
+class StrategySummaryRow(BaseModel):
+    """One per-strategy row of the ``summary`` replay table.
+
+    Attributes:
+        strategy:   Display name of the tested strategy.
+        total_size: Total encoded size across the test chunks (bytes).
+        metrics:    Min-across-test-chunks value for every measured
+                    ``(metric, statistic)`` key — the fixed-mode dominance and
+                    anchor inputs. Empty when nothing was measured.
+    """
+
+    strategy:   str
+    total_size: int
+    metrics:    dict[str, float] = Field(default_factory=dict)
+
+
+class _OptimizationSidecarBase(BaseModel):
+    """The common keys of both ``optimization.yaml`` variants.
+
+    Fields are named for WHAT they identify (Req 61): ``source`` the source
+    content identity, ``chunks`` the chunk-set fingerprint (a re-chunk wipes
+    winners), ``strategies`` each strategy's resolved-args fingerprint,
+    ``probe`` the structured facet, ``sampling`` the measurement factor.
+    The key block is REQUIRED (every write path populates it) — a sidecar
+    missing keys fails validation and loads as absent: the phase redoes its
+    work (Req 32 amended 2026-10-10; per-key unknown semantics remain for
+    the ``strategies`` map only). ``summary`` is the replay aggregate
+    (freshness guaranteed by the pending gate), and ``test_chunks`` the
+    persisted selection basis (checked for full-set presence at read —
+    Req 44).
+    """
+
+    source:      Fingerprint
+    chunks:      Fingerprint
+    strategies:  dict[str, Fingerprint]        = Field(default_factory=dict)
+    probe:       ProbeFacet
+    sampling:    int
+    test_chunks: list[str]                     = Field(default_factory=list)
+    summary:     list[StrategySummaryRow]      = Field(default_factory=list)
+
+
+class SearchOptimizationSidecar(_OptimizationSidecarBase):
+    """The search variant: the quality-target set is the mode key."""
+
+    mode:    Literal["search"] = "search"
+    targets: list[str]         = Field(default_factory=list)
+
+
+class FixedOptimizationSidecar(_OptimizationSidecarBase):
+    """The fixed variant: the per-strategy pinned-quality map is the mode key.
+
+    Keyed by strategy display name, valued by the strategy's quantized pinned
+    quality — an equal map performs no invalidation (the pending gate alone
+    decides reuse or resume, Req 40).
+    """
+
+    mode:   Literal["fixed"]        = "fixed"
+    pinned: dict[str, DecimalYaml]  = Field(default_factory=dict)
+
+
+OptimizationSidecar = SearchOptimizationSidecar | FixedOptimizationSidecar
+"""The per-mode union; loading dispatches on the ``mode`` tag (never try-both)."""
+
+_OPTIMIZATION_ADAPTER: TypeAdapter[OptimizationSidecar] = TypeAdapter(
+    Annotated[OptimizationSidecar, Field(discriminator="mode")],
+)
+
+
+def load_optimization_sidecar(path: Path) -> OptimizationSidecar | None:
+    """Load ``optimization.yaml`` dispatching on the persisted mode tag.
+
+    Args:
+        path: The ``optimization.yaml`` path.
+
+    Returns:
+        The tagged sidecar, or ``None`` when absent or unparsable.
+    """
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        return _OPTIMIZATION_ADAPTER.validate_python(data or {})
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        logger.warning("Could not load %s: %s", path, exc)
+        return None
+
+
+def save_optimization_sidecar(path: Path, sidecar: OptimizationSidecar) -> None:
+    """Persist a tagged optimization sidecar atomically."""
+    save_model(path, sidecar)
+
+
+def current_optimization_sidecar(
+    plan:        EncodingPlan,
+    source:      Fingerprint,
+    chunks:      Fingerprint,
+    probe:       ProbeFacet,
+    sampling:    int,
+    test_chunks: list[str],
+    summary:     list[StrategySummaryRow],
+) -> OptimizationSidecar:
+    """Build the sidecar describing the CURRENT run's inputs (union by mode).
+
+    The single composition site both the invalidation comparisons and the
+    post-success saves build on — the persisted file and the live inputs can
+    never diverge in shape.
+    """
+    if plan.fixed_quality:
+        return FixedOptimizationSidecar(
+            source      = source,
+            chunks      = chunks,
+            strategies  = {s.display_name(): s.fingerprint for s in plan.strategies},
+            probe       = probe,
+            sampling    = sampling,
+            test_chunks = test_chunks,
+            summary     = summary,
+            pinned = {
+                s.display_name(): s.codec.quality_better.quantize(
+                    s.codec.quality_granularity,
+                )
+                for s in plan.strategies
+            },
+        )
+    return SearchOptimizationSidecar(
+        source      = source,
+        chunks      = chunks,
+        strategies  = {s.display_name(): s.fingerprint for s in plan.strategies},
+        probe       = probe,
+        sampling    = sampling,
+        test_chunks = test_chunks,
+        summary     = summary,
+        targets     = targets_as_strings(plan.targets),
+    )
 
 
 def _comparison_metrics(metrics: dict[str, float]) -> dict[str, float]:
@@ -90,11 +220,11 @@ def _comparison_metrics(metrics: dict[str, float]) -> dict[str, float]:
         metrics: ``{metric_statistic: value}`` — the aggregated measurement.
 
     Returns:
-        The subset restricted to :data:`_FIXED_COMPARISON_STATS` statistics.
+        The subset restricted to :data:`FIXED_COMPARISON_STATS` statistics.
     """
     return {
         key: value for key, value in metrics.items()
-        if key.rsplit("_", 1)[1] in _FIXED_COMPARISON_STATS
+        if key.rsplit("_", 1)[1] in FIXED_COMPARISON_STATS
     }
 
 
@@ -179,8 +309,10 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         self._strategies_to_test: list[Strategy]                   = []
         self._test_chunks:       list[VideoStreamChunk]            = []
         self._selected_names:    list[str]                         = []
-        self._strategy_results:  list[StrategyTestResult]          = []
-        self._current_probe:     ProbeState | None                 = None
+        self._strategy_results:  list[StrategySummaryRow]          = []
+        self._current_probe:     ProbeFacet | None                 = None
+        self._chunks_fingerprint: Fingerprint | None               = None
+        """The current chunk-set fingerprint (the chunks key's live side)."""
         self._anchor_name:       str | None                        = None
         """The fixed-mode measurement anchor's display name (fixed compared
         runs only; ``None`` in searched and uncompared runs)."""
@@ -192,33 +324,27 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
     # ------------------------------------------------------------------
 
     def _skip_check(self, dry_run: bool) -> OptimizationPhaseResult | None:
-        """Skip decision plus the fixed-mode entry (guard, wipe, banner).
+        """Skip decision plus the fixed-mode banner.
 
         Dependencies are already resolved when this runs (the template
-        resolves them before the skip check), so both the fixed-mode entry
-        and the all-strategies path read dependency results directly.
-
-        The fixed-mode entry lives here because ``_skip_check`` is the single
-        always-executed point the template's ``run()`` crosses on BOTH the
-        optimize path and the all-strategies path — the wipe, guard, and
-        banner must fire on every fixed start regardless of mode.
+        resolves them before the skip check). The fixed-mode entry is
+        PRESENTATION only now: the cleanup guard moved to the run boundary
+        (plan-boundary construction validation, Req 55) and the unconditional
+        winner wipe is replaced by the pinned-quality map key (an equal map
+        performs no invalidation — the pending gate decides, Req 40/O-2).
 
         Args:
-            dry_run: When ``True``, skip the ``optimization.yaml`` write and
-                the winner-layer wipe (a dry run changes nothing).
+            dry_run: Unused (the banner is presentation).
 
         Returns:
-            The all-strategies result, a FAILED result when the cleanup guard
-            stops the run — or ``None`` to proceed with the template.
+            The all-strategies result, or ``None`` to proceed with the template.
         """
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         strategies = plan.strategies
 
         if plan.fixed_quality:
-            entry = self._fixed_mode_entry(dry_run, strategies)
-            if entry is not None:
-                return entry
+            self._log_fixed_quality_banner(strategies)
 
         # All-strategies mode: triggered by the optimize flag being off or a
         # single strategy given (nothing to optimize against).
@@ -226,49 +352,6 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             return None
 
         return self._all_strategies(dry_run)
-
-    def _fixed_mode_entry(
-        self,
-        dry_run:    bool,
-        strategies: list[Strategy],
-    ) -> OptimizationPhaseResult | None:
-        """Every fixed-mode start: cleanup guard, winner wipe, banner (Req 5–7).
-
-        Order matters: the guard hard-stops before any destructive or
-        expensive work; the wipe deletes the winner layer unconditionally
-        (winners re-derive from the attempt workspace during execution);
-        the banner announces what a fixed run does and does not guarantee.
-
-        Args:
-            dry_run:    When ``True``, skip the wipe (a dry run changes nothing).
-            strategies: The resolved strategies (wipe scope, banner content).
-
-        Returns:
-            A FAILED result when the cleanup guard stops the run; otherwise
-            ``None`` to continue into the mode branch exactly as a searched
-            run would.
-        """
-        job_result = self._dep_result(JobPhase)
-
-        if job_result.cleanup >= CleanupLevel.INTERMEDIATE:
-            err = (
-                f"Fixed-quality run refuses cleanup level {job_result.cleanup.name} "
-                f"(>= INTERMEDIATE): attempts in encoding/ are the re-derivation "
-                f"substrate for fixed re-runs — cleanup deletes them, and winners "
-                f"alone cannot re-derive after a value change or interruption, so "
-                f"an interrupted run resumed under cleanup would re-encode "
-                f"completed chunks. Re-run without --cleanup."
-            )
-            logger.critical(err)
-            return self._make_result(PhaseOutcome.FAILED, [], err)
-
-        if not dry_run:
-            # Unconditional winner-layer invalidation: no q-value or mode is
-            # persisted for comparison — winners re-derive from attempts.
-            _wipe_encoded_dir(job_result.work_dir, strategies)
-
-        self._log_fixed_quality_banner(strategies)
-        return None
 
     def _log_fixed_quality_banner(self, strategies: list[Strategy]) -> None:
         """The fixed-mode WARNING banner (Req 5).
@@ -318,7 +401,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
     def _log_key_params(self) -> None:
         """Log the strategy list and tolerance (key parameters)."""
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         logger.info("Strategies:  %s", ", ".join(s.display_name() for s in plan.strategies))
         logger.info("Tolerance:   %.1f%%", self._config.encoding.optimize_tolerance)
@@ -327,26 +410,36 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         """The recovery summary counts winning attempts (one per pair)."""
         return "attempt"
 
+    def _invalidate(self) -> None:
+        """Run the shared-namespace invalidation ladder (disk effects only).
+
+        Delegates to :meth:`_invalidate_shared_namespace` — identity /
+        probe facet / strategy-args fingerprints (fatal or permission-gated
+        wipes), the winner-band keys (automatic wipe-winners + sidecar
+        rewrite), and the §99 conservative wipe for a missing sidecar.
+        Every effect lands on disk; the classification re-reads the sidecar
+        afterwards (no in-memory handoff).
+
+        Raises:
+            RecoveryError: On a fatal-band condition without ``--force``.
+        """
+        plan     = self._deps[ProbePhase].plan
+        work_dir = self._deps[JobPhase].work_dir
+        self._invalidate_shared_namespace(work_dir, plan)
+
     def _recover(self) -> Recovery:
-        """Resolve optimization state currency: invalidations first, then the ledger.
+        """Classify the pair ledger from post-invalidation disk truth.
 
-        Steps:
+        Runs after :meth:`_invalidate` settled the sidecar on disk; the
+        classification re-reads it. Steps:
 
-        1. ``force_wipe`` (from JobPhase) → delete ``optimization.yaml`` and
-           the ``encoding/`` test workspace.
-        2. Probe mismatch against ``optimization.yaml`` — fatal without
-           ``--force`` (handled in step 1 when forced).
-        3. Quality-target / metrics-sampling change → wipe ``encoded/``
-           result dirs and treat all cached strategy results as stale.
-        4. Missing sidecar with winners present → wipe ``encoded/``: no file
-           proves which parameters produced those winners, so they re-derive
-           from the attempt workspace (near-free replay via attempt
-           cache-hits).
-        5. The per-pair ledger (one ``Artifact[EncodedChunk]`` row per
+        1. The per-pair ledger (one ``Artifact[EncodedChunk]`` row per
            (test chunk, strategy) winning attempt, presence-based). The
            to-test set is its projection: any strategy with a non-``COMPLETE``
            pair has work pending; complete pairs are the reuse substrate.
-        6. Nothing to test and a persisted table covering the plan → the
+        2. The test-chunk selection: the persisted set reused only when it
+           fully survives in the current chunking output (O-6).
+        3. Nothing to test and a persisted table covering the plan → the
            fast exit seeds the display from the persisted rows (plan-scoped)
            and computes the selection live.
 
@@ -354,83 +447,21 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             The :class:`Recovery` single source of truth.
 
         Raises:
-            RecoveryError: On a probe change without ``--force``, or when
-                ChunkingPhase produced no chunks.
+            RecoveryError: When ChunkingPhase produced no chunks.
         """
-        job_result   = self._dep_result(JobPhase)
-        probe_result = self._dep_result(ProbePhase)
-        work_dir     = job_result.work_dir
-        opt_yaml     = work_dir / OptimizationPhase.SIDECAR_NAME
-        tolerance    = self._config.encoding.optimize_tolerance
-        plan         = probe_result.plan
+        work_dir  = self._deps[JobPhase].work_dir
+        tolerance = self._config.encoding.optimize_tolerance
+        plan      = self._deps[ProbePhase].plan
 
-        strategies   = plan.strategies
-        force_wipe   = job_result.force_wipe
+        strategies = plan.strategies
 
-        current_probe      = ProbeState.from_probe(probe_result)
-        self._current_probe = current_probe
-
-        # Step 1 — force wipe (before any currency decision, so --force
-        # always re-tests).
-        persisted: OptimizationParams | None = OptimizationParams.load(opt_yaml)
-        if force_wipe:
-            self._wipe_artifacts(work_dir)
-            persisted = None
-
-        # Step 2 — probe mismatch invalidation.
-        if persisted is not None and persisted.strategy_results and persisted.probe != current_probe:
-            raise RecoveryError(
-                "Probe params changed since last optimization run "
-                f"(persisted={persisted.probe}, current={current_probe}). "
-                "Re-run with --force to delete stale optimization artifacts and continue."
-            )
-
-        # Step 3 — quality-target / sampling change detection.
-        current_targets  = targets_as_strings(plan.targets)
-        current_sampling = self._config.measurement.sampling
-        targets_changed = (
-            persisted is not None
-            and bool(persisted.quality_targets)
-            and persisted.quality_targets != current_targets
+        # The invalidation ladder settled the sidecar on disk; the
+        # classification re-reads it (current keys, or absent).
+        persisted = load_optimization_sidecar(
+            work_dir / OptimizationPhase.SIDECAR_NAME,
         )
-        sampling_changed = (
-            persisted is not None
-            and persisted.sampling is not None
-            and persisted.sampling != current_sampling
-        )
-        if (targets_changed or sampling_changed) and persisted is not None and persisted.strategy_results:
-            if sampling_changed:
-                logger.debug(
-                    "metrics sampling changed (%d → %d) — wiping encoded/ dirs",
-                    persisted.sampling, current_sampling,
-                )
-            # Wipe encoded/ for every strategy — contents are hard-linked attempts
-            # and result sidecars; EncodingPhase will re-discover from encoding/.
-            _wipe_encoded_dir(work_dir, strategies)
-            # Treat all cached strategy results as stale — force re-encoding.
-            persisted = OptimizationParams(
-                probe            = persisted.probe,
-                test_chunks      = persisted.test_chunks,
-                strategy_results = [],
-                quality_targets  = persisted.quality_targets,
-                sampling         = persisted.sampling,
-            )
 
-        # Step 4 — missing sidecar with winners present: unknown currency.
-        # Nothing proves which targets/probe produced the winners, so they
-        # are conservatively invalidated and re-derived from attempts.
-        if (
-            persisted is None
-            and not force_wipe
-            and (work_dir / ENCODED_OUTPUT_DIR).exists()
-        ):
-            logger.info(
-                "optimization.yaml missing — winner currency unknown; "
-                "wiping encoded/ (winners re-derive from the attempt workspace)"
-            )
-            _wipe_encoded_dir(work_dir, strategies)
-
-        # Step 5 — the per-pair ledger. The to-test set is a projection of
+        # Step 6 — the per-pair ledger. The to-test set is a projection of
         # the ledger (presence-based, both modes): a strategy with any
         # non-COMPLETE (test chunk, strategy) pair re-tests. Re-test cost is
         # bounded by the attempt workspace — per-attempt cache-hits in
@@ -446,18 +477,18 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             s for s in strategies if s.display_name() in incomplete
         ]
 
-        # Step 6 — the no-pending fast exit: the single sanctioned reader of
+        # Step 7 — the no-pending fast exit: the single sanctioned reader of
         # the persisted rows. The display seeds plan-scoped from the table;
         # the selection is computed LIVE (current tolerance / dominance) and
         # so can never be stale.
         plan_names   = [s.display_name() for s in strategies]
         table_covers = persisted is not None and (
-            {r.strategy for r in persisted.strategy_results} >= set(plan_names)
+            {r.strategy for r in persisted.summary} >= set(plan_names)
         )
         if not self._strategies_to_test and table_covers:
             assert persisted is not None
             table_rows = [
-                r for r in persisted.strategy_results if r.strategy in set(plan_names)
+                r for r in persisted.summary if r.strategy in set(plan_names)
             ]
             self._strategy_results = table_rows
             if plan.fixed_quality:
@@ -494,23 +525,228 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             return Recovery(artifacts=rows, pending=True)
         return Recovery.from_artifacts(rows)
 
-    def _resolve_test_chunks(self, persisted: OptimizationParams | None) -> list[VideoStreamChunk]:
-        """The test-chunk set: the persisted selection, or a fresh pick.
+    def _invalidate_shared_namespace(
+        self,
+        work_dir: Path,
+        plan:     EncodingPlan,
+    ) -> OptimizationSidecar | None:
+        """The full shared-namespace invalidation ladder (Req 38-44).
 
-        The fresh selection is stashed here (recovery) so ``_execute`` uses
-        the same set that produced the ledger counts.
+        Optimization owns EVERY key-based invalidation over the shared
+        attempt/winner namespace; both this phase's optimize path and the
+        all-strategies skip path run this same ladder. Every effect is a
+        disk effect (a wipe and/or a sidecar rewrite); nothing is cleared in
+        memory. Order: identity → probe facet (catastrophic, whole
+        namespace) → strategy-args fingerprints (catastrophic, per
+        strategy) → winner-band keys (automatic: mode, chunk-set,
+        mode-key, sampling) → missing sidecar (§99 conservative).
+
+        Args:
+            work_dir: The run's work dir.
+            plan:     The run's resolved encoding plan.
+
+        Returns:
+            The surviving persisted sidecar (``None`` when invalidated or
+            absent) — the caller's classification substrate.
+
+        Raises:
+            RecoveryError: On a fatal-band condition without ``--force``.
+        """
+        job_result = self._deps[JobPhase]
+        opt_yaml   = work_dir / OptimizationPhase.SIDECAR_NAME
+        strategies = plan.strategies
+        self._chunks_fingerprint = fingerprinter.of_ids(
+            c.safe_name() for c in (a.payload for a in self._deps[ChunkingPhase].chunks)
+        )
+        self._current_probe = ProbeFacet.from_probe(self._deps[ProbePhase])
+        current_probe = self._current_probe
+        chunks_fps    = self._chunks_fingerprint
+        assert current_probe is not None and chunks_fps is not None
+        current    = current_optimization_sidecar(
+            plan        = plan,
+            source      = job_result.file.payload.fingerprint,
+            chunks      = chunks_fps,
+            probe       = current_probe,
+            sampling    = self._config.measurement.sampling,
+            test_chunks = [],   # the selection resolves after invalidation
+            summary     = [],
+        )
+
+        # Step 1 — identity key: catastrophic for the shared namespace.
+        persisted: OptimizationSidecar | None = load_optimization_sidecar(opt_yaml)
+        if persisted is not None and not persisted.source.matches(
+            job_result.file.payload.fingerprint,
+        ):
+            if not job_result.force:
+                raise RecoveryError(
+                    "Source content identity mismatch (optimization.yaml) — the "
+                    "shared attempt/winner namespace belongs to a different source.  "
+                    "Re-run with --force to grant permission to wipe attempts, "
+                    "winners, and the sidecar, and re-derive from the new source."
+                )
+            logger.warning(
+                "Source identity mismatch (--force granted — wiping the shared "
+                "attempt/winner namespace and optimization.yaml)"
+            )
+            self._wipe_artifacts(work_dir, strategies)
+            persisted = None
+
+        # Step 2 — probe facet: catastrophic for the whole shared namespace
+        # (explicit field-wise comparison — Req 23; human fields never leak).
+        if (
+            persisted is not None
+            and not persisted.probe.matches(current_probe)
+        ):
+            if not job_result.force:
+                raise RecoveryError(
+                    "Probe params changed since the last optimization run "
+                    f"(persisted facet={persisted.probe}, "
+                    f"current={current_probe}) — every attempt's pixels "
+                    "changed.  Re-run with --force to grant permission to wipe "
+                    "the shared namespace and re-test."
+                )
+            logger.warning(
+                "Probe facet changed (--force granted — wiping the shared "
+                "attempt/winner namespace and optimization.yaml)"
+            )
+            self._wipe_artifacts(work_dir, strategies)
+            persisted = None
+
+        # Step 3 — strategy-args fingerprints: catastrophic PER STRATEGY
+        # (a changed codec's attempts are stale products; unchanged
+        # strategies keep theirs — Req 39).
+        if persisted is not None:
+            changed_strategies = [
+                name for name, fp in current.strategies.items()
+                if name in persisted.strategies
+                and not persisted.strategies[name].matches(fp)
+            ]
+            if changed_strategies:
+                if not job_result.force:
+                    raise RecoveryError(
+                        "Strategy arguments changed for: "
+                        f"{', '.join(sorted(changed_strategies))} — their attempts "
+                        "are stale products of the old codec configuration.  "
+                        "Re-run with --force to grant permission to wipe those "
+                        "strategies' attempts and winners."
+                    )
+                for name in sorted(changed_strategies):
+                    logger.warning(
+                        "Strategy args changed (--force granted — wiping %s's "
+                        "attempts and winners)", name,
+                    )
+                # ONLY the changed strategies' trees go (Req 39's letter).
+                # The sidecar is rewritten immediately, so the §99
+                # unknown-currency branch below must NOT fire: other
+                # strategies' winners stay (their keys are current now).
+                self._wipe_strategies(work_dir, plan, changed_strategies)
+                save_optimization_sidecar(opt_yaml, current)
+                persisted = current
+
+        # Step 4 — winner-band keys: automatic wipe-winners + sidecar rewrite
+        # (a disk effect — no in-memory table clearing, Req 37-42). Mode,
+        # chunk-set, mode-key (targets / pinned map), and sampling all fire
+        # here; an equal fixed map performs NO invalidation (O-2) — the
+        # pending gate alone decides.
+        if persisted is not None:
+            reasons = self._winner_band_reasons(persisted, current)
+            if reasons:
+                for reason in reasons:
+                    logger.info(
+                        "%s — wiping winners (they re-derive from the attempt "
+                        "workspace); optimization.yaml rewritten", reason,
+                    )
+                _wipe_encoded_dir(work_dir, strategies)
+                save_optimization_sidecar(opt_yaml, current)
+                persisted = None
+
+        # Step 5 — missing sidecar with winners present: unknown currency.
+        # Nothing proves which parameters produced the winners, so they
+        # are conservatively invalidated and re-derived from attempts (§99).
+        if (
+            persisted is None
+            and (work_dir / ENCODED_OUTPUT_DIR).exists()
+        ):
+            logger.info(
+                "optimization.yaml missing — winner currency unknown; "
+                "wiping encoded/ (winners re-derive from the attempt workspace)"
+            )
+            _wipe_encoded_dir(work_dir, strategies)
+
+        return persisted
+
+    @staticmethod
+    def _winner_band_reasons(
+        persisted: OptimizationSidecar,
+        current:   OptimizationSidecar,
+    ) -> list[str]:
+        """Why winners must be wiped (the automatic band's condition list).
+
+        The key block is required on both sides (a sidecar missing keys
+        never loaded); per-key unknown semantics remain for the
+        ``strategies`` map only. An equal fixed pinned map contributes
+        nothing (O-2).
+        """
+        reasons: list[str] = []
+        if persisted.mode != current.mode:
+            reasons.append(
+                f"mode changed ({persisted.mode} → {current.mode})"
+            )
+        if not persisted.chunks.matches(current.chunks):
+            reasons.append("chunk set changed (re-chunk)")
+        if (
+            persisted.mode == "search"
+            and current.mode == "search"
+            and persisted.targets
+            and persisted.targets != current.targets
+        ):
+            reasons.append("quality targets changed")
+        if (
+            persisted.mode == "fixed"
+            and current.mode == "fixed"
+            and persisted.pinned != current.pinned
+        ):
+            reasons.append("pinned quality map changed")
+        if persisted.sampling != current.sampling:
+            reasons.append(
+                f"metrics sampling changed ({persisted.sampling} → {current.sampling})"
+            )
+        return reasons
+
+    @staticmethod
+    def _wipe_strategies(work_dir: Path, plan: EncodingPlan, names: list[str]) -> None:
+        """Wipe the changed strategies' attempts and winners (permission band).
+
+        Only the changed strategies' trees go — unchanged strategies keep
+        their products (Req 39).
+        """
+        for strategy in plan.strategies:
+            if strategy.display_name() not in names:
+                continue
+            for tree in (ENCODED_OUTPUT_DIR, ENCODING_WORKSPACE_DIR):
+                shutil.rmtree(work_dir / tree / strategy.safe_name(), ignore_errors=True)
+
+    def _resolve_test_chunks(self, persisted: OptimizationSidecar | None) -> list[VideoStreamChunk]:
+        """The test-chunk set: the persisted selection reused only when the
+        FULL set survives in the current chunking output (Req 44/O-6) —
+        partial survival triggers a fresh full pick with a log line, never a
+        silently shrunk test basis. The fresh selection is stashed here
+        (recovery) so ``_execute`` uses the same set that produced the
+        ledger counts.
         """
         chunks: list[VideoStreamChunk] = [
-            a.payload for a in self._dep_result(ChunkingPhase).chunks
+            a.payload for a in self._deps[ChunkingPhase].chunks
         ]
 
         test_ids = persisted.test_chunks if persisted is not None and persisted.test_chunks else []
         if test_ids:
             by_id = {c.safe_name(): c for c in chunks}
-            selected = [by_id[i] for i in test_ids if i in by_id]
-            if selected:
-                return selected
-            logger.warning("Persisted test chunk IDs not found — re-selecting")
+            if set(test_ids) <= set(by_id):
+                return [by_id[i] for i in test_ids]
+            logger.info(
+                "Persisted test-chunk selection no longer fully present "
+                "(re-chunk) — re-selecting a fresh full test basis"
+            )
         return _select_test_chunks(chunks)
 
     def _pair_ledger(self, work_dir: Path, strategies: list[Strategy]) -> list[Artifact]:
@@ -548,17 +784,17 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         Returns:
             ``OptimizationPhaseResult`` with ``selected_strategies`` set.
         """
-        job_result = self._dep_result(JobPhase)
+        job_result = self._deps[JobPhase]
         work_dir   = job_result.work_dir
         opt_yaml   = work_dir / OptimizationPhase.SIDECAR_NAME
         tolerance  = self._config.encoding.optimize_tolerance
-        plan       = self._dep_result(ProbePhase).plan
+        plan       = self._deps[ProbePhase].plan
 
         fixed      = plan.fixed_quality
         assert self._current_probe is not None, "_recover populates the probe state before execution"
+        assert self._chunks_fingerprint is not None, "_recover populates the chunk-set key"
         crop       = self._current_probe.crop
 
-        current_targets  = targets_as_strings(plan.targets)
         current_sampling = self._config.measurement.sampling
 
         from pyqenc.phases.encoding import (
@@ -635,7 +871,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             # encode pool, metrics from the sidecars.
             assert enc_result is not None, "fixed compared runs always re-test (the entry wiped the winners)"
 
-            new_results: list[StrategyTestResult] = []
+            new_results: list[StrategySummaryRow] = []
             for strategy in plan.strategies:
                 winners_by_chunk = {
                     w.chunk.safe_name(): w
@@ -645,8 +881,8 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 for chunk in test_chunks:
                     encoded = winners_by_chunk.get(chunk.safe_name())
                     if encoded is not None and encoded.stream.stream.file.path.exists():
-                        file_sizes.append(encoded.stream.stream.file.file_size_bytes or 0)
-                new_results.append(StrategyTestResult(
+                        file_sizes.append(safe_stat_size(encoded.stream.stream.file.path) or 0)
+                new_results.append(StrategySummaryRow(
                     strategy     = strategy.display_name(),
                     total_size    = int(sum(file_sizes)),
                     metrics      = self._aggregate_strategy_metrics(
@@ -669,13 +905,18 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             )
             self._synthetic_targets = self._synthetic_targets_from(anchor_result)
 
-            OptimizationParams(
-                probe            = self._current_probe,
-                test_chunks      = [c.safe_name() for c in test_chunks],
-                strategy_results = final_results,
-                quality_targets  = current_targets,
-                sampling         = current_sampling,
-            ).save(opt_yaml)
+            save_optimization_sidecar(
+                opt_yaml,
+                current_optimization_sidecar(
+                    plan        = plan,
+                    source      = self._deps[JobPhase].file.payload.fingerprint,
+                    chunks      = self._chunks_fingerprint,
+                    probe       = self._current_probe,
+                    sampling    = current_sampling,
+                    test_chunks = [c.safe_name() for c in test_chunks],
+                    summary     = final_results,
+                ),
+            )
 
             self._selected_names   = selected
             self._strategy_results = final_results
@@ -694,11 +935,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         for row in rows:
             if row.state == ArtifactState.COMPLETE and isinstance(row.payload, EncodedChunk):
                 name = row.payload.strategy.display_name()
-                sizes[name] = sizes.get(name, 0) + (row.payload.stream.stream.file.file_size_bytes or 0)
+                sizes[name] = sizes.get(name, 0) + (safe_stat_size(row.payload.stream.stream.file.path) or 0)
 
         final_results = sorted(
             [
-                StrategyTestResult(
+                StrategySummaryRow(
                     strategy    = s.display_name(),
                     total_size  = sizes.get(s.display_name(), 0),
                 )
@@ -709,13 +950,18 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         selected = self._apply_tolerance(final_results, tolerance)
 
         # The single sidecar save — after successful processing.
-        OptimizationParams(
-            probe            = self._current_probe,
-            test_chunks      = [c.safe_name() for c in test_chunks],
-            strategy_results = final_results,
-            quality_targets  = current_targets,
-            sampling         = current_sampling,
-        ).save(opt_yaml)
+        save_optimization_sidecar(
+            opt_yaml,
+            current_optimization_sidecar(
+                plan        = plan,
+                source      = self._deps[JobPhase].file.payload.fingerprint,
+                chunks      = self._chunks_fingerprint,
+                probe       = self._current_probe,
+                sampling    = current_sampling,
+                test_chunks = [c.safe_name() for c in test_chunks],
+                summary     = final_results,
+            ),
+        )
 
         self._selected_names   = selected
         self._strategy_results = final_results
@@ -730,7 +976,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> OptimizationPhaseResult:
         """Build the reused result from the fast-exit stash (display + live selection)."""
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         if plan.fixed_quality:
             resolved_names = [s.display_name() for s in plan.strategies]
@@ -763,7 +1009,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             exists).
         """
         # Resolve strategy name strings to Strategy objects from the live plan.
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         by_name = {s.display_name(): s for s in plan.strategies}
         unknown = [n for n in self._selected_names if n not in by_name]
@@ -808,44 +1054,37 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         Returns:
             ``OptimizationPhaseResult`` with all configured strategies selected.
         """
-        job_result       = self._dep_result(JobPhase)
+        job_result       = self._deps[JobPhase]
         work_dir         = job_result.work_dir
-        plan             = self._dep_result(ProbePhase).plan
+        plan             = self._deps[ProbePhase].plan
 
         opt_yaml         = work_dir / OptimizationPhase.SIDECAR_NAME
-        current_targets  = targets_as_strings(plan.targets)
         current_sampling = self._config.measurement.sampling
 
         if not dry_run:
-            persisted = OptimizationParams.load(opt_yaml)
-            params_stale = (
-                persisted is not None
-                and (
-                    (bool(persisted.quality_targets) and persisted.quality_targets != current_targets)
-                    or (persisted.sampling is not None and persisted.sampling != current_sampling)
-                )
-            )
-            if params_stale:
-                logger.info(
-                    "All-strategies mode: quality targets or metrics sampling changed"
-                    " — wiping encoded/ dirs"
-                )
-                _wipe_encoded_dir(work_dir, plan.strategies)
-            elif persisted is not None:
-                logger.debug(
-                    "All-strategies mode: params unchanged (sampling=%s, targets=%s) — encoded/ kept",
-                    persisted.sampling, persisted.quality_targets,
-                )
+            # The full shared-namespace invalidation ladder applies on this
+            # path too (Req 38/20): identity, facet, fingerprints, mode,
+            # chunk-set, mode-key, sampling — then the sidecar is rewritten
+            # with ALL current keys exactly as the optimize paths do.
+            self._invalidate_shared_namespace(work_dir, plan)
+            assert (
+                self._current_probe is not None
+                and self._chunks_fingerprint is not None
+            ), "the ladder stashes the live facet and chunk-set key"
 
-            # Always write optimization.yaml with current targets and sampling
             work_dir.mkdir(parents=True, exist_ok=True)
-            OptimizationParams(
-                probe            = None,
-                test_chunks      = [],
-                strategy_results = [],
-                quality_targets  = current_targets,
-                sampling         = current_sampling,
-            ).save(opt_yaml)
+            save_optimization_sidecar(
+                opt_yaml,
+                current_optimization_sidecar(
+                    plan        = plan,
+                    source      = job_result.file.payload.fingerprint,
+                    chunks      = self._chunks_fingerprint,
+                    probe       = self._current_probe,
+                    sampling    = current_sampling,
+                    test_chunks = [],
+                    summary     = [],
+                ),
+            )
 
         assert plan.strategies, "all-strategies mode requires at least one strategy"
         return OptimizationPhaseResult(
@@ -854,29 +1093,31 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             selected_strategies = list(plan.strategies),
         )
 
-    def _wipe_artifacts(self, work_dir: Path) -> None:
-        """Delete optimization test artifacts and ``optimization.yaml``.
+    def _wipe_artifacts(self, work_dir: Path, strategies: list[Strategy]) -> None:
+        """Delete the shared namespace and ``optimization.yaml`` (permission band).
 
-        Removes the ``encoded/`` directory (test encode workspace) and the
-        ``optimization.yaml`` parameter file.
+        Removes the ``encoded/`` winner tree, the ``encoding/`` attempt
+        workspace, and the ``optimization.yaml`` parameter file — the whole
+        shared namespace this phase owns invalidation over.
 
         Args:
-            work_dir: Pipeline working directory.
+            work_dir:   Pipeline working directory.
+            strategies: The plan's strategies (winner-tree wipe scope).
         """
         opt_yaml = work_dir / OptimizationPhase.SIDECAR_NAME
         if opt_yaml.exists():
             opt_yaml.unlink()
-            logger.debug("force_wipe: deleted %s", opt_yaml)
+            logger.debug("identity wipe: deleted %s", opt_yaml)
 
-        # Delete test encode artifacts (stored under encoding/ per strategy)
+        _wipe_encoded_dir(work_dir, strategies)
         encoding_dir = work_dir / ENCODING_WORKSPACE_DIR
         if encoding_dir.exists():
             shutil.rmtree(encoding_dir)
-            logger.debug("force_wipe: deleted %s", encoding_dir)
+            logger.debug("identity wipe: deleted %s", encoding_dir)
 
     @staticmethod
     def _apply_tolerance(
-        results:       list[StrategyTestResult],
+        results:       list[StrategySummaryRow],
         tolerance_pct: float,
     ) -> list[str]:
         """Select strategy names within *tolerance_pct* of the best (smallest) result.
@@ -900,11 +1141,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         return [r.strategy for r in successful if r.total_size <= threshold]
 
     @staticmethod
-    def _dominates(a: StrategyTestResult, b: StrategyTestResult) -> bool:
+    def _dominates(a: StrategySummaryRow, b: StrategySummaryRow) -> bool:
         """Whether *a* Pareto-dominates *b* (the pruning predicate).
 
         Evaluated over the fixed-mode comparison statistics only
-        (:data:`_FIXED_COMPARISON_STATS`) — stability/shape statistics are not
+        (:data:`FIXED_COMPARISON_STATS`) — stability/shape statistics are not
         quality bars and must not sway selection. Requires ``size(a) ≤
         size(b)``, ``a ≥ b`` on every compared statistic, at least one strict
         inequality (exact duplicates coexist), and identical non-empty
@@ -925,7 +1166,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         )
 
     @staticmethod
-    def _dominance_survivors(results: list[StrategyTestResult]) -> list[str]:
+    def _dominance_survivors(results: list[StrategySummaryRow]) -> list[str]:
         """Survivor names after Pareto dominance pruning (fixed compared runs).
 
         Dominated strategies are excluded; every survivor is selected and
@@ -950,7 +1191,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
     @staticmethod
     def _select_anchor(
-        results:        list[StrategyTestResult],
+        results:        list[StrategySummaryRow],
         resolved_names: list[str],
         survivors:      list[str],
     ) -> str | None:
@@ -984,11 +1225,11 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         ).strategy
 
     @staticmethod
-    def _synthetic_targets_from(anchor: StrategyTestResult | None) -> list[QualityTarget]:
+    def _synthetic_targets_from(anchor: StrategySummaryRow | None) -> list[QualityTarget]:
         """The anchor's aggregated metrics as the synthetic target set.
 
         Restricted to the fixed-mode comparison statistics
-        (:data:`_FIXED_COMPARISON_STATS`) — the ruler pipes straight into the
+        (:data:`FIXED_COMPARISON_STATS`) — the ruler pipes straight into the
         presentation machinery, so its breadth also bounds the chunk log
         lines and the winner-limiter table. Min-across-test-chunks values
         match search-mode per-chunk strictness. Presentation data only —
@@ -1006,7 +1247,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         metrics_present = sorted({key.rsplit("_", 1)[0] for key in compared})
         targets: list[QualityTarget] = []
         for metric in metrics_present:
-            for statistic in _FIXED_COMPARISON_STATS:
+            for statistic in FIXED_COMPARISON_STATS:
                 key = f"{metric}_{statistic}"
                 if key in compared:
                     targets.append(QualityTarget(
@@ -1039,8 +1280,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         Returns:
             ``{metric_statistic: min_across_chunks}``.
         """
-        from pyqenc.constants import ENCODED_ATTEMPT_NAME_PATTERN
-        from pyqenc.phases.encoding import _encoded_dir, _read_sidecar_yaml
+        from pyqenc.phases.encoding import read_winner_sidecar
 
         winners_by_chunk = {
             w.chunk.safe_name(): w
@@ -1051,23 +1291,16 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             winner = winners_by_chunk.get(chunk.safe_name())
             if winner is None:
                 continue
-            name_match = ENCODED_ATTEMPT_NAME_PATTERN.match(winner.stream.stream.file.path.name)
-            if name_match is None:
-                continue
-            sidecar = _read_sidecar_yaml(
-                _encoded_dir(work_dir, strategy)
-                / f"{name_match.group('chunk_id')}.{name_match.group('resolution')}.yaml"
-            )
+            sidecar = read_winner_sidecar(work_dir, winner)
             if sidecar is None:
                 continue
-            for key, value in sidecar.get("metrics", {}).items():
-                measured = float(value)
+            for key, measured in sidecar.metrics.items():
                 mins[key] = min(mins[key], measured) if key in mins else measured
         return mins
 
     def _log_optimization_summary(
         self,
-        results:  list[StrategyTestResult],
+        results:  list[StrategySummaryRow],
         selected: list[str],
     ) -> None:
         """Emit the optimization summary table to the log.
@@ -1107,7 +1340,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
     def _log_fixed_comparison(
         self,
-        results:        list[StrategyTestResult],
+        results:        list[StrategySummaryRow],
         selected:       list[str],
         anchor_name:    str | None,
         resolved_names: list[str],
@@ -1212,7 +1445,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
     @staticmethod
     def _dominator_map(
-        results:        list[StrategyTestResult],
+        results:        list[StrategySummaryRow],
         resolved_names: list[str],
     ) -> dict[str, str]:
         """Map each pruned strategy to one dominating strategy (first in resolved order).
@@ -1294,7 +1527,7 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
 def _headline_metric_keys(metric_maps: list[dict[str, float]]) -> list[str]:
     """The fixed-mode comparison-table column set.
 
-    Exactly what the ruler judges (:data:`_FIXED_COMPARISON_STATS` — the
+    Exactly what the ruler judges (:data:`FIXED_COMPARISON_STATS` — the
     table must not imply a different comparison basis than pruning used): for
     every distinct metric, its ``p10`` and ``median`` statistics when
     measured, ordered metric-major. Full statistics live in
@@ -1312,7 +1545,7 @@ def _headline_metric_keys(metric_maps: list[dict[str, float]]) -> list[str]:
     return [
         f"{metric}_{statistic}"
         for metric in sorted({key.rsplit("_", 1)[0] for key in present})
-        for statistic in _FIXED_COMPARISON_STATS
+        for statistic in FIXED_COMPARISON_STATS
         if f"{metric}_{statistic}" in present
     ]
 
@@ -1389,7 +1622,7 @@ def _make_encoder(
     """
     from pyqenc.phases.encoding import ChunkEncoder
     return ChunkEncoder(
-        quality_evaluator = QualityEvaluator(work_dir),
+        quality_evaluator = QualityMeasurer(work_dir),
         work_dir          = work_dir,
         collector         = collector,
         crop_params       = crop_params,

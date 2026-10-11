@@ -106,16 +106,20 @@ class TestParseDuration:
 # _resolve_crop
 # ---------------------------------------------------------------------------
 
-from pyqenc.models import CropParams
+from pyqenc.models import CropParams, Fingerprint, fingerprinter
+from pyqenc.phases.job import JobSidecar
 from pyqenc.phases.measure import _resolve_crop
-from pyqenc.stream_model import File, JobSidecar
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic
 
 
 def _seed_job_yaml(work_dir: Path, source: Path) -> None:
-    """Write a job.yaml (the File dump) recording the given source path."""
+    """Write a job.yaml (the identity record) recording the given source."""
     work_dir.mkdir(parents=True, exist_ok=True)
-    sidecar = JobSidecar(source=File(path=source, file_size_bytes=None))
+    fingerprint = (
+        fingerprinter.of_file(source) if source.exists()
+        else Fingerprint(token="0" * 32)
+    )
+    sidecar = JobSidecar(path=source, source=fingerprint)
     write_yaml_atomic(work_dir / "job.yaml", sidecar.model_dump(exclude_none=True))
 
 
@@ -149,11 +153,12 @@ class TestResolveCrop:
 
     def test_none_probe_yaml_with_crop_returns_crop(self, tmp_path: Path) -> None:
         """None with a probe.yaml containing crop returns that crop without reading job.yaml."""
-        from pyqenc.state import ProbeState
+        from pyqenc.models import Fingerprint
+        from pyqenc.phases.probe import ProbeState
 
         expected_crop = CropParams(top=138, bottom=138, left=0, right=0)
-        probe = ProbeState(frame_count=1000, crop=expected_crop)
-        probe.save(tmp_path / "probe.yaml")
+        probe = ProbeState(source=Fingerprint(token="0" * 32), frame_count=1000, crop=expected_crop)
+        save_model(tmp_path / "probe.yaml", probe)
 
         result = _resolve_crop(None, tmp_path, tmp_path / "source.mkv")
         assert result == expected_crop
@@ -164,10 +169,11 @@ class TestResolveCrop:
         """None with probe.yaml whose crop is empty returns empty CropParams
         immediately — an empty crop is a concrete resolution, never a reason
         to keep probing the job.yaml fallback."""
-        from pyqenc.state import ProbeState
+        from pyqenc.models import Fingerprint
+        from pyqenc.phases.probe import ProbeState
 
-        probe = ProbeState(frame_count=500)
-        probe.save(tmp_path / "probe.yaml")
+        probe = ProbeState(source=Fingerprint(token="0" * 32), frame_count=500)
+        save_model(tmp_path / "probe.yaml", probe)
 
         source = tmp_path / "source.mkv"
         _seed_job_yaml(tmp_path, tmp_path / "other.mkv")
@@ -222,15 +228,19 @@ class TestWriteSidecar:
         stats: MetricStats = {"min": 90.0, "p05": 91.0, "p10": 91.5, "p25": 93.0, "median": 95.0, "p75": 97.0, "p90": 98.0, "p95": 98.5, "max": 99.0, "std": 1.5}
         return {MetricType.VMAF: stats}
 
-    def test_write_failure_logs_warning_and_does_not_raise(
-        self, tmp_path: Path, caplog
+    def test_write_failure_raises_loudly(
+        self, tmp_path: Path,
     ) -> None:
-        """OSError from write_yaml_atomic must be caught; warning logged; no exception."""
+        """Sidecar write failures are disk-level emergencies — they raise.
+
+        Ruling 2026-10-10: phase sidecars are critical for work; the old
+        swallow-to-warning behavior is gone (a failed write leaves an
+        attempt without its record; crash-idempotency self-heals via one
+        re-measure on the next run)."""
         with patch(
-            "pyqenc.phases.measure.write_yaml_atomic",
+            "pyqenc.phases.measure.save_model",
             side_effect=OSError("disk full"),
-        ), caplog.at_level(logging.WARNING, logger="pyqenc.phases.measure"):
-            # Must not raise
+        ), pytest.raises(OSError, match="disk full"):
             _write_sidecar(
                 path                       = tmp_path / "target.yaml",
                 source_video               = tmp_path / "source.mkv",
@@ -242,8 +252,6 @@ class TestWriteSidecar:
                 target_duration_seconds    = 98.0,
                 effective_duration_seconds = 98.0,
             )
-
-        assert any("Failed to write metrics sidecar" in r.message for r in caplog.records)
 
     def test_write_success_creates_no_tmp_file(self, tmp_path: Path) -> None:
         """On success the final file exists and no .tmp file is left behind."""

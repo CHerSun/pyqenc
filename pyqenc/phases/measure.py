@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
-import yaml
+from pydantic import BaseModel, Field
 
 from pyqenc.constants import (
     DEFAULT_SCREENSHOT_COUNT,
@@ -24,16 +24,44 @@ from pyqenc.constants import (
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
-from pyqenc.models import CropParams
+from pyqenc.models import CropParams, Resolution
 from pyqenc.phases.extraction import _probe_streams_json
+from pyqenc.phases.job import JobSidecar
+from pyqenc.phases.probe import ProbeState
 from pyqenc.quality import ChunkQualityStats, MetricType, flatten_metric_stats
-from pyqenc.state import MeasureSidecar, ProbeState
-from pyqenc.stream_model import File, JobSidecar, VideoStream, VideoStreamInfo
+from pyqenc.stream_model import File, LongPathYaml, VideoStream, VideoStreamInfo
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg_async
 from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.log_format import fmt_key_value_table, fmt_metric_value, fmt_size_mb
-from pyqenc.utils.visualization import QualityEvaluator
-from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
+from pyqenc.utils.visualization import QualityMeasurer
+from pyqenc.utils.yaml_utils import load_model, save_model
+
+# ---------------------------------------------------------------------------
+# The standalone-measure sidecar (re-homed, Req 21)
+# ---------------------------------------------------------------------------
+
+class MeasureSidecar(BaseModel):
+    """Standalone measure sidecar (``<target_stem>.yaml``).
+
+    Written by the ``measure`` command alongside the quality graph and
+    screenshots.  Records source/target paths, durations, crop parameters,
+    the frame subsampling factor, and per-metric statistics.
+
+    The ``metrics`` field uses the same flat ``{metric_stat: value}`` format
+    as ``AttemptSidecar`` (e.g. ``vmaf_min``, ``ssim_median``), with all
+    ten statistics: min, p05, p10, p25, median, p75, p90, p95, max, std.
+    The YAML key for the sampling factor is ``sampling``.
+    """
+
+    source_video:               LongPathYaml
+    target_video:               LongPathYaml
+    source_duration_seconds:    float | None          = None
+    target_duration_seconds:    float | None          = None
+    effective_duration_seconds: float | None          = None
+    sampling:                   int
+    crop_params:                dict[str, int] | None = None
+    metrics:                    dict[str, float]      = Field(default_factory=dict)
+
 
 logger = logging.getLogger(__name__)
 
@@ -259,7 +287,7 @@ def _resolve_crop(
     # Prefer probe.yaml — crop is owned by ProbePhase. Loading materializes
     # an empty CropParams when the key is absent, and an empty crop is a
     # concrete resolution ("no crop") — never a reason to keep probing.
-    probe = ProbeState.load(work_dir / "probe.yaml")
+    probe = load_model(work_dir / "probe.yaml", ProbeState)
     if probe is not None:
         logger.debug("Loaded crop from probe.yaml: %s", probe.crop)
         return probe.crop
@@ -296,7 +324,7 @@ def _load_job_source_path(job_yaml: Path) -> Path | None:
         The recorded source path, or ``None`` when absent/unparseable.
     """
     sidecar = load_model(job_yaml, JobSidecar)
-    return sidecar.source.path if sidecar is not None else None
+    return sidecar.path if sidecar is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -318,8 +346,8 @@ async def _run_metrics(
 ) -> ChunkQualityStats:
     """Run quality metric computation for one source/target pair.
 
-    Delegates to ``QualityEvaluator.evaluate_chunk_async`` with ``targets=[]`` so
-    no pass/fail evaluation is performed — only metric statistics are returned.
+    Delegates to ``QualityMeasurer.measure_chunk_async`` (measurement only —
+    the evaluator takes no targets, Req 51-53); metric statistics are returned.
 
     Args:
         source_video:     Reference (original) video path.
@@ -337,12 +365,11 @@ async def _run_metrics(
         ``ChunkQualityStats`` mapping each ``MetricType`` to its key statistics.
     """
 
-    evaluator  = QualityEvaluator(metrics_dir)
-    evaluation = await evaluator.evaluate_chunk_async(
+    evaluator  = QualityMeasurer(metrics_dir)
+    evaluation = await evaluator.measure_chunk_async(
         encoded          = target_video,
         reference        = FFmpegInput(path=source_video),
         ref_crop         = crop_params,
-        targets          = [],
         output_dir       = metrics_dir,
         duration_seconds = duration_seconds,
         fps_value        = fps_value,
@@ -403,25 +430,15 @@ def _effective_resolution(
     Raises:
         ValueError: If the stream's resolution is unavailable or unparseable.
     """
-    resolution = stream.info.resolution
-    if not resolution:
+    if not stream.info.resolution:
         raise ValueError(f"Resolution unavailable for {stream.file.path}")
-
-    parts = resolution.split("x")
-    if len(parts) != 2:
-        raise ValueError(f"Unexpected resolution format: {resolution!r}")
-
-    raw_w = int(parts[0])
-    raw_h = int(parts[1])
-
-    cropped_w = raw_w - crop_params.left - crop_params.right
-    cropped_h = raw_h - crop_params.top  - crop_params.bottom
+    cropped = Resolution.parse(stream.info.resolution) - crop_params
 
     if width is None:
-        return cropped_w, cropped_h
+        return cropped.width, cropped.height
 
     # Scale preserving aspect ratio: scale=width:-1 (height rounded to even)
-    scale_h = round(cropped_h * width / cropped_w)
+    scale_h = round(cropped.height * width / cropped.width)
     # ffmpeg scale=-1 rounds to nearest even
     if scale_h % 2 != 0:
         scale_h += 1
@@ -552,7 +569,7 @@ def _write_sidecar(
 
     Records source/target paths, durations, sampling factor, crop parameters,
     and all computed metric statistics in the flat ``{metric_stat: value}``
-    format consistent with ``MetricsSidecar`` (e.g. ``vmaf_min``, ``ssim_median``).
+    format consistent with ``AttemptSidecar`` (e.g. ``vmaf_min``, ``ssim_median``).
     On write failure logs a warning and returns without raising so that the
     graph and screenshots are not lost.
 
@@ -586,12 +603,8 @@ def _write_sidecar(
         crop_params                = crop_dict,
         metrics                    = flat_metrics,
     )
-
-    try:
-        write_yaml_atomic(path, sidecar.model_dump(exclude_none=True))
-        logger.debug("Wrote metrics sidecar: %s", path)
-    except (OSError, ValueError, yaml.YAMLError) as exc:
-        logger.warning("Failed to write metrics sidecar %s: %s", path, exc)
+    save_model(path, sidecar)
+    logger.debug("Wrote metrics sidecar: %s", path)
 
 
 # ---------------------------------------------------------------------------

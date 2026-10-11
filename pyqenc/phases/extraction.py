@@ -11,7 +11,9 @@ family (:class:`~pyqenc.stream_model.Stream` objects composed with the job's
 stream objects.
 
 Recovery loads ``extraction.yaml`` instead of re-probing whenever the sidecar
-is present and its source identity matches the job's live ``File``.
+is present and its identity key matches the live source; a missing sidecar is
+the unknown-currency condition (conservative wipe + re-extract), and an
+identity mismatch is catastrophic (fatal without ``--force``, wipe with it).
 """
 # CHerSun 2026
 
@@ -26,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, TypeIs, assert_never
 
+from pydantic import BaseModel
+
 from pyqenc.constants import (
     CHAPTERS_FILENAME,
     EXTRACTED_DIR,
@@ -38,7 +42,7 @@ from pyqenc.constants import (
     TIMESTAMPS_FILENAME,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import PhaseOutcome
+from pyqenc.models import Fingerprint, PhaseOutcome
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -47,6 +51,7 @@ from pyqenc.phase import (
     PhaseResult,
     Recovery,
     RecoveryError,
+    claim_expected_name,
 )
 from pyqenc.phases.job import JobPhase
 from pyqenc.state import ArtifactState
@@ -56,11 +61,9 @@ from pyqenc.stream_model import (
     AudioStream,
     AudioStreamInfo,
     Chapters,
-    ExtractionSidecar,
     File,
-    SourceMismatchError,
+    ProbedFile,
     StreamInfo,
-    StreamsInventory,
     SubtitleStream,
     SubtitleStreamInfo,
     VideoStream,
@@ -69,11 +72,57 @@ from pyqenc.stream_model import (
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg
 from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.log_format import fmt_size_mb
-from pyqenc.utils.yaml_utils import load_model, write_yaml_atomic
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
+
+# ---------------------------------------------------------------------------
+# extraction.yaml — the stream inventory sidecar (re-homed, Req 21)
+# ---------------------------------------------------------------------------
+
+class StreamsInventory(BaseModel):
+    """The per-type stream inventory of :class:`ExtractionSidecar`.
+
+    Each entry is the stream's own info slice — the composed :class:`File` is
+    never part of a dump.
+
+    Attributes:
+        video:       The (first) video stream info, or ``None`` when absent.
+        audio:       Audio stream infos in track order.
+        subtitles:   Subtitle stream infos in track order.
+        attachments: Attachment stream infos in track order.
+    """
+
+    video:       VideoStreamInfo | None    = None
+    audio:       list[AudioStreamInfo]     = []
+    subtitles:   list[SubtitleStreamInfo]  = []
+    attachments: list[AttachmentStreamInfo] = []
+
+
+class ExtractionSidecar(BaseModel):
+    """The ``extraction.yaml`` slice: stream inventory, chapters presence,
+    source identity.
+
+    Owned by ExtractionPhase; a reuse run loads it instead of re-probing.
+    ``source`` is the identity key (the fingerprint pair, no path — Req 31):
+    a mismatch against the live source is the phase's catastrophic condition.
+    Required: a sidecar missing it fails validation, loads as absent, and
+    the inventory re-probes (Req 32 amended 2026-10-10).
+
+    Attributes:
+        source:   The source identity key (fingerprint only).
+        streams:  The per-type stream inventory (info slices).
+        chapters: Whether the source carries a chapter edition (the extracted
+                  location is the fixed ``chapters.xml`` convention — nothing
+                  per-run to record).
+    """
+
+    source:   Fingerprint
+    streams:  StreamsInventory
+    chapters: bool = False
+
 
 logger = logging.getLogger(__name__)
 
@@ -463,7 +512,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         self._materialize: bool = materialize
 
         # Recovery stash — the run's stream inventory and sidecar currency.
-        self._source_file: File | None             = None
+        self._source_file: ProbedFile | None       = None
         self._video:       VideoStream | None      = None
         self._audio:       list[AudioStream]       = []
         self._subtitles:   list[SubtitleStream]    = []
@@ -477,8 +526,8 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
     def _log_key_params(self) -> None:
         """Log the source path and the active include/exclude filter."""
-        job = self._dep_result(JobPhase)
-        logger.info("Source:   %s", job.source.name)
+        job = self._deps[JobPhase]
+        logger.info("Source:   %s", job.file.payload.path.name)
         extraction_cfg = job.config.extraction
         if extraction_cfg.include or extraction_cfg.exclude:
             logger.info("Filter:")
@@ -487,17 +536,60 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             if extraction_cfg.exclude:
                 logger.info("  Exclude:  %s", extraction_cfg.exclude)
 
+    def _invalidate(self) -> None:
+        """Key-triggered effects over ``extraction.yaml`` and ``extracted/``.
+
+        Disk effects only (Req 33/47): an identity-key mismatch against the
+        live source is catastrophic — fatal without the ``--force``
+        permission; with it, wipe ``extracted/`` and the sidecar. A MISSING
+        sidecar is the unknown-currency condition (X-1): the artifacts'
+        currency is unknown, so they are conservatively wiped (the wipe is
+        vacuous when nothing exists — no existence probe) — automatic, no
+        permission (everything here re-derives from the source).
+
+        Raises:
+            RecoveryError: On an identity mismatch without permission.
+        """
+        job_result    = self._deps[JobPhase]
+        extracted_dir = job_result.work_dir / EXTRACTED_DIR
+        sidecar_path  = job_result.work_dir / ExtractionPhase.SIDECAR_NAME
+
+        sidecar = load_model(sidecar_path, ExtractionSidecar)
+        if sidecar is not None and not sidecar.source.matches(
+                            job_result.file.payload.fingerprint):
+            if not job_result.force:
+                raise RecoveryError(
+                    "Source content identity mismatch (extraction.yaml) — this "
+                    "workdir's extracted artifacts belong to a different source.  "
+                    "Re-run with --force to grant permission to wipe extracted/ "
+                    "and re-extract from the new source."
+                )
+            logger.warning(
+                "Source identity mismatch (--force granted — wiping extracted/ "
+                "and re-extracting)"
+            )
+            self._wipe_extracted(extracted_dir, sidecar_path)
+        elif sidecar is None:
+            # Unknown currency (Req 47): no record of what produced the
+            # files; everything here re-derives from the source itself, so
+            # the conservative treatment is automatic.
+            if extracted_dir.exists():
+                logger.info(
+                    "extraction.yaml missing — extracted/ currency unknown; "
+                    "wiping and re-extracting"
+                )
+            shutil.rmtree(extracted_dir, ignore_errors=True)
+
     def _recover(self) -> Recovery:
         """Build the stream inventory and classify the extractable artifacts.
 
-        Steps:
+        Runs after :meth:`_invalidate` settled the sidecar on disk. Steps:
 
-        1. If ``force_wipe``: delete ``extracted/`` and ``extraction.yaml``.
-        2. Clean up leftover ``.tmp`` files.
-        3. Resolve the inventory: load ``extraction.yaml`` when present and its
-           source identity matches the job's live ``File`` (no re-probe);
+        1. Clean up leftover ``.tmp`` files.
+        2. Resolve the inventory: load ``extraction.yaml`` when present (its
+           identity was verified by the invalidation — no re-probe);
            otherwise enumerate via ffprobe and mark the sidecar dirty.
-        4. Produce one artifact per subtitle/attachment (name owned by the
+        3. Produce one artifact per subtitle/attachment (name owned by the
            stream class), plus chapters and timestamps artifacts. ``wanted``
            comes from the current include/exclude filter and ``video_required``;
            ``state`` from the single on-disk listing — the two are orthogonal,
@@ -510,25 +602,18 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         Raises:
             RecoveryError: When the source cannot be analysed at all.
         """
-        job_result = self._dep_result(JobPhase)
+        job_result    = self._deps[JobPhase]
         work_dir      = job_result.work_dir
         extracted_dir = work_dir / EXTRACTED_DIR
         sidecar_path  = work_dir / ExtractionPhase.SIDECAR_NAME
-        force_wipe    = job_result.force_wipe
 
-        # Step 1: force-wipe.
-        if force_wipe:
-            if extracted_dir.exists():
-                shutil.rmtree(extracted_dir)
-                logger.debug("force_wipe: deleted %s", extracted_dir)
-            sidecar_path.unlink(missing_ok=True)
-
-        # Step 2: clean up .tmp files.
+        # Step 1: clean up .tmp files.
         remove_stale_tmp_files(extracted_dir)
 
-        # Step 3: resolve the stream inventory (sidecar first, no re-probe).
+        # Step 2: resolve the stream inventory (sidecar first, no re-probe).
         self._source_file = job_result.file.payload
-        self._load_or_enumerate(job_result.file.payload, sidecar_path)
+        sidecar = load_model(sidecar_path, ExtractionSidecar)
+        self._load_or_enumerate(job_result.file.payload, sidecar)
         self._normalize_extracted_paths(work_dir)
 
         # The filter selects extractable streams only — the video row's wanted
@@ -547,6 +632,8 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         on_disk_names = _on_disk_file_names(extracted_dir)
 
         rows: list[_ExtractionRow] = []
+        claimed: dict[str, str] = {}
+        """The listing's claim registry — the Req 5 collision guard."""
 
         if self._video is not None:
             # The video artifact's material components: the per-frame PTS
@@ -560,6 +647,8 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
                 container = self._video.info.extracted_path
                 assert container is not None, "materialization sets the expected location"
                 expected_video_files.add(container.name)
+            for name in expected_video_files:
+                claim_expected_name(claimed, name, self._video.display_name())
             rows.append(Artifact(
                 payload = self._video,
                 state   = _row_state(expected_video_files, on_disk_names),
@@ -576,6 +665,9 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         for stream in self._audio:
             if self._materialize:
                 assert stream.info.extracted_path is not None, "materialization sets the expected location"
+                claim_expected_name(
+                    claimed, stream.info.extracted_path.name, stream.display_name(),
+                )
                 audio_state: ArtifactState = _row_state(
                     {stream.info.extracted_path.name}, on_disk_names,
                 )
@@ -588,6 +680,9 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             ))
         for stream in self._subtitles:
             assert stream.info.extracted_path is not None
+            claim_expected_name(
+                claimed, stream.info.extracted_path.name, stream.display_name(),
+            )
             rows.append(Artifact(
                 payload = stream,
                 state   = _row_state({stream.info.extracted_path.name}, on_disk_names),
@@ -595,6 +690,9 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             ))
         for stream in self._attachments:
             assert stream.info.extracted_path is not None
+            claim_expected_name(
+                claimed, stream.info.extracted_path.name, stream.display_name(),
+            )
             rows.append(Artifact(
                 payload = stream,
                 state   = _row_state({stream.info.extracted_path.name}, on_disk_names),
@@ -603,6 +701,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
         if self._has_chapters:
             assert self._source_file is not None, "inventory resolution sets the File before rows are built"
+            claim_expected_name(claimed, CHAPTERS_FILENAME, CHAPTERS_FILENAME)
             rows.append(Artifact(
                 payload = Chapters(file=self._source_file),
                 state   = _row_state({CHAPTERS_FILENAME}, on_disk_names),
@@ -625,7 +724,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         plan prints on dry-runs (the whole cost picture before anything is
         written) and on execute runs alike.
         """
-        file_size = self._source_file.file_size_bytes if self._source_file else 0
+        file_size = self._source_file.fingerprint.size if self._source_file else 0
         assert file_size is not None, "the job's File carries the source size"
         logger.info("Materialization plan:")
         for row in rows:
@@ -688,33 +787,35 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
                     "extracted_path": extracted_dir / f"{self._video.safe_name()}.mkv",
                 })})
 
-    def _load_or_enumerate(self, source_file: File, sidecar_path: Path) -> None:
-        """Resolve the run's stream inventory from the sidecar or ffprobe.
+    def _load_or_enumerate(
+        self,
+        source_file: File,
+        sidecar:     ExtractionSidecar | None,
+    ) -> None:
+        """Resolve the run's stream inventory from the verified sidecar or ffprobe.
+
+        The caller has already settled the sidecar's currency (identity key
+        verified, or wiped): a non-``None`` sidecar is loaded as-is; ``None``
+        means enumerate fresh via ffprobe (dirty — persisted by ``_execute``).
 
         Args:
-            source_file: The job's live ``File`` (identity for validation).
-            sidecar_path: Path to ``extraction.yaml``.
+            source_file: The job's live ``File`` (composes every stream).
+            sidecar:     The verified sidecar, or ``None`` to enumerate.
 
         Raises:
             RecoveryError: When ffprobe enumeration fails.
         """
-        sidecar = self._load_sidecar(sidecar_path)
         if sidecar is not None:
-            try:
-                sidecar.validate_source(source_file)
-            except SourceMismatchError as exc:
-                logger.info("extraction.yaml source identity mismatch — re-enumerating: %s", exc)
-            else:
-                inv = sidecar.streams
-                self._video = (
-                    VideoStream(file=source_file, info=inv.video)
-                    if inv.video is not None else None
-                )
-                self._audio       = [AudioStream(file=source_file, info=i) for i in inv.audio]
-                self._subtitles   = [SubtitleStream(file=source_file, info=i) for i in inv.subtitles]
-                self._attachments = [AttachmentStream(file=source_file, info=i) for i in inv.attachments]
-                self._has_chapters = sidecar.chapters
-                return
+            inv = sidecar.streams
+            self._video = (
+                VideoStream(file=source_file, info=inv.video)
+                if inv.video is not None else None
+            )
+            self._audio       = [AudioStream(file=source_file, info=i) for i in inv.audio]
+            self._subtitles   = [SubtitleStream(file=source_file, info=i) for i in inv.subtitles]
+            self._attachments = [AttachmentStream(file=source_file, info=i) for i in inv.attachments]
+            self._has_chapters = sidecar.chapters
+            return
 
         try:
             data = _probe_streams_json(source_file.path)
@@ -725,19 +826,18 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         self._subtitles, self._attachments, self._has_chapters = subtitles, attachments, has_chapters
         self._sidecar_dirty = True
 
-    @staticmethod
-    def _load_sidecar(path: Path) -> ExtractionSidecar | None:
-        """Load ``extraction.yaml``; ``None`` when absent or unparseable."""
-        return load_model(path, ExtractionSidecar)
+    def _wipe_extracted(self, extracted_dir: Path, sidecar_path: Path) -> None:
+        """Delete ``extracted/`` and the sidecar (the catastrophic effect)."""
+        shutil.rmtree(extracted_dir, ignore_errors=True)
+        sidecar_path.unlink(missing_ok=True)
 
     def _persist_sidecar(self, sidecar_path: Path) -> None:
         """Write the inventory to ``extraction.yaml`` (the unique info slices)."""
-        # The inventory's source identity — the first enumerated stream's File.
-        stream = self._video or next(iter(self._audio), None) \
-            or next(iter(self._subtitles), None) or next(iter(self._attachments), None)
-        assert stream is not None, "inventory has at least one stream (video required for timestamps)"
+        # The identity key — the live source fingerprint (carried by the
+        # job's File; verified against the previous key during recovery).
+        assert self._source_file is not None, "inventory resolution sets the File first"
         sidecar = ExtractionSidecar(
-            source          = stream.file,
+            source          = self._source_file.fingerprint,
             streams         = StreamsInventory(
                 video       = self._video.info if self._video is not None else None,
                 audio       = [s.info for s in self._audio],
@@ -746,7 +846,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             ),
             chapters = self._has_chapters,
         )
-        write_yaml_atomic(sidecar_path, sidecar.model_dump(exclude_none=True))
+        save_model(sidecar_path, sidecar)
         self._sidecar_dirty = False
         logger.debug("Wrote stream inventory: %s", sidecar_path.name)
 
@@ -783,7 +883,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             subtitle_streams   = [r for r in artifacts if _is_subtitle_row(r)],
             attachment_streams = [r for r in artifacts if _is_attachment_row(r)],
             chapters           = next((r for r in artifacts if _is_chapters_row(r)), None),
-            work_dir           = self._dep_result(JobPhase).work_dir,
+            work_dir           = self._deps[JobPhase].work_dir,
         )
 
     def _execute(
@@ -809,7 +909,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             ``ExtractionPhaseResult`` built directly from the updated rows.
         """
         artifacts = wanted
-        job_result = self._dep_result(JobPhase)
+        job_result = self._deps[JobPhase]
         work_dir      = job_result.work_dir
         extracted_dir = work_dir / EXTRACTED_DIR
         extracted_dir.mkdir(parents=True, exist_ok=True)
@@ -817,7 +917,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         if self._sidecar_dirty or self._materialize:
             self._persist_sidecar(work_dir / ExtractionPhase.SIDECAR_NAME)
 
-        source = job_result.source
+        source = job_result.file.payload.path
         if not source.exists():
             err = f"Source video not found: {source}"
             logger.critical(err)

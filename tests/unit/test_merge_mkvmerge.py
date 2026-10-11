@@ -43,6 +43,7 @@ from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import (
     CleanupLevel,
     PhaseOutcome,
+    SizedFingerprint,
     Strategy,
 )
 from pyqenc.phase import Artifact, PhaseRegistry
@@ -59,19 +60,21 @@ from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
     ExtendedVideoStream,
-    File,
+    MergedVideo,
+    ProbedFile,
     VideoStream,
     VideoStreamInfo,
 )
 from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.long_path import LongPath
+from pyqenc.utils.yaml_utils import load_model
 
 
 def _extended_stream(path: Path, frame_count: int) -> ExtendedVideoStream:
     """An ExtendedVideoStream for the source (fast facet + frame count)."""
     return ExtendedVideoStream(
         stream=VideoStream(
-            file=File(path=path, file_size_bytes=64),
+            file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path),
             info=VideoStreamInfo(
                 track_id=0, codec_name="hevc", fps=24.0,
                 fps_fraction=Fraction(24, 1), resolution="1920x1080",
@@ -106,7 +109,7 @@ def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
     from pyqenc.stream_model import (
         EncodedChunk,
         ExtendedVideoStream,
-        File,
+        ProbedFile,
         VideoStream,
         VideoStreamInfo,
     )
@@ -120,7 +123,7 @@ def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
     return EncodedChunk(
         stream = ExtendedVideoStream(
             stream = VideoStream(
-                file = File(path=path, file_size_bytes=path.stat().st_size if path.exists() else 64),
+                file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path),
                 info = VideoStreamInfo(track_id=0, resolution="1920x1080"),
             ),
             frame_count = 24,
@@ -128,7 +131,6 @@ def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
         ),
         chunk    = _make_chunk_window(path.parent / "source.mkv", chunk_id),
         strategy = strategy,
-        crf      = Decimal("20"),
     )
 
 
@@ -137,7 +139,7 @@ def _make_chunk_window(source, chunk_id):
     from pyqenc.models import CropParams
     from pyqenc.stream_model import (
         ExtendedVideoStream,
-        File,
+        ProbedFile,
         VideoStream,
         VideoStreamChunk,
         VideoStreamInfo,
@@ -148,14 +150,14 @@ def _make_chunk_window(source, chunk_id):
         with contextlib.suppress(ValueError):
             from pyqenc.stream_model import VideoStreamChunk as _VSC
             bounds = _VSC.parse_chunk_id(chunk_id, ExtendedVideoStream(
-                stream=VideoStream(file=File(path=source), info=VideoStreamInfo(track_id=0)),
+                stream=VideoStream(file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), info=VideoStreamInfo(track_id=0)),
                 frame_count=24, crop=CropParams(),
             ))
             start, end = bounds.start_timestamp, bounds.end_timestamp
     return VideoStreamChunk(
         stream = ExtendedVideoStream(
             stream = VideoStream(
-                file = File(path=source),
+                file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source),
                 info = VideoStreamInfo(track_id=0, resolution="1920x1080"),
             ),
             frame_count = 24,
@@ -201,7 +203,7 @@ def _make_merge_phase(
 
     job = JobPhase(
         config, {},
-        source     = source,
+        source = source,
         work_dir   = work_dir,
         force      = False,
         cleanup    = CleanupLevel.NONE,
@@ -211,11 +213,12 @@ def _make_merge_phase(
     job.result = JobPhaseResult(
         outcome    = PhaseOutcome.COMPLETED,
         message    = "job complete",
-        file       = Artifact(payload=File(path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
-        force_wipe = False,
+        file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
+        force      = False,
+        cleanup    = CleanupLevel.NONE,
+        no_metrics = True,
         config     = config,
         work_dir   = work_dir,
-        source     = source,
     )
 
     registry: PhaseRegistry = {JobPhase: job}
@@ -223,7 +226,7 @@ def _make_merge_phase(
     extraction = ExtractionPhase(config, registry, video_required=True, collector=collector)
     video_row = Artifact(
         payload = VideoStream(
-            file = File(path=source),
+            file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source),
             info = VideoStreamInfo(track_id=0, resolution="1920x1080"),
         ),
         state   = (
@@ -709,16 +712,17 @@ class TestStaleTmpTwinSwept:
 # ---------------------------------------------------------------------------
 
 class TestPartialSalvage:
-    """A PARTIAL output (final present, sidecar missing) is completed by
-    re-measuring the existing file — no re-concatenation.
+    """A PARTIAL output (final present, sidecar missing) is UNVERIFIABLE —
+    nothing vouches for what produced the file, so it is RE-MERGED in place
+    (Req 49/50; the 2026-10-08 audit's F3: the old rename-first re-measure
+    accepted a stale concat as current after an input change between crash
+    and rerun). The old file stays present until the promotion rename.
 
-    Bug guarded: the rename-first contract guarantees a sidecar-less final
-    is complete by construction, so re-running mkvmerge over it would burn
-    the concat investment for nothing — and is impossible once cleanup has
-    removed the encoded chunks.
+    The sampling-ONLY difference keeps the concat and re-measures — that
+    case is pinned in TestPerFileAcceptance.
     """
 
-    def test_partial_is_remeasured_without_concat(self) -> None:
+    def test_partial_is_remerged_with_concat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             work_dir = tmp_path / "work"
@@ -740,20 +744,37 @@ class TestPartialSalvage:
             merged_dir.mkdir(parents=True, exist_ok=True)
             output_file = merged_dir / f"{source.stem} {_SAFE_NAME}.mkv"
             output_file.write_bytes(b"\x00" * 128)
-            # Cleanup may have removed the encoded chunks — salvage must not care.
-            chunk.unlink()
+
+            def fake_subprocess_run(cmd: list, **kwargs: object) -> MagicMock:
+                result = MagicMock()
+                result.returncode = 0
+                result.stderr = ""
+                if cmd[0] == "mkvmerge":
+                    # mkvmerge reads its args from the options file —
+                    # materialize the tmp twin it names.
+                    import json as _json
+
+                    options_path = Path(str(cmd[1])[1:])
+                    args = _json.loads(options_path.read_text(encoding="utf-8"))
+                    tmp_out = Path(args[args.index("-o") + 1])
+                    tmp_out.parent.mkdir(parents=True, exist_ok=True)
+                    tmp_out.write_bytes(b"\x00" * 128)
+                return result
 
             with (
-                patch("pyqenc.phases.merge.subprocess.run") as mock_subprocess,
+                patch(
+                    "pyqenc.phases.merge.subprocess.run",
+                    side_effect=fake_subprocess_run,
+                ) as mock_subprocess,
                 patch("pyqenc.phases.merge.get_frame_count", return_value=100),
             ):
                 result = merge.run(dry_run=False)
 
-            mock_subprocess.assert_not_called()
+            mock_subprocess.assert_called(), "unverifiable sidecar must re-merge"
             assert result.outcome == PhaseOutcome.COMPLETED, (
                 f"Expected COMPLETED, got {result.outcome} (message={result.message!r})"
             )
-            assert output_file.exists(), "Salvage must keep the existing output"
+            assert output_file.exists(), "re-merge promotes to the same final name"
             assert output_file.with_suffix(".yaml").exists(), (
                 "Sidecar must be written — the artifact completes"
             )
@@ -970,24 +991,34 @@ def _fixed_strategy_fixture(pinned: str, granularity: str = "0.5", label: str = 
     return Strategy(preset="slow", profile="h265-aq", codec=codec, profile_args=[])
 
 
-class TestUniformPinnedQuality:
-    """The suffix exists only for uniform pinned-value fixed runs."""
+class TestPinnedQualitySuffix:
+    """The per-strategy rendering: sanitized label + granularity-quantized value.
 
-    def test_uniform_fixed_run_returns_value(self) -> None:
-        from decimal import Decimal
+    The uniformity gate is gone (M-2b): the suffix is per-strategy whenever
+    that strategy's own range is a single point."""
 
-        strategies = [_fixed_strategy_fixture("18"), _fixed_strategy_fixture("18")]
-        assert MergePhase._uniform_pinned_quality(strategies) == Decimal(18)
+    def test_quantized_to_strategy_granularity(self) -> None:
+        """-q 18 at 0.5 granularity renders 18.0 — uniform with 17.5-style
+        siblings, never 'CRF=18' next to 'CRF=17.5'."""
+        assert MergedVideo.pinned_quality_suffix(_fixed_strategy_fixture("18")) == " CRF=18.0"
+        assert MergedVideo.pinned_quality_suffix(_fixed_strategy_fixture("17.5")) == " CRF=17.5"
 
-    def test_decimal_spellings_are_one_value(self) -> None:
-        """Decimal("18") == Decimal("18.0") numerically — mixed spellings
-        count as one uniform pinned value."""
-        from decimal import Decimal
+    def test_integer_granularity_stays_integral(self) -> None:
+        strategy = _fixed_strategy_fixture("18", granularity="1", label="QP")
+        assert MergedVideo.pinned_quality_suffix(strategy) == " QP=18"
 
-        mixed = [_fixed_strategy_fixture("18"), _fixed_strategy_fixture("18.0")]
-        assert MergePhase._uniform_pinned_quality(mixed) == Decimal(18)
+    def test_spelling_independent(self) -> None:
+        """CLI '18' and profile '18.0' quantize to the identical name form."""
+        assert MergedVideo.pinned_quality_suffix(_fixed_strategy_fixture("18")) == " CRF=18.0"
+        assert MergedVideo.pinned_quality_suffix(_fixed_strategy_fixture("18.0")) == " CRF=18.0"
 
-    def test_searched_run_none(self) -> None:
+    def test_label_sanitized_filesystem_safe(self) -> None:
+        """VBR labels like Mbit/s land filesystem-safe in the name."""
+        strategy = _fixed_strategy_fixture("20", granularity="0.5", label="Mbit/s")
+        assert MergedVideo.pinned_quality_suffix(strategy) == " Mbit_s=20.0"
+
+    def test_ranged_strategy_carries_no_suffix(self) -> None:
+        """Search-mode outputs get no quality distinguisher (Req 7)."""
         from decimal import Decimal
 
         from pyqenc.models import CodecConfig
@@ -997,53 +1028,17 @@ class TestUniformPinnedQuality:
             quality_range=(Decimal("6"), Decimal("30")), presets=["slow"],
         )
         strategy = Strategy(preset="slow", profile="h265-aq", codec=codec, profile_args=[])
-        assert MergePhase._uniform_pinned_quality([strategy]) is None
+        assert MergedVideo.pinned_quality_suffix(strategy) == ""
+        assert MergedVideo.output_file_name("test", strategy) == "test h265-aq+slow.mkv"
 
-    def test_mixed_pinned_values_none(self) -> None:
-        strategies = [_fixed_strategy_fixture("18"), _fixed_strategy_fixture("20")]
-        assert MergePhase._uniform_pinned_quality(strategies) is None
-
-
-class TestQSuffix:
-    """The per-strategy rendering: sanitized label + granularity-quantized value."""
-
-    def test_quantized_to_strategy_granularity(self) -> None:
-        """-q 18 at 0.5 granularity renders 18.0 — uniform with 17.5-style
-        siblings, never 'CRF=18' next to 'CRF=17.5'."""
-        from decimal import Decimal
-
-        assert MergePhase._q_suffix(_fixed_strategy_fixture("18"), Decimal(18)) == " CRF=18.0"
-        assert MergePhase._q_suffix(_fixed_strategy_fixture("17.5"), Decimal("17.5")) == " CRF=17.5"
-
-    def test_integer_granularity_stays_integral(self) -> None:
-        from decimal import Decimal
-
-        strategy = _fixed_strategy_fixture("18", granularity="1", label="QP")
-        assert MergePhase._q_suffix(strategy, Decimal(18)) == " QP=18"
-
-    def test_spelling_independent(self) -> None:
-        """CLI '18' and profile '18.0' quantize to the identical name form."""
-        from decimal import Decimal
-
-        assert MergePhase._q_suffix(_fixed_strategy_fixture("18"), Decimal("18")) == " CRF=18.0"
-        assert MergePhase._q_suffix(_fixed_strategy_fixture("18.0"), Decimal("18.0")) == " CRF=18.0"
-
-    def test_label_sanitized_filesystem_safe(self) -> None:
-        """VBR labels like Mbit/s land filesystem-safe in the name."""
-        from decimal import Decimal
-
-        strategy = _fixed_strategy_fixture("20", granularity="0.5", label="Mbit/s")
-        assert MergePhase._q_suffix(strategy, Decimal(20)) == " Mbit_s=20.0"
-
-    def test_expected_path_carries_suffix(self, tmp_path: Path) -> None:
-        from decimal import Decimal
-
-        strategy = _fixed_strategy_fixture("18.0")
-        path = MergePhase._expected_output_path(
-            tmp_path, "test", strategy,
-            MergePhase._q_suffix(strategy, Decimal("18.0")),
-        )
-        assert path.name == "test h265-aq+slow CRF=18.0.mkv"
+    def test_non_uniform_fixed_run_each_output_suffixed(self, tmp_path: Path) -> None:
+        """M-2b: two collapsed strategies of DIFFERENT values each name their
+        own output — the old uniformity gate silently dropped both suffixes
+        and a stale same-name reuse became possible."""
+        a = _fixed_strategy_fixture("18")
+        b = _fixed_strategy_fixture("20")
+        assert MergedVideo.output_file_name("test", a) == "test h265-aq+slow CRF=18.0.mkv"
+        assert MergedVideo.output_file_name("test", b) == "test h265-aq+slow CRF=20.0.mkv"
 
 
 class TestFixedMergeRecoveryNaming:
@@ -1083,7 +1078,7 @@ class TestFixedMergeRecoveryNaming:
         encoding = phase._phases[EncodingPhase]
         winner = Artifact(
             payload=_encoded_chunk(chunk, "chunk1", "h265-aq").model_copy(
-                deep=True, update={"strategy": fixed_strategy, "crf": Decimal("18")},
+                deep=True, update={"strategy": fixed_strategy},
             ),
             state=ArtifactState.COMPLETE,
         )
@@ -1109,10 +1104,11 @@ class TestFixedMergeRecoveryNaming:
         assert stale.exists()  # kept in place — no blind deletion
 
 # ---------------------------------------------------------------------------
-# Mode-honest merge sidecars (unified-summaries spec, interim landing)
+# Per-output acceptance records + merge.yaml replay aggregate (G8)
 # ---------------------------------------------------------------------------
 
-from pyqenc.state import MergeParams
+_STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
+"""Stub source identity — phases read the job File's fingerprint."""
 
 
 def _run_full_merge(
@@ -1124,7 +1120,7 @@ def _run_full_merge(
     """Drive MergePhase through run() with external shells mocked.
 
     Returns ``(merge_phase, merged_dir)``. One strategy's output is produced
-    with measurement mocked to a full-ish metric dict, so both sidecars land
+    with measurement mocked to a full metric dict, so both sidecars land
     on disk.
     """
     work_dir = tmp_path / "work"
@@ -1158,7 +1154,7 @@ def _run_full_merge(
         encoding = merge._phases[_EncodingPhase]
         winner = Artifact(
             payload=_encoded_chunk(chunk, "chunk1", "h265-aq").model_copy(
-                deep=True, update={"strategy": fixed_strategy, "crf": Decimal("18")},
+                deep=True, update={"strategy": fixed_strategy},
             ),
             state=ArtifactState.COMPLETE,
         )
@@ -1199,63 +1195,95 @@ def _run_full_merge(
     with (
         patch("pyqenc.phases.merge.subprocess.run", side_effect=fake_subprocess_run),
         patch("pyqenc.phases.merge.get_frame_count", return_value=100),
-        patch.object(MergePhase, "_measure_quality", return_value=(measured, True, None)),
+        patch.object(MergePhase, "_measure_quality", return_value=(measured, None)),
     ):
         result = merge.run(dry_run=False)
     assert result.outcome == PhaseOutcome.COMPLETED, result.message
     return merge, merged_dir
 
 
-class TestModeHonestMergeSidecars:
-    """Both merge sidecars carry mode-honest content and keys."""
+class TestPerOutputSidecarShape:
+    """The acceptance record: facts + provenance, no verdict (Req 27)."""
 
-    def test_fixed_per_video_sidecar_holds_knob_anchor_full_metrics(self, tmp_path: Path) -> None:
-        import yaml as _yaml
+    def test_fixed_record_round_trips_via_the_mode_union(self, tmp_path: Path) -> None:
+        """Save → load dispatches to the FIXED variant with its quality, and
+        the full measured set is retained (stats outside any target set)."""
+        from pyqenc.phases.merge import FixedMergedProvenance, MergedOutputSidecar
 
         _merge, merged_dir = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
-        data = _yaml.safe_load(next(merged_dir.glob("*.yaml")).read_text(encoding="utf-8"))
-        assert data["quality"] == {"label": "CRF", "value": 18.0}
-        assert data["anchor"] == "h265-aq+slow"
-        assert "targets" not in data and "targets_met" not in data
-        # Retention: the full measured set (incl. stats outside any target set).
-        assert data["metrics"]["vmaf_std"] == 1.2
-        assert data["metrics"]["vmaf_max"] == 99.0
-
-    def test_search_per_video_sidecar_unchanged(self, tmp_path: Path) -> None:
         import yaml as _yaml
+
+        data = _yaml.safe_load(next(merged_dir.glob("*.yaml")).read_text(encoding="utf-8"))
+        record = MergedOutputSidecar.model_validate(data)
+        assert isinstance(record.provenance, FixedMergedProvenance)
+        assert record.provenance.quality == Decimal("18.0")
+        assert record.provenance.winners.size == 1
+        assert record.provenance.strategy.token, "strategy IS the args fingerprint (Req 61)"
+        # Retention: the FULL measured set (incl. stats outside any target set).
+        assert record.metrics["vmaf_std"] == 1.2
+        assert record.metrics["vmaf_max"] == 99.0
+
+    def test_search_record_round_trips_via_the_mode_union(self, tmp_path: Path) -> None:
+        """Save → load dispatches to the SEARCH variant carrying the targets
+        basis (targets steer the search — a change re-searches and re-merges)."""
+        import yaml as _yaml
+
+        from pyqenc.phases.merge import MergedOutputSidecar, SearchMergedProvenance
 
         _merge, merged_dir = _run_full_merge(tmp_path, fixed=False)
         data = _yaml.safe_load(next(merged_dir.glob("*.yaml")).read_text(encoding="utf-8"))
-        assert "targets" in data and "targets_met" in data
-        assert "quality" not in data and "anchor" not in data
+        record = MergedOutputSidecar.model_validate(data)
+        assert isinstance(record.provenance, SearchMergedProvenance)
+        assert record.provenance.targets, "search runs carry the targets basis"
 
-    def test_merge_yaml_keys_and_summaries_mode_honest_fixed(self, tmp_path: Path) -> None:
+
+class TestMergeYamlReplayAggregate:
+    """merge.yaml = the summary replay rows only (Req 28/61)."""
+
+    def test_summary_only_no_basis(self, tmp_path: Path) -> None:
+        """No basis marker exists: replay re-renders verdicts live against
+        the current bar, so nothing downstream needs the rendering basis
+        (dropped 2026-10-09 — zero consumers)."""
+
+        from pyqenc.phases.merge import MergeSidecar
+
         merge, _ = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
-        persisted = MergeParams.load(merge._dep_result(JobPhase).work_dir / "merge.yaml")
+        persisted = load_model(merge._deps[JobPhase].work_dir / "merge.yaml", MergeSidecar)
         assert persisted is not None
-        # Fixed-run key: the ruler basis; no configured-targets key.
-        assert persisted.anchor == "h265-aq+slow"
-        assert persisted.quality_targets == []
-        # Replay-leak fields are gone.
-        assert "source_stem" not in persisted.model_dump()
-        assert "source_size_bytes" not in persisted.model_dump()
-        # Summaries carry only the rendered (config-target) stats — the
-        # measured-but-unrendered stability stats stay out.
-        [summary] = persisted.strategy_summaries
-        assert "vmaf_std" not in summary.metrics
-        assert "vmaf_max" not in summary.metrics
+        assert not hasattr(persisted, "basis")
+        assert [row.strategy_name for row in persisted.summary] == ["h265-aq+slow"]
+        # No verdict on the replay rows (marks render live).
+        assert "targets_met" not in persisted.summary[0].model_dump()
 
-    def test_merge_yaml_search_mode_keys(self, tmp_path: Path) -> None:
+    def test_search_summary_rows_persist(self, tmp_path: Path) -> None:
+        from pyqenc.phases.merge import MergeSidecar
+
         merge, _ = _run_full_merge(tmp_path, fixed=False)
-        persisted = MergeParams.load(merge._dep_result(JobPhase).work_dir / "merge.yaml")
+        persisted = load_model(merge._deps[JobPhase].work_dir / "merge.yaml", MergeSidecar)
         assert persisted is not None
-        assert persisted.anchor is None
-        assert persisted.quality_targets, "search run keys on configured targets"
+        assert persisted.summary, "search runs persist their summary rows"
 
-    def test_fixed_target_change_does_not_invalidate(self, tmp_path: Path) -> None:
-        """Config targets drive nothing in fixed mode: changing them between
-        fixed runs must NOT delete merge sidecars (anchor/sampling/probe are
-        the only fixed-run keys)."""
+
+class TestPerFileAcceptance:
+    """Per-file provenance compare decides COMPLETE vs re-merge (Req 49)."""
+
+    def _recover_state(self, merge, strategy_name: str):
+        recovery = merge._recover()
+        row = next(
+            r for r in recovery.artifacts
+            if r.wanted and r.payload.strategy.display_name() == strategy_name
+        )
+        return recovery, row
+
+    def test_matching_provenance_accepts(self, tmp_path: Path) -> None:
+        merge, _ = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
+        _recovery, row = self._recover_state(merge, "h265-aq+slow")
+        assert row.state is ArtifactState.COMPLETE
+
+    def test_fixed_config_target_change_does_not_invalidate(self, tmp_path: Path) -> None:
+        """Config targets drive nothing in fixed mode (Req 40 lineage): a
+        change between fixed runs must NOT reject the output — the record
+        carries the quality only, never config targets."""
         merge, merged_dir = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
         sidecar = next(merged_dir.glob("*.yaml"))
         sidecar_before = sidecar.read_text(encoding="utf-8")
@@ -1269,14 +1297,19 @@ class TestModeHonestMergeSidecars:
             quality    = (Decimal("18"), Decimal("18")),
         )
 
-        merge._recover()
-        assert sidecar.read_text(encoding="utf-8") == sidecar_before, (
-            "fixed merge must not be invalidated by a config-target change"
-        )
+        _recovery, row = self._recover_state(merge, "h265-aq+slow")
+        assert row.state is ArtifactState.COMPLETE
+        assert sidecar.read_text(encoding="utf-8") == sidecar_before
 
-    def test_fixed_anchor_change_invalidates(self, tmp_path: Path) -> None:
+    def test_anchor_change_does_not_remerge(self, tmp_path: Path) -> None:
+        """§112 resolved (2026-10-09): the anchor is a runtime-elected
+        presentation basis, never a provenance dimension — its re-election
+        must accept an output whose winner-set fingerprint (the actual
+        input identity) matches. The old behavior re-merged provably
+        identical outputs (~50 min each) on every anchor re-election."""
         merge, merged_dir = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
         sidecar = next(merged_dir.glob("*.yaml"))
+        sidecar_before = sidecar.read_text(encoding="utf-8")
 
         from pyqenc.phases.optimization import OptimizationPhase as _OptPhase
 
@@ -1286,5 +1319,159 @@ class TestModeHonestMergeSidecars:
             anchor="h264+ultrafast",
         )
 
-        merge._recover()
-        assert not sidecar.exists(), "anchor change is the fixed-run key: sidecars deleted"
+        _recovery, row = self._recover_state(merge, "h265-aq+slow")
+        assert row.state is ArtifactState.COMPLETE, (
+            "anchor re-election must not reject an input-identical output"
+        )
+        assert sidecar.read_text(encoding="utf-8") == sidecar_before
+
+    def test_search_targets_change_means_remerge(self, tmp_path: Path) -> None:
+        merge, _ = _run_full_merge(tmp_path, fixed=False)
+        config = merge._config
+        probe_result = merge._phases[ProbePhase].result
+        assert probe_result is not None
+        probe_result.plan = config.resolve_encoding(
+            strategies = ["h265-aq+slow"],
+            targets    = ["vmaf-min:99.0"],
+        )
+
+        _recovery, row = self._recover_state(merge, "h265+slow")
+        assert row.state is not ArtifactState.COMPLETE, "targets mismatch must not accept"
+
+    def test_winner_set_change_means_remerge(self, tmp_path: Path) -> None:
+        """M-2/§86: re-searched winners under identical static names must
+        reject the stale output — only the winner-set fingerprint catches it."""
+        from pyqenc.phases.encoding import EncodingPhase as _EncodingPhase
+
+        merge, _ = _run_full_merge(tmp_path, fixed=False)
+        work_dir = merge._deps[JobPhase].work_dir
+        extra_chunk = work_dir / "chunk2.q18.0.mkv"
+        extra_chunk.write_bytes(b"\x00" * 64)
+        encoding = merge._phases[_EncodingPhase]
+        assert encoding.result is not None
+        strategy = encoding.result.winners[0].payload.strategy
+        encoding.result = EncodingPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="encoding complete",
+            winners=list(encoding.result.winners) + [Artifact(
+                payload=_encoded_chunk(extra_chunk, "chunk2", "h265-aq").model_copy(
+                    deep=True, update={"strategy": strategy},
+                ),
+                state=ArtifactState.COMPLETE,
+            )],
+        )
+
+        _recovery, row = self._recover_state(merge, "h265+slow")
+        assert row.state is not ArtifactState.COMPLETE, "winner-set drift must not accept"
+
+    def test_sampling_only_difference_remeasures_in_place(self, tmp_path: Path) -> None:
+        """Req 49: a sampling-only difference keeps the concat — the row is
+        pending with the re-measure reason (never re-merged)."""
+        merge, _ = _run_full_merge(tmp_path, fixed=False)
+        merge._config.measurement.sampling = 5
+
+        _recovery, row = self._recover_state(merge, "h265+slow")
+        assert row.state is ArtifactState.PARTIAL, "file present, not accepted"
+        assert merge._pending_reasons["h265+slow"] == "sampling"
+
+    def test_missing_merge_yaml_still_decides_via_per_output_records(self, tmp_path: Path) -> None:
+        """M-7: merge.yaml is replay-only — its absence never skips the
+        per-file acceptance checks."""
+        merge, _ = _run_full_merge(tmp_path, fixed=False)
+        (merge._deps[JobPhase].work_dir / "merge.yaml").unlink()
+
+        _recovery, row = self._recover_state(merge, "h265+slow")
+        assert row.state is ArtifactState.COMPLETE, "per-output records decide"
+
+    def test_identity_mismatch_fatal_without_permission(self, tmp_path: Path) -> None:
+        merge, _ = _run_full_merge(tmp_path, fixed=False)
+        merge.result = None  # clear the memoized result for the rerun
+        job = merge._phases[JobPhase]
+        assert job.result is not None
+        job.result.file = Artifact(
+            payload=ProbedFile(
+                fingerprint=SizedFingerprint(token="f" * 32, size=64),
+                path=job.result.file.payload.path,
+            ),
+            state=ArtifactState.COMPLETE,
+        )
+
+        result = merge.run(dry_run=False)
+        assert result.outcome is PhaseOutcome.FAILED
+        assert "identity mismatch" in result.message.lower()
+        assert "--force" in result.message
+
+
+class TestNamingCollisionLoud:
+    """Req 5: two artifacts consuming one on-disk name fail loudly — never
+    the silent setdefault coalesce the 2026-10-08 audit found."""
+
+    def test_two_distinct_strategies_with_one_safe_name_fail_loudly(
+        self, tmp_path: Path,
+    ) -> None:
+        from decimal import Decimal
+
+        from pyqenc.models import CodecConfig, Strategy
+        from pyqenc.phases.encoding import EncodingPhase as _EncodingPhase
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        chunk = work_dir / "chunk1.mkv"
+        chunk.write_bytes(b"\x00" * 64)
+        ts_file = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+        ts_file.parent.mkdir(parents=True, exist_ok=True)
+        ts_file.write_text("0\n", encoding="utf-8")
+
+        merge = _make_merge_phase(work_dir, tmp_path / "test.mkv", chunk, timestamps_path=ts_file)
+
+        codec = CodecConfig(
+            name="h265-10bit", default_quality=Decimal("20"), default_preset="slow",
+            quality_range=(Decimal("0"), Decimal("51")), presets=["slow"],
+        )
+        same_name = Strategy(preset="slow", profile="h265", codec=codec, profile_args=[])
+        other_args = Strategy(
+            preset="slow", profile="h265", codec=codec, profile_args=["-tune", "grain"],
+        )
+        assert same_name.safe_name() == other_args.safe_name()
+        assert same_name != other_args
+
+        payload = _encoded_chunk(chunk, "chunk1", "h265+slow")
+        encoding = merge._phases[_EncodingPhase]
+        encoding.result = EncodingPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="encoding complete",
+            winners=[
+                Artifact(payload=payload.model_copy(update={"strategy": same_name}), state=ArtifactState.COMPLETE),
+                Artifact(payload=payload.model_copy(update={"strategy": other_args}), state=ArtifactState.COMPLETE),
+            ],
+        )
+
+        result = merge.run(dry_run=False)
+        assert result.outcome is PhaseOutcome.FAILED
+        assert "naming collision" in result.message.lower()
+
+    def test_identical_strategy_twice_is_one_expected_output(self, tmp_path: Path) -> None:
+        """The same strategy on two winner rows (duplicate rows) deduplicates
+        silently — one identity, one output name, no collision."""
+        from pyqenc.phases.encoding import EncodingPhase as _EncodingPhase
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        chunk = work_dir / "chunk1.mkv"
+        chunk.write_bytes(b"\x00" * 64)
+        ts_file = work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME
+        ts_file.parent.mkdir(parents=True, exist_ok=True)
+        ts_file.write_text("0\n", encoding="utf-8")
+
+        merge = _make_merge_phase(work_dir, tmp_path / "test.mkv", chunk, timestamps_path=ts_file)
+        payload = _encoded_chunk(chunk, "chunk1", "h265+slow")
+        encoding = merge._phases[_EncodingPhase]
+        encoding.result = EncodingPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="encoding complete",
+            winners=[
+                Artifact(payload=payload, state=ArtifactState.COMPLETE),
+                Artifact(payload=payload, state=ArtifactState.COMPLETE),
+            ],
+        )
+
+        recovery = merge._recover()
+        wanted = [r for r in recovery.artifacts if r.wanted]
+        assert len(wanted) == 1, "identical strategy rows collapse to one output"

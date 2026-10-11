@@ -47,7 +47,6 @@ from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import (
     CHAIN_FILENAME_SUFFIX,
     CHUNK_NAME_PATTERN,
-    ENCODED_ATTEMPT_NAME_PATTERN,
     FFMPEG_SELECTOR_PREFIX,
     RANGE_SEPARATOR,
     SELECTOR_KEY_CH,
@@ -57,7 +56,7 @@ from pyqenc.constants import (
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
-from pyqenc.models import CropParams, Strategy
+from pyqenc.models import CropParams, SizedFingerprint, Strategy
 from pyqenc.utils.ffmpeg_runner import FFmpegInput
 from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.naming import sanitize_filesystem_text
@@ -104,24 +103,47 @@ DecimalYaml = Annotated[
 # ---------------------------------------------------------------------------
 
 class File(BaseModel):
-    """A file on disk plus its basic identity metadata.
+    """A located file plus its cheap facts — no content identity.
 
-    Constructed exactly once per run by JobPhase (populated eagerly from the
-    filesystem) and exposed on ``JobPhaseResult``; every downstream phase
-    obtains it by reference. ``job.yaml`` persists only the :class:`File` dump,
-    and sidecar source-identity checks compare the persisted path +
-    ``file_size_bytes`` against live values.
+    The base record for every file we reference without probing it:
+    winner files, listed surplus rows, placeholder paths. Sizes of such
+    files are stat-able at read time — never mirrored here.
+
+    Identity lives on :class:`ProbedFile` — the VideoStream →
+    ExtendedVideoStream pattern at the file layer: Job's input is a path,
+    its output is the probed source file.
 
     Attributes:
-        path:            Link to the file on disk.
-        file_size_bytes: File size in bytes, or ``None`` when unavailable
-                         (e.g. the file is a pipe or the stat failed).
+        path: Link to the file on disk.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    path:            LongPathYaml
-    file_size_bytes: int | None = None
+    path: LongPathYaml
+
+
+class ProbedFile(File):
+    """A :class:`File` with its REQUIRED content identity.
+
+    The run's source file as Job produces it (``BlakeFingerprinter.of_file``
+    — sampled windows; ``fingerprint.size`` is the file size belt). The
+    ``VideoStream`` → ``ExtendedVideoStream`` pattern applied to the file
+    layer: probed-ness is expressed by construction, so downstream
+    consumers never handle identity optionality and no accessor needs a
+    presence assert. Exactly one probed file exists per run.
+
+    ``fingerprint.size`` IS the file size (the belt; set by the
+    fingerprinter's stat) — the single size the record carries. Consumers
+    needing sizes of unprobed files stat them at read time.
+
+    Attributes:
+        fingerprint: The sampled-content identity (Req 30) — REQUIRED;
+                     its ``size`` is the file size in bytes (typed
+                     non-optional via :class:`SizedFingerprint`).
+    """
+
+    fingerprint: SizedFingerprint
+
 
 
 # ---------------------------------------------------------------------------
@@ -724,21 +746,6 @@ class VideoStreamChunk(BaseModel):
 # Req 14 — Encoded attempt as a stream
 # ---------------------------------------------------------------------------
 
-class EncodedAttemptName(BaseModel):
-    """The typed record parsed from an encoded attempt's file name.
-
-    The name carries only part of a composed identity — recovery joins this
-    record against phase results rather than pretending the name reconstructs
-    the object.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    chunk_id:  str
-    resolution: str
-    crf:       DecimalYaml
-
-
 class EncodedChunk(BaseModel):
     """An encoding attempt: the attempt file's own video as a stream.
 
@@ -747,16 +754,23 @@ class EncodedChunk(BaseModel):
     construction (applied during the encode); the attempt's
     :class:`VideoStreamInfo` is populated eagerly, once, after the encode.
 
-    This class owns the attempt-file name family: the name is a
-    pure function of the composed identity, generation and parsing living
-    here as a strict inverse pair — presence-based recovery is trustworthy
-    only because ``parse(format(x)) == x`` is pinned by tests.
+    This class owns BOTH encoding name families, each compose-only (spec
+    2026-10-07, Req 1/9 — no globbing, no parsing; lookups are exact-name):
+
+    - attempt ``<chunk_id>.q<quality>.mkv`` (the quality is the search's
+      cache key; no resolution component — the name is fully known before
+      encoding begins), sidecar as the stem swap;
+    - winner ``<chunk_id>.mkv`` / ``<chunk_id>.yaml`` — a pure function of
+      the chunk identity, no quality and no resolution.
+
+    The winning quality is NOT a field: it is a fact of the winner sidecar
+    only, read by processing-path consumers (the re-merge CRF graph, the
+    winner scan, the fixed ruler) — never at recovery (Req 4).
 
     Attributes:
         stream:   The attempt file's own extended video stream.
         chunk:    The source window the attempt encodes.
         strategy: The strategy the attempt was encoded with.
-        crf:      The quality parameter value used for the attempt.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -764,34 +778,26 @@ class EncodedChunk(BaseModel):
     stream:   ExtendedVideoStream
     chunk:    VideoStreamChunk
     strategy: Strategy
-    crf:      DecimalYaml
 
     @staticmethod
-    def format_file_name(chunk_id: str, resolution: str, crf: Decimal) -> str:
-        """The attempt file name for an identity: ``<chunk_id>.<res>.q<crf>.mkv``."""
-        return f"{chunk_id}.{resolution}.q{crf}.mkv"
+    def format_attempt_file_name(chunk_id: str, quality: Decimal) -> str:
+        """The attempt file name: ``<chunk_id>.q<quality>.mkv``."""
+        return f"{chunk_id}.q{quality}.mkv"
 
-    @classmethod
-    def parse_file_name(cls, name: str) -> EncodedAttemptName:
-        """Parse an attempt file name into its typed identity record.
+    @staticmethod
+    def format_attempt_sidecar_name(chunk_id: str, quality: Decimal) -> str:
+        """The attempt sidecar name: the attempt stem with a ``.yaml`` suffix."""
+        return f"{chunk_id}.q{quality}.yaml"
 
-        Args:
-            name: The attempt file name.
+    @staticmethod
+    def format_winner_file_name(chunk_id: str) -> str:
+        """The winner file name: ``<chunk_id>.mkv`` (pure chunk identity)."""
+        return f"{chunk_id}.mkv"
 
-        Returns:
-            The parsed :class:`EncodedAttemptName`.
-
-        Raises:
-            ValueError: When ``name`` does not match the attempt-name pattern.
-        """
-        match = ENCODED_ATTEMPT_NAME_PATTERN.match(name)
-        if not match:
-            raise ValueError(f"Not an encoded attempt file name: {name!r}")
-        return EncodedAttemptName(
-            chunk_id   = match.group("chunk_id"),
-            resolution = match.group("resolution"),
-            crf        = Decimal(match.group("quality")),
-        )
+    @staticmethod
+    def format_winner_sidecar_name(chunk_id: str) -> str:
+        """The winner result-sidecar name: the winner stem with ``.yaml``."""
+        return f"{chunk_id}.yaml"
 
 
 # ---------------------------------------------------------------------------
@@ -851,8 +857,13 @@ class MergedVideo(BaseModel):
     """One merged output per strategy — the merge phase's payload.
 
     Composes the strategy with the source identity needed for naming plus the
-    measured facts consumers need. The output name materializes from
-    ``<file stem> <strategy>.mkv`` at the merge phase's single derivation site.
+    measured facts consumers need. This entity owns its output-name family:
+    :meth:`output_file_name` composes ``<source stem> <strategy
+    safe_name>[ <LABEL>=<q>].mkv`` — the pinned-quality suffix appears
+    whenever the strategy's effective quality range is a single point
+    (fixed), per-strategy by construction; value uniformity across the run
+    is never a naming gate (spec 2026-10-07, Req 6 — closes M-2b). Search
+    outputs carry no quality or generation distinguisher (Req 7).
 
     Attributes:
         source_stem:  The source file's name stem (naming identity).
@@ -882,108 +893,33 @@ class MergedVideo(BaseModel):
         """Filesystem-safe name — the sanitized display form (no extension)."""
         return sanitize_filesystem_text(self.display_name())
 
+    @classmethod
+    def output_file_name(cls, source_stem: str, strategy: Strategy) -> str:
+        """The output's file name: safe base, optional pinned-q suffix, ``.mkv``.
 
-# ---------------------------------------------------------------------------
-# Req 5 — sidecar slices (unique-property persistence)
-# ---------------------------------------------------------------------------
-
-class SourceMismatchError(ValueError):
-    """Raised when a sidecar's recorded source identity does not match the live
-    :class:`File` — the owning phase re-enumerates and rewrites the sidecar."""
-
-
-class _SourceSidecarBase(BaseModel):
-    """Private base for sidecar models that record the source identity."""
-
-    source: File
-
-    def validate_source(self, live: File) -> None:
-        """Validate the recorded source identity against the live file.
-
-        Args:
-            live: The in-run :class:`File` from JobPhase.
-
-        Raises:
-            SourceMismatchError: When the recorded path or size differs from
-                                 the live values.
+        The pinned suffix is PER-STRATEGY whenever that strategy's effective
+        range is a single point — a non-uniform fixed run (collapsed profiles
+        of different values) still names each output with its own value, so
+        a stale same-name reuse is impossible (M-2b).
         """
-        if (
-            self.source.path != live.path
-            or self.source.file_size_bytes != live.file_size_bytes
-        ):
-            raise SourceMismatchError(
-                f"Sidecar source identity mismatch: recorded "
-                f"{self.source.path} ({self.source.file_size_bytes} bytes), "
-                f"live {live.path} ({live.file_size_bytes} bytes)."
-            )
+        base = sanitize_filesystem_text(f"{source_stem} {strategy.display_name()}")
+        return f"{base}{cls.pinned_quality_suffix(strategy)}.mkv"
+
+    @staticmethod
+    def pinned_quality_suffix(strategy: Strategy) -> str:
+        """The strategy's pinned-knob suffix: ``" CRF=18.0"``, or ``""``.
+
+        The label is the strategy's own (sanitized — labels like ``Mbit/s``
+        must land filesystem-safe), and the value is quantized to the
+        strategy's granularity: identical settings always produce identical
+        names, whatever Decimal spelling declared them (``-q 18`` and
+        ``-q 17.5`` at 0.5 granularity render ``18.0`` and ``17.5``).
+        """
+        codec = strategy.codec
+        if codec.quality_better != codec.quality_worse:
+            return ""
+        label = sanitize_filesystem_text(codec.quality_label)
+        quantized = codec.quality_better.quantize(codec.quality_granularity)
+        return f" {label}={quantized}"
 
 
-class JobSidecar(_SourceSidecarBase):
-    """The ``job.yaml`` slice: the :class:`File` dump under the ``source`` key.
-
-    The persisted path + size are the source-mismatch comparison basis.
-    """
-
-
-class StreamsInventory(BaseModel):
-    """The per-type stream inventory of :class:`ExtractionSidecar`.
-
-    Each entry is the stream's own info slice — the composed :class:`File` is
-    never part of a dump.
-
-    Attributes:
-        video:       The (first) video stream info, or ``None`` when absent.
-        audio:       Audio stream infos in track order.
-        subtitles:   Subtitle stream infos in track order.
-        attachments: Attachment stream infos in track order.
-    """
-
-    video:       VideoStreamInfo | None    = None
-    audio:       list[AudioStreamInfo]     = []
-    subtitles:   list[SubtitleStreamInfo]  = []
-    attachments: list[AttachmentStreamInfo] = []
-
-
-class ExtractionSidecar(_SourceSidecarBase):
-    """The ``extraction.yaml`` slice: stream inventory, chapters presence,
-    source identity.
-
-    Owned by ExtractionPhase; a reuse run loads it instead of re-probing, with
-    :meth:`validate_source` deciding whether the inventory is still valid.
-
-    Attributes:
-        source:   The source identity for invalidation.
-        streams:  The per-type stream inventory (info slices).
-        chapters: Whether the source carries a chapter edition (the extracted
-                  location is the fixed ``chapters.xml`` convention — nothing
-                  per-run to record).
-    """
-
-    streams:  StreamsInventory
-    chapters: bool = False
-
-
-class SceneRecord(BaseModel):
-    """One persisted scene boundary.
-
-    Attributes:
-        timestamp_seconds: The boundary's timestamp on the source timeline.
-        frame:             The detector-reported frame index — informational
-                           only; no code path depends on it.
-    """
-
-    timestamp_seconds: float
-    frame:             int | None = None
-
-
-class ChunkingSidecar(BaseModel):
-    """The ``chunking.yaml`` slice: scene boundaries (no chunking mode).
-
-    Chunk windows are derived from these boundaries plus the stream duration
-    at load time — no per-chunk records, no per-chunk sidecars.
-
-    Attributes:
-        scenes: Scene boundaries in order; the first is the stream start.
-    """
-
-    scenes: list[SceneRecord]

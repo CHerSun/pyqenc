@@ -153,7 +153,7 @@ class TestOverrideApplication:
     def test_default_quality_auto_adjusted_to_override(self, caplog: pytest.LogCaptureFixture) -> None:
         # h265 default_quality is 18.0; pinning to 20 excludes it → nearest
         # bound (20) with a recorded adjustment.
-        with caplog.at_level(logging.INFO, logger="pyqenc.app_config"):
+        with caplog.at_level(logging.DEBUG, logger="pyqenc.app_config"):
             plan = _resolve_with_override(["h265-aq"], (Decimal("20"), Decimal("20")))
         (strategy,) = plan.strategies
         assert strategy.codec.default_quality == Decimal("20")
@@ -172,7 +172,7 @@ class TestOverrideApplication:
         config_dict = _DEFAULT_CONFIG.model_dump()
         config_dict["profiles"]["h265-aq"]["quality_range"] = [20.0, 24.0]
         config = AppConfig.model_validate(config_dict)
-        with caplog.at_level(logging.INFO, logger="pyqenc.app_config"):
+        with caplog.at_level(logging.DEBUG, logger="pyqenc.app_config"):
             plan = config.resolve_encoding(strategies=["h265-aq"])
         (strategy,) = plan.strategies
         assert strategy.codec.default_quality == Decimal("20.0")

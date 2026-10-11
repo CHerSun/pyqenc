@@ -23,20 +23,26 @@ from pyqenc.models import (
     CleanupLevel,
     CropParams,
     EncodingPlan,
+    Fingerprint,
     PhaseOutcome,
     QualityTarget,
+    SizedFingerprint,
     Strategy,
+    fingerprinter,
 )
 from pyqenc.phase import Artifact, PhaseRegistry
+from pyqenc.phases.encoding import WinnerSidecar
 from pyqenc.phases.job import JobPhase
-from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
-from pyqenc.state import (
-    ArtifactState,
-    OptimizationParams,
-    ProbeState,
-    StrategyTestResult,
+from pyqenc.phases.optimization import (
+    OptimizationPhase,
+    OptimizationPhaseResult,
+    StrategySummaryRow,
+    current_optimization_sidecar,
+    load_optimization_sidecar,
 )
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.state import ArtifactState, ProbeFacet
+from pyqenc.stream_model import ProbedFile
+from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -142,23 +148,42 @@ def _make_phase(
 
 
 def _persist_optimization(
-    work_dir: Path,
-    strategy_results: list[StrategyTestResult],
+    phase: OptimizationPhase,
+    summary:    list[StrategySummaryRow],
     *,
     test_chunks: list[str] | None = None,
 ) -> None:
-    """Write optimization.yaml with given results.
+    """Write an optimization.yaml whose keys MATCH the phase's live inputs.
 
-    The persisted ``probe`` matches the coherent state the ``_make_phase``
-    probe mock reports (``source=None`` → frame_count=0, empty crop), so the
-    phase's probe-mismatch validation sees a current persisted state.
+    Built through the production composer from the phase's own dependency
+    results (job source identity, probe facet, chunk set, plan) so no
+    invalidation fires — the persisted ``summary`` is what the test varies.
     """
+
+    job    = phase._phases[JobPhase]
+    probe  = next(
+        ph for cls, ph in phase._phases.items() if cls.__name__ == "ProbePhase"
+    )
+    chunking = next(
+        ph for cls, ph in phase._phases.items() if cls.__name__ == "ChunkingPhase"
+    )
+    assert probe.result is not None and job.result is not None
+    assert chunking.result is not None
+    assert job.result is not None
+    work_dir = job.result.work_dir
     work_dir.mkdir(parents=True, exist_ok=True)
-    OptimizationParams(
-        probe            = ProbeState(frame_count=0, crop=CropParams()),
-        test_chunks      = test_chunks if test_chunks is not None else ["chunk-001", "chunk-002"],
-        strategy_results = strategy_results,
-    ).save(work_dir / "optimization.yaml")
+    sidecar = current_optimization_sidecar(
+        plan        = probe.result.plan,
+        source      = job.result.file.payload.fingerprint,
+        chunks      = fingerprinter.of_ids(
+            a.payload.safe_name() for a in chunking.result.chunks
+        ),
+        probe       = ProbeFacet.from_probe(probe.result),
+        sampling    = phase._config.measurement.sampling,
+        test_chunks = test_chunks if test_chunks is not None else ["chunk-001", "chunk-002"],
+        summary     = summary,
+    )
+    save_model(work_dir / "optimization.yaml", sidecar)
 
 
 def _seed_winner(
@@ -170,19 +195,17 @@ def _seed_winner(
 ) -> None:
     """Fabricate a COMPLETE winner pair (file + result sidecar) on disk."""
     from pyqenc.constants import ENCODED_OUTPUT_DIR
-    from pyqenc.phases.encoding import EncodingResultSidecar
     from pyqenc.stream_model import EncodedChunk as _EC
 
     strategy_dir = work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
     strategy_dir.mkdir(parents=True, exist_ok=True)
-    winner = strategy_dir / _EC.format_file_name(
-        chunk.safe_name(), "1920x1080", Decimal(20))
+    winner = strategy_dir / _EC.format_winner_file_name(chunk.safe_name())
     winner.write_bytes(b"x" * size_bytes)
     write_yaml_atomic(
-        strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
-        EncodingResultSidecar(
-            winning_attempt=winner.name, crf=Decimal(20),
-            metrics={}, targets_met=True,
+        strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
+        WinnerSidecar(
+            crf=Decimal(20),
+            frame_count=24, metrics={}, targets_met=True,
         ).model_dump(exclude_none=True),
     )
 
@@ -200,11 +223,11 @@ def _wire_chunks(phase: OptimizationPhase, chunks: list) -> None:
     )
 
 
-def _make_results(sizes: list[int]) -> list[StrategyTestResult]:
-    """Create StrategyTestResult list for S1, S2, S3 with given sizes."""
+def _make_results(sizes: list[int]) -> list[StrategySummaryRow]:
+    """Create StrategySummaryRow list for S1, S2, S3 with given sizes."""
     strategies = [_S1, _S2, _S3]
     return [
-        StrategyTestResult(strategy=s.display_name(), total_size=sz)
+        StrategySummaryRow(strategy=s.display_name(), total_size=sz)
         for s, sz in zip(strategies, sizes)
     ]
 
@@ -240,8 +263,8 @@ class TestApplyTolerance:
     def test_zero_size_results_excluded(self) -> None:
         """Strategies with total_size=0 (failed) are excluded."""
         results = [
-            StrategyTestResult(strategy=_S1.display_name(), total_size=0),
-            StrategyTestResult(strategy=_S2.display_name(), total_size=100),
+            StrategySummaryRow(strategy=_S1.display_name(), total_size=0),
+            StrategySummaryRow(strategy=_S2.display_name(), total_size=100),
         ]
         selected = OptimizationPhase._apply_tolerance(results, 5.0)
         assert _S1.display_name() not in selected
@@ -281,7 +304,7 @@ class TestFastExitLiveSelection:
             for chunk in chunks:
                 _seed_winner(work_dir, s, chunk)
         _persist_optimization(
-            work_dir, _make_results([100, 104, 120]),
+            phase, _make_results([100, 104, 120]),
             test_chunks=[c.safe_name() for c in chunks],
         )
         return phase, work_dir
@@ -318,7 +341,7 @@ class TestFastExitLiveSelection:
         for s in (strategies[0], strategies[1]):
             _seed_winner(work_dir, s, chunks[0])
         _persist_optimization(
-            work_dir, _make_results([100, 104, 120]),
+            phase, _make_results([100, 104, 120]),
             test_chunks=[c.safe_name() for c in chunks],
         )
         result = phase.run(dry_run=True)
@@ -353,12 +376,12 @@ class TestSelectionFromLiveState:
         # Stale table from a previous run's strategy set: the old bug picked
         # the tiny stale row ("smallest size") and crashed downstream.
         _persist_optimization(
-            work_dir,
+            phase,
             [
-                StrategyTestResult(strategy=_S2.display_name(), total_size=100),
-                StrategyTestResult(strategy="h264+veryslow", total_size=110),
-                StrategyTestResult(strategy=_S1.display_name(), total_size=200),
-                StrategyTestResult(strategy=_S3.display_name(), total_size=300),
+                StrategySummaryRow(strategy=_S2.display_name(), total_size=100),
+                StrategySummaryRow(strategy="h264+veryslow", total_size=110),
+                StrategySummaryRow(strategy=_S1.display_name(), total_size=200),
+                StrategySummaryRow(strategy=_S3.display_name(), total_size=300),
             ],
             test_chunks=[c.safe_name() for c in chunks],
         )
@@ -390,11 +413,11 @@ class TestSelectionFromLiveState:
             for chunk in chunks:
                 _seed_winner(work_dir, s, chunk, size_bytes=100 if s is _S1 else 105)
         _persist_optimization(
-            work_dir,
+            phase,
             [
-                StrategyTestResult(strategy="h264+veryslow", total_size=90),
-                StrategyTestResult(strategy=_S1.display_name(), total_size=200),
-                StrategyTestResult(strategy=_S2.display_name(), total_size=210),
+                StrategySummaryRow(strategy="h264+veryslow", total_size=90),
+                StrategySummaryRow(strategy=_S1.display_name(), total_size=200),
+                StrategySummaryRow(strategy=_S2.display_name(), total_size=210),
             ],
             test_chunks=[c.safe_name() for c in chunks],
         )
@@ -416,11 +439,11 @@ class TestSelectionFromLiveState:
         assert result.outcome is PhaseOutcome.COMPLETED
         plan_names = {s.display_name() for s in strategies}
         assert {s.display_name() for s in result.selected_strategies} <= plan_names
-        persisted = OptimizationParams.load(work_dir / "optimization.yaml")
+        persisted = load_optimization_sidecar(work_dir / "optimization.yaml")
         assert persisted is not None
-        assert {r.strategy for r in persisted.strategy_results} == plan_names
+        assert {r.strategy for r in persisted.summary} == plan_names
         # Sizes derive from the live winner files (2 chunks x seeded bytes).
-        by_name = {r.strategy: r for r in persisted.strategy_results}
+        by_name = {r.strategy: r for r in persisted.summary}
         assert by_name[_S1.display_name()].total_size == 200
         assert by_name[_S3.display_name()].total_size == 300
 
@@ -437,8 +460,8 @@ class TestSelectionFromLiveState:
                 _seed_winner(work_dir, s, chunk, size_bytes=100 if s is _S1 else 110)
         # Table covers only S1 — S2's row is missing.
         _persist_optimization(
-            work_dir,
-            [StrategyTestResult(strategy=_S1.display_name(), total_size=1)],
+            phase,
+            [StrategySummaryRow(strategy=_S1.display_name(), total_size=1)],
             test_chunks=[c.safe_name() for c in chunks],
         )
 
@@ -446,9 +469,9 @@ class TestSelectionFromLiveState:
 
         assert result.outcome is PhaseOutcome.COMPLETED
         assert result.selected_strategies == [_S1]  # 200 vs 220 at 5% tolerance
-        persisted = OptimizationParams.load(work_dir / "optimization.yaml")
+        persisted = load_optimization_sidecar(work_dir / "optimization.yaml")
         assert persisted is not None
-        by_name = {r.strategy: r for r in persisted.strategy_results}
+        by_name = {r.strategy: r for r in persisted.summary}
         assert by_name[_S1.display_name()].total_size == 200
         assert by_name[_S2.display_name()].total_size == 220
 
@@ -529,7 +552,6 @@ def _make_chunk(cid_start: float, cid_end: float, tmp_path: Path):
 
     from pyqenc.stream_model import (
         ExtendedVideoStream,
-        File,
         VideoStream,
         VideoStreamChunk,
         VideoStreamInfo,
@@ -537,7 +559,7 @@ def _make_chunk(cid_start: float, cid_end: float, tmp_path: Path):
     return VideoStreamChunk(
         stream=ExtendedVideoStream(
             stream=VideoStream(
-                file=File(path=tmp_path / "source.mkv", file_size_bytes=64),
+                file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
                 info=VideoStreamInfo(
                     track_id=0, codec_name="hevc", fps=24.0,
                     fps_fraction=Fraction(24, 1), resolution="1920x1080",
@@ -571,7 +593,7 @@ class TestPairLedger:
         # Persist the full chunk set as the test selection so recovery is
         # deterministic (the fresh random pick stays covered by the e2e run).
         _persist_optimization(
-            work_dir, [],
+            phase, [],
             test_chunks=[c.safe_name() for c in chunks],
         )
         return phase, work_dir, chunks
@@ -625,7 +647,6 @@ class TestPairLedger:
         from decimal import Decimal
 
         from pyqenc.constants import ENCODED_OUTPUT_DIR
-        from pyqenc.phases.encoding import EncodingResultSidecar
         from pyqenc.stream_model import EncodedChunk as _EC
         from pyqenc.utils.yaml_utils import write_yaml_atomic
 
@@ -633,21 +654,19 @@ class TestPairLedger:
         strat = _S1
         strategy_dir = work_dir / ENCODED_OUTPUT_DIR / strat.safe_name()
         strategy_dir.mkdir(parents=True, exist_ok=True)
-        winner = strategy_dir / _EC.format_file_name(
-            chunk.safe_name(), "1920x1080", Decimal(20))
+        winner = strategy_dir / _EC.format_winner_file_name(chunk.safe_name())
         winner.write_bytes(b"x" * 16)
         write_yaml_atomic(
-            strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
-            EncodingResultSidecar(
-                winning_attempt=winner.name, crf=Decimal(20),
-                metrics={}, targets_met=True,
+            strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
+            WinnerSidecar(
+                crf=Decimal(20),
+                frame_count=24, metrics={}, targets_met=True,
             ).model_dump(exclude_none=True),
         )
 
         phase2, _, _ = self._phase_with_chunks(tmp_path, 1, chunks)
         recovery2 = phase2._recover()
         assert [a.state for a in recovery2.artifacts] == [ArtifactState.COMPLETE]
-        assert recovery2.artifacts[0].payload.crf == Decimal(20)
         # The pair is complete, but the persisted table carries no rows —
         # sizes/selection must be re-derived, so work IS pending.
         assert recovery2.pending is True
@@ -661,6 +680,10 @@ class TestPairLedger:
 from decimal import Decimal
 
 from pyqenc.constants import ENCODED_OUTPUT_DIR
+
+_STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
+"""Stub source identity — phases read the job File's fingerprint."""
+
 
 
 def _make_fixed_phase(
@@ -681,6 +704,8 @@ def _make_fixed_phase(
     from pyqenc.phases.job import JobPhase as _JP
     from pyqenc.phases.probe import ProbePhase as _PP
     from pyqenc.phases.probe import ProbePhaseResult
+
+
 
     config = _APP_CONFIG.model_copy(deep=True)
     config.encoding.optimize = optimize
@@ -730,47 +755,51 @@ def _seed_encoded_winner(work_dir: Path, strategy: Strategy) -> Path:
     return strategy_dir
 
 
-class TestCleanupGuard:
-    """Fixed + cleanup >= INTERMEDIATE hard-stops before any wipe/encode work."""
+class TestRunBoundaryGuard:
+    """Fixed + cleanup >= INTERMEDIATE is a run-configuration contradiction,
+    validated at the plan boundary (api) — never a phase skip (Req 55)."""
+
+    @staticmethod
+    def _plan(fixed: bool) -> EncodingPlan:
+        if fixed:
+            return _APP_CONFIG.resolve_encoding(
+                strategies=["h265-aq+slow"],
+                quality=(Decimal(18), Decimal(18)),
+            )
+        return _APP_CONFIG.resolve_encoding(
+            targets=["vmaf-min:93.0"], strategies=["h265-aq+slow", "h264+slow"],
+        )
 
     @pytest.mark.parametrize("level", [CleanupLevel.INTERMEDIATE, CleanupLevel.ALL])
-    def test_guard_stops_fixed_run(self, tmp_path: Path, level: CleanupLevel) -> None:
-        phase, work_dir, plan = _make_fixed_phase(
-            tmp_path, strategy_names=["h265-aq+slow"], cleanup=level,
-        )
-        seeded = _seed_encoded_winner(work_dir, plan.strategies[0])
-        result = phase.run(dry_run=False)
-        assert result.outcome is PhaseOutcome.FAILED
-        assert "cleanup" in result.message and "re-derivation substrate" in result.message
-        # The guard fires BEFORE the wipe — the winner layer stays intact.
-        assert seeded.exists()
+    def test_guard_rejects_fixed_plus_cleanup(self, level: CleanupLevel) -> None:
+        from pyqenc.api import _validate_run_configuration
 
-    def test_guard_passes_fixed_none(self, tmp_path: Path) -> None:
-        phase, work_dir, plan = _make_fixed_phase(
-            tmp_path, strategy_names=["h265-aq+slow"], cleanup=CleanupLevel.NONE,
-        )
-        seeded = _seed_encoded_winner(work_dir, plan.strategies[0])
-        phase.run(dry_run=False)
-        # No guard failure — the wipe ran instead.
-        assert not seeded.exists()
+        with pytest.raises(ValueError, match="re-derivation substrate"):
+            _validate_run_configuration(self._plan(fixed=True), level)
 
-    def test_guard_never_applies_to_searched_runs(self, tmp_path: Path) -> None:
-        phase, work_dir = _make_phase(
-            tmp_path, [_S1, _S2], optimize=False, force=False,
-            cleanup=CleanupLevel.ALL,
-        )
-        # Search mode with ALL cleanup: no fixed-quality guard may fire (the
-        # phase proceeds to its normal outcome instead of a guard stop).
-        seeded = _seed_encoded_winner(work_dir, _S1)
-        result = phase.run(dry_run=False)
-        assert "cleanup" not in result.message
-        assert seeded.exists()
+    def test_guard_passes_fixed_without_cleanup(self) -> None:
+        from pyqenc.api import _validate_run_configuration
+
+        _validate_run_configuration(self._plan(fixed=True), CleanupLevel.NONE)
+
+    def test_guard_never_applies_to_searched_runs(self) -> None:
+        from pyqenc.api import _validate_run_configuration
+
+        _validate_run_configuration(self._plan(fixed=False), CleanupLevel.ALL)
+
+    def test_guard_ignores_audio_only_runs(self) -> None:
+        """A planless (audio-only) closure has no fixed run to contradict."""
+        from pyqenc.api import _validate_run_configuration
+
+        _validate_run_configuration(None, CleanupLevel.ALL)
 
 
-class TestFixedWinnerWipe:
-    """The winner layer is wiped unconditionally on every fixed start (Req 6)."""
+class TestWinnerWipeSemantics:
+    """Winner wipes are CONDITION-driven now: the §99 unknown-currency wipe
+    (sidecar missing + winners present) is mode-independent; a CURRENT
+    sidecar wipes nothing (the pending gate alone decides — O-1/O-2)."""
 
-    def test_wipe_on_all_strategies_path(self, tmp_path: Path) -> None:
+    def test_missing_sidecar_wipes_on_all_strategies_path(self, tmp_path: Path) -> None:
         # Single fixed strategy + optimize on → all-strategies skip path.
         phase, work_dir, plan = _make_fixed_phase(
             tmp_path, strategy_names=["h265-aq+slow"], optimize=True,
@@ -778,27 +807,34 @@ class TestFixedWinnerWipe:
         seeded = _seed_encoded_winner(work_dir, plan.strategies[0])
         result = phase.run(dry_run=False)
         assert result.outcome is PhaseOutcome.REUSED  # all-strategies skip result
-        assert not seeded.exists()
+        assert not seeded.exists(), "no sidecar vouches for the winner — wiped"
 
-    def test_wipe_on_optimize_path(self, tmp_path: Path) -> None:
-        # Two fixed strategies + optimize on → the test-encode path. The
-        # stubbed chunking has no chunks, so recovery fails AFTER the entry
-        # block already ran — the wipe and banner are what must have fired.
-        phase, work_dir, plan = _make_fixed_phase(
-            tmp_path, strategy_names=["h265-aq+slow", "h264+slow"], optimize=True,
-        )
-        strategies = plan.strategies
-        seeded = [_seed_encoded_winner(work_dir, s) for s in strategies]
-        result = phase.run(dry_run=False)
-        assert result.outcome is PhaseOutcome.FAILED
-        assert "No chunks" in result.message
-        assert not any(d.exists() for d in seeded)
-
-    def test_wipe_never_on_searched_runs(self, tmp_path: Path) -> None:
+    def test_missing_sidecar_wipes_on_searched_runs_too(self, tmp_path: Path) -> None:
+        """The conservative §99 wipe is mode-independent — searched winners
+        without a sidecar are equally unknown currency."""
         phase, work_dir = _make_phase(tmp_path, [_S1], optimize=False, force=False)
         seeded = _seed_encoded_winner(work_dir, _S1)
         phase.run(dry_run=False)
-        assert seeded.exists()
+        assert not seeded.exists()
+
+    def test_current_sidecar_wipes_nothing_on_fixed_rerun(self, tmp_path: Path) -> None:
+        """O-2: a fixed rerun with the SAME pinned map performs no
+        invalidation — winners stay (the pending gate decides reuse)."""
+        phase, work_dir, plan = _make_fixed_phase(
+            tmp_path, strategy_names=["h265-aq+slow"], optimize=True,
+        )
+        seeded = _seed_encoded_winner(work_dir, plan.strategies[0])
+        # First run persists the current keys (§99 wipes the seeded winner —
+        # so seed again after the sidecar exists).
+        phase.run(dry_run=False)
+        seeded = _seed_encoded_winner(work_dir, plan.strategies[0])
+
+        phase2, _, _ = _make_fixed_phase(
+            tmp_path, strategy_names=["h265-aq+slow"], optimize=True,
+        )
+        phase2.run(dry_run=False)
+
+        assert seeded.exists(), "same pinned map + current sidecar → no wipe"
 
     def test_wipe_skipped_on_dry_run(self, tmp_path: Path) -> None:
         phase, work_dir, plan = _make_fixed_phase(
@@ -808,6 +844,70 @@ class TestFixedWinnerWipe:
         phase.run(dry_run=True)
         # A dry run changes nothing — the wipe waits for the executing run.
         assert seeded.exists()
+
+
+class TestStrategyFingerprintWipe:
+    """Req 39's letter: the permission-gated args wipe removes ONLY the
+    changed strategies' attempts and winners — the §99 cascade must not
+    fire afterwards (2026-10-08 audit minor, promoted to a fix)."""
+
+    def test_only_changed_strategy_wiped(self, tmp_path: Path) -> None:
+        from pyqenc.phases.job import JobPhase as _JP
+        from pyqenc.phases.optimization import (
+            SearchOptimizationSidecar,
+            current_optimization_sidecar,
+        )
+        from pyqenc.state import ProbeFacet
+
+        # force=True grants the permission the fatal band demands.
+        phase, work_dir = _make_phase(
+            tmp_path, [_S1, _S2], optimize=True, force=True,
+        )
+        chunks = [_make_chunk(0.0, 10.0, tmp_path), _make_chunk(10.0, 20.0, tmp_path)]
+        _wire_chunks(phase, chunks)
+        for strategy in (_S1, _S2):
+            for chunk in chunks:
+                _seed_winner(work_dir, strategy, chunk)
+
+        # Persist a sidecar whose keys match the run EXCEPT S1's args
+        # fingerprint (simulating S1's codec args having changed since).
+        job      = phase._phases[_JP]
+        probe    = next(
+            ph for cls, ph in phase._phases.items() if cls.__name__ == "ProbePhase"
+        )
+        chunking = next(
+            ph for cls, ph in phase._phases.items() if cls.__name__ == "ChunkingPhase"
+        )
+        assert job.result is not None and probe.result is not None
+        assert chunking.result is not None
+        stale = current_optimization_sidecar(
+            plan        = probe.result.plan,
+            source      = job.result.file.payload.fingerprint,
+            chunks      = fingerprinter.of_ids(
+                a.payload.safe_name() for a in chunking.result.chunks
+            ),
+            probe       = ProbeFacet.from_probe(probe.result),
+            sampling    = phase._config.measurement.sampling,
+            test_chunks = [c.safe_name() for c in chunks],
+            summary     = [],
+        )
+        data = stale.model_dump()
+        data["strategies"][_S1.display_name()] = Fingerprint(token="f" * 32).model_dump()
+        save_model(
+            work_dir / "optimization.yaml",
+            SearchOptimizationSidecar.model_validate(data),
+        )
+
+        s1_dir = work_dir / "encoded" / _S1.safe_name()
+        s2_dir = work_dir / "encoded" / _S2.safe_name()
+        assert s1_dir.exists() and s2_dir.exists()
+
+        phase.run(dry_run=False)  # encode of S1's pairs fails on fake media
+
+        assert not s1_dir.exists(), "changed strategy's winners must be wiped"
+        assert s2_dir.exists(), "unchanged strategy's winners must SURVIVE (Req 39)"
+        for path in s2_dir.glob("*.mkv"):
+            assert path.exists()
 
 
 class TestFixedQualityBanner:
@@ -897,9 +997,9 @@ class TestFixedQualityBanner:
 # Fixed compared-run optimization: pruning, anchor, synthetic set (Req 8)
 # ---------------------------------------------------------------------------
 
-def _result(name: str, size: int, metrics: dict[str, float]) -> StrategyTestResult:
-    """A StrategyTestResult with metrics (the fixed-mode pruning input)."""
-    return StrategyTestResult(strategy=name, total_size=size, metrics=metrics)
+def _result(name: str, size: int, metrics: dict[str, float]) -> StrategySummaryRow:
+    """A StrategySummaryRow with metrics (the fixed-mode pruning input)."""
+    return StrategySummaryRow(strategy=name, total_size=size, metrics=metrics)
 
 
 class TestDominancePruning:
@@ -1083,19 +1183,24 @@ class TestAggregateStrategyMetrics:
         strategy = _S1
         encoded_chunks: dict[str, list[EncodedChunk]] = {}
         for i, chunk in enumerate(chunks):
-            name = f"{chunk.safe_name()}.1920x1080.q18.0"
+            name = EncodedChunk.format_winner_file_name(chunk.safe_name())
             strategy_dir = tmp_path / "encoded" / strategy.safe_name()
             strategy_dir.mkdir(parents=True, exist_ok=True)
-            (strategy_dir / f"{name}.mkv").write_bytes(b"x" * (100 * (i + 1)))
-            # Result sidecar naming: <chunk_id>.<resolution>.yaml (no q part).
-            write_yaml_atomic(
-                strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
-                {"metrics": {"vmaf_median": 91.0 + i, "vif_median": 84.0 - i}},
+            (strategy_dir / name).write_bytes(b"x" * (100 * (i + 1)))
+            # Result sidecar naming: the winner stem swap.
+            save_model(
+                strategy_dir / EncodedChunk.format_winner_sidecar_name(chunk.safe_name()),
+                WinnerSidecar(
+                    crf     = Decimal(20),
+                    frame_count = 24,
+                    metrics = {"vmaf_median": 91.0 + i, "vif_median": 84.0 - i},
+                    targets_met = True,
+                ),
             )
             encoded_chunks.setdefault(strategy.display_name(), []).append(
                 build_encoded_chunk(
-                    chunk=chunk, strategy=strategy, crf=Decimal("18.0"),
-                    path=strategy_dir / f"{name}.mkv", resolution="1920x1080",
+                    chunk=chunk, strategy=strategy,
+                    path=strategy_dir / name,
                     frame_count=24,
                 )
             )
@@ -1108,19 +1213,20 @@ class TestAggregateStrategyMetrics:
 
     def test_missing_sidecar_chunk_contributes_nothing(self, tmp_path: Path) -> None:
         from pyqenc.phases.encoding import build_encoded_chunk
+        from pyqenc.stream_model import EncodedChunk as _EC
 
         chunk = _make_chunk(0.0, 10.0, tmp_path)
         strategy = _S1
         strategy_dir = tmp_path / "encoded" / strategy.safe_name()
         strategy_dir.mkdir(parents=True, exist_ok=True)
-        mkv = strategy_dir / f"{chunk.safe_name()}.1920x1080.q18.0.mkv"
+        mkv = strategy_dir / _EC.format_winner_file_name(chunk.safe_name())
         mkv.write_bytes(b"x" * 100)
         # No sidecar next to the winner.
         encoded_chunks = {
             strategy.display_name(): [
                 build_encoded_chunk(
-                    chunk=chunk, strategy=strategy, crf=Decimal("18.0"),
-                    path=mkv, resolution="1920x1080", frame_count=24,
+                    chunk=chunk, strategy=strategy,
+                    path=mkv, frame_count=24,
                 ),
             ],
         }
@@ -1158,6 +1264,7 @@ class TestFixedComparedExecute:
             EncodingResult,
             build_encoded_chunk,
         )
+        from pyqenc.stream_model import EncodedChunk as _EC
 
         strategy_names = ["h265-aq", "h265", "h265-anime"]
         phase, work_dir, plan = _make_fixed_phase(
@@ -1177,7 +1284,7 @@ class TestFixedComparedExecute:
         )
         # Persist the full chunk set as the test selection (deterministic).
         _persist_optimization(
-            work_dir, [],
+            phase, [],
             test_chunks=[c.safe_name() for c in chunks],
         )
 
@@ -1191,16 +1298,16 @@ class TestFixedComparedExecute:
                     per_chunk = sizes[display][chunk_idx]
                     strategy_dir = work_dir / "encoded" / strategy.safe_name()
                     strategy_dir.mkdir(parents=True, exist_ok=True)
-                    mkv = strategy_dir / f"{chunk.safe_name()}.1920x1080.q18.0.mkv"
+                    mkv = strategy_dir / _EC.format_winner_file_name(chunk.safe_name())
                     mkv.write_bytes(b"x" * per_chunk)
                     write_yaml_atomic(
-                        strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
-                        {"crf": "18.0", "targets_met": True, "metrics": metrics[display]},
+                        strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
+                        {"crf": "18.0", "targets_met": True, "frame_count": 24, "metrics": metrics[display]},
                     )
                     result.encoded_chunks.setdefault(display, []).append(
                         build_encoded_chunk(
-                            chunk=chunk, strategy=strategy, crf=Decimal("18.0"),
-                            path=mkv, resolution="1920x1080", frame_count=24,
+                            chunk=chunk, strategy=strategy,
+                            path=mkv, frame_count=24,
                         )
                     )
             return result
@@ -1269,17 +1376,17 @@ class TestFixedComparedExecute:
         # The sidecar persists facts only — selection/anchor are live
         # derivations and the synthetic ruler re-derives from
         # strategy_results on read (no synthetic_targets field).
-        persisted = OptimizationParams.load(work_dir / "optimization.yaml")
+        persisted = load_optimization_sidecar(work_dir / "optimization.yaml")
         assert persisted is not None
         assert not hasattr(persisted, "synthetic_targets")
         # The per-strategy records keep the FULL aggregated metrics for reuse
         # (data retention — re-selecting the comparison set never re-measures).
-        by_name = {r.strategy: r for r in persisted.strategy_results}
+        by_name = {r.strategy: r for r in persisted.summary}
         assert by_name["h265-aq+slow"].metrics["vmaf_median"] == 91.0
         assert by_name["h265-aq+slow"].metrics["vmaf_std"] == 1.1
         # Re-derivation from the persisted facts reproduces the ruler verbatim.
         anchor_result = next(
-            r for r in persisted.strategy_results if r.strategy == result.anchor
+            r for r in persisted.summary if r.strategy == result.anchor
         )
         assert [
             (t.metric, t.statistic, t.value)
@@ -1338,6 +1445,8 @@ class TestFixedReuseFromPersisted:
         phase, work_dir, plan = _make_fixed_phase(
             tmp_path, strategy_names=strategy_names, optimize=True,
         )
+        from pyqenc.stream_model import EncodedChunk as _EC
+
         chunks = [_make_chunk(0.0, 10.0, tmp_path), _make_chunk(10.0, 20.0, tmp_path)]
         from pyqenc.phases.chunking import ChunkingPhaseResult
         chunking = next(
@@ -1354,20 +1463,20 @@ class TestFixedReuseFromPersisted:
             strategy_dir = work_dir / "encoded" / strategy.safe_name()
             strategy_dir.mkdir(parents=True, exist_ok=True)
             for chunk in chunks:
-                mkv = strategy_dir / f"{chunk.safe_name()}.1920x1080.q18.0.mkv"
+                mkv = strategy_dir / _EC.format_winner_file_name(chunk.safe_name())
                 mkv.write_bytes(b"x" * 64)
                 write_yaml_atomic(
-                    strategy_dir / f"{chunk.safe_name()}.1920x1080.yaml",
+                    strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
                     {"crf": "18.0", "targets_met": True, "metrics": {}},
                 )
         _persist_optimization(
-            work_dir,
+            phase,
             [
-                StrategyTestResult(
+                StrategySummaryRow(
                     strategy="h265-aq+slow", total_size=1000,
                     metrics={"vmaf_median": 91.0},
                 ),
-                StrategyTestResult(
+                StrategySummaryRow(
                     strategy="h265+slow", total_size=1400,
                     metrics={"vmaf_median": 93.0},
                 ),
@@ -1399,7 +1508,7 @@ class TestUncomparedFixedSkipsAnchor:
         assert result.outcome is PhaseOutcome.REUSED  # all-strategies skip path
         assert result.synthetic_targets == []
         assert result.anchor is None
-        persisted = OptimizationParams.load(work_dir / "optimization.yaml")
+        persisted = load_optimization_sidecar(work_dir / "optimization.yaml")
         assert persisted is not None
         # Selection and anchor are live derivations — not sidecar fields.
         assert "selected" not in persisted.model_dump()

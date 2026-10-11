@@ -7,12 +7,10 @@ quality targets, including parallel execution and artifact-based resumption.
 # CHerSun 2026
 
 import asyncio
-import json
 import logging
 import os
 import shutil
 import statistics
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from dataclasses import replace as _dc_replace
@@ -20,20 +18,21 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
-import yaml
+from pydantic import BaseModel
 
 from pyqenc.constants import (
     APPROXIMATE_INDICATOR_SYMBOL,
     BRACKET_LEFT,
     BRACKET_RIGHT,
-    ENCODED_ATTEMPT_NAME_PATTERN,
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
     FAILURE_SYMBOL_MAJOR,
     FAILURE_SYMBOL_MINOR,
+    FIXED_COMPARISON_STATS,
     METRIC_KEY_QUALITY_MEASURE,
     NEUTRAL_INDICATOR_SYMBOL,
     SUCCESS_SYMBOL_MINOR,
+    TEMP_SUFFIX,
     THRESHOLD_ATTEMPTS_WARNING,
     WARNING_SYMBOL,
 )
@@ -42,6 +41,7 @@ from pyqenc.models import (
     AttemptMetadata,
     CleanupLevel,
     CropParams,
+    EncodingPlan,
     PhaseOutcome,
     QualityTarget,
     Strategy,
@@ -54,22 +54,16 @@ from pyqenc.phase import (
     PhaseResult,
     Recovery,
     RecoveryError,
+    claim_expected_name,
 )
 from pyqenc.phases.chunking import ChunkingPhase
 from pyqenc.phases.job import JobPhase
-from pyqenc.phases.optimization import OptimizationPhase
+from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.quality import QualitySearchBase, QualitySearchV3, flatten_metric_stats
-from pyqenc.state import (
-    ArtifactState,
-    EncodingParams,
-    EncodingResultSidecar,
-    LimiterSummary,
-    LimiterSummaryRow,
-    MetricsSidecar,
-    ProbeState,
-)
+from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
+    DecimalYaml,
     EncodedChunk,
     ExtendedVideoStream,
     VideoStream,
@@ -91,61 +85,167 @@ from pyqenc.utils.log_format import (
     fmt_metric_summary,
 )
 from pyqenc.utils.long_path import LongPath
-from pyqenc.utils.visualization import QualityEvaluator
-from pyqenc.utils.yaml_utils import write_yaml_atomic
+from pyqenc.utils.visualization import QualityMeasurer
+from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
 
+# ---------------------------------------------------------------------------
+# Per-attempt / winner sidecars (re-homed, Req 21)
+# ---------------------------------------------------------------------------
+
+class AttemptSidecar(BaseModel):
+    """Per-attempt sidecar (``<chunk>.q<quality>.yaml`` — the attempt stem swap).
+
+    The INTERNAL intermediate record — the main investment: an encoding
+    attempt in the workspace, storing ALL measured metric values (not
+    filtered to current targets). Facts of the attempt only: pass/fail
+    against quality targets is a comparison with foreign state (which
+    targets, which sampling) and is always re-evaluated from ``metrics``
+    where it is decided — never stored here (the WINNING attempt's
+    conclusion is recorded on :class:`WinnerSidecar`). This is the
+    re-judging substrate: cache-hits re-judge under new targets without
+    re-encoding.
+
+    ``sampling`` records the frame subsampling factor used when the metrics
+    were measured — LOAD-BEARING: attempts survive a sampling change
+    (winners are wholesale-wiped by the optimization band key) and are
+    lazily re-measured at pick-up when this differs from the current
+    config. REQUIRED — every write path carries it; a sidecar missing it
+    fails validation → absent → re-measure.
+
+    ``frame_count`` is a fact of the attempt file, from whoever last
+    decoded it whole: the encode run that produced it, or the measure run
+    on a re-measured attempt (the metric run reads the attempt whole, so
+    its progress count IS the file's count — found live 2026-10-09, when
+    re-measured sidecars carried 0 and darkened the frame-preservation
+    chain).  ``0`` is the sentinel for "could not be determined" (no valid
+    video has zero frames) and marks the sidecar incomplete at pick-up
+    (Req 9a) — the next re-measure heals it.
+
+    The ``metrics`` field uses the flat ``{metric_stat: value}`` format
+    (e.g. ``vmaf_min``, ``ssim_median``) consistent with
+    ``ChunkQualityStats`` serialisation.
+
+    The attempt's output resolution is deliberately NOT a field: it is
+    derivable (source dimensions − crop, by construction of the crop
+    filter) and was never read — the legacy per-attempt ffprobe and the
+    sidecar fact were relics of resolution-in-filename days (removed
+    2026-10-09; the human-facing derivation lives on ``probe.yaml``).
+
+    ``crf`` is likewise deliberately NOT a field (dropped 2026-10-09):
+    the quality is the attempt's ADDRESS — the file name is the cache
+    key, the search's proposed q rides the pick-up metadata, and no
+    consumer ever read the persisted value back.
+    """
+
+    sampling:    int                # subsampling factor used when the metrics were measured
+    frame_count: int                # frames of the attempt file (0 = unknown)
+    metrics:     dict[str, float]   # all measured values, e.g. vmaf_min, ssim_median
+
+
+class WinnerSidecar(BaseModel):
+    """Winner result sidecar (``<chunk_id>.yaml`` — the winner stem swap).
+
+    The EXTERNAL artifact record: written when the quality search for a
+    ``(chunk_id, strategy)`` pair concludes and the winning attempt is
+    promoted to the static winner name.  Its presence means the pair is
+    ``COMPLETE``.  ``chunk_id`` and ``strategy`` are derived from the file
+    name and directory — not stored here; the winning attempt's identity
+    is fully derivable from the pair, so no back-pointer to the attempt
+    is persisted (Req 25).
+
+    Quality-target tracking is owned exclusively by ``OptimizationPhase`` via
+    ``optimization.yaml``.  ``OptimizationPhase`` deletes stale result sidecars
+    before ``EncodingPhase`` runs, so ``EncodingPhase._recover()`` simply sees
+    ``PARTIAL`` pairs naturally when targets change.
+
+    ``metrics`` carries the TARGETED subset only, mode-aware: search runs
+    persist the judging targets' keys; fixed runs persist the fixed
+    comparison stat set (``p10``/``median`` of every measured metric — the
+    anchor ruler derives FROM these, so without them the fixed chain runs
+    dataless). Full measured sets live on attempt sidecars (the re-judging
+    substrate) and on merged-output sidecars; phase-sidecar summaries carry
+    targeted metrics as well.
+
+    ``frame_count`` is the winning attempt's frame count carried over from
+    its attempt sidecar at finalize — the durable per-pair record the
+    end-of-run scan sums into the frame-preservation invariant.  ``0`` is
+    the "could not be determined" sentinel (the winner was accepted from a
+    re-measured attempt with no count on record).
+
+    ``sampling`` is deliberately NOT a field (challenged out 2026-10-10):
+    the optimization band key already holds sampling run-level and wipes
+    ALL winners wholesale on a change — a readable winner was necessarily
+    produced under the current sampling, and any reader can consult the
+    co-existing ``optimization.yaml`` (a winner never outlives a matching
+    one — §99). Attempts DO carry it: they survive the wipe and re-measure
+    lazily.
+
+    ``crf`` is a fact of this winner; recovery-time classification and
+    composition never read it — only processing-path consumers (the re-merge
+    CRF graph, the winner scan, the fixed ruler) may. The winner's output
+    resolution is deliberately NOT a field: derivable (source − crop) and
+    never read (removed 2026-10-09).
+    """
+
+    crf:         DecimalYaml        # exact string round-trip (no float drift)
+    metrics:     dict[str, float]   # the TARGETED metric subset
+    frame_count: int                # frames of the winning attempt (0 = unknown)
+    targets_met: bool               # False when search exhausted without a passing attempt
+
+
 logger = logging.getLogger(__name__)
 
 
-def _probe_resolution(path: Path) -> str | None:
-    """Return the video resolution of *path* as ``'WxH'``, or ``None`` on failure."""
-    cmd: list[str | os.PathLike] = [
-        "ffprobe", "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=width,height",
-        "-of", "json",
-        path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
-        data = json.loads(result.stdout)
-        streams = data.get("streams", [])
-        if streams:
-            w, h = streams[0].get("width"), streams[0].get("height")
-            if w and h:
-                return f"{w}x{h}"
-    except (OSError, subprocess.SubprocessError, ValueError) as e:
-        logger.debug("Failed to probe resolution of %s: %s", path.name, e)
-    return None
+# ---------------------------------------------------------------------------
+# encoding.yaml — the replay aggregate (no keys; Req 24/61)
+# ---------------------------------------------------------------------------
 
+class LimiterSummaryRow(BaseModel):
+    """One winning-limiter row of the encoding summary table (persisted form).
 
-def _read_sidecar_yaml(sidecar_path: Path) -> dict | None:
-    """Read a metrics/result sidecar YAML next to an encoded attempt.
-
-    Both sidecar kinds share the core schema (keys: ``crf``, ``metrics``,
-    ``frame_count``): the per-attempt metrics sidecar in the workspace
-    (attempt facts only) and the encoding result sidecar in ``encoded/``
-    (additionally carries ``targets_met`` — the winning attempt's recorded
-    conclusion).
-
-    Args:
-        sidecar_path: Exact path to the sidecar ``.yaml`` file.
-
-    Returns:
-        Parsed sidecar dict, or ``None`` if it does not exist or cannot be
-        parsed.
+    Purely presentational data for ``encoding.yaml`` — rebuilt from the
+    winner sidecars on every concluded encoding pass, shown verbatim on
+    fully-reused runs.
     """
-    if sidecar_path.exists():
-        try:
-            with sidecar_path.open("r", encoding="utf-8") as fh:
-                return yaml.safe_load(fh)
-        except (OSError, yaml.YAMLError) as e:
-            logger.debug("Failed to read metrics sidecar %s: %s", sidecar_path.name, e)
 
-    return None
+    limiter:     str                 # "<metric>_<statistic>" of the worst target
+    passed:      int
+    missed:      int
+    med_deficit: float | None = None  # median deficit among the misses
+    med_surplus: float | None = None  # median surplus among the passes (worst-target surplus)
+    med_crf:     DecimalYaml         # median winning CRF of the row's chunks
+
+
+class LimiterSummary(BaseModel):
+    """One strategy group of the encoding summary table (persisted form)."""
+
+    strategy: str
+    chunks:   int
+    rows:     list[LimiterSummaryRow]
+
+
+class EncodingSummary(BaseModel):
+    """``encoding.yaml`` — the replay aggregate (aggregates only, no keys).
+
+    ``limiter`` is the winning-limiter table (presentational — target-gated;
+    empty = not rendered: the run carried no judging targets, e.g. an
+    uncompared fixed run); ``frames`` is the per-strategy Σ winner frame
+    totals backing the frame-preservation re-assertion on fully-reused
+    runs — only positive totals are held, empty (``{}``) marks
+    unknown/skip semantics. Both keys always persist on the single
+    post-success write; a file missing either fails validation and costs
+    replay aggregates only (Req 24: no invalidation power).
+
+    Freshness is guaranteed by the pending gate — any invalidated pair
+    routes the run through the processing path, which rebuilds and
+    re-saves the aggregate.
+    """
+
+    limiter: list[LimiterSummary]   # winning-limiter rows ([] = no table)
+    frames:  dict[str, int]         # per-strategy Σ winner frame totals
 
 
 def _encoded_dir(work_dir: Path, strategy: Strategy) -> Path:
@@ -157,40 +257,71 @@ def _encoded_dir(work_dir: Path, strategy: Strategy) -> Path:
     return work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
 
 
-def _write_metrics_sidecar(
+def _attempts_dir(work_dir: Path, strategy: Strategy) -> Path:
+    """The CRF-search workspace directory for *strategy*.
+
+    Attempt files (intermediate — the investment) are written here during
+    the search; on convergence the winning attempt is hard-linked into
+    :func:`_encoded_dir`. The twin composition of the two owned directories,
+    module-level like its sibling (the workspace has no module consumers
+    today but the pair reads symmetrically).
+    """
+    return work_dir / ENCODING_WORKSPACE_DIR / strategy.safe_name()
+
+
+def read_winner_sidecar(work_dir: Path, winner: EncodedChunk) -> WinnerSidecar | None:
+    """Read a winner's result sidecar by its static name (processing paths).
+
+    The single sanctioned composition site for consumers that need a
+    winner's facts (crf, targeted metrics, frame count,
+    ``targets_met``) — recovery never calls this (Req 3); processing paths
+    (the winner scan, the merge CRF graph, the fixed ruler) do. Typed like
+    every sidecar: an unparseable/invalid file loads as ``None``.
+
+    Args:
+        work_dir: The run's work dir (locates ``encoded/<strategy>/``).
+        winner:   The winner payload whose sidecar to read.
+
+    Returns:
+        The parsed :class:`WinnerSidecar`, or ``None`` when absent
+        or unparseable.
+    """
+    return load_model(
+        _encoded_dir(work_dir, winner.strategy)
+        / EncodedChunk.format_winner_sidecar_name(winner.chunk.safe_name()),
+        WinnerSidecar,
+    )
+
+
+def _write_attempt_sidecar(
     attempt_path:     Path,
-    crf:              Decimal,
     metrics:          dict[str, float],
     metrics_sampling: int,
     frame_count:      int,
 ) -> None:
-    """Atomically write a per-attempt metrics sidecar alongside an encoded attempt.
+    """Atomically write a per-attempt sidecar alongside an encoded attempt.
 
     Uses ``write_yaml_atomic`` so a crash during writing never leaves a partial
     sidecar.  Stores ALL measured metric values (not filtered to current targets)
-    so the CRF history is reusable when quality targets change — facts of the
+    so the quality history is reusable when quality targets change — facts of the
     attempt only; pass/fail is re-evaluated from ``metrics`` where decided.
+    No ``crf`` fact: the quality is the attempt's ADDRESS (the file name is
+    the cache key), and no consumer ever read it back (dropped 2026-10-09).
 
     Args:
         attempt_path:     Path to the encoded attempt ``.mkv`` file.
-        crf:              CRF value used for this attempt.
         metrics:          ALL measured quality metrics dict (not filtered to targets).
         metrics_sampling: Frame subsampling factor used when metrics were measured.
-        frame_count:      Frames of the attempt file from its encode run — a fact
-                          of the file, carried over unchanged on re-measure;
+        frame_count:      Frames of the attempt file — a fact of the file from
+                          whoever last decoded it whole (encode or measure run);
                           ``0`` = could not be determined.
     """
     sidecar = attempt_path.with_suffix(".yaml")
-    data    = MetricsSidecar(
-        crf         = crf,
+    save_model(sidecar, AttemptSidecar(
         metrics     = metrics,
         sampling    = metrics_sampling,
         frame_count = frame_count,
-    )
-    try:
-        write_yaml_atomic(sidecar, data.model_dump(exclude_none=True))
-    except (OSError, ValueError, yaml.YAMLError) as e:
-        logger.warning("Failed to write metrics sidecar for %s: %s", attempt_path.name, e)
+    ))
 
 
 def _hardlink_or_copy(src: Path, dst: Path) -> None:
@@ -212,52 +343,75 @@ def _hardlink_or_copy(src: Path, dst: Path) -> None:
         logger.debug("Copied (cross-device fallback) %s → %s", src.name, dst)
 
 
-def _write_encoding_result_sidecar(
+def _winner_targeted_metrics(
+    metrics:        dict[str, float],
+    quality_targets: list[QualityTarget],
+) -> dict[str, float]:
+    """The winner sidecar's targeted subset (Req 25), mode-aware.
+
+    Search: the judging targets' keys. Fixed (``quality_targets`` empty —
+    searched runs always carry targets by the plan invariant, so empty
+    ⟺ fixed): the fixed comparison stat set — the anchor ruler is DERIVED
+    from winner metrics, and dominance, the comparison table, and the
+    winner-limiter scan all consume ``p10``/``median``, so those keys must
+    reach the winner sidecar or the whole fixed chain runs dataless (found
+    live 2026-10-09: every fixed winner persisted ``metrics: {}`` → "ruler:
+    none — no strategy carried measurements" → Pareto pruned nothing, the
+    limiter table empty). Full measured sets stay on attempt sidecars.
+
+    Args:
+        metrics:        All measured metric values of the winning attempt.
+        quality_targets: The targets that judged the pair (empty in fixed
+                         mode).
+
+    Returns:
+        The targeted subset for the winner result sidecar.
+    """
+    if quality_targets:
+        keys = {f"{t.metric}_{t.statistic}" for t in quality_targets}
+    else:
+        keys = {k for k in metrics if k.rsplit("_", 1)[1] in FIXED_COMPARISON_STATS}
+    return {k: v for k, v in metrics.items() if k in keys}
+
+
+def _write_winner_sidecar(
     output_dir:      Path,
     chunk_id:        str,
-    resolution:      str,
-    winning_attempt: Path,
     crf:             Decimal,
     metrics:         dict[str, float],
     frame_count:     int,
     targets_met:     bool = True,
 ) -> None:
-    """Atomically write an encoding result sidecar when CRF search converges.
+    """Atomically write the winner result sidecar when the search converges.
 
-    Written as ``<chunk_id>.<res>.yaml`` in the strategy output directory.
-    Its presence marks the ``(chunk_id, strategy)`` pair as ``COMPLETE``.
+    Written as ``<chunk_id>.yaml`` (the winner stem swap) in the strategy
+    output directory.  Its presence marks the ``(chunk_id, strategy)`` pair
+    as ``COMPLETE``.  ``metrics`` must be the TARGETED subset (the caller
+    filters against the judging targets — full sets live on attempt
+    sidecars); no ``sampling`` fact — the optimization band key guarantees
+    winner/sampling consistency run-level (see the model docstring).
 
     Args:
         output_dir:      Strategy output directory.
         chunk_id:        Chunk identifier.
-        resolution:      Output resolution string (e.g. ``'1920x800'``).
-        winning_attempt: Path to the winning encoded attempt ``.mkv``.
-        crf:             Winning CRF value.
-        metrics:         All measured metric values for the winning attempt.
+        crf:             Winning quality value.
+        metrics:         The targeted metric subset for the winning attempt.
         frame_count:     Frames of the winning attempt (``0`` = could not be
                          determined).
         targets_met:     Whether quality targets were met; ``False`` when the
                          search was exhausted without a passing attempt.
     """
-    sidecar_path = output_dir / f"{chunk_id}.{resolution}.yaml"
-    data = EncodingResultSidecar(
-        winning_attempt = winning_attempt.name,
-        crf             = crf,
-        metrics         = metrics,
-        frame_count     = frame_count,
-        targets_met     = targets_met,
+    sidecar_path = output_dir / EncodedChunk.format_winner_sidecar_name(chunk_id)
+    save_model(sidecar_path, WinnerSidecar(
+        crf         = crf,
+        metrics     = metrics,
+        frame_count = frame_count,
+        targets_met = targets_met,
+    ))
+    logger.debug(
+        "Wrote winner result sidecar: %s (crf=%s, targets_met=%s)",
+        sidecar_path.name, crf, targets_met,
     )
-    try:
-        write_yaml_atomic(sidecar_path, data.model_dump(exclude_none=True))
-        logger.debug(
-            "Wrote encoding result sidecar: %s (crf=%s, targets_met=%s)",
-            sidecar_path.name, crf, targets_met,
-        )
-    except (OSError, ValueError, yaml.YAMLError) as e:
-        logger.warning(
-            "Failed to write encoding result sidecar for %s/%s: %s",
-            chunk_id, resolution, e,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -268,20 +422,20 @@ def _pair_placeholder(work_dir: Path, chunk: VideoStreamChunk, strategy: Strateg
     """A placeholder payload for a pair row with no winner on disk.
 
     The pair identity (chunk + strategy) is real; the attempt-specific facts
-    (file, crf, resolution) are unknown until a winner exists — the row's
+    (the file) are unknown until a winner exists — the row's
     ``ABSENT``/``PARTIAL`` state says so. Consumers read attempt facts from
-    ``COMPLETE`` rows only. The placeholder file path uses the attempt-in-
-    progress naming convention (the CRF-less fallback of the encoder's own
-    path builder).
+    ``COMPLETE`` rows only. The placeholder file path uses the static winner
+    name (the identity-derived destination the promotion writes to).
     """
     source_info = chunk.stream.stream.info
-    in_progress = (
-        work_dir / ENCODING_WORKSPACE_DIR / strategy.safe_name() / f"{chunk.safe_name()}.mkv"
+    winner = (
+        work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
+        / EncodedChunk.format_winner_file_name(chunk.safe_name())
     )
     return EncodedChunk(
         stream = ExtendedVideoStream(
             stream      = VideoStream(
-                file = StreamFile(path=in_progress),
+                file = StreamFile(path=winner),
                 info = VideoStreamInfo(
                     track_id     = 0,
                     resolution   = source_info.resolution,
@@ -294,7 +448,6 @@ def _pair_placeholder(work_dir: Path, chunk: VideoStreamChunk, strategy: Strateg
         ),
         chunk    = chunk,
         strategy = strategy,
-        crf      = strategy.codec.default_quality,
     )
 
 
@@ -323,15 +476,12 @@ def _pair_rows(
             # Every (chunk_id, name) combination has a row — direct index.
             pair = pair_recovery.pairs[(chunk_id, name)]
             if pair.state == ArtifactState.COMPLETE and pair.winning_file is not None:
-                record = EncodedChunk.parse_file_name(pair.winning_file.name)
                 rows.append(Artifact(
                     payload = build_encoded_chunk(
                         chunk      = chunk_by_id[chunk_id],
                         strategy   = strategy_by_name[name],
-                        crf        = record.crf,
                         path       = pair.winning_file,
-                        resolution = record.resolution,
-                        frame_count= 0,  # unknown on recovery
+                        frame_count= 0,     # unknown on recovery
                     ),
                     state   = ArtifactState.COMPLETE,
                 ))
@@ -344,13 +494,13 @@ def _pair_rows(
 
 
 def _orphan_strategy_rows(work_dir: Path, strategies: list[Strategy]) -> list[Artifact[StreamFile]]:
-    """Rows for orphaned ``encoded/<strategy>/`` directories.
+    """Rows for orphaned ``encoded/<strategy>/`` directories (surfaced at optimization).
 
-    A strategy directory absent from the current selection has no
-    reconstructible entity (its Strategy object is gone) — the on-disk
-    product itself is the only identity left. Ledger-only rows (``wanted=
-    False``): retained in place, never pending; deletion only via explicit
-    cleanup.
+    A strategy directory absent from the current plan has no reconstructible
+    entity (its Strategy object is gone) — the on-disk product itself is the
+    only identity left. Ledger-only rows (``wanted=False``), surfaced by
+    optimization's pair ledger for honest reporting; encoding's winner-layer
+    curation deletes the directories themselves on its recovery (Req 17).
     """
     out_dir = work_dir / ENCODED_OUTPUT_DIR
     if not out_dir.exists():
@@ -399,10 +549,11 @@ def _recover_encoding_attempts(
 ) -> _PhaseRecovery:
     """Classify all ``(chunk_id, strategy)`` pairs from a single directory scan per strategy.
 
-    For each strategy, lists ``encoded/<strategy>/`` once to build a set of
-    chunk_ids that have a result sidecar (``<chunk_id>.*.yaml``).  Pairs whose
-    chunk_id appears in that set are ``COMPLETE``; all others are ``ABSENT``.
-    No per-pair globs and no file reads are performed during recovery.
+    For each strategy, lists ``encoded/<strategy>/`` once and consumes the
+    STATIC expected names: a pair is ``COMPLETE`` iff both
+    ``<chunk_id>.mkv`` and ``<chunk_id>.yaml`` (the winner file and its
+    result sidecar, composed by :class:`EncodedChunk`) are present in the
+    listing. No name parsing, no per-pair globs, no file reads.
 
     CRF history for pending pairs is not pre-loaded: when the encoding worker
     actually picks a pair up, each attempt the search proposes is checked
@@ -428,56 +579,46 @@ def _recover_encoding_attempts(
         # The finalized output directory for this strategy under encoded/.
         encoded_dir = _encoded_dir(work_dir, strategy)
 
-        # Build index: chunk_id -> winning .mkv path, from a single directory listing.
-        # Layout in encoded/<strategy>/:
-        #   <chunk_id>.<res>.q<N>.mkv   — winning attempt file
-        #   <chunk_id>.<res>.yaml        — result sidecar (NO quality in name)
-        #   <chunk_id>.<res>.q<N>.png    — quality graph (optional)
-        # A pair is COMPLETE when both the winning .mkv and its result sidecar exist.
-        complete_index: dict[str, Path] = {}
+        # Static-name membership over one listing. Layout in encoded/<strategy>/:
+        #   <chunk_id>.mkv     — the promoted winner (pure chunk identity)
+        #   <chunk_id>.yaml    — the winner result sidecar (stem swap)
+        #   <chunk_id>.png     — the winner quality graph (optional)
+        present_names: set[str] = set()
         if encoded_dir.exists():
-            # Collect mkv paths and result-sidecar chunk_ids in one pass
-            mkv_by_chunk:     dict[str, Path] = {}
-            sidecar_chunk_ids: set[str]        = set()
+            present_names = {f.name for f in encoded_dir.iterdir() if f.is_file()}
 
-            for f in encoded_dir.iterdir():
-                if f.suffix == ".mkv":
-                    m = ENCODED_ATTEMPT_NAME_PATTERN.match(f.name)
-                    if m:
-                        mkv_by_chunk[m.group("chunk_id")] = f
-                elif f.suffix == ".yaml":
-                    # Result sidecar: <chunk_id>.<res>.yaml — stem has exactly one dot-separated
-                    # resolution component at the end, no "crf" segment.
-                    stem_parts = f.stem.rsplit(".", 1)
-                    if len(stem_parts) == 2:
-                        res = stem_parts[-1]
-                        if "x" in res and res.replace("x", "").isdigit():
-                            sidecar_chunk_ids.add(stem_parts[0])
-
-            for chunk_id_candidate, mkv_path in mkv_by_chunk.items():
-                if chunk_id_candidate in sidecar_chunk_ids:
-                    complete_index[chunk_id_candidate] = mkv_path
-
+        claimed: dict[str, str] = {}
+        """This strategy dir's claim registry — the Req 5 collision guard."""
         for chunk_id in chunk_ids:
-            if chunk_id in complete_index:
+            claim_expected_name(
+                claimed, EncodedChunk.format_winner_file_name(chunk_id),
+                f"pair {chunk_id}/{name}",
+            )
+            complete = (
+                EncodedChunk.format_winner_file_name(chunk_id) in present_names
+                and EncodedChunk.format_winner_sidecar_name(chunk_id) in present_names
+            )
+            if complete:
                 pairs[(chunk_id, name)] = _EncodingRecovery(
                     chunk_id     = chunk_id,
                     strategy     = name,
                     state        = ArtifactState.COMPLETE,
-                    winning_file = complete_index[chunk_id],
+                    winning_file = encoded_dir / EncodedChunk.format_winner_file_name(chunk_id),
                 )
                 complete_count += 1
             else:
                 pairs[(chunk_id, name)] = _EncodingRecovery(
                     chunk_id = chunk_id,
                     strategy = name,
-                    state    = ArtifactState.ABSENT,
+                    state    = ArtifactState.PARTIAL
+                    if EncodedChunk.format_winner_file_name(chunk_id) in present_names
+                    else ArtifactState.ABSENT,
                 )
                 absent_count += 1
                 pending.append((chunk_id, name))
 
     logger.debug(
-        "Attempts recovery: %d pair(s) total — %d COMPLETE, %d ABSENT",
+        "Attempts recovery: %d pair(s) total — %d COMPLETE, %d not-complete",
         len(pairs), complete_count, absent_count,
     )
     return _PhaseRecovery(pairs=pairs, pending=pending)
@@ -576,7 +717,7 @@ class ChunkEncoder:
 
     def __init__(
         self,
-        quality_evaluator: QualityEvaluator,
+        quality_evaluator: QualityMeasurer,
         work_dir:          Path,
         collector:         MetricsCollector,
         crop_params:       CropParams | None = None,
@@ -622,216 +763,162 @@ class ChunkEncoder:
         self._metric_prefix    = metric_prefix
         self._measure_attempts = measure_attempts
 
-    def _get_output_dir(self, strategy: Strategy) -> Path:
-        """Get the CRF search workspace directory for *strategy*.
-
-        Attempt files (intermediate) are written here during the CRF search.
-        On convergence the winning attempt is hard-linked into ``_get_encoded_dir``.
-
-        Args:
-            strategy: Encoding strategy.
-
-        Returns:
-            Path to ``<work_dir>/encoding/<safe_strategy>/``.
-        """
-        return self.work_dir / ENCODING_WORKSPACE_DIR / strategy.safe_name()
-
-    def _get_encoded_dir(self, strategy: Strategy) -> Path:
-        """Get the finalized output directory for *strategy*.
-
-        Hard-linked winning attempts, result sidecars, and quality graphs are
-        written here.  The presence of a result sidecar marks a pair as
-        ``COMPLETE``.
-
-        Args:
-            strategy: Encoding strategy.
-
-        Returns:
-            Path to ``<work_dir>/encoded/<safe_strategy>/``.
-        """
-        return _encoded_dir(self.work_dir, strategy)
-
     def _get_attempt_path(
         self,
         chunk_id:   str,
         strategy:   Strategy,
-        resolution: str | None = None,
-        crf:        Decimal | None = None,
+        crf:        Decimal,
     ) -> Path:
-        """Get the final path for a CRF-only encoded attempt.
+        """The attempt path for a (chunk, quality) pair — the exact cache address.
 
-        Naming pattern: ``<chunk_id>.<width>x<height>.q{CRF}.mkv``
-
-        Falls back to a simpler name when resolution or CRF are not yet known.
+        Naming pattern: ``<chunk_id>.q<quality>.mkv`` — the quality is the
+        search's cache key, and the name is fully known before encoding
+        begins (no resolution component, no post-encode rename — Req 9/9b).
 
         Args:
-            chunk_id:   Chunk identifier (e.g. ``'00꞉00꞉00․000-00꞉05꞉20․000'``).
-            strategy:   Encoding strategy.
-            resolution: Output resolution string (e.g. ``'1920x800'``).
-            crf:        CRF value used for this attempt.
+            chunk_id: Chunk identifier (e.g. ``'00꞉00꞉00․000-00꞉05꞉20․000'``).
+            strategy: Encoding strategy.
+            crf:      Quality value used for this attempt (already quantized
+                      to the codec's granularity).
 
         Returns:
-            Path to encoded file for this attempt.
+            Path to the attempt file.
         """
-        output_dir = self._get_output_dir(strategy)
-        if resolution and crf is not None:
-            filename = EncodedChunk.format_file_name(chunk_id, resolution, crf)
-        else:
-            filename = f"{chunk_id}.mkv"
-        return output_dir / filename
+        output_dir = _attempts_dir(self.work_dir, strategy)
+        return output_dir / EncodedChunk.format_attempt_file_name(chunk_id, crf)
+
 
     def _check_existing_encoding(
         self,
         chunk_id:   str,
         strategy:   Strategy,
-        resolution: str | None,
         crf:        Decimal,
     ) -> AttemptMetadata | None:
-        """Check if a complete encoded attempt already exists on disk.
+        """Check if a complete encoded attempt already exists at the exact address.
 
-        Scans the strategy output directory for a file matching
-        ``ENCODED_ATTEMPT_NAME_PATTERN`` with the correct ``chunk_id``,
-        ``resolution``, and ``crf``.  No progress-tracker lookup is performed.
+        Composes the attempt's static name for the proposed quality and
+        checks existence — no globbing, no name parsing (Req 9). Resolution
+        matching no longer participates: it is a sidecar fact, verified with
+        the rest of the sidecar at pick-up.
 
         Args:
-            chunk_id:   Chunk identifier.
-            strategy:   Encoding strategy.
-            resolution: Expected resolution string (e.g. ``'1920x800'``).
-                        When ``None`` any resolution is accepted.
-            crf:        CRF value to look for.
+            chunk_id: Chunk identifier.
+            strategy: Encoding strategy.
+            crf:      Quality value to look for.
 
         Returns:
-            ``AttemptMetadata`` if a matching file exists, ``None`` otherwise.
+            ``AttemptMetadata`` if the attempt file exists, ``None`` otherwise.
         """
-        output_dir = self._get_output_dir(strategy)
-        if not output_dir.exists():
+        candidate = self._get_attempt_path(chunk_id, strategy, crf)
+        try:
+            size = candidate.stat().st_size
+        except OSError:
             return None
-
-        for candidate in output_dir.glob(f"{chunk_id}.*.q*.mkv"):
-            m = ENCODED_ATTEMPT_NAME_PATTERN.match(candidate.name)
-            if m is None:
-                continue
-            if m.group("chunk_id") != chunk_id:
-                continue
-            try:
-                file_crf = Decimal(str(m.group("quality"))).quantize(strategy.codec.quality_granularity)
-            except ValueError:
-                continue
-            if abs(file_crf - crf) > Decimal("0.05"):
-                continue
-            file_resolution = m.group("resolution")
-            if resolution is not None and file_resolution != resolution:
-                continue
-            # Found a matching file
-            try:
-                size = candidate.stat().st_size
-            except OSError:
-                continue
-            if size == 0:
-                continue
-            return AttemptMetadata(
-                path=candidate,
-                chunk_id=chunk_id,
-                strategy=strategy.display_name(),
-                crf=file_crf,
-                resolution=file_resolution,
-                file_size_bytes=size,
-            )
-        return None
+        if size == 0:
+            return None
+        return AttemptMetadata(
+            path            = candidate,
+            chunk_id        = chunk_id,
+            strategy        = strategy.display_name(),
+            crf             = crf,
+            file_size_bytes = size,
+        )
 
     def _finalize_winning_attempt(
         self,
         strategy:        Strategy,
         chunk_id:        str,
-        resolution:      str,
         winning_attempt: Path,
         crf:             Decimal,
         metrics:         dict[str, float],
         frame_count:     int,
+        quality_targets: list[QualityTarget],
         targets_met:     bool = True,
     ) -> None:
-        """Hard-link the winning attempt into ``encoded/`` and write the result sidecar.
+        """Promote the winning attempt to the static winner name and write the sidecar.
 
-        On CRF search convergence:
+        On quality-search convergence:
         1. Hard-link the winning ``.mkv`` from ``encoding/<strategy>/`` into
-           ``encoded/<strategy>/`` (same filename).
-        2. Hard-link the winning ``.png`` quality graph (if present) alongside it.
-        3. Write the encoding result sidecar ``<chunk_id>.<res>.yaml`` into
-           ``encoded/<strategy>/`` — its presence marks the pair as ``COMPLETE``.
+           ``encoded/<strategy>/<chunk_id>.mkv`` — the statically composed
+           winner name (pure chunk identity, no quality/resolution — Req 1/2).
+        2. Hard-link the winning ``.png`` quality graph (if present) alongside
+           it under the winner stem.
+        3. Write the winner result sidecar ``<chunk_id>.yaml`` into
+           ``encoded/<strategy>/`` — its presence marks the pair as
+           ``COMPLETE``.  Its metrics are the TARGETED subset (filtered here
+           against the judging targets; full sets stay on attempt sidecars).
 
         Args:
             strategy:        Encoding strategy.
             chunk_id:        Chunk identifier.
-            resolution:      Output resolution string (e.g. ``'1920x800'``).
             winning_attempt: Path to the winning attempt ``.mkv`` in ``encoding/``.
-            crf:             Winning CRF value.
+            crf:             Winning quality value.
             metrics:         All measured metric values for the winning attempt.
             frame_count:     Frames of the winning attempt — the winning encode
                              run's count, or the attempt sidecar's count for a
                              cache-hit winner; ``0`` = could not be determined.
+            quality_targets: The targets that judged the pair (the metrics filter).
             targets_met:     Whether quality targets were met; ``False`` when the
                              search was exhausted without a passing attempt.
         """
-        encoded_dir = self._get_encoded_dir(strategy)
+        encoded_dir = _encoded_dir(self.work_dir, strategy)
         encoded_dir.mkdir(parents=True, exist_ok=True)
 
-        dst_mkv = encoded_dir / winning_attempt.name
+        dst_mkv = encoded_dir / EncodedChunk.format_winner_file_name(chunk_id)
         if not dst_mkv.exists():
             _hardlink_or_copy(winning_attempt, dst_mkv)
 
         src_graph = winning_attempt.with_suffix(".png")
         if src_graph.exists():
-            dst_graph = encoded_dir / src_graph.name
+            dst_graph = encoded_dir / f"{chunk_id}.png"
             if not dst_graph.exists():
                 _hardlink_or_copy(src_graph, dst_graph)
 
-        _write_encoding_result_sidecar(
+        _write_winner_sidecar(
             output_dir  = encoded_dir,
             chunk_id    = chunk_id,
-            resolution  = resolution,
-            winning_attempt = dst_mkv,
             crf         = crf,
-            metrics     = metrics,
+            metrics     = _winner_targeted_metrics(metrics, quality_targets),
             frame_count = frame_count,
             targets_met = targets_met,
         )
 
         # Intermediate cleanup: delete all attempt files for this pair from
-        # encoding/ — only after the hard-link and sidecar are safely written.
+        # encoding/ — only after the promotion and sidecar are safely written.
         if self._cleanup_level >= CleanupLevel.INTERMEDIATE:
-            encoding_dir = self._get_output_dir(strategy)
+            encoding_dir = _attempts_dir(self.work_dir, strategy)
             if encoding_dir.exists():
-                for attempt_file in list(encoding_dir.glob(f"{chunk_id}.*.q*.mkv")):
-                    m = ENCODED_ATTEMPT_NAME_PATTERN.match(attempt_file.name)
-                    if m and m.group("chunk_id") == chunk_id:
-                        # Delete the attempt .mkv, its per-attempt sidecar, and its graph
-                        for related in (
-                            attempt_file,
-                            attempt_file.with_suffix(".yaml"),
-                            attempt_file.with_suffix(".png"),
-                        ):
-                            if related.exists():
-                                try:
-                                    related.unlink()
-                                    logger.debug("Intermediate cleanup: deleted %s", related.name)
-                                except OSError as exc:
-                                    logger.warning(
-                                        "Intermediate cleanup: could not delete %s: %s",
-                                        related.name, exc,
-                                    )
-                        # Also remove the per-attempt metrics subfolder if present
-                        metrics_dir = encoding_dir / attempt_file.stem
-                        if metrics_dir.is_dir():
+                # The attempt's exact q values are workspace facts — sweep the
+                # pair's attempts by prefix (deletion, not identity parsing).
+                for attempt_file in list(encoding_dir.glob(f"{chunk_id}.q*.mkv")):
+                    # Delete the attempt .mkv, its per-attempt sidecar, and its graph
+                    for related in (
+                        attempt_file,
+                        attempt_file.with_suffix(".yaml"),
+                        attempt_file.with_suffix(".png"),
+                    ):
+                        if related.exists():
                             try:
-                                shutil.rmtree(metrics_dir)
-                                logger.debug(
-                                    "Intermediate cleanup: deleted metrics dir %s", metrics_dir.name
-                                )
+                                related.unlink()
+                                logger.debug("Intermediate cleanup: deleted %s", related.name)
                             except OSError as exc:
                                 logger.warning(
-                                    "Intermediate cleanup: could not delete metrics dir %s: %s",
-                                    metrics_dir.name, exc,
+                                    "Intermediate cleanup: could not delete %s: %s",
+                                    related.name, exc,
                                 )
+                    # Also remove the per-attempt metrics subfolder if present
+                    metrics_dir = encoding_dir / attempt_file.stem
+                    if metrics_dir.is_dir():
+                        try:
+                            shutil.rmtree(metrics_dir)
+                            logger.debug(
+                                "Intermediate cleanup: deleted metrics dir %s", metrics_dir.name,
+                            )
+                        except OSError as exc:
+                            logger.warning(
+                                "Intermediate cleanup: could not delete metrics dir %s: %s",
+                                metrics_dir.name, exc,
+                            )
 
     def _encode_with_ffmpeg(
         self,
@@ -956,53 +1043,48 @@ class ChunkEncoder:
 
             logger.debug(fmt_chunk_attempt_start(strategy.display_name(), chunk.safe_name(), attempt_number, current_q, strategy.codec.quality_label, self._visual_hash, strategy.codec.quality_log_padding))
 
-            # Determine the final output path for this CRF (resolution unknown yet)
-            # We'll encode to a temp file, probe resolution, then rename to final path.
-            output_dir = self._get_output_dir(strategy)
+            # The attempt's final name is fully known before encoding begins
+            # (quality = the cache key; no resolution component — Req 9b), so
+            # there is no post-encode rename: the encoded output lands at its
+            # final address. The output resolution is derivable (source −
+            # crop) and never probed or persisted per attempt.
+            output_dir = _attempts_dir(self.work_dir, strategy)
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            # The source stream's resolution seeds the attempt path; the
-            # post-encode probe corrects it when crop changes the dimensions.
-            resolution = chunk.stream.stream.info.resolution
-
-            # When crop is active the encoded output resolution differs from the source chunk
-            # resolution, so we cannot use the source resolution to match existing files.
-            # Pass None to accept any resolution for the given chunk_id + crf.
-            check_resolution = None if (self._crop_params and not self._crop_params.is_empty()) else resolution
-
-            # Check for existing encoding at this quality value (filesystem scan, no tracker).
+            # Check for an existing attempt at the exact proposed address
+            # (exact-name compose, no scan — Req 9).
             goto_eval   = False
             output_file: Path | None = None
             attempt_frames: int = 0
             if not force:
                 existing = self._check_existing_encoding(
-                    chunk.safe_name(), strategy, check_resolution, current_q
+                    chunk.safe_name(), strategy, current_q
                 )
                 if existing is not None:
-                    sidecar = _read_sidecar_yaml(existing.path.with_suffix(".yaml"))
+                    sidecar = load_model(existing.path.with_suffix(".yaml"), AttemptSidecar)
                     # Validate sidecar contains all required metric keys.
-                    required_keys        = {f"{t.metric}_{t.statistic}" for t in quality_targets}
-                    raw_sidecar_sampling = sidecar.get("sampling") if sidecar is not None else None
-                    sidecar_sampling     = int(raw_sidecar_sampling) if raw_sidecar_sampling is not None else None
-                    sampling_stale       = (
-                        sidecar_sampling is not None
-                        and sidecar_sampling != self._metrics_sampling
-                    )
-                    sidecar_valid = (
+                    required_keys  = {f"{t.metric}_{t.statistic}" for t in quality_targets}
+                    sampling_stale = (
                         sidecar is not None
-                        and not sampling_stale
-                        and required_keys.issubset(sidecar.get("metrics", {}).keys())
+                        and sidecar.sampling != self._metrics_sampling
                     )
                     # The file's frame count survives regardless of sidecar
                     # staleness — re-measure never changes the encoded file
-                    # (0 = not on record).
-                    file_frames = int(sidecar.get("frame_count") or 0) if sidecar is not None else 0
+                    # (0 = not on record). A 0 count marks the sidecar
+                    # incomplete (Req 9a: frame count present) — the re-measure
+                    # below re-derives it from the metric run's whole-file
+                    # decode.
+                    file_frames  = sidecar.frame_count if sidecar is not None else 0
+                    sidecar_valid = (
+                        sidecar is not None
+                        and not sampling_stale
+                        and file_frames > 0
+                        and required_keys.issubset(sidecar.metrics)
+                    )
                     if sidecar_valid and sidecar is not None:
                         # Full cache hit — no real work performed.
                         frame_counts[existing.path] = file_frames
-                        all_sidecar_metrics: dict[str, float] = {
-                            k: float(v) for k, v in sidecar.get("metrics", {}).items()
-                        }
+                        all_sidecar_metrics: dict[str, float] = dict(sidecar.metrics)
                         all_metrics_by_path[existing.path] = all_sidecar_metrics
                         targets_set_reused = {f"{t.metric}_{t.statistic}" for t in quality_targets}
                         metrics_dict: dict[str, float] = {
@@ -1049,7 +1131,7 @@ class ChunkEncoder:
                     else:
                         # File exists but sidecar is missing, incomplete, or stale — re-measure.
                         reason = (
-                            f"sampling changed ({sidecar_sampling} → {self._metrics_sampling})"
+                            f"sampling changed ({sidecar.sampling if sidecar is not None else '?'} → {self._metrics_sampling})"
                             if sampling_stale
                             else "sidecar missing or incomplete"
                         )
@@ -1067,7 +1149,7 @@ class ChunkEncoder:
                 # Encode — real work.
                 _any_real_work = True
                 output_file    = self._get_attempt_path(
-                    chunk.safe_name(), strategy, resolution=resolution, crf=current_q
+                    chunk.safe_name(), strategy, crf=current_q
                 )
                 with self._collector.time(self._metric_prefix, strategy.display_name()):
                     run_result = self._encode_with_ffmpeg(
@@ -1117,19 +1199,6 @@ class ChunkEncoder:
                             chunk.start_timestamp, chunk.end_timestamp,
                         )
 
-                # Update resolution from actual output (crop may change dimensions).
-                actual_resolution = _probe_resolution(output_file)
-                if actual_resolution and actual_resolution != resolution:
-                    correct_path = self._get_attempt_path(
-                        chunk.safe_name(), strategy, resolution=actual_resolution, crf=current_q
-                    )
-                    try:
-                        output_file.replace(correct_path)
-                    except OSError:
-                        output_file.rename(correct_path)
-                    output_file = correct_path
-                    resolution  = actual_resolution
-
             assert output_file is not None
 
             # Evaluate quality — raw metric logs/stats go into a per-attempt subfolder;
@@ -1138,11 +1207,10 @@ class ChunkEncoder:
             # verdict — single-point domains accept the attempt unconditionally.
             if self._measure_attempts:
                 with self._collector.time(self._metric_prefix, METRIC_KEY_QUALITY_MEASURE):
-                    evaluation = self.quality_evaluator.evaluate_chunk(
+                    evaluation = self.quality_evaluator.measure_chunk(
                         encoded              = output_file,
                         reference            = chunk.as_input(),
                         ref_crop             = self._crop_params or CropParams(),
-                        targets              = quality_targets,
                         output_dir           = output_file.parent,
                         duration_seconds     = chunk.duration_seconds,
                         fps_value            = chunk.stream.stream.info.fps_fraction,
@@ -1151,9 +1219,19 @@ class ChunkEncoder:
                         chunk_start_seconds  = chunk.start_timestamp,
                     )
                 all_metrics         = flatten_metric_stats(evaluation.metrics)
-                # Live comparator verdict — logs this attempt's pass/miss;
-                # never persisted (the attempt sidecar stores facts only).
-                attempt_targets_met = evaluation.targets_met
+                # The metric run decoded the attempt whole — its progress
+                # count IS the file's frame count (the most recent authority;
+                # subsampling reduces scoring, not the frame flow). Replaces
+                # the encode-run / carried-sidecar count on every measured
+                # attempt; 0 = the run did not determine it.
+                if evaluation.frame_count > 0:
+                    attempt_frames = evaluation.frame_count
+                # Live comparator verdict — a DECISION after measurement
+                # (Req 53), never persisted (the attempt sidecar stores
+                # facts only).
+                attempt_targets_met = not QualitySearchBase.failed_targets(
+                    all_metrics, quality_targets,
+                )
             else:
                 all_metrics         = {}
                 attempt_targets_met = True
@@ -1164,12 +1242,12 @@ class ChunkEncoder:
             targets_set  = {f"{t.metric}_{t.statistic}" for t in quality_targets}
             metrics_dict = {k: v for k, v in all_metrics.items() if k in targets_set}
 
-            # Record the final path's count (post resolution-correction rename)
-            # and write the per-attempt metrics sidecar atomically.
+            # Record the attempt's facts and write the per-attempt sidecar
+            # atomically.
             frame_counts[output_file] = attempt_frames
             all_metrics_by_path[output_file] = all_metrics
-            _write_metrics_sidecar(
-                output_file, current_q, all_metrics,
+            _write_attempt_sidecar(
+                output_file, all_metrics,
                 self._metrics_sampling, attempt_frames,
             )
 
@@ -1179,7 +1257,6 @@ class ChunkEncoder:
                 chunk_id        = chunk.safe_name(),
                 strategy        = strategy.display_name(),
                 crf             = current_q,
-                resolution      = resolution or "",
                 file_size_bytes = output_file.stat().st_size,
             )
 
@@ -1233,11 +1310,11 @@ class ChunkEncoder:
             self._finalize_winning_attempt(
                 strategy        = strategy,
                 chunk_id        = chunk.safe_name(),
-                resolution      = final_attempt.resolution,
                 winning_attempt = final_attempt.path,
                 crf             = search.best_quality,
                 metrics         = all_metrics_by_path.get(final_attempt.path, {}),
                 frame_count     = frame_counts.get(final_attempt.path, 0),
+                quality_targets = quality_targets,
                 targets_met     = True,
             )
         elif not search.best_targets_met and best_fail_attempt is not None:
@@ -1275,11 +1352,11 @@ class ChunkEncoder:
             self._finalize_winning_attempt(
                 strategy        = strategy,
                 chunk_id        = chunk.safe_name(),
-                resolution      = best_fail_attempt.resolution,
                 winning_attempt = best_fail_attempt.path,
                 crf             = search.best_quality,
                 metrics         = all_metrics_by_path.get(best_fail_attempt.path, {}),
                 frame_count     = frame_counts.get(best_fail_attempt.path, 0),
+                quality_targets = quality_targets,
                 targets_met     = False,
             )
             final_attempt = best_fail_attempt
@@ -1338,41 +1415,38 @@ class ChunkEncoder:
 def build_encoded_chunk(
     chunk:        VideoStreamChunk,
     strategy:     Strategy,
-    crf:          Decimal,
     path:         Path,
-    resolution:   str,
     frame_count:  int,
 ) -> EncodedChunk:
     """Compose the winning attempt as an :class:`EncodedChunk`.
 
     The attempt's own video stream: crop empty by construction (applied
-    during the encode), frame count from the encode run, info from the
-    post-encode probe (resolution) plus the source fps — path and size are
-    read through ``stream.file``, never duplicated.
+    during the encode), frame count from the encode run, fps from the
+    source — path and size are read through ``stream.file``, never
+    duplicated. The winning quality is deliberately NOT composed: it lives
+    on the winner sidecar as a fact for processing-path consumers only
+    (Req 4). The output resolution is likewise not composed — derivable
+    (source − crop, by construction of the crop filter) and never carried.
 
     Args:
         chunk:        The source window the attempt encodes.
         strategy:     The strategy used.
-        crf:          The winning quality value.
-        path:         The attempt file.
-        resolution:   The attempt's actual output resolution.
+        path:         The winner file.
         frame_count:  Frames from the winning encode run (0 = unknown).
 
     Returns:
         The composed :class:`~pyqenc.stream_model.EncodedChunk`.
     """
-    file_size_bytes = safe_stat_size(path)
     source_info = chunk.stream.stream.info
     attempt_info = VideoStreamInfo(
         track_id     = 0,
-        resolution   = resolution or None,
         fps          = source_info.fps,
         fps_fraction = source_info.fps_fraction,
     )
     return EncodedChunk(
         stream = ExtendedVideoStream(
             stream      = VideoStream(
-                file = StreamFile(path=path, file_size_bytes=file_size_bytes),
+                file = StreamFile(path=path),
                 info = attempt_info,
             ),
             frame_count = frame_count,
@@ -1380,7 +1454,6 @@ def build_encoded_chunk(
         ),
         chunk    = chunk,
         strategy = strategy,
-        crf      = crf,
     )
 
 
@@ -1547,16 +1620,13 @@ async def _encode_chunks_parallel(
                         f"winning file guaranteed for COMPLETE pair "
                         f"{chunk.safe_name()}/{strategy.display_name()}"
                     )
-                    name_record = EncodedChunk.parse_file_name(pair_recovery.winning_file.name)
                     result.encoded_chunks.setdefault(
                         strategy.display_name(), [],
                     ).append(build_encoded_chunk(
                         chunk        = chunk,
                         strategy     = strategy,
-                        crf          = name_record.crf,
                         path         = pair_recovery.winning_file,
-                        resolution   = name_record.resolution,
-                        frame_count  = 0,  # unknown on recovery
+                        frame_count  = 0,     # unknown on recovery
                     ))
                     result.reused_count += 1
                     complete_pairs.add((chunk.safe_name(), strategy.display_name()))
@@ -1604,9 +1674,7 @@ async def _encode_chunks_parallel(
                     ).append(build_encoded_chunk(
                         chunk        = chunk,
                         strategy     = strategy,
-                        crf          = chunk_result.final_crf,
                         path         = chunk_result.encoded_file.path,
-                        resolution   = chunk_result.encoded_file.resolution,
                         frame_count  = chunk_result.frame_count,
                     ))
 
@@ -1727,10 +1795,10 @@ def _scan_winner_sidecars(
     """Scan every winner's result sidecar once: limiter tallies + frame counts.
 
     Derived from the encoding-phase result artifacts
-    (``encoded/<strategy>/<chunk_id>.<res>.yaml``), written for every
-    concluded pair — so the scan is identical on fresh, resumed, and
-    recovered runs, and survives intermediate cleanup of the attempt
-    workspace.  Winners with a pattern-mismatched file name, a missing
+    (``encoded/<strategy>/<chunk_id>.yaml`` — the winner stem swap), written
+    for every concluded pair — so the scan is identical on fresh, resumed,
+    and recovered runs, and survives intermediate cleanup of the attempt
+    workspace.  Winners with a missing
     sidecar, or no persisted frame count are excluded from the affected
     output and mark ``frames_known=False`` (skip semantics).
 
@@ -1755,18 +1823,8 @@ def _scan_winner_sidecars(
     for winners in encoded_chunks.values():
         for winner in winners:
             strategy_name = winner.strategy.display_name()
-            name_match = ENCODED_ATTEMPT_NAME_PATTERN.match(winner.stream.stream.file.path.name)
-            if name_match is None:
-                logger.debug(
-                    "Winner %s does not match the attempt name pattern — excluded from the winner scan",
-                    winner.stream.stream.file.path.name,
-                )
-                frames_known = False
-                continue
-            sidecar = _read_sidecar_yaml(
-                _encoded_dir(work_dir, winner.strategy)
-                / f"{name_match.group('chunk_id')}.{name_match.group('resolution')}.yaml"
-            )
+            chunk_id = winner.chunk.safe_name()
+            sidecar = read_winner_sidecar(work_dir, winner)
             if sidecar is None:
                 logger.debug(
                     "Winner %s has no result sidecar — excluded from the winner scan",
@@ -1775,25 +1833,25 @@ def _scan_winner_sidecars(
                 frames_known = False
                 continue
 
-            frames_value = int(sidecar.get("frame_count") or 0)
+            frames_value = sidecar.frame_count
             if frames_value > 0:
                 frames.setdefault(strategy_name, []).append(
-                    (name_match.group("chunk_id"), frames_value)
+                    (chunk_id, frames_value)
                 )
             else:
                 frames_known = False
 
             if not quality_targets:
                 continue
-            metrics     = {k: float(v) for k, v in sidecar.get("metrics", {}).items()}
-            targets_met = bool(sidecar.get("targets_met", False))
+            metrics     = dict(sidecar.metrics)
+            targets_met = sidecar.targets_met
             worst       = QualitySearchBase.find_worst_target(metrics, quality_targets)
             if worst is None:
                 continue
             tally = tallies.setdefault(strategy_name, {}).setdefault(
                 f"{worst[0].metric}_{worst[0].statistic}", _LimiterTally(),
             )
-            tally.crfs.append(winner.crf)
+            tally.crfs.append(sidecar.crf)
             if targets_met:
                 tally.passed += 1
                 tally.surpluses.append(worst[1])
@@ -1873,7 +1931,7 @@ def encode_all_chunks(
                            pair converges.
         metrics_sampling:  Frame subsampling factor for quality metric generation.
                            Passed through to ``ChunkEncoder`` and then to
-                           ``QualityEvaluator.evaluate_chunk``.
+                           ``QualityMeasurer.measure_chunk``.
         measure_attempts:  Whether encoded attempts get quality evaluations
                            (the ``ChunkEncoder`` seam; default = measure).
 
@@ -1910,7 +1968,7 @@ def encode_all_chunks(
 
     # Create encoder
     encoder = ChunkEncoder(
-        quality_evaluator = QualityEvaluator(work_dir),
+        quality_evaluator = QualityMeasurer(work_dir),
         work_dir          = work_dir,
         collector         = collector,
         crop_params       = crop_params,
@@ -1983,10 +2041,16 @@ class EncodingPhaseResult(PhaseResult):
                         per (chunk, selected strategy); consumed by Merge.
         quality_labels: Strategy display name -> quality label (settings —
                         consumed by Merge to label plots).
+        presentation_anchor: The fixed-mode presentation anchor's display
+                        name (deltas basis) — optimization's due anchor, or
+                        the scan-elected fallback on uncompared runs. NEVER
+                        a persisted key, a selection input, or merge's
+                        anchor basis (Req 59).
     """
 
-    winners:        list[Artifact[EncodedChunk]] = field(default_factory=list)
-    quality_labels: dict[str, str]               = field(default_factory=dict)
+    winners:             list[Artifact[EncodedChunk]] = field(default_factory=list)
+    quality_labels:      dict[str, str]               = field(default_factory=dict)
+    presentation_anchor: str | None                   = None
 
     @property
     def encoded_chunks(self) -> dict[str, list[EncodedChunk]]:
@@ -2029,10 +2093,9 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
     ) -> None:
         super().__init__(config, phases, collector=collector)
 
-        self.params:        EncodingParams | None     = None
-        self._persisted:    EncodingParams | None     = None
-        """Params loaded from ``encoding.yaml`` during recovery (``None`` when
-        absent) — the fast-exit source for the persisted limiter summary."""
+        self._persisted:    EncodingSummary | None   = None
+        """The replay aggregate loaded from ``encoding.yaml`` during recovery
+        (``None`` when absent) — the fast-exit source for the summary."""
         self.quality_labels: dict[str, str]           = {}
         """Maps strategy name → quality_label (e.g. ``'CRF'``, ``'CQ'``) for all
         strategies resolved during the last ``run()`` call.  Empty until ``run()``
@@ -2050,16 +2113,16 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         """Log chunks, strategies, crop, and targets (key parameters)."""
         logger.info("Scanning for existing artifacts...")
 
-        probe_result = self._dep_result(ProbePhase)
+        probe_result = self._deps[ProbePhase]
         crop         = probe_result.crop
 
-        strategies = self._dep_result(OptimizationPhase).selected_strategies
-        chunks     = self._dep_result(ChunkingPhase).chunks
+        strategies = self._deps[OptimizationPhase].selected_strategies
+        chunks     = self._deps[ChunkingPhase].chunks
         logger.info("Chunks:      %d", len(chunks))
         logger.info("Strategies:  %s", ", ".join(s.display_name() for s in strategies) if strategies else "none")
         if crop:
             logger.info("Crop:        %s", crop)
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         logger.info("Targets:     %s", ", ".join(f"{t.metric}-{t.statistic}≥{t.value}" for t in plan.targets))
 
@@ -2122,7 +2185,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         """
         if not ctx.deep_cleanup:
             return
-        work_dir = self._dep_result(JobPhase).work_dir
+        work_dir = self._deps[JobPhase].work_dir
         for target in (work_dir / ENCODING_WORKSPACE_DIR, work_dir / ENCODED_OUTPUT_DIR):
             if target.exists():
                 try:
@@ -2135,65 +2198,59 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _invalidate(self) -> None:
+        """Deliberately EMPTY — the split's case study (Req 38/54).
+
+        The shared attempt/winner namespace's keys all live at optimization
+        (identity, facet, fingerprints, mode, targets/pinned, sampling,
+        chunk-set); winner currency is certified cross-phase by
+        ``optimization.yaml``. Encoding carries no key of its own, so this
+        hook performs nothing — recovery is classification plus the
+        consumption-triggered winner-layer curation.
+        """
+        return
+
     def _recover(self) -> Recovery:
-        """Classify ``(chunk, strategy)`` pairs and handle force-wipe / crop mismatch.
+        """Classification-only recovery over the shared namespace.
 
         Steps:
-        1. If ``force_wipe``: delete ``encoding/``, ``encoded/``,
-           and ``encoding.yaml``.
-        2. Check crop mismatch against ``encoding.yaml`` — a probe change
-           without ``--force`` is a fatal invalidation.
-        3. Clean up leftover ``.tmp`` files.
-        4. Classify all (chunk, strategy) pairs via the shared pair-ledger
-           builders; orphaned ``encoded/<strategy>/`` directories surface as
-           ``wanted=False`` rows (kept in place; deletion only via explicit
-           cleanup).
+        1. Clean up leftover ``.tmp`` files.
+        2. Classify all (chunk, strategy) pairs via the shared pair-ledger
+           builders (static-name consumption over one listing per strategy
+           dir).
+        3. Consumption-triggered curation (winner-layer policy): orphaned
+           ``encoded/<strategy>/`` directories (strategy no longer selected)
+           and names no pair consumed (old-chunk-id winners, stray sidecars)
+           are DELETED automatically — ``encoded/`` stays merge-ready and
+           human-clean (Req 13/16/17). The attempt workspace ``encoding/``
+           is the investment layer: never classified, never auto-deleted.
+
+        Encoding carries NO invalidation of its own (Req 38): the shared
+        namespace's keys all live at optimization; winner currency is
+        certified cross-phase by ``optimization.yaml``.
 
         Returns:
             The :class:`Recovery` single source of truth.
 
         Raises:
-            RecoveryError: On a probe change without ``--force``, or when
-                chunking/optimization produced no chunks / strategies.
+            RecoveryError: When chunking/optimization produced no chunks /
+                strategies.
         """
-        job_result = self._dep_result(JobPhase)
+        job_result = self._deps[JobPhase]
         work_dir   = job_result.work_dir
         enc_dir    = work_dir / ENCODING_WORKSPACE_DIR
-        out_dir    = work_dir / ENCODED_OUTPUT_DIR
         yaml_path  = work_dir / EncodingPhase.SIDECAR_NAME
-        force_wipe = job_result.force_wipe
 
-        # Step 1: force-wipe
-        if force_wipe:
-            for d in (enc_dir, out_dir):
-                if d.exists():
-                    shutil.rmtree(d)
-                    logger.debug("force_wipe: deleted %s", d)
-            if yaml_path.exists():
-                yaml_path.unlink()
-                logger.debug("force_wipe: deleted %s", yaml_path)
+        # The replay aggregate — loaded here for the fast-exit resurface;
+        # its absence costs display only, never invalidation (Req 24).
+        self._persisted = load_model(yaml_path, EncodingSummary)
 
-        # Step 2: probe mismatch check (with --force the wipe above already
-        # removed encoding.yaml, so a mismatch can only be seen without it).
-        if not force_wipe:
-            persisted_enc = EncodingParams.load(yaml_path)
-            self._persisted = persisted_enc
-            current_probe = ProbeState.from_probe(self._dep_result(ProbePhase))
-            self.params   = EncodingParams(probe=current_probe)
-
-            if persisted_enc is not None and persisted_enc.probe != current_probe:
-                raise RecoveryError(
-                    "Probe params changed since last encoding run "
-                    f"(persisted={persisted_enc.probe}, current={current_probe}). "
-                    "Re-run with --force to delete stale encoding artifacts and continue."
-                )
-
-        # Step 3: clean up .tmp files
+        # Step 1: clean up .tmp files
         remove_stale_tmp_files(enc_dir)
 
-        # Step 4: get chunks and strategies from dependencies
-        chunking_result     = self._dep_result(ChunkingPhase)
-        optimization_result = self._dep_result(OptimizationPhase)
+        # Step 2: get chunks and strategies from dependencies
+        chunking_result     = self._deps[ChunkingPhase]
+        optimization_result = self._deps[OptimizationPhase]
 
         chunks: list[VideoStreamChunk] = [a.payload for a in chunking_result.chunks]
         strategies = optimization_result.selected_strategies
@@ -2203,14 +2260,76 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         if not strategies:
             raise RecoveryError("No strategies available from OptimizationPhase")
 
-        # Step 5: the per-pair ledger (winning attempt per chunk x strategy,
-        # presence-based) plus the orphaned-strategy rows. COMPLETE rows carry
-        # the composed winners — a REUSED run's result carries them (merge
-        # derives its expected strategies from the winners; without this, a
-        # reuse run with deleted finals finds nothing to re-merge).
+        # Step 3: the per-pair ledger (winning attempt per chunk x strategy,
+        # presence-based) plus the winner-layer curation.
         rows: list[Artifact] = _pair_rows(work_dir, chunks, strategies)
-        rows += _orphan_strategy_rows(work_dir, strategies)
+        rows += self._curate_winner_layer(work_dir, strategies, chunks)
         return Recovery.from_artifacts(rows)
+
+    def _curate_winner_layer(
+        self,
+        work_dir:   Path,
+        strategies: list[Strategy],
+        chunks:     list[VideoStreamChunk],
+    ) -> list[Artifact]:
+        """Winner-layer curation: delete what no pair consumed (Req 13/17).
+
+        Two leftovers classes, both deleted automatically (the winner layer
+        re-derives from the attempt substrate):
+
+        - orphan strategy directories (a strategy removed from the
+          selection — its attempts stay in ``encoding/``);
+        - names inside selected strategy dirs that no expected pair
+          consumed (old-chunk-id winners after a re-chunk, stray sidecars).
+
+        Curation rows (``wanted=False``) surface what was deleted for the
+        recovery line; nothing is retained in place — that policy belongs
+        to the deliverable layer.
+        """
+        curated: list[Artifact] = []
+        expected_dirs = {s.safe_name() for s in strategies}
+        chunk_ids     = {c.safe_name() for c in chunks}
+
+        out_dir = work_dir / ENCODED_OUTPUT_DIR
+        if not out_dir.exists():
+            return curated
+
+        for strategy_dir in sorted(out_dir.iterdir()):
+            if not strategy_dir.is_dir():
+                continue
+            if strategy_dir.name not in expected_dirs:
+                logger.info(
+                    "encoded/%s is orphaned (strategy no longer selected) — "
+                    "deleting the winner directory (attempts stay in encoding/)",
+                    strategy_dir.name,
+                )
+                shutil.rmtree(strategy_dir, ignore_errors=True)
+                curated.append(Artifact(
+                    payload = StreamFile(path=LongPath(strategy_dir)),
+                    state   = ArtifactState.ABSENT,
+                    wanted  = False,
+                ))
+                continue
+
+            expected_names = set()
+            for chunk_id in chunk_ids:
+                expected_names.add(EncodedChunk.format_winner_file_name(chunk_id))
+                expected_names.add(EncodedChunk.format_winner_sidecar_name(chunk_id))
+                expected_names.add(f"{chunk_id}.png")
+            for path in sorted(strategy_dir.iterdir()):
+                if path.name.endswith(TEMP_SUFFIX) or path.name in expected_names:
+                    continue
+                try:
+                    path.unlink()
+                    logger.debug("Deleted unconsumed winner-layer name: %s", path.name)
+                    curated.append(Artifact(
+                        payload = StreamFile(path=LongPath(path)),
+                        state   = ArtifactState.ABSENT,
+                        wanted  = False,
+                    ))
+                except OSError as exc:
+                    logger.warning("Could not delete %s: %s", path, exc)
+        return curated
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> EncodingPhaseResult:
         """Resurface the persisted aggregates on a fully-reused run.
@@ -2230,29 +2349,29 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             The reused ``EncodingPhaseResult``.
         """
         result = super()._reused_result(wanted, message)
-        if self._persisted is not None and self._persisted.limiter_summary is not None:
-            self._log_limiter_summary(self._persisted.limiter_summary)
+        if self._persisted is not None and self._persisted.limiter:
+            self._log_limiter_summary(self._persisted.limiter)
         else:
             logger.debug("No persisted limiter summary — table skipped on reused run")
         self._reassert_frame_preservation(self._persisted)
         return result
 
-    def _reassert_frame_preservation(self, persisted: EncodingParams | None) -> None:
+    def _reassert_frame_preservation(self, persisted: EncodingSummary | None) -> None:
         """Re-assert frame preservation from the persisted aggregate (fast exit).
 
-        Reads the single ``winners_frame_totals`` property — never per-winner
-        sidecars — and compares each strategy's total against the probe's
-        in-memory frame count.  A disagreement is surfaced as a warning (the
-        hook contract keeps the REUSED outcome); the merge-time frame
-        verification remains the hard backstop.  Empty totals (unknown)
-        keep the skip semantics and stay silent.
+        Reads the single ``summary.frames`` map — never per-winner sidecars —
+        and compares each strategy's total against the probe's in-memory
+        frame count.  A disagreement is surfaced as a warning (the hook
+        contract keeps the REUSED outcome); the merge-time frame verification
+        remains the hard backstop.  Empty totals (unknown) keep the skip
+        semantics and stay silent.
         """
         if persisted is None:
             return
-        totals = persisted.winners_frame_totals
+        totals = persisted.frames
         if not totals:
             return
-        probe_stream = self._dep_result(ProbePhase).stream
+        probe_stream = self._deps[ProbePhase].stream
         if probe_stream is None or probe_stream.payload.frame_count <= 0:
             return
         source_total = probe_stream.payload.frame_count
@@ -2270,27 +2389,31 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         outcome:   PhaseOutcome,
         artifacts: list[Artifact[EncodedChunk]],
         message:   str,
+        presentation_anchor: str | None = None,
     ) -> EncodingPhaseResult:
         """Assemble an ``EncodingPhaseResult`` from the pair rows.
 
         Args:
-            outcome:   The phase outcome.
+        outcome:   The phase outcome.
             artifacts: The wanted pair rows (the winners field takes the
                        complete ones).
             message:   Human-readable summary — on ``FAILED``, the error
                        description (count plus identifiers).
+            presentation_anchor: The elected presentation anchor (execute
+                       path only).
 
         Returns:
             The populated result.
         """
         return EncodingPhaseResult(
-            outcome        = outcome,
-            message        = message,
-            winners        = [
+            outcome             = outcome,
+            message             = message,
+            winners             = [
                 r for r in artifacts
                 if isinstance(r.payload, EncodedChunk) and r.state == ArtifactState.COMPLETE
             ],
-            quality_labels = dict(self.quality_labels),
+            quality_labels      = dict(self.quality_labels),
+            presentation_anchor = presentation_anchor,
         )
 
     def _execute(
@@ -2313,13 +2436,13 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         Returns:
             ``EncodingPhaseResult`` after encoding.
         """
-        work_dir = self._dep_result(JobPhase).work_dir
-        probe_result = self._dep_result(ProbePhase)
+        work_dir = self._deps[JobPhase].work_dir
+        probe_result = self._deps[ProbePhase]
         crop         = probe_result.crop
 
         # Resolve chunks and strategies from dependencies
-        chunking_result     = self._dep_result(ChunkingPhase)
-        optimization_result = self._dep_result(OptimizationPhase)
+        chunking_result     = self._deps[ChunkingPhase]
+        optimization_result = self._deps[OptimizationPhase]
 
         chunks: list[VideoStreamChunk] = [a.payload for a in chunking_result.chunks]
         strategies = optimization_result.selected_strategies
@@ -2343,19 +2466,17 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         # read as all-miss noise); uncompared fixed runs have no ruler
         # (absolute values, no verdicts — the limiter table self-extinguishes
         # on empty targets); searched runs use the config targets, unchanged.
-        plan = self._dep_result(ProbePhase).plan
+        plan = self._deps[ProbePhase].plan
 
         if plan.fixed_quality:
             presentation_targets = optimization_result.synthetic_targets
         else:
             presentation_targets = plan.targets
 
-        # Persist encoding.yaml with current probe state
+        # encoding.yaml carries the replay aggregate ONLY (no keys — Req 24):
+        # a single post-success write; there is no crash-safe early write
+        # because there is no key to certify mid-run.
         encoding_yaml = work_dir / EncodingPhase.SIDECAR_NAME
-        if self.params is None:
-            self.params = EncodingParams(probe=ProbeState.from_probe(probe_result))
-        self.params.save(encoding_yaml)
-        logger.debug("Wrote encoding.yaml (crop=%s)", crop)
 
         # Run encoding via the existing encode_all_chunks function
         enc_result = encode_all_chunks(
@@ -2365,11 +2486,11 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             work_dir         = work_dir,
             collector        = self._collector,
             max_parallel     = self._config.encoding.concurrency,
-            force            = self._dep_result(JobPhase).force_wipe,
+            force            = False,  # attempt reuse is never bypassed by --force (permission, not a command)
             dry_run          = False,
             crop_params      = crop,
-            encoding_yaml    = None,  # already persisted above with ProbeState
-            cleanup_level    = self._dep_result(JobPhase).cleanup,
+            encoding_yaml    = None,
+            cleanup_level    = self._deps[JobPhase].cleanup,
             visual_hash      = self._config.encoding.visual_hash,
             metrics_sampling = self._config.measurement.sampling,
             measure_attempts = True,  # default-flipping is TODO §83's decision
@@ -2454,27 +2575,93 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
                     source_total,
                 )
 
-        # Second post-success write (the probe-only write above stays the
-        # crash-safe early one): the winning-limiter table and the winners
-        # frame totals are persisted so fully-reused runs resurface both
+        # Anchor presentation (Req 59): optimization's due anchor is the
+        # ruler basis; when NONE was due (the all-strategies path — no test
+        # work, no measurements at optimization), the concluded scan elects
+        # a presentation anchor here: the smallest-total-size strategy with
+        # measured metrics. Presentation-only — never persisted as a key,
+        # never a selection input, never merge's anchor basis. When an
+        # anchor WAS due but no strategy carried measurements, the
+        # optimization error surfaces loudly instead of a silent election.
+        presentation_anchor = self._resolve_presentation_anchor(
+            optimization_result, scan, plan,
+            winner_sizes={
+                name: sum(
+                    safe_stat_size(p.stream.stream.file.path) or 0
+                    for p in payloads
+                )
+                for name, payloads in enc_result.encoded_chunks.items()
+            },
+        )
+
+        # The single post-success write: the winning-limiter table and the
+        # winners frame totals persist so fully-reused runs resurface both
         # without re-reading every winner sidecar.  Only on full success — a
         # failed pair leaves the phase pending on rerun, which rebuilds them
         # via the processing path.
         if scan is not None:
-            assert self.params is not None, "params persisted before encode"
             if scan.summaries is not None:
                 self._log_limiter_summary(scan.summaries)
-            self.params = EncodingParams(
-                probe                = self.params.probe,
-                limiter_summary      = scan.summaries,
-                winners_frame_totals = scan.frame_totals() if scan.frames_known else {},
-            )
-            self.params.save(encoding_yaml)
+            save_model(encoding_yaml, EncodingSummary(
+                limiter = scan.summaries if scan.summaries is not None else [],
+                frames  = scan.frame_totals() if scan.frames_known else {},
+            ))
 
         outcome = PhaseOutcome.COMPLETED if enc_result.encoded_count > 0 else PhaseOutcome.REUSED
         return self._make_result(
             outcome, winners, f"{complete_count} pair(s) complete",
+            presentation_anchor=presentation_anchor,
         )
+
+    def _resolve_presentation_anchor(
+        self,
+        optimization_result: OptimizationPhaseResult,
+        scan:                _WinnerScan | None,
+        plan:                EncodingPlan,
+        winner_sizes:        dict[str, int],
+    ) -> str | None:
+        """The presentation anchor for delta display (Req 59) — never a key.
+
+        Args:
+            optimization_result: The optimization phase's result (the due
+                                anchor, when one was elected).
+            scan:                The concluded winner scan (the measured
+                                population for the fallback election).
+            plan:                The run's encoding plan (compared-vs-not).
+            winner_sizes:        Per-strategy Σ winner file sizes (the
+                                election's ordering basis).
+
+        Returns:
+            The presentation anchor's display name, or ``None`` (searched
+            runs elect nothing — their reference row is the config targets).
+        """
+        if not plan.fixed_quality:
+            return None
+        if optimization_result.anchor is not None:
+            return optimization_result.anchor
+
+        # No anchor from optimization: DUE only when the run was compared
+        # (optimize on, more than one strategy) — then a missing anchor with
+        # no measured strategy is an optimization error surfaced loudly,
+        # never silently elected around. The uncompared case (all-strategies
+        # path — no test work, no measurements at optimization) elects here:
+        # the smallest-total-size strategy with measured metrics.
+        compared = self._config.encoding.optimize and len(plan.strategies) > 1
+        measured = [
+            name for name, rows in (scan.frames if scan is not None else {}).items()
+            if rows
+        ]
+        if not measured:
+            if compared:
+                logger.error(
+                    "An anchor was due (compared fixed run) but no strategy "
+                    "carried measurements — the ruler is missing (optimization "
+                    "error); no silent election."
+                )
+            return None
+        anchor = min(measured, key=lambda name: winner_sizes.get(name, 0))
+        logger.info("Presentation anchor (elected at the winner scan): %s", anchor)
+        return anchor
 
 # ---------------------------------------------------------------------------
 # Module-level helpers

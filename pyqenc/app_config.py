@@ -855,17 +855,18 @@ class AppConfig(BaseModel):
     ) -> CodecConfig:
         """Return a ``CodecConfig`` with the effective quality settings applied.
 
-        Range precedence: CLI override (``quality_range_override``, canonical
-        ``(lower, upper)`` bounds) > profile ``quality_range`` (already
-        codec-ordered at load) > codec bounds (returned unchanged, identity).
-        Whatever wins is stored in the codec's own direction convention.
+        Range precedence: CLI override (``quality_range_override``) >
+        profile ``quality_range`` (already codec-ordered at load) > codec
+        bounds (returned unchanged, identity). The override arrives in ANY
+        input order — canonicalization + the codec's direction convention
+        are applied here via :meth:`_codec_ordered_range` (the single home
+        of the convention).
 
         Whenever the resulting effective range excludes ``default_quality`` (the
         search's starting point — nothing else clamps it into the band), the
-        effective codec auto-adjusts it to the nearest range bound and logs the
-        adjustment.  Auto-adjust over a loud exit: the starting point is a hint
-        the search refines; in fixed runs it makes the effective settings object
-        self-consistent with the pinned value.
+        effective codec auto-adjusts it to the nearest range bound (logged at
+        debug: with an explicit ``-q`` pin this is exactly the intent
+        propagating — the pin replaces the codec's default starting point).
 
         Range validation is **not** performed here — the callers
         (``_validate_profile_ranges`` at load, ``_expand_strategy_pattern``
@@ -874,8 +875,7 @@ class AppConfig(BaseModel):
         Args:
             profile_cfg: Profile configuration — may carry an optional quality_range.
             codec:       Resolved codec configuration to use as the base.
-            quality_range_override: Optional CLI override as canonical
-                          ``(lower, upper)`` bounds.
+            quality_range_override: Optional CLI override, in any input order.
 
         Returns:
             The original *codec* when neither override nor profile narrows the
@@ -897,7 +897,7 @@ class AppConfig(BaseModel):
         if default_quality < lower or default_quality > upper:
             clamped = lower if default_quality < lower else upper
             updates["default_quality"] = clamped
-            _logger.info(
+            _logger.debug(
                 "Codec '%s': default_quality %s lies outside the effective range "
                 "[%s, %s] — adjusted to %s",
                 codec.name, default_quality, effective_range[0], effective_range[1], clamped,
