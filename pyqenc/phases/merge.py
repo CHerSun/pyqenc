@@ -80,7 +80,7 @@ from pyqenc.utils.log_format import (
     fmt_size_mb,
 )
 from pyqenc.utils.long_path import LongPath
-from pyqenc.utils.visualization import QualityEvaluator, create_crf_plot
+from pyqenc.utils.visualization import QualityMeasurer, create_crf_plot
 from pyqenc.utils.yaml_utils import load_model, save_model
 
 # ---------------------------------------------------------------------------
@@ -1167,10 +1167,10 @@ class MergePhase(Phase[MergePhaseResult]):
         Returns:
             Tuple of ``(metrics_dict, plot_path)``.
         """
-        evaluator = QualityEvaluator(output_dir)
+        evaluator = QualityMeasurer(output_dir)
         plot_path = output_dir / f"{final_result.stem}.png"
 
-        evaluation = evaluator.evaluate_chunk(
+        evaluation = evaluator.measure_chunk(
             encoded            = final_result,
             reference          = source_stream.stream.as_input(),
             ref_crop           = ref_crop,

@@ -25,8 +25,8 @@ from pyqenc.quality import (
     FullMetricStatistics,
     MetricStats,
     MetricType,
-    QualityEvaluation,
     QualityLogs,
+    QualityMeasurement,
     run_metrics,
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
@@ -1114,7 +1114,7 @@ def create_crf_plot(
     logger.debug("CRF plot saved to %s", output_path)
 
 
-class QualityEvaluator:
+class QualityMeasurer:
     """Measures encoded chunks against a reference (measurement only).
 
     This class integrates with the metric runner for metric generation and
@@ -1167,7 +1167,7 @@ class QualityEvaluator:
 
         Returns:
             ``(QualityLogs, frame_count)`` — the ``.tmp`` paths for all four
-            metrics (``plot`` is ``None`` — filled in by ``_finish_evaluation``)
+            metrics (``plot`` is ``None`` — filled in by ``_finish_measurement``)
             and the measured file's frame count from the run's progress (the
             distorted input is decoded whole; subsampling reduces scoring
             only, so the count is exact; ``0`` = not determined).
@@ -1242,7 +1242,7 @@ class QualityEvaluator:
         # None → 0 (the unknown sentinel) at the typed boundary.
         return artifacts, result.frame_count or 0
 
-    async def evaluate_chunk_async(
+    async def measure_chunk_async(
         self,
         encoded:             Path,
         reference:           FFmpegInput,
@@ -1257,10 +1257,10 @@ class QualityEvaluator:
         width:               int               = 0,
         bar_title:           str | None        = None,
         metrics_output_dir:  Path | None       = None,
-    ) -> QualityEvaluation:
-        """Async variant of ``evaluate_chunk`` for use inside a running event loop.
+    ) -> QualityMeasurement:
+        """Async variant of ``measure_chunk`` for use inside a running event loop.
 
-        Identical behaviour to ``evaluate_chunk`` but ``await``s ``_generate_metrics``
+        Identical behaviour to ``measure_chunk`` but ``await``s ``_generate_metrics``
         directly instead of calling ``asyncio.run()``.  Use this when already inside
         an ``async`` context (e.g. ``run_measure``).
 
@@ -1269,10 +1269,10 @@ class QualityEvaluator:
                                 defaults to the encoded file stem.
             metrics_output_dir: Directory for raw metric ``.tmp`` files.  When
                                 ``None``, uses ``output_dir``.
-            (all other args same as ``evaluate_chunk``)
+            (all other args same as ``measure_chunk``)
 
         Returns:
-            QualityEvaluation with the measured metrics (no verdict —
+            QualityMeasurement with the measured metrics (no verdict —
             Req 51-53: verdicts are pure functions applied by callers).
         """
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -1307,7 +1307,7 @@ class QualityEvaluator:
                 fps_value        = fps_value,
             )
 
-        return self._finish_evaluation(
+        return self._finish_measurement(
             encoded             = encoded,
             artifacts           = artifacts,
             output_dir          = output_dir,
@@ -1318,7 +1318,7 @@ class QualityEvaluator:
             frame_count         = run_frames,
         )
 
-    def evaluate_chunk(
+    def measure_chunk(
         self,
         encoded:             Path,
         reference:           FFmpegInput,
@@ -1332,10 +1332,10 @@ class QualityEvaluator:
         chunk_start_seconds: float             = 0.0,
         width:               int               = 0,
         metrics_output_dir:  Path | None       = None,
-    ) -> QualityEvaluation:
+    ) -> QualityMeasurement:
         """Measure encoded chunk against a reference (no verdict - Req 51-53).
 
-        Thin sync wrapper over :meth:`evaluate_chunk_async` (the single
+        Thin sync wrapper over :meth:`measure_chunk_async` (the single
         implementation): runs the coroutine on a fresh event loop.  Use only
         from sync code with no running loop — callers already inside an
         ``async`` context must ``await`` the async twin instead.
@@ -1360,11 +1360,11 @@ class QualityEvaluator:
                                  ``None``, uses ``output_dir``.
 
         Returns:
-            QualityEvaluation with the measured metrics (no verdict —
+            QualityMeasurement with the measured metrics (no verdict —
             Req 51-53: verdicts are pure functions applied by callers).
         """
         return asyncio.run(
-            self.evaluate_chunk_async(
+            self.measure_chunk_async(
                 encoded             = encoded,
                 reference           = reference,
                 ref_crop            = ref_crop,
@@ -1380,7 +1380,7 @@ class QualityEvaluator:
             )
         )
 
-    def _finish_evaluation(
+    def _finish_measurement(
         self,
         encoded:             Path,
         artifacts:           QualityLogs,
@@ -1390,11 +1390,11 @@ class QualityEvaluator:
         fps_value:           Fraction | None,
         chunk_start_seconds: float,
         frame_count:         int = 0,
-    ) -> QualityEvaluation:
+    ) -> QualityMeasurement:
         """Parse metric files, generate the plot (measurement completion).
 
-        Shared post-processing used by both ``evaluate_chunk`` and
-        ``evaluate_chunk_async`` after metric files have been produced.
+        Shared post-processing used by both ``measure_chunk`` and
+        ``measure_chunk_async`` after metric files have been produced.
 
         Args:
             encoded:             Path to the encoded video (used for plot title/path).
@@ -1408,7 +1408,7 @@ class QualityEvaluator:
                                  metric run's progress (``0`` = not determined).
 
         Returns:
-            ``QualityEvaluation`` with metrics, target results, and artifact paths.
+            ``QualityMeasurement`` with metrics, target results, and artifact paths.
         """
         logger.debug("Parsing metrics and generating plots")
         resolved_plot_path = plot_path if plot_path is not None else output_dir / f"{encoded.stem}.png"
@@ -1457,7 +1457,7 @@ class QualityEvaluator:
 
         artifacts.plot = resolved_plot_path
 
-        return QualityEvaluation(
+        return QualityMeasurement(
             metrics     = metrics,
             logs        = artifacts,
             frame_count = frame_count,

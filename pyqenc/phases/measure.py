@@ -33,7 +33,7 @@ from pyqenc.stream_model import File, LongPathYaml, VideoStream, VideoStreamInfo
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg_async
 from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.log_format import fmt_key_value_table, fmt_metric_value, fmt_size_mb
-from pyqenc.utils.visualization import QualityEvaluator
+from pyqenc.utils.visualization import QualityMeasurer
 from pyqenc.utils.yaml_utils import load_model, save_model
 
 # ---------------------------------------------------------------------------
@@ -346,7 +346,7 @@ async def _run_metrics(
 ) -> ChunkQualityStats:
     """Run quality metric computation for one source/target pair.
 
-    Delegates to ``QualityEvaluator.evaluate_chunk_async`` (measurement only —
+    Delegates to ``QualityMeasurer.measure_chunk_async`` (measurement only —
     the evaluator takes no targets, Req 51-53); metric statistics are returned.
 
     Args:
@@ -365,8 +365,8 @@ async def _run_metrics(
         ``ChunkQualityStats`` mapping each ``MetricType`` to its key statistics.
     """
 
-    evaluator  = QualityEvaluator(metrics_dir)
-    evaluation = await evaluator.evaluate_chunk_async(
+    evaluator  = QualityMeasurer(metrics_dir)
+    evaluation = await evaluator.measure_chunk_async(
         encoded          = target_video,
         reference        = FFmpegInput(path=source_video),
         ref_crop         = crop_params,

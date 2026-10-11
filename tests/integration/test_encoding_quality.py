@@ -8,7 +8,7 @@ import pytest
 from pyqenc.metrics import MetricsCollector
 from pyqenc.models import QualityTarget, Strategy
 from pyqenc.stream_model import VideoStreamChunk
-from pyqenc.utils.visualization import QualityEvaluator
+from pyqenc.utils.visualization import QualityMeasurer
 from tests.fixtures.metric_fixtures import (
     create_mock_psnr_file,
     create_mock_ssim_file,
@@ -125,7 +125,7 @@ class TestEncodingQualityWithRealVideo:
 
     def test_quality_evaluator_initialization(self, tmp_path):
         """Test quality evaluator can be initialized."""
-        evaluator = QualityEvaluator(tmp_path)
+        evaluator = QualityMeasurer(tmp_path)
         assert evaluator.work_dir == tmp_path
 
 
@@ -186,7 +186,7 @@ class TestEncodeChunkQualitySearchV2Integration:
 
         from pyqenc.models import AttemptMetadata, QualityTarget
         from pyqenc.phases.encoding import ChunkEncoder, ChunkEncodingResult
-        from pyqenc.utils.visualization import QualityEvaluator
+        from pyqenc.utils.visualization import QualityMeasurer
 
         strategy = self._make_strategy()
         chunk    = self._make_chunk(tmp_path)
@@ -212,7 +212,7 @@ class TestEncodeChunkQualitySearchV2Integration:
             "metrics":     {"vmaf_min": 95.0 + vmaf_delta * 0.5},
         }
 
-        evaluator = MagicMock(spec=QualityEvaluator)
+        evaluator = MagicMock(spec=QualityMeasurer)
         evaluator.work_dir = tmp_path
 
         encoder = ChunkEncoder(
@@ -241,7 +241,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         assert result.reused is True, f"Expected reused=True, got: {result}"
         assert result.success is True
         # Quality evaluator must NOT have been called (pure cache hit).
-        evaluator.evaluate_chunk.assert_not_called()
+        evaluator.measure_chunk.assert_not_called()
 
     @pytest.mark.skip(reason="ChunkEncoder constructor signature changed (collector arg added); needs update")
     def test_encode_chunk_calls_finalize_on_convergence(self, tmp_path: Path) -> None:
@@ -251,27 +251,27 @@ class TestEncodeChunkQualitySearchV2Integration:
 
         from pyqenc.models import QualityTarget
         from pyqenc.phases.encoding import ChunkEncoder
-        from pyqenc.quality import MetricType, QualityEvaluation, QualityLogs
-        from pyqenc.utils.visualization import QualityEvaluator
+        from pyqenc.quality import MetricType, QualityLogs, QualityMeasurement
+        from pyqenc.utils.visualization import QualityMeasurer
 
         strategy = self._make_strategy()
         chunk    = self._make_chunk(tmp_path)
         target   = QualityTarget(metric="vmaf", statistic="min", value=95.0)
 
         # Fake evaluation result: passes with surplus within acceptance_delta → early acceptance.
-        fake_eval = MagicMock(spec=QualityEvaluation)
-        fake_eval.targets_met    = True
-        fake_eval.failed_targets = []
-        fake_eval.logs           = QualityLogs()
-        fake_eval.frame_count    = 120
-        fake_eval.metrics        = {
+        fake_measurement = MagicMock(spec=QualityMeasurement)
+        fake_measurement.targets_met    = True
+        fake_measurement.failed_targets = []
+        fake_measurement.logs           = QualityLogs()
+        fake_measurement.frame_count    = 120
+        fake_measurement.metrics        = {
             MetricType.VMAF: {"min": 95.1, "median": 96.0, "p05": 94.0, "p10": 94.5, "p25": 95.0,
                               "p75": 97.0, "p90": 97.5, "p95": 98.0, "max": 99.0, "std": 1.0},
         }
 
-        evaluator = MagicMock(spec=QualityEvaluator)
+        evaluator = MagicMock(spec=QualityMeasurer)
         evaluator.work_dir        = tmp_path
-        evaluator.evaluate_chunk.return_value = fake_eval
+        evaluator.measure_chunk.return_value = fake_measurement
 
         encoder = ChunkEncoder(
             quality_evaluator = evaluator,

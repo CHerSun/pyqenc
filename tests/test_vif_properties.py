@@ -25,7 +25,7 @@ from pyqenc.models import QualityTarget
 # take ~2-3 s on first import on Windows, which would exceed the deadline).
 from pyqenc.quality import MetricInfo, MetricType, QualityLogs
 from pyqenc.utils.visualization import (
-    QualityEvaluator,
+    QualityMeasurer,
     compute_metric_stats,
     normalize_metrics,
     parse_metrics,
@@ -268,7 +268,7 @@ def test_generate_metrics_vif_shares_vmaf_path(tmp_path: Path) -> None:
     from pyqenc.quality import MetricType as _MetricType
     from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRunResult
 
-    evaluator = QualityEvaluator(work_dir=tmp_path)
+    evaluator = QualityMeasurer(work_dir=tmp_path)
 
     async def _fake_run_metrics(metrics, **kwargs) -> FFmpegRunResult:
         """Fake run_metrics: touch the expected .tmp output files."""

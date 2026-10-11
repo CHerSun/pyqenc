@@ -85,7 +85,7 @@ from pyqenc.utils.log_format import (
     fmt_metric_summary,
 )
 from pyqenc.utils.long_path import LongPath
-from pyqenc.utils.visualization import QualityEvaluator
+from pyqenc.utils.visualization import QualityMeasurer
 from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
@@ -717,7 +717,7 @@ class ChunkEncoder:
 
     def __init__(
         self,
-        quality_evaluator: QualityEvaluator,
+        quality_evaluator: QualityMeasurer,
         work_dir:          Path,
         collector:         MetricsCollector,
         crop_params:       CropParams | None = None,
@@ -1207,7 +1207,7 @@ class ChunkEncoder:
             # verdict — single-point domains accept the attempt unconditionally.
             if self._measure_attempts:
                 with self._collector.time(self._metric_prefix, METRIC_KEY_QUALITY_MEASURE):
-                    evaluation = self.quality_evaluator.evaluate_chunk(
+                    evaluation = self.quality_evaluator.measure_chunk(
                         encoded              = output_file,
                         reference            = chunk.as_input(),
                         ref_crop             = self._crop_params or CropParams(),
@@ -1932,7 +1932,7 @@ def encode_all_chunks(
                            pair converges.
         metrics_sampling:  Frame subsampling factor for quality metric generation.
                            Passed through to ``ChunkEncoder`` and then to
-                           ``QualityEvaluator.evaluate_chunk``.
+                           ``QualityMeasurer.measure_chunk``.
         measure_attempts:  Whether encoded attempts get quality evaluations
                            (the ``ChunkEncoder`` seam; default = measure).
 
@@ -1969,7 +1969,7 @@ def encode_all_chunks(
 
     # Create encoder
     encoder = ChunkEncoder(
-        quality_evaluator = QualityEvaluator(work_dir),
+        quality_evaluator = QualityMeasurer(work_dir),
         work_dir          = work_dir,
         collector         = collector,
         crop_params       = crop_params,

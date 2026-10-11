@@ -492,7 +492,7 @@ class QualityLogs:
 
 
 @dataclass
-class QualityEvaluation:
+class QualityMeasurement:
     """The measured facts of one quality evaluation (no verdict — Req 51-53).
 
     Verdicts are decisions computed live from ``metrics`` against whatever

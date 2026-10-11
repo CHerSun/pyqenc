@@ -151,11 +151,11 @@ from pyqenc.models import Strategy as _Strategy
 from pyqenc.phases.encoding import ChunkEncoder as _ChunkEncoder
 from pyqenc.phases.encoding import ChunkEncodingResult
 from pyqenc.quality import MetricType as _MetricType
-from pyqenc.quality import QualityEvaluation as _QE
 from pyqenc.quality import QualityLogs as _QL
+from pyqenc.quality import QualityMeasurement as _QE
 from pyqenc.stream_model import VideoStreamChunk as _VSC
 from pyqenc.utils.ffmpeg_runner import FFmpegRunResult as _FFR
-from pyqenc.utils.visualization import QualityEvaluator as _QEvaluator
+from pyqenc.utils.visualization import QualityMeasurer as _QEvaluator
 
 
 def _fixed_strategy() -> _Strategy:
@@ -213,7 +213,7 @@ def _run_encode(
 
     evaluator = _MM(spec=_QEvaluator)
     evaluator.work_dir = tmp_path
-    evaluator.evaluate_chunk.return_value = fake_eval
+    evaluator.measure_chunk.return_value = fake_eval
 
     if measure_attempts is None:
         encoder = _ChunkEncoder(
@@ -257,7 +257,7 @@ class TestMeasureAttemptsSeam:
         """Without the kwarg the encoder measures (today's behavior)."""
         result, evaluator = _run_encode(tmp_path, measure_attempts=None)
         assert result.success is True
-        evaluator.evaluate_chunk.assert_called_once()
+        evaluator.measure_chunk.assert_called_once()
 
     def test_off_path_skips_evaluation_and_accepts_single_point(self, tmp_path: Path) -> None:
         """measure_attempts=False: no evaluation, empty sidecar metrics, one
@@ -269,7 +269,7 @@ class TestMeasureAttemptsSeam:
         metrics, and the winner is promoted unconditionally.
         """
         result, evaluator = _run_encode(tmp_path, measure_attempts=False)
-        evaluator.evaluate_chunk.assert_not_called()
+        evaluator.measure_chunk.assert_not_called()
         assert result.success is True
         assert result.targets_met is True
         assert result.final_crf == _D("18.0")
@@ -290,7 +290,7 @@ class TestMeasureAttemptsSeam:
     def test_on_path_measures_and_persists_all_metrics(self, tmp_path: Path) -> None:
         """measure_attempts=True: evaluation runs and all metrics persist."""
         result, evaluator = _run_encode(tmp_path, measure_attempts=True)
-        evaluator.evaluate_chunk.assert_called_once()
+        evaluator.measure_chunk.assert_called_once()
         assert result.success is True
         sidecar_path = (
             tmp_path / "encoding" / "test_strategy" / "chunk_001.q18.0.yaml"
@@ -341,7 +341,7 @@ class TestFixedDegenerateSinglePoint:
         result, evaluator = _run_encode_with_targets(
             tmp_path, targets=[], measure_attempts=True,
         )
-        evaluator.evaluate_chunk.assert_called_once()
+        evaluator.measure_chunk.assert_called_once()
         assert result.success is True
         assert result.targets_met is True
         assert result.attempts == 1
@@ -431,7 +431,7 @@ def _run_encode_with_targets(
 
     evaluator = _MM(spec=_QEvaluator)
     evaluator.work_dir = tmp_path
-    evaluator.evaluate_chunk.return_value = fake_eval
+    evaluator.measure_chunk.return_value = fake_eval
 
     encoder = _ChunkEncoder(
         quality_evaluator = evaluator,
@@ -508,7 +508,7 @@ class TestAttemptFrameCountSourcing:
         fake_eval.frame_count  = 120
         evaluator = _MM(spec=_QEvaluator)
         evaluator.work_dir = tmp_path
-        evaluator.evaluate_chunk.return_value = fake_eval
+        evaluator.measure_chunk.return_value = fake_eval
         encoder = self._encoder(tmp_path, evaluator)
 
         with _patch.object(encoder, "_encode_with_ffmpeg") as mock_encode:
@@ -522,7 +522,7 @@ class TestAttemptFrameCountSourcing:
 
         assert result.success is True
         mock_encode.assert_not_called()          # the file existed — measure-only
-        evaluator.evaluate_chunk.assert_called_once()
+        evaluator.measure_chunk.assert_called_once()
         data = _yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 120
 
@@ -547,7 +547,7 @@ class TestAttemptFrameCountSourcing:
 
         assert result.success is True
         mock_encode.assert_not_called()
-        evaluator.evaluate_chunk.assert_not_called()
+        evaluator.measure_chunk.assert_not_called()
         data = _yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
         assert data["frame_count"] == 120
 

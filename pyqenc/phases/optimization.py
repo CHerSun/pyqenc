@@ -62,7 +62,7 @@ from pyqenc.state import ArtifactState, ProbeFacet
 from pyqenc.stream_model import DecimalYaml, EncodedChunk, VideoStreamChunk
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.log_format import fmt_size_mb
-from pyqenc.utils.visualization import QualityEvaluator
+from pyqenc.utils.visualization import QualityMeasurer
 from pyqenc.utils.yaml_utils import save_model
 
 if TYPE_CHECKING:
@@ -1621,7 +1621,7 @@ def _make_encoder(
     """
     from pyqenc.phases.encoding import ChunkEncoder
     return ChunkEncoder(
-        quality_evaluator = QualityEvaluator(work_dir),
+        quality_evaluator = QualityMeasurer(work_dir),
         work_dir          = work_dir,
         collector         = collector,
         crop_params       = crop_params,
