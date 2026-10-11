@@ -1419,7 +1419,32 @@ must reject unwanted rows at construction; do partial-failure paths
 
 ---
 
-## Last known = 120
+## 121. Docstring audit — bring every docstring to the universal Google-style format
+
+**Status:** needs thinking (rule added to coding-standards.md 2026-10-12;
+audit pending)
+
+Rule: ALL docstrings Google-style — one-line summary, prose, then
+structured `Args:`/`Returns:`/`Raises:`/`Yields:`/`Attributes:` sections
+(the LSP parses these for hover/parameter help). The codebase is mostly
+there already (the house style evolved toward it), but the sweep must
+find and fix:
+
+- Missing sections (functions with args but no `Args:`; classes with
+  fields but no `Attributes:`).
+- reST-style fields (`:param x:`, `:rtype:`) or NumPy-style underlined
+  headers that predate the convention.
+- Stale sections (parameters renamed/removed but the docstring still
+  lists them) — the LSP surfaces mismatches; fix as found.
+- Docstrings that narrate mechanics instead of contract (summary +
+  why/constraints, not line-by-line retelling).
+
+Mechanics: per-file pass, no behavior changes; Pylance/Pyright hover on
+each symbol is the verification tool.
+
+---
+
+## Last known = 121
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

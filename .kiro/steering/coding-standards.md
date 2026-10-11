@@ -10,6 +10,7 @@
 - Annotations rely on PEP 649 lazy evaluation (3.14 default): NEVER write `from __future__ import annotations` (a deprecated no-op on 3.14) and NEVER quote annotations (`"AppConfig"`) — bare names work for forward references and `TYPE_CHECKING`-only imports.
 - For volatile things - try (not check).
 - All functions, classes and class members MUST BE type-hinted.
+- **Docstrings are GOOGLE-STYLE, universally** (every function, class, and class member): one-line summary, extended prose paragraphs, then structured sections — `Args:` (or `Arguments:`), `Returns:`, `Raises:`, `Yields:`, `Attributes:` for classes — with `name: description` entries and indented continuations. This format is parsed by the LSP (Pylance/Pyright hover help and per-parameter info) — keep it exact so the tooling works. No reST fields (`:param x:`), no NumPy-style underlined headers.
 - Type-hint using newer syntax: `int|None` instead of `Optional[int]`, newer generic classes without imports from `typing` where possible.
 - Use top-level imports. In-place (local) imports are only acceptable when top-level imports are not possible, e.g. to break circular dependencies.
 - Use vertical alignment between arguments/parameters where it improves readability.
