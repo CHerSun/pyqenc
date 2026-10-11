@@ -96,9 +96,9 @@ class ProbeState(BaseModel):
     field.
     """
 
+    source:      Fingerprint
     frame_count: int
     crop:        CropYaml = CropParams()
-    source:      Fingerprint
     crop_source: str | None         = None
     resulting_resolution: str | None = None
 

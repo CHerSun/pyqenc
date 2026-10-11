@@ -93,19 +93,19 @@ class AudioSidecar(BaseModel):
 
     On-disk shape (``audio.yaml``)::
 
+        source: {size: …, token: "…"}
         chains:
           normal: {token: "9f2c…"}
-        source: {size: …, token: "…"}
 
     Attributes:
-        chains: Map of chain name → its committed chain fingerprint.
         source: The source identity key (mismatch = catastrophic, Req 33) —
                 required: every write path carries it, and a sidecar missing
                 it fails validation → absent → the phase redoes its work.
+        chains: Map of chain name → its committed chain fingerprint.
     """
 
-    chains: dict[str, Fingerprint] = Field(default_factory=dict)
     source:  Fingerprint
+    chains: dict[str, Fingerprint] = Field(default_factory=dict)
 
     @classmethod
     def from_resolved(

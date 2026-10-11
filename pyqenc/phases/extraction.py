@@ -113,15 +113,15 @@ class ExtractionSidecar(BaseModel):
 
     Attributes:
         source:   The source identity key (fingerprint only).
-        streams:  The per-type stream inventory (info slices).
         chapters: Whether the source carries a chapter edition (the extracted
                   location is the fixed ``chapters.xml`` convention — nothing
                   per-run to record).
+        streams:  The per-type stream inventory (info slices).
     """
 
     source:   Fingerprint
-    streams:  StreamsInventory
     chapters: bool = False
+    streams:  StreamsInventory
 
 
 logger = logging.getLogger(__name__)

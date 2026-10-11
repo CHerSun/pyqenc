@@ -191,9 +191,9 @@ class WinnerSidecar(BaseModel):
     """
 
     crf:         DecimalYaml        # exact string round-trip (no float drift)
-    metrics:     dict[str, float]   # the TARGETED metric subset
     frame_count: int                # frames of the winning attempt (0 = unknown)
     targets_met: bool               # False when search exhausted without a passing attempt
+    metrics:     dict[str, float]   # the TARGETED metric subset
 
 
 logger = logging.getLogger(__name__)
@@ -244,8 +244,8 @@ class EncodingSummary(BaseModel):
     re-saves the aggregate.
     """
 
-    limiter: list[LimiterSummary]   # winning-limiter rows ([] = no table)
     frames:  dict[str, int]         # per-strategy Σ winner frame totals
+    limiter: list[LimiterSummary]   # winning-limiter rows ([] = no table)
 
 
 def _encoded_dir(work_dir: Path, strategy: Strategy) -> Path:

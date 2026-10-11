@@ -55,11 +55,11 @@ class MeasureSidecar(BaseModel):
 
     source_video:               LongPathYaml
     target_video:               LongPathYaml
+    sampling:                   int
+    crop_params:                dict[str, int] | None = None
     source_duration_seconds:    float | None          = None
     target_duration_seconds:    float | None          = None
     effective_duration_seconds: float | None          = None
-    sampling:                   int
-    crop_params:                dict[str, int] | None = None
     metrics:                    dict[str, float]      = Field(default_factory=dict)
 
 
