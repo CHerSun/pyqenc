@@ -1452,7 +1452,38 @@ each symbol is the verification tool.
 
 ---
 
-## Last known = 121
+---
+
+## 122. Names audit — public/private surface + project vocabulary
+
+**Status:** needs thinking (user direction 2026-10-12; TABLE FIRST, then
+implementation on approval)
+
+Two dimensions:
+
+- **Public/private surface.** Module top-levels are the main concern —
+  they form each module's external contract, and the project wants a
+  MINIMAL contract (coding-standards: "only truly necessary functions
+  should be public"). Many top-levels look internal/implementation-
+  specific but carry no underscore (e.g. `LimiterSummaryRow` — a
+  persisted-form row of one phase's summary table; who outside the
+  module would ever import it?). Per-class members are a lesser
+  concern — same treatment, lower priority.
+- **Vocabulary.** The project has an established vocabulary
+  (attempt/winner, probe facet, fingerprint, sidecar, measure vs
+  evaluate→measure, presence/listing, encoding workspace vs encoded
+  dir, …) — names should USE it. Drifted synonyms and generic names
+  (record, item, result, info where a domain word exists) are the
+  smell.
+
+Process (explicit): produce a TABLE first — current name, proposed name
+(public→`_private` or rename or unchanged), reasoning — one row per
+symbol, grouped by module; the user audits and approves; only then the
+implementation sweep. No drive-by renames.
+
+---
+
+## Last known = 122
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
