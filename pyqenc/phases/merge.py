@@ -151,14 +151,14 @@ class MergedOutputSidecar(BaseModel):
     and is never persisted.
 
     Attributes:
-        frame_count: Measured frame count — REQUIRED key; ``null`` = not
-                     determined (the honest persisted absence; exclude_none
-                     drops the key, and a file missing it fails validation).
+        frame_count: Measured frame count of the merged output (``0`` = the
+                     unknown sentinel — no valid video has zero frames;
+                     set at the fetch site, never a model default).
         metrics:     The full measured metric set.
         provenance:  The production-basis record (acceptance compares it).
     """
 
-    frame_count: int | None
+    frame_count: int
     metrics:     dict[str, float]         = Field(default_factory=dict)
     provenance:  Annotated[MergedProvenance, Field(discriminator="mode")]
 
@@ -178,7 +178,7 @@ class MergeSummaryRow(BaseModel):
 
     strategy_name:   str
     output_path:     LongPathYaml
-    file_size_bytes: int              = 0
+    file_size_bytes: int
     metrics:         dict[str, float] = Field(default_factory=dict)
 
 
@@ -1143,7 +1143,7 @@ class MergePhase(Phase[MergePhaseResult]):
         stem and is never persisted.
         """
         record = MergedOutputSidecar(
-            frame_count = frame_count,
+            frame_count = frame_count or 0,
             metrics     = {k: float(v) for k, v in all_metrics.items()},
             provenance  = provenance,
         )

@@ -1367,7 +1367,36 @@ disappear.
 
 ---
 
-## Last known = 118
+## 119. Table formatting is hand-aligned everywhere — unify the mechanism (mini-research)
+
+**Status:** needs thinking (user direction 2026-10-10)
+
+The summary/comparison tables (optimization's select table, the fixed
+comparison table, merge's summary + miss-detail tables, the limiter table,
+`fmt_key_value_table` call sites) each hand-roll column alignment —
+`%-30s %12s %8s` format strings, manual padding constants, per-site width
+tuning. The LOOK is right (neat, aligned, terminal-friendly); the
+repetition is the problem: every new table re-implements alignment,
+width-fitting, and unit suffixing.
+
+Research the options:
+
+- **External**: `rich.table` / `tabulate` / `wcwidth`-based helpers — do
+  they render the same aesthetic (plain text, aligned columns, no color
+  dependency in logs), and what do they pull in as dependencies
+  (CLI-first, minimal-deps preference)?
+- **Internal**: one common formatter (e.g. a `format_table(headers, rows,
+  aligns)` util) with the current visual conventions encoded once —
+  probably the default answer given the aesthetic is already ours; the
+  research should confirm an external lib buys nothing we don't have.
+
+Constraint: the output must stay byte-identical-ish to today's tables
+(the user likes them); logs go through the plain logger (no ANSI color
+assumptions in `metrics.yaml`-adjacent output).
+
+---
+
+## Last known = 119
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
