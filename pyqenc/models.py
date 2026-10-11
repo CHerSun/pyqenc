@@ -166,7 +166,7 @@ class BlakeFingerprinter:
         return Fingerprint(token=cls._token(canonical))
 
     @classmethod
-    def of_ids(cls, ids: Iterable[str]) -> Fingerprint:
+    def of_ids(cls, ids: Iterable[str]) -> SizedFingerprint:
         """The identity of a set of ids: hash over the sorted ids, ``size`` = count.
 
         ONE derivation, two vantages (spec 2026-10-07, Req 19/11a): optimization
@@ -178,10 +178,11 @@ class BlakeFingerprinter:
             ids: The member ids in any order (chunk ids / winner ids).
 
         Returns:
-            The set's fingerprint (``size`` = member count).
+            The set's fingerprint (``size`` = member count — structurally
+            guaranteed, hence :class:`SizedFingerprint`).
         """
         ordered = sorted(ids)
-        return Fingerprint(token=cls._token("\n".join(ordered)), size=len(ordered))
+        return SizedFingerprint(token=cls._token("\n".join(ordered)), size=len(ordered))
 
     _FILE_WINDOW_BYTES: ClassVar[int] = 1_048_576
     """Sampled-window size (~1 MiB): head + tail + two interior windows."""
