@@ -564,7 +564,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         assert current_probe is not None and chunks_fps is not None
         current    = current_optimization_sidecar(
             plan        = plan,
-            source      = job_result.source_fingerprint,
+            source      = job_result.file.payload.fingerprint,
             chunks      = chunks_fps,
             probe       = current_probe,
             sampling    = self._config.measurement.sampling,
@@ -575,7 +575,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         # Step 1 — identity key: catastrophic for the shared namespace.
         persisted: OptimizationSidecar | None = load_optimization_sidecar(opt_yaml)
         if persisted is not None and not persisted.source.matches(
-            job_result.source_fingerprint,
+            job_result.file.payload.fingerprint,
         ):
             if not job_result.force:
                 raise RecoveryError(
@@ -909,7 +909,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 opt_yaml,
                 current_optimization_sidecar(
                     plan        = plan,
-                    source      = self._deps[JobPhase].source_fingerprint,
+                    source      = self._deps[JobPhase].file.payload.fingerprint,
                     chunks      = self._chunks_fingerprint,
                     probe       = self._current_probe,
                     sampling    = current_sampling,
@@ -954,7 +954,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             opt_yaml,
             current_optimization_sidecar(
                 plan        = plan,
-                source      = self._deps[JobPhase].source_fingerprint,
+                source      = self._deps[JobPhase].file.payload.fingerprint,
                 chunks      = self._chunks_fingerprint,
                 probe       = self._current_probe,
                 sampling    = current_sampling,
@@ -1077,7 +1077,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 opt_yaml,
                 current_optimization_sidecar(
                     plan        = plan,
-                    source      = job_result.source_fingerprint,
+                    source      = job_result.file.payload.fingerprint,
                     chunks      = self._chunks_fingerprint,
                     probe       = self._current_probe,
                     sampling    = current_sampling,

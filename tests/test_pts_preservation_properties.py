@@ -142,14 +142,13 @@ def _make_extraction_phase(
         force  = False,
         config     = config,
         work_dir   = work_dir,
-        source     = source,
             cleanup     = CleanupLevel.NONE,
             no_metrics  = True,
     )
 
     job = JobPhase(
         config, {},
-        source     = source,
+        source = source,
         work_dir   = work_dir,
         force      = False,
         cleanup    = CleanupLevel.NONE,
@@ -437,7 +436,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
         # --- Real dependency phases with pre-set COMPLETED results ---
         job = JobPhase(
             config, {},
-            source     = source,
+            source = source,
             work_dir   = work_dir,
             force      = False,
             cleanup    = CleanupLevel.NONE,
@@ -451,7 +450,6 @@ def test_frame_count_preservation(frame_count: int) -> None:
             force  = False,
             config     = config,
             work_dir   = work_dir,
-            source     = source,
             cleanup     = CleanupLevel.NONE,
             no_metrics  = True,
         )

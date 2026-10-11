@@ -66,7 +66,6 @@ def _make_job_result(work_dir: Path, source: Path) -> JobPhaseResult:
         file      = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
         config    = _APP_CONFIG,
         work_dir  = work_dir,
-        source    = source,
         force     = False,
         cleanup   = CleanupLevel.NONE,
         no_metrics= True,
@@ -123,7 +122,7 @@ def _make_probe_phase(
 
     job = JobPhase(
         _APP_CONFIG, {},
-        source     = job_result.source,
+        source     = job_result.file.payload.path,
         work_dir   = job_result.work_dir,
         force      = False,
         cleanup    = CleanupLevel.NONE,
@@ -309,7 +308,7 @@ class TestProbePhaseCompleted:
         assert loaded is not None
         job = _make_job_result(work_dir, tmp_path / "source.mkv")
         assert loaded.source is not None
-        assert loaded.source.matches(job.source_fingerprint)
+        assert loaded.source.matches(job.file.payload.fingerprint)
         assert loaded.crop_source == "detected"
 
     def test_probe_yaml_persists_resulting_resolution(self, tmp_path: Path):

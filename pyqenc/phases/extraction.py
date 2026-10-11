@@ -527,7 +527,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
     def _log_key_params(self) -> None:
         """Log the source path and the active include/exclude filter."""
         job = self._deps[JobPhase]
-        logger.info("Source:   %s", job.source.name)
+        logger.info("Source:   %s", job.file.payload.path.name)
         extraction_cfg = job.config.extraction
         if extraction_cfg.include or extraction_cfg.exclude:
             logger.info("Filter:")
@@ -556,7 +556,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
 
         sidecar = load_model(sidecar_path, ExtractionSidecar)
         if sidecar is not None and not sidecar.source.matches(
-                            job_result.source_fingerprint):
+                            job_result.file.payload.fingerprint):
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (extraction.yaml) — this "
@@ -917,7 +917,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         if self._sidecar_dirty or self._materialize:
             self._persist_sidecar(work_dir / ExtractionPhase.SIDECAR_NAME)
 
-        source = job_result.source
+        source = job_result.file.payload.path
         if not source.exists():
             err = f"Source video not found: {source}"
             logger.critical(err)

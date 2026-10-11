@@ -292,7 +292,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         yaml_path  = job_result.work_dir / ChunkingPhase.SIDECAR_NAME
 
         sidecar = load_model(yaml_path, ChunkingSidecar)
-        if sidecar is not None and not sidecar.source.matches(job_result.source_fingerprint):
+        if sidecar is not None and not sidecar.source.matches(job_result.file.payload.fingerprint):
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (chunking.yaml) — the "
@@ -405,7 +405,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
                     SceneRecord(timestamp_seconds=b.timestamp_seconds, frame=b.frame)
                     for b in boundaries
                 ],
-                source           = self._deps[JobPhase].source_fingerprint,
+                source           = self._deps[JobPhase].file.payload.fingerprint,
                 scene_threshold  = self._config.chunking.scene_threshold,
                 min_scene_length = self._config.chunking.min_scene_length,
             )

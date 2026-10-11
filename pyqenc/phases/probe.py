@@ -234,7 +234,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         remove_stale_tmp_file(probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX))
 
         state = load_model(probe_yaml, ProbeState)
-        if state is not None and not state.source.matches(job_result.source_fingerprint):
+        if state is not None and not state.source.matches(job_result.file.payload.fingerprint):
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (probe.yaml) — the committed "
@@ -363,7 +363,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         save_model(probe_yaml, ProbeState(
             frame_count          = frame_count,
             crop                 = crop,
-            source               = job_result.source_fingerprint,
+            source               = job_result.file.payload.fingerprint,
             crop_source          = crop_source,
             resulting_resolution = resulting_resolution,
         ))

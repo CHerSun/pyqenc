@@ -86,12 +86,14 @@ class JobPhaseResult(PhaseResult):
 
     Attributes:
         file:       The source-file artifact — the run's single
-                    :class:`~pyqenc.stream_model.File` (path + size +
-                    sampled fingerprint) wrapped with its recovery facts;
-                    ``COMPLETE`` once established and persisted.
+                    :class:`~pyqenc.stream_model.ProbedFile` wrapped with
+                    its recovery facts; ``COMPLETE`` once established and
+                    persisted. THE single source of truth for the source:
+                    consumers read ``file.payload.path`` (where) and
+                    ``file.payload.fingerprint`` (identity) — no echoed
+                    input fields, no derived accessors.
         config:     Full validated application configuration.
         work_dir:   Working directory for all pipeline artifacts.
-        source:     Resolved path to the source video file.
         force:      The raw ``--force`` CLI flag — PERMISSION for
                     destructive invalidation effects this run and nothing
                     else (Req 35a): it never causes a wipe by itself; each
@@ -105,20 +107,9 @@ class JobPhaseResult(PhaseResult):
     file:       Artifact[ProbedFile]
     config:     AppConfig
     work_dir:   Path
-    source:     Path
     force:      bool
     cleanup:    CleanupLevel
     no_metrics: bool
-
-    @property
-    def source_fingerprint(self) -> Fingerprint:
-        """The live source content identity — computed once per run at Job.
-
-        The single accessor every phase's identity-key comparison reads.
-        The fingerprint is REQUIRED on ``ProbedFile`` — identity
-        optionality is class-enforced away (2026-10-11); no asserts.
-        """
-        return self.file.payload.fingerprint
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +345,6 @@ class JobPhase(Phase[JobPhaseResult]):
             force       = self._force,
             config      = self._config,
             work_dir    = self._work_dir,
-            source      = self._source,
             cleanup     = self._cleanup,
             no_metrics  = self._no_metrics,
         )

@@ -173,7 +173,7 @@ def _persist_optimization(
     work_dir.mkdir(parents=True, exist_ok=True)
     sidecar = current_optimization_sidecar(
         plan        = probe.result.plan,
-        source      = job.result.source_fingerprint,
+        source      = job.result.file.payload.fingerprint,
         chunks      = fingerprinter.of_ids(
             a.payload.safe_name() for a in chunking.result.chunks
         ),
@@ -882,7 +882,7 @@ class TestStrategyFingerprintWipe:
         assert chunking.result is not None
         stale = current_optimization_sidecar(
             plan        = probe.result.plan,
-            source      = job.result.source_fingerprint,
+            source      = job.result.file.payload.fingerprint,
             chunks      = fingerprinter.of_ids(
                 a.payload.safe_name() for a in chunking.result.chunks
             ),

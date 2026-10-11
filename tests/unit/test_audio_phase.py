@@ -106,7 +106,7 @@ def _make_phase(tmp_path: Path, config: AudioConfig, tracks: list[AudioStream]) 
     job_result = MagicMock()
     job_result.work_dir   = tmp_path
     job_result.force = False
-    job_result.source_fingerprint = _STUB_SOURCE_FP
+    job_result.file.payload.fingerprint = _STUB_SOURCE_FP
     job_result.config     = app_config
 
     job_mock = MagicMock()

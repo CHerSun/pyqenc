@@ -388,7 +388,7 @@ class MergePhase(Phase[MergePhaseResult]):
 
     def _log_key_params(self) -> None:
         """Log the source stem and quality targets (key parameters)."""
-        logger.info("Source stem:  %s", self._deps[JobPhase].source.stem)
+        logger.info("Source stem:  %s", self._deps[JobPhase].file.payload.path.stem)
         plan = self._deps[ProbePhase].plan
 
         if plan.targets:
@@ -443,7 +443,7 @@ class MergePhase(Phase[MergePhaseResult]):
         for existing in sorted(merged_dir.glob("*.yaml")):
             record = MergePhase._load_merge_sidecar(existing)
             if record is not None and not record.provenance.source.matches(
-                job_result.source_fingerprint,
+                job_result.file.payload.fingerprint,
             ):
                 if not job_result.force:
                     raise RecoveryError(
@@ -519,7 +519,7 @@ class MergePhase(Phase[MergePhaseResult]):
         if not strategies:
             return Recovery()
 
-        source_stem = job_result.source.stem
+        source_stem = job_result.file.payload.path.stem
 
         # Per-file acceptance (Req 49): the current provenance each output
         # must match. The winner-set fingerprint derives live from the
@@ -627,7 +627,7 @@ class MergePhase(Phase[MergePhaseResult]):
     def _current_provenance_builder(self) -> _ProvenanceBuilder:
         """The current run's provenance template for per-file acceptance."""
         return _ProvenanceBuilder(
-            source    = self._deps[JobPhase].source_fingerprint,
+            source    = self._deps[JobPhase].file.payload.fingerprint,
             probe     = ProbeFacet.from_probe(self._deps[ProbePhase]),
             plan      = self._deps[ProbePhase].plan,
             sampling  = self._config.measurement.sampling,
@@ -666,8 +666,8 @@ class MergePhase(Phase[MergePhaseResult]):
                 # run used — the ruler in fixed mode (optimization re-derives
                 # it on its own fast path), the config targets in search.
                 quality_targets   = self._presentation_bar(),
-                source_stem       = job_result.source.stem,
-                source_size_bytes = safe_stat_size(job_result.source) or 0,
+                source_stem       = job_result.file.payload.path.stem,
+                source_size_bytes = safe_stat_size(job_result.file.payload.path) or 0,
                 metrics_sampling  = self._config.measurement.sampling,
             )
         return self._make_result(PhaseOutcome.REUSED, wanted, message)
@@ -738,7 +738,7 @@ class MergePhase(Phase[MergePhaseResult]):
         assert probe_result.stream is not None, "probe guaranteed complete by the dependency walk"
         source_stream: ExtendedVideoStream = probe_result.stream.payload
         source_frame_count: int            = probe_result.stream.payload.frame_count
-        source_stem = job_result.source.stem
+        source_stem = job_result.file.payload.path.stem
 
         # Build encoded_chunks dict from EncodingPhase result
         encoded_chunks = self._collect_encoded_chunks()

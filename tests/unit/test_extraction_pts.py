@@ -101,14 +101,13 @@ def _make_extraction_phase(
         force      = force,
         config     = config,
         work_dir   = work_dir,
-        source     = source,
             cleanup     = CleanupLevel.NONE,
             no_metrics  = True,
     )
 
     job = JobPhase(
         config, {},
-        source     = source,
+        source = source,
         work_dir   = work_dir,
         force      = False,
         cleanup    = CleanupLevel.NONE,

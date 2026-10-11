@@ -396,7 +396,6 @@ class TestExtractionPhaseTiming:
             message    = "ok",
             force  = False,
             file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
-            source     = source,
             work_dir   = source.parent / "work",
             config     = config,
             cleanup     = CleanupLevel.NONE,
@@ -589,7 +588,6 @@ class TestChunkingPhaseTiming:
             message    = "ok",
             force  = False,
             file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
-            source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
             cleanup     = CleanupLevel.NONE,
@@ -793,7 +791,6 @@ class TestAudioPhaseTiming:
             message    = "ok",
             force  = False,
             file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
-            source     = source,
             work_dir   = work_dir,
             config     = config,
             cleanup     = CleanupLevel.NONE,
@@ -931,7 +928,6 @@ class TestOptimizationPhaseTiming:
             message    = "ok",
             force  = False,
             file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
-            source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
             cleanup     = CleanupLevel.NONE,
@@ -1050,7 +1046,7 @@ class TestOptimizationPhaseTiming:
         strategy = _STRATEGY_SLOW_H265
         sidecar = current_optimization_sidecar(
             plan        = probe.result.plan,
-            source      = job.result.source_fingerprint,
+            source      = job.result.file.payload.fingerprint,
             chunks      = fingerprinter.of_ids(
                 a.payload.safe_name() for a in chunking.result.chunks
             ),
@@ -1196,7 +1192,6 @@ class TestEncodingPhaseTiming:
             message    = "ok",
             force  = False,
             file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
-            source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
             cleanup     = CleanupLevel.NONE,
@@ -1490,7 +1485,6 @@ class TestMergePhaseTiming:
             message    = "ok",
             force  = False,
             file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
-            source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
             cleanup     = CleanupLevel.NONE,

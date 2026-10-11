@@ -88,7 +88,6 @@ def _make_registry(
         file      = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
         config    = config,
         work_dir  = work_dir,
-        source    = source,
         force     = force,
             cleanup     = CleanupLevel.NONE,
             no_metrics  = True,

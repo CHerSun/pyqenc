@@ -203,7 +203,7 @@ def _make_merge_phase(
 
     job = JobPhase(
         config, {},
-        source     = source,
+        source = source,
         work_dir   = work_dir,
         force      = False,
         cleanup    = CleanupLevel.NONE,
@@ -219,7 +219,6 @@ def _make_merge_phase(
         no_metrics = True,
         config     = config,
         work_dir   = work_dir,
-        source     = source,
     )
 
     registry: PhaseRegistry = {JobPhase: job}
@@ -1391,7 +1390,7 @@ class TestPerFileAcceptance:
         job.result.file = Artifact(
             payload=ProbedFile(
                 fingerprint=Fingerprint(token="f" * 32, size=64),
-                path=job.result.source,
+                path=job.result.file.payload.path,
             ),
             state=ArtifactState.COMPLETE,
         )
