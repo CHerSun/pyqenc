@@ -13,8 +13,6 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-import psutil
-
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.models import EncodingPlan
@@ -46,17 +44,9 @@ from pyqenc.utils.ffmpeg_runner import kill_all_ffmpeg
 from pyqenc.utils.log_format import fmt_key_value_table
 from pyqenc.utils.logging import setup_logging
 from pyqenc.utils.long_path import LongPath
+from pyqenc.utils.process import lower_process_priority
 
 logger = logging.getLogger(__name__)
-
-
-def _set_process_priority() -> None:
-    """Set main process priority to below normal."""
-    try:
-        psutil.Process().nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if sys.platform == "win32" else 10)
-        logger.debug("Process priority set to below normal")
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Failed to set process priority: {e}")
 
 
 def _parse_strategies(strategies_str: str | None) -> list[str] | None:
@@ -949,7 +939,7 @@ Examples:
     setup_logging(args.log_level)
     logger.info("Welcome to pyqenc v%s", pyqenc.__version__)
 
-    _set_process_priority()
+    lower_process_priority()
 
 
     def _sigint_handler(_signum: int, _frame: object) -> None:

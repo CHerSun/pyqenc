@@ -1152,22 +1152,6 @@ tasks-authoring stage:
 
 ---
 
-## 113. All tests must run at lowered process priority (pipeline parity)
-
-**Status:** needs thinking (user ruling 2026-10-09)
-
-The pipeline lowers its process priority in code as one of its first
-steps — encoding work must never starve the user's other work. Test
-processes MUST do the same whenever they spawn real work (e2e runs,
-integration tests driving ffmpeg/ffprobe): pytest and every child it
-starts should run at the same lowered priority as a normal pipeline
-run. (2026-10-09 session: e2e tests spun ffmpeg at normal priority and
-starved the machine while "hanging".)
-
-Related, same session: e2e tests should also run rather fast, on a
-premeditated source (per the standing speed rule) — not on whatever
-sample happens to be around.
-
 ## 114. e2e intent tests hang: ffmpeg 9.0.2 spins encoding the sample's chunk-3 region
 
 **Status:** needs thinking (reproduced standalone 2026-10-09; no code
@@ -1192,6 +1176,10 @@ the same command shape works elsewhere, and the real-source e2e
 scoop ffmpeg version or regenerate the sample; re-verify the intent
 e2e suite after. Also blocks any full-suite gate run that includes
 `tests/e2e/`.
+
+Related (2026-10-09 session): e2e tests should run rather fast, on a
+premeditated source (per the standing speed rule) — not on whatever
+sample happens to be around.
 
 ---
 
