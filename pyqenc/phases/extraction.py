@@ -42,7 +42,7 @@ from pyqenc.constants import (
     TIMESTAMPS_FILENAME,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import Fingerprint, PhaseOutcome
+from pyqenc.models import PhaseOutcome, SizedFingerprintYaml
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -119,7 +119,7 @@ class ExtractionSidecar(BaseModel):
         streams:  The per-type stream inventory (info slices).
     """
 
-    source:   Fingerprint
+    source:   SizedFingerprintYaml
     chapters: bool = False
     streams:  StreamsInventory
 

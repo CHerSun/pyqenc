@@ -38,7 +38,7 @@ from pyqenc.constants import (
     THICK_LINE,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import Fingerprint, PhaseOutcome
+from pyqenc.models import FingerprintYaml, PhaseOutcome, SizedFingerprint, SizedFingerprintYaml
 from pyqenc.phase import (
     Artifact,
     Phase,
@@ -91,11 +91,12 @@ class AudioSidecar(BaseModel):
     leftovers deleted — Req 12-13), so nothing needs to remember how old
     files were named.
 
-    On-disk shape (``audio.yaml``)::
+    On-disk shape (``audio.yaml``) — fingerprints persist as their
+    one-line storage strings (:func:`str` on :class:`Fingerprint`)::
 
-        source: {size: …, token: "…"}
+        source: <sized storage string>
         chains:
-          normal: {token: "9f2c…"}
+          normal: <token-only storage string>
 
     Attributes:
         source: The source identity key (mismatch = catastrophic, Req 33) —
@@ -104,14 +105,14 @@ class AudioSidecar(BaseModel):
         chains: Map of chain name → its committed chain fingerprint.
     """
 
-    source:  Fingerprint
-    chains: dict[str, Fingerprint] = Field(default_factory=dict)
+    source:  SizedFingerprintYaml
+    chains: dict[str, FingerprintYaml] = Field(default_factory=dict)
 
     @classmethod
     def from_resolved(
         cls,
         resolved: dict[str, ResolvedChain],
-        source: Fingerprint,
+        source: SizedFingerprint,
     ) -> Self:
         """Build an ``AudioSidecar`` from resolved chains.
 

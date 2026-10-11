@@ -39,9 +39,11 @@ from pyqenc.models import (
     CleanupLevel,
     CropParams,
     EncodingPlan,
-    Fingerprint,
+    FingerprintYaml,
     PhaseOutcome,
     QualityTarget,
+    SizedFingerprint,
+    SizedFingerprintYaml,
     Strategy,
     fingerprinter,
     targets_as_strings,
@@ -109,9 +111,9 @@ class _OptimizationSidecarBase(BaseModel):
     Req 44).
     """
 
-    source:      Fingerprint
-    chunks:      Fingerprint
-    strategies:  dict[str, Fingerprint]        = Field(default_factory=dict)
+    source:      SizedFingerprintYaml
+    chunks:      SizedFingerprintYaml
+    strategies:  dict[str, FingerprintYaml]  = Field(default_factory=dict)
     probe:       ProbeFacet
     sampling:    int
     test_chunks: list[str]                     = Field(default_factory=list)
@@ -172,8 +174,8 @@ def save_optimization_sidecar(path: Path, sidecar: OptimizationSidecar) -> None:
 
 def current_optimization_sidecar(
     plan:        EncodingPlan,
-    source:      Fingerprint,
-    chunks:      Fingerprint,
+    source:      SizedFingerprint,
+    chunks:      SizedFingerprint,
     probe:       ProbeFacet,
     sampling:    int,
     test_chunks: list[str],
@@ -311,7 +313,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         self._selected_names:    list[str]                         = []
         self._strategy_results:  list[StrategySummaryRow]          = []
         self._current_probe:     ProbeFacet | None                 = None
-        self._chunks_fingerprint: Fingerprint | None               = None
+        self._chunks_fingerprint: SizedFingerprint | None           = None
         """The current chunk-set fingerprint (the chunks key's live side)."""
         self._anchor_name:       str | None                        = None
         """The fixed-mode measurement anchor's display name (fixed compared

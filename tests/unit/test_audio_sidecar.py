@@ -52,9 +52,9 @@ def _sidecar(*chains: tuple[str, list[str]]) -> AudioSidecar:
         name: resolve_chain(ChainSpec(name=name, filters=order), palette)
         for name, order in chains
     }
-    from pyqenc.models import Fingerprint
+    from pyqenc.models import SizedFingerprint
 
-    return AudioSidecar.from_resolved(resolved, source=Fingerprint(token="0" * 32))
+    return AudioSidecar.from_resolved(resolved, source=SizedFingerprint(token="0" * 32, size=64))
 
 
 class TestRoundTrip:
@@ -109,7 +109,9 @@ class TestRoundTrip:
         text = path.read_text(encoding="utf-8")
         assert "bitrate_per_channel" not in text
         assert "dynaudnorm" not in text
-        assert "token:" in text
+        # The fingerprints persist as their one-line storage strings.
+        assert "token:" not in text
+        assert "\u00a0·\u00a0" in text
 
 
 class TestInvalidationFingerprints:

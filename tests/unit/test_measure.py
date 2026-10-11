@@ -106,7 +106,7 @@ class TestParseDuration:
 # _resolve_crop
 # ---------------------------------------------------------------------------
 
-from pyqenc.models import CropParams, Fingerprint, fingerprinter
+from pyqenc.models import CropParams, SizedFingerprint, fingerprinter
 from pyqenc.phases.job import JobSidecar
 from pyqenc.phases.measure import _resolve_crop
 from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic
@@ -117,7 +117,7 @@ def _seed_job_yaml(work_dir: Path, source: Path) -> None:
     work_dir.mkdir(parents=True, exist_ok=True)
     fingerprint = (
         fingerprinter.of_file(source) if source.exists()
-        else Fingerprint(token="0" * 32)
+        else SizedFingerprint(token="0" * 32, size=64)
     )
     sidecar = JobSidecar(path=source, source=fingerprint)
     write_yaml_atomic(work_dir / "job.yaml", sidecar.model_dump(exclude_none=True))
@@ -153,11 +153,14 @@ class TestResolveCrop:
 
     def test_none_probe_yaml_with_crop_returns_crop(self, tmp_path: Path) -> None:
         """None with a probe.yaml containing crop returns that crop without reading job.yaml."""
-        from pyqenc.models import Fingerprint
+        from pyqenc.models import SizedFingerprint
         from pyqenc.phases.probe import ProbeState
 
         expected_crop = CropParams(top=138, bottom=138, left=0, right=0)
-        probe = ProbeState(source=Fingerprint(token="0" * 32), frame_count=1000, crop=expected_crop)
+        probe = ProbeState(
+            source=SizedFingerprint(token="0" * 32, size=64),
+            frame_count=1000, crop=expected_crop,
+        )
         save_model(tmp_path / "probe.yaml", probe)
 
         result = _resolve_crop(None, tmp_path, tmp_path / "source.mkv")
@@ -169,10 +172,12 @@ class TestResolveCrop:
         """None with probe.yaml whose crop is empty returns empty CropParams
         immediately — an empty crop is a concrete resolution, never a reason
         to keep probing the job.yaml fallback."""
-        from pyqenc.models import Fingerprint
+        from pyqenc.models import SizedFingerprint
         from pyqenc.phases.probe import ProbeState
 
-        probe = ProbeState(source=Fingerprint(token="0" * 32), frame_count=500)
+        probe = ProbeState(
+            source=SizedFingerprint(token="0" * 32, size=64), frame_count=500,
+        )
         save_model(tmp_path / "probe.yaml", probe)
 
         source = tmp_path / "source.mkv"

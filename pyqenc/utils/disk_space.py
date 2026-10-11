@@ -92,15 +92,8 @@ def estimate_required_space(
     Returns:
         Estimated required space in GB.
     """
-    size_bytes = (
-        stream.file.fingerprint.size
-        if isinstance(stream.file, ProbedFile) else None
-    )
-    if size_bytes is None:
-        logger.warning("Cannot determine source file size for %s", stream.file.path)
-        return 0.0
-
-    source_size_gb = size_bytes / (1024 ** 3)
+    assert isinstance(stream.file, ProbedFile), "source stream carries the probed job file"
+    source_size_gb = stream.file.fingerprint.size / (1024 ** 3)
     total_pixels   = stream.info.total_pixels
 
     if total_pixels is not None:
@@ -143,11 +136,8 @@ def check_disk_space(
     """
     min_required_gb = estimate_required_space(stream, min_strategies)
     max_required_gb = estimate_required_space(stream, max_strategies)
-    source_size = (
-        stream.file.fingerprint.size
-        if isinstance(stream.file, ProbedFile) else 0
-    )
-    source_size_gb  = source_size / (1024 ** 3)
+    assert isinstance(stream.file, ProbedFile), "source stream carries the probed job file"
+    source_size_gb  = stream.file.fingerprint.size / (1024 ** 3)
     recommended_gb  = max_required_gb * OVERHEAD_TIGHT_MARGIN
 
     work_dir.mkdir(parents=True, exist_ok=True)

@@ -31,7 +31,6 @@ from pyqenc.metrics import (
 )
 from pyqenc.models import (
     CleanupLevel,
-    Fingerprint,
     PhaseOutcome,
     SizedFingerprint,
     Strategy,
@@ -655,7 +654,7 @@ class TestChunkingPhaseTiming:
         write_yaml_atomic(
             work_dir / "chunking.yaml",
             _CS(
-                source=Fingerprint(token="0" * 32),
+                source=_STUB_SOURCE_FP,
                 scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)],
                 scene_threshold=27.0, min_scene_length=24,
             ).model_dump(),
@@ -725,7 +724,7 @@ class TestChunkingPhaseTiming:
         write_yaml_atomic(
             work_dir / "chunking.yaml",
             _CS(
-                source=Fingerprint(token="0" * 32),
+                source=_STUB_SOURCE_FP,
                 scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)],
                 scene_threshold=27.0, min_scene_length=24,
             ).model_dump(),

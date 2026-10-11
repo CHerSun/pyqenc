@@ -13,7 +13,7 @@ from collections.abc import Iterable
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import Enum, IntEnum
 from pathlib import Path
-from typing import Annotated, ClassVar, Self
+from typing import Annotated, ClassVar, Final, Self
 
 from pydantic import (
     BaseModel,
@@ -43,6 +43,14 @@ logger = logging.getLogger(__name__)
 # Fingerprint — the standard identity-comparison value (spec 2026-10-07, Req 10)
 # ---------------------------------------------------------------------------
 
+_NBSP: Final = "\u00a0"
+"""Non-breaking space — RENDERS like a plain space but is NOT yaml
+whitespace (yaml folds U+0020 only), so storage strings built with it
+dump as plain, unquoted scalars."""
+
+_FINGERPRINT_BELT_SEPARATOR: Final = f"{_NBSP}·{_NBSP}"
+"""The fingerprint storage-form separator (belt · token)."""
+
 class Fingerprint(BaseModel):
     """An opaque identity token plus an optional belt magnitude.
 
@@ -66,7 +74,8 @@ class Fingerprint(BaseModel):
     consumers persist and compare with no knowledge of either. Tokens are
     idempotency markers, never re-validated into the model they summarize
     (a fingerprint may omit required fields by construction) and never
-    user-facing data.
+    user-facing data. ``str()`` is the yaml storage form (see the
+    ``FingerprintYaml`` aliases below) — belt first, token last.
 
     Attributes:
         token: The opaque hash token (hex string) — REQUIRED, non-empty.
@@ -119,6 +128,57 @@ class Fingerprint(BaseModel):
             return False
         return self.token == other.token
 
+    def __str__(self) -> str:
+        """The yaml storage form: belt, separator, token.
+
+        The separator (``_FINGERPRINT_BELT_SEPARATOR`` — non-breaking
+        spaces around a middle dot, so yaml never quotes the scalar) is
+        ALWAYS present; the belt part is empty when ``size`` is ``None``.
+        Because the size part (digits or empty) can never contain the
+        separator, parsing is a single split on its FIRST occurrence —
+        an opaque token can never be mistaken for it.
+        """
+        belt = "" if self.size is None else str(self.size)
+        return f"{belt}{_FINGERPRINT_BELT_SEPARATOR}{self.token}"
+
+    @classmethod
+    def parse(cls, value: str) -> Fingerprint:
+        """Parse the yaml storage string (the :meth:`__str__` inverse).
+
+        The constructed class follows belt presence: a present belt part
+        yields :class:`SizedFingerprint`, an empty one a plain
+        :class:`Fingerprint` — which then fails validation on fields
+        demanding the sized type, loudly.
+
+        Args:
+            value: ``"<size><sep><token>"`` — the separator is required;
+                   an empty size part means no belt; ``"0"`` is a real
+                   zero belt (an empty id set), never conflated with
+                   ``None``.
+
+        Returns:
+            The fingerprint (sized when the belt part is present).
+
+        Raises:
+            ValueError: On a missing separator, a non-digit size part, or
+                        an empty token.
+        """
+        size_part, sep, token = value.partition(_FINGERPRINT_BELT_SEPARATOR)
+        if not sep:
+            raise ValueError(
+                f"Invalid fingerprint string {value!r}: the belt separator "
+                "is structural — use the str() storage form"
+            )
+        if not token:
+            raise ValueError(f"Invalid fingerprint string {value!r}: empty token")
+        if size_part == "":
+            return Fingerprint(token=token)
+        if not (size_part.isascii() and size_part.isdigit()):
+            raise ValueError(
+                f"Invalid fingerprint string {value!r}: bad size part {size_part!r}"
+            )
+        return SizedFingerprint(token=token, size=int(size_part))
+
 
 class SizedFingerprint(Fingerprint):
     """A fingerprint whose belt is guaranteed — the file identity.
@@ -132,6 +192,34 @@ class SizedFingerprint(Fingerprint):
     """
 
     size: int  # narrowed from int | None — the belt is total for these derivations
+
+
+def _fingerprint_from_yaml(value: object) -> object:
+    """Accept the storage string wherever a fingerprint loads from yaml.
+
+    ``str(Fingerprint)`` is the declared storage form; a native dict (the
+    legacy nested dump) passes through to normal validation unchanged.
+    """
+    if isinstance(value, str):
+        return Fingerprint.parse(value)
+    return value
+
+
+FingerprintYaml = Annotated[
+    Fingerprint, BeforeValidator(_fingerprint_from_yaml), PlainSerializer(str)
+]
+"""``Fingerprint`` as it persists: the compact one-line storage string,
+parsed back via :meth:`Fingerprint.parse` — the class stays explicitly
+typed; only the yaml boundary changes form. For producers whose belt is
+structural, use :data:`SizedFingerprintYaml` instead."""
+
+SizedFingerprintYaml = Annotated[
+    SizedFingerprint, BeforeValidator(_fingerprint_from_yaml), PlainSerializer(str)
+]
+"""The sized guarantee at the yaml boundary: persisted fields whose
+producer structurally carries the belt (``of_file`` / ``of_ids``). A
+belt-less value fails validation here — a corrupted or foreign record,
+never a silent accept."""
 
 
 class BlakeFingerprinter:

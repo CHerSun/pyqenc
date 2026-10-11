@@ -41,9 +41,11 @@ from pyqenc.metrics import MetricKey
 from pyqenc.models import (
     CropParams,
     EncodingPlan,
-    Fingerprint,
+    FingerprintYaml,
     PhaseOutcome,
     QualityTarget,
+    SizedFingerprint,
+    SizedFingerprintYaml,
     Strategy,
     fingerprinter,
     targets_as_strings,
@@ -114,11 +116,11 @@ class _MergedSidecarBase(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    source:      Fingerprint
-    strategy:    Fingerprint
+    source:      SizedFingerprintYaml
+    strategy:    FingerprintYaml
     probe:       ProbeFacet
     sampling:    int
-    winners:     Fingerprint
+    winners:     SizedFingerprintYaml
     frame_count: int
     metrics:     dict[str, float] = Field(default_factory=dict)
 
@@ -243,11 +245,11 @@ class _SidecarBuilder:
 
     def __init__(
         self,
-        source:   Fingerprint,
+        source:   SizedFingerprint,
         probe:    ProbeFacet,
         plan:     EncodingPlan,
         sampling: int,
-        winners:  Fingerprint,
+        winners:  SizedFingerprint,
     ) -> None:
         self._source   = source
         self._probe    = probe

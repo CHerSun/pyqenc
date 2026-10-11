@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from yaml import safe_dump, safe_load
 
 from pyqenc.audio.layout import ChannelLayout
-from pyqenc.models import CodecConfig, CropParams, Fingerprint, Strategy
+from pyqenc.models import CodecConfig, CropParams, SizedFingerprint, Strategy
 from pyqenc.phases.chunking import ChunkingSidecar, SceneRecord
 from pyqenc.phases.extraction import ExtractionSidecar
 from pyqenc.phases.job import JobSidecar
@@ -39,7 +39,7 @@ from pyqenc.utils.long_path import LongPath
 # Fixtures
 # ---------------------------------------------------------------------------
 
-_STUB_FINGERPRINT = Fingerprint(token="a" * 32, size=8_123_498_745)
+_STUB_FINGERPRINT = SizedFingerprint(token="a" * 32, size=8_123_498_745)
 """A source identity key stub — the same shape every phase sidecar persists."""
 
 
@@ -374,10 +374,9 @@ class TestSidecarIdentityKeys:
     def test_extraction_sidecar_persists_fingerprint_only(self) -> None:
         """Bug prevented: a sidecar key carrying the source PATH — the path is
         a runtime locator (a move must not invalidate anything); the key is
-        the fingerprint pair alone (Req 31)."""
+        the fingerprint storage string alone (Req 31)."""
         dumped = _extraction_sidecar().model_dump(exclude_none=True)
-        assert set(dumped["source"]) == {"token", "size"}
-        assert "path" not in dumped["source"]
+        assert dumped["source"] == str(_STUB_FINGERPRINT)
 
 
 # ---------------------------------------------------------------------------

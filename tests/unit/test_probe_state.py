@@ -3,9 +3,9 @@
 
 from pathlib import Path
 
-from pyqenc.models import CropParams, Fingerprint
+from pyqenc.models import CropParams, SizedFingerprint
 
-_STUB_FP = Fingerprint(token="0" * 32)
+_STUB_FP = SizedFingerprint(token="0" * 32, size=64)
 
 from pyqenc.phases.probe import ProbeState
 from pyqenc.utils.yaml_utils import load_model, save_model
@@ -107,7 +107,7 @@ class TestProbeStateRoundTrip:
         path = tmp_path / "probe.yaml"
         path.write_text(
             "frame_count: 10\n"
-            f"source: {{token: \"{_STUB_FP.token}\"}}\n"
+            f"source: {{token: \"{_STUB_FP.token}\", size: {_STUB_FP.size}}}\n"
             "crop:\n"
             "  top: 5\n"
             "  bottom: 6\n"
@@ -187,7 +187,7 @@ class TestProbeStateRoundTrip:
         tolerance, not file-form pinning."""
         path = tmp_path / "probe.yaml"
         path.write_text(
-            f"frame_count: 100\ncrop: 22,22,0,0\nsource: {{token: \"{_STUB_FP.token}\"}}\n",
+            f"frame_count: 100\ncrop: 22,22,0,0\nsource: {_STUB_FP!s}\n",
             encoding="utf-8",
         )
 

@@ -30,9 +30,9 @@ from pyqenc.models import (
     CropParams,
     CropYaml,
     EncodingPlan,
-    Fingerprint,
     PhaseOutcome,
     Resolution,
+    SizedFingerprintYaml,
 )
 from pyqenc.phase import (
     Artifact,
@@ -96,7 +96,7 @@ class ProbeState(BaseModel):
     field.
     """
 
-    source:      Fingerprint
+    source:      SizedFingerprintYaml
     frame_count: int
     crop:        CropYaml = CropParams()
     crop_source: str | None         = None

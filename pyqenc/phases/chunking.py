@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from scenedetect import ContentDetector, detect
 
 from pyqenc.metrics import MetricKey
-from pyqenc.models import Fingerprint, PhaseOutcome, SceneBoundary
+from pyqenc.models import PhaseOutcome, SceneBoundary, SizedFingerprintYaml
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -89,7 +89,7 @@ class ChunkingSidecar(BaseModel):
                           start.
     """
 
-    source:           Fingerprint
+    source:           SizedFingerprintYaml
     scene_threshold:  float
     min_scene_length: int
     scenes:           list[SceneRecord]
