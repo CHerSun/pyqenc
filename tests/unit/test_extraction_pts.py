@@ -96,7 +96,6 @@ def _make_extraction_phase(
         message    = "job complete",
         file       = Artifact(payload=ProbedFile(
             path            = source,
-            file_size_bytes = source.stat().st_size if source.exists() else 64,
             fingerprint     = fingerprint,
         ), state=ArtifactState.COMPLETE),
         force      = force,
@@ -201,7 +200,7 @@ class TestEnumerateStreams:
     def test_typed_streams_built_from_ffprobe_json(self) -> None:
         """Bug prevented: enumeration losing type-specific fast-facet fields —
         fps fraction, channel layout, forced flag, attachment filename."""
-        file = File(path=LongPath("D:/media/source.mkv"), file_size_bytes=5)
+        file = File(path=LongPath("D:/media/source.mkv"))
         video, audio, subs, attachments, has_chapters = _enumerate_streams(
             _ffprobe_json(
                 _video_json(), _audio_json(), _subtitle_json(), _attachment_json(),

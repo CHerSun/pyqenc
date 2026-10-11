@@ -53,7 +53,7 @@ from pyqenc.phases.job import JobPhase
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import AudioOutput, AudioStream, File
 from pyqenc.utils.alive import AdvanceState, ProgressBar
-from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
+from pyqenc.utils.fs import remove_stale_tmp_files
 from pyqenc.utils.yaml_utils import load_model, save_model
 
 logger = logging.getLogger(__name__)
@@ -440,7 +440,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
             path = audio_dir / name
             rows.append(
                 Artifact(
-                    payload=File(path=path, file_size_bytes=safe_stat_size(path)),
+                    payload=File(path=path),
                     state=ArtifactState.COMPLETE,
                     wanted=False,
                 )

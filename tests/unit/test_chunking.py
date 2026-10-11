@@ -51,7 +51,7 @@ def _stream(frame_count: int = 640, duration: float = 26.67) -> ExtendedVideoStr
     """An extended video stream: 24000/1001 fps, 1920x1080, 640 frames."""
     return ExtendedVideoStream(
         stream = VideoStream(
-            file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path="D:/media/source.mkv", file_size_bytes=64),
+            file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path="D:/media/source.mkv"),
             info = VideoStreamInfo(
                 track_id=0, codec_name="hevc",
                 fps=23.976, fps_fraction=Fraction(24000, 1001),
@@ -85,7 +85,7 @@ def _make_registry(
     job_result = JobPhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
         message   = "job complete",
-        file      = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+        file      = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
         config    = config,
         work_dir  = work_dir,
         source    = source,

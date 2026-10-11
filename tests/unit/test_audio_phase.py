@@ -80,7 +80,7 @@ def _track(tmp_path: Path, stem: str, *, track_id: int = 1, language: str = "eng
     src = LongPath(tmp_path) / f"{stem}.mkv"
     src.write_bytes(b"\x00" * 16)
     return AudioStream(
-        file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=src, file_size_bytes=16),
+        file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=src),
         info = AudioStreamInfo(
             track_id=track_id, codec_name="flac", language=language,
             layout=ChannelLayout.parse(layout),

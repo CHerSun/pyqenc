@@ -106,24 +106,20 @@ class File(BaseModel):
     """A located file plus its cheap facts — no content identity.
 
     The base record for every file we reference without probing it:
-    winner files (size tables), listed surplus rows, placeholder paths.
-    ``file_size_bytes`` is optional because the stat can fail (a pipe, a
-    vanished file) — an honest ``None``, never a fabricated 0.
+    winner files, listed surplus rows, placeholder paths. Sizes of such
+    files are stat-able at read time — never mirrored here.
 
     Identity lives on :class:`ProbedFile` — the VideoStream →
     ExtendedVideoStream pattern at the file layer: Job's input is a path,
     its output is the probed source file.
 
     Attributes:
-        path:            Link to the file on disk.
-        file_size_bytes: File size in bytes, or ``None`` when unavailable
-                         (e.g. the file is a pipe or the stat failed).
+        path: Link to the file on disk.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    path:            LongPathYaml
-    file_size_bytes: int | None = None
+    path: LongPathYaml
 
 
 class ProbedFile(File):
@@ -136,13 +132,13 @@ class ProbedFile(File):
     consumers never handle identity optionality and no accessor needs a
     presence assert. Exactly one probed file exists per run.
 
-    ``file_size_bytes`` coincides with ``fingerprint.size`` by construction
-    (the same stat feeds both) — the belt serves identity comparison, the
-    field serves the size tables and disk estimates that read plain
-    (unprobed) files too.
+    ``fingerprint.size`` IS the file size (the belt; set by the
+    fingerprinter's stat) — the single size the record carries. Consumers
+    needing sizes of unprobed files stat them at read time.
 
     Attributes:
-        fingerprint: The sampled-content identity (Req 30) — REQUIRED.
+        fingerprint: The sampled-content identity (Req 30) — REQUIRED;
+                     its ``size`` is the file size in bytes.
     """
 
     fingerprint: Fingerprint

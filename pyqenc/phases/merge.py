@@ -595,7 +595,7 @@ class MergePhase(Phase[MergePhaseResult]):
                     else ArtifactState.PARTIAL
                 )
                 rows.append(Artifact(
-                    payload = File(path=LongPath(output_file), file_size_bytes=safe_stat_size(output_file)),
+                    payload = File(path=LongPath(output_file)),
                     state   = state,
                     wanted  = False,
                 ))

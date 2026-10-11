@@ -60,7 +60,7 @@ def _make_chunk(cid_start: float, cid_end: float, tmp_path: Path) -> VideoStream
     return VideoStreamChunk(
         stream = ExtendedVideoStream(
             stream = VideoStream(
-                file = File(path=tmp_path / "source.mkv", file_size_bytes=64),
+                file = File(path=tmp_path / "source.mkv"),
                 info = VideoStreamInfo(
                     track_id=0, codec_name="hevc", fps=24.0,
                     fps_fraction=Fraction(24, 1), resolution=_RESOLUTION,
@@ -371,7 +371,7 @@ def _make_encoding_phase(tmp_path: Path, probe_frames: int) -> EncodingPhase:
         stream  = Artifact(
             payload = ExtendedVideoStream(
                 stream = VideoStream(
-                    file = File(path=tmp_path / "source.mkv", file_size_bytes=64),
+                    file = File(path=tmp_path / "source.mkv"),
                     info = VideoStreamInfo(
                         track_id=0, codec_name="hevc", fps=24.0,
                         fps_fraction=Fraction(24, 1), resolution=_RESOLUTION,

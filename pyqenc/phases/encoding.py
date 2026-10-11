@@ -1437,7 +1437,6 @@ def build_encoded_chunk(
     Returns:
         The composed :class:`~pyqenc.stream_model.EncodedChunk`.
     """
-    file_size_bytes = safe_stat_size(path)
     source_info = chunk.stream.stream.info
     attempt_info = VideoStreamInfo(
         track_id     = 0,
@@ -1447,7 +1446,7 @@ def build_encoded_chunk(
     return EncodedChunk(
         stream = ExtendedVideoStream(
             stream      = VideoStream(
-                file = StreamFile(path=path, file_size_bytes=file_size_bytes),
+                file = StreamFile(path=path),
                 info = attempt_info,
             ),
             frame_count = frame_count,
@@ -2588,7 +2587,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             optimization_result, scan, plan,
             winner_sizes={
                 name: sum(
-                    p.stream.stream.file.file_size_bytes or 0
+                    safe_stat_size(p.stream.stream.file.path) or 0
                     for p in payloads
                 )
                 for name, payloads in enc_result.encoded_chunks.items()

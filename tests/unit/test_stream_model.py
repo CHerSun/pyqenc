@@ -44,7 +44,7 @@ _STUB_FINGERPRINT = Fingerprint(token="a" * 32, size=8_123_498_745)
 
 
 def _file() -> File:
-    return File(path=LongPath("D:/media/source.mkv"), file_size_bytes=8_123_498_745)
+    return File(path=LongPath("D:/media/source.mkv"))
 
 
 def _video_stream() -> VideoStream:
@@ -78,7 +78,7 @@ def _extended() -> ExtendedVideoStream:
 class TestFile:
     def test_plain_path_string_is_coerced_to_long_path(self) -> None:
         """A str/pathlib input validates into a LongPath (long-path-safe I/O)."""
-        f = File.model_validate({"path": "D:/media/source.mkv", "file_size_bytes": 1})
+        f = File.model_validate({"path": "D:/media/source.mkv"})
         assert isinstance(f.path, LongPath)
 
     def test_size_is_optional(self) -> None:

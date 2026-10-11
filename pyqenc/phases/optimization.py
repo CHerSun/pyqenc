@@ -60,6 +60,7 @@ from pyqenc.phases.probe import ProbePhase
 from pyqenc.state import ArtifactState, ProbeFacet
 from pyqenc.stream_model import DecimalYaml, EncodedChunk, VideoStreamChunk
 from pyqenc.utils.alive import AdvanceState, ProgressBar
+from pyqenc.utils.fs import safe_stat_size
 from pyqenc.utils.log_format import fmt_size_mb
 from pyqenc.utils.visualization import QualityMeasurer
 from pyqenc.utils.yaml_utils import save_model
@@ -880,7 +881,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 for chunk in test_chunks:
                     encoded = winners_by_chunk.get(chunk.safe_name())
                     if encoded is not None and encoded.stream.stream.file.path.exists():
-                        file_sizes.append(encoded.stream.stream.file.file_size_bytes or 0)
+                        file_sizes.append(safe_stat_size(encoded.stream.stream.file.path) or 0)
                 new_results.append(StrategySummaryRow(
                     strategy     = strategy.display_name(),
                     total_size    = int(sum(file_sizes)),
@@ -934,7 +935,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         for row in rows:
             if row.state == ArtifactState.COMPLETE and isinstance(row.payload, EncodedChunk):
                 name = row.payload.strategy.display_name()
-                sizes[name] = sizes.get(name, 0) + (row.payload.stream.stream.file.file_size_bytes or 0)
+                sizes[name] = sizes.get(name, 0) + (safe_stat_size(row.payload.stream.stream.file.path) or 0)
 
         final_results = sorted(
             [

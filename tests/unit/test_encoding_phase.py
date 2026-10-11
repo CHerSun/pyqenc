@@ -606,7 +606,7 @@ class TestEncodingPresentationTargets:
         )
         extended = ExtendedVideoStream(
             stream=VideoStream(
-                file=_File(path=src, file_size_bytes=64), info=info,
+                file=_File(path=src), info=info,
             ),
             frame_count=240, crop=CropParams(),
         )
@@ -737,7 +737,7 @@ class TestOneWinnerPerChunkGuard:
 
         stream = ExtendedVideoStream(
             stream=VideoStream(
-                file=File(path=Path(f"c_{start}_{end}.mkv"), file_size_bytes=64),
+                file=File(path=Path(f"c_{start}_{end}.mkv")),
                 info=VideoStreamInfo(
                     track_id=0, codec_name="hevc", fps=24.0,
                     fps_fraction=Fraction(24, 1), resolution="1920x1080",

@@ -102,7 +102,7 @@ def _audio_output(out_path: Path):
 
     return AudioOutput(
         stream=AudioStream(
-            file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=out_path.parent.parent / "source.mkv", file_size_bytes=64),
+            file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=out_path.parent.parent / "source.mkv"),
             info=AudioStreamInfo(
                 track_id=1, codec_name="flac", language="eng",
                 layout=ChannelLayout.parse("stereo"), duration_seconds=100.0,
@@ -152,7 +152,7 @@ def _make_video_stream_fixture(path: Path):
     from pyqenc.stream_model import VideoStream, VideoStreamInfo
 
     return VideoStream(
-        file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=64),
+        file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path),
         info=VideoStreamInfo(
             track_id=0, codec_name="hevc", fps=24.0,
             fps_fraction=Fraction(24, 1), resolution="1920x1080",
@@ -187,7 +187,7 @@ def _make_extended_stream(path: Path, frame_count: int, duration: float) -> Exte
 
     return ExtendedVideoStream(
         stream=VideoStream(
-            file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=64),
+            file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path),
             info=VideoStreamInfo(
                 track_id=0, codec_name="hevc", fps=25.0,
                 fps_fraction=Fraction(25, 1), resolution="1920x1080",
@@ -395,7 +395,7 @@ class TestExtractionPhaseTiming:
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
             force  = False,
-            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = source.parent / "work",
             config     = config,
@@ -403,7 +403,7 @@ class TestExtractionPhaseTiming:
             no_metrics  = True,
         )
         result.file     = Artifact(
-            payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=source.stat().st_size),
+            payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source),
             state=ArtifactState.COMPLETE,
         )
         return result
@@ -588,7 +588,7 @@ class TestChunkingPhaseTiming:
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
             force  = False,
-            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
@@ -792,7 +792,7 @@ class TestAudioPhaseTiming:
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
             force  = False,
-            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = work_dir,
             config     = config,
@@ -930,7 +930,7 @@ class TestOptimizationPhaseTiming:
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
             force  = False,
-            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
@@ -1195,7 +1195,7 @@ class TestEncodingPhaseTiming:
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
             force  = False,
-            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
@@ -1489,7 +1489,7 @@ class TestMergePhaseTiming:
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
             force  = False,
-            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,

@@ -44,7 +44,7 @@ from pyqenc.phase import (
     RecoveryError,
 )
 from pyqenc.stream_model import LongPathYaml, ProbedFile
-from pyqenc.utils.fs import remove_stale_tmp_file, safe_stat_size
+from pyqenc.utils.fs import remove_stale_tmp_file
 from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
@@ -401,20 +401,16 @@ class JobPhase(Phase[JobPhaseResult]):
         re-hashing the source or handling identity optionality.
 
         Returns:
-            The probed source file (path + size + fingerprint; size is
-            ``None`` when the stat fails).
+            The probed source file (path + fingerprint; the fingerprint's
+            ``size`` belt is the file size).
 
         Raises:
             OSError: When the source cannot be read for the fingerprint —
                      a fatal at this computing site, never a carried ``None``
                      (Req 10).
         """
-        file_size_bytes = safe_stat_size(self._source)
-        if file_size_bytes is None:
-            logger.warning("Could not stat source file: %s", self._source)
         return ProbedFile(
-            path            = self._source,
-            file_size_bytes = file_size_bytes,
-            fingerprint     = fingerprinter.of_file(self._source),
+            path        = self._source,
+            fingerprint = fingerprinter.of_file(self._source),
         )
 

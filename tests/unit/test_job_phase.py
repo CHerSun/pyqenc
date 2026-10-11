@@ -183,7 +183,6 @@ class TestJobPhaseRunExecuteNoMismatch:
         assert result.file is not None
         assert result.file.state == ArtifactState.COMPLETE
         assert result.file.payload.path == src
-        assert result.file.payload.file_size_bytes == src.stat().st_size
         assert result.file.payload.fingerprint is not None
         assert result.file.payload.fingerprint.size == src.stat().st_size
 

@@ -68,7 +68,7 @@ def _merge_encoded_chunk(path, chunk_id: str, strategy_name: str):
     return EncodedChunk(
         stream=ExtendedVideoStream(
             stream=VideoStream(
-                file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=128),
+                file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path),
                 info=VideoStreamInfo(track_id=0, resolution="1920x1080"),
             ),
             frame_count=24,
@@ -94,7 +94,7 @@ def _extended_stream(path: Path, frame_count: int):
 
     return ExtendedVideoStream(
         stream=VideoStream(
-            file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=64),
+            file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path),
             info=VideoStreamInfo(
                 track_id=0, codec_name="hevc", fps=24.0,
                 fps_fraction=Fraction(24, 1), resolution="1920x1080",
@@ -136,7 +136,7 @@ def _make_extraction_phase(
     config.extraction.include = include
     config.extraction.exclude = exclude
     job_result = JobPhaseResult(
-        file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=source.stat().st_size if source.exists() else 64), state=ArtifactState.COMPLETE),
+        file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
         outcome    = PhaseOutcome.COMPLETED,
         message    = "job complete",
         force  = False,
@@ -447,7 +447,7 @@ def test_frame_count_preservation(frame_count: int) -> None:
         job.result = JobPhaseResult(
             outcome    = PhaseOutcome.COMPLETED,
             message    = "job complete",
-            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
             force  = False,
             config     = config,
             work_dir   = work_dir,

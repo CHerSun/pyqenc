@@ -74,7 +74,7 @@ def _extended_stream(path: Path, frame_count: int) -> ExtendedVideoStream:
     """An ExtendedVideoStream for the source (fast facet + frame count)."""
     return ExtendedVideoStream(
         stream=VideoStream(
-            file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=64),
+            file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path),
             info=VideoStreamInfo(
                 track_id=0, codec_name="hevc", fps=24.0,
                 fps_fraction=Fraction(24, 1), resolution="1920x1080",
@@ -123,7 +123,7 @@ def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
     return EncodedChunk(
         stream = ExtendedVideoStream(
             stream = VideoStream(
-                file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=path.stat().st_size if path.exists() else 64),
+                file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path),
                 info = VideoStreamInfo(track_id=0, resolution="1920x1080"),
             ),
             frame_count = 24,
@@ -213,7 +213,7 @@ def _make_merge_phase(
     job.result = JobPhaseResult(
         outcome    = PhaseOutcome.COMPLETED,
         message    = "job complete",
-        file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+        file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), state=ArtifactState.COMPLETE),
         force      = False,
         cleanup    = CleanupLevel.NONE,
         no_metrics = True,
@@ -1391,7 +1391,7 @@ class TestPerFileAcceptance:
         job.result.file = Artifact(
             payload=ProbedFile(
                 fingerprint=Fingerprint(token="f" * 32, size=64),
-                path=job.result.source, file_size_bytes=64,
+                path=job.result.source,
             ),
             state=ArtifactState.COMPLETE,
         )
