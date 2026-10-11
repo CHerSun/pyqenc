@@ -74,8 +74,9 @@ Winner sidecar: `{crf, metrics, frame_count, targets_met}` — `winning_attempt`
 All fingerprints serialize as the type's YAML form `{size, token}`, `size` omitted when absent (the codebase's `exclude_none` convention); tokens are hashes — canonical dumps are never persisted (Req 10d).
 
 ```yaml
-# job.yaml — the one human-facing header
-source: {path: D:/movie.mkv, fingerprint: {size: 12345, token: "b2:9f…"}}
+# job.yaml — the one human-facing header (amended 2026-10-10: flattened — no nested record; `source` = the identity fingerprint, uniform with every other sidecar)
+path:   D:/movie.mkv
+source: {size: 12345, token: "b2:9f…"}
 
 # optimization.yaml — per-mode union (tag: mode); ALL keys on the common base, all-strategies path included
 mode: search

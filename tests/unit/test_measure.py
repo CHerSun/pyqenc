@@ -107,7 +107,7 @@ class TestParseDuration:
 # ---------------------------------------------------------------------------
 
 from pyqenc.models import CropParams, Fingerprint
-from pyqenc.phases.job import JobSidecar, JobSourceRecord
+from pyqenc.phases.job import JobSidecar
 from pyqenc.phases.measure import _resolve_crop
 from pyqenc.stream_model import File
 from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic
@@ -120,7 +120,7 @@ def _seed_job_yaml(work_dir: Path, source: Path) -> None:
         File.sampled_fingerprint(source) if source.exists()
         else Fingerprint(token="0" * 32)
     )
-    sidecar = JobSidecar(source=JobSourceRecord(path=source, fingerprint=fingerprint))
+    sidecar = JobSidecar(path=source, source=fingerprint)
     write_yaml_atomic(work_dir / "job.yaml", sidecar.model_dump(exclude_none=True))
 
 

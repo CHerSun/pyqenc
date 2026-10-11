@@ -19,7 +19,7 @@ Responsibilities:
 # CHerSun 2026
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
@@ -53,30 +53,23 @@ if TYPE_CHECKING:
 # job.yaml — the human-facing identity record (re-homed sidecar, Req 21)
 # ---------------------------------------------------------------------------
 
-class JobSourceRecord(BaseModel):
-    """The ``job.yaml`` identity record: the locator beside the content.
+class JobSidecar(BaseModel):
+    """``job.yaml`` — the one human-facing sidecar.
 
-    Path is the RUNTIME LOCATOR (a move rewrites ``job.yaml`` and nothing
-    else — no fatal, no invalidation, Req 34); the fingerprint is the
-    identity every phase key compares against (Req 31). The file size lives
-    inside the fingerprint as its belt — it is not duplicated as a field.
+    ``path`` is the RUNTIME LOCATOR (a move rewrites ``job.yaml`` and
+    nothing else — no fatal, no invalidation, Req 34); ``source`` is the
+    identity key every phase's sidecar compares against (Req 31) — the
+    SAME field name as every other sidecar carries for the source
+    identity. The file size lives inside the fingerprint as its belt —
+    it is not duplicated as a field. This file is also the standalone
+    ``measure`` command's source discovery (the sanctioned cross-sidecar
+    read).
     """
 
     model_config = ConfigDict(frozen=True)
 
-    path:       LongPathYaml
-    fingerprint: Fingerprint
-
-
-class JobSidecar(BaseModel):
-    """The ``job.yaml`` slice — the one human-facing sidecar.
-
-    ``source`` names what this workdir works with (the locator + content
-    identity); it is also the standalone ``measure`` command's source
-    discovery (the sanctioned cross-sidecar read).
-    """
-
-    source: JobSourceRecord
+    path:   LongPathYaml
+    source: Fingerprint
 
 
 logger = logging.getLogger(__name__)
@@ -112,9 +105,9 @@ class JobPhaseResult(PhaseResult):
     config:     AppConfig
     work_dir:   Path
     source:     Path
-    force:      bool                  = field(default=False)
-    cleanup:    CleanupLevel          = field(default=CleanupLevel.NONE)
-    no_metrics: bool                  = field(default=False)
+    force:      bool
+    cleanup:    CleanupLevel
+    no_metrics: bool
 
     @property
     def source_fingerprint(self) -> Fingerprint:
@@ -225,7 +218,7 @@ class JobPhase(Phase[JobPhaseResult]):
         if existing is None:
             return
 
-        if not existing.source.fingerprint.matches(live_fingerprint):
+        if not existing.source.matches(live_fingerprint):
             if not self._force:
                 raise RecoveryError(
                     "Source content identity mismatch — this workdir belongs to a "
@@ -240,13 +233,13 @@ class JobPhase(Phase[JobPhaseResult]):
             self._rewrite_record(job_yaml)
             return
 
-        if existing.source.path.resolve() != self._source.resolve():
+        if existing.path.resolve() != self._source.resolve():
             # Locator update (Req 34): the content is unchanged — only the
             # runtime location moved. Rewrite the record; nothing else fires.
             logger.info(
                 "Source moved (%s → %s) — updating the recorded locator "
                 "(content identity unchanged)",
-                existing.source.path, self._source,
+                existing.path, self._source,
             )
             self._rewrite_record(job_yaml)
 
@@ -278,8 +271,8 @@ class JobPhase(Phase[JobPhaseResult]):
         existing = load_model(job_yaml, JobSidecar)
         current = (
             existing is not None
-            and existing.source.fingerprint.matches(live_fingerprint)
-            and existing.source.path.resolve() == self._source.resolve()
+            and existing.source.matches(live_fingerprint)
+            and existing.path.resolve() == self._source.resolve()
         )
         self._stale = not current
         return Recovery.from_artifacts([
@@ -394,10 +387,10 @@ class JobPhase(Phase[JobPhaseResult]):
         assert self._file is not None, "the invalidation probe stashes the File"
         fingerprint = self._file.fingerprint
         assert fingerprint is not None, "the probed File carries its fingerprint"
-        save_model(job_yaml, JobSidecar(source=JobSourceRecord(
-            path       = self._source,
-            fingerprint = fingerprint,
-        )))
+        save_model(job_yaml, JobSidecar(
+            path   = self._source,
+            source = fingerprint,
+        ))
 
     def _probe_file(self) -> File:
         """Construct the run's single :class:`File`, eagerly from the filesystem.

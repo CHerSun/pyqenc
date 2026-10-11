@@ -18,7 +18,7 @@ from pyqenc.audio.layout import ChannelLayout
 from pyqenc.models import CodecConfig, CropParams, Fingerprint, Strategy
 from pyqenc.phases.chunking import ChunkingSidecar, SceneRecord
 from pyqenc.phases.extraction import ExtractionSidecar
-from pyqenc.phases.job import JobSidecar, JobSourceRecord
+from pyqenc.phases.job import JobSidecar
 from pyqenc.stream_model import (
     AttachmentStreamInfo,
     AudioStream,
@@ -344,9 +344,9 @@ class TestSidecarByteIdentity:
     """dump → load → dump is byte-identical for every new sidecar (Req 5.3)."""
 
     def test_job_sidecar(self) -> None:
-        sidecar = JobSidecar(source=JobSourceRecord(
-            path=_file().path, fingerprint=_STUB_FINGERPRINT,
-        ))
+        sidecar = JobSidecar(
+            path=_file().path, source=_STUB_FINGERPRINT,
+        )
         assert _yaml(_reload(sidecar)) == _yaml(sidecar)
 
     def test_extraction_sidecar(self) -> None:

@@ -324,7 +324,7 @@ def _load_job_source_path(job_yaml: Path) -> Path | None:
         The recorded source path, or ``None`` when absent/unparseable.
     """
     sidecar = load_model(job_yaml, JobSidecar)
-    return sidecar.source.path if sidecar is not None else None
+    return sidecar.path if sidecar is not None else None
 
 
 # ---------------------------------------------------------------------------

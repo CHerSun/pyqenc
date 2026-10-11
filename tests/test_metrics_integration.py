@@ -320,7 +320,7 @@ class TestJobPhaseTiming:
 
         Validates: Requirements 6.5
         """
-        from pyqenc.phases.job import JobPhase, JobSidecar, JobSourceRecord
+        from pyqenc.phases.job import JobPhase, JobSidecar
         from pyqenc.stream_model import File
 
         config   = _make_config(tmp_path)
@@ -333,10 +333,10 @@ class TestJobPhaseTiming:
         # Pre-create a valid job.yaml (the identity record) so the phase
         # takes the REUSED path.
         volatile["work_dir"].mkdir(parents=True, exist_ok=True)
-        sidecar = JobSidecar(source=JobSourceRecord(
-            path        = volatile["source"],
-            fingerprint = File.sampled_fingerprint(volatile["source"]),
-        ))
+        sidecar = JobSidecar(
+            path   = volatile["source"],
+            source = File.sampled_fingerprint(volatile["source"]),
+        )
         job_yaml = volatile["work_dir"] / "job.yaml"
         write_yaml_atomic(job_yaml, sidecar.model_dump(exclude_none=True))
         before = job_yaml.read_bytes()
@@ -399,6 +399,8 @@ class TestExtractionPhaseTiming:
             source     = source,
             work_dir   = source.parent / "work",
             config     = config,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
         )
         result.file     = Artifact(
             payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=source.stat().st_size),
@@ -593,6 +595,8 @@ class TestChunkingPhaseTiming:
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
         )
         return result
 
@@ -795,6 +799,8 @@ class TestAudioPhaseTiming:
             source     = source,
             work_dir   = work_dir,
             config     = config,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
         )
 
         extraction_result = ExtractionPhaseResult(
@@ -931,6 +937,8 @@ class TestOptimizationPhaseTiming:
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
         )
         return result
 
@@ -1194,6 +1202,8 @@ class TestEncodingPhaseTiming:
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
         )
         return result
 
@@ -1486,6 +1496,8 @@ class TestMergePhaseTiming:
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
         )
         return result
 

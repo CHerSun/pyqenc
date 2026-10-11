@@ -90,6 +90,8 @@ def _make_registry(
         work_dir  = work_dir,
         source    = source,
         force     = force,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
     )
     job = JobPhase(config, {}, source=source, work_dir=work_dir, force=False,
                    cleanup=CleanupLevel.NONE, no_metrics=True, collector=collector)

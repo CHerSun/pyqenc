@@ -286,7 +286,7 @@ sidecar); per-attempt and per-output sidecars mark pair/output completeness.
 
 | File                  | Contents                                                                                     |
 | --------------------- | -------------------------------------------------------------------------------------------- |
-| `job.yaml`            | Source locator + content identity: `{path, fingerprint {size, token}}`                       |
+| `job.yaml`            | Source locator + content identity: `{path, source {size, token}}`                             |
 | `extraction.yaml`     | Stream inventory (info slices), chapters presence, source identity key                       |
 | `probe.yaml`          | Frame count, crop, crop provenance, resulting resolution (human-facing, derived `source − crop`), source identity key |
 | `chunking.yaml`       | Scene boundaries + detection-param keys (`scene_threshold`, `min_scene_length`) + identity   |

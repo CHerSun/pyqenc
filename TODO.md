@@ -1047,11 +1047,16 @@ Should we move them into separate file, to be readily available for both optimiz
 
 ---
 
-## 107. Phase sidecars: uniform layout — execution-order fields + job.yaml flattening
+## 107. Phase sidecars: uniform layout — execution-order fields
 
-**Status:** feasible, design settled by user (2026-10-09, from the real e2e run's sidecar review); not yet implemented
+**Status:** feasible, design settled by user (2026-10-09, from the real e2e
+run's sidecar review); job.yaml half LANDED 2026-10-10 (b78790f follow-up,
+`JobSidecar` flattened to top-level `{path, source}` with `source` = the
+identity fingerprint everywhere; `JobSourceRecord` deleted); field-order
+half not yet implemented
 
-Two uniformity gaps observed across the eight phase sidecars on a true run:
+The remaining uniformity gap observed across the phase sidecars on a true
+run:
 
 - **Field ordering is not uniform.** Want a stable, execution-order layout in
   every phase YAML: (1) deps/inputs used for invalidation first — `source`
@@ -1062,12 +1067,6 @@ Two uniformity gaps observed across the eight phase sidecars on a true run:
   field-declaration order, so this is a declaration reorder per sidecar
   model — no custom serializers needed. Applies to all phase sidecars + the
   per-output merged sidecar (provenance before facts there, same principle).
-- **job.yaml folds its two values unnecessarily**: `{source: {path,
-  fingerprint}}` today. Flatten to top-level `{path, source}` — `source`
-  then means the identity fingerprint everywhere (uniform with other
-  phases), `path` is the human-facing locator. Pre-alpha break: existing
-  workdirs' job.yaml stops parsing → identity rebuilds on first run (fatal
-  only if the rebuilt identity then mismatches a phase sidecar).
 
 ---
 

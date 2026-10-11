@@ -103,6 +103,8 @@ def _make_extraction_phase(
         config     = config,
         work_dir   = work_dir,
         source     = source,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
     )
 
     job = JobPhase(

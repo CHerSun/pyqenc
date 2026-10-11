@@ -67,6 +67,9 @@ def _make_job_result(work_dir: Path, source: Path) -> JobPhaseResult:
         config    = _APP_CONFIG,
         work_dir  = work_dir,
         source    = source,
+        force     = False,
+        cleanup   = CleanupLevel.NONE,
+        no_metrics= True,
     )
 
 

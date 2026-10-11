@@ -145,6 +145,8 @@ def _make_extraction_phase(
         config     = config,
         work_dir   = work_dir,
         source     = source,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
     )
 
     job = JobPhase(
@@ -452,6 +454,8 @@ def test_frame_count_preservation(frame_count: int) -> None:
             config     = config,
             work_dir   = work_dir,
             source     = source,
+            cleanup     = CleanupLevel.NONE,
+            no_metrics  = True,
         )
 
         registry: PhaseRegistry = {JobPhase: job}

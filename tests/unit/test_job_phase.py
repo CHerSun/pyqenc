@@ -26,7 +26,7 @@ from pyqenc.models import (
     PhaseOutcome,
     QualityTarget,
 )
-from pyqenc.phases.job import JobPhase, JobSidecar, JobSourceRecord
+from pyqenc.phases.job import JobPhase, JobSidecar
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import File
 from pyqenc.utils.yaml_utils import write_yaml_atomic
@@ -79,10 +79,10 @@ def _persist_job(
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     content = fingerprint_of if fingerprint_of is not None else source
-    sidecar = JobSidecar(source=JobSourceRecord(
-        path        = as_path if as_path is not None else source,
-        fingerprint = File.sampled_fingerprint(content),
-    ))
+    sidecar = JobSidecar(
+        path   = as_path if as_path is not None else source,
+        source = File.sampled_fingerprint(content),
+    )
     write_yaml_atomic(work_dir / "job.yaml", sidecar.model_dump(exclude_none=True))
 
 
@@ -168,11 +168,11 @@ class TestJobPhaseRunExecuteNoMismatch:
         phase.run(dry_run=False)
 
         data = yaml.safe_load((tmp_path / "work" / "job.yaml").read_text(encoding="utf-8"))
-        assert set(data) == {"source"}
-        assert set(data["source"]) == {"path", "fingerprint"}
-        assert data["source"]["path"] == str(src)
-        assert data["source"]["fingerprint"]["size"] == src.stat().st_size
-        assert data["source"]["fingerprint"]["token"]
+        assert set(data) == {"path", "source"}
+        assert set(data["source"]) == {"size", "token"}
+        assert data["path"] == str(src)
+        assert data["source"]["size"] == src.stat().st_size
+        assert data["source"]["token"]
 
     def test_result_carries_eager_file(self, tmp_path: Path) -> None:
         """JobPhaseResult exposes the run's single File — path + size +
@@ -244,7 +244,7 @@ class TestJobPhaseLocatorUpdate:
         assert result.is_complete is True
         assert result.outcome == PhaseOutcome.REUSED
         data = yaml.safe_load((work_dir / "job.yaml").read_text(encoding="utf-8"))
-        assert data["source"]["path"] == str(src)
+        assert data["path"] == str(src)
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +336,7 @@ class TestJobPhaseIdentityMismatchWithForce:
         assert result.file is not None
         assert result.file.state == ArtifactState.COMPLETE
         data = yaml.safe_load((work_dir / "job.yaml").read_text(encoding="utf-8"))
-        assert data["source"]["fingerprint"]["token"] == File.sampled_fingerprint(src).token
+        assert data["source"]["token"] == File.sampled_fingerprint(src).token
 
     def test_mismatch_with_permission_logs_warning(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
