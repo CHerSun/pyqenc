@@ -171,7 +171,7 @@ class BlakeFingerprinter:
 
         ONE derivation, two vantages (spec 2026-10-07, Req 19/11a): optimization
         persists it as the chunk-set key (mismatch ⇒ wipe winners), and each
-        merged output's provenance carries it as the winner-set fingerprint.
+        merged output's sidecar carries it as the winner-set fingerprint.
         Order-independent by construction (sorted before hashing).
 
         Args:

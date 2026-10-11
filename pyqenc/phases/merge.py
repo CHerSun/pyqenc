@@ -22,7 +22,8 @@ from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from pyqenc.constants import (
     FAILURE_SYMBOL_MINOR,
@@ -87,35 +88,42 @@ from pyqenc.utils.yaml_utils import load_model, save_model
 # merge.yaml replay aggregate
 # ---------------------------------------------------------------------------
 
-class _MergedProvenanceBase(BaseModel):
-    """The common provenance dimensions of both merged-output variants
-    (Req 27).
+class _MergedSidecarBase(BaseModel):
+    """The common fields of both merged-output sidecar variants (Req 27).
 
-    Every dimension is compared per-file at recovery (Req 49) except
+    The per-output acceptance record, written next to each merged output
+    (stem swap): its presence PLUS a match on every identity dimension
+    makes the output COMPLETE (Req 49). Field names follow the design
+    layout: named for WHAT they identify, never for the fingerprint
+    mechanism (Req 61) — ``strategy`` IS the strategy's resolved-args
+    fingerprint; the strategy's name is already the output's own file
+    name. Every dimension is compared per-file at recovery except
     ``source`` — the one dimension that escalates to the phase-level
-    catastrophic condition (Req 60). Field names follow the design layout:
-    named for WHAT they identify, never for the fingerprint mechanism
-    (Req 61) — ``strategy`` IS the strategy's resolved-args fingerprint;
-    the strategy's name is already the output's own file name.
+    catastrophic condition (Req 60). The anchor is never a dimension: it
+    is a runtime-elected presentation basis (the least-size strategy
+    with measurements), re-derived per run by optimization — never
+    persisted, never compared.
 
-    The anchor is deliberately NOT a dimension (dropped 2026-10-09): it is
-    a runtime-elected presentation basis (the least-size strategy with
-    measurements), re-derived per run by optimization — never persisted,
-    never compared (this resolves TODO §112: anchor re-elections used to
-    re-merge outputs whose winner-set fingerprint — the actual input
-    identity — matched).
+    ``frame_count`` is the measured frame count of the merged output
+    (``0`` = the unknown sentinel — no valid video has zero frames; set
+    at the fetch site, never a model default). ``metrics`` is the FULL
+    measured set in both modes — the re-judgeable end-user record
+    (verdicts are always live, Req 51, so none is ever persisted). The
+    plot path derives from the stem and is never persisted.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    source:   Fingerprint
-    strategy: Fingerprint
-    probe:    ProbeFacet
-    sampling: int
-    winners:  Fingerprint
+    source:      Fingerprint
+    strategy:    Fingerprint
+    probe:       ProbeFacet
+    sampling:    int
+    winners:     Fingerprint
+    frame_count: int
+    metrics:     dict[str, float] = Field(default_factory=dict)
 
 
-class FixedMergedProvenance(_MergedProvenanceBase):
+class FixedMergedOutputSidecar(_MergedSidecarBase):
     """Fixed runs: the strategy's quantized quality is the mode key.
 
     A quality change re-merges automatically — the collapsed range puts
@@ -128,7 +136,7 @@ class FixedMergedProvenance(_MergedProvenanceBase):
     quality: DecimalYaml
 
 
-class SearchMergedProvenance(_MergedProvenanceBase):
+class SearchMergedOutputSidecar(_MergedSidecarBase):
     """Search runs: the targets basis is the mode key (targets steer the
     search — a change re-searches and re-merges; Req 50)."""
 
@@ -136,30 +144,32 @@ class SearchMergedProvenance(_MergedProvenanceBase):
     targets: list[str]         = Field(default_factory=list)
 
 
-MergedProvenance = FixedMergedProvenance | SearchMergedProvenance
-"""The per-mode provenance union; loading dispatches on the ``mode`` tag."""
+MergedOutputSidecar = FixedMergedOutputSidecar | SearchMergedOutputSidecar
+"""The per-mode sidecar union; loading dispatches on the ``mode`` tag."""
+
+_MERGED_OUTPUT_ADAPTER: TypeAdapter[MergedOutputSidecar] = TypeAdapter(
+    Annotated[MergedOutputSidecar, Field(discriminator="mode")]
+)
 
 
-class MergedOutputSidecar(BaseModel):
-    """The per-output acceptance record — facts + provenance, no verdict (Req 27).
+def load_merged_output_sidecar(sidecar_path: Path) -> MergedOutputSidecar | None:
+    """Load a merged-output acceptance record dispatching on the mode tag.
 
-    Written next to each merged output (stem swap). Its presence PLUS a
-    provenance match makes the output COMPLETE (Req 49); ``metrics`` is the
-    FULL measured set in both modes (the re-judgeable end-user record —
-    verdicts are always live, Req 51). The plot path derives from the stem
-    and is never persisted.
+    Args:
+        sidecar_path: The sidecar YAML path.
 
-    Attributes:
-        frame_count: Measured frame count of the merged output (``0`` = the
-                     unknown sentinel — no valid video has zero frames;
-                     set at the fetch site, never a model default).
-        metrics:     The full measured metric set.
-        provenance:  The production-basis record (acceptance compares it).
+    Returns:
+        The tagged record, or ``None`` when absent or unparsable.
     """
-
-    frame_count: int
-    metrics:     dict[str, float]         = Field(default_factory=dict)
-    provenance:  Annotated[MergedProvenance, Field(discriminator="mode")]
+    if not sidecar_path.exists():
+        return None
+    try:
+        with sidecar_path.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        return _MERGED_OUTPUT_ADAPTER.validate_python(data or {})
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        logger.warning("Could not load %s: %s", sidecar_path, exc)
+        return None
 
 
 class MergeSummaryRow(BaseModel):
@@ -221,13 +231,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-class _ProvenanceBuilder:
-    """The current run's provenance template + the per-file acceptance rule.
+class _SidecarBuilder:
+    """The current run's acceptance inputs + the per-file record composer.
 
-    One builder per recovery; ``for_strategy`` composes the expected
-    provenance of one output (the mode's own variant — fixed carries the
+    One builder per recovery; ``compose`` builds the acceptance record to
+    persist for one output (the mode's own variant — fixed carries the
     quality, search the targets), ``acceptance_mismatch`` names the first
-    recorded dimension that contradicts it (``None`` = accepted).
+    recorded dimension that contradicts the current inputs (``None`` =
+    accepted).
     """
 
     def __init__(
@@ -244,30 +255,44 @@ class _ProvenanceBuilder:
         self._sampling = sampling
         self._winners  = winners
 
-    def for_strategy(self, strategy: Strategy) -> MergedProvenance:
-        """Compose the expected provenance for one output (the mode's variant)."""
+    def compose(
+        self,
+        strategy:    Strategy,
+        frame_count: int,
+        all_metrics: dict[str, float],
+    ) -> MergedOutputSidecar:
+        """Build the per-output acceptance record (the mode's variant).
+
+        Facts (frame count, the FULL measured metric set in both modes —
+        the re-judgeable end-user record) plus the production-basis
+        identity; no verdict (verdicts are live, Req 51).
+        """
         codec = strategy.codec
         if self._plan.fixed_quality:
-            return FixedMergedProvenance(
-                source   = self._source,
-                strategy = strategy.fingerprint,
-                quality  = codec.quality_better.quantize(codec.quality_granularity),
-                probe    = self._probe,
-                sampling = self._sampling,
-                winners  = self._winners,
+            return FixedMergedOutputSidecar(
+                source      = self._source,
+                strategy    = strategy.fingerprint,
+                probe       = self._probe,
+                sampling    = self._sampling,
+                winners     = self._winners,
+                frame_count = frame_count,
+                metrics     = {k: float(v) for k, v in all_metrics.items()},
+                quality     = codec.quality_better.quantize(codec.quality_granularity),
             )
-        return SearchMergedProvenance(
-            source   = self._source,
-            strategy = strategy.fingerprint,
-            targets  = targets_as_strings(self._plan.targets),
-            probe    = self._probe,
-            sampling = self._sampling,
-            winners  = self._winners,
+        return SearchMergedOutputSidecar(
+            source      = self._source,
+            strategy    = strategy.fingerprint,
+            probe       = self._probe,
+            sampling    = self._sampling,
+            winners     = self._winners,
+            frame_count = frame_count,
+            metrics     = {k: float(v) for k, v in all_metrics.items()},
+            targets     = targets_as_strings(self._plan.targets),
         )
 
     def acceptance_mismatch(
         self,
-        recorded: MergedProvenance,
+        recorded: MergedOutputSidecar,
         strategy: Strategy,
     ) -> str | None:
         """The first recorded dimension contradicting the current inputs.
@@ -278,26 +303,26 @@ class _ProvenanceBuilder:
         as a mismatch (conservative). The variant kinds must agree — a
         mode switch between runs is itself a mismatch.
         """
-        expected = self.for_strategy(strategy)
-        if not recorded.strategy.matches(expected.strategy):
+        codec = strategy.codec
+        if not recorded.strategy.matches(strategy.fingerprint):
             return "strategy fingerprint"
-        if isinstance(expected, FixedMergedProvenance):
-            if not isinstance(recorded, FixedMergedProvenance):
+        if self._plan.fixed_quality:
+            if not isinstance(recorded, FixedMergedOutputSidecar):
                 return "mode"
-            if recorded.quality != expected.quality:
+            if recorded.quality != codec.quality_better.quantize(codec.quality_granularity):
                 return "quality"
         else:
-            if not isinstance(recorded, SearchMergedProvenance):
+            if not isinstance(recorded, SearchMergedOutputSidecar):
                 return "mode"
-            if recorded.targets != expected.targets:
+            if recorded.targets != targets_as_strings(self._plan.targets):
                 return "targets"
-        if not recorded.probe.matches(expected.probe):
+        if not recorded.probe.matches(self._probe):
             return "probe facet"
         # The winner-set fingerprint is compared as a whole (Req 11a):
         # count + hash over the sorted winner ids; unverifiable = mismatch.
-        if not recorded.winners.matches(expected.winners):
+        if not recorded.winners.matches(self._winners):
             return "winner set"
-        if recorded.sampling != expected.sampling:
+        if recorded.sampling != self._sampling:
             return "sampling"
         return None
 
@@ -428,7 +453,7 @@ class MergePhase(Phase[MergePhaseResult]):
         recorded source identity contradicting the live source is
         catastrophic — fatal without the ``--force`` permission; with it,
         wipe ``merged/`` and ``merge.yaml``. Every other production-basis
-        change is a per-file provenance mismatch handled by the
+        change is a per-file record mismatch handled by the
         classification (re-merge in place — deliverables are retained until
         replaced, Req 60).
 
@@ -442,13 +467,13 @@ class MergePhase(Phase[MergePhaseResult]):
         merged_dir.mkdir(parents=True, exist_ok=True)
         for existing in sorted(merged_dir.glob("*.yaml")):
             record = MergePhase._load_merge_sidecar(existing)
-            if record is not None and not record.provenance.source.matches(
+            if record is not None and not record.source.matches(
                 job_result.file.payload.fingerprint,
             ):
                 if not job_result.force:
                     raise RecoveryError(
                         "Source content identity mismatch (a merged output's "
-                        "provenance) — the deliverables belong to a different source.  "
+                        "sidecar) — the deliverables belong to a different source.  "
                         "Re-run with --force to grant permission to wipe merged/ and "
                         "re-merge the new source."
                     )
@@ -471,7 +496,7 @@ class MergePhase(Phase[MergePhaseResult]):
         2. Clean up leftover ``.tmp`` files.
         3. Determine expected strategies from the encoding winners.
         4. Per-file acceptance: an output is COMPLETE only when the file is
-           present AND its sidecar's provenance matches the current inputs
+           present AND its sidecar matches the current inputs
            on every recorded dimension (strategy fingerprint, mode + the
            mode's key — quality (fixed) / targets (search) —, probe facet,
            sampling, winner-set fingerprint); any mismatch or an
@@ -521,10 +546,10 @@ class MergePhase(Phase[MergePhaseResult]):
 
         source_stem = job_result.file.payload.path.stem
 
-        # Per-file acceptance (Req 49): the current provenance each output
-        # must match. The winner-set fingerprint derives live from the
+        # Per-file acceptance (Req 49): the current inputs each output's
+        # record must match. The winner-set fingerprint derives live from the
         # encoding winners (in memory — no disk reads).
-        current_provenance = self._current_provenance_builder()
+        sidecar_builder = self._sidecar_builder()
         self._pending_reasons = {}
 
         rows: list[Artifact] = []
@@ -535,8 +560,8 @@ class MergePhase(Phase[MergePhaseResult]):
             record = MergePhase._load_merge_sidecar(output_file)
 
             if output_file.exists() and record is not None:
-                reason = current_provenance.acceptance_mismatch(
-                    record.provenance, strategy,
+                reason = sidecar_builder.acceptance_mismatch(
+                    record, strategy,
                 )
                 if reason is None:
                     # COMPLETE — accepted: facts load for the live-verdict
@@ -624,9 +649,9 @@ class MergePhase(Phase[MergePhaseResult]):
         """
         return not QualitySearchBase.failed_targets(metrics, self._presentation_bar())
 
-    def _current_provenance_builder(self) -> _ProvenanceBuilder:
-        """The current run's provenance template for per-file acceptance."""
-        return _ProvenanceBuilder(
+    def _sidecar_builder(self) -> _SidecarBuilder:
+        """The current run's acceptance inputs for per-file record checks."""
+        return _SidecarBuilder(
             source    = self._deps[JobPhase].file.payload.fingerprint,
             probe     = ProbeFacet.from_probe(self._deps[ProbePhase]),
             plan      = self._deps[ProbePhase].plan,
@@ -713,7 +738,7 @@ class MergePhase(Phase[MergePhaseResult]):
         instead).
 
         Every pending row re-merges from the current winners — ABSENT,
-        provenance-mismatched, and the sidecar-less PARTIAL alike (the
+        record-mismatched, and the sidecar-less PARTIAL alike (the
         unverifiable case, Req 49/50) — EXCEPT the sampling-only difference,
         which keeps the concat and re-measures in place.
 
@@ -742,7 +767,7 @@ class MergePhase(Phase[MergePhaseResult]):
 
         # Build encoded_chunks dict from EncodingPhase result
         encoded_chunks = self._collect_encoded_chunks()
-        provenance_builder = self._current_provenance_builder()
+        sidecar_builder = self._sidecar_builder()
 
         final_rows: list[Artifact[MergedVideo]] = []
         failed_strategies: list[str] = []
@@ -772,7 +797,7 @@ class MergePhase(Phase[MergePhaseResult]):
                     source_stream   = source_stream,
                     encoded_chunks  = encoded_chunks,
                 ):
-                    # Everything else re-merges — ABSENT rows, provenance
+                    # Everything else re-merges — ABSENT rows, record
                     # mismatches (M-8: a mode-key change re-searched
                     # winners upstream; the old concat is never current),
                     # and the UNVERIFIABLE case (file present, sidecar
@@ -838,14 +863,15 @@ class MergePhase(Phase[MergePhaseResult]):
                 else:
                     logger.warning("No CRF data available for strategy %s — skipping CRF plot", strategy_name)
 
-                # Write the per-output acceptance record (facts + provenance,
+                # Write the per-output acceptance record (facts + identity,
                 # no verdict — Req 27).
-                self._write_merge_sidecar(
-                    output_file = output_file,
-                    strategy    = strategy,
-                    frame_count = frame_count,
-                    all_metrics = metrics_dict,
-                    provenance  = provenance_builder.for_strategy(strategy),
+                save_model(
+                    MergePhase._sidecar_path(output_file),
+                    sidecar_builder.compose(
+                        strategy    = strategy,
+                        frame_count = frame_count or 0,
+                        all_metrics = metrics_dict,
+                    ),
                 )
 
                 targets_met = self._live_verdict(metrics_dict)
@@ -1086,7 +1112,7 @@ class MergePhase(Phase[MergePhaseResult]):
     @staticmethod
     def _load_merge_sidecar(output_file: Path) -> MergedOutputSidecar | None:
         """Load the per-output acceptance record, or ``None`` if absent/invalid."""
-        return load_model(MergePhase._sidecar_path(output_file), MergedOutputSidecar)
+        return load_merged_output_sidecar(MergePhase._sidecar_path(output_file))
 
     @staticmethod
     def _build_strategy_summaries(
@@ -1125,28 +1151,6 @@ class MergePhase(Phase[MergePhaseResult]):
                 metrics         = {k: v for k, v in payload.metrics.items() if k in rendered_keys},
             ))
         return source_size, summaries
-
-    def _write_merge_sidecar(
-        self,
-        output_file:  Path,
-        strategy:     Strategy,
-        frame_count:  int | None,
-        all_metrics:  dict[str, float],
-        provenance:   MergedProvenance,
-    ) -> None:
-        """Atomically write the per-output acceptance record (Req 27).
-
-        Facts (frame count, the FULL measured metric set in both modes — the
-        re-judgeable end-user record) plus the production provenance; no
-        verdict (verdicts are live, Req 51). The plot path derives from the
-        stem and is never persisted.
-        """
-        record = MergedOutputSidecar(
-            frame_count = frame_count or 0,
-            metrics     = {k: float(v) for k, v in all_metrics.items()},
-            provenance  = provenance,
-        )
-        save_model(MergePhase._sidecar_path(output_file), record)
 
     def _measure_quality(
         self,
