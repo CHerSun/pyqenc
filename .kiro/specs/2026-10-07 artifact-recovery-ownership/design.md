@@ -88,8 +88,9 @@ targets: ["vmaf-min:93.0"]                 # search key
 summary: [ … ]                             # per-strategy rows (sizes [+ comparison metrics])
 # fixed variant instead: pinned: {"h265+slow": "18.0"}   # fixed key
 
-# encoding.yaml — aggregates only (no keys); ONE summary block, typed by the sidecar class
-summary: {limiter: [ … ], frames: {"h265+slow": 172000}}
+# encoding.yaml — aggregates only (no keys); the flattened replay aggregate (amended 2026-10-10: single-field `summary` wrapper deleted; limiter [] = not rendered)
+limiter: [ … ]                            # winning-limiter table ([] = no targets)
+frames: {"h265+slow": 172000}
 
 # probe.yaml  → {frame_count, crop, crop_source: manual|detected, resulting_resolution}   # crop_source + resulting_resolution human-only (the derived dims, source − crop)
 # chunking.yaml → {scenes: […], scene_threshold: 0.27, min_scene_length: 15}  # params = keys

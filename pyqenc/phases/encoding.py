@@ -18,7 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from pyqenc.constants import (
     APPROXIMATE_INDICATOR_SYMBOL,
@@ -141,7 +141,7 @@ class AttemptSidecar(BaseModel):
     """
 
     sampling:    int                # subsampling factor used when the metrics were measured
-    frame_count: int         = 0    # frames of the attempt file (0 = unknown)
+    frame_count: int                # frames of the attempt file (0 = unknown)
     metrics:     dict[str, float]   # all measured values, e.g. vmaf_min, ssim_median
 
 
@@ -192,8 +192,8 @@ class WinnerSidecar(BaseModel):
 
     crf:         DecimalYaml        # exact string round-trip (no float drift)
     metrics:     dict[str, float]   # the TARGETED metric subset
-    frame_count: int         = 0    # frames of the winning attempt (0 = unknown)
-    targets_met: bool        = True # False when search exhausted without a passing attempt
+    frame_count: int                # frames of the winning attempt (0 = unknown)
+    targets_met: bool               # False when search exhausted without a passing attempt
 
 
 logger = logging.getLogger(__name__)
@@ -228,29 +228,24 @@ class LimiterSummary(BaseModel):
 
 
 class EncodingSummary(BaseModel):
-    """The replay aggregate under ``encoding.yaml``'s single ``summary`` key.
+    """``encoding.yaml`` — the replay aggregate (aggregates only, no keys).
 
-    ``limiter`` is the winning-limiter table (presentational — target-gated);
-    ``frames`` is the per-strategy Σ winner frame totals backing the
-    frame-preservation re-assertion on fully-reused runs. Empty ``frames``
-    holds only positive totals; empty (``{}``) marks unknown/skip semantics.
+    ``limiter`` is the winning-limiter table (presentational — target-gated;
+    empty = not rendered: the run carried no judging targets, e.g. an
+    uncompared fixed run); ``frames`` is the per-strategy Σ winner frame
+    totals backing the frame-preservation re-assertion on fully-reused
+    runs — only positive totals are held, empty (``{}``) marks
+    unknown/skip semantics. Both keys always persist on the single
+    post-success write; a file missing either fails validation and costs
+    replay aggregates only (Req 24: no invalidation power).
+
+    Freshness is guaranteed by the pending gate — any invalidated pair
+    routes the run through the processing path, which rebuilds and
+    re-saves the aggregate.
     """
 
-    limiter: list[LimiterSummary] | None = None
-    frames:  dict[str, int]              = Field(default_factory=dict)
-
-
-class EncodingSidecar(BaseModel):
-    """``encoding.yaml`` — the ONE ``summary`` block, nothing else.
-
-    Winner currency is certified cross-phase by ``optimization.yaml``'s keys
-    (Req 24): this file carries no invalidation key, so a missing file costs
-    replay aggregates only and never invalidates anything. Freshness of the
-    summary is guaranteed by the pending gate — any invalidated pair routes
-    the run through the processing path, which rebuilds and re-saves it.
-    """
-
-    summary: EncodingSummary | None = None
+    limiter: list[LimiterSummary]   # winning-limiter rows ([] = no table)
+    frames:  dict[str, int]         # per-strategy Σ winner frame totals
 
 
 def _encoded_dir(work_dir: Path, strategy: Strategy) -> Path:
@@ -260,6 +255,18 @@ def _encoded_dir(work_dir: Path, strategy: Strategy) -> Path:
     here; the presence of a result sidecar marks a pair as ``COMPLETE``.
     """
     return work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
+
+
+def _attempts_dir(work_dir: Path, strategy: Strategy) -> Path:
+    """The CRF-search workspace directory for *strategy*.
+
+    Attempt files (intermediate — the investment) are written here during
+    the search; on convergence the winning attempt is hard-linked into
+    :func:`_encoded_dir`. The twin composition of the two owned directories,
+    module-level like its sibling (the workspace has no module consumers
+    today but the pair reads symmetrically).
+    """
+    return work_dir / ENCODING_WORKSPACE_DIR / strategy.safe_name()
 
 
 def read_winner_sidecar(work_dir: Path, winner: EncodedChunk) -> WinnerSidecar | None:
@@ -756,40 +763,11 @@ class ChunkEncoder:
         self._metric_prefix    = metric_prefix
         self._measure_attempts = measure_attempts
 
-    def _get_output_dir(self, strategy: Strategy) -> Path:
-        """Get the CRF search workspace directory for *strategy*.
-
-        Attempt files (intermediate) are written here during the CRF search.
-        On convergence the winning attempt is hard-linked into ``_get_encoded_dir``.
-
-        Args:
-            strategy: Encoding strategy.
-
-        Returns:
-            Path to ``<work_dir>/encoding/<safe_strategy>/``.
-        """
-        return self.work_dir / ENCODING_WORKSPACE_DIR / strategy.safe_name()
-
-    def _get_encoded_dir(self, strategy: Strategy) -> Path:
-        """Get the finalized output directory for *strategy*.
-
-        Hard-linked winning attempts, result sidecars, and quality graphs are
-        written here.  The presence of a result sidecar marks a pair as
-        ``COMPLETE``.
-
-        Args:
-            strategy: Encoding strategy.
-
-        Returns:
-            Path to ``<work_dir>/encoded/<safe_strategy>/``.
-        """
-        return _encoded_dir(self.work_dir, strategy)
-
     def _get_attempt_path(
         self,
-        chunk_id: str,
-        strategy: Strategy,
-        crf: Decimal,
+        chunk_id:   str,
+        strategy:   Strategy,
+        crf:        Decimal,
     ) -> Path:
         """The attempt path for a (chunk, quality) pair — the exact cache address.
 
@@ -806,8 +784,9 @@ class ChunkEncoder:
         Returns:
             Path to the attempt file.
         """
-        output_dir = self._get_output_dir(strategy)
+        output_dir = _attempts_dir(self.work_dir, strategy)
         return output_dir / EncodedChunk.format_attempt_file_name(chunk_id, crf)
+
 
     def _check_existing_encoding(
         self,
@@ -882,7 +861,7 @@ class ChunkEncoder:
             targets_met:     Whether quality targets were met; ``False`` when the
                              search was exhausted without a passing attempt.
         """
-        encoded_dir = self._get_encoded_dir(strategy)
+        encoded_dir = _encoded_dir(self.work_dir, strategy)
         encoded_dir.mkdir(parents=True, exist_ok=True)
 
         dst_mkv = encoded_dir / EncodedChunk.format_winner_file_name(chunk_id)
@@ -907,7 +886,7 @@ class ChunkEncoder:
         # Intermediate cleanup: delete all attempt files for this pair from
         # encoding/ — only after the promotion and sidecar are safely written.
         if self._cleanup_level >= CleanupLevel.INTERMEDIATE:
-            encoding_dir = self._get_output_dir(strategy)
+            encoding_dir = _attempts_dir(self.work_dir, strategy)
             if encoding_dir.exists():
                 # The attempt's exact q values are workspace facts — sweep the
                 # pair's attempts by prefix (deletion, not identity parsing).
@@ -1069,7 +1048,7 @@ class ChunkEncoder:
             # there is no post-encode rename: the encoded output lands at its
             # final address. The output resolution is derivable (source −
             # crop) and never probed or persisted per attempt.
-            output_dir = self._get_output_dir(strategy)
+            output_dir = _attempts_dir(self.work_dir, strategy)
             output_dir.mkdir(parents=True, exist_ok=True)
 
             # Check for an existing attempt at the exact proposed address
@@ -2115,7 +2094,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
     ) -> None:
         super().__init__(config, phases, collector=collector)
 
-        self._persisted:    EncodingSidecar | None    = None
+        self._persisted:    EncodingSummary | None   = None
         """The replay aggregate loaded from ``encoding.yaml`` during recovery
         (``None`` when absent) — the fast-exit source for the summary."""
         self.quality_labels: dict[str, str]           = {}
@@ -2265,7 +2244,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
 
         # The replay aggregate — loaded here for the fast-exit resurface;
         # its absence costs display only, never invalidation (Req 24).
-        self._persisted = load_model(yaml_path, EncodingSidecar)
+        self._persisted = load_model(yaml_path, EncodingSummary)
 
         # Step 1: clean up .tmp files
         remove_stale_tmp_files(enc_dir)
@@ -2371,18 +2350,14 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             The reused ``EncodingPhaseResult``.
         """
         result = super()._reused_result(wanted, message)
-        if (
-            self._persisted is not None
-            and self._persisted.summary is not None
-            and self._persisted.summary.limiter is not None
-        ):
-            self._log_limiter_summary(self._persisted.summary.limiter)
+        if self._persisted is not None and self._persisted.limiter:
+            self._log_limiter_summary(self._persisted.limiter)
         else:
             logger.debug("No persisted limiter summary — table skipped on reused run")
         self._reassert_frame_preservation(self._persisted)
         return result
 
-    def _reassert_frame_preservation(self, persisted: EncodingSidecar | None) -> None:
+    def _reassert_frame_preservation(self, persisted: EncodingSummary | None) -> None:
         """Re-assert frame preservation from the persisted aggregate (fast exit).
 
         Reads the single ``summary.frames`` map — never per-winner sidecars —
@@ -2392,9 +2367,9 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         remains the hard backstop.  Empty totals (unknown) keep the skip
         semantics and stay silent.
         """
-        if persisted is None or persisted.summary is None:
+        if persisted is None:
             return
-        totals = persisted.summary.frames
+        totals = persisted.frames
         if not totals:
             return
         probe_stream = self._deps[ProbePhase].stream
@@ -2628,10 +2603,10 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         if scan is not None:
             if scan.summaries is not None:
                 self._log_limiter_summary(scan.summaries)
-            save_model(encoding_yaml, EncodingSidecar(summary=EncodingSummary(
-                limiter = scan.summaries,
+            save_model(encoding_yaml, EncodingSummary(
+                limiter = scan.summaries if scan.summaries is not None else [],
                 frames  = scan.frame_totals() if scan.frames_known else {},
-            )))
+            ))
 
         outcome = PhaseOutcome.COMPLETED if enc_result.encoded_count > 0 else PhaseOutcome.REUSED
         return self._make_result(

@@ -22,7 +22,6 @@ from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, ClassVar, Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from pyqenc.constants import (
@@ -152,12 +151,14 @@ class MergedOutputSidecar(BaseModel):
     and is never persisted.
 
     Attributes:
-        frame_count: Measured frame count (``None`` = not determined).
+        frame_count: Measured frame count — REQUIRED key; ``null`` = not
+                     determined (the honest persisted absence; exclude_none
+                     drops the key, and a file missing it fails validation).
         metrics:     The full measured metric set.
         provenance:  The production-basis record (acceptance compares it).
     """
 
-    frame_count: int | None               = None
+    frame_count: int | None
     metrics:     dict[str, float]         = Field(default_factory=dict)
     provenance:  Annotated[MergedProvenance, Field(discriminator="mode")]
 
@@ -1146,10 +1147,7 @@ class MergePhase(Phase[MergePhaseResult]):
             metrics     = {k: float(v) for k, v in all_metrics.items()},
             provenance  = provenance,
         )
-        try:
-            save_model(MergePhase._sidecar_path(output_file), record)
-        except (OSError, ValueError, yaml.YAMLError) as exc:
-            logger.warning("Could not write merge sidecar for %s: %s", output_file.name, exc)
+        save_model(MergePhase._sidecar_path(output_file), record)
 
     def _measure_quality(
         self,

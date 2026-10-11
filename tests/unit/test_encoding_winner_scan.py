@@ -19,7 +19,6 @@ from pyqenc.models import CropParams, PhaseOutcome, QualityTarget
 from pyqenc.phase import Artifact, ArtifactState, PhaseRegistry
 from pyqenc.phases.encoding import (
     EncodingPhase,
-    EncodingSidecar,
     EncodingSummary,
     _scan_winner_sidecars,
     _write_attempt_sidecar,
@@ -331,31 +330,28 @@ class TestScanWinnerSidecars:
 # encoding.yaml aggregate round-trip
 # ---------------------------------------------------------------------------
 
-class TestEncodingSidecarTotals:
+class TestEncodingSummaryTotals:
 
     def test_round_trip(self, tmp_path: Path) -> None:
-        """summary.frames persists into encoding.yaml and loads back."""
+        """frames persists into encoding.yaml and loads back."""
         path = tmp_path / "encoding.yaml"
-        save_model(path, EncodingSidecar(summary=EncodingSummary(
+        save_model(path, EncodingSummary(
+            limiter=[],
             frames={_STRATEGY.display_name(): 9526},
-        )))
+        ))
 
-        loaded = load_model(path, EncodingSidecar)
+        loaded = load_model(path, EncodingSummary)
 
         assert loaded is not None
-        assert loaded.summary is not None
-        assert loaded.summary.frames == {_STRATEGY.display_name(): 9526}
+        assert loaded.frames == {_STRATEGY.display_name(): 9526}
 
-    def test_absent_summary_loads_as_none(self, tmp_path: Path) -> None:
-        """A file with no summary block loads with summary=None (display
-        degrades only — the file carries no keys, Req 24)."""
+    def test_file_missing_keys_loads_absent(self, tmp_path: Path) -> None:
+        """A file missing the aggregate keys fails validation → absent
+        (display degrades only — the file carries no keys, Req 24)."""
         path = tmp_path / "encoding.yaml"
         path.write_text("{}", encoding="utf-8")
 
-        loaded = load_model(path, EncodingSidecar)
-
-        assert loaded is not None
-        assert loaded.summary is None
+        assert load_model(path, EncodingSummary) is None
 
 
 # ---------------------------------------------------------------------------
@@ -398,8 +394,9 @@ class TestReassertFramePreservation:
 
         phase = _make_encoding_phase(tmp_path, probe_frames=9526)
         with caplog.at_level(logging.WARNING):
-            phase._reassert_frame_preservation(EncodingSidecar(
-                summary=EncodingSummary(frames={_STRATEGY.display_name(): 9526}),
+            phase._reassert_frame_preservation(EncodingSummary(
+                limiter=[],
+                frames={_STRATEGY.display_name(): 9526},
             ))
         assert not [r for r in caplog.records if "disagree" in r.message]
 
@@ -408,8 +405,9 @@ class TestReassertFramePreservation:
 
         phase = _make_encoding_phase(tmp_path, probe_frames=9526)
         with caplog.at_level(logging.WARNING):
-            phase._reassert_frame_preservation(EncodingSidecar(
-                summary=EncodingSummary(frames={_STRATEGY.display_name(): 9000}),
+            phase._reassert_frame_preservation(EncodingSummary(
+                limiter=[],
+                frames={_STRATEGY.display_name(): 9000},
             ))
         assert any(
             "disagree" in r.message and "source=9526" in r.message
@@ -421,8 +419,8 @@ class TestReassertFramePreservation:
 
         phase = _make_encoding_phase(tmp_path, probe_frames=9526)
         with caplog.at_level(logging.WARNING):
-            phase._reassert_frame_preservation(EncodingSidecar(
-                summary=EncodingSummary(frames={}),
+            phase._reassert_frame_preservation(EncodingSummary(
+                limiter=[], frames={},
             ))
             phase._reassert_frame_preservation(None)
         assert not [r for r in caplog.records if "disagree" in r.message]

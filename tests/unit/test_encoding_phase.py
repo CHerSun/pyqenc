@@ -43,7 +43,7 @@ def _make_complete_pair(encoded_dir: Path, chunk_id: str = _CHUNK_ID, crf: Decim
     mkv     = encoded_dir / _EC.format_winner_file_name(chunk_id)
     sidecar = encoded_dir / _EC.format_winner_sidecar_name(chunk_id)
     mkv.write_bytes(b"\x00" * 512)
-    write_yaml_atomic(sidecar, {"crf": str(crf), "targets_met": True, "metrics": {"vmaf_min": 94.5}})
+    write_yaml_atomic(sidecar, {"crf": str(crf), "targets_met": True, "frame_count": 24, "metrics": {"vmaf_min": 94.5}})
     return mkv
 
 
