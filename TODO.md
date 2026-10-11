@@ -1434,6 +1434,14 @@ find and fix:
   fields but no `Attributes:`).
 - reST-style fields (`:param x:`, `:rtype:`) or NumPy-style underlined
   headers that predate the convention.
+- **De-archaeologize**: dated reasoning ("dropped 2026-10-09"), discovery
+  stories ("found live when…"), and tombstones of deliberately-absent
+  fields ("X is deliberately NOT a field…") — contract only in the
+  docstring; the history is in commits/specs. The 2026-10-10/11
+  sidecar-diet cycles wrote a lot of this in.
+- **De-duplicate**: field inline trailing comments repeating an
+  `Attributes:` entry — one home; the docstring section wins when the
+  class has a docstring.
 - Stale sections (parameters renamed/removed but the docstring still
   lists them) — the LSP surfaces mismatches; fix as found.
 - Docstrings that narrate mechanics instead of contract (summary +
