@@ -30,13 +30,13 @@ from pyqenc.app_config import AudioConfig, ChainSpec, FilterInstance, SelectEntr
 from pyqenc.audio.chain import ResolvedChain, chain_output_path
 from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import AUDIO_OUTPUT_DIR
-from pyqenc.models import Fingerprint, PhaseOutcome
+from pyqenc.models import PhaseOutcome, SizedFingerprint
 from pyqenc.phases.audio import AudioPhase, AudioSidecar
 from pyqenc.stream_model import AudioStream, AudioStreamInfo, ProbedFile
 from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.yaml_utils import load_model
 
-_STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
+_STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
 """Stub source identity — phases read the job File's fingerprint."""
 
 

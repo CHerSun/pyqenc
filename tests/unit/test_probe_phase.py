@@ -29,8 +29,8 @@ from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import (
     CleanupLevel,
     CropParams,
-    Fingerprint,
     PhaseOutcome,
+    SizedFingerprint,
 )
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
@@ -46,7 +46,7 @@ from tests.test_metrics_integration import (
     _top_level_keys,
 )
 
-_STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
+_STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
 """Stub source identity — phases read the job File's fingerprint."""
 
 

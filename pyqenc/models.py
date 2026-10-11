@@ -120,6 +120,20 @@ class Fingerprint(BaseModel):
         return self.token == other.token
 
 
+class SizedFingerprint(Fingerprint):
+    """A fingerprint whose belt is guaranteed — the file identity.
+
+    The type-level statement of a producer's guarantee: derivations whose
+    belt is structural (``BlakeFingerprinter.of_file`` always stats the
+    file) return this, so consumers read ``.size`` as a plain ``int``
+    with no dead None-handling. Comparison semantics are unchanged —
+    this is-a :class:`Fingerprint`, the belt participates via
+    :meth:`Fingerprint.matches` exactly as before.
+    """
+
+    size: int  # narrowed from int | None — the belt is total for these derivations
+
+
 class BlakeFingerprinter:
     """The single owner of ``Fingerprint`` derivations — the means (Req 10).
 
@@ -173,16 +187,18 @@ class BlakeFingerprinter:
     """Sampled-window size (~1 MiB): head + tail + two interior windows."""
 
     @classmethod
-    def of_file(cls, path: Path) -> Fingerprint:
+    def of_file(cls, path: Path) -> SizedFingerprint:
         """The source file's sampled-content fingerprint (spec Req 30).
 
         Reads head + tail + two interior windows (~1 MiB each, deterministic
         offsets), hashing the concatenation with blake2b-128; ``size`` is the
-        file size. Threat model — accident only: the digest guards against
-        accidental wholesale replacement (re-mux/re-download of a same-named
-        file) and in-window corruption; it does NOT promise detection of
-        isolated mid-file bit rot (coverage is too thin) and NOT adversarial
-        tampering (fixed windows are trivially preserved by an attacker).
+        file size — structurally guaranteed, hence the
+        :class:`SizedFingerprint` return. Threat model — accident only: the
+        digest guards against accidental wholesale replacement
+        (re-mux/re-download of a same-named file) and in-window corruption;
+        it does NOT promise detection of isolated mid-file bit rot
+        (coverage is too thin) and NOT adversarial tampering (fixed windows
+        are trivially preserved by an attacker).
 
         Args:
             path: The file to sample.
@@ -200,7 +216,7 @@ class BlakeFingerprinter:
             for offset in cls._file_window_offsets(size):
                 fh.seek(offset)
                 digest.update(fh.read(cls._FILE_WINDOW_BYTES))
-        return Fingerprint(size=size, token=digest.hexdigest())
+        return SizedFingerprint(size=size, token=digest.hexdigest())
 
     @classmethod
     def _file_window_offsets(cls, size: int) -> list[int]:

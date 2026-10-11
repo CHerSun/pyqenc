@@ -56,7 +56,7 @@ from pyqenc.constants import (
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
 )
-from pyqenc.models import CropParams, Fingerprint, Strategy
+from pyqenc.models import CropParams, SizedFingerprint, Strategy
 from pyqenc.utils.ffmpeg_runner import FFmpegInput
 from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.naming import sanitize_filesystem_text
@@ -138,10 +138,11 @@ class ProbedFile(File):
 
     Attributes:
         fingerprint: The sampled-content identity (Req 30) — REQUIRED;
-                     its ``size`` is the file size in bytes.
+                     its ``size`` is the file size in bytes (typed
+                     non-optional via :class:`SizedFingerprint`).
     """
 
-    fingerprint: Fingerprint
+    fingerprint: SizedFingerprint
 
 
 

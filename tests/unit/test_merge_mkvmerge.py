@@ -42,8 +42,8 @@ from pyqenc.constants import EXTRACTED_DIR, MERGED_OUTPUT_DIR, TIMESTAMPS_FILENA
 from pyqenc.metrics import NoOpMetricsCollector
 from pyqenc.models import (
     CleanupLevel,
-    Fingerprint,
     PhaseOutcome,
+    SizedFingerprint,
     Strategy,
 )
 from pyqenc.phase import Artifact, PhaseRegistry
@@ -1107,7 +1107,7 @@ class TestFixedMergeRecoveryNaming:
 # Per-output acceptance records + merge.yaml replay aggregate (G8)
 # ---------------------------------------------------------------------------
 
-_STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
+_STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
 """Stub source identity — phases read the job File's fingerprint."""
 
 
@@ -1389,7 +1389,7 @@ class TestPerFileAcceptance:
         assert job.result is not None
         job.result.file = Artifact(
             payload=ProbedFile(
-                fingerprint=Fingerprint(token="f" * 32, size=64),
+                fingerprint=SizedFingerprint(token="f" * 32, size=64),
                 path=job.result.file.payload.path,
             ),
             state=ArtifactState.COMPLETE,

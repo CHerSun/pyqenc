@@ -144,7 +144,7 @@ def check_disk_space(
     min_required_gb = estimate_required_space(stream, min_strategies)
     max_required_gb = estimate_required_space(stream, max_strategies)
     source_size = (
-        (stream.file.fingerprint.size or 0)
+        stream.file.fingerprint.size
         if isinstance(stream.file, ProbedFile) else 0
     )
     source_size_gb  = source_size / (1024 ** 3)

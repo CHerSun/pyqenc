@@ -26,6 +26,7 @@ from pyqenc.models import (
     Fingerprint,
     PhaseOutcome,
     QualityTarget,
+    SizedFingerprint,
     Strategy,
     fingerprinter,
 )
@@ -680,7 +681,7 @@ from decimal import Decimal
 
 from pyqenc.constants import ENCODED_OUTPUT_DIR
 
-_STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
+_STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
 """Stub source identity — phases read the job File's fingerprint."""
 
 
@@ -851,7 +852,6 @@ class TestStrategyFingerprintWipe:
     fire afterwards (2026-10-08 audit minor, promoted to a fix)."""
 
     def test_only_changed_strategy_wiped(self, tmp_path: Path) -> None:
-        from pyqenc.models import Fingerprint
         from pyqenc.phases.job import JobPhase as _JP
         from pyqenc.phases.optimization import (
             SearchOptimizationSidecar,

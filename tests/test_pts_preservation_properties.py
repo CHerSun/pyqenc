@@ -22,7 +22,7 @@ from hypothesis import strategies as st
 from pyqenc.app_config import load_app_config
 from pyqenc.constants import EXTRACTED_DIR, TIMESTAMPS_FILENAME
 from pyqenc.metrics import NoOpMetricsCollector
-from pyqenc.models import CleanupLevel, Fingerprint, PhaseOutcome
+from pyqenc.models import CleanupLevel, PhaseOutcome, SizedFingerprint
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import (
     ExtractionPhase,
@@ -33,7 +33,7 @@ from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import ProbedFile, VideoStream, VideoStreamInfo
 
-_STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
+_STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
 """Stub source identity — phases read the job File's fingerprint."""
 
 

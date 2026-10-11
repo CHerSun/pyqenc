@@ -17,7 +17,7 @@ import pytest
 
 from pyqenc.app_config import AppConfig, load_app_config
 from pyqenc.metrics import NoOpMetricsCollector
-from pyqenc.models import CleanupLevel, Fingerprint, PhaseOutcome, SceneBoundary
+from pyqenc.models import CleanupLevel, PhaseOutcome, SceneBoundary, SizedFingerprint
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.chunking import (
     ChunkingPhase,
@@ -37,7 +37,7 @@ from pyqenc.stream_model import (
     VideoStreamInfo,
 )
 
-_STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
+_STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
 """Stub source identity — phases read the job File's fingerprint."""
 
 _APP_CONFIG = load_app_config(default_only=True)

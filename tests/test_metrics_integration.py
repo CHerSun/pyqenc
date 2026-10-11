@@ -33,6 +33,7 @@ from pyqenc.models import (
     CleanupLevel,
     Fingerprint,
     PhaseOutcome,
+    SizedFingerprint,
     Strategy,
     fingerprinter,
 )
@@ -48,7 +49,7 @@ from pyqenc.state import ArtifactState
 from pyqenc.stream_model import ExtendedVideoStream, ProbedFile, VideoStreamChunk
 from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic
 
-_STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
+_STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
 """Stub source identity — phases read the job File's fingerprint."""
 
 
@@ -645,7 +646,6 @@ class TestChunkingPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.models import Fingerprint
         from pyqenc.phases.chunking import ChunkingSidecar as _CS
         from pyqenc.phases.chunking import SceneRecord
 
@@ -717,7 +717,6 @@ class TestChunkingPhaseTiming:
 
         Validates: Requirements 6.5, 2.7
         """
-        from pyqenc.models import Fingerprint
         from pyqenc.phases.chunking import ChunkingSidecar as _CS
         from pyqenc.phases.chunking import SceneRecord
 
