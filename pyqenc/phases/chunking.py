@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from scenedetect import ContentDetector, detect
 
 from pyqenc.metrics import MetricKey
-from pyqenc.models import Fingerprint, PhaseOutcome, SceneBoundary, identity_changed
+from pyqenc.models import Fingerprint, PhaseOutcome, SceneBoundary
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -45,9 +45,6 @@ if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
 
-# ---------------------------------------------------------------------------
-# chunking.yaml — the boundaries sidecar (re-homed, Req 21)
-# ---------------------------------------------------------------------------
 
 class SceneRecord(BaseModel):
     """One persisted scene boundary.
@@ -100,11 +97,6 @@ class ChunkingSidecar(BaseModel):
 
 logger = logging.getLogger(__name__)
 
-
-
-# ---------------------------------------------------------------------------
-# Scene detection
-# ---------------------------------------------------------------------------
 
 def detect_scenes(
     stream:           ExtendedVideoStream,
@@ -300,7 +292,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         yaml_path  = job_result.work_dir / ChunkingPhase.SIDECAR_NAME
 
         sidecar = load_model(yaml_path, ChunkingSidecar)
-        if sidecar is not None and identity_changed(sidecar.source, job_result.source_fingerprint):
+        if sidecar is not None and not sidecar.source.matches(job_result.source_fingerprint):
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (chunking.yaml) — the "
@@ -482,7 +474,3 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
             ctx: Pre-resolved end-of-run decisions from the runner.
         """
         return
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------

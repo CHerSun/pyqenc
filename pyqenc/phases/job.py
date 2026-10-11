@@ -31,6 +31,7 @@ from pyqenc.models import (
     CleanupLevel,
     Fingerprint,
     PhaseOutcome,
+    fingerprinter,
 )
 from pyqenc.phase import (
     Artifact,
@@ -415,6 +416,6 @@ class JobPhase(Phase[JobPhaseResult]):
         return File(
             path            = self._source,
             file_size_bytes = file_size_bytes,
-            fingerprint     = File.sampled_fingerprint(self._source),
+            fingerprint     = fingerprinter.of_file(self._source),
         )
 

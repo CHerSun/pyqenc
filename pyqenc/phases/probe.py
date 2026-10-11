@@ -33,7 +33,6 @@ from pyqenc.models import (
     Fingerprint,
     PhaseOutcome,
     Resolution,
-    identity_changed,
 )
 from pyqenc.phase import (
     Artifact,
@@ -235,7 +234,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         remove_stale_tmp_file(probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX))
 
         state = load_model(probe_yaml, ProbeState)
-        if state is not None and identity_changed(state.source, job_result.source_fingerprint):
+        if state is not None and not state.source.matches(job_result.source_fingerprint):
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (probe.yaml) — the committed "

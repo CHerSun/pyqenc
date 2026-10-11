@@ -25,10 +25,10 @@ from pyqenc.models import (
     CleanupLevel,
     PhaseOutcome,
     QualityTarget,
+    fingerprinter,
 )
 from pyqenc.phases.job import JobPhase, JobSidecar
 from pyqenc.state import ArtifactState
-from pyqenc.stream_model import File
 from pyqenc.utils.yaml_utils import write_yaml_atomic
 
 # ---------------------------------------------------------------------------
@@ -81,7 +81,7 @@ def _persist_job(
     content = fingerprint_of if fingerprint_of is not None else source
     sidecar = JobSidecar(
         path   = as_path if as_path is not None else source,
-        source = File.sampled_fingerprint(content),
+        source = fingerprinter.of_file(content),
     )
     write_yaml_atomic(work_dir / "job.yaml", sidecar.model_dump(exclude_none=True))
 
@@ -336,7 +336,7 @@ class TestJobPhaseIdentityMismatchWithForce:
         assert result.file is not None
         assert result.file.state == ArtifactState.COMPLETE
         data = yaml.safe_load((work_dir / "job.yaml").read_text(encoding="utf-8"))
-        assert data["source"]["token"] == File.sampled_fingerprint(src).token
+        assert data["source"]["token"] == fingerprinter.of_file(src).token
 
     def test_mismatch_with_permission_logs_warning(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

@@ -17,10 +17,8 @@ from pyqenc.models import (
     CodecConfig,
     Fingerprint,
     Strategy,
-    fingerprint_token,
-    id_set_fingerprint,
+    fingerprinter,
 )
-from pyqenc.stream_model import File
 
 
 def _codec(**overrides) -> CodecConfig:
@@ -104,30 +102,30 @@ class TestFingerprintType:
 class TestTokenDerivation:
     """The shared hash primitive and the id-set derivation (Req 10c, 11a)."""
 
-    def test_fingerprint_token_deterministic_and_sensitive(self) -> None:
+    def test_of_text_deterministic_and_sensitive(self) -> None:
         """Same canonical form → same token; any difference → different token.
 
         Bug: a non-deterministic or insensitive hash would make every
         fingerprint comparison meaningless.
         """
-        assert fingerprint_token("abc") == fingerprint_token("abc")
-        assert fingerprint_token("abc") != fingerprint_token("abd")
+        assert fingerprinter.of_text("abc") == fingerprinter.of_text("abc")
+        assert fingerprinter.of_text("abc") != fingerprinter.of_text("abd")
 
-    def test_id_set_fingerprint_is_order_insensitive(self) -> None:
+    def test_of_ids_is_order_insensitive(self) -> None:
         """Set identity does not depend on iteration order.
 
         Bug: the chunk-set key would spuriously invalidate winners whenever
         the chunking result arrived in a different order.
         """
-        assert id_set_fingerprint(["b", "a", "c"]) == id_set_fingerprint(["c", "a", "b"])
+        assert fingerprinter.of_ids(["b", "a", "c"]) == fingerprinter.of_ids(["c", "a", "b"])
 
-    def test_id_set_fingerprint_size_is_the_count(self) -> None:
+    def test_of_ids_size_is_the_count(self) -> None:
         """``size`` carries the cardinality (Req 11a: count + hash).
 
         Bug: without the count, two different sets could collide only via
         hash; the belt is the cheap pre-check.
         """
-        fp = id_set_fingerprint(["a", "b"])
+        fp = fingerprinter.of_ids(["a", "b"])
         assert fp.size == 2
 
     def test_id_set_fingerprint_detects_membership_change(self) -> None:
@@ -135,10 +133,10 @@ class TestTokenDerivation:
 
         Bug guarded (Req 19): a re-chunk must wipe winners via this key.
         """
-        base = id_set_fingerprint(["a", "b"])
-        assert base.matches(id_set_fingerprint(["a", "b"]))
-        assert not base.matches(id_set_fingerprint(["a", "b", "c"]))
-        assert not base.matches(id_set_fingerprint(["a"]))
+        base = fingerprinter.of_ids(["a", "b"])
+        assert base.matches(fingerprinter.of_ids(["a", "b"]))
+        assert not base.matches(fingerprinter.of_ids(["a", "b", "c"]))
+        assert not base.matches(fingerprinter.of_ids(["a"]))
 
 
 class TestStrategyFingerprint:
@@ -232,8 +230,8 @@ class TestSourceFingerprint:
         for p in (a, b):
             p.write_bytes(data)
         try:
-            fp_a = File.sampled_fingerprint(a)
-            fp_b = File.sampled_fingerprint(b)
+            fp_a = fingerprinter.of_file(a)
+            fp_b = fingerprinter.of_file(b)
             assert fp_a.matches(fp_b)
             assert fp_a.size == fp_b.size == len(data)
         finally:
@@ -251,9 +249,9 @@ class TestSourceFingerprint:
         p = Path("D:/_encoding/tmp/fp_c.mkv")
         try:
             p.write_bytes(b"a" * size)
-            original = File.sampled_fingerprint(p)
+            original = fingerprinter.of_file(p)
             p.write_bytes(b"b" * size)
-            replaced = File.sampled_fingerprint(p)
+            replaced = fingerprinter.of_file(p)
             assert not original.matches(replaced)
         finally:
             p.unlink(missing_ok=True)
@@ -268,12 +266,12 @@ class TestSourceFingerprint:
         p = Path("D:/_encoding/tmp/fp_d.bin")
         try:
             p.write_bytes(b"")
-            empty = File.sampled_fingerprint(p)
+            empty = fingerprinter.of_file(p)
             assert empty.size == 0
             assert empty.token
 
             p.write_bytes(b"abc")
-            tiny = File.sampled_fingerprint(p)
+            tiny = fingerprinter.of_file(p)
             assert tiny.size == 3
             assert tiny.token
             assert not tiny.matches(empty)

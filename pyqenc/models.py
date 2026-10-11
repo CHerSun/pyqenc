@@ -93,6 +93,15 @@ class Fingerprint(BaseModel):
     def matches(self, other: Fingerprint) -> bool:
         """Uniform identity comparison: token authoritative, size a belt.
 
+        THE identity comparison callers use directly (Req 32/33): the key
+        is required on every sidecar that carries it — a sidecar missing
+        it fails validation and loads as absent, so the caller's
+        sidecar-presence guard is the only unknown state left, and a
+        present key that does not match the live identity is the phase's
+        catastrophic condition. NOT ``__eq__``: belt-tolerant equality is
+        not transitive (``{t, 64}`` matches ``{t}`` matches ``{t, 128}``,
+        but the outer two mismatch) — value equality stays pydantic's.
+
         Args:
             other: The fingerprint to compare against.
 
@@ -111,64 +120,106 @@ class Fingerprint(BaseModel):
         return self.token == other.token
 
 
-def fingerprint_token(canonical: str) -> str:
-    """Hash a canonical serialization into an opaque fingerprint token.
+class BlakeFingerprinter:
+    """The single owner of ``Fingerprint`` derivations — the means (Req 10).
 
-    The one primitive every fingerprint derivation builds on: blake2b-128
-    over the canonical form's UTF-8 bytes. Canonical dumps themselves are
-    never persisted anywhere — debug reads the config / source of truth, not
-    the sidecar.
-
-    Args:
-        canonical: The owner-declared canonical serialization (deterministic
-                   for the same value by construction).
-
-    Returns:
-        The hex token.
+    ``Fingerprint`` stays a dumb value record; every token in the system is
+    derived HERE: blake2b-128 over each thing's canonical form (Req 10d:
+    canonical dumps are never persisted — debug reads the config / source
+    of truth, not the sidecar). One method per input kind — no uniform
+    ``from_payload``: the file derivation is sampled windows, not a
+    canonical-form hash, and pretending otherwise would lie about it.
     """
-    return hashlib.blake2b(
-        canonical.encode("utf-8"), digest_size=FINGERPRINT_DIGEST_SIZE_BYTES,
-    ).hexdigest()
+
+    @staticmethod
+    def _token(canonical: str) -> str:
+        """blake2b-128 over the canonical form's UTF-8 bytes."""
+        return hashlib.blake2b(
+            canonical.encode("utf-8"), digest_size=FINGERPRINT_DIGEST_SIZE_BYTES,
+        ).hexdigest()
+
+    @classmethod
+    def of_text(cls, canonical: str) -> Fingerprint:
+        """A canonical serialization's fingerprint (token only).
+
+        Args:
+            canonical: The owner-declared canonical serialization
+                       (deterministic for the same value by construction).
+
+        Returns:
+            The fingerprint (no belt — text has no meaningful magnitude).
+        """
+        return Fingerprint(token=cls._token(canonical))
+
+    @classmethod
+    def of_ids(cls, ids: Iterable[str]) -> Fingerprint:
+        """The identity of a set of ids: hash over the sorted ids, ``size`` = count.
+
+        ONE derivation, two vantages (spec 2026-10-07, Req 19/11a): optimization
+        persists it as the chunk-set key (mismatch ⇒ wipe winners), and each
+        merged output's provenance carries it as the winner-set fingerprint.
+        Order-independent by construction (sorted before hashing).
+
+        Args:
+            ids: The member ids in any order (chunk ids / winner ids).
+
+        Returns:
+            The set's fingerprint (``size`` = member count).
+        """
+        ordered = sorted(ids)
+        return Fingerprint(token=cls._token("\n".join(ordered)), size=len(ordered))
+
+    _FILE_WINDOW_BYTES: ClassVar[int] = 1_048_576
+    """Sampled-window size (~1 MiB): head + tail + two interior windows."""
+
+    @classmethod
+    def of_file(cls, path: Path) -> Fingerprint:
+        """The source file's sampled-content fingerprint (spec Req 30).
+
+        Reads head + tail + two interior windows (~1 MiB each, deterministic
+        offsets), hashing the concatenation with blake2b-128; ``size`` is the
+        file size. Threat model — accident only: the digest guards against
+        accidental wholesale replacement (re-mux/re-download of a same-named
+        file) and in-window corruption; it does NOT promise detection of
+        isolated mid-file bit rot (coverage is too thin) and NOT adversarial
+        tampering (fixed windows are trivially preserved by an attacker).
+
+        Args:
+            path: The file to sample.
+
+        Returns:
+            The fingerprint (``size`` = file size in bytes).
+
+        Raises:
+            OSError: When the file cannot be read — a fatal at the computing
+                     site (Job), never a carried ``None``.
+        """
+        size = path.stat().st_size
+        digest = hashlib.blake2b(digest_size=FINGERPRINT_DIGEST_SIZE_BYTES)
+        with open(path, "rb") as fh:
+            for offset in cls._file_window_offsets(size):
+                fh.seek(offset)
+                digest.update(fh.read(cls._FILE_WINDOW_BYTES))
+        return Fingerprint(size=size, token=digest.hexdigest())
+
+    @classmethod
+    def _file_window_offsets(cls, size: int) -> list[int]:
+        """The four deterministic sample offsets: head, 1/3, 2/3, tail.
+
+        For files smaller than the windows the reads simply overlap or come
+        up empty (seeks past EOF read zero bytes) — the derivation stays
+        total and deterministic for every size, including zero.
+        """
+        return sorted({
+            0,
+            size // 3,
+            (size * 2) // 3,
+            max(0, size - cls._FILE_WINDOW_BYTES),
+        })
 
 
-def id_set_fingerprint(ids: Iterable[str]) -> Fingerprint:
-    """The identity of a set of ids: hash over the sorted ids, ``size`` = count.
-
-    ONE derivation, two vantages (spec 2026-10-07, Req 19/11a): optimization
-    persists it as the chunk-set key (mismatch ⇒ wipe winners), and each
-    merged output's provenance carries it as the winner-set fingerprint.
-    Order-independent by construction (sorted before hashing).
-
-    Args:
-        ids: The member ids in any order (chunk ids / winner ids).
-
-    Returns:
-        The set's fingerprint (``size`` = member count).
-    """
-    ordered = sorted(ids)
-    return Fingerprint(
-        token = fingerprint_token("\n".join(ordered)),
-        size  = len(ordered),
-    )
-
-
-def identity_changed(persisted: Fingerprint, live: Fingerprint) -> bool:
-    """The one source-identity comparison (Req 32/33).
-
-    The identity key is REQUIRED on every sidecar that carries it — a
-    sidecar missing the key fails validation and loads as absent, so the
-    caller's sidecar-presence guard is the only unknown state left. A
-    present key that does not match the live identity is the phase's
-    catastrophic condition.
-
-    Args:
-        persisted: The sidecar's recorded identity key.
-        live:      The live source identity (from the job's ``File``).
-
-    Returns:
-        ``True`` when the persisted key contradicts the live identity.
-    """
-    return not persisted.matches(live)
+fingerprinter = BlakeFingerprinter()
+"""The derivation surface callers use — ``fingerprinter.of_text/of_ids/of_file``."""
 
 
 
@@ -277,10 +328,8 @@ class Strategy(BaseModel):
         with :meth:`Fingerprint.matches` — no model-shape knowledge at any
         comparison site. Joining the name family: display/safe/fingerprint.
         """
-        return Fingerprint(
-            token=fingerprint_token(
-                self.model_dump_json(exclude=self._fingerprint_exclude_spec()),
-            ),
+        return fingerprinter.of_text(
+            self.model_dump_json(exclude=self._fingerprint_exclude_spec()),
         )
 
     @classmethod

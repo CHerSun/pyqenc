@@ -42,7 +42,7 @@ from pyqenc.constants import (
     TIMESTAMPS_FILENAME,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import Fingerprint, PhaseOutcome, identity_changed
+from pyqenc.models import Fingerprint, PhaseOutcome
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -554,7 +554,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         sidecar_path  = job_result.work_dir / ExtractionPhase.SIDECAR_NAME
 
         sidecar = load_model(sidecar_path, ExtractionSidecar)
-        if sidecar is not None and identity_changed(sidecar.source,
+        if sidecar is not None and not sidecar.source.matches(
                             job_result.source_fingerprint):
             if not job_result.force:
                 raise RecoveryError(

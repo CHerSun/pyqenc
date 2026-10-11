@@ -27,6 +27,7 @@ from pyqenc.models import (
     PhaseOutcome,
     QualityTarget,
     Strategy,
+    fingerprinter,
 )
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.encoding import WinnerSidecar
@@ -156,7 +157,6 @@ def _persist_optimization(
     results (job source identity, probe facet, chunk set, plan) so no
     invalidation fires — the persisted ``summary`` is what the test varies.
     """
-    from pyqenc.models import id_set_fingerprint
 
     job    = phase._phases[JobPhase]
     probe  = next(
@@ -173,7 +173,7 @@ def _persist_optimization(
     sidecar = current_optimization_sidecar(
         plan        = probe.result.plan,
         source      = job.result.source_fingerprint,
-        chunks      = id_set_fingerprint(
+        chunks      = fingerprinter.of_ids(
             a.payload.safe_name() for a in chunking.result.chunks
         ),
         probe       = ProbeFacet.from_probe(probe.result),
@@ -851,7 +851,7 @@ class TestStrategyFingerprintWipe:
     fire afterwards (2026-10-08 audit minor, promoted to a fix)."""
 
     def test_only_changed_strategy_wiped(self, tmp_path: Path) -> None:
-        from pyqenc.models import Fingerprint, id_set_fingerprint
+        from pyqenc.models import Fingerprint
         from pyqenc.phases.job import JobPhase as _JP
         from pyqenc.phases.optimization import (
             SearchOptimizationSidecar,
@@ -883,7 +883,7 @@ class TestStrategyFingerprintWipe:
         stale = current_optimization_sidecar(
             plan        = probe.result.plan,
             source      = job.result.source_fingerprint,
-            chunks      = id_set_fingerprint(
+            chunks      = fingerprinter.of_ids(
                 a.payload.safe_name() for a in chunking.result.chunks
             ),
             probe       = ProbeFacet.from_probe(probe.result),

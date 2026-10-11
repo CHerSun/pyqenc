@@ -34,6 +34,7 @@ from pyqenc.models import (
     Fingerprint,
     PhaseOutcome,
     Strategy,
+    fingerprinter,
 )
 from pyqenc.phase import Artifact, PhaseRegistry, Recovery
 from pyqenc.phases.audio import AudioPhase, AudioPhaseResult
@@ -321,7 +322,6 @@ class TestJobPhaseTiming:
         Validates: Requirements 6.5
         """
         from pyqenc.phases.job import JobPhase, JobSidecar
-        from pyqenc.stream_model import File
 
         config   = _make_config(tmp_path)
         volatile = _make_volatile(tmp_path)
@@ -335,7 +335,7 @@ class TestJobPhaseTiming:
         volatile["work_dir"].mkdir(parents=True, exist_ok=True)
         sidecar = JobSidecar(
             path   = volatile["source"],
-            source = File.sampled_fingerprint(volatile["source"]),
+            source = fingerprinter.of_file(volatile["source"]),
         )
         job_yaml = volatile["work_dir"] / "job.yaml"
         write_yaml_atomic(job_yaml, sidecar.model_dump(exclude_none=True))
@@ -1035,7 +1035,7 @@ class TestOptimizationPhaseTiming:
         Built through the production composer from the stub registry's own
         results, with a summary covering the plan — the run then takes the
         no-pending fast exit (no invalidation, no encodes)."""
-        from pyqenc.models import id_set_fingerprint
+        from pyqenc.models import fingerprinter
         from pyqenc.phases.chunking import ChunkingPhase
         from pyqenc.phases.job import JobPhase
         from pyqenc.phases.optimization import (
@@ -1054,7 +1054,7 @@ class TestOptimizationPhaseTiming:
         sidecar = current_optimization_sidecar(
             plan        = probe.result.plan,
             source      = job.result.source_fingerprint,
-            chunks      = id_set_fingerprint(
+            chunks      = fingerprinter.of_ids(
                 a.payload.safe_name() for a in chunking.result.chunks
             ),
             probe       = ProbeFacet.from_probe(probe.result),

@@ -43,8 +43,7 @@ from pyqenc.models import (
     PhaseOutcome,
     QualityTarget,
     Strategy,
-    id_set_fingerprint,
-    identity_changed,
+    fingerprinter,
     targets_as_strings,
 )
 from pyqenc.phase import (
@@ -555,7 +554,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         job_result = self._deps[JobPhase]
         opt_yaml   = work_dir / OptimizationPhase.SIDECAR_NAME
         strategies = plan.strategies
-        self._chunks_fingerprint = id_set_fingerprint(
+        self._chunks_fingerprint = fingerprinter.of_ids(
             c.safe_name() for c in (a.payload for a in self._deps[ChunkingPhase].chunks)
         )
         self._current_probe = ProbeFacet.from_probe(self._deps[ProbePhase])
@@ -574,8 +573,9 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         # Step 1 — identity key: catastrophic for the shared namespace.
         persisted: OptimizationSidecar | None = load_optimization_sidecar(opt_yaml)
-        if persisted is not None and identity_changed(persisted.source,
-                                                      job_result.source_fingerprint):
+        if persisted is not None and not persisted.source.matches(
+            job_result.source_fingerprint,
+        ):
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (optimization.yaml) — the "

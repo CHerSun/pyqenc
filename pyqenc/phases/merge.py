@@ -44,8 +44,7 @@ from pyqenc.models import (
     PhaseOutcome,
     QualityTarget,
     Strategy,
-    id_set_fingerprint,
-    identity_changed,
+    fingerprinter,
     targets_as_strings,
 )
 from pyqenc.phase import (
@@ -443,8 +442,8 @@ class MergePhase(Phase[MergePhaseResult]):
         merged_dir.mkdir(parents=True, exist_ok=True)
         for existing in sorted(merged_dir.glob("*.yaml")):
             record = MergePhase._load_merge_sidecar(existing)
-            if record is not None and identity_changed(
-                record.provenance.source, job_result.source_fingerprint,
+            if record is not None and not record.provenance.source.matches(
+                job_result.source_fingerprint,
             ):
                 if not job_result.force:
                     raise RecoveryError(
@@ -632,7 +631,7 @@ class MergePhase(Phase[MergePhaseResult]):
             probe     = ProbeFacet.from_probe(self._deps[ProbePhase]),
             plan      = self._deps[ProbePhase].plan,
             sampling  = self._config.measurement.sampling,
-            winners   = id_set_fingerprint(
+            winners   = fingerprinter.of_ids(
                 row.payload.chunk.safe_name()
                 for row in self._deps[EncodingPhase].winners
             ),

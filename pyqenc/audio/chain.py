@@ -60,7 +60,7 @@ from pyqenc.constants import (
     FLAC_EXTENSION,
     OUTPUT_FORMAT_MUXERS,
 )
-from pyqenc.models import Fingerprint, fingerprint_token
+from pyqenc.models import Fingerprint, fingerprinter
 from pyqenc.stream_model import AudioStream
 from pyqenc.utils.ffmpeg_runner import (
     FFmpegRequest,
@@ -138,7 +138,7 @@ class ResolvedChain(BaseModel):
         (spec 2026-10-07, Req 10b). No ``size`` belt — a chain has no
         meaningful pre-check magnitude.
         """
-        return Fingerprint(token=fingerprint_token(self.model_dump_json()))
+        return fingerprinter.of_text(self.model_dump_json())
 
 
 def resolve_chain(spec: ChainSpec, palette: dict[str, FilterInstance]) -> ResolvedChain:

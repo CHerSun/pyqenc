@@ -38,7 +38,7 @@ from pyqenc.constants import (
     THICK_LINE,
 )
 from pyqenc.metrics import MetricKey
-from pyqenc.models import Fingerprint, PhaseOutcome, identity_changed
+from pyqenc.models import Fingerprint, PhaseOutcome
 from pyqenc.phase import (
     Artifact,
     Phase,
@@ -226,7 +226,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
         audio_dir.mkdir(parents=True, exist_ok=True)
 
         persisted_audio = load_model(sidecar_path, AudioSidecar)
-        if persisted_audio is not None and identity_changed(persisted_audio.source, job_result.source_fingerprint):
+        if persisted_audio is not None and not persisted_audio.source.matches(job_result.source_fingerprint):
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (audio.yaml) — the chain "
