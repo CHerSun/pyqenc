@@ -327,20 +327,20 @@ class PhaseDependencies:
 
     def __init__(
         self,
-        registry:  PhaseRegistry,
-        owner:     Phase,
-        depends_on: tuple[type[Phase], ...],
+        registry: PhaseRegistry,
+        owner:    Phase,
     ) -> None:
-        """Store the live registry link, the owner, and the declared key domain.
+        """Store the live registry link and the owning phase.
+
+        The key domain is read live from ``owner.DEPENDS_ON`` — the owner
+        IS its declaration; nothing is copied.
 
         Args:
-            registry:   The shared phase registry (fetched from per access).
-            owner:      The phase whose ``DEPENDS_ON`` scopes the key domain.
-            depends_on: The owner's declared dependency classes.
+            registry: The shared phase registry (fetched from per access).
+            owner:    The phase whose ``DEPENDS_ON`` scopes the key domain.
         """
-        self._registry  = registry
-        self._owner     = owner
-        self._depends_on = depends_on
+        self._registry = registry
+        self._owner    = owner
 
     def __getitem__[R: PhaseResult](self, dep_cls: type[Phase[R]]) -> R:
         """Return the dependency's cached typed result.
@@ -361,7 +361,7 @@ class PhaseDependencies:
                 phase hook ran before the dependency walk (a programming
                 error, never a runtime condition to handle).
         """
-        assert dep_cls in self._depends_on, (
+        assert dep_cls in self._owner.DEPENDS_ON, (
             f"{type(self._owner).__name__} reads {dep_cls.__name__} "
             "without declaring it in DEPENDS_ON (dependency access is "
             "scoped to declared dependencies)"
@@ -458,9 +458,7 @@ class Phase[ResultT: PhaseResult](ABC):
         self._config:    AppConfig        = config
         self._collector: MetricsCollector = collector
         self._phases:    PhaseRegistry    = phases
-        self._deps:      PhaseDependencies = PhaseDependencies(
-            phases, self, self.DEPENDS_ON,
-        )
+        self._deps:      PhaseDependencies = PhaseDependencies(phases, self)
         self.result:     ResultT | None  = None
 
     # ------------------------------------------------------------------
