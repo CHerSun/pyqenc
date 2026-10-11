@@ -976,7 +976,7 @@ class TestOptimizationPhaseTiming:
 
         # ProbePhase is a dependency; the uniform run() resolves deps first, so a
         # completed probe result must be present for the reuse path to be reached.
-        # The result is a REAL typed result (recovery builds a ProbeState from
+        # The result is a REAL typed result (recovery builds a ProbeSidecar from
         # .source/.crop — bare Mocks would fail pydantic validation).
         from pyqenc.phases.probe import ProbePhaseResult
         probe_mock = MagicMock(spec=ProbePhase)

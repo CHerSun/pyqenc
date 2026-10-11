@@ -61,7 +61,7 @@ if TYPE_CHECKING:
 # probe.yaml — the slow-facet sidecar (re-homed, Req 21)
 # ---------------------------------------------------------------------------
 
-class ProbeState(BaseModel):
+class ProbeSidecar(BaseModel):
     """Sidecar model for ``probe.yaml`` (the slow facet).
 
     Written by ``ProbePhase`` after resolving frame count and crop.  Contains
@@ -207,7 +207,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
 
         # Recovery stash — the loaded probe.yaml state, the extraction stream
         # and the resolved payload for result construction.
-        self._probe_state:     ProbeState | None          = None
+        self._probe_sidecar:   ProbeSidecar | None      = None
         self._video_stream:    VideoStream | None          = None
         self._resolved:        ExtendedVideoStream | None  = None
 
@@ -233,8 +233,8 @@ class ProbePhase(Phase[ProbePhaseResult]):
         # .tmp pre-clean (probe.yaml is written via .tmp-then-rename).
         remove_stale_tmp_file(probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX))
 
-        state = load_model(probe_yaml, ProbeState)
-        if state is not None and not state.source.matches(job_result.file.payload.fingerprint):
+        sidecar = load_model(probe_yaml, ProbeSidecar)
+        if sidecar is not None and not sidecar.source.matches(job_result.file.payload.fingerprint):
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (probe.yaml) — the committed "
@@ -272,16 +272,16 @@ class ProbePhase(Phase[ProbePhaseResult]):
             )
         self._video_stream = video_artifact.payload
 
-        self._probe_state = load_model(probe_yaml, ProbeState)
+        self._probe_sidecar = load_model(probe_yaml, ProbeSidecar)
         crop_override_active = (
             self._crop_params is not None
             and (
-                self._probe_state is None
-                or self._crop_params != self._probe_state.crop
+                self._probe_sidecar is None
+                or self._crop_params != self._probe_sidecar.crop
             )
         )
 
-        if self._probe_state is None or crop_override_active:
+        if self._probe_sidecar is None or crop_override_active:
             # Absent/wiped (full probe needed), or a differing manual --crop
             # override invalidates the cached crop (cheap rewrite: the frame
             # count stays cached). The row is ABSENT with the unknown-sentinel
@@ -297,8 +297,8 @@ class ProbePhase(Phase[ProbePhaseResult]):
 
         self._resolved = ExtendedVideoStream(
             stream      = self._video_stream,
-            frame_count = self._probe_state.frame_count,
-            crop        = self._probe_state.crop,
+            frame_count = self._probe_sidecar.frame_count,
+            crop        = self._probe_sidecar.crop,
         )
         return Recovery.from_artifacts([
             Artifact(payload=self._resolved, state=ArtifactState.COMPLETE),
@@ -321,12 +321,12 @@ class ProbePhase(Phase[ProbePhaseResult]):
             ``ProbePhaseResult`` with outcome ``COMPLETED``.
         """
         probe_yaml = self._deps[JobPhase].work_dir / ProbePhase.SIDECAR_NAME
-        probe_state = self._probe_state
+        probe_sidecar = self._probe_sidecar
         video       = self._video_stream
         assert video is not None  # recovery guarantees a video stream
 
-        needs_crop_detect = self._crop_params is None and probe_state is None
-        needs_frame_probe = probe_state is None or probe_state.frame_count <= 0
+        needs_crop_detect = self._crop_params is None and probe_sidecar is None
+        needs_frame_probe = probe_sidecar is None or probe_sidecar.frame_count <= 0
         if needs_crop_detect or needs_frame_probe:
             logger.info(
                 "Probe: starting long probe%s%s — may take a while",
@@ -338,9 +338,9 @@ class ProbePhase(Phase[ProbePhaseResult]):
             crop        = self._crop_params
             crop_source = CROP_SOURCE_MANUAL
             logger.info("Crop: %s (manual)", crop.display())
-        elif probe_state is not None:
-            crop        = probe_state.crop
-            crop_source = probe_state.crop_source or CROP_SOURCE_DETECTED
+        elif probe_sidecar is not None:
+            crop        = probe_sidecar.crop
+            crop_source = probe_sidecar.crop_source or CROP_SOURCE_DETECTED
             logger.info("Crop: %s (cached)", crop.display())
         else:
             logger.info("Detecting crop: %s", video.file.path.name)
@@ -349,8 +349,8 @@ class ProbePhase(Phase[ProbePhaseResult]):
             crop_source = CROP_SOURCE_DETECTED
 
         # Resolve frame count: cached → timestamps.txt count → null-count pass.
-        if probe_state is not None and probe_state.frame_count > 0:
-            frame_count = probe_state.frame_count
+        if probe_sidecar is not None and probe_sidecar.frame_count > 0:
+            frame_count = probe_sidecar.frame_count
             logger.debug("Frame count: %d (cached)", frame_count)
         else:
             frame_count = self._count_source_frames()
@@ -360,7 +360,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         # (Req 23); source is the identity key.
         job_result = self._deps[JobPhase]
         resulting_resolution = _derive_resulting_resolution(video, crop)
-        save_model(probe_yaml, ProbeState(
+        save_model(probe_yaml, ProbeSidecar(
             frame_count          = frame_count,
             crop                 = crop,
             source               = job_result.file.payload.fingerprint,
@@ -394,7 +394,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> ProbePhaseResult:
         """Build the reused result from the cached ``probe.yaml`` state."""
-        assert self._probe_state is not None  # current currency implies a loaded state
+        assert self._probe_sidecar is not None  # current currency implies a loaded sidecar
         assert self._video_stream is not None  # recovery guarantees a video stream
         assert self._resolved is not None  # stashed by the current-currency path
         logger.info("Probe: all values cached — reusing probe.yaml")

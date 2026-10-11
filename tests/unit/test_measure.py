@@ -154,10 +154,10 @@ class TestResolveCrop:
     def test_none_probe_yaml_with_crop_returns_crop(self, tmp_path: Path) -> None:
         """None with a probe.yaml containing crop returns that crop without reading job.yaml."""
         from pyqenc.models import SizedFingerprint
-        from pyqenc.phases.probe import ProbeState
+        from pyqenc.phases.probe import ProbeSidecar
 
         expected_crop = CropParams(top=138, bottom=138, left=0, right=0)
-        probe = ProbeState(
+        probe = ProbeSidecar(
             source=SizedFingerprint(token="0" * 32, size=64),
             frame_count=1000, crop=expected_crop,
         )
@@ -173,9 +173,9 @@ class TestResolveCrop:
         immediately — an empty crop is a concrete resolution, never a reason
         to keep probing the job.yaml fallback."""
         from pyqenc.models import SizedFingerprint
-        from pyqenc.phases.probe import ProbeState
+        from pyqenc.phases.probe import ProbeSidecar
 
-        probe = ProbeState(
+        probe = ProbeSidecar(
             source=SizedFingerprint(token="0" * 32, size=64), frame_count=500,
         )
         save_model(tmp_path / "probe.yaml", probe)
