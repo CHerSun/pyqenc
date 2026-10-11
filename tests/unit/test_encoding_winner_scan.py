@@ -19,7 +19,7 @@ from pyqenc.models import CropParams, PhaseOutcome, QualityTarget
 from pyqenc.phase import Artifact, ArtifactState, PhaseRegistry
 from pyqenc.phases.encoding import (
     EncodingPhase,
-    EncodingSummary,
+    EncodingSidecar,
     _scan_winner_sidecars,
     _write_attempt_sidecar,
     _write_winner_sidecar,
@@ -330,17 +330,17 @@ class TestScanWinnerSidecars:
 # encoding.yaml aggregate round-trip
 # ---------------------------------------------------------------------------
 
-class TestEncodingSummaryTotals:
+class TestEncodingSidecarTotals:
 
     def test_round_trip(self, tmp_path: Path) -> None:
         """frames persists into encoding.yaml and loads back."""
         path = tmp_path / "encoding.yaml"
-        save_model(path, EncodingSummary(
-            limiter=[],
+        save_model(path, EncodingSidecar(
+            summary=[],
             frames={_STRATEGY.display_name(): 9526},
         ))
 
-        loaded = load_model(path, EncodingSummary)
+        loaded = load_model(path, EncodingSidecar)
 
         assert loaded is not None
         assert loaded.frames == {_STRATEGY.display_name(): 9526}
@@ -351,7 +351,7 @@ class TestEncodingSummaryTotals:
         path = tmp_path / "encoding.yaml"
         path.write_text("{}", encoding="utf-8")
 
-        assert load_model(path, EncodingSummary) is None
+        assert load_model(path, EncodingSidecar) is None
 
 
 # ---------------------------------------------------------------------------
@@ -394,8 +394,8 @@ class TestReassertFramePreservation:
 
         phase = _make_encoding_phase(tmp_path, probe_frames=9526)
         with caplog.at_level(logging.WARNING):
-            phase._reassert_frame_preservation(EncodingSummary(
-                limiter=[],
+            phase._reassert_frame_preservation(EncodingSidecar(
+                summary=[],
                 frames={_STRATEGY.display_name(): 9526},
             ))
         assert not [r for r in caplog.records if "disagree" in r.message]
@@ -405,8 +405,8 @@ class TestReassertFramePreservation:
 
         phase = _make_encoding_phase(tmp_path, probe_frames=9526)
         with caplog.at_level(logging.WARNING):
-            phase._reassert_frame_preservation(EncodingSummary(
-                limiter=[],
+            phase._reassert_frame_preservation(EncodingSidecar(
+                summary=[],
                 frames={_STRATEGY.display_name(): 9000},
             ))
         assert any(
@@ -419,8 +419,8 @@ class TestReassertFramePreservation:
 
         phase = _make_encoding_phase(tmp_path, probe_frames=9526)
         with caplog.at_level(logging.WARNING):
-            phase._reassert_frame_preservation(EncodingSummary(
-                limiter=[], frames={},
+            phase._reassert_frame_preservation(EncodingSidecar(
+                summary=[], frames={},
             ))
             phase._reassert_frame_preservation(None)
         assert not [r for r in caplog.records if "disagree" in r.message]
