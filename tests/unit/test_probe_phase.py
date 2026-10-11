@@ -37,7 +37,7 @@ from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult, ProbeState
 from pyqenc.state import ArtifactState
-from pyqenc.stream_model import File, VideoStream, VideoStreamInfo
+from pyqenc.stream_model import ProbedFile, VideoStream, VideoStreamInfo
 from pyqenc.utils.yaml_utils import load_model, save_model
 from tests.test_metrics_integration import (
     _dotted_groups,
@@ -63,7 +63,7 @@ def _make_job_result(work_dir: Path, source: Path) -> JobPhaseResult:
     return JobPhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
         message   = "job complete",
-        file      = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+        file      = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         config    = _APP_CONFIG,
         work_dir  = work_dir,
         source    = source,
@@ -76,7 +76,7 @@ def _make_job_result(work_dir: Path, source: Path) -> JobPhaseResult:
 def _make_video_stream(path: Path) -> VideoStream:
     """A video stream with the fast facet pre-populated (no probing)."""
     return VideoStream(
-        file = File(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=64),
+        file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=64),
         info = VideoStreamInfo(
             track_id=0, codec_name="hevc", fps=24.0,
             fps_fraction=Fraction(24, 1), resolution="1920x1080",
@@ -341,7 +341,7 @@ class TestDeriveResultingResolution:
         from pyqenc.phases.probe import _derive_resulting_resolution
 
         video = VideoStream(
-            file = File(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "s.mkv", file_size_bytes=64),
+            file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "s.mkv", file_size_bytes=64),
             info = VideoStreamInfo(track_id=0),
         )
         assert _derive_resulting_resolution(video, CropParams()) is None

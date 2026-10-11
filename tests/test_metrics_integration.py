@@ -45,7 +45,7 @@ from pyqenc.phases.job import JobPhaseResult
 from pyqenc.phases.merge import MergePhase
 from pyqenc.phases.optimization import OptimizationPhase, OptimizationPhaseResult
 from pyqenc.state import ArtifactState
-from pyqenc.stream_model import ExtendedVideoStream, File, VideoStreamChunk
+from pyqenc.stream_model import ExtendedVideoStream, ProbedFile, VideoStreamChunk
 from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic
 
 _STUB_SOURCE_FP = Fingerprint(token="0" * 32, size=64)
@@ -102,7 +102,7 @@ def _audio_output(out_path: Path):
 
     return AudioOutput(
         stream=AudioStream(
-            file=File(fingerprint=_STUB_SOURCE_FP, path=out_path.parent.parent / "source.mkv", file_size_bytes=64),
+            file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=out_path.parent.parent / "source.mkv", file_size_bytes=64),
             info=AudioStreamInfo(
                 track_id=1, codec_name="flac", language="eng",
                 layout=ChannelLayout.parse("stereo"), duration_seconds=100.0,
@@ -152,7 +152,7 @@ def _make_video_stream_fixture(path: Path):
     from pyqenc.stream_model import VideoStream, VideoStreamInfo
 
     return VideoStream(
-        file=File(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=64),
+        file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=64),
         info=VideoStreamInfo(
             track_id=0, codec_name="hevc", fps=24.0,
             fps_fraction=Fraction(24, 1), resolution="1920x1080",
@@ -187,7 +187,7 @@ def _make_extended_stream(path: Path, frame_count: int, duration: float) -> Exte
 
     return ExtendedVideoStream(
         stream=VideoStream(
-            file=File(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=64),
+            file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=64),
             info=VideoStreamInfo(
                 track_id=0, codec_name="hevc", fps=25.0,
                 fps_fraction=Fraction(25, 1), resolution="1920x1080",
@@ -395,7 +395,7 @@ class TestExtractionPhaseTiming:
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
             force  = False,
-            file       = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = source.parent / "work",
             config     = config,
@@ -403,7 +403,7 @@ class TestExtractionPhaseTiming:
             no_metrics  = True,
         )
         result.file     = Artifact(
-            payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=source.stat().st_size),
+            payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=source.stat().st_size),
             state=ArtifactState.COMPLETE,
         )
         return result
@@ -439,7 +439,6 @@ class TestExtractionPhaseTiming:
         from pyqenc.phases.extraction import ExtractionPhase
         from pyqenc.state import ArtifactState
         from pyqenc.stream_model import (
-            File,
             SubtitleStream,
             SubtitleStreamInfo,
         )
@@ -447,7 +446,7 @@ class TestExtractionPhaseTiming:
         # A complete subtitle row so _recover returns all-complete → REUSED path
         stub_artifact = Artifact(
             payload = SubtitleStream(
-                file = File(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
+                file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
                 info = SubtitleStreamInfo(
                     track_id=3, codec_name="subrip",
                     extracted_path=tmp_path / "work" / "extracted" / "sub.srt",
@@ -487,7 +486,6 @@ class TestExtractionPhaseTiming:
         from pyqenc.phases.extraction import ExtractionPhase
         from pyqenc.state import ArtifactState
         from pyqenc.stream_model import (
-            File,
             SubtitleStream,
             SubtitleStreamInfo,
         )
@@ -499,7 +497,7 @@ class TestExtractionPhaseTiming:
 
         stub_artifact = Artifact(
             payload = SubtitleStream(
-                file = File(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
+                file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
                 info = SubtitleStreamInfo(
                     track_id=3, codec_name="subrip",
                     extracted_path=absent_path,
@@ -542,7 +540,6 @@ class TestExtractionPhaseTiming:
         from pyqenc.phases.extraction import ExtractionPhase
         from pyqenc.state import ArtifactState
         from pyqenc.stream_model import (
-            File,
             SubtitleStream,
             SubtitleStreamInfo,
         )
@@ -552,7 +549,7 @@ class TestExtractionPhaseTiming:
 
         stub_artifact = Artifact(
             payload = SubtitleStream(
-                file = File(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
+                file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
                 info = SubtitleStreamInfo(
                     track_id=3, codec_name="subrip",
                     extracted_path=tmp_path / "work" / "extracted" / "sub.srt",
@@ -591,7 +588,7 @@ class TestChunkingPhaseTiming:
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
             force  = False,
-            file       = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
@@ -795,7 +792,7 @@ class TestAudioPhaseTiming:
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
             force  = False,
-            file       = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = work_dir,
             config     = config,
@@ -933,7 +930,7 @@ class TestOptimizationPhaseTiming:
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
             force  = False,
-            file       = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
@@ -1198,7 +1195,7 @@ class TestEncodingPhaseTiming:
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
             force  = False,
-            file       = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
@@ -1492,7 +1489,7 @@ class TestMergePhaseTiming:
             outcome    = PhaseOutcome.COMPLETED,
             message    = "ok",
             force  = False,
-            file       = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+            file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
             source     = source,
             work_dir   = tmp_path / "work",
             config     = config,
@@ -1566,9 +1563,6 @@ class TestMergePhaseTiming:
         from pyqenc.phase import Artifact as _Artifact
         from pyqenc.state import ArtifactState as _ArtifactState
         from pyqenc.stream_model import (
-            File as _File,
-        )
-        from pyqenc.stream_model import (
             VideoStream as _VideoStream,
         )
         from pyqenc.stream_model import (
@@ -1577,7 +1571,7 @@ class TestMergePhaseTiming:
 
         video_row = _Artifact(
             payload = _VideoStream(
-                file = _File(fingerprint=_STUB_SOURCE_FP, path=work_dir / "source.mkv"),
+                file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=work_dir / "source.mkv"),
                 info = _VideoStreamInfo(track_id=0),
             ),
             state   = _ArtifactState.COMPLETE,

@@ -1309,6 +1309,8 @@ interplay with §111's summary-table rendering (the dash vocabulary is its
 display form); sequencing vs the QualitySearch V4 spec (§78 rides that
 same refactor wave — do the record type and the key type together?).
 
+`FIXED_COMPARISON_STATS` should also become explicit targets?
+
 ---
 
 ## 117. Observability research — traces/metrics for a CLI-first tool; replace the app-metrics stub
@@ -1346,24 +1348,6 @@ dotted-key metrics — and their applicability to a local `metrics.yaml`
 dump. §2 (parallelism field / spec reconciliation), §12 (per-chain
 dotted audio metrics) and §59 (concurrent dumps) all ride under this
 umbrella and should be re-evaluated against whatever shape lands.
-
----
-
-## 118. `File.fingerprint` optionality should be class-enforced, not accessor-asserted
-
-**Status:** needs thinking (user direction 2026-10-10)
-
-`File.fingerprint: Fingerprint | None` is live-entity lifecycle
-optionality (the File exists before Job probes it); today the invariant
-"the source File always carries its fingerprint (Req 30)" is enforced by
-a contract assert inside `JobPhaseResult.source_fingerprint` — a
-runtime check papering over a type-level hole. Direction: the
-VideoStream → ExtendedVideoStream precedent — an initial class without
-the probe facts and an extended class that CARRIES them, construction
-being the promotion point; the fingerprint moves the same way (a
-pre-probe `File` vs a probed variant with a required fingerprint), so
-downstream consumers take the probed type and the Optional + assert
-disappear.
 
 ---
 

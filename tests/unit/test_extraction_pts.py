@@ -41,7 +41,7 @@ from pyqenc.phases.extraction import (
 )
 from pyqenc.phases.job import JobPhase, JobPhaseResult
 from pyqenc.state import ArtifactState
-from pyqenc.stream_model import File
+from pyqenc.stream_model import File, ProbedFile
 from pyqenc.utils.ffmpeg_runner import (
     _PROGRESS_FLAGS,
     FFmpegRequest,
@@ -94,7 +94,7 @@ def _make_extraction_phase(
     job_result = JobPhaseResult(
         outcome    = PhaseOutcome.COMPLETED,
         message    = "job complete",
-        file       = Artifact(payload=File(
+        file       = Artifact(payload=ProbedFile(
             path            = source,
             file_size_bytes = source.stat().st_size if source.exists() else 64,
             fingerprint     = fingerprint,

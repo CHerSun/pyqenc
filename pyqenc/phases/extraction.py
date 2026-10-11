@@ -62,6 +62,7 @@ from pyqenc.stream_model import (
     AudioStreamInfo,
     Chapters,
     File,
+    ProbedFile,
     StreamInfo,
     SubtitleStream,
     SubtitleStreamInfo,
@@ -511,7 +512,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         self._materialize: bool = materialize
 
         # Recovery stash — the run's stream inventory and sidecar currency.
-        self._source_file: File | None             = None
+        self._source_file: ProbedFile | None       = None
         self._video:       VideoStream | None      = None
         self._audio:       list[AudioStream]       = []
         self._subtitles:   list[SubtitleStream]    = []
@@ -835,10 +836,8 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         # The identity key — the live source fingerprint (carried by the
         # job's File; verified against the previous key during recovery).
         assert self._source_file is not None, "inventory resolution sets the File first"
-        fingerprint = self._source_file.fingerprint
-        assert fingerprint is not None, "the job's live File carries the source fingerprint"
         sidecar = ExtractionSidecar(
-            source          = fingerprint,
+            source          = self._source_file.fingerprint,
             streams         = StreamsInventory(
                 video       = self._video.info if self._video is not None else None,
                 audio       = [s.info for s in self._audio],

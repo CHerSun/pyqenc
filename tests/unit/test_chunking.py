@@ -31,7 +31,7 @@ from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
     CropParams,
     ExtendedVideoStream,
-    File,
+    ProbedFile,
     VideoStream,
     VideoStreamChunk,
     VideoStreamInfo,
@@ -51,7 +51,7 @@ def _stream(frame_count: int = 640, duration: float = 26.67) -> ExtendedVideoStr
     """An extended video stream: 24000/1001 fps, 1920x1080, 640 frames."""
     return ExtendedVideoStream(
         stream = VideoStream(
-            file = File(fingerprint=_STUB_SOURCE_FP, path="D:/media/source.mkv", file_size_bytes=64),
+            file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path="D:/media/source.mkv", file_size_bytes=64),
             info = VideoStreamInfo(
                 track_id=0, codec_name="hevc",
                 fps=23.976, fps_fraction=Fraction(24000, 1001),
@@ -85,7 +85,7 @@ def _make_registry(
     job_result = JobPhaseResult(
         outcome   = PhaseOutcome.COMPLETED,
         message   = "job complete",
-        file      = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+        file      = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         config    = config,
         work_dir  = work_dir,
         source    = source,
@@ -218,7 +218,7 @@ class TestDetectScenes:
         stream = _stream(duration=13.33)
         stream = stream.model_copy(update={
             "stream": stream.stream.model_copy(update={
-                "file": File(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
+                "file": ProbedFile(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv"),
             }),
         })
         with patch("pyqenc.phases.chunking.detect", return_value=[]):

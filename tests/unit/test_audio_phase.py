@@ -32,7 +32,7 @@ from pyqenc.audio.layout import ChannelLayout
 from pyqenc.constants import AUDIO_OUTPUT_DIR
 from pyqenc.models import Fingerprint, PhaseOutcome
 from pyqenc.phases.audio import AudioPhase, AudioSidecar
-from pyqenc.stream_model import AudioStream, AudioStreamInfo, File
+from pyqenc.stream_model import AudioStream, AudioStreamInfo, ProbedFile
 from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.yaml_utils import load_model
 
@@ -80,7 +80,7 @@ def _track(tmp_path: Path, stem: str, *, track_id: int = 1, language: str = "eng
     src = LongPath(tmp_path) / f"{stem}.mkv"
     src.write_bytes(b"\x00" * 16)
     return AudioStream(
-        file = File(fingerprint=_STUB_SOURCE_FP, path=src, file_size_bytes=16),
+        file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=src, file_size_bytes=16),
         info = AudioStreamInfo(
             track_id=track_id, codec_name="flac", language=language,
             layout=ChannelLayout.parse(layout),

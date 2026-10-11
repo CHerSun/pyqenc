@@ -103,32 +103,49 @@ DecimalYaml = Annotated[
 # ---------------------------------------------------------------------------
 
 class File(BaseModel):
-    """A file on disk plus its basic identity metadata.
+    """A located file plus its cheap facts — no content identity.
 
-    Constructed exactly once per run by JobPhase (populated eagerly from the
-    filesystem) and exposed on ``JobPhaseResult``; every downstream phase
-    obtains it by reference. ``job.yaml`` persists only the :class:`File` dump,
-    and sidecar source-identity checks compare the persisted path +
-    ``file_size_bytes`` against live values.
+    The base record for every file we reference without probing it:
+    winner files (size tables), listed surplus rows, placeholder paths.
+    ``file_size_bytes`` is optional because the stat can fail (a pipe, a
+    vanished file) — an honest ``None``, never a fabricated 0.
 
-    ``fingerprint`` carries the source's sampled-content identity when the
-    file IS the run's source (populated by JobPhase via the
-    fingerprinter (``BlakeFingerprinter.of_file``); attempt files and other ordinary files leave
-    it unset — nothing compares their content identity).
+    Identity lives on :class:`ProbedFile` — the VideoStream →
+    ExtendedVideoStream pattern at the file layer: Job's input is a path,
+    its output is the probed source file.
 
     Attributes:
         path:            Link to the file on disk.
         file_size_bytes: File size in bytes, or ``None`` when unavailable
                          (e.g. the file is a pipe or the stat failed).
-        fingerprint:     Sampled-content identity — present on the run's
-                         source ``File`` only.
     """
 
     model_config = ConfigDict(frozen=True)
 
     path:            LongPathYaml
     file_size_bytes: int | None = None
-    fingerprint:     Fingerprint | None = None
+
+
+class ProbedFile(File):
+    """A :class:`File` with its REQUIRED content identity.
+
+    The run's source file as Job produces it (``BlakeFingerprinter.of_file``
+    — sampled windows; ``fingerprint.size`` is the file size belt). The
+    ``VideoStream`` → ``ExtendedVideoStream`` pattern applied to the file
+    layer: probed-ness is expressed by construction, so downstream
+    consumers never handle identity optionality and no accessor needs a
+    presence assert. Exactly one probed file exists per run.
+
+    ``file_size_bytes`` coincides with ``fingerprint.size`` by construction
+    (the same stat feeds both) — the belt serves identity comparison, the
+    field serves the size tables and disk estimates that read plain
+    (unprobed) files too.
+
+    Attributes:
+        fingerprint: The sampled-content identity (Req 30) — REQUIRED.
+    """
+
+    fingerprint: Fingerprint
 
 
 

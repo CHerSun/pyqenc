@@ -43,7 +43,7 @@ from pyqenc.phase import (
     Recovery,
     RecoveryError,
 )
-from pyqenc.stream_model import File, LongPathYaml
+from pyqenc.stream_model import LongPathYaml, ProbedFile
 from pyqenc.utils.fs import remove_stale_tmp_file, safe_stat_size
 from pyqenc.utils.yaml_utils import load_model, save_model
 
@@ -102,7 +102,7 @@ class JobPhaseResult(PhaseResult):
 
     # Always-present payload (every phase-built result populates all of it —
     # required, never Optional) comes before the defaulted conveniences.
-    file:       Artifact[File]
+    file:       Artifact[ProbedFile]
     config:     AppConfig
     work_dir:   Path
     source:     Path
@@ -114,13 +114,11 @@ class JobPhaseResult(PhaseResult):
     def source_fingerprint(self) -> Fingerprint:
         """The live source content identity — computed once per run at Job.
 
-        The single accessor every phase's identity-key comparison reads; the
-        contract assert replaces per-consumer Optional handling (the source
-        ``File`` always carries its fingerprint).
+        The single accessor every phase's identity-key comparison reads.
+        The fingerprint is REQUIRED on ``ProbedFile`` — identity
+        optionality is class-enforced away (2026-10-11); no asserts.
         """
-        fingerprint = self.file.payload.fingerprint
-        assert fingerprint is not None, "the source File carries its fingerprint (Req 30)"
-        return fingerprint
+        return self.file.payload.fingerprint
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +129,7 @@ class JobPhase(Phase[JobPhaseResult]):
     """Phase that establishes the source identity and owns ``job.yaml``.
 
     This phase has no dependencies and is a declared dependency of every other
-    phase. Its ledger is one ``Artifact[File]`` row — ``COMPLETE`` once the
+    phase. Its ledger is one ``Artifact[ProbedFile]`` row — ``COMPLETE`` once the
     source identity is verified and persisted; ``job.yaml`` remains phase STATE
     (the sidecar), distinct from the artifact.
 
@@ -180,7 +178,7 @@ class JobPhase(Phase[JobPhaseResult]):
 
         # Recovery stash — the run's File, resolved during _recover();
         # consumed by _execute()/_make_result().
-        self._file:   File | None = None
+        self._file:   ProbedFile | None = None
         self._stale:  bool       = False
         """Whether the persisted job.yaml record is stale (identity wipe or
         locator move) and must be rewritten by ``_execute``."""
@@ -393,17 +391,18 @@ class JobPhase(Phase[JobPhaseResult]):
             source = fingerprint,
         ))
 
-    def _probe_file(self) -> File:
-        """Construct the run's single :class:`File`, eagerly from the filesystem.
+    def _probe_file(self) -> ProbedFile:
+        """Construct the run's single probed source file, eagerly from the filesystem.
 
         The source's sampled-content fingerprint is derived here (Req 30) —
-        computed once per run and carried by the live ``File``, so downstream
-        phases compare their persisted identity key against it without ever
-        re-hashing the source.
+        computed once per run and carried REQUIRED on the
+        :class:`~pyqenc.stream_model.ProbedFile`, so downstream phases
+        compare their persisted identity key against it without ever
+        re-hashing the source or handling identity optionality.
 
         Returns:
-            The source ``File`` (path + size + fingerprint; size is ``None``
-            when the stat fails).
+            The probed source file (path + size + fingerprint; size is
+            ``None`` when the stat fails).
 
         Raises:
             OSError: When the source cannot be read for the fingerprint —
@@ -413,7 +412,7 @@ class JobPhase(Phase[JobPhaseResult]):
         file_size_bytes = safe_stat_size(self._source)
         if file_size_bytes is None:
             logger.warning("Could not stat source file: %s", self._source)
-        return File(
+        return ProbedFile(
             path            = self._source,
             file_size_bytes = file_size_bytes,
             fingerprint     = fingerprinter.of_file(self._source),

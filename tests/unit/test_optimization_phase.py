@@ -40,6 +40,7 @@ from pyqenc.phases.optimization import (
     load_optimization_sidecar,
 )
 from pyqenc.state import ArtifactState, ProbeFacet
+from pyqenc.stream_model import ProbedFile
 from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic
 
 # ---------------------------------------------------------------------------
@@ -550,7 +551,6 @@ def _make_chunk(cid_start: float, cid_end: float, tmp_path: Path):
 
     from pyqenc.stream_model import (
         ExtendedVideoStream,
-        File,
         VideoStream,
         VideoStreamChunk,
         VideoStreamInfo,
@@ -558,7 +558,7 @@ def _make_chunk(cid_start: float, cid_end: float, tmp_path: Path):
     return VideoStreamChunk(
         stream=ExtendedVideoStream(
             stream=VideoStream(
-                file=File(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv", file_size_bytes=64),
+                file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=tmp_path / "source.mkv", file_size_bytes=64),
                 info=VideoStreamInfo(
                     track_id=0, codec_name="hevc", fps=24.0,
                     fps_fraction=Fraction(24, 1), resolution="1920x1080",

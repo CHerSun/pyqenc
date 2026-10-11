@@ -60,8 +60,8 @@ from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import (
     ExtendedVideoStream,
-    File,
     MergedVideo,
+    ProbedFile,
     VideoStream,
     VideoStreamInfo,
 )
@@ -74,7 +74,7 @@ def _extended_stream(path: Path, frame_count: int) -> ExtendedVideoStream:
     """An ExtendedVideoStream for the source (fast facet + frame count)."""
     return ExtendedVideoStream(
         stream=VideoStream(
-            file=File(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=64),
+            file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=64),
             info=VideoStreamInfo(
                 track_id=0, codec_name="hevc", fps=24.0,
                 fps_fraction=Fraction(24, 1), resolution="1920x1080",
@@ -109,7 +109,7 @@ def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
     from pyqenc.stream_model import (
         EncodedChunk,
         ExtendedVideoStream,
-        File,
+        ProbedFile,
         VideoStream,
         VideoStreamInfo,
     )
@@ -123,7 +123,7 @@ def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
     return EncodedChunk(
         stream = ExtendedVideoStream(
             stream = VideoStream(
-                file = File(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=path.stat().st_size if path.exists() else 64),
+                file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=path, file_size_bytes=path.stat().st_size if path.exists() else 64),
                 info = VideoStreamInfo(track_id=0, resolution="1920x1080"),
             ),
             frame_count = 24,
@@ -139,7 +139,7 @@ def _make_chunk_window(source, chunk_id):
     from pyqenc.models import CropParams
     from pyqenc.stream_model import (
         ExtendedVideoStream,
-        File,
+        ProbedFile,
         VideoStream,
         VideoStreamChunk,
         VideoStreamInfo,
@@ -150,14 +150,14 @@ def _make_chunk_window(source, chunk_id):
         with contextlib.suppress(ValueError):
             from pyqenc.stream_model import VideoStreamChunk as _VSC
             bounds = _VSC.parse_chunk_id(chunk_id, ExtendedVideoStream(
-                stream=VideoStream(file=File(fingerprint=_STUB_SOURCE_FP, path=source), info=VideoStreamInfo(track_id=0)),
+                stream=VideoStream(file=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source), info=VideoStreamInfo(track_id=0)),
                 frame_count=24, crop=CropParams(),
             ))
             start, end = bounds.start_timestamp, bounds.end_timestamp
     return VideoStreamChunk(
         stream = ExtendedVideoStream(
             stream = VideoStream(
-                file = File(fingerprint=_STUB_SOURCE_FP, path=source),
+                file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source),
                 info = VideoStreamInfo(track_id=0, resolution="1920x1080"),
             ),
             frame_count = 24,
@@ -213,7 +213,7 @@ def _make_merge_phase(
     job.result = JobPhaseResult(
         outcome    = PhaseOutcome.COMPLETED,
         message    = "job complete",
-        file       = Artifact(payload=File(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
+        file       = Artifact(payload=ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source, file_size_bytes=64), state=ArtifactState.COMPLETE),
         force      = False,
         cleanup    = CleanupLevel.NONE,
         no_metrics = True,
@@ -227,7 +227,7 @@ def _make_merge_phase(
     extraction = ExtractionPhase(config, registry, video_required=True, collector=collector)
     video_row = Artifact(
         payload = VideoStream(
-            file = File(fingerprint=_STUB_SOURCE_FP, path=source),
+            file = ProbedFile(fingerprint=_STUB_SOURCE_FP, path=source),
             info = VideoStreamInfo(track_id=0, resolution="1920x1080"),
         ),
         state   = (
@@ -1389,7 +1389,7 @@ class TestPerFileAcceptance:
         job = merge._phases[JobPhase]
         assert job.result is not None
         job.result.file = Artifact(
-            payload=File(
+            payload=ProbedFile(
                 fingerprint=Fingerprint(token="f" * 32, size=64),
                 path=job.result.source, file_size_bytes=64,
             ),
