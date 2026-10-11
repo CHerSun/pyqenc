@@ -48,7 +48,7 @@ class MeasureSidecar(BaseModel):
     the frame subsampling factor, and per-metric statistics.
 
     The ``metrics`` field uses the same flat ``{metric_stat: value}`` format
-    as ``MetricsSidecar`` (e.g. ``vmaf_min``, ``ssim_median``), with all
+    as ``AttemptSidecar`` (e.g. ``vmaf_min``, ``ssim_median``), with all
     ten statistics: min, p05, p10, p25, median, p75, p90, p95, max, std.
     The YAML key for the sampling factor is ``sampling``.
     """
@@ -569,7 +569,7 @@ def _write_sidecar(
 
     Records source/target paths, durations, sampling factor, crop parameters,
     and all computed metric statistics in the flat ``{metric_stat: value}``
-    format consistent with ``MetricsSidecar`` (e.g. ``vmaf_min``, ``ssim_median``).
+    format consistent with ``AttemptSidecar`` (e.g. ``vmaf_min``, ``ssim_median``).
     On write failure logs a warning and returns without raising so that the
     graph and screenshots are not lost.
 

@@ -29,7 +29,7 @@ from pyqenc.models import (
     Strategy,
 )
 from pyqenc.phase import Artifact, PhaseRegistry
-from pyqenc.phases.encoding import EncodingResultSidecar
+from pyqenc.phases.encoding import WinnerSidecar
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.optimization import (
     OptimizationPhase,
@@ -201,7 +201,7 @@ def _seed_winner(
     winner.write_bytes(b"x" * size_bytes)
     write_yaml_atomic(
         strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
-        EncodingResultSidecar(
+        WinnerSidecar(
             crf=Decimal(20),
             metrics={}, targets_met=True,
         ).model_dump(exclude_none=True),
@@ -657,7 +657,7 @@ class TestPairLedger:
         winner.write_bytes(b"x" * 16)
         write_yaml_atomic(
             strategy_dir / _EC.format_winner_sidecar_name(chunk.safe_name()),
-            EncodingResultSidecar(
+            WinnerSidecar(
                 crf=Decimal(20),
                 metrics={}, targets_met=True,
             ).model_dump(exclude_none=True),
@@ -1190,7 +1190,7 @@ class TestAggregateStrategyMetrics:
             # Result sidecar naming: the winner stem swap.
             save_model(
                 strategy_dir / EncodedChunk.format_winner_sidecar_name(chunk.safe_name()),
-                EncodingResultSidecar(
+                WinnerSidecar(
                     crf     = Decimal(20),
                     metrics = {"vmaf_median": 91.0 + i, "vif_median": 84.0 - i},
                 ),

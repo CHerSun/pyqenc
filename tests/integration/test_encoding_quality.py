@@ -290,7 +290,7 @@ class TestEncodeChunkQualitySearchV2Integration:
         with (
             patch.object(encoder, "_check_existing_encoding", return_value=None),
             patch.object(encoder, "_encode_with_ffmpeg", return_value=True),
-            patch("pyqenc.phases.encoding._write_metrics_sidecar"),
+            patch("pyqenc.phases.encoding._write_attempt_sidecar"),
             patch.object(encoder, "_finalize_winning_attempt") as mock_finalize,
         ):
             result = encoder.encode_chunk(

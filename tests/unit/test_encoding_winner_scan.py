@@ -22,8 +22,8 @@ from pyqenc.phases.encoding import (
     EncodingSidecar,
     EncodingSummary,
     _scan_winner_sidecars,
-    _write_encoding_result_sidecar,
-    _write_metrics_sidecar,
+    _write_attempt_sidecar,
+    _write_winner_sidecar,
     build_encoded_chunk,
 )
 from pyqenc.phases.probe import ProbePhase, ProbePhaseResult
@@ -118,7 +118,7 @@ class TestSidecarFrameCount:
     def test_metrics_sidecar_persists_frame_count(self, tmp_path: Path) -> None:
         """The per-attempt sidecar carries the attempt's frame count."""
         attempt = tmp_path / "chunk.q18.0.mkv"
-        _write_metrics_sidecar(
+        _write_attempt_sidecar(
             attempt, {"vmaf_min": 94.5}, 3, 2400,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
@@ -127,7 +127,7 @@ class TestSidecarFrameCount:
     def test_metrics_sidecar_writes_zero_for_unknown_frame_count(self, tmp_path: Path) -> None:
         """An unknown count is persisted as the 0 sentinel (no None in yaml)."""
         attempt = tmp_path / "chunk.q18.0.mkv"
-        _write_metrics_sidecar(
+        _write_attempt_sidecar(
             attempt, {"vmaf_min": 94.5}, 3, 0,
         )
         data = yaml.safe_load(attempt.with_suffix(".yaml").read_text(encoding="utf-8"))
@@ -167,7 +167,7 @@ class TestWinnerTargetedSubset:
 
     def test_result_sidecar_persists_frame_count(self, tmp_path: Path) -> None:
         """The winner result sidecar carries the winning attempt's count."""
-        _write_encoding_result_sidecar(
+        _write_winner_sidecar(
             tmp_path, "chunk",
             Decimal("18.0"), {"vmaf_min": 94.5}, 2400,
         )

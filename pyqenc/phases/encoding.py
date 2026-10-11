@@ -95,41 +95,38 @@ if TYPE_CHECKING:
 # Per-attempt / winner sidecars (re-homed, Req 21)
 # ---------------------------------------------------------------------------
 
-class _MeasuredSidecarBase(BaseModel):
-    """The measured facts shared by the attempt and winner sidecars.
-
-    ``frame_count`` is a fact of the encoded file, from whoever last
-    decoded it whole: the encode run that produced it, or the measure run
-    on a re-measured attempt (the metric run reads the file whole, so its
-    progress count IS the file's count — found live 2026-10-09, when
-    re-measured sidecars carried 0 and darkened the frame-preservation
-    chain).  ``0`` is the sentinel for "could not be determined" (no valid
-    video has zero frames).  ``metrics`` uses the flat
-    ``{metric_stat: value}`` format (e.g. ``vmaf_min``, ``ssim_median``)
-    consistent with ``ChunkQualityStats`` serialisation.
-    """
-
-    frame_count: int                = 0    # frames of the encoded file (0 = unknown)
-    metrics:     dict[str, float]          # measured values, e.g. vmaf_min, ssim_median
-
-
-class MetricsSidecar(_MeasuredSidecarBase):
+class AttemptSidecar(BaseModel):
     """Per-attempt sidecar (``<chunk>.q<quality>.yaml`` — the attempt stem swap).
 
-    Stores ALL measured metric values — not filtered to current targets.
-    Facts of the attempt only: pass/fail against quality targets is a
-    comparison with foreign state (which targets, which sampling) and is
-    always re-evaluated from ``metrics`` where it is decided — never stored
-    here (the WINNING attempt's conclusion is recorded on
-    :class:`EncodingResultSidecar`). This is the re-judging substrate:
-    cache-hits re-judge under new targets without re-encoding.
+    The INTERNAL intermediate record — the main investment: an encoding
+    attempt in the workspace, storing ALL measured metric values (not
+    filtered to current targets). Facts of the attempt only: pass/fail
+    against quality targets is a comparison with foreign state (which
+    targets, which sampling) and is always re-evaluated from ``metrics``
+    where it is decided — never stored here (the WINNING attempt's
+    conclusion is recorded on :class:`WinnerSidecar`). This is the
+    re-judging substrate: cache-hits re-judge under new targets without
+    re-encoding.
 
     ``sampling`` records the frame subsampling factor used when the metrics
-    were measured — LOAD-BEARING here and only here: attempts survive a
-    sampling change (winners are wholesale-wiped by the optimization band
-    key) and are lazily re-measured at pick-up when this differs from the
-    current config. REQUIRED — every write path carries it; a sidecar
-    missing it fails validation → absent → re-measure.
+    were measured — LOAD-BEARING: attempts survive a sampling change
+    (winners are wholesale-wiped by the optimization band key) and are
+    lazily re-measured at pick-up when this differs from the current
+    config. REQUIRED — every write path carries it; a sidecar missing it
+    fails validation → absent → re-measure.
+
+    ``frame_count`` is a fact of the attempt file, from whoever last
+    decoded it whole: the encode run that produced it, or the measure run
+    on a re-measured attempt (the metric run reads the attempt whole, so
+    its progress count IS the file's count — found live 2026-10-09, when
+    re-measured sidecars carried 0 and darkened the frame-preservation
+    chain).  ``0`` is the sentinel for "could not be determined" (no valid
+    video has zero frames) and marks the sidecar incomplete at pick-up
+    (Req 9a) — the next re-measure heals it.
+
+    The ``metrics`` field uses the flat ``{metric_stat: value}`` format
+    (e.g. ``vmaf_min``, ``ssim_median``) consistent with
+    ``ChunkQualityStats`` serialisation.
 
     The attempt's output resolution is deliberately NOT a field: it is
     derivable (source dimensions − crop, by construction of the crop
@@ -143,18 +140,21 @@ class MetricsSidecar(_MeasuredSidecarBase):
     consumer ever read the persisted value back.
     """
 
-    sampling: int  # subsampling factor used when the metrics were measured
+    sampling:    int                # subsampling factor used when the metrics were measured
+    frame_count: int         = 0    # frames of the attempt file (0 = unknown)
+    metrics:     dict[str, float]   # all measured values, e.g. vmaf_min, ssim_median
 
 
-class EncodingResultSidecar(_MeasuredSidecarBase):
+class WinnerSidecar(BaseModel):
     """Winner result sidecar (``<chunk_id>.yaml`` — the winner stem swap).
 
-    Written when the quality search for a ``(chunk_id, strategy)`` pair
-    concludes and the winning attempt is promoted to the static winner name.
-    Its presence means the pair is ``COMPLETE``.  ``chunk_id`` and
-    ``strategy`` are derived from the file name and directory — not stored
-    here; the winning attempt's identity is fully derivable from the pair,
-    so no back-pointer to the attempt is persisted (Req 25).
+    The EXTERNAL artifact record: written when the quality search for a
+    ``(chunk_id, strategy)`` pair concludes and the winning attempt is
+    promoted to the static winner name.  Its presence means the pair is
+    ``COMPLETE``.  ``chunk_id`` and ``strategy`` are derived from the file
+    name and directory — not stored here; the winning attempt's identity
+    is fully derivable from the pair, so no back-pointer to the attempt
+    is persisted (Req 25).
 
     Quality-target tracking is owned exclusively by ``OptimizationPhase`` via
     ``optimization.yaml``.  ``OptimizationPhase`` deletes stale result sidecars
@@ -191,6 +191,8 @@ class EncodingResultSidecar(_MeasuredSidecarBase):
     """
 
     crf:         DecimalYaml        # exact string round-trip (no float drift)
+    metrics:     dict[str, float]   # the TARGETED metric subset
+    frame_count: int         = 0    # frames of the winning attempt (0 = unknown)
     targets_met: bool        = True # False when search exhausted without a passing attempt
 
 
@@ -260,7 +262,7 @@ def _encoded_dir(work_dir: Path, strategy: Strategy) -> Path:
     return work_dir / ENCODED_OUTPUT_DIR / strategy.safe_name()
 
 
-def read_winner_sidecar(work_dir: Path, winner: EncodedChunk) -> EncodingResultSidecar | None:
+def read_winner_sidecar(work_dir: Path, winner: EncodedChunk) -> WinnerSidecar | None:
     """Read a winner's result sidecar by its static name (processing paths).
 
     The single sanctioned composition site for consumers that need a
@@ -274,17 +276,17 @@ def read_winner_sidecar(work_dir: Path, winner: EncodedChunk) -> EncodingResultS
         winner:   The winner payload whose sidecar to read.
 
     Returns:
-        The parsed :class:`EncodingResultSidecar`, or ``None`` when absent
+        The parsed :class:`WinnerSidecar`, or ``None`` when absent
         or unparseable.
     """
     return load_model(
         _encoded_dir(work_dir, winner.strategy)
         / EncodedChunk.format_winner_sidecar_name(winner.chunk.safe_name()),
-        EncodingResultSidecar,
+        WinnerSidecar,
     )
 
 
-def _write_metrics_sidecar(
+def _write_attempt_sidecar(
     attempt_path:     Path,
     metrics:          dict[str, float],
     metrics_sampling: int,
@@ -308,7 +310,7 @@ def _write_metrics_sidecar(
                           ``0`` = could not be determined.
     """
     sidecar = attempt_path.with_suffix(".yaml")
-    save_model(sidecar, MetricsSidecar(
+    save_model(sidecar, AttemptSidecar(
         metrics     = metrics,
         sampling    = metrics_sampling,
         frame_count = frame_count,
@@ -365,7 +367,7 @@ def _winner_targeted_metrics(
     return {k: v for k, v in metrics.items() if k in keys}
 
 
-def _write_encoding_result_sidecar(
+def _write_winner_sidecar(
     output_dir:      Path,
     chunk_id:        str,
     crf:             Decimal,
@@ -393,7 +395,7 @@ def _write_encoding_result_sidecar(
                          search was exhausted without a passing attempt.
     """
     sidecar_path = output_dir / EncodedChunk.format_winner_sidecar_name(chunk_id)
-    save_model(sidecar_path, EncodingResultSidecar(
+    save_model(sidecar_path, WinnerSidecar(
         crf         = crf,
         metrics     = metrics,
         frame_count = frame_count,
@@ -893,7 +895,7 @@ class ChunkEncoder:
             if not dst_graph.exists():
                 _hardlink_or_copy(src_graph, dst_graph)
 
-        _write_encoding_result_sidecar(
+        _write_winner_sidecar(
             output_dir  = encoded_dir,
             chunk_id    = chunk_id,
             crf         = crf,
@@ -1080,7 +1082,7 @@ class ChunkEncoder:
                     chunk.safe_name(), strategy, current_q
                 )
                 if existing is not None:
-                    sidecar = load_model(existing.path.with_suffix(".yaml"), MetricsSidecar)
+                    sidecar = load_model(existing.path.with_suffix(".yaml"), AttemptSidecar)
                     # Validate sidecar contains all required metric keys.
                     required_keys  = {f"{t.metric}_{t.statistic}" for t in quality_targets}
                     sampling_stale = (
@@ -1265,7 +1267,7 @@ class ChunkEncoder:
             # atomically.
             frame_counts[output_file] = attempt_frames
             all_metrics_by_path[output_file] = all_metrics
-            _write_metrics_sidecar(
+            _write_attempt_sidecar(
                 output_file, all_metrics,
                 self._metrics_sampling, attempt_frames,
             )
