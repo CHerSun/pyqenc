@@ -1311,6 +1311,8 @@ same refactor wave — do the record type and the key type together?).
 
 `FIXED_COMPARISON_STATS` should also become explicit targets?
 
+and need a distinction between full metrics set and targeted metrics set at typing level, so that we don't have to guess.
+
 ---
 
 ## 117. Observability research — traces/metrics for a CLI-first tool; replace the app-metrics stub
@@ -1380,7 +1382,44 @@ assumptions in `metrics.yaml`-adjacent output).
 
 ---
 
-## Last known = 119
+---
+
+## 120. PhaseResult redesign — base artifacts field, frozen results, naming pass
+
+**Status:** needs thinking (user direction 2026-10-12; investigate before
+implementing)
+
+`PhaseResult.artifacts` is a derived property — dataclass introspection
+re-concatenating the subclass's declared `Artifact` fields on EVERY access
+(no cache), sanctioned as "the one dynamic access". Re-investigate the
+design:
+
+- **At minimum**: cache the construction (results are never modified in
+  flight — phases build them right before exiting), or back the property
+  with a base private field.
+- **Better — invert the storage**: a base `artifacts` field on ALL phase
+  results (it is already baked into `.run`'s decision and the external
+  contract). Explicit typing stays, but reversed: `__init__` accepts the
+  base artifacts list and SPLITS it into the typed fields/views per phase
+  (extraction: video/audio/subtitle rows; chunking: chunks; etc.).
+  Typed views can be static properties over the frozen base.
+- **Frozen**: consumers should not modify results; phases construct at
+  exit. A frozen dataclass base + statically-constructed typed views;
+  the generic `artifacts` (or `_artifacts`) lives on the base for
+  `.run`/the runner.
+- **Naming pass**: streamlining across all `*PhaseResult` classes
+  (`chunks:` vs `outputs:` vs `winners:` vs `merged:` vs `file:` —
+  one convention, named per-phase but shaped uniformly).
+
+Open questions: does the "derived, never storage" doctrine (internal
+ledger rows can't leak into results) survive the inversion — the split
+must reject unwanted rows at construction; do partial-failure paths
+(FAILED with some rows) fit the frozen-at-exit model; interplay with
+`wanted`-derivation in the template.
+
+---
+
+## Last known = 120
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
