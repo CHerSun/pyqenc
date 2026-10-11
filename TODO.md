@@ -1047,36 +1047,6 @@ Should we move them into separate file, to be readily available for both optimiz
 
 ---
 
-## 107. Phase sidecars: uniform layout — execution-order fields
-
-**Status:** RESOLVED 2026-10-11. job.yaml half landed 2026-10-10 (b78790f
-follow-up, `JobSidecar` flattened to top-level `{path, source}` with
-`source` = the identity fingerprint everywhere; `JobSourceRecord`
-deleted); field-order half landed 2026-10-11 — execution-order layout in
-every phase/file sidecar (keys first with `source` always first, config
-params, own facts short→long, measured `metrics` / replay summaries
-last; declaration order only, no custom serializers), plus the merged
-family flattened to per-mode sidecar variants (`_MergedSidecarBase` →
-`Fixed/SearchMergedOutputSidecar`, the union on the full sidecar with
-`mode`-tag dispatch — no nested `provenance` block). The two union
-sidecars keep their base→derived rhythm: common fields serialize first,
-`mode` + the mode-key trail by pydantic inheritance mechanics.
-
-The remaining uniformity gap observed across the phase sidecars on a true
-run:
-
-- **Field ordering is not uniform.** Want a stable, execution-order layout in
-  every phase YAML: (1) deps/inputs used for invalidation first — `source`
-  (the identity key) always first; (2) config params next (audio chains,
-  scene thresholds, targets/pinned map, sampling); (3) own phase results
-  (chunking scenes, test_chunks, summary-relevant facts); (4) preserved
-  summaries (`summary`) last. Mechanically free: pydantic v2 serializes in
-  field-declaration order, so this is a declaration reorder per sidecar
-  model — no custom serializers needed. Applies to all phase sidecars + the
-  per-output merged sidecar (provenance before facts there, same principle).
-
----
-
 ## 108. Run-log polish — phase banners and uniform final status lines
 
 **Status:** feasible, design settled by user (2026-10-09, from the real e2e run's log review); not yet implemented
