@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Self
 from pydantic import BaseModel
 
 from pyqenc.models import (
-    CropParams,
     CropYaml,
 )
 
@@ -72,7 +71,10 @@ class ProbeFacet(BaseModel):
     count and the crop values — compared field-wise, never by whole-model
     equality (human-facing provenance like ``crop_source`` must never leak
     into a key). ``frame_count=0`` is the unknown sentinel: unknown on
-    either side contributes nothing (unknown-not-mismatch, Req 32).
+    either side contributes nothing (unknown-not-mismatch, Req 32). Both
+    fields are REQUIRED — the sole constructor (:meth:`from_probe`)
+    materializes them from the probe result (0 when the stream is absent,
+    the fetch-site sentinel); bare construction is a programming error.
 
     Attributes:
         frame_count: Frames of the source (0 = unknown).
@@ -80,8 +82,8 @@ class ProbeFacet(BaseModel):
                      storage string — ``crop: 22,22,0,0``).
     """
 
-    frame_count: int = 0
-    crop:        CropYaml = CropParams()
+    frame_count: int
+    crop:        CropYaml
 
     @classmethod
     def from_probe(cls, probe_result: ProbePhaseResult) -> Self:

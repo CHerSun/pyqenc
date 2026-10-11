@@ -511,7 +511,7 @@ class QualityMeasurement:
 
     metrics:     ChunkQualityStats
     logs:        QualityLogs
-    frame_count: int = 0
+    frame_count: int
 
 
 # ---------------------------------------------------------------------------
