@@ -13,7 +13,7 @@ from collections.abc import Iterable
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import Enum, IntEnum
 from pathlib import Path
-from typing import Annotated, ClassVar, Final, Self
+from typing import TYPE_CHECKING, Annotated, ClassVar, Final, Self
 
 from pydantic import (
     BaseModel,
@@ -35,6 +35,9 @@ from pyqenc.constants import (
     UP_ARROW,
 )
 from pyqenc.utils.naming import sanitize_filesystem_text
+
+if TYPE_CHECKING:
+    from pyqenc.quality import MetricStatKey
 
 logger = logging.getLogger(__name__)
 
@@ -611,6 +614,27 @@ class QualityTarget(BaseModel):
                 f"Invalid quality target format: '{target_str}'. "
                 f"Expected format: 'metric-stat:value' (e.g., 'vmaf-min:95')"
             ) from e
+
+    def key(self) -> MetricStatKey:
+        """Return the target's metric-statistic identity.
+
+        The fields stay strings (the value-type fold is TODO §116); this is
+        the typed view over them.
+
+        Returns:
+            The typed metric-statistic key.
+
+        Raises:
+            ValueError: The metric or statistic field is outside the closed
+                sets (fields are validated at target parse, not at
+                construction — this accessor is where bad values fail).
+        """
+        from pyqenc.quality import MetricStatKey, MetricType, StatisticType  # deferred to avoid circular import
+
+        return MetricStatKey(
+            metric    = MetricType(self.metric),
+            statistic = StatisticType(self.statistic),
+        )
 
     def __str__(self) -> str:
         return f"{self.metric}-{self.statistic}≥{self.value}"
