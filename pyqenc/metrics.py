@@ -564,7 +564,7 @@ class YamlMetricsCollector(MetricsCollector):
         if not metrics_file.exists():
             return
         try:
-            raw = yaml.safe_load(metrics_file.read_text(encoding="utf-8"))
+            raw = yaml.safe_load(metrics_file.read_text(encoding="utf-8-sig"))
             pm  = PipelineMetrics.model_validate(raw["pipeline_metrics"])
         except Exception as exc:  # noqa: BLE001
             logger.warning("Metrics: failed to load %s, starting fresh: %s", metrics_file, exc)
@@ -733,7 +733,7 @@ class YamlMetricsCollector(MetricsCollector):
         data = {"pipeline_metrics": metrics.model_dump()}
         text = yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
         try:
-            self._tmp_path.write_text(text, encoding="utf-8")
+            self._tmp_path.write_text(text, encoding="utf-8-sig")
             self._tmp_path.replace(self._metrics_path)
         except OSError as exc:
             logger.warning("Metrics: failed to write %s: %s", self._metrics_path, exc)

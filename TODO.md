@@ -1308,39 +1308,6 @@ implementation sweep. No drive-by renames.
 
 ---
 
-## 124. YAML sidecars are BOM-less UTF-8 — Windows tools guess ANSI and mangle the non-ASCII glyphs
-
-**Status:** needs thinking (user direction 2026-10-12; SOON — mechanical,
-land with the next yaml_utils touch)
-
-Every yaml write goes through the UTF-8-no-BOM chokepoints
-(`save_model` / `write_yaml_atomic` in `utils/yaml_utils.py`). Windows
-tools that guess the codepage (ANSI default in many editors/viewers) then
-misrender the non-ASCII glyphs the formats deliberately rely on: the
-fingerprint storage separator (NBSP·NBSP — yaml-whitespace-safe by design)
-and the narrow no-break space in size formatting (U+202F).
-
-- Write side: one line — write the tmp twin with `encoding="utf-8-sig"`
-  (EF BB BF lands at every sidecar's start; tmp-then-rename atomicity
-  unchanged).
-- Read side: today's plain `encoding="utf-8"` loads TOLERATE the BOM
-  (probed empirically against PyYAML 6 — a leading U+FEFF in the decoded
-  text loads fine), so nothing breaks by just adding the BOM. Still worth
-  switching the ~5 load sites to `utf-8-sig` (yaml_utils' `load_model` +
-  the direct `path.open(encoding="utf-8")` pairs in the phase sidecar
-  loaders) — explicit beats parser tolerance, and `utf-8-sig` is identical
-  on BOM-less files.
-- JSON stays BOM-free (mkvmerge options file, ffmpeg JSON outputs) — a BOM
-  can break other JSON consumers.
-- Verify: the fingerprint strings are byte-compared — the suite's
-  round-trip tests are the gate.
-
-**Questions to think about:** none blocking — mechanical change, small
-test addition (a BOM'd sidecar loads; a written sidecar starts with the
-BOM).
-
----
-
 ## 125. Winner-limiter table never states the absolute bar it judges against
 
 **Status:** needs thinking (user direction 2026-10-12; SOON — small
@@ -1429,7 +1396,13 @@ binds to the preceding selector).
 
 ---
 
-## Last known = 126
+## 127. Fingerprint vs SizedFingerprint
+
+pydantic doesn't allow `__eq__` between different models by default, so `Fingerprint` and `SizedFingerprint` aren't directly comparable. Resulting question is - do we need `size` optional field on `Fingerprint`? I don't like optionals, they break programmatic contracts. I prefer a clean explicit typing, like upgrading `Fingerprint` to `SizedFingerprint`, rather then asserting / none-checking size on each access.
+
+---
+
+## Last known = 127
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

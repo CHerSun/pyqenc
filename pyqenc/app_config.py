@@ -961,7 +961,7 @@ def load_app_config(*, default_only: bool = False) -> AppConfig:
             "This indicates a broken package installation."
         )
 
-    with bundled_default.open(encoding="utf-8") as fh:
+    with bundled_default.open(encoding="utf-8-sig") as fh:
         merged: dict = yaml.safe_load(fh) or {}
 
     source_paths: list[Path] = [bundled_default]
@@ -970,7 +970,7 @@ def load_app_config(*, default_only: bool = False) -> AppConfig:
     if not default_only:
         home_config = Path.home() / CONFIG_DIR_HOME / CONFIG_FILENAME_HOME
         if home_config.exists():
-            with home_config.open(encoding="utf-8") as fh:
+            with home_config.open(encoding="utf-8-sig") as fh:
                 home_data: dict = yaml.safe_load(fh) or {}
             merged = _deep_merge(merged, home_data)
             source_paths.append(home_config)
@@ -980,7 +980,7 @@ def load_app_config(*, default_only: bool = False) -> AppConfig:
 
         cwd_config = Path.cwd() / CONFIG_FILENAME_CWD
         if cwd_config.exists():
-            with cwd_config.open(encoding="utf-8") as fh:
+            with cwd_config.open(encoding="utf-8-sig") as fh:
                 cwd_data: dict = yaml.safe_load(fh) or {}
             merged = _deep_merge(merged, cwd_data)
             source_paths.append(cwd_config)

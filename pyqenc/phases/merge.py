@@ -172,7 +172,7 @@ def load_merged_output_sidecar(sidecar_path: Path) -> MergedOutputSidecar | None
     if not sidecar_path.exists():
         return None
     try:
-        with sidecar_path.open("r", encoding="utf-8") as fh:
+        with sidecar_path.open("r", encoding="utf-8-sig") as fh:
             data = yaml.safe_load(fh)
         return _MERGED_OUTPUT_ADAPTER.validate_python(data or {})
     except (OSError, ValueError, yaml.YAMLError) as exc:

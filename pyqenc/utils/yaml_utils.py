@@ -40,7 +40,7 @@ def load_model[ModelT: BaseModel](path: Path, model_cls: type[ModelT]) -> ModelT
     if not path.exists():
         return None
     try:
-        with path.open("r", encoding="utf-8") as fh:
+        with path.open("r", encoding="utf-8-sig") as fh:
             data = yaml.safe_load(fh)
         return model_cls.model_validate(data or {})
     except (OSError, ValueError, yaml.YAMLError) as e:
@@ -65,6 +65,10 @@ def save_model(path: Path, model: BaseModel) -> None:
 def write_yaml_atomic(path: Path, data: dict) -> None:
     """Write *data* as YAML to *path* using the ``.tmp``-then-rename protocol.
 
+    The file starts with a UTF-8 BOM (``utf-8-sig``) so Windows tools that
+    guess the ANSI codepage detect UTF-8 and render the non-ASCII glyphs
+    correctly.
+
     Writes to a sibling temp file ``<path.stem>.tmp`` first, then renames it
     to *path* on success.  If any exception occurs the temp file is deleted so
     no partial file is left on disk.
@@ -82,7 +86,7 @@ def write_yaml_atomic(path: Path, data: dict) -> None:
     tmp_path = path.parent / f"{path.stem}{TEMP_SUFFIX}"
 
     try:
-        with tmp_path.open("w", encoding="utf-8") as fh:
+        with tmp_path.open("w", encoding="utf-8-sig") as fh:
             yaml.dump(data, fh, allow_unicode=True, sort_keys=False)
         tmp_path.replace(path)
         logger.debug("Wrote YAML atomically: %s", path)

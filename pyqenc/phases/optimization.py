@@ -150,7 +150,7 @@ def load_optimization_sidecar(path: Path) -> OptimizationSidecar | None:
     if not path.exists():
         return None
     try:
-        with path.open("r", encoding="utf-8") as fh:
+        with path.open("r", encoding="utf-8-sig") as fh:
             data = yaml.safe_load(fh)
         return _OPTIMIZATION_ADAPTER.validate_python(data or {})
     except (OSError, ValueError, yaml.YAMLError) as exc:
