@@ -144,13 +144,11 @@ How would it interact with CRF search monotonicity?
 
 **Status:** needs thinking (partially addressed)
 
-- `StrategyTestResult` carries only `strategy_name` + `total_size`
-  (`pyqenc/state.py:269-278`); ranking is `sorted(..., key=total_size)`
-  (`pyqenc/phases/optimization.py:461`) with tolerance selection
-  (`_apply_tolerance`, `:645-668`). The summary table shows a passed/failed
-  status column (`:670-707`) but no success-rate %, no score, and no
-  exhausted-attempts vs targets-met distinction. Original motivation:
-  AV1-FGS.
+- Selection is size-based (`_apply_tolerance` band in search,
+  tolerance-epsilon dominance in fixed) over `StrategyRow` populations.
+  The unified comparison table shows per-statistic deltas vs the basis
+  row — still no success-rate %, no score, and no exhausted-attempts vs
+  targets-met distinction. Original motivation: AV1-FGS.
 
 **Questions to think about:** rank by success % (then size)? Add average
 negative score for failures?
@@ -484,9 +482,6 @@ Deferred as costly/structural:
   extended-stream, encoded-chunk builders) → conftest consolidation.
 - `EncodedChunk` composition duplicated (`_pair_placeholder` vs
   `build_encoded_chunk` shapes).
-- ASCII summary-table scaffold duplicated (optimization vs merge) — consumed
-  by the `2026-10-03 unified-quality-summaries` spec (the shared
-  builder/renderer is the spec's core deliverable).
 - measure→extraction private imports (`_probe_streams_json`, `_video_info`)
   and api→measure `_parse_duration` — re-homing per §57.
 - Broader test-surface rework beyond metrics (string-format pinning etc.);
@@ -715,26 +710,6 @@ Legitimate usages for `str` do exist, like messages. But if it masks object usag
 
 ---
 
-## 90. Sidecar content round 2 — summary-content narrowing stays open
-
-**Status:** needs thinking (remainder; the typed per-mode models + the
-per-output merged sidecar typing landed with the `2026-10-07
-artifact-recovery-ownership` spec — optimization/merge are discriminated
-unions, the merged sidecar is a typed facts+provenance model, `plot`/`anchor`
-dropped, `quality_targets` mode-omitted)
-
-Still open here (owns the summary-content narrowing; builds on the landed
-substrate — see `2026-10-03 unified-quality-summaries`):
-
-- `optimization.yaml` `summary[].metrics` still dumps ALL stats — narrow to
-  the comparison set (p10 + median)? Tension: the full set is the current
-  re-derivation substrate for the "changed comparison stat set re-projects
-  old measurements" property; narrowing moves retention to the attempt
-  sidecars (where it already lives) and makes re-derivation read them — the
-  reuse path then re-reads sidecars (or re-derives within p10/med only).
-  Decide explicitly with the unified-summaries spec.
-
----
 
 ---
 
@@ -994,33 +969,6 @@ Bad examples:
 Good examples:
 - include/exclude patterns - regex is text. Could probably also switch to compiled regex to make it obvious, but in general this is okeish.
 
-## 105. Extra thoughts on Optimization/Encoding phase invalidation
-
-- Optimization phase owns winners invalidation (`encoded`).
-- We now have 2 run modes - fixed vs search.
-- fixed mode - uses direct quality. quality change between reruns = invalidation of full `encoded`.
-- search mode - uses targets. targets changed = invalidation of full `encoded`.
-
-hypothesis - saving either quality or targets ~= mode
-after winners invalidation - save updated sphase sidecar with new params.
-as an option - 2 types for sidecar model, explicitly typed for fixed vs search mode (from common base to define common params once).
-- fixed - quality
-- search - targets
-- summary table as common? Same data for pareto and tolerance application? See also summary reworks to do here.
-
-How to understand on load which type to use for sidecar? Just try both (with mandatory fields should be a fast-fail)?
-
-## 106. Encoding/optimization phases share a lot of mechanics
-
-**Status:** partial (2026-10-07) — the shared pair-ledger machinery
-(`_pair_rows` static-name consumption, winner curation) re-homed under the
-`2026-10-07 artifact-recovery-ownership` rework; the import-cycle break
-itself (circular `optimization <-> encoding` deferred imports) stays open
-here.
-
-Should we move them into separate file, to be readily available for both optimization and encoding phases (not circular imports optimization <--> encoding).
-
----
 
 ## 108. Run-log polish — phase banners and uniform final status lines
 
@@ -1236,13 +1184,11 @@ key-value tables) is still open — that is §119's leftover scope.
 
 **Status:** needs thinking (user direction 2026-10-10)
 
-The summary/comparison tables (optimization's select table, the fixed
-comparison table, merge's summary + miss-detail tables, the limiter table,
-`fmt_key_value_table` call sites) each hand-roll column alignment —
-`%-30s %12s %8s` format strings, manual padding constants, per-site width
-tuning. The LOOK is right (neat, aligned, terminal-friendly); the
-repetition is the problem: every new table re-implements alignment,
-width-fitting, and unit suffixing.
+The remaining hand-aligned tables (the winning-limiter table, the measure
+summary, `fmt_key_value_table` call sites) each hand-roll column
+alignment — `%-30s %12s %8s`-style format strings, manual padding
+constants, per-site width tuning. The LOOK is right (neat, aligned,
+terminal-friendly); the repetition is the problem.
 
 Research the options:
 
@@ -1362,8 +1308,128 @@ implementation sweep. No drive-by renames.
 
 ---
 
+## 124. YAML sidecars are BOM-less UTF-8 — Windows tools guess ANSI and mangle the non-ASCII glyphs
 
-## Last known = 123
+**Status:** needs thinking (user direction 2026-10-12; SOON — mechanical,
+land with the next yaml_utils touch)
+
+Every yaml write goes through the UTF-8-no-BOM chokepoints
+(`save_model` / `write_yaml_atomic` in `utils/yaml_utils.py`). Windows
+tools that guess the codepage (ANSI default in many editors/viewers) then
+misrender the non-ASCII glyphs the formats deliberately rely on: the
+fingerprint storage separator (NBSP·NBSP — yaml-whitespace-safe by design)
+and the narrow no-break space in size formatting (U+202F).
+
+- Write side: one line — write the tmp twin with `encoding="utf-8-sig"`
+  (EF BB BF lands at every sidecar's start; tmp-then-rename atomicity
+  unchanged).
+- Read side: today's plain `encoding="utf-8"` loads TOLERATE the BOM
+  (probed empirically against PyYAML 6 — a leading U+FEFF in the decoded
+  text loads fine), so nothing breaks by just adding the BOM. Still worth
+  switching the ~5 load sites to `utf-8-sig` (yaml_utils' `load_model` +
+  the direct `path.open(encoding="utf-8")` pairs in the phase sidecar
+  loaders) — explicit beats parser tolerance, and `utf-8-sig` is identical
+  on BOM-less files.
+- JSON stays BOM-free (mkvmerge options file, ffmpeg JSON outputs) — a BOM
+  can break other JSON consumers.
+- Verify: the fingerprint strings are byte-compared — the suite's
+  round-trip tests are the gate.
+
+**Questions to think about:** none blocking — mechanical change, small
+test addition (a BOM'd sidecar loads; a written sidecar starts with the
+BOM).
+
+---
+
+## 125. Winner-limiter table never states the absolute bar it judges against
+
+**Status:** needs thinking (user direction 2026-10-12; SOON — small
+presentation item, out of the unified-summaries scope by Req 11.5)
+
+The encoding summary's winning-limiter table
+(`EncodingPhase._log_limiter_summary`) reports pass/miss counts with median
+surplus/deficit deltas — but never the ABSOLUTE bar: search runs judge the
+user's configured targets, fixed runs the anchor-derived synthetic ruler,
+and neither set of values appears anywhere before the table. A reader
+cannot turn `miss 3 (−1.2)` into an actual metric value without opening
+sidecars.
+
+Direction: state the absolutes BEFORE the table (a line above it, in the
+pattern the unified comparison tables use — their convention line names the
+ruler identity, and their ruler row carries the absolute values). Natural
+shape: one `targets/synthetic ruler:` line listing `metric-stat = value`
+pairs over the table's limiter keys, so the deltas below read against
+visible numbers.
+
+---
+
+## 126. Per-selector fixed quality — multiple `--strategies`/`-q` pairs
+
+**Status:** needs thinking (feature consideration 2026-10-12; do-later —
+first whether we really need it, then the blast radius)
+
+Fixed runs with a single `-q` are an awesome tool, but quality is NOT
+uniform between codecs — AV1 CRF and H.265 CRF differ wildly in both value
+and perceptible quality for the same number. Wanting different codecs at
+different fixed qualities in ONE run is impossible today:
+
+- one `--strategies` value (plain `store` — a second occurrence silently
+  overwrites the first, `cli.py:281-293`) + one `-q` (`cli.py:294-308`),
+  both wired into the single `resolve_encoding` call (`cli.py:406-421`);
+- the shared `-q` is applied to EVERY matched strategy
+  (`_expand_strategy_pattern(pattern, canonical_quality)`,
+  `app_config.py:627-630`). The uniform-labels guard
+  (`app_config.py:641-652`) only catches different label TEXT (CRF vs CQ vs
+  Mbit/s; the label defaults to "CRF", `models.py:828`), so `av1,h265 -q 18`
+  passes but silently shares the NUMBER across differently-scaled codecs.
+  Escape hatches today: one run per codec family, or editing config — both
+  ugly.
+
+Proposal: multiple `--strategies` selectors, each optionally followed by
+its own `-q`, quality sticking to the last `--strategies` before it —
+`--strategies av1 -q 14 --strategies h26* -q 18` expands to the av1
+profile(s) with quality override (14, 14) and the h26* profiles with
+(18, 18), each keeping default presets. Argparse side looks feasible via
+one custom `argparse.Action` shared by both flags, appending
+`{strategy, quality}` pairs in order (sketched by the user; `-q` before any
+`--strategies` raises `ArgumentError`); needs a bit of support from our
+side, including scoping the single-label requirement to WITHIN one pair
+(labels may differ between pairs).
+
+Blast radius (verified):
+
+- CLI parse layer: the custom Action pairing; `_parse_strategies` /
+  `_parse_quality_override` stay per-value; `resolve_plan_args` re-shapes
+  its wiring. Rules needed: `-q` twice on one selector (error vs
+  last-wins); a selector with NO `-q` among pinned ones (the
+  all-fixed-or-all-searched guard fires — wanted?); comma-separated
+  patterns inside one selector receive the selector's `-q` as a group.
+- `AppConfig.resolve_encoding` (`app_config.py:576-672`): `quality`
+  becomes per-pattern (parallel sequence, or folded into the strategies
+  argument); the uniform-labels guard re-scopes from the whole matched set
+  to one selector's pair (one `-q` value must still mean one thing for
+  everything it pins).
+- Dedup by `(preset, profile)` first-occurrence (`app_config.py:632-639`):
+  the same strategy matched by two selectors with different `-q` is
+  ambiguous — explicit error needed.
+- Mixed fixed/searched guard (`app_config.py:654-670`) unchanged and still
+  binding: either every selector pins a point or none does.
+- Downstream looks mostly untouched: per-strategy effective ranges already
+  exist (`_effective_codec`), `EncodingPlan.fixed_quality` stays a
+  plan-wide "all collapsed" bool (`models.py:685-729`), and merge's fixed
+  provenance quality is already per-output from each strategy's codec
+  (`merge.py:135-144, 264-273, 302-306`). Verify the optimization
+  sidecar/replay re-derivation paths read per-strategy quality, not the
+  CLI value.
+
+**Questions to think about:** is the need real enough to justify the CLI
+surface (alternate: per-profile fixed quality in config — the profile layer
+already owns ranges)? Error messages must teach the pairing rule (quality
+binds to the preceding selector).
+
+---
+
+## Last known = 126
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.
