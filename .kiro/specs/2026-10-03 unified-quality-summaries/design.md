@@ -2,232 +2,360 @@
 
 <!-- markdownlint-disable MD024 -->
 
-- Spec: Unified Quality Summaries — one anchor-relative comparison table across optimization, encoding, and merge
+- Spec: Unified Quality Summaries — one comparison table across optimization and merge
 - Created: 2026-10-03
+- Amended: 2026-10-12 — convergence rework (design sessions 2026-10-09 + 2026-10-12): one persisted row shape + one renderer, deltas in every mode, %-size deltas, ruler-row semantics, mode-dependent marks, tolerance-epsilon dominance, the shared plain-text formatter, merge presentation-bar closure
 
 ## Context
 
 The fixed-quality spec shipped the anchor-relative comparison table at
 optimization and, through two smoke-test review rounds, settled a compact
 format: one size cell (MB + ×ratio vs anchor, anchor bare), one column per
-metric carrying both compared statistics (anchor: `p10..median` range, others:
-`Δp10/Δmedian`). That format is the seed. Merge still prints a different
-table (config-target verdicts), search runs print a third (size/status), and
-the encoding limiter table has no delta mode without an optimization anchor.
+metric carrying both compared statistics (anchor: `p10..median` range,
+others: `Δp10/Δmedian`). That format was the seed. Merge printed a different
+table (config-target verdicts), search runs printed a third (size/status),
+and the two phases persisted different row shapes (`StrategySummaryRow`,
+`MergeSummaryRow`).
 
-Two foundations need work before the table can live in three phases:
+Two foundations needed work before the table could live in two phases:
 
 - **Key plumbing.** A metric-statistic identity is spelled `vmaf_median` in
   sidecars and `vmaf-median` on the CLI, joined and split ad hoc at every
-  boundary, with no closed set of statistics (`std` is measured but is not a
-  legal target; `med` parses to `median`). Table data is assembled from
+  boundary, with no closed set of statistics. Table data is assembled from
   stringly keys throughout.
-- **Data path.** Some tables persist prepared data and replay it on fast
-  exits (limiter summary in `encoding.yaml`, strategy summaries in
-  `merge.yaml`); others rebuild from facts each run. The unified rule is
-  facts → prepared data → rendering on processing runs, load → render on
-  fast exits.
+- **Data path.** The two phases persist different row shapes
+  (`StrategySummaryRow`, `MergeSummaryRow`), and the merge renderer re-stats
+  output files at render time instead of trusting its persisted sizes.
+
+The 2026-10-12 amendment resolves the presentation direction completely
+(judged through three sketch rounds on real run data):
+
+- **Convergence is total** — one persisted row shape, one renderer, one
+  mechanics pair (aggregate→persist→render on processing; load→render on
+  fast exit). The renderer adapts to the data the population provides, never
+  to phase identity.
+- **Deltas everywhere** — strategy rows show Δ vs the ruler in both modes;
+  absolutes live on the ruler row alone (targets in search, anchor in
+  fixed).
+- **%-size deltas** replace ×ratios, folded into the single size column,
+  human-readable, and self-explanatory against the stated tolerance.
+- **Marks are mode-dependent**: selection-only at optimization,
+  recommendation (+ live verdicts in search) at merge.
+- **Tolerance-epsilon dominance** gives fixed-mode pruning its bite, reusing
+  the two tolerances that already exist.
 
 ## Flow
 
 ```mermaid
 flowchart TD
-    OPT["OptimizationPhase concludes<br/>(test-subset population)"] --> ELECT["elect anchor (once per run)<br/>persist anchor + survivors + facts<br/>(strategy_results; ruler derives)"]
-    ELECT --> OT["build table model (subset values)<br/>persist prepared data → render"]
-    ELECT --> ENC["EncodingPhase summary<br/>limiter/chunks table (shape unchanged)<br/>ruler = optimization anchor"]
-    ENC -->|"no optimization anchor"| DEF["default anchor: smallest total<br/>winner size (presentation only)"]
-    ENC -->|anchor carried| MER
-    MER["MergePhase concludes<br/>(full-movie population)"] --> MEAS["measure ruler stats + targets<br/>per merged output"]
-    MEAS --> MT["build table model vs elected anchor<br/>+ shadow-anchor line (same / SHIFTED)"]
-    MT --> PERSIST["persist prepared data → render"]
-    FAST["fast-exit run (optimization / merge)"] --> LOAD["load prepared data → render"]
+    OPT["OptimizationPhase concludes<br/>(test-subset population)"] --> ELECT["elect test anchor (once per run)<br/>tolerance-epsilon pruning → survivors<br/>persist StrategyRow list (facts only)<br/>ruler derives from rows"]
+    ELECT --> OT["assemble ruler + rows + marks<br/>render comparison table"]
+    ELECT -->|"anchor identity (audit only)"| MER
+    MER["MergePhase concludes<br/>(full-movie population)"] --> MEAS["measure full stats per output<br/>rows persist the rendered basis"]
+    MEAS --> MT["elect merge anchor (same rule)<br/>assemble ruler + rows + marks<br/>+ anchor-audit line"]
+    MT --> PERSIST["persist StrategyRow list → render"]
+    FAST["fast-exit run (optimization / merge)"] --> LOAD["load persisted rows<br/>derive ruler/marks live → render<br/>(byte-identical, zero recompute)"]
 ```
 
 ## The table model and its owner
 
-A dedicated module (e.g. `pyqenc/summary_tables.py`) owns two things and
-nothing else:
+A dedicated module (e.g. `pyqenc/summary_tables.py`) owns the comparison
+table: the persisted row model, the render-time composition, and the
+renderer. Nothing else.
 
 ```python
-@dataclass(frozen=True)
-class ComparisonRow:
-    name:        str
-    kind:        RowKind            # SOURCE | REFERENCE | STRATEGY
-    size_bytes:  int | None         # None for the targets reference row
-    values:      dict[MetricStatKey, float]     # absolute, keyed by the pair type
+class StrategyRow(BaseModel):          # THE persisted shape, both sidecars
+    strategy:   str                    # display name
+    size_bytes: int
+    metrics:    dict[MetricStatKey, float]   # canonical keys; breadth per Req 6.8
 
 @dataclass(frozen=True)
-class ComparisonTable:
-    ruler_kind:  RulerKind          # ANCHOR | TARGETS
-    reference:   ComparisonRow      # anchor (fixed) or targets (search)
-    rows:        list[ComparisonRow]
-    marks:       dict[str, RowMark] # survivor / pruned(dominator) / merged / recommended?
-    deltas:      computed at render # never persisted — facts stay absolute
+class ComparisonTable:                 # render-time composition, never persisted
+    rows:        list[ComparisonRow]   # sorted by size ascending; ruler folds in
+    ruler:       Ruler                 # TARGETS (values ride the source/targets row) | ANCHOR (name) | NONE (uncompared)
+    source:      SourceRow | None      # merge only: name + size (metric cells = targets in search)
+    marks:       dict[str, Mark]       # derived live: SELECTED / RECOMMENDED / verdict glyph
 ```
 
-Phases assemble rows from their own artifacts (winner payloads, merged
-outputs, sidecars), persist the model in their params sidecar, and hand it to
-the renderer. The renderer is the ONLY place cell text exists — separators,
-delta formatting, marks, source cues (Req 5 variants parameterize it; a
-variant is a named configuration of the renderer, not a fork).
+Phases assemble `StrategyRow` populations from their own artifacts (winner
+payloads, merged outputs, sidecars), persist them in their params sidecar,
+and hand rows + ruler inputs to the renderer. The renderer is the ONLY place
+cell text exists — the folded size cell, the delta pairs, the endpoints in
+headers, marks, cues. A variant is a named configuration of constants, not a
+fork.
 
-Deltas are computed at render time from absolute values — prepared data stays
-facts-only, so a renderer change (e.g. the variant review's outcome) re-renders
-old runs' persisted tables without re-measuring anything.
+Deltas, %Δ, and marks are computed at render time from absolute facts — so a
+renderer change re-renders old runs' persisted tables without re-measuring
+anything, and a changed verdict bar re-renders old rows correctly.
 
-## Reference row and anchor lifecycle
+## Renderer and formatter
 
-- **Fixed runs:** the anchor is elected once at optimization (survivor with
-  the smallest test size — the existing election) and persisted in
-  `optimization.yaml`. Merge receives it via the optimization result and
-  judges its population against it. The sidecar stores facts + decisions
-  only — `strategy_results` (full aggregated stats), `selected`, `anchor` —
-  never the ruler itself: the synthetic target set is a pure projection of
-  the anchor's facts onto the comparison stat set and derives on demand
-  (persisting it was dropped in the 2026-10-03 review as write-only data
-  with a drift risk). The anchor ROW at merge shows the
-  anchor's own full-movie measurements — its deltas vs the elected ruler's
-  values are exactly the "did the test subset represent the movie" signal,
-  visible in-table.
-- **Shadow anchor at merge:** re-running the election over the full-movie
-  rows is a pure function of the table model — a re-election in fact, but
-  reported, never installed. The result surfaces as an anchor line that
+Two layers, one direction of dependency:
+
+- **`format_table` (generic util, `pyqenc/utils/`)** — owns the plain-text
+  mechanics only: column headers, rows, per-column left/right alignment,
+  dash rule rows, dynamic widths (content and header maxima, with floor
+  hints), suffix-safe truncation, and bare columns — content-only zones
+  with no header text and no rule-row segment (an empty header is the
+  candidate flag), so trailing zones like marks render through the
+  formatter with real width computation and alignment instead of
+  hand-appended text. Rule rows preserve in-cell divider positions: the
+  formatter scans the cells it already renders per column and writes `|`
+  at the same offsets (dashes elsewhere) — compound columns read as ruled
+  sub-columns (`---------|------`), pipe-free columns keep solid spans, so
+  tables without sub-columns (the §119 remainder) render identically.
+  Logger-plain output: 2-space column gaps, no ANSI,
+  no borders, and a documented narrow-glyph constraint (the current
+  `len()`-based behavior; wide or ambiguous-width glyphs stay out of table
+  cells by convention). This is Req 10's deliverable — §119's mechanism,
+  rejecting external libraries (research 2026-10-12).
+- **The comparison renderer (`summary_tables`)** — owns every cell's TEXT:
+  composes the folded size cell (MB right-aligned + fixed-width %Δ
+  sub-value), the delta pairs, the header endpoints, ruler cues, marks, and
+  the below-table detail lines; then hands finished rows to `format_table`.
+  All presentation constants (separators, glyphs, cue strings, number
+  formats) live here as named constants — switchable without touching
+  either layer's logic.
+
+Re-homing the remaining tables (winner-limiter, measure summary,
+key-value) onto `format_table` is TODO §119's remainder — outside this
+spec.
+
+## Ruler row, deltas, and the size column
+
+- **Search runs:** the ruler is the configured target set. At merge the
+  target values ride the source row (◎-marked, `(src)` cue) — the source's
+  own metric cells are undefined by construction (source-vs-source is
+  perfect), so the cells are free. At optimization a standalone `targets`
+  ruler row leads with no size value. Strategy rows show `Δlo | Δhi` per
+  metric vs the targets; negative deltas are the visible miss story (a
+  strategy can be selected while its test chunks still miss targets —
+  selection is a size band over strategies with winners).
+- **Delta cells:** each metric cell carries one signed difference per
+  compared statistic, in the header's statistic order — never averaged or
+  otherwise aggregated across statistics, rendered as right-aligned
+  sub-columns (Req 2.8). The underlying value is a single
+  aggregate over the population (worst-chunk value at optimization;
+  the output's own pooled measurement at merge) — no per-winner
+  distribution semantics. The pair exists so the two questions stay
+  separable: the lower endpoint (p10, the floor) and the higher (median,
+  the typical frame); a row that wins one and loses the other is exactly
+  what the pair must expose.
+- **Fixed runs:** the anchor is the ruler — ◎-marked, absolutes, bare size
+  (the test anchor at optimization, the merge anchor at merge). Rows sort
+  by size ascending; the ◎ mark locates the ruler wherever the sort places
+  it (under tolerance-epsilon dominance a pruned row can be smaller than
+  its dominator). Other rows show `Δlo | Δhi` vs the ruler's comparison
+  stats.
+- **Fixed runs always carry a ruler (§123):** the single-strategy skip
+  applies to search only — a single-strategy fixed run elects its only
+  strategy (the ruler row IS the strategy row; absolutes by construction);
+  `--no-optimize` fixed runs test-encode with dominance pruning disabled
+  (every strategy selected; anchor = the smallest test size — the
+  unchanged smallest-survivor rule over an unpruned population). No-ruler
+  absolute rendering has no fixed-mode case, save the no-measurement
+  anchor (caveated rendering).
+- **Size column:** one column — MB value + folded %Δ (`456.9 (+0.0%)`,
+  `512.3 (-63.0%)`). Basis: source (merge) or smallest strategy row
+  (optimization). The basis row carries no self-delta; the source row shows
+  `(src)` instead. With the tolerance stated in the ruler line, a cut row's
+  `+12%` is self-explanatory — no separate cut annotation exists.
+- **Alignment:** numeric cells right-aligned at uniform precision
+  (decimal-point alignment); names left-aligned; suffix-safe truncation
+  (`(src)`/`(anchor)` always survive). One blank line after the table before
+  any detail lines.
+- **Headers:** `VMAF 10% | 50%` — the compared statistics per metric,
+  listed in the closed set's order and rendered as sub-columns (search:
+  the per-metric targeted statistics; fixed: the comparison statistics);
+  a single targeted statistic renders `VMAF 50%` with single-value cells.
+  The ` | ` is the single value separator — a divider, not a range: each
+  statistic's value right-aligns within its own sub-width, so the pipe
+  forms a continuous inner divider across the header and all rows
+  (headers, the ruler row's absolute pairs, and strategy delta pairs
+  alike).
+- **Convention line:** one line above the table states the reading basis —
+  ruler identity, Δ basis, size-%Δ basis, mark legend (`ruler: configured
+  targets ◎ · Δ vs targets · size Δ% vs source · ◀ recommended`). The mark
+  zone itself is a bare column (no header, no rule segment), so the legend
+  lives here rather than in a column header.
+
+## Anchor lifecycle: two elections, one audit
+
+- **Per-population election.** Each table's ruler is elected from its own
+  population by the same rule — smallest survivor of tolerance-epsilon
+  pruning (test anchor at optimization, merge anchor at merge). The merge
+  anchor rules the merge table and the fixed-mode presentation bar; the
+  test anchor's values participate nowhere at merge. Neither ruler is ever
+  persisted as values — each derives on demand from its population's
+  persisted rows (a changed comparison stat set re-projects old
+  measurements correctly).
+- **Anchor audit at merge.** The test anchor's identity flows to merge via
+  the optimization result — for comparison only. The below-table line
   always logs: stable at INFO (`anchor holds at full scale: h265-aq`), a
-  shift at WARNING with both names (`anchor shifted at full scale:
-  h265-aq (test subset) → h264 (full movie) — test chunk selection may not
-  generalize`). Rendering variants cover how pronounced the shift is.
-- **Search runs:** the reference row is the target set — the absolute values
-  wanted, in the metric cells; a source placeholder in the size column;
-  verdict glyphs (✔/✘ per target-set satisfaction) allowed because these
-  are true targets. Fixed-mode rows carry no symbolic verdicts — different
-  run goals, different knobs, adjusted presentation.
-- **Encoding is not a comparison-table renderer.** Its summary keeps the
-  winning-limiter/chunks shape in both modes; in fixed mode the ruler feeding
-  it is the optimization anchor, and uncompared fixed runs elect the default
-  anchor (smallest total winner size) locally — presentation-only, never
-  persisted as a ruler; single strategy degenerates to absolutes.
+  shift at WARNING with both names (`anchor shifted at full scale: h265-aq
+  (test subset) → h264 (full movie) — test chunk selection may not
+  generalize`). When the election shifts, the test anchor's strategy is a
+  regular row in the merge table — its deltas vs the merge anchor quantify
+  the difference in-table; when it holds, the same strategy's two absolute
+  rows (test population, full movie) are the audit.
 
-## Metric-statistic pair type
+## Tolerance-epsilon dominance
+
+Replaces strict dominance in fixed-mode pruning (both dimensions reuse
+existing configured bars — no new knobs):
 
 ```python
-class StatisticType(Enum):      # closed set, validated against the evaluator
+def _dominates(a: StrategyRow, b: StrategyRow, tolerance_pct: float) -> bool:
+    if a.size_bytes > b.size_bytes * (1 + tolerance_pct / 100):
+        return False                      # size tolerance: optimize_tolerance
+    return all(                            # stat tolerance: per-metric acceptance_delta
+        a.metrics[key] >= b.metrics[key] - acceptance_delta(key)
+        for key in compared_keys
+    )
+```
+
+A slightly-larger but clearly-better strategy can now dominate — the
+flexibility the strict test lacked (0/4 pruned twice on real data). The
+stat comparison is a per-statistic conjunction with **no compensation
+across statistics or metrics**: a median surplus never covers a p10
+deficit, mirroring the all-targets-pass semantics of search mode. The
+tolerance doubles as noise absorption — tail statistics (p10) are noisier
+estimators than the median, especially under subsampling, and both rows
+are measured over the same frames (a paired comparison, so no
+between-strategy sampling bias exists).
+
+The anchor stays the smallest survivor; search-mode selection (the size
+band) is untouched. Dominator attribution for the below-table `pruned:`
+lines stays the first-in-resolved-order dominator. The comparison
+direction is pinned here and confirmed on the two real-data cases in the
+verification render.
+
+## Metric-statistic pair type (minimal scope)
+
+```python
+class StatisticType(Enum):      # closed set, validated against the measurer
     MIN, P05, P10, P25, MEDIAN, P75, P90, P95, MAX, STD
 
 @dataclass(frozen=True)
-class MetricStatKey:            # or a named tuple on (MetricType, StatisticType)
+class MetricStatKey:            # hashable — the dict key of measured-metrics maps
     metric:    MetricType
     statistic: StatisticType
 
     def sidecar_key(self) -> str:   ...   # "vmaf_median" — THE canonical form
-    def display(self) -> str:       ...   # "vmaf-median" — THE display form
+    def display(self) -> str:       ...   # "VMAF 50%" — THE display form (plot vocabulary)
     @classmethod
-    def parse(cls, text: str) -> Self: ...  # accepts a set of separators for
-                                           # user input; unknown → loud ValueError
+    def parse(cls, text: str) -> Self: ...  # tolerant separators + `med` alias;
+                                            # unknown → loud ValueError
 ```
 
-The type is the single naming authority: user-facing parsing accepts a set
-of separators (the tolerant-input principle, aligned with TODO §81's intent);
-sidecar serialization and deserialization use exactly one canonical form; the
-`med`→`median` CLI alias and the `-`/`_` duality live only inside `parse`/
-`display`.
+Display mapping: percentiles render as percents (`p10` → `10%`, `median` →
+`50%` — the vocabulary the plots already use: `Min, 5%, 10%, …, 95%, Max`);
+`min`/`max`/`std` stay words; metrics upper-case. Sidecar serialization
+stays `vmaf_median`; the CLI/config vocabulary (`vmaf-med:96`) parses
+unchanged. Pydantic dict-key fields use an annotated alias (the
+`FingerprintYaml`/`CropYaml` pattern applied to keys) so `StrategyRow.metrics`
+round-trips canonical strings on disk and typed keys in memory.
 
-**Presentation vs retention.** Presentation surfaces (tables, log lines,
-winner result sidecars, merged-output sidecars) show the inspectable set —
-the comparison statistics (p10 + median per metric). Retention surfaces
-(attempt sidecars — internal intermediates) keep the full measured set, and
-the optimization aggregation reads them (the attempt under a winner is
-guaranteed present in fixed mode by the cleanup guard; equivalently in
-search mode the attempt sidecar is the attempt's own record). Consequence:
-winner result sidecars narrow back from all-metrics to the presentation set —
-their all-metrics widening in the fixed-quality spec served the aggregation,
-which now returns to its retention source. Re-selecting the comparison set
-therefore never re-measures: full data stays on the retention surface.
+Scope fence: this spec lands identity + serialization + display + parse
+only. The per-metric parser classes, the `QualityTarget` field fold, sidecar
+retargeting, and the visualization `p5`/`p50` unification stay in TODO §116.
+Existing stringly sidecar dicts convert at table assembly through the type's
+own `parse` — no ad hoc `f"{metric}_{stat}"` / `rsplit` in new code.
 
-Migration is staged so no phase's data path is ever half-migrated: the type +
-parse/serialize tests land first; then targets (`QualityTarget` fields),
-ruler keys (`_FIXED_COMPARISON_STATS` becomes
-`tuple[MetricStatKey, ...]`), sidecar readers, table keys, prepared data.
-Each stage is independently green.
+Migration staging: the type + parse/serialize tests land first; then the
+table module; then the phases. Each stage is independently green.
 
-## Facts → prepared data → rendering
+## Aggregate → persist → emerge
 
-- Processing runs: phase concludes → assemble `ComparisonTable` (and the
-  limiter summary) from artifacts → persist into the phase's params sidecar
-  (`optimization.yaml`, `encoding.yaml`, `merge.yaml` alongside the existing
-  aggregate fields they replace) → render.
-- Fast-exit runs: load the model, render. The existing
-  limiter-summary/merge-summary replay pattern generalizes; per-winner
-  sidecar scans disappear from the merge fast path exactly as they already
-  did for encoding.
-- Staleness of prepared data follows the existing pending-gate rule: any
-  invalidated artifact routes the phase through the processing path, which
-  rebuilds and re-persists.
+- **Processing runs:** phase concludes → assemble `StrategyRow` lists from
+  artifacts → persist into the phase's params sidecar (`optimization.yaml`,
+  `merge.yaml`) → render. Optimization rows carry the full worst-chunk
+  statistics (min across test chunks, per statistic — the ruler
+  re-derivation substrate); merge rows carry the rendered basis (the
+  presentation bar's keys) — full retention stays on the per-video
+  sidecars, and discrepancies re-actualize rows through the invalidation
+  ladder.
+- **Worst-chunk aggregation (why min across chunks).** The chunk is the
+  evaluation currency: search mode demands every chunk meet its targets —
+  no chunk compensates for another, the no-compensation principle one level
+  up from statistics. The ruler must be a bar the anchor demonstrably
+  clears on every chunk (an averaged ruler would sit above the anchor's own
+  worse chunks and judge every other strategy unfairly). And the final
+  video's floor statistics are driven by its worst chunks, so the
+  worst-chunk probe previews the merge outcome. Known cost: min over a
+  small test subset is high-variance and anomaly-sensitive — the
+  test-chunk selection's start/end exclusions exist partly for this
+  (§67's first-frame anomaly). The optimization row is thus a deliberately
+  pessimistic floor probe; the merge row is the pooled full-movie truth —
+  and the deliberate difference between them is what the anchor audit
+  reads.
+- **Fast-exit runs:** load rows → derive ruler + marks live → render. No
+  winner-sidecar scans, no output re-stat. The merge renderer's live
+  `safe_stat_size` is deleted — persisted `size_bytes` drive the table
+  (byte-identical replay). `merge.yaml` carries `output_dir` once (not a
+  path per row); the `Files named`/`Location` lines render from it plus the
+  live source stem.
+- Staleness of rows follows the pending-gate rule: any invalidated artifact
+  routes the phase through the processing path, which rebuilds and
+  re-persists.
 
-## Merge measurement set
+## Merge measurement and the presentation bar
 
-Fixed runs: merge measures `config targets ∪ ruler statistics (p10, median ×
-metrics)` per output — the ruler values themselves are neither re-measured
-nor stored: they re-derive from `optimization.yaml`'s persisted
-`strategy_results`; only each output's own values are measured. Search
-runs: config targets only, as today. Measured values persist in the prepared
-table data keyed by `MetricStatKey`.
-
-## Merge sidecar content (mode-honest)
-
-The 2026-10-03 e2e inspection found both merge sidecars mode-dishonest in
-fixed runs (config `targets` blocks that drove nothing, a 40-stat
-`strategy_summaries[].metrics` dump replayed into an 8-key table) and
-replay-leakage (`source_stem`/`source_size_bytes` persisted beside the
-invalidation keys). Content per surface and mode:
+Merge measures the full statistic set per output (as today); rows persist
+the rendered basis only — the presentation bar's keys:
 
 | Surface | Search run | Fixed run |
 |---|---|---|
-| per-video sidecar | `targets`, target-keyed verdicts + metrics (as today) | pinned knob (label + value), anchor identity, `metrics` = full measured set (retention — the re-measure-avoidance record next to the product) |
-| `merge.yaml` prepared data | rendered table values only (config-target stats) | rendered table values only (ruler stats) |
-| `merge.yaml` invalidation keys | quality targets, sampling, probe | ruler basis (anchor + comparison set), sampling, probe |
+| per-video sidecar | `targets`, target-keyed verdicts + metrics (as today) | pinned knob, anchor identity, full `metrics` (retention) — landed mode union |
+| `merge.yaml` rows | rendered basis = target statistics | rendered basis = ruler statistics |
+| `merge.yaml` extras | `output_dir` only (no per-row paths, no identity, no keys — landed) | same |
 
-- Replay reads live where a resolved dependency already holds the fact: the
-  summary's source row (stem, size, %) renders from the JobPhase result, so
-  neither field persists on `merge.yaml`.
-- Invalidation compares the declared keys only — never whole-model equality
-  (which replay fields would perpetually break; today's `persisted !=
-  self.params` gate is already dead weight for exactly this reason).
-- Fixed runs carry no configured-`quality_targets` key: those targets drive
-  nothing there, so a fixed merge is neither invalidated nor re-measured by
-  their change.
+The presentation bar (search: config targets; fixed: the merge anchor's
+synthetic set) feeds **every** merge presentation surface — the table's
+ruler, the rows' rendered keys, and the per-output inline completion line
+(closes §109: the processing path stops passing `plan.targets`
+unconditionally; `_fmt_inline_metrics` reads the bar). Fixed runs carry no
+configured-`targets` block anywhere in merge persistence, so a fixed merge
+is never invalidated (nor re-measured) by configured-target changes.
 
-## Variants program (Req 5)
+## Verification render (Req 5)
 
-One task produces rendered variants from a real work dir (the existing
-`pyqenc_tmp` data is ideal: 4 strategies, anchor, near-ties, a dominated
-case). Variants vary ONLY the renderer configuration:
-
-- separator: `88.1·91.2` (middle dot) vs `88.1~91.2` (wavy) — both must not
-  collide with the decimal point;
-- delta emphasis: plain `+2.5`, emoji-flagged `+2.5🔺/−0.6🔻`-style (exact
-  glyphs from the existing symbol vocabulary), plain-with-mark-column;
-- source cue: placeholder glyph in the ratio cell + name prefix;
-- anchor-shift line: INFO-only vs WARNING + in-table marker.
-
-The user picks; the chosen configuration is frozen as the default and the
-task list closes the loop with a verification run.
+The presentation constants are pre-settled through the 2026-10-12 rulings
+(` | ` as THE single value separator — the sub-column divider, after
+rejecting the `…`-and-`/` pair and the middle dot `·`; `◎` ruler glyph,
+`(src)` cue, bare `0.0` zero, %-size deltas, one-decimal numbers,
+right-aligned numeric cells). One task
+renders the frozen renderer on a real work dir's data (4 strategies, an
+anchor, near-ties inside both tolerance bars, a dominated case, and at
+least one row that wins one statistic of a pair while losing the other —
+the no-compensation demonstrator — the 2026-10-09 fixed-run shape, or
+regenerated to that shape) and presents it for final visual confirmation.
+Every constant is named; post-freeze tweaks
+are constant flips.
 
 ## Correctness properties
 
-1. **Facts stay absolute** — persisted table data carries only measured
-   facts; deltas exist solely at render time, so renderer changes never
-   invalidate prepared data.
-2. **No presentation leaks into decisions** — the anchor, shadow anchor,
-   marks, and verdict glyphs never gate encoding, pruning, or merging.
-3. **One election per run** — the ruler is elected at optimization only;
-   later phases present and audit, never re-elect.
-4. **Fast-exit fidelity** — a fast-exit run renders byte-identical tables to
-   the processing run that persisted them.
-5. **Mechanics untouched, presentation follows the run's goal** — decisions,
-   artifacts, and non-summary logs are invariant for both modes (the minimal
-   possible change); summary presentation adjusts to what each run pursues
-   (targets in search mode, pinned-knob anchor deltas in fixed mode).
-   Deliberate, narrow supersession of the fixed-quality spec's
-   presentation-level searched invariance.
+1. **Facts stay absolute** — persisted rows carry only measured facts;
+   deltas, %Δ, and marks exist solely at render time, so renderer changes
+   never invalidate prepared data.
+2. **No presentation leaks into decisions** — the anchors, the audit line,
+   marks, and verdict glyphs never gate encoding, pruning (beyond the
+   dominance rule itself), or merging.
+3. **One election per population** — each table's ruler is elected from its
+   own population (test anchor at optimization, merge anchor at merge); the
+   test anchor's only role at merge is the audit.
+4. **Fast-exit fidelity** — a fast-exit run renders byte-identical tables
+   to the processing run that persisted them (persisted sizes, no
+   re-stat).
+5. **Mechanics untouched, presentation follows the run's goal** —
+   decisions, artifacts, and non-summary logs are invariant for both
+   modes; summary presentation adjusts to what each run pursues.
 6. **Closed statistic vocabulary** — any statistic outside the closed set
    fails loudly at the parse boundary, never silently round-trips.
+7. **Presentation is data-driven** — every glyph, delta, and mark derives
+   from persisted facts plus the live bar at render; nothing is
+   hand-assigned per row.
+8. **One shape, caveated rendering** — the same row model and renderer
+   serve all four populations; presentation branches only on data
+   availability (source row, ruler, per-metric stat sets), never on phase
+   identity.
