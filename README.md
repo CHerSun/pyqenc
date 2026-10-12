@@ -2,11 +2,21 @@
 
 <!-- markdownlint-disable MD024 MD026 MD028 -->
 
-> WARNING: This is EXPERIMENTAL project in pre-alpha state currently. It could break or drastically change from version to version.
+> WARNING: current project state is ALPHA. It could break or drastically change from version to version until stabilized. Also worth noting that this is a pet project, that is not really meant for production usage (though I do hope it is stable enough).
 
-Encoding a movie to archive it sounds simple — until you spend hours tweaking quality settings, only to get inconsistent results across scenes, or lose everything to a power cut mid-encode.
+Encoding a movie sounds simple — until you spend hours tweaking quality settings, getting blurry edges or artifacts, or ending up with too huge of a file, or getting inconsistent results across scenes, or even losing everything to a power cut mid-encode.
 
-**pyqenc** automates this. You tell it the quality you want. It figures out the rest — per scene, automatically, and picks up right where it left off if interrupted.
+**pyqenc** automates this. You tell it the quality you want (fixed or targeted). It does everything else:
+
+- ✅ detects scenes,
+- ✅ searches for suitable knobs,
+- ✅ encodes each scene,
+- ✅ merges encoded scenes back into a full video,
+- ✅ recovers from interrupts with minimal possible loss of investments,
+- ✅ processes audio, for you to pick the best variant,
+- ✅ extracts attachments.
+
+It only leaves the decision on what to mux into final movie to you.
 
 > This project was inspired by [Av1an](https://github.com/rust-av/Av1an) and [Handbrake](https://handbrake.fr/).
 
@@ -14,7 +24,7 @@ Encoding a movie to archive it sounds simple — until you spend hours tweaking 
 
 ## ⚡ Quick Start
 
-**Step 1 — install dependencies** ([FFmpeg](https://www.ffmpeg.org/), [MKVToolNix](https://mkvtoolnix.download/), and [uv](https://docs.astral.sh/uv/)):
+**Step 1 — install dependencies once** ([FFmpeg](https://www.ffmpeg.org/), [MKVToolNix](https://mkvtoolnix.download/), and [uv](https://docs.astral.sh/uv/)):
 
 ```sh
 # Windows (Scoop)
@@ -67,21 +77,23 @@ For all options: `pyqenc auto --help` or [CLI Reference](docs/cli-reference.md).
 
 The video is split into scenes first — detected directly from the source as timestamp windows, with no intermediate copy. Each scene is short and visually uniform — a dark scene, a fast-action sequence, a title card — they all have very different encoding characteristics. pyqenc assigns an independent quality parameter to each scene, so every scene gets exactly what it needs. Dark scenes get their own value, fast-moving scenes get theirs. No wasted bits, no scenes that look worse than others (this differs from native 2-pass encoding, where static scenes are prioritized).
 
-### Quality targeting
+### Quality targeting or fixed quality
 
-You specify quality targets as metric thresholds (e.g. `vmaf-med:97`). pyqenc encodes each scene repeatedly, adjusting the quality parameter until all targets are met. It stops as soon as they are — no over-encoding.
+You can use either quality targeting via metrics or specify fixed quality. For fixed quality - add `-q` argument, like `-q 18` - applied to all strategies.
 
-Supported metrics: `vmaf`, `vif`, `ssim`, `psnr`. Supported statistics: `min`, `p05`, `p25`, `med`, `p75`, `p95`, `max`.
+For quality targeting mode you need to specify minimal thresholds to reach. The default config already has some setup. Either copy & adjust config (`pyqenc config . -y`), or you can override via `--targets` argument with a list of quality targets.
 
-For default targets - see `default_config.yaml`. Subject to change.
+Quality targets are specified as `{metric}-{stat}:{value}[,{metric}-{stat}:value}]`, like `--targets vmaf-p10:95,vmaf-med:97,psnr-p10:44`.
+
+Supported metrics: `vmaf`, `vif`, `ssim`, `psnr`.
+
+Supported stats: `min`, `p05`, `p25`, `med`, `p75`, `p95`, `max`.
 
 See [Quality Targeting Guide](docs/quality-targeting.md) for guidance on choosing good targets.
 
 ### 🔁 Resumption
 
-pyqenc can be stopped at any point — power loss, `Ctrl+C`, whatever. Re-run the exact same command and it picks up where it left off. Existing work is detected and reused automatically.
-
-This also means you can change your mind mid-way: adjust quality targets, add a strategy — only the minimum necessary work is redone.
+pyqenc can be stopped at any point — power loss, `Ctrl+C`, whatever. Re-run the command targetting same work dir and same source to resume. Existing work is detected and reused automatically. If you've changed something between reruns - pyqenc will still try to reuse what's possible (consistency is the first target, so more work could be required on changes).
 
 ### Best strategy search
 
@@ -89,7 +101,7 @@ An encoding *strategy* is a combination of a profile and a codec preset (e.g. `h
 
 By default, pyqenc tests all specified strategies on ~1% of chunks first, then encodes the full video using only the ones with the smallest output that still meets your quality targets. You get the best result without encoding the whole movie multiple times.
 
-Use `--no-optimize` to skip optimization and produce one output per strategy — useful when you want to compare results side by side.
+Use `--no-optimize` to produce one output per strategy — useful when you want to compare results side by side.
 
 ---
 
@@ -111,8 +123,8 @@ Results are written under the working directory:
 ```
 
 - `merged/` and `audio/` folders hold the results you should care about. Pick the video and audio streams you want, then mux them together with MKVmerge GUI (drag&drop streams, export).
-- `extracted/` might be useful if you want to add translations, for example, or edit subtitles. Run `pyqenc extract source.mkv -y` to materialize streams as standalone files — every kind, video and audio included (e.g. source audio for external editors); deselection via `--exclude`.
-- `measure/` holds results if you used `measure` subcommand directly.
+- `extracted/` might be useful if you want to add translations or edit subtitles, for example. Pipeline materializes only subtitles, chapters and attachments. If you want to materialize source video or audio - use `pyqenc extract source.mkv -y`. You can use `--include` and `--exclude` filters for better control of extraction along with dry-run (no `-y` flag).
+- `measure/` holds results if you used `measure` subcommand directly. It can be used to compare source to other variants, including externally produced.
 - Everything else is intermediate — preserved for inspection and resumption unless you use `--cleanup`.
 
 Audio outputs are produced by user-defined **chains** (ordered filter recipes) applied to **selected** tracks, configured under `audio:` in your config file. Each output is named after its source audio stream: `<stream name> chain=<name>.<ext>`. See the [Audio Processing Guide](docs/audio-processing.md) for filters, chains, and track selection.
@@ -129,7 +141,15 @@ pyqenc auto movie.mkv --strategies "av1*" -y
 
 This will test all defined AV1 profiles and select the optimal ones for the full encoding.
 
+AV1 strongly smoothes content. If you want to encode crispy (cartoons/anime) or noisy (older movies, natural grain) - AV1 is a bad choice. AV1 wins on modern content.
+
 > NOTE: Your devices could lack AV1 hardware decoding support and struggle with the codec.
+
+## h264 encoding
+
+h.264 codec is **NOT recommended** for use with pyqenc.
+
+h264 is an older generation codec. It has a caveat that could ruin pyqenc encoding - h264 stores codec private data once. While pyqenc encodes each chunk separately. This could cause different codec private data on chunks. When merges - video won't play correctly. Default config adds extra measures against that, but doesn't guarantee full compatibility.
 
 ## 📊 Measuring quality
 
@@ -192,8 +212,7 @@ Config build order: built-in defaults → `~/.config/pyqenc/config.yaml` → `./
 
 **Insufficient disk space** — the whole process typically needs several times the source size (attempts for several strategies + audio + merged outputs). Before encoding, pyqenc logs a space estimate (required and recommended ranges) against the available space. Use `--work-dir` to point to a larger disk if required.
 
-**Slow encoding** — try a faster codec or faster codec preset (`fast`, `medium`). If CPU is not fully utilized - add `--concurrency 2` or higher. OR switch to GPU-encoding. All options reduce resulting quality or increase output size, effective encoding is only achievable on CPU with slow
-presets.
+**Slow encoding** — try a faster codec or faster codec preset (`fast`, `medium`). If CPU is not fully utilized - add `--concurrency 2` or higher. OR switch to GPU-encoding. Besides concurrency all other options affect resulting quality and/or size. Effective encoding is slow and CPU-only. You can also choose to use fixed quality encoding instead of quality targeting - quality search is costly, convergence is in ~4.1 attempts currently.
 
 **Strategy wildcard not expanding** — some shells require quoting: `"h265*"`. Use dry-run to verify expansion. Verify that the config does have the wanted profiles.
 
@@ -213,5 +232,3 @@ presets.
 ## License & contributing
 
 Open-source. See [LICENSE](LICENSE) for details. Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
-
-> This is a pet project built to solve a personal need. Not intended for production use, at least yet. Currently in β — working and giving proper results, but not widely tested.
