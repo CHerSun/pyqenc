@@ -22,7 +22,8 @@ from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from pyqenc.constants import (
     FAILURE_SYMBOL_MINOR,
@@ -40,9 +41,11 @@ from pyqenc.metrics import MetricKey
 from pyqenc.models import (
     CropParams,
     EncodingPlan,
-    Fingerprint,
+    FingerprintYaml,
     PhaseOutcome,
     QualityTarget,
+    SizedFingerprint,
+    SizedFingerprintYaml,
     Strategy,
     fingerprinter,
     targets_as_strings,
@@ -61,7 +64,7 @@ from pyqenc.phases.extraction import ExtractionPhase
 from pyqenc.phases.job import JobPhase
 from pyqenc.phases.optimization import OptimizationPhase
 from pyqenc.phases.probe import ProbePhase
-from pyqenc.quality import QualitySearchBase, flatten_metric_stats
+from pyqenc.quality import MetricStatKey, QualitySearchBase, flatten_metric_stats
 from pyqenc.state import ProbeFacet
 from pyqenc.stream_model import (
     DecimalYaml,
@@ -71,13 +74,19 @@ from pyqenc.stream_model import (
     LongPathYaml,
     MergedVideo,
 )
+from pyqenc.summary_tables import (
+    COMPARISON_STATS,
+    ComparisonTable,
+    Mark,
+    MetricStatMap,
+    Ruler,
+    SourceInfo,
+    StrategyRow,
+    render_comparison_table,
+)
 from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
 from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
-from pyqenc.utils.log_format import (
-    fmt_key_value_table,
-    fmt_metric_value,
-    fmt_size_mb,
-)
+from pyqenc.utils.log_format import fmt_metric_value
 from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.visualization import QualityMeasurer, create_crf_plot
 from pyqenc.utils.yaml_utils import load_model, save_model
@@ -87,35 +96,42 @@ from pyqenc.utils.yaml_utils import load_model, save_model
 # merge.yaml replay aggregate
 # ---------------------------------------------------------------------------
 
-class _MergedProvenanceBase(BaseModel):
-    """The common provenance dimensions of both merged-output variants
-    (Req 27).
+class _MergedSidecarBase(BaseModel):
+    """The common fields of both merged-output sidecar variants (Req 27).
 
-    Every dimension is compared per-file at recovery (Req 49) except
+    The per-output acceptance record, written next to each merged output
+    (stem swap): its presence PLUS a match on every identity dimension
+    makes the output COMPLETE (Req 49). Field names follow the design
+    layout: named for WHAT they identify, never for the fingerprint
+    mechanism (Req 61) — ``strategy`` IS the strategy's resolved-args
+    fingerprint; the strategy's name is already the output's own file
+    name. Every dimension is compared per-file at recovery except
     ``source`` — the one dimension that escalates to the phase-level
-    catastrophic condition (Req 60). Field names follow the design layout:
-    named for WHAT they identify, never for the fingerprint mechanism
-    (Req 61) — ``strategy`` IS the strategy's resolved-args fingerprint;
-    the strategy's name is already the output's own file name.
+    catastrophic condition (Req 60). The anchor is never a dimension: it
+    is a runtime-elected presentation basis (the least-size strategy
+    with measurements), re-derived per run by optimization — never
+    persisted, never compared.
 
-    The anchor is deliberately NOT a dimension (dropped 2026-10-09): it is
-    a runtime-elected presentation basis (the least-size strategy with
-    measurements), re-derived per run by optimization — never persisted,
-    never compared (this resolves TODO §112: anchor re-elections used to
-    re-merge outputs whose winner-set fingerprint — the actual input
-    identity — matched).
+    ``frame_count`` is the measured frame count of the merged output
+    (``0`` = the unknown sentinel — no valid video has zero frames; set
+    at the fetch site, never a model default). ``metrics`` is the FULL
+    measured set in both modes — the re-judgeable end-user record
+    (verdicts are always live, Req 51, so none is ever persisted). The
+    plot path derives from the stem and is never persisted.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    source:   Fingerprint
-    strategy: Fingerprint
-    probe:    ProbeFacet
-    sampling: int
-    winners:  Fingerprint
+    source:      SizedFingerprintYaml
+    strategy:    FingerprintYaml
+    probe:       ProbeFacet
+    sampling:    int
+    winners:     SizedFingerprintYaml
+    frame_count: int
+    metrics:     dict[str, float] = Field(default_factory=dict)
 
 
-class FixedMergedProvenance(_MergedProvenanceBase):
+class FixedMergedOutputSidecar(_MergedSidecarBase):
     """Fixed runs: the strategy's quantized quality is the mode key.
 
     A quality change re-merges automatically — the collapsed range puts
@@ -128,7 +144,7 @@ class FixedMergedProvenance(_MergedProvenanceBase):
     quality: DecimalYaml
 
 
-class SearchMergedProvenance(_MergedProvenanceBase):
+class SearchMergedOutputSidecar(_MergedSidecarBase):
     """Search runs: the targets basis is the mode key (targets steer the
     search — a change re-searches and re-merges; Req 50)."""
 
@@ -136,49 +152,32 @@ class SearchMergedProvenance(_MergedProvenanceBase):
     targets: list[str]         = Field(default_factory=list)
 
 
-MergedProvenance = FixedMergedProvenance | SearchMergedProvenance
-"""The per-mode provenance union; loading dispatches on the ``mode`` tag."""
+MergedOutputSidecar = FixedMergedOutputSidecar | SearchMergedOutputSidecar
+"""The per-mode sidecar union; loading dispatches on the ``mode`` tag."""
+
+_MERGED_OUTPUT_ADAPTER: TypeAdapter[MergedOutputSidecar] = TypeAdapter(
+    Annotated[MergedOutputSidecar, Field(discriminator="mode")]
+)
 
 
-class MergedOutputSidecar(BaseModel):
-    """The per-output acceptance record — facts + provenance, no verdict (Req 27).
+def load_merged_output_sidecar(sidecar_path: Path) -> MergedOutputSidecar | None:
+    """Load a merged-output acceptance record dispatching on the mode tag.
 
-    Written next to each merged output (stem swap). Its presence PLUS a
-    provenance match makes the output COMPLETE (Req 49); ``metrics`` is the
-    FULL measured set in both modes (the re-judgeable end-user record —
-    verdicts are always live, Req 51). The plot path derives from the stem
-    and is never persisted.
+    Args:
+        sidecar_path: The sidecar YAML path.
 
-    Attributes:
-        frame_count: Measured frame count of the merged output (``0`` = the
-                     unknown sentinel — no valid video has zero frames;
-                     set at the fetch site, never a model default).
-        metrics:     The full measured metric set.
-        provenance:  The production-basis record (acceptance compares it).
+    Returns:
+        The tagged record, or ``None`` when absent or unparsable.
     """
-
-    frame_count: int
-    metrics:     dict[str, float]         = Field(default_factory=dict)
-    provenance:  Annotated[MergedProvenance, Field(discriminator="mode")]
-
-
-class MergeSummaryRow(BaseModel):
-    """One per-strategy row of ``merge.yaml``'s replay summary.
-
-    Verdicts are never persisted (Req 51): the replay renders marks live
-    from ``metrics`` against the current targets.
-
-    Attributes:
-        strategy_name:   Display name of the encoding strategy.
-        output_path:     Absolute path to the merged output file.
-        file_size_bytes: Size of the output file in bytes at time of merge.
-        metrics:         The rendered metric subset keyed by ``"{metric}_{statistic}"``.
-    """
-
-    strategy_name:   str
-    output_path:     LongPathYaml
-    file_size_bytes: int
-    metrics:         dict[str, float] = Field(default_factory=dict)
+    if not sidecar_path.exists():
+        return None
+    try:
+        with sidecar_path.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        return _MERGED_OUTPUT_ADAPTER.validate_python(data or {})
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        logger.warning("Could not load %s: %s", sidecar_path, exc)
+        return None
 
 
 class MergeSidecar(BaseModel):
@@ -186,16 +185,20 @@ class MergeSidecar(BaseModel):
 
     The per-output sidecars are the acceptance records (Req 28): this file
     carries no identity and no invalidation keys; its absence costs summary
-    replay only, never correctness (M-7 made structural). No basis marker:
-    verdict marks re-render live at replay against the current bar, so
-    nothing downstream ever needed to know what the table was rendered
-    under (dropped 2026-10-09 — zero consumers).
+    replay only, never correctness. The rows are ``StrategyRow`` — THE
+    shared row shape — carrying the rendered basis (the presentation bar's
+    keys: target statistics in search, the fixed comparison statistics);
+    full retention lives on the per-video sidecars, and discrepancies
+    re-actualize through the invalidation ladder.
 
     Attributes:
-        summary: Per-strategy replay rows (empty until a processing pass).
+        output_dir: The directory holding the merged outputs (the
+                    ``Location`` line renders from it).
+        summary:    Per-strategy replay rows (empty until a processing pass).
     """
 
-    summary: list[MergeSummaryRow] = Field(default_factory=list)
+    output_dir: LongPathYaml
+    summary:    list[StrategyRow] = Field(default_factory=list)
 
 
 if TYPE_CHECKING:
@@ -221,22 +224,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-class _ProvenanceBuilder:
-    """The current run's provenance template + the per-file acceptance rule.
+class _SidecarBuilder:
+    """The current run's acceptance inputs + the per-file record composer.
 
-    One builder per recovery; ``for_strategy`` composes the expected
-    provenance of one output (the mode's own variant — fixed carries the
+    One builder per recovery; ``compose`` builds the acceptance record to
+    persist for one output (the mode's own variant — fixed carries the
     quality, search the targets), ``acceptance_mismatch`` names the first
-    recorded dimension that contradicts it (``None`` = accepted).
+    recorded dimension that contradicts the current inputs (``None`` =
+    accepted).
     """
 
     def __init__(
         self,
-        source:   Fingerprint,
+        source:   SizedFingerprint,
         probe:    ProbeFacet,
         plan:     EncodingPlan,
         sampling: int,
-        winners:  Fingerprint,
+        winners:  SizedFingerprint,
     ) -> None:
         self._source   = source
         self._probe    = probe
@@ -244,30 +248,44 @@ class _ProvenanceBuilder:
         self._sampling = sampling
         self._winners  = winners
 
-    def for_strategy(self, strategy: Strategy) -> MergedProvenance:
-        """Compose the expected provenance for one output (the mode's variant)."""
+    def compose(
+        self,
+        strategy:    Strategy,
+        frame_count: int,
+        all_metrics: dict[str, float],
+    ) -> MergedOutputSidecar:
+        """Build the per-output acceptance record (the mode's variant).
+
+        Facts (frame count, the FULL measured metric set in both modes —
+        the re-judgeable end-user record) plus the production-basis
+        identity; no verdict (verdicts are live, Req 51).
+        """
         codec = strategy.codec
         if self._plan.fixed_quality:
-            return FixedMergedProvenance(
-                source   = self._source,
-                strategy = strategy.fingerprint,
-                quality  = codec.quality_better.quantize(codec.quality_granularity),
-                probe    = self._probe,
-                sampling = self._sampling,
-                winners  = self._winners,
+            return FixedMergedOutputSidecar(
+                source      = self._source,
+                strategy    = strategy.fingerprint,
+                probe       = self._probe,
+                sampling    = self._sampling,
+                winners     = self._winners,
+                frame_count = frame_count,
+                metrics     = {k: float(v) for k, v in all_metrics.items()},
+                quality     = codec.quality_better.quantize(codec.quality_granularity),
             )
-        return SearchMergedProvenance(
-            source   = self._source,
-            strategy = strategy.fingerprint,
-            targets  = targets_as_strings(self._plan.targets),
-            probe    = self._probe,
-            sampling = self._sampling,
-            winners  = self._winners,
+        return SearchMergedOutputSidecar(
+            source      = self._source,
+            strategy    = strategy.fingerprint,
+            probe       = self._probe,
+            sampling    = self._sampling,
+            winners     = self._winners,
+            frame_count = frame_count,
+            metrics     = {k: float(v) for k, v in all_metrics.items()},
+            targets     = targets_as_strings(self._plan.targets),
         )
 
     def acceptance_mismatch(
         self,
-        recorded: MergedProvenance,
+        recorded: MergedOutputSidecar,
         strategy: Strategy,
     ) -> str | None:
         """The first recorded dimension contradicting the current inputs.
@@ -278,26 +296,26 @@ class _ProvenanceBuilder:
         as a mismatch (conservative). The variant kinds must agree — a
         mode switch between runs is itself a mismatch.
         """
-        expected = self.for_strategy(strategy)
-        if not recorded.strategy.matches(expected.strategy):
+        codec = strategy.codec
+        if not recorded.strategy.matches(strategy.fingerprint):
             return "strategy fingerprint"
-        if isinstance(expected, FixedMergedProvenance):
-            if not isinstance(recorded, FixedMergedProvenance):
+        if self._plan.fixed_quality:
+            if not isinstance(recorded, FixedMergedOutputSidecar):
                 return "mode"
-            if recorded.quality != expected.quality:
+            if recorded.quality != codec.quality_better.quantize(codec.quality_granularity):
                 return "quality"
         else:
-            if not isinstance(recorded, SearchMergedProvenance):
+            if not isinstance(recorded, SearchMergedOutputSidecar):
                 return "mode"
-            if recorded.targets != expected.targets:
+            if recorded.targets != targets_as_strings(self._plan.targets):
                 return "targets"
-        if not recorded.probe.matches(expected.probe):
+        if not recorded.probe.matches(self._probe):
             return "probe facet"
         # The winner-set fingerprint is compared as a whole (Req 11a):
         # count + hash over the sorted winner ids; unverifiable = mismatch.
-        if not recorded.winners.matches(expected.winners):
+        if not recorded.winners.matches(self._winners):
             return "winner set"
-        if recorded.sampling != expected.sampling:
+        if recorded.sampling != self._sampling:
             return "sampling"
         return None
 
@@ -428,7 +446,7 @@ class MergePhase(Phase[MergePhaseResult]):
         recorded source identity contradicting the live source is
         catastrophic — fatal without the ``--force`` permission; with it,
         wipe ``merged/`` and ``merge.yaml``. Every other production-basis
-        change is a per-file provenance mismatch handled by the
+        change is a per-file record mismatch handled by the
         classification (re-merge in place — deliverables are retained until
         replaced, Req 60).
 
@@ -442,13 +460,13 @@ class MergePhase(Phase[MergePhaseResult]):
         merged_dir.mkdir(parents=True, exist_ok=True)
         for existing in sorted(merged_dir.glob("*.yaml")):
             record = MergePhase._load_merge_sidecar(existing)
-            if record is not None and not record.provenance.source.matches(
+            if record is not None and not record.source.matches(
                 job_result.file.payload.fingerprint,
             ):
                 if not job_result.force:
                     raise RecoveryError(
                         "Source content identity mismatch (a merged output's "
-                        "provenance) — the deliverables belong to a different source.  "
+                        "sidecar) — the deliverables belong to a different source.  "
                         "Re-run with --force to grant permission to wipe merged/ and "
                         "re-merge the new source."
                     )
@@ -471,7 +489,7 @@ class MergePhase(Phase[MergePhaseResult]):
         2. Clean up leftover ``.tmp`` files.
         3. Determine expected strategies from the encoding winners.
         4. Per-file acceptance: an output is COMPLETE only when the file is
-           present AND its sidecar's provenance matches the current inputs
+           present AND its sidecar matches the current inputs
            on every recorded dimension (strategy fingerprint, mode + the
            mode's key — quality (fixed) / targets (search) —, probe facet,
            sampling, winner-set fingerprint); any mismatch or an
@@ -521,10 +539,10 @@ class MergePhase(Phase[MergePhaseResult]):
 
         source_stem = job_result.file.payload.path.stem
 
-        # Per-file acceptance (Req 49): the current provenance each output
-        # must match. The winner-set fingerprint derives live from the
+        # Per-file acceptance (Req 49): the current inputs each output's
+        # record must match. The winner-set fingerprint derives live from the
         # encoding winners (in memory — no disk reads).
-        current_provenance = self._current_provenance_builder()
+        sidecar_builder = self._sidecar_builder()
         self._pending_reasons = {}
 
         rows: list[Artifact] = []
@@ -535,8 +553,8 @@ class MergePhase(Phase[MergePhaseResult]):
             record = MergePhase._load_merge_sidecar(output_file)
 
             if output_file.exists() and record is not None:
-                reason = current_provenance.acceptance_mismatch(
-                    record.provenance, strategy,
+                reason = sidecar_builder.acceptance_mismatch(
+                    record, strategy,
                 )
                 if reason is None:
                     # COMPLETE — accepted: facts load for the live-verdict
@@ -604,29 +622,29 @@ class MergePhase(Phase[MergePhaseResult]):
         return Recovery.from_artifacts(rows)
 
     def _presentation_bar(self) -> list[QualityTarget]:
-        """The CURRENT verdict bar both the live path and the replay use.
+        """The live verdict bar for SEARCH runs: the configured targets.
 
-        Fixed runs judge against the anchor-derived synthetic ruler (config
-        targets are search-tuned vocabulary and would read as all-miss
-        noise); searched runs against the config targets. The same live
-        basis on the fast-exit replay — no persisted marker involved.
+        Fixed runs carry no interim bar — the merge ruler (the merge anchor)
+        exists only once the full-movie population completes, and the test
+        anchor's values participate nowhere at merge (Req 3.2); the table is
+        the fixed verdict surface.
         """
         plan = self._deps[ProbePhase].plan
         if plan.fixed_quality:
-            return self._deps[OptimizationPhase].synthetic_targets
-        return plan.targets
+            return []
+        return list(plan.targets)
 
     def _live_verdict(self, metrics: dict[str, float]) -> bool:
-        """The live pass/fail against the CURRENT presentation targets (Req 51).
+        """The live pass/fail against the presentation bar (Req 51).
 
-        Fixed runs without a ruler (uncompared) carry no verdict basis —
-        ``True`` with empty targets is the vacuous truth.
+        Fixed runs without a bar carry no verdict basis — ``True`` with
+        empty targets is the vacuous truth.
         """
         return not QualitySearchBase.failed_targets(metrics, self._presentation_bar())
 
-    def _current_provenance_builder(self) -> _ProvenanceBuilder:
-        """The current run's provenance template for per-file acceptance."""
-        return _ProvenanceBuilder(
+    def _sidecar_builder(self) -> _SidecarBuilder:
+        """The current run's acceptance inputs for per-file record checks."""
+        return _SidecarBuilder(
             source    = self._deps[JobPhase].file.payload.fingerprint,
             probe     = ProbeFacet.from_probe(self._deps[ProbePhase]),
             plan      = self._deps[ProbePhase].plan,
@@ -637,22 +655,30 @@ class MergePhase(Phase[MergePhaseResult]):
             ),
         )
 
-    def _summary_rendered_keys(self) -> set[str]:
-        """Metric keys the summary table renders — what summaries persist.
+    def _rendered_basis(self, measured: dict[str, float]) -> MetricStatMap:
+        """The rendered basis of one output's measurement — what rows persist.
 
-        The current renderer judges and displays the configured quality
-        targets in both modes (the anchor-relative table is the unified-
-        summaries spec's work), so the rendered set is the target-key set.
+        The presentation bar's keys: the configured target statistics in
+        search, the fixed comparison statistics in fixed mode (the merge
+        anchor election and the table both consume them; full retention
+        stays on the per-video sidecars).
         """
         plan = self._deps[ProbePhase].plan
-
+        if plan.fixed_quality:
+            return {
+                key: value for key, value in
+                ((MetricStatKey.parse(k), v) for k, v in measured.items())
+                if key.statistic in COMPARISON_STATS
+            }
+        target_keys = {t.key() for t in plan.targets}
         return {
-            f"{t.metric}_{t.statistic}"
-            for t in plan.targets
+            key: value for key, value in
+            ((MetricStatKey.parse(k), v) for k, v in measured.items())
+            if key in target_keys
         }
 
     def _reused_result(self, wanted: list[Artifact], message: str) -> MergePhaseResult:
-        """Build the reused result, replaying the persisted merge summary."""
+        """Build the reused result, emerging the summary from the persisted rows."""
         job_result = self._deps[JobPhase]
         merge_yaml = job_result.work_dir / MergePhase.SIDECAR_NAME
         persisted  = load_model(merge_yaml, MergeSidecar)
@@ -660,16 +686,12 @@ class MergePhase(Phase[MergePhaseResult]):
             logger.info(THICK_LINE)
             logger.info("MERGE SUMMARY")
             logger.info(THICK_LINE)
-            MergePhase._log_merge_summary_from_sidecar(
-                sidecar           = persisted,
-                # The replay judges against the same LIVE bar the producing
-                # run used — the ruler in fixed mode (optimization re-derives
-                # it on its own fast path), the config targets in search.
-                quality_targets   = self._presentation_bar(),
-                source_stem       = job_result.file.payload.path.stem,
-                source_size_bytes = safe_stat_size(job_result.file.payload.path) or 0,
-                metrics_sampling  = self._config.measurement.sampling,
-            )
+            # The replay re-derives ruler and marks live from the persisted
+            # rows (byte-identical to the producing run's table; a changed
+            # verdict bar re-renders old rows correctly, Req 6.7).
+            self._render_merge_summary(persisted.summary, persisted.output_dir)
+        else:
+            logger.info("  No summary data saved — re-run to generate.")
         return self._make_result(PhaseOutcome.REUSED, wanted, message)
 
     def _make_result(
@@ -713,7 +735,7 @@ class MergePhase(Phase[MergePhaseResult]):
         instead).
 
         Every pending row re-merges from the current winners — ABSENT,
-        provenance-mismatched, and the sidecar-less PARTIAL alike (the
+        record-mismatched, and the sidecar-less PARTIAL alike (the
         unverifiable case, Req 49/50) — EXCEPT the sampling-only difference,
         which keeps the concat and re-measures in place.
 
@@ -742,7 +764,7 @@ class MergePhase(Phase[MergePhaseResult]):
 
         # Build encoded_chunks dict from EncodingPhase result
         encoded_chunks = self._collect_encoded_chunks()
-        provenance_builder = self._current_provenance_builder()
+        sidecar_builder = self._sidecar_builder()
 
         final_rows: list[Artifact[MergedVideo]] = []
         failed_strategies: list[str] = []
@@ -772,7 +794,7 @@ class MergePhase(Phase[MergePhaseResult]):
                     source_stream   = source_stream,
                     encoded_chunks  = encoded_chunks,
                 ):
-                    # Everything else re-merges — ABSENT rows, provenance
+                    # Everything else re-merges — ABSENT rows, record
                     # mismatches (M-8: a mode-key change re-searched
                     # winners upstream; the old concat is never current),
                     # and the UNVERIFIABLE case (file present, sidecar
@@ -838,14 +860,15 @@ class MergePhase(Phase[MergePhaseResult]):
                 else:
                     logger.warning("No CRF data available for strategy %s — skipping CRF plot", strategy_name)
 
-                # Write the per-output acceptance record (facts + provenance,
+                # Write the per-output acceptance record (facts + identity,
                 # no verdict — Req 27).
-                self._write_merge_sidecar(
-                    output_file = output_file,
-                    strategy    = strategy,
-                    frame_count = frame_count,
-                    all_metrics = metrics_dict,
-                    provenance  = provenance_builder.for_strategy(strategy),
+                save_model(
+                    MergePhase._sidecar_path(output_file),
+                    sidecar_builder.compose(
+                        strategy    = strategy,
+                        frame_count = frame_count or 0,
+                        all_metrics = metrics_dict,
+                    ),
                 )
 
                 targets_met = self._live_verdict(metrics_dict)
@@ -889,35 +912,25 @@ class MergePhase(Phase[MergePhaseResult]):
         logger.info(THICK_LINE)
         if failed_strategies:
             logger.error("  Failed strategies: %s", ", ".join(failed_strategies))
-        rendered_keys = self._summary_rendered_keys()
-        _, strategy_summaries = MergePhase._build_strategy_summaries(
-            final_rows,
-            source_stream.stream.file.path,
-            rendered_keys,
-        )
-        MergePhase._log_merge_summary(
-            summaries         = strategy_summaries,
-            source_stem       = source_stem,
-            source_size_bytes = safe_stat_size(source_stream.stream.file.path) or 0,
-            quality_targets   = plan.targets,
-            metrics_sampling  = self._config.measurement.sampling,
-        )
-        if failed_strategies and not final_rows:
-            return self._make_result(PhaseOutcome.FAILED, [], "All strategy merges failed")
-
-        # Persist merge.yaml: the summary replay aggregate ONLY (Req 28) —
-        # the per-output sidecars are the acceptance records; replay
-        # re-renders verdicts live, so no basis marker exists.
-        if complete_count > 0:
-            _, strategy_summaries = MergePhase._build_strategy_summaries(
-                final_rows,
-                source_stream.stream.file.path,
-                rendered_keys,
+        strategy_summaries = self._build_strategy_summaries(final_rows)
+        output_dir = (
+            next(
+                (row.payload.output_path.parent for row in final_rows
+                 if row.state == ArtifactState.COMPLETE),
+                None,
             )
+        )
+        if output_dir is not None:
+            self._render_merge_summary(strategy_summaries, output_dir)
+            # Persist merge.yaml: the summary replay aggregate ONLY (Req 28)
+            # — the per-output sidecars are the acceptance records; ruler and
+            # marks re-derive live at replay.
             save_model(
                 self._deps[JobPhase].work_dir / MergePhase.SIDECAR_NAME,
-                MergeSidecar(summary=strategy_summaries),
+                MergeSidecar(output_dir=output_dir, summary=strategy_summaries),
             )
+        if failed_strategies and not final_rows:
+            return self._make_result(PhaseOutcome.FAILED, [], "All strategy merges failed")
 
         if failed_strategies:
             return self._make_result(
@@ -1086,67 +1099,36 @@ class MergePhase(Phase[MergePhaseResult]):
     @staticmethod
     def _load_merge_sidecar(output_file: Path) -> MergedOutputSidecar | None:
         """Load the per-output acceptance record, or ``None`` if absent/invalid."""
-        return load_model(MergePhase._sidecar_path(output_file), MergedOutputSidecar)
+        return load_merged_output_sidecar(MergePhase._sidecar_path(output_file))
 
-    @staticmethod
     def _build_strategy_summaries(
-        rows:              list[Artifact[MergedVideo]],
-        source_video_path: Path | None,
-        rendered_keys:     set[str],
-    ) -> tuple[int, list[MergeSummaryRow]]:
-        """Build per-strategy summary rows and source size from complete rows.
+        self,
+        rows: list[Artifact[MergedVideo]],
+    ) -> list[StrategyRow]:
+        """Build the per-strategy summary rows from the complete merged outputs.
 
-        Summary metrics carry ONLY the stats the summary table renders — the
-        phase sidecar is a presentation surface (full measured stats live on
-        the per-video sidecars, the re-measure-avoidance record).
+        Sizes are recorded at merge time (persisted sizes drive the table and
+        the replay — no live re-stat, Req 6.7); metrics carry ONLY the
+        rendered basis (the presentation bar's keys) — full measured stats
+        live on the per-video sidecars, the re-measure-avoidance record.
 
         Args:
-            rows:              The merged-output rows (complete ones are summarized).
-            source_video_path: Path to the source video for size capture; ``None`` if unavailable.
-            rendered_keys:     Metric keys the summary table displays; others are dropped.
+            rows: The merged-output rows (complete ones are summarized).
 
         Returns:
-            Tuple of ``(source_size_bytes, strategy_summaries)``.
+            The ``StrategyRow`` population for the comparison table.
         """
-        source_size = (
-            (safe_stat_size(source_video_path) or 0)
-            if source_video_path is not None else 0
-        )
-
-        summaries: list[MergeSummaryRow] = []
+        summaries: list[StrategyRow] = []
         for row in rows:
             if row.state != ArtifactState.COMPLETE:
                 continue
             payload = row.payload
-            summaries.append(MergeSummaryRow(
-                strategy_name   = payload.strategy.display_name(),
-                output_path     = payload.output_path,
-                file_size_bytes = safe_stat_size(payload.output_path) or 0,
-                metrics         = {k: v for k, v in payload.metrics.items() if k in rendered_keys},
+            summaries.append(StrategyRow(
+                strategy   = payload.strategy.display_name(),
+                size_bytes = safe_stat_size(payload.output_path) or 0,
+                metrics    = self._rendered_basis(payload.metrics),
             ))
-        return source_size, summaries
-
-    def _write_merge_sidecar(
-        self,
-        output_file:  Path,
-        strategy:     Strategy,
-        frame_count:  int | None,
-        all_metrics:  dict[str, float],
-        provenance:   MergedProvenance,
-    ) -> None:
-        """Atomically write the per-output acceptance record (Req 27).
-
-        Facts (frame count, the FULL measured metric set in both modes — the
-        re-judgeable end-user record) plus the production provenance; no
-        verdict (verdicts are live, Req 51). The plot path derives from the
-        stem and is never persisted.
-        """
-        record = MergedOutputSidecar(
-            frame_count = frame_count or 0,
-            metrics     = {k: float(v) for k, v in all_metrics.items()},
-            provenance  = provenance,
-        )
-        save_model(MergePhase._sidecar_path(output_file), record)
+        return summaries
 
     def _measure_quality(
         self,
@@ -1191,17 +1173,29 @@ class MergePhase(Phase[MergePhaseResult]):
     ) -> str:
         """Return a compact single-line metrics string for the completion log line.
 
-        Example: ``"vmaf-min=94.1 ✔  vmaf-median=97.4 ✔  psnr-min=41.5 ✘  ssim-min=95.7 ✔"``
+        Search runs mark ``✔``/``✘`` per target (the configured targets are
+        the bar — available upfront). Fixed runs show the comparison values
+        WITHOUT verdicts: the merge ruler exists only after the full-movie
+        population completes (the test anchor's values participate nowhere,
+        Req 3.2) — the table is the fixed verdict surface.
 
         Args:
-            metrics_dict:    Measured metric values keyed by ``"{metric}_{statistic}"``.
-            quality_targets: Targets used to determine pass/fail symbols.
+            metrics_dict: Measured metric values keyed by ``"{metric}_{statistic}"``.
 
         Returns:
-            Space-separated metric readings, or empty string if no targets.
+            Space-separated metric readings, or empty string when nothing renders.
         """
-        parts: list[str] = []
         plan = self._deps[ProbePhase].plan
+        parts: list[str] = []
+
+        if plan.fixed_quality:
+            for key_text, value in metrics_dict.items():
+                key = MetricStatKey.parse(key_text)
+                if key.statistic in COMPARISON_STATS:
+                    parts.append(
+                        f"{key.metric.value}-{key.statistic.value}={fmt_metric_value(value)}"
+                    )
+            return "  ".join(parts)
 
         for target in plan.targets:
             key   = f"{target.metric}_{target.statistic}"
@@ -1252,150 +1246,85 @@ class MergePhase(Phase[MergePhaseResult]):
                 WARNING_SYMBOL, strategy_name, ";  ".join(missed),
             )
 
-    @staticmethod
-    def _log_merge_summary(
-        summaries:         list[MergeSummaryRow],
-        source_stem:       str,
-        source_size_bytes: int,
-        quality_targets:   list[QualityTarget],
-        metrics_sampling:  int,
-    ) -> None:
-        """Log the merge summary: source row + strategy table with sizes, % of source,
-        and quality pass/miss marks; followed by a targets reminder and per-miss details.
+    def _render_merge_summary(self, summaries: list[StrategyRow], output_dir: Path) -> None:
+        """Render the unified merge comparison table from persisted rows.
+
+        The single rendering path for processing and replay alike (Req 6):
+        rows + a live-derived ruler and marks. Fixed mode elects the MERGE
+        anchor over the full-movie rows (the test anchor's values
+        participate nowhere, Req 3.2) and the below-table anchor-audit line
+        compares the two elections; search mode rules by the configured
+        targets with live all-targets-pass verdicts. Below the table: the
+        ``Files named``/``Location`` lines and the subsampling footnote.
 
         Args:
-            summaries:         Per-strategy summary rows, sorted by file size ascending.
-            source_stem:       Source video stem (filename without extension).
-            source_size_bytes: Size of the source video in bytes; ``0`` if unavailable.
-            quality_targets:   Quality targets that were checked.
-            metrics_sampling:  Frame subsampling factor used during measurement.
+            summaries:  The ``StrategyRow`` population (persisted sizes drive
+                        the table — no output re-stat).
+            output_dir: The directory holding the merged outputs.
         """
         if not summaries:
             logger.info("  No output files produced.")
             return
 
-        source_size = source_size_bytes
-        has_targets = bool(quality_targets)
+        job_result = self._deps[JobPhase]
+        plan       = self._deps[ProbePhase].plan
+        source     = SourceInfo(
+            stem       = job_result.file.payload.path.stem,
+            size_bytes = safe_stat_size(job_result.file.payload.path) or 0,
+        )
 
-        sorted_summaries = sorted(summaries, key=lambda r: safe_stat_size(r.output_path) or 0)
-
-        def _pct_str(size: int) -> str:
-            if source_size <= 0:
-                return "  N/A"
-            return f"{size / source_size * 100:5.1f}%"
-
-        # --- Table header ---
-        if has_targets:
-            logger.info("  %-25s  %12s  %7s  %s", "Strategy", "Size (MB)", "vs src", "Quality")
-            logger.info("  %-25s  %12s  %7s  %s", "-" * 25, "-" * 12, "-" * 7, "-" * 7)
+        marks: dict[str, Mark] = {}
+        ruler:  Ruler | None
+        if plan.fixed_quality:
+            tolerance     = self._config.encoding.optimize_tolerance
+            names         = [r.strategy for r in summaries]
+            survivors     = OptimizationPhase._dominance_survivors(summaries, tolerance)
+            merge_anchor  = OptimizationPhase._select_anchor(summaries, names, survivors)
+            ruler         = Ruler(kind="anchor", anchor=merge_anchor) if merge_anchor else None
         else:
-            logger.info("  %-25s  %12s  %7s", "Strategy", "Size (MB)", "vs src")
-            logger.info("  %-25s  %12s  %7s", "-" * 25, "-" * 12, "-" * 7)
+            ruler = Ruler(kind="targets", targets=tuple(plan.targets))
+            for row in summaries:
+                verdict = all(
+                    (value := row.metrics.get(target.key())) is not None and value >= target.value
+                    for target in plan.targets
+                ) if row.metrics else False
+                marks[row.strategy] = Mark(verdict=verdict)
 
-        # --- Source row ---
-        if source_size > 0:
-            src_str = fmt_size_mb(source_size)
-            if has_targets:
-                logger.info("  %-25s  %12s  %7s  %s", source_stem[:25], src_str, "100.0%", "")
-            else:
-                logger.info("  %-25s  %12s  %7s", source_stem[:25], src_str, "100.0%")
+        smallest = min(summaries, key=lambda r: (r.size_bytes, r.strategy)).strategy
+        marks[smallest] = Mark(
+            selected = True,
+            verdict  = marks[smallest].verdict if smallest in marks else None,
+        )
 
-        # --- Strategy rows ---
-        any_miss = False
-        for summary in sorted_summaries:
-            size_bytes = safe_stat_size(summary.output_path) or 0
-            size_str   = fmt_size_mb(size_bytes)
-            pct        = _pct_str(size_bytes)
+        table = ComparisonTable(
+            rows        = list(summaries),
+            ruler       = ruler,
+            source      = source,
+            marks       = marks,
+            mark_legend = "recommended",
+        )
+        for line in render_comparison_table(table):
+            logger.info(line)
 
-            if has_targets:
-                met = not QualitySearchBase.failed_targets(summary.metrics, quality_targets)
-                if summary.metrics:
-                    mark = SUCCESS_SYMBOL_MINOR if met else FAILURE_SYMBOL_MINOR
-                    if not met:
-                        any_miss = True
-                else:
-                    mark = "-"
-                logger.info("  %-25s  %12s  %7s  %s", summary.strategy_name[:25], size_str, pct, mark)
-            else:
-                logger.info("  %-25s  %12s  %7s", summary.strategy_name[:25], size_str, pct)
+        if plan.fixed_quality and ruler is not None:
+            test_anchor = self._deps[OptimizationPhase].anchor
+            if test_anchor == ruler.anchor:
+                logger.info("anchor holds at full scale: %s", ruler.anchor)
+            elif test_anchor is not None:
+                logger.warning(
+                    "anchor shifted at full scale: %s (test subset) → %s (full movie)"
+                    " — test chunk selection may not generalize",
+                    test_anchor, ruler.anchor,
+                )
 
-        # --- Output location note ---
-        output_dir = sorted_summaries[0].output_path.parent
-        logger.info("")
-        logger.info("  Files named: %s *.mkv  (where * is the strategy)", source_stem)
+        logger.info("  Files named: %s *.mkv  (where * is the strategy)", source.stem)
         logger.info("  Location: %s", output_dir)
-
-        if not has_targets:
-            return
-
-        # --- Targets reminder ---
-        targets_str = "  Targets: " + ",  ".join(
-            f"{t.metric}-{t.statistic} ≥ {t.value:.2f}"
-            for t in quality_targets
-        )
-        logger.info("")
-        logger.info(targets_str)
-
-        if not any_miss:
-            logger.info("  %s All quality targets met.", SUCCESS_SYMBOL_MINOR)
-            return
-
-        # --- Per-miss details as key-value table ---
-        miss_table: dict[str, str | list] = {}
-
-        for summary in sorted_summaries:
-            met = not QualitySearchBase.failed_targets(summary.metrics, quality_targets)
-            if met or not summary.metrics:
-                continue
-            missed_lines = []
-            for target in quality_targets:
-                key   = f"{target.metric}_{target.statistic}"
-                value = summary.metrics.get(key)
-                if value is None:
-                    missed_lines.append(f"{target.metric}-{target.statistic}: not measured (target: {target.value:.2f})")
-                elif value < target.value:
-                    missed_lines.append(f"{target.metric}-{target.statistic}: {value:.2f} (target: {target.value:.2f})")
-            if missed_lines:
-                miss_table[f"{WARNING_SYMBOL} {summary.strategy_name}"] = missed_lines if len(missed_lines) > 1 else missed_lines[0]
-
-        fmt_key_value_table(miss_table)
-
-        if miss_table and metrics_sampling > 1:
-            logger.info("  (Subsampling 1:%d — with fewer frames measured, there's a higher chance to miss outliers, making quality targeting less reliable)", metrics_sampling)
-
-    @staticmethod
-    def _log_merge_summary_from_sidecar(
-        sidecar:           MergeSidecar,
-        quality_targets:   list[QualityTarget],
-        source_stem:       str,
-        source_size_bytes: int,
-        metrics_sampling:  int,
-    ) -> None:
-        """Replay the merge summary table from the persisted replay aggregate.
-
-        Called on the REUSED path so the user sees the same table as on the
-        original run — with LIVE verdict marks (Req 51): the rows carry
-        metrics only, judged here against the CURRENT targets. The source
-        row renders live from the JobPhase result.
-
-        Args:
-            sidecar:           Loaded ``MergeSidecar`` from ``merge.yaml``.
-            quality_targets:   Current quality targets (the live verdict bar).
-            source_stem:       Source filename stem (live from the job result).
-            source_size_bytes: Source size in bytes (live from the job result).
-            metrics_sampling:  Current sampling (miss-detail footnote).
-        """
-        if not sidecar.summary:
-            logger.info("  No summary data saved — re-run to generate.")
-            return
-
-        MergePhase._log_merge_summary(
-            summaries         = sidecar.summary,
-            source_stem       = source_stem,
-            source_size_bytes = source_size_bytes,
-            quality_targets   = quality_targets,
-            metrics_sampling  = metrics_sampling,
-        )
+        if self._config.measurement.sampling > 1:
+            logger.info(
+                "  (Subsampling 1:%d — with fewer frames measured, there's a higher"
+                " chance to miss outliers, making quality targeting less reliable)",
+                self._config.measurement.sampling,
+            )
 
     @staticmethod
     def _collect_crf_data(

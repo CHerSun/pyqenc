@@ -36,13 +36,19 @@ from pyqenc.phases.job import JobPhase
 from pyqenc.phases.optimization import (
     OptimizationPhase,
     OptimizationPhaseResult,
-    StrategySummaryRow,
     current_optimization_sidecar,
     load_optimization_sidecar,
 )
+from pyqenc.quality import MetricStatKey as _K
+from pyqenc.quality import MetricType as _MT
+from pyqenc.quality import StatisticType as _ST
 from pyqenc.state import ArtifactState, ProbeFacet
 from pyqenc.stream_model import ProbedFile
+from pyqenc.summary_tables import StrategyRow
 from pyqenc.utils.yaml_utils import save_model, write_yaml_atomic
+
+_TOL = 5.0
+"""The dominance/pruning tolerance used by pruning tests (the config default)."""
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -149,7 +155,7 @@ def _make_phase(
 
 def _persist_optimization(
     phase: OptimizationPhase,
-    summary:    list[StrategySummaryRow],
+    summary:    list[StrategyRow],
     *,
     test_chunks: list[str] | None = None,
 ) -> None:
@@ -223,11 +229,11 @@ def _wire_chunks(phase: OptimizationPhase, chunks: list) -> None:
     )
 
 
-def _make_results(sizes: list[int]) -> list[StrategySummaryRow]:
-    """Create StrategySummaryRow list for S1, S2, S3 with given sizes."""
+def _make_results(sizes: list[int]) -> list[StrategyRow]:
+    """Create StrategyRow list for S1, S2, S3 with given sizes."""
     strategies = [_S1, _S2, _S3]
     return [
-        StrategySummaryRow(strategy=s.display_name(), total_size=sz)
+        StrategyRow(strategy=s.display_name(), size_bytes=sz)
         for s, sz in zip(strategies, sizes)
     ]
 
@@ -261,10 +267,10 @@ class TestApplyTolerance:
         assert OptimizationPhase._apply_tolerance([], 5.0) == []
 
     def test_zero_size_results_excluded(self) -> None:
-        """Strategies with total_size=0 (failed) are excluded."""
+        """Strategies with size_bytes=0 (failed) are excluded."""
         results = [
-            StrategySummaryRow(strategy=_S1.display_name(), total_size=0),
-            StrategySummaryRow(strategy=_S2.display_name(), total_size=100),
+            StrategyRow(strategy=_S1.display_name(), size_bytes=0),
+            StrategyRow(strategy=_S2.display_name(), size_bytes=100),
         ]
         selected = OptimizationPhase._apply_tolerance(results, 5.0)
         assert _S1.display_name() not in selected
@@ -378,10 +384,10 @@ class TestSelectionFromLiveState:
         _persist_optimization(
             phase,
             [
-                StrategySummaryRow(strategy=_S2.display_name(), total_size=100),
-                StrategySummaryRow(strategy="h264+veryslow", total_size=110),
-                StrategySummaryRow(strategy=_S1.display_name(), total_size=200),
-                StrategySummaryRow(strategy=_S3.display_name(), total_size=300),
+                StrategyRow(strategy=_S2.display_name(), size_bytes=100),
+                StrategyRow(strategy="h264+veryslow", size_bytes=110),
+                StrategyRow(strategy=_S1.display_name(), size_bytes=200),
+                StrategyRow(strategy=_S3.display_name(), size_bytes=300),
             ],
             test_chunks=[c.safe_name() for c in chunks],
         )
@@ -415,9 +421,9 @@ class TestSelectionFromLiveState:
         _persist_optimization(
             phase,
             [
-                StrategySummaryRow(strategy="h264+veryslow", total_size=90),
-                StrategySummaryRow(strategy=_S1.display_name(), total_size=200),
-                StrategySummaryRow(strategy=_S2.display_name(), total_size=210),
+                StrategyRow(strategy="h264+veryslow", size_bytes=90),
+                StrategyRow(strategy=_S1.display_name(), size_bytes=200),
+                StrategyRow(strategy=_S2.display_name(), size_bytes=210),
             ],
             test_chunks=[c.safe_name() for c in chunks],
         )
@@ -444,8 +450,8 @@ class TestSelectionFromLiveState:
         assert {r.strategy for r in persisted.summary} == plan_names
         # Sizes derive from the live winner files (2 chunks x seeded bytes).
         by_name = {r.strategy: r for r in persisted.summary}
-        assert by_name[_S1.display_name()].total_size == 200
-        assert by_name[_S3.display_name()].total_size == 300
+        assert by_name[_S1.display_name()].size_bytes == 200
+        assert by_name[_S3.display_name()].size_bytes == 300
 
     def test_missing_table_rows_derive_only(self, tmp_path: Path) -> None:
         """All pairs complete but the table misses a plan strategy → sizes
@@ -461,7 +467,7 @@ class TestSelectionFromLiveState:
         # Table covers only S1 — S2's row is missing.
         _persist_optimization(
             phase,
-            [StrategySummaryRow(strategy=_S1.display_name(), total_size=1)],
+            [StrategyRow(strategy=_S1.display_name(), size_bytes=1)],
             test_chunks=[c.safe_name() for c in chunks],
         )
 
@@ -472,8 +478,8 @@ class TestSelectionFromLiveState:
         persisted = load_optimization_sidecar(work_dir / "optimization.yaml")
         assert persisted is not None
         by_name = {r.strategy: r for r in persisted.summary}
-        assert by_name[_S1.display_name()].total_size == 200
-        assert by_name[_S2.display_name()].total_size == 220
+        assert by_name[_S1.display_name()].size_bytes == 200
+        assert by_name[_S2.display_name()].size_bytes == 220
 
     def test_missing_sidecar_wipes_winners(self, tmp_path: Path) -> None:
         """No sidecar → winner currency is unknown → conservative wipe +
@@ -797,53 +803,41 @@ class TestRunBoundaryGuard:
 class TestWinnerWipeSemantics:
     """Winner wipes are CONDITION-driven now: the §99 unknown-currency wipe
     (sidecar missing + winners present) is mode-independent; a CURRENT
-    sidecar wipes nothing (the pending gate alone decides — O-1/O-2)."""
+    sidecar wipes nothing (the pending gate alone decides — O-1/O-2).
 
-    def test_missing_sidecar_wipes_on_all_strategies_path(self, tmp_path: Path) -> None:
-        # Single fixed strategy + optimize on → all-strategies skip path.
-        phase, work_dir, plan = _make_fixed_phase(
-            tmp_path, strategy_names=["h265-aq+slow"], optimize=True,
-        )
-        seeded = _seed_encoded_winner(work_dir, plan.strategies[0])
-        result = phase.run(dry_run=False)
-        assert result.outcome is PhaseOutcome.REUSED  # all-strategies skip result
-        assert not seeded.exists(), "no sidecar vouches for the winner — wiped"
+    Fixed runs no longer take an all-strategies skip path (§123), so these
+    exercise the search-mode skip path — the ladder semantics are shared.
+    """
 
     def test_missing_sidecar_wipes_on_searched_runs_too(self, tmp_path: Path) -> None:
-        """The conservative §99 wipe is mode-independent — searched winners
-        without a sidecar are equally unknown currency."""
+        """The conservative §99 wipe fires on the skip path too — searched
+        winners without a sidecar are unknown currency."""
         phase, work_dir = _make_phase(tmp_path, [_S1], optimize=False, force=False)
         seeded = _seed_encoded_winner(work_dir, _S1)
         phase.run(dry_run=False)
         assert not seeded.exists()
 
-    def test_current_sidecar_wipes_nothing_on_fixed_rerun(self, tmp_path: Path) -> None:
-        """O-2: a fixed rerun with the SAME pinned map performs no
-        invalidation — winners stay (the pending gate decides reuse)."""
-        phase, work_dir, plan = _make_fixed_phase(
-            tmp_path, strategy_names=["h265-aq+slow"], optimize=True,
-        )
-        seeded = _seed_encoded_winner(work_dir, plan.strategies[0])
+    def test_current_sidecar_wipes_nothing_on_rerun(self, tmp_path: Path) -> None:
+        """O-2: a rerun with the SAME keys performs no invalidation —
+        winners stay (the pending gate decides reuse)."""
+        phase, work_dir = _make_phase(tmp_path, [_S1], optimize=False, force=False)
+        seeded = _seed_encoded_winner(work_dir, _S1)
         # First run persists the current keys (§99 wipes the seeded winner —
         # so seed again after the sidecar exists).
         phase.run(dry_run=False)
-        seeded = _seed_encoded_winner(work_dir, plan.strategies[0])
+        seeded = _seed_encoded_winner(work_dir, _S1)
 
-        phase2, _, _ = _make_fixed_phase(
-            tmp_path, strategy_names=["h265-aq+slow"], optimize=True,
-        )
+        phase2, _ = _make_phase(tmp_path, [_S1], optimize=False, force=False)
         phase2.run(dry_run=False)
 
-        assert seeded.exists(), "same pinned map + current sidecar → no wipe"
+        assert seeded.exists(), "same keys + current sidecar → no wipe"
 
     def test_wipe_skipped_on_dry_run(self, tmp_path: Path) -> None:
-        phase, work_dir, plan = _make_fixed_phase(
-            tmp_path, strategy_names=["h265-aq+slow"], optimize=False,
-        )
-        seeded = _seed_encoded_winner(work_dir, plan.strategies[0])
+        phase, work_dir = _make_phase(tmp_path, [_S1], optimize=False, force=False)
+        _seed_encoded_winner(work_dir, _S1)
         phase.run(dry_run=True)
         # A dry run changes nothing — the wipe waits for the executing run.
-        assert seeded.exists()
+        assert (work_dir / ENCODED_OUTPUT_DIR).exists()
 
 
 class TestStrategyFingerprintWipe:
@@ -997,9 +991,15 @@ class TestFixedQualityBanner:
 # Fixed compared-run optimization: pruning, anchor, synthetic set (Req 8)
 # ---------------------------------------------------------------------------
 
-def _result(name: str, size: int, metrics: dict[str, float]) -> StrategySummaryRow:
-    """A StrategySummaryRow with metrics (the fixed-mode pruning input)."""
-    return StrategySummaryRow(strategy=name, total_size=size, metrics=metrics)
+def _result(name: str, size: int, metrics: dict[str, float]) -> StrategyRow:
+    """A StrategyRow with metrics (the fixed-mode pruning input).
+
+    ``metrics`` arrive in the persisted (stringly) form and validate through
+    the pair type's own parse — the sanctioned boundary conversion.
+    """
+    return StrategyRow.model_validate(
+        {"strategy": name, "size_bytes": size, "metrics": metrics},
+    )
 
 
 class TestDominancePruning:
@@ -1013,7 +1013,7 @@ class TestDominancePruning:
             _result("h265+slow", 1000, {"vmaf_median": 93.0, "vif_median": 90.0}),
             _result("h264+slow", 1200, {"vmaf_median": 91.5, "vif_median": 85.0}),
         ]
-        assert OptimizationPhase._dominance_survivors(results) == ["h265+slow"]
+        assert OptimizationPhase._dominance_survivors(results, _TOL) == ["h265+slow"]
 
     def test_av1_vs_h265_both_survive(self) -> None:
         """Smaller-but-worse vs bigger-but-better — neither dominates."""
@@ -1021,7 +1021,7 @@ class TestDominancePruning:
             _result("av1+slow", 1000, {"vmaf_median": 91.0, "vif_median": 84.0}),
             _result("h265+slow", 1400, {"vmaf_median": 93.0, "vif_median": 90.0}),
         ]
-        assert OptimizationPhase._dominance_survivors(results) == [
+        assert OptimizationPhase._dominance_survivors(results, _TOL) == [
             "av1+slow", "h265+slow",
         ]
 
@@ -1032,7 +1032,7 @@ class TestDominancePruning:
             _result("a+slow", 1000, dict(self._M)),
             _result("b+slow", 1000, dict(self._M)),
         ]
-        assert OptimizationPhase._dominance_survivors(results) == ["a+slow", "b+slow"]
+        assert OptimizationPhase._dominance_survivors(results, _TOL) == ["a+slow", "b+slow"]
 
     def test_size_tie_metric_advantage_dominates(self) -> None:
         """Equal size, better metrics on one — the better one dominates."""
@@ -1040,15 +1040,15 @@ class TestDominancePruning:
             _result("a+slow", 1000, {"vmaf_median": 90.0}),
             _result("b+slow", 1000, {"vmaf_median": 91.0}),
         ]
-        assert OptimizationPhase._dominance_survivors(results) == ["b+slow"]
+        assert OptimizationPhase._dominance_survivors(results, _TOL) == ["b+slow"]
 
     def test_failed_strategies_excluded(self) -> None:
-        """total_size == 0 (failed encodes) never survives."""
+        """size_bytes == 0 (failed encodes) never survives."""
         results = [
             _result("a+slow", 0, {}),
             _result("b+slow", 1000, {"vmaf_median": 91.0}),
         ]
-        assert OptimizationPhase._dominance_survivors(results) == ["b+slow"]
+        assert OptimizationPhase._dominance_survivors(results, _TOL) == ["b+slow"]
 
     def test_metric_key_mismatch_incomparable(self) -> None:
         """Partial measurements cannot be honestly compared — both survive."""
@@ -1056,16 +1056,16 @@ class TestDominancePruning:
             _result("a+slow", 1000, {"vmaf_median": 91.0}),
             _result("b+slow", 1400, {"vmaf_median": 93.0, "vif_median": 90.0}),
         ]
-        assert OptimizationPhase._dominance_survivors(results) == ["a+slow", "b+slow"]
+        assert OptimizationPhase._dominance_survivors(results, _TOL) == ["a+slow", "b+slow"]
 
     def test_all_measured_metrics_evaluated(self) -> None:
         """Dominance needs advantage on every compared statistic — a single
         deficit blocks the prune even when every other compared stat wins."""
         results = [
-            _result("a+slow", 1000, {"vmaf_median": 93.0, "vif_median": 83.9}),
+            _result("a+slow", 1000, {"vmaf_median": 93.0, "vif_median": 83.5}),
             _result("b+slow", 1400, {"vmaf_median": 91.0, "vif_median": 84.0}),
         ]
-        assert OptimizationPhase._dominance_survivors(results) == ["a+slow", "b+slow"]
+        assert OptimizationPhase._dominance_survivors(results, _TOL) == ["a+slow", "b+slow"]
 
     def test_stability_stats_do_not_sway_dominance(self) -> None:
         """std/max-style statistics are outside the comparison set — a
@@ -1078,7 +1078,44 @@ class TestDominancePruning:
                 "vmaf_p10": 88.0, "vmaf_median": 91.0, "vmaf_std": 2.0, "vmaf_max": 99.0,
             }),
         ]
-        assert OptimizationPhase._dominance_survivors(results) == ["a+slow"]
+        assert OptimizationPhase._dominance_survivors(results, _TOL) == ["a+slow"]
+
+    def test_near_tie_within_both_tolerances_prunes(self) -> None:
+        """§97/Req 9: near-ties inside the tolerances count as equal — given
+        no meaningful deficit, the strictly-cheaper one dominates (size is
+        the tiebreak; the 2026-10-09 real-data shape)."""
+        results = [
+            _result("a+slow", 1000, {"vmaf_median": 91.0}),
+            _result("b+slow", 1010, {"vmaf_median": 91.05}),
+        ]
+        assert OptimizationPhase._dominance_survivors(results, _TOL) == ["a+slow"]
+
+    def test_equal_size_near_equal_stats_coexist(self) -> None:
+        """At equal size with ±stats inside the tolerances both directions —
+        mutual near-duplicates coexist (size cannot break the tie)."""
+        results = [
+            _result("a+slow", 1000, {"vmaf_median": 93.0, "vif_median": 83.9}),
+            _result("b+slow", 1000, {"vmaf_median": 91.0, "vif_median": 84.0}),
+        ]
+        assert OptimizationPhase._dominance_survivors(results, _TOL) == ["a+slow", "b+slow"]
+
+    def test_deficit_within_acceptance_delta_no_longer_blocks(self) -> None:
+        """A deficit smaller than the metric's acceptance_delta (VIF 0.15)
+        no longer blocks pruning — the tolerance is the 'good enough' bar."""
+        results = [
+            _result("a+slow", 1000, {"vmaf_median": 93.0, "vif_median": 83.9}),
+            _result("b+slow", 1400, {"vmaf_median": 91.0, "vif_median": 84.0}),
+        ]
+        assert OptimizationPhase._dominance_survivors(results, _TOL) == ["a+slow"]
+
+    def test_deficit_beyond_acceptance_delta_blocks(self) -> None:
+        """A deficit clearly beyond the acceptance_delta still blocks — a
+        median surplus never covers a floor deficit (no compensation)."""
+        results = [
+            _result("a+slow", 1000, {"vmaf_median": 93.0, "vif_median": 83.5}),
+            _result("b+slow", 1400, {"vmaf_median": 91.0, "vif_median": 84.0}),
+        ]
+        assert OptimizationPhase._dominance_survivors(results, _TOL) == ["a+slow", "b+slow"]
 
 
 class TestAnchorSelection:
@@ -1089,7 +1126,7 @@ class TestAnchorSelection:
             _result("av1+slow", 1000, {"vmaf_median": 91.0}),
             _result("h265+slow", 1400, {"vmaf_median": 93.0}),
         ]
-        survivors = OptimizationPhase._dominance_survivors(results)
+        survivors = OptimizationPhase._dominance_survivors(results, _TOL)
         assert OptimizationPhase._select_anchor(
             results, ["av1+slow", "h265+slow"], survivors,
         ) == "av1+slow"
@@ -1102,7 +1139,7 @@ class TestAnchorSelection:
             _result("b+slow", 900, {"vmaf_median": 85.0}),
             _result("c+slow", 1200, {"vmaf_median": 90.0}),
         ]
-        survivors = OptimizationPhase._dominance_survivors(results)
+        survivors = OptimizationPhase._dominance_survivors(results, _TOL)
         assert survivors == ["b+slow", "c+slow"]
         assert OptimizationPhase._select_anchor(
             results, ["a+slow", "b+slow", "c+slow"], survivors,
@@ -1114,7 +1151,7 @@ class TestAnchorSelection:
             _result("a+slow", 1000, {"vmaf_median": 91.0}),
             _result("b+slow", 1000, {"vmaf_median": 91.0}),
         ]
-        survivors = OptimizationPhase._dominance_survivors(results)
+        survivors = OptimizationPhase._dominance_survivors(results, _TOL)
         assert survivors == ["a+slow", "b+slow"]
         assert OptimizationPhase._select_anchor(
             results, ["b+slow", "a+slow"], survivors,
@@ -1125,7 +1162,7 @@ class TestAnchorSelection:
             _result("a+slow", 1000, {}),
             _result("b+slow", 1400, {"vmaf_median": 91.0}),
         ]
-        survivors = OptimizationPhase._dominance_survivors(results)
+        survivors = OptimizationPhase._dominance_survivors(results, _TOL)
         assert OptimizationPhase._select_anchor(
             results, ["a+slow", "b+slow"], survivors,
         ) == "b+slow"
@@ -1137,7 +1174,7 @@ class TestAnchorSelection:
             _result("a+slow", 1000, {"vmaf_std": 1.5, "vmaf_max": 98.0}),
             _result("b+slow", 1400, {"vmaf_p10": 88.0, "vmaf_median": 91.0}),
         ]
-        survivors = OptimizationPhase._dominance_survivors(results)
+        survivors = OptimizationPhase._dominance_survivors(results, _TOL)
         assert OptimizationPhase._select_anchor(
             results, ["a+slow", "b+slow"], survivors,
         ) == "b+slow"
@@ -1207,9 +1244,12 @@ class TestAggregateStrategyMetrics:
 
         phase, _, _ = _make_fixed_phase(tmp_path, strategy_names=["h265-aq+slow"])
         mins = phase._aggregate_strategy_metrics(
-            tmp_path, chunks, strategy, encoded_chunks,
+            tmp_path, chunks, strategy, encoded_chunks[strategy.display_name()],
         )
-        assert mins == {"vmaf_median": 91.0, "vif_median": 83.0}
+        assert mins == {
+            _K(_MT.VMAF, _ST.MEDIAN): 91.0,
+            _K(_MT.VIF, _ST.MEDIAN): 83.0,
+        }
 
     def test_missing_sidecar_chunk_contributes_nothing(self, tmp_path: Path) -> None:
         from pyqenc.phases.encoding import build_encoded_chunk
@@ -1232,7 +1272,7 @@ class TestAggregateStrategyMetrics:
         }
         phase, _, _ = _make_fixed_phase(tmp_path, strategy_names=["h265-aq+slow"])
         assert phase._aggregate_strategy_metrics(
-            tmp_path, [chunk], strategy, encoded_chunks,
+            tmp_path, [chunk], strategy, encoded_chunks[strategy.display_name()],
         ) == {}
 class TestFixedComparedExecute:
     """The fixed compared-run execute path end to end (mocked encoder pool).
@@ -1382,8 +1422,9 @@ class TestFixedComparedExecute:
         # The per-strategy records keep the FULL aggregated metrics for reuse
         # (data retention — re-selecting the comparison set never re-measures).
         by_name = {r.strategy: r for r in persisted.summary}
-        assert by_name["h265-aq+slow"].metrics["vmaf_median"] == 91.0
-        assert by_name["h265-aq+slow"].metrics["vmaf_std"] == 1.1
+        aq = by_name["h265-aq+slow"].metrics
+        assert aq[_K(_MT.VMAF, _ST.MEDIAN)] == 91.0
+        assert aq[_K(_MT.VMAF, _ST.STD)] == 1.1
         # Re-derivation from the persisted facts reproduces the ruler verbatim.
         anchor_result = next(
             r for r in persisted.summary if r.strategy == result.anchor
@@ -1398,11 +1439,11 @@ class TestFixedComparedExecute:
             ("vmaf", "median", 91.0),
         ]
 
-    def test_tolerance_not_applied_in_fixed(
+    def test_size_tolerance_does_not_rescue_stat_dominance(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A 100% tolerance (searched mode would select everything) must not
-        rescue the dominated strategy."""
+        """A 100% size tolerance opens the size dimension completely — a
+        strategy dominated on STATISTICS still prunes (no compensation)."""
         result, _ = self._run_scenario(
             tmp_path, monkeypatch,
             tolerance=100.0,
@@ -1423,16 +1464,20 @@ class TestFixedComparedExecute:
                 metrics=self._SCENARIO_METRICS,
             )
         text = caplog.text
-        assert "Fixed-quality comparison — ruler: h265-aq+slow (smallest test size)" in text
-        # The stat convention is stated once; metric columns are one per metric.
-        assert "anchor p10..median, others Δp10/Δmedian vs anchor" in text
-        # Anchor row: bare size (baseline) + p10..median ranges.
-        assert "87.0..91.0" in text and "81.0..84.0" in text
-        # Non-anchor rows: size with folded ratio + paired deltas.
-        assert "(1.40×)" in text
-        assert "+2.5/+2.1" in text  # h265 vmaf Δp10/Δmedian vs anchor
-        assert "dominated by h265+slow" in text
-        assert "Survivors (Pareto front): h265-aq+slow, h265+slow — all will be encoded" in text
+        # Convention line: ruler identity, bases, legend, tolerance (Req 2.9).
+        assert "ruler: h265-aq+slow (anchor) ◎" in text
+        assert "Δ vs anchor" in text and "size Δ% vs best size" in text
+        assert "◀ selected" in text and "size tolerance 5%" in text
+        # Anchor row: absolutes as sub-column pairs.
+        assert "87.0 | 91.0" in text and "81.0 | 84.0" in text
+        # Non-anchor rows: paired deltas + the folded size %Δ.
+        assert "+2.5 | +2.1" in text  # h265 vmaf Δp10 | Δmed vs anchor
+        assert "(+40.0%)" in text
+        # Dominator attribution is a below-table detail line, not a column.
+        assert "pruned: h265-anime+slow — dominated by h265+slow" in text
+        # The old furniture is gone: no survivors line, no status column.
+        assert "Survivors (Pareto front)" not in text
+        assert "passed" not in text and "Selected strategies:" not in text
 
 
 class TestFixedReuseFromPersisted:
@@ -1472,14 +1517,8 @@ class TestFixedReuseFromPersisted:
         _persist_optimization(
             phase,
             [
-                StrategySummaryRow(
-                    strategy="h265-aq+slow", total_size=1000,
-                    metrics={"vmaf_median": 91.0},
-                ),
-                StrategySummaryRow(
-                    strategy="h265+slow", total_size=1400,
-                    metrics={"vmaf_median": 93.0},
-                ),
+                _result("h265-aq+slow", 1000, {"vmaf_median": 91.0}),
+                _result("h265+slow", 1400, {"vmaf_median": 93.0}),
             ],
             test_chunks=[c.safe_name() for c in chunks],
         )
@@ -1494,22 +1533,75 @@ class TestFixedReuseFromPersisted:
         assert [(t.metric, t.statistic, t.value) for t in result.synthetic_targets] == [
             ("vmaf", "median", 91.0),
         ]
-        assert "Fixed-quality comparison — ruler: h265-aq+slow" in caplog.text
+        assert "ruler: h265-aq+slow (anchor) ◎" in caplog.text
 
 
-class TestUncomparedFixedSkipsAnchor:
-    """Single-strategy / optimize-off fixed runs skip anchor machinery (Req 8.7)."""
+class TestFixedAlwaysRuns:
+    """§123: fixed runs always run the test population and elect an anchor —
+    the single-strategy skip and the `--no-optimize` fixed skip are gone;
+    the anchor machinery behaves identically to any compared fixed run."""
 
-    def test_single_strategy_no_synthetic_set(self, tmp_path: Path) -> None:
-        phase, work_dir, _ = _make_fixed_phase(
+    def test_single_strategy_fails_loudly_without_chunks(self, tmp_path: Path) -> None:
+        """No all-strategies skip: a single fixed strategy proceeds into
+        optimization and fails loudly when no chunks exist (previously the
+        skip returned REUSED)."""
+        phase, _work_dir, _ = _make_fixed_phase(
             tmp_path, strategy_names=["h265-aq+slow"], optimize=True,
         )
         result = phase.run(dry_run=False)
-        assert result.outcome is PhaseOutcome.REUSED  # all-strategies skip path
+        assert result.outcome is PhaseOutcome.FAILED
         assert result.synthetic_targets == []
         assert result.anchor is None
-        persisted = load_optimization_sidecar(work_dir / "optimization.yaml")
-        assert persisted is not None
-        # Selection and anchor are live derivations — not sidecar fields.
-        assert "selected" not in persisted.model_dump()
-        assert "anchor" not in persisted.model_dump()
+
+    def test_single_strategy_elects_itself_anchor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A single-strategy fixed run tests, elects its only strategy as
+        anchor, and derives the synthetic ruler from its test metrics."""
+        from pyqenc.phases.encoding import EncodingResult, build_encoded_chunk
+        from pyqenc.stream_model import EncodedChunk as _EC
+
+        phase, work_dir, plan = _make_fixed_phase(
+            tmp_path, strategy_names=["h265-aq+slow"], optimize=True,
+        )
+        chunks = [_make_chunk(0.0, 10.0, tmp_path)]
+        from pyqenc.phases.chunking import ChunkingPhaseResult
+        chunking = next(
+            ph for cls, ph in phase._phases.items() if cls.__name__ == "ChunkingPhase"
+        )
+        chunking.result = ChunkingPhaseResult(
+            outcome=PhaseOutcome.COMPLETED, message="stub",
+            chunks=[Artifact(payload=c, state=ArtifactState.COMPLETE) for c in chunks],
+        )
+        _persist_optimization(phase, [], test_chunks=[c.safe_name() for c in chunks])
+        strategy = plan.strategies[0]
+        strategy_dir = work_dir / "encoded" / strategy.safe_name()
+        strategy_dir.mkdir(parents=True, exist_ok=True)
+        mkv = strategy_dir / _EC.format_winner_file_name(chunks[0].safe_name())
+        mkv.write_bytes(b"x" * 500)
+        write_yaml_atomic(
+            strategy_dir / _EC.format_winner_sidecar_name(chunks[0].safe_name()),
+            {"crf": "18.0", "targets_met": True, "frame_count": 24,
+             "metrics": {"vmaf_p10": 87.0, "vmaf_median": 91.0}},
+        )
+
+        async def _fake_parallel(**_kwargs: object) -> EncodingResult:
+            result = EncodingResult()
+            result.encoded_chunks[strategy.display_name()] = [
+                build_encoded_chunk(chunk=chunks[0], strategy=strategy, path=mkv, frame_count=24)
+            ]
+            return result
+
+        monkeypatch.setattr(
+            "pyqenc.phases.optimization._make_encoder", lambda **_kw: MagicMock(),
+        )
+        monkeypatch.setattr(
+            "pyqenc.phases.encoding._encode_chunks_parallel", _fake_parallel,
+        )
+        result = phase.run(dry_run=False)
+
+        assert result.outcome is PhaseOutcome.COMPLETED
+        assert result.anchor == strategy.display_name()
+        assert [(t.metric, t.statistic, t.value) for t in result.synthetic_targets] == [
+            ("vmaf", "p10", 87.0), ("vmaf", "median", 91.0),
+        ]

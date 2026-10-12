@@ -169,10 +169,10 @@ class TestJobPhaseRunExecuteNoMismatch:
 
         data = yaml.safe_load((tmp_path / "work" / "job.yaml").read_text(encoding="utf-8"))
         assert set(data) == {"path", "source"}
-        assert set(data["source"]) == {"size", "token"}
         assert data["path"] == str(src)
-        assert data["source"]["size"] == src.stat().st_size
-        assert data["source"]["token"]
+        # The source persists as the fingerprint storage string (belt · token);
+        # of_file's belt IS the file size.
+        assert data["source"] == str(fingerprinter.of_file(src))
 
     def test_result_carries_eager_file(self, tmp_path: Path) -> None:
         """JobPhaseResult exposes the run's single File — path + size +
@@ -335,7 +335,7 @@ class TestJobPhaseIdentityMismatchWithForce:
         assert result.file is not None
         assert result.file.state == ArtifactState.COMPLETE
         data = yaml.safe_load((work_dir / "job.yaml").read_text(encoding="utf-8"))
-        assert data["source"]["token"] == fingerprinter.of_file(src).token
+        assert data["source"] == str(fingerprinter.of_file(src))
 
     def test_mismatch_with_permission_logs_warning(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

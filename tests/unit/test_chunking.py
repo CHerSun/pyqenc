@@ -250,7 +250,7 @@ class TestChunkingPhaseLifecycle:
         assert set(data) == {"scenes", "source", "scene_threshold", "min_scene_length"}
         assert [rec["timestamp_seconds"] for rec in data["scenes"]] == [0.0, 13.33]
         assert data["scenes"][1]["frame"] == 320
-        assert data["source"]["token"] == _STUB_SOURCE_FP.token
+        assert data["source"] == str(_STUB_SOURCE_FP)
         assert data["scene_threshold"] == _APP_CONFIG.chunking.scene_threshold
         assert data["min_scene_length"] == _APP_CONFIG.chunking.min_scene_length
 
@@ -303,7 +303,7 @@ class TestChunkingPhaseLifecycle:
 
         sidecar_path = work_dir / "chunking.yaml"
         data = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
-        data["source"]["token"] = "f" * 32
+        data["source"] = str(SizedFingerprint(token="f" * 32, size=_STUB_SOURCE_FP.size))
         from pyqenc.utils.yaml_utils import write_yaml_atomic
 
         write_yaml_atomic(sidecar_path, data)

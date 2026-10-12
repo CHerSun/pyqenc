@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from scenedetect import ContentDetector, detect
 
 from pyqenc.metrics import MetricKey
-from pyqenc.models import Fingerprint, PhaseOutcome, SceneBoundary
+from pyqenc.models import PhaseOutcome, SceneBoundary, SizedFingerprintYaml
 from pyqenc.phase import (
     Artifact,
     FinalizeContext,
@@ -78,8 +78,6 @@ class ChunkingSidecar(BaseModel):
     never a mismatch (Req 32).
 
     Attributes:
-        scenes:           Scene boundaries in order; the first is the stream
-                          start.
         source:           The source identity key (fingerprint only) —
                           required; a sidecar missing it fails validation →
                           absent → re-detection (Req 32 amended 2026-10-10).
@@ -87,12 +85,14 @@ class ChunkingSidecar(BaseModel):
                           detected under.
         min_scene_length: The minimum scene length (frames) in force at
                           detection.
+        scenes:           Scene boundaries in order; the first is the stream
+                          start.
     """
 
-    scenes:           list[SceneRecord]
-    source:           Fingerprint
+    source:           SizedFingerprintYaml
     scene_threshold:  float
     min_scene_length: int
+    scenes:           list[SceneRecord]
 
 
 logger = logging.getLogger(__name__)

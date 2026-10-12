@@ -11,14 +11,20 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 from pydantic import ValidationError
 
 from pyqenc.models import (
     CodecConfig,
     Fingerprint,
+    SizedFingerprint,
     Strategy,
     fingerprinter,
 )
+
+_SEP = "\u00a0·\u00a0"
+"""The storage-form separator as it sits on disk (NBSP — not yaml whitespace)."""
 
 
 def _codec(**overrides) -> CodecConfig:
@@ -82,12 +88,9 @@ class TestFingerprintType:
         assert bare.matches(base)
 
     def test_round_trip_through_yaml_dump(self) -> None:
-        """The ``{token, size?}`` YAML form round-trips with size omitted when
-        absent (the codebase's exclude_none convention).
-
-        Bug: an explicit ``size: null`` key would leak into every sidecar for
-        sizeless owners (Strategy, ResolvedChain) and drift from the declared
-        sidecar layouts.
+        """The raw model dump stays nested (the class's own shape) — the
+        compact one-line storage form belongs to the ``FingerprintYaml``
+        boundary aliases, not the value type (see ``TestYamlStorageForm``).
         """
         sized  = Fingerprint(token="ab", size=5)
         sizeless = Fingerprint(token="cd")
@@ -97,6 +100,102 @@ class TestFingerprintType:
 
         assert Fingerprint.model_validate(sized.model_dump()) == sized
         assert Fingerprint.model_validate(sizeless.model_dump()) == sizeless
+
+
+class TestYamlStorageForm:
+    """The one-line storage string every sidecar field persists as."""
+
+    def test_storage_string_and_parse_inverse(self) -> None:
+        """``str`` is ``belt<sep>token`` with the separator ALWAYS present
+        (empty belt = no belt); ``parse`` is its inverse and the constructed
+        class follows belt presence.
+
+        Bug guarded: a bare-token form for belt-less fingerprints would be
+        ambiguous exactly when an opaque token contains the separator.
+        """
+        sized = SizedFingerprint(token="ab", size=5)
+        bare  = Fingerprint(token="cd")
+        zero_belt = SizedFingerprint(token="ef", size=0)
+
+        assert str(sized) == f"5{_SEP}ab"
+        assert str(bare) == f"{_SEP}cd"
+        assert str(zero_belt) == f"0{_SEP}ef", "a real zero belt is not None"
+
+        parsed_sized = Fingerprint.parse(str(sized))
+        assert isinstance(parsed_sized, SizedFingerprint) and parsed_sized == sized
+        assert Fingerprint.parse(str(bare)) == bare
+        assert Fingerprint.parse(str(zero_belt)) == zero_belt
+
+    @given(st.text(min_size=1))
+    def test_any_token_round_trips(self, token: str) -> None:
+        """Opacity property: whatever the token contains — including the
+        separator itself — the storage string parses back to it (the
+        always-separator design: the size part can never contain the
+        separator, so its first occurrence is always the real one).
+        """
+        assert Fingerprint.parse(str(Fingerprint(token=token))) == Fingerprint(token=token)
+        assert Fingerprint.parse(str(SizedFingerprint(token=token, size=7))) == (
+            SizedFingerprint(token=token, size=7)
+        )
+
+    def test_sidecar_fields_persist_as_storage_strings(self) -> None:
+        """A real sidecar's fingerprint fields dump as the storage string and
+        validate back — the boundary the aliases own.
+
+        Bug guarded: the nested ``{token, size}`` form cost three lines per
+        fingerprint on every sidecar.
+        """
+        from pyqenc.phases.audio import AudioSidecar
+
+        sidecar = AudioSidecar(
+            source=SizedFingerprint(token="ab", size=5),
+            chains={"normal": Fingerprint(token="cd")},
+        )
+        dumped = sidecar.model_dump(exclude_none=True)
+        assert dumped == {"source": f"5{_SEP}ab", "chains": {"normal": f"{_SEP}cd"}}
+
+        assert AudioSidecar.model_validate(dumped) == sidecar
+
+    def test_legacy_nested_dict_still_validates(self) -> None:
+        """Sidecars written before the storage string load unchanged (the
+        dict passes through to normal validation)."""
+        from pyqenc.phases.audio import AudioSidecar
+
+        legacy = AudioSidecar.model_validate({
+            "source": {"token": "ab", "size": 5},
+            "chains": {"normal": {"token": "cd"}},
+        })
+        assert legacy.source == SizedFingerprint(token="ab", size=5)
+        assert legacy.chains["normal"] == Fingerprint(token="cd")
+
+    def test_beltless_value_rejected_on_sized_field(self) -> None:
+        """A belt-less value where the producer structurally carries the
+        belt is a corrupted or foreign record — validation fails loudly
+        (the sidecar loads as absent and the phase redoes its work).
+
+        Bug guarded: silently accepting it would lose the sized guarantee
+        ``of_file``/``of_ids`` give every written sidecar.
+        """
+        from pyqenc.phases.audio import AudioSidecar
+
+        with pytest.raises(ValidationError):
+            AudioSidecar.model_validate({
+                "source": f"{_SEP}ab",  # token-only on a sized field
+                "chains": {},
+            })
+
+    def test_parse_rejects_malformed_strings(self) -> None:
+        """Missing separator (incl. the regular-space lookalike), a bad
+        size part, or an empty token all raise — loud, never a guess."""
+        for bad in (
+            "ab",                        # no separator at all
+            " · ab",                     # regular-space lookalike
+            f"x{_SEP}ab",                # non-digit size part
+            "5",                         # separator lost to editing
+            f"5{_SEP}",                  # empty token
+        ):
+            with pytest.raises(ValueError):
+                Fingerprint.parse(bad)
 
 
 class TestTokenDerivation:

@@ -8,17 +8,19 @@ algorithms for iterative encoding optimization.
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import Enum
 from pathlib import Path
 from typing import (
+    Annotated,
     TypedDict,
     cast,
 )
 
 import pandas as pd
+from pydantic import BeforeValidator, PlainSerializer
 
 from pyqenc.utils.ffmpeg_runner import (
     FFmpegInput,
@@ -271,6 +273,144 @@ class MetricStats(TypedDict):
     std:    float
 
 ChunkQualityStats = dict[MetricType, MetricStats]
+
+
+# ---------------------------------------------------------------------------
+# Metric-statistic identity (Req 7, unified-quality-summaries spec)
+# ---------------------------------------------------------------------------
+
+class StatisticType(Enum):
+    """The closed set of measured statistics.
+
+    Member values are the canonical sidecar tokens — the single spelling
+    inside ``{metric}_{statistic}`` keys. The display vocabulary (the plot
+    labels: ``Min, 5%, 10%, …, 95%, Max, Std``) lives on :attr:`display`.
+    Declaration order is the closed set's order (headers list a metric's
+    compared statistics in it).
+    """
+
+    MIN    = "min"
+    P05    = "p05"
+    P10    = "p10"
+    P25    = "p25"
+    MEDIAN = "median"
+    P75    = "p75"
+    P90    = "p90"
+    P95    = "p95"
+    MAX    = "max"
+    STD    = "std"
+
+    @property
+    def display(self) -> str:
+        """The plot-vocabulary label: percentiles as percents, min/max/std as words."""
+        return _STATISTIC_DISPLAY[self]
+
+
+_STATISTIC_DISPLAY: dict[StatisticType, str] = {
+    StatisticType.MIN:    "Min",
+    StatisticType.P05:    "5%",
+    StatisticType.P10:    "10%",
+    StatisticType.P25:    "25%",
+    StatisticType.MEDIAN: "50%",
+    StatisticType.P75:    "75%",
+    StatisticType.P90:    "90%",
+    StatisticType.P95:    "95%",
+    StatisticType.MAX:    "Max",
+    StatisticType.STD:    "Std",
+}
+
+_STATISTIC_ALIASES: dict[str, str] = {
+    "med": "median",
+}
+
+
+@dataclass(frozen=True)
+class MetricStatKey:
+    """The identity of one measured value: a metric paired with a statistic.
+
+    The single naming authority for metric-statistic keys: ``sidecar_key``
+    is THE canonical persistence form (``vmaf_median``), ``display`` is THE
+    display form (``VMAF 50%``), and ``parse`` accepts the tolerant input
+    vocabulary (dash or underscore separators, the ``med`` alias,
+    case-insensitive). Frozen and hashable — usable directly as the key of
+    measured-metrics maps.
+
+    Attributes:
+        metric:    The measured metric.
+        statistic: The measured statistic.
+    """
+
+    metric:    MetricType
+    statistic: StatisticType
+
+    def sidecar_key(self) -> str:
+        """Return the canonical persistence form, e.g. ``vmaf_median``."""
+        return f"{self.metric.value}_{self.statistic.value}"
+
+    def display(self) -> str:
+        """Return the display form, e.g. ``VMAF 50%`` (plot vocabulary)."""
+        return f"{self.metric.info.name} {self.statistic.display}"
+
+    @classmethod
+    def parse(cls, text: str) -> MetricStatKey:
+        """Parse a metric-statistic key from tolerant input.
+
+        Args:
+            text: Key text with a dash or underscore separator and optional
+                case variation, e.g. ``vmaf-median`` or ``VMAF_MEDIAN``.
+
+        Returns:
+            The typed key.
+
+        Raises:
+            ValueError: No separator, unknown metric, or unknown statistic —
+                loud, never a silent round-trip.
+        """
+        normalized = text.strip().lower().replace("-", "_")
+        metric_token, sep, statistic_token = normalized.partition("_")
+        if not sep or not statistic_token:
+            raise ValueError(
+                f"Invalid metric-statistic key '{text}': "
+                f"expected 'metric-statistic' (e.g. 'vmaf-median')"
+            )
+        try:
+            metric = MetricType(metric_token)
+        except ValueError:
+            valid = sorted(m.value for m in MetricType)
+            raise ValueError(
+                f"Invalid metric '{metric_token}' in '{text}'. Must be one of: {valid}"
+            ) from None
+        try:
+            statistic = StatisticType(_STATISTIC_ALIASES.get(statistic_token, statistic_token))
+        except ValueError:
+            valid = sorted(s.value for s in StatisticType)
+            raise ValueError(
+                f"Invalid statistic '{statistic_token}' in '{text}'. Must be one of: {valid}"
+            ) from None
+        return cls(metric=metric, statistic=statistic)
+
+
+def _parse_metric_stat_map(raw: object) -> object:
+    """BeforeValidator for :data:`MetricStatMap`: string keys become typed keys."""
+    if isinstance(raw, Mapping):
+        return {
+            MetricStatKey.parse(key) if isinstance(key, str) else key: value
+            for key, value in raw.items()
+        }
+    return raw
+
+
+def _dump_metric_stat_map(mapping: Mapping[MetricStatKey, float]) -> dict[str, float]:
+    """PlainSerializer for :data:`MetricStatMap`: typed keys become canonical strings."""
+    return {key.sidecar_key(): value for key, value in mapping.items()}
+
+
+MetricStatMap = Annotated[
+    dict[MetricStatKey, float],
+    BeforeValidator(_parse_metric_stat_map),
+    PlainSerializer(_dump_metric_stat_map),
+]
+"""Measured-metrics map: typed keys in memory, canonical strings on disk."""
 
 
 def flatten_metric_stats(metrics: ChunkQualityStats) -> dict[str, float]:

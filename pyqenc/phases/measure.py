@@ -27,7 +27,7 @@ from pyqenc.constants import (
 from pyqenc.models import CropParams, Resolution
 from pyqenc.phases.extraction import _probe_streams_json
 from pyqenc.phases.job import JobSidecar
-from pyqenc.phases.probe import ProbeState
+from pyqenc.phases.probe import ProbeSidecar
 from pyqenc.quality import ChunkQualityStats, MetricType, flatten_metric_stats
 from pyqenc.stream_model import File, LongPathYaml, VideoStream, VideoStreamInfo
 from pyqenc.utils.ffmpeg_runner import FFmpegInput, FFmpegRequest, run_ffmpeg_async
@@ -55,11 +55,11 @@ class MeasureSidecar(BaseModel):
 
     source_video:               LongPathYaml
     target_video:               LongPathYaml
+    sampling:                   int
+    crop_params:                dict[str, int] | None = None
     source_duration_seconds:    float | None          = None
     target_duration_seconds:    float | None          = None
     effective_duration_seconds: float | None          = None
-    sampling:                   int
-    crop_params:                dict[str, int] | None = None
     metrics:                    dict[str, float]      = Field(default_factory=dict)
 
 
@@ -287,7 +287,7 @@ def _resolve_crop(
     # Prefer probe.yaml — crop is owned by ProbePhase. Loading materializes
     # an empty CropParams when the key is absent, and an empty crop is a
     # concrete resolution ("no crop") — never a reason to keep probing.
-    probe = load_model(work_dir / "probe.yaml", ProbeState)
+    probe = load_model(work_dir / "probe.yaml", ProbeSidecar)
     if probe is not None:
         logger.debug("Loaded crop from probe.yaml: %s", probe.crop)
         return probe.crop

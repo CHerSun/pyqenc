@@ -31,7 +31,6 @@ from pydantic import BaseModel, Field, TypeAdapter
 from pyqenc.constants import (
     ENCODED_OUTPUT_DIR,
     ENCODING_WORKSPACE_DIR,
-    FIXED_COMPARISON_STATS,
     WARNING_SYMBOL,
 )
 from pyqenc.metrics import MetricKey
@@ -39,9 +38,11 @@ from pyqenc.models import (
     CleanupLevel,
     CropParams,
     EncodingPlan,
-    Fingerprint,
+    FingerprintYaml,
     PhaseOutcome,
     QualityTarget,
+    SizedFingerprint,
+    SizedFingerprintYaml,
     Strategy,
     fingerprinter,
     targets_as_strings,
@@ -59,9 +60,17 @@ from pyqenc.phases.job import JobPhase
 from pyqenc.phases.probe import ProbePhase
 from pyqenc.state import ArtifactState, ProbeFacet
 from pyqenc.stream_model import DecimalYaml, EncodedChunk, VideoStreamChunk
+from pyqenc.summary_tables import (
+    COMPARISON_STATS,
+    ComparisonTable,
+    Mark,
+    MetricStatMap,
+    Ruler,
+    StrategyRow,
+    render_comparison_table,
+)
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.fs import safe_stat_size
-from pyqenc.utils.log_format import fmt_size_mb
 from pyqenc.utils.visualization import QualityMeasurer
 from pyqenc.utils.yaml_utils import save_model
 
@@ -76,22 +85,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # optimization.yaml — per-mode discriminated-union sidecars (Req 18-21, 61)
 # ---------------------------------------------------------------------------
-
-class StrategySummaryRow(BaseModel):
-    """One per-strategy row of the ``summary`` replay table.
-
-    Attributes:
-        strategy:   Display name of the tested strategy.
-        total_size: Total encoded size across the test chunks (bytes).
-        metrics:    Min-across-test-chunks value for every measured
-                    ``(metric, statistic)`` key — the fixed-mode dominance and
-                    anchor inputs. Empty when nothing was measured.
-    """
-
-    strategy:   str
-    total_size: int
-    metrics:    dict[str, float] = Field(default_factory=dict)
-
 
 class _OptimizationSidecarBase(BaseModel):
     """The common keys of both ``optimization.yaml`` variants.
@@ -109,13 +102,13 @@ class _OptimizationSidecarBase(BaseModel):
     Req 44).
     """
 
-    source:      Fingerprint
-    chunks:      Fingerprint
-    strategies:  dict[str, Fingerprint]        = Field(default_factory=dict)
+    source:      SizedFingerprintYaml
+    chunks:      SizedFingerprintYaml
+    strategies:  dict[str, FingerprintYaml]  = Field(default_factory=dict)
     probe:       ProbeFacet
     sampling:    int
     test_chunks: list[str]                     = Field(default_factory=list)
-    summary:     list[StrategySummaryRow]      = Field(default_factory=list)
+    summary:     list[StrategyRow]      = Field(default_factory=list)
 
 
 class SearchOptimizationSidecar(_OptimizationSidecarBase):
@@ -172,12 +165,12 @@ def save_optimization_sidecar(path: Path, sidecar: OptimizationSidecar) -> None:
 
 def current_optimization_sidecar(
     plan:        EncodingPlan,
-    source:      Fingerprint,
-    chunks:      Fingerprint,
+    source:      SizedFingerprint,
+    chunks:      SizedFingerprint,
     probe:       ProbeFacet,
     sampling:    int,
     test_chunks: list[str],
-    summary:     list[StrategySummaryRow],
+    summary:     list[StrategyRow],
 ) -> OptimizationSidecar:
     """Build the sidecar describing the CURRENT run's inputs (union by mode).
 
@@ -213,18 +206,18 @@ def current_optimization_sidecar(
     )
 
 
-def _comparison_metrics(metrics: dict[str, float]) -> dict[str, float]:
+def _comparison_metrics(metrics: MetricStatMap) -> MetricStatMap:
     """Project measured metrics onto the fixed-mode comparison stat set.
 
     Args:
-        metrics: ``{metric_statistic: value}`` — the aggregated measurement.
+        metrics: The worst-chunk aggregated measurement (pair-keyed).
 
     Returns:
-        The subset restricted to :data:`FIXED_COMPARISON_STATS` statistics.
+        The subset restricted to the comparison statistics.
     """
     return {
         key: value for key, value in metrics.items()
-        if key.rsplit("_", 1)[1] in FIXED_COMPARISON_STATS
+        if key.statistic in COMPARISON_STATS
     }
 
 
@@ -309,9 +302,9 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         self._strategies_to_test: list[Strategy]                   = []
         self._test_chunks:       list[VideoStreamChunk]            = []
         self._selected_names:    list[str]                         = []
-        self._strategy_results:  list[StrategySummaryRow]          = []
+        self._strategy_results:  list[StrategyRow]          = []
         self._current_probe:     ProbeFacet | None                 = None
-        self._chunks_fingerprint: Fingerprint | None               = None
+        self._chunks_fingerprint: SizedFingerprint | None           = None
         """The current chunk-set fingerprint (the chunks key's live side)."""
         self._anchor_name:       str | None                        = None
         """The fixed-mode measurement anchor's display name (fixed compared
@@ -345,9 +338,15 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         if plan.fixed_quality:
             self._log_fixed_quality_banner(strategies)
+            # §123: fixed runs always run the test population — single-
+            # strategy and `--no-optimize` included (the latter with
+            # dominance pruning disabled at selection); the anchor mechanics
+            # and the ruler behave identically to any compared fixed run.
+            return None
 
         # All-strategies mode: triggered by the optimize flag being off or a
-        # single strategy given (nothing to optimize against).
+        # single strategy given (nothing to optimize against) — search runs
+        # only; the fixed case returned above.
         if self._config.encoding.optimize and len(strategies) > 1:
             return None
 
@@ -492,9 +491,13 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             ]
             self._strategy_results = table_rows
             if plan.fixed_quality:
-                # Re-select by pruning (tolerance is void in fixed mode) and
+                # Re-select live (pruning under the current tolerance — or
+                # all measured rows for `--no-optimize` fixed runs, §123) and
                 # re-derive the anchor ruler from the persisted measurements.
-                self._selected_names = self._dominance_survivors(table_rows)
+                if self._config.encoding.optimize:
+                    self._selected_names = self._dominance_survivors(table_rows, tolerance)
+                else:
+                    self._selected_names = [r.strategy for r in table_rows if r.size_bytes > 0]
                 self._anchor_name = self._select_anchor(
                     table_rows, plan_names, self._selected_names,
                 )
@@ -505,13 +508,12 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 self._synthetic_targets = self._synthetic_targets_from(anchor_result)
             else:
                 self._selected_names = self._apply_tolerance(
-                    sorted(table_rows, key=lambda r: r.total_size), tolerance,
+                    sorted(table_rows, key=lambda r: r.size_bytes), tolerance,
                 )
 
-        # Searched: fatal only when work is actually pending. Fixed:
-        # _recover only runs for compared runs (single-strategy and
-        # optimize-off take the all-strategies skip path) — a compared run
-        # without test chunks cannot prune and always fails loudly.
+        # Searched: fatal only when work is actually pending. Fixed runs now
+        # always run the test population (§123) — without test chunks they
+        # cannot elect an anchor and fail loudly.
         if not self._test_chunks and (self._strategies_to_test or plan.fixed_quality):
             raise RecoveryError("No chunks available from ChunkingPhase")
 
@@ -867,38 +869,36 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         if fixed:
             # Fixed mode derives every strategy fresh from the current disk
-            # state (the winners' result sidecars) — sizes from the just-run
-            # encode pool, metrics from the sidecars.
-            assert enc_result is not None, "fixed compared runs always re-test (the entry wiped the winners)"
+            # state — sizes from the winners, metrics worst-chunk-aggregated
+            # from the winner sidecars.
+            assert enc_result is not None or not self._strategies_to_test, \
+                "fixed compared runs always re-test (the entry wiped the winners)"
 
-            new_results: list[StrategySummaryRow] = []
-            for strategy in plan.strategies:
-                winners_by_chunk = {
-                    w.chunk.safe_name(): w
-                    for w in enc_result.encoded_chunks.get(strategy.display_name(), [])
-                }
-                file_sizes: list[float] = []
-                for chunk in test_chunks:
-                    encoded = winners_by_chunk.get(chunk.safe_name())
-                    if encoded is not None and encoded.stream.stream.file.path.exists():
-                        file_sizes.append(safe_stat_size(encoded.stream.stream.file.path) or 0)
-                new_results.append(StrategySummaryRow(
-                    strategy     = strategy.display_name(),
-                    total_size    = int(sum(file_sizes)),
-                    metrics      = self._aggregate_strategy_metrics(
-                        work_dir, test_chunks, strategy, enc_result.encoded_chunks,
-                    ),
-                ))
+            winners_by_strategy: dict[str, list[EncodedChunk]] = dict(enc_result.encoded_chunks) \
+                if enc_result is not None else {}
+            if enc_result is None:
+                for row in rows:
+                    if row.state == ArtifactState.COMPLETE and isinstance(row.payload, EncodedChunk):
+                        winners_by_strategy.setdefault(
+                            row.payload.strategy.display_name(), [],
+                        ).append(row.payload)
+            final_results = [
+                self._build_strategy_row(work_dir, test_chunks, strategy, winners_by_strategy)
+                for strategy in plan.strategies
+            ]
 
-            # Selection = dominance pruning; anchor = smallest survivor (the
-            # only front member selectable without a quality opinion);
-            # synthetic set = the anchor's min-aggregated metrics. The sidecar
-            # persists facts (strategy_results) only — the ruler re-derives on
-            # read, so a changed comparison stat set re-projects old
-            # measurements correctly.
-            resolved_names  = [s.display_name() for s in plan.strategies]
-            final_results   = new_results
-            selected        = self._dominance_survivors(final_results)
+            # Selection = tolerance-epsilon dominance pruning — disabled for
+            # `--no-optimize` fixed runs (§123: every strategy is selected;
+            # anchoring, not dominance, is the point); anchor = smallest
+            # survivor (or smallest measured row unpruned); synthetic set =
+            # the anchor's worst-chunk metrics. The sidecar persists facts
+            # only — the ruler re-derives on read, so a changed comparison
+            # stat set re-projects old measurements correctly.
+            resolved_names = [s.display_name() for s in plan.strategies]
+            if self._config.encoding.optimize:
+                selected = self._dominance_survivors(final_results, tolerance)
+            else:
+                selected = [r.strategy for r in final_results if r.size_bytes > 0]
             self._anchor_name = self._select_anchor(final_results, resolved_names, selected)
             anchor_result = next(
                 (r for r in final_results if r.strategy == self._anchor_name), None,
@@ -921,7 +921,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             self._selected_names   = selected
             self._strategy_results = final_results
 
-            self._log_fixed_comparison(final_results, selected, self._anchor_name, resolved_names)
+            self._log_comparison(final_results, selected, self._anchor_name, resolved_names)
 
             return self._make_result(
                 PhaseOutcome.COMPLETED,
@@ -929,23 +929,19 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                 f"{len(selected)} survivor(s) selected",
             )
 
-        # Searched: per-strategy sizes derive from the live ledger — the
-        # winner files of the plan's strategies (never the persisted table).
-        sizes: dict[str, int] = {}
+        # Searched: rows derive from the live ledger — the winner files of
+        # the plan's strategies (never the persisted table). Sizes stat the
+        # winners; metrics worst-chunk-aggregate from the winner sidecars.
+        winners_by_strategy: dict[str, list[EncodedChunk]] = {}
         for row in rows:
             if row.state == ArtifactState.COMPLETE and isinstance(row.payload, EncodedChunk):
-                name = row.payload.strategy.display_name()
-                sizes[name] = sizes.get(name, 0) + (safe_stat_size(row.payload.stream.stream.file.path) or 0)
-
+                winners_by_strategy.setdefault(row.payload.strategy.display_name(), []).append(row.payload)
         final_results = sorted(
             [
-                StrategySummaryRow(
-                    strategy    = s.display_name(),
-                    total_size  = sizes.get(s.display_name(), 0),
-                )
-                for s in plan.strategies
+                self._build_strategy_row(work_dir, test_chunks, strategy, winners_by_strategy)
+                for strategy in plan.strategies
             ],
-            key=lambda r: r.total_size,
+            key=lambda r: r.size_bytes,
         )
         selected = self._apply_tolerance(final_results, tolerance)
 
@@ -966,7 +962,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         self._selected_names   = selected
         self._strategy_results = final_results
 
-        self._log_optimization_summary(final_results, selected)
+        self._log_comparison(final_results, selected, None, [s.display_name() for s in plan.strategies])
 
         return self._make_result(
             PhaseOutcome.COMPLETED,
@@ -978,13 +974,10 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         """Build the reused result from the fast-exit stash (display + live selection)."""
         plan = self._deps[ProbePhase].plan
 
-        if plan.fixed_quality:
-            resolved_names = [s.display_name() for s in plan.strategies]
-            self._log_fixed_comparison(
-                self._strategy_results, self._selected_names, self._anchor_name, resolved_names,
-            )
-        else:
-            self._log_optimization_summary(self._strategy_results, self._selected_names)
+        self._log_comparison(
+            self._strategy_results, self._selected_names, self._anchor_name,
+            [s.display_name() for s in plan.strategies],
+        )
         return self._make_result(
             PhaseOutcome.REUSED, wanted, "all strategy results reused",
         )
@@ -1117,7 +1110,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
     @staticmethod
     def _apply_tolerance(
-        results:       list[StrategySummaryRow],
+        results:       list[StrategyRow],
         tolerance_pct: float,
     ) -> list[str]:
         """Select strategy names within *tolerance_pct* of the best (smallest) result.
@@ -1131,67 +1124,76 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         Returns:
             List of selected strategy name strings.
         """
-        successful = [r for r in results if r.total_size > 0]
+        successful = [r for r in results if r.size_bytes > 0]
         if not successful:
             return []
 
-        best_size = successful[0].total_size
+        best_size = successful[0].size_bytes
         threshold = best_size * (1.0 + tolerance_pct / 100.0)
 
-        return [r.strategy for r in successful if r.total_size <= threshold]
+        return [r.strategy for r in successful if r.size_bytes <= threshold]
 
     @staticmethod
-    def _dominates(a: StrategySummaryRow, b: StrategySummaryRow) -> bool:
-        """Whether *a* Pareto-dominates *b* (the pruning predicate).
+    def _dominates(a: StrategyRow, b: StrategyRow, tolerance_pct: float) -> bool:
+        """Whether *a* tolerance-epsilon-dominates *b* (the pruning predicate).
 
-        Evaluated over the fixed-mode comparison statistics only
-        (:data:`FIXED_COMPARISON_STATS`) — stability/shape statistics are not
-        quality bars and must not sway selection. Requires ``size(a) ≤
-        size(b)``, ``a ≥ b`` on every compared statistic, at least one strict
-        inequality (exact duplicates coexist), and identical non-empty
-        compared key sets on both sides — strategies with missing or partial
-        measurements are never honestly comparable.
+        Both dimensions tolerate (Req 9): size within ``tolerance_pct`` (the
+        search-selection band reused) and every compared statistic within the
+        metric's ``acceptance_delta`` — a median surplus never covers a p10
+        deficit (per-statistic conjunction, no compensation). Given no
+        meaningful deficit, SIZE breaks the tie: a strictly-cheaper strategy
+        dominates (the pipeline's objective is size at equal quality); at
+        equal size, domination needs strict superiority on EVERY compared
+        statistic — near-equal ±stats duplicates coexist. The size tiebreak
+        makes the relation antisymmetric (mutual near-ties would otherwise
+        prune both). Evaluated over the fixed-mode comparison statistics
+        only; identical non-empty compared key sets required.
         """
         a_metrics = _comparison_metrics(a.metrics)
         b_metrics = _comparison_metrics(b.metrics)
         if not a_metrics or set(a_metrics) != set(b_metrics):
             return False
-        if a.total_size > b.total_size:
+        if a.size_bytes > b.size_bytes * (1.0 + tolerance_pct / 100.0):
             return False
-        if any(a_metrics[k] < b_metrics[k] for k in a_metrics):
+        if any(
+            a_metrics[key] < b_metrics[key] - key.metric.info.acceptance_delta
+            for key in a_metrics
+        ):
             return False
-        return (
-            a.total_size < b.total_size
-            or any(a_metrics[k] > b_metrics[k] for k in a_metrics)
+        if a.size_bytes < b.size_bytes:
+            return True
+        return a.size_bytes == b.size_bytes and all(
+            a_metrics[key] > b_metrics[key] for key in a_metrics
         )
 
     @staticmethod
-    def _dominance_survivors(results: list[StrategySummaryRow]) -> list[str]:
-        """Survivor names after Pareto dominance pruning (fixed compared runs).
+    def _dominance_survivors(results: list[StrategyRow], tolerance_pct: float) -> list[str]:
+        """Survivor names after tolerance-epsilon dominance pruning (fixed runs).
 
         Dominated strategies are excluded; every survivor is selected and
-        encoded. Strategies with ``total_size <= 0`` (failed test encodes)
+        encoded. Strategies with ``size_bytes <= 0`` (failed test encodes)
         are not candidates and are never selected.
 
         Args:
-            results: Per-strategy test results (any order; survivors return
-                     in input order).
+            results:       Per-strategy test results (any order; survivors
+                           return in input order).
+            tolerance_pct: The size tolerance band (percent).
 
         Returns:
-            Survivor strategy names — the Pareto front.
+            Survivor strategy names.
         """
-        candidates = [r for r in results if r.total_size > 0]
+        candidates = [r for r in results if r.size_bytes > 0]
         return [
             r.strategy for r in candidates
             if not any(
-                OptimizationPhase._dominates(other, r)
+                OptimizationPhase._dominates(other, r, tolerance_pct)
                 for other in candidates if other is not r
             )
         ]
 
     @staticmethod
     def _select_anchor(
-        results:        list[StrategySummaryRow],
+        results:        list[StrategyRow],
         resolved_names: list[str],
         survivors:      list[str],
     ) -> str | None:
@@ -1221,17 +1223,16 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             return None
         return min(
             eligible,
-            key=lambda r: (r.total_size, order.get(r.strategy, len(order))),
+            key=lambda r: (r.size_bytes, order.get(r.strategy, len(order))),
         ).strategy
 
     @staticmethod
-    def _synthetic_targets_from(anchor: StrategySummaryRow | None) -> list[QualityTarget]:
+    def _synthetic_targets_from(anchor: StrategyRow | None) -> list[QualityTarget]:
         """The anchor's aggregated metrics as the synthetic target set.
 
-        Restricted to the fixed-mode comparison statistics
-        (:data:`FIXED_COMPARISON_STATS`) — the ruler pipes straight into the
-        presentation machinery, so its breadth also bounds the chunk log
-        lines and the winner-limiter table. Min-across-test-chunks values
+        Restricted to the fixed-mode comparison statistics — the ruler pipes
+        straight into the presentation machinery, so its breadth also bounds
+        the chunk log lines and the winner-limiter table. Worst-chunk values
         match search-mode per-chunk strictness. Presentation data only —
         never search goals, pass/fail gates, or selection thresholds.
 
@@ -1244,49 +1245,78 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         if anchor is None:
             return []
         compared = _comparison_metrics(anchor.metrics)
-        metrics_present = sorted({key.rsplit("_", 1)[0] for key in compared})
-        targets: list[QualityTarget] = []
-        for metric in metrics_present:
-            for statistic in FIXED_COMPARISON_STATS:
-                key = f"{metric}_{statistic}"
-                if key in compared:
-                    targets.append(QualityTarget(
-                        metric=metric, statistic=statistic, value=float(compared[key]),
-                    ))
-        return targets
+        stat_rank = {statistic: index for index, statistic in enumerate(COMPARISON_STATS)}
+        return [
+            QualityTarget(
+                metric=key.metric.value, statistic=key.statistic.value, value=float(value),
+            )
+            for key, value in sorted(
+                compared.items(),
+                key=lambda kv: (kv[0].metric.value, stat_rank[kv[0].statistic]),
+            )
+        ]
+
+    def _build_strategy_row(
+        self,
+        work_dir:            Path,
+        test_chunks:         list[VideoStreamChunk],
+        strategy:            Strategy,
+        winners_by_strategy: dict[str, list[EncodedChunk]],
+    ) -> StrategyRow:
+        """Build one strategy's row from its test winners (both modes).
+
+        Size stats the winner files that exist; metrics worst-chunk-aggregate
+        from the winner sidecars. The single row-assembly site for processing
+        runs (both modes) — the fast exit reads persisted rows instead.
+
+        Args:
+            work_dir:            Pipeline working directory.
+            test_chunks:         The test-chunk set.
+            strategy:            The strategy the row describes.
+            winners_by_strategy: Winner payloads per strategy display name.
+
+        Returns:
+            The strategy's ``StrategyRow`` (worst-chunk values; empty metrics
+            when nothing was measured).
+        """
+        winners = winners_by_strategy.get(strategy.display_name(), [])
+        size_bytes = sum(safe_stat_size(w.stream.stream.file.path) or 0 for w in winners)
+        return StrategyRow(
+            strategy   = strategy.display_name(),
+            size_bytes = int(size_bytes),
+            metrics    = self._aggregate_strategy_metrics(work_dir, test_chunks, strategy, winners),
+        )
 
     def _aggregate_strategy_metrics(
         self,
-        work_dir:        Path,
-        test_chunks:     list[VideoStreamChunk],
-        strategy:        Strategy,
-        encoded_chunks:  dict[str, list[EncodedChunk]],
-    ) -> dict[str, float]:
-        """Min-aggregate a strategy's measured metrics across its test winners.
+        work_dir:   Path,
+        test_chunks: list[VideoStreamChunk],
+        strategy:   Strategy,
+        winners:    list[EncodedChunk],
+    ) -> MetricStatMap:
+        """Worst-chunk-aggregate a strategy's measured metrics across its test winners.
 
         Reads each winner's result sidecar in ``encoded/<strategy>/`` — the
-        same data the sidecars persist for the winning attempts (all measured
-        metrics, not target-filtered). Missing winners or sidecars simply
-        contribute nothing; a key present on some chunks still aggregates
-        over those chunks.
+        same data the sidecars persist for the winning attempts. Missing
+        winners or sidecars simply contribute nothing; a key present on some
+        chunks still aggregates over those chunks. Sidecar keys parse
+        through the pair type — the sanctioned stringly→typed conversion at
+        table assembly (Req 7.5).
 
         Args:
-            work_dir:       Pipeline working directory.
-            test_chunks:    The test-chunk set.
-            strategy:       The strategy being aggregated.
-            encoded_chunks: The encode result map (strategy display name ->
-                            winner payloads).
+            work_dir:    Pipeline working directory.
+            test_chunks: The test-chunk set.
+            strategy:    The strategy being aggregated.
+            winners:     The strategy's winner payloads.
 
         Returns:
-            ``{metric_statistic: min_across_chunks}``.
+            Worst-chunk values keyed by the metric-statistic pair type.
         """
         from pyqenc.phases.encoding import read_winner_sidecar
+        from pyqenc.quality import MetricStatKey as _Key
 
-        winners_by_chunk = {
-            w.chunk.safe_name(): w
-            for w in encoded_chunks.get(strategy.display_name(), [])
-        }
-        mins: dict[str, float] = {}
+        winners_by_chunk = {w.chunk.safe_name(): w for w in winners}
+        mins: MetricStatMap = {}
         for chunk in test_chunks:
             winner = winners_by_chunk.get(chunk.safe_name())
             if winner is None:
@@ -1295,164 +1325,73 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             if sidecar is None:
                 continue
             for key, measured in sidecar.metrics.items():
-                mins[key] = min(mins[key], measured) if key in mins else measured
+                parsed = _Key.parse(key)
+                mins[parsed] = min(mins[parsed], measured) if parsed in mins else measured
         return mins
 
-    def _log_optimization_summary(
+    def _log_comparison(
         self,
-        results:  list[StrategySummaryRow],
-        selected: list[str],
-    ) -> None:
-        """Emit the optimization summary table to the log.
-
-        Args:
-            results:  All strategy test results ordered by size.
-            selected: Selected strategies.
-        """
-        selected_names = set(selected)
-
-        logger.info("")
-        logger.info(
-            "  %-30s  %12s  %8s",
-            "Strategy", "Size (MB)", "Status",
-        )
-        logger.info(
-            "  %-30s  %12s  %8s",
-            "-" * 30, "-" * 12, "-" * 8,
-        )
-
-        for res in results:
-            size_str = fmt_size_mb(res.total_size)
-            marker   = " ◀ selected" if res.strategy in selected_names else ""
-            status   = "passed" if res.total_size > 0 else "failed"
-            logger.info(
-                "  %-30s  %12s  %8s%s",
-                res.strategy[:30], size_str, status, marker,
-            )
-
-        logger.info("")
-        if selected:
-            logger.info("Selected strategies: %s", ", ".join(selected))
-        else:
-            logger.critical("NO strategies selected (all failed).")
-
-        logger.info("")
-
-    def _log_fixed_comparison(
-        self,
-        results:        list[StrategySummaryRow],
+        results:        list[StrategyRow],
         selected:       list[str],
         anchor_name:    str | None,
         resolved_names: list[str],
     ) -> None:
-        """The fixed-mode comparison table: sizes and metric deltas vs the anchor.
+        """Emit the unified comparison table (both modes) plus detail lines.
 
-        Compact layout: one Size column (MB, with the ×ratio vs the anchor
-        folded in — the anchor row omits it, marking the baseline), one
-        column per metric carrying both comparison statistics (anchor:
-        ``p10..median`` range; others: ``Δp10/Δmedian``). The stat convention
-        is stated once below the ruler, not in every column. Pruned rows name
-        one dominator. Full stats live in ``optimization.yaml``.
+        The table renders through the shared comparison renderer; below the
+        table come the pruned-with-dominator detail lines (fixed mode with
+        pruning). The concise outcome line (§108) is the caller's, not the
+        table's.
 
         Args:
             results:        Per-strategy test results.
-            selected:       Survivor names (the Pareto front).
-            anchor_name:    The anchor's name, or ``None`` (no measurements).
+            selected:       Selected/survivor names.
+            anchor_name:    The anchor's name (fixed mode), or ``None``.
             resolved_names: Strategy names in resolved order (dominator pick).
         """
-        anchor_result = next((r for r in results if r.strategy == anchor_name), None)
-        anchor_size   = anchor_result.total_size if anchor_result is not None else 0
-
-        logger.info("")
-        ruler = (
-            f"{anchor_name} (smallest test size)" if anchor_name is not None
-            else "none — no strategy carried measurements"
-        )
-        logger.info("Fixed-quality comparison — ruler: %s", ruler)
-        logger.info(
-            "  size: MB (× = vs anchor) · metrics: anchor p10..median, others Δp10/Δmedian vs anchor"
-        )
-
-        # Column keys per metric in comparison order (p10, median — present
-        # ones only), metric-major.
-        keys_by_metric: dict[str, list[str]] = {}
-        for key in _headline_metric_keys([r.metrics for r in results if r.metrics]):
-            keys_by_metric.setdefault(key.rsplit("_", 1)[0], []).append(key)
-
-        name_width  = max((len(r.strategy) for r in results), default=30) + 2
-        metric_cols = len(keys_by_metric) if anchor_result is not None else 0
-        header_cells = [
-            f"{'Strategy':<{name_width}}",
-            f"{'Size (MB)':>12}",
-        ]
-        if anchor_result is not None:
-            header_cells += [f"{metric:>11}" for metric in keys_by_metric]
-        logger.info("  " + "  ".join(header_cells))
-        logger.info("  " + "  ".join(
-            ["-" * name_width, "-" * 12]
-            + (["-" * 11] * metric_cols if anchor_result is not None else [])
-        ))
-
-        selected_set  = set(selected)
-        dominator_for = self._dominator_map(results, resolved_names)
-
-        for res in sorted(results, key=lambda r: (r.total_size, r.strategy)):
-            size_str = fmt_size_mb(res.total_size)
-            if res.strategy == anchor_name:
-                size_cell = size_str  # baseline: no ratio against itself
-            elif anchor_size > 0:
-                size_cell = f"{size_str} ({res.total_size / anchor_size:.2f}×)"
-            else:
-                size_cell = f"{size_str} (N/A)"
-            cells = [
-                f"{res.strategy[:name_width - 2]:<{name_width}}",
-                f"{size_cell:>12}",
-            ]
-            if anchor_result is not None:
-                for keys in keys_by_metric.values():
-                    if res.strategy == anchor_name:
-                        values = [anchor_result.metrics.get(key) for key in keys]
-                        cell = "..".join(f"{v:.1f}" for v in values if v is not None) or "-"
-                    else:
-                        parts: list[str] = []
-                        for key in keys:
-                            value = res.metrics.get(key)
-                            anchor_value = anchor_result.metrics.get(key)
-                            parts.append(
-                                f"{value - anchor_value:+.1f}"
-                                if value is not None and anchor_value is not None
-                                else "-"
-                            )
-                        cell = "/".join(parts)
-                    cells.append(f"{cell:>11}")
-            if res.strategy not in selected_set:
-                dominator = dominator_for.get(res.strategy)
-                cells.append(
-                    f"  ← dominated by {dominator} → pruned" if dominator
-                    else "  ← not selected"
-                )
-            logger.info("  " + "  ".join(cells))
-
-        if selected:
-            logger.info("")
-            logger.info(
-                "Survivors (Pareto front): %s — all will be encoded",
-                ", ".join(selected),
+        plan      = self._deps[ProbePhase].plan
+        tolerance = self._config.encoding.optimize_tolerance
+        all_rows  = list(results)
+        if plan.fixed_quality:
+            ruler: Ruler | None = (
+                Ruler(kind="anchor", anchor=anchor_name)
+                if anchor_name is not None else None
             )
         else:
-            logger.critical("NO survivors selected (all failed).")
+            ruler = Ruler(kind="targets", targets=tuple(plan.targets))
+
+        table = ComparisonTable(
+            rows               = all_rows,
+            ruler              = ruler,
+            marks              = {name: Mark(selected=True) for name in selected},
+            mark_legend        = "selected",
+            size_tolerance_pct = tolerance,
+        )
+        for line in render_comparison_table(table):
+            logger.info(line)
+
+        if plan.fixed_quality and self._config.encoding.optimize:
+            dominator_for = self._dominator_map(results, resolved_names, tolerance)
+            for beaten, dominator in dominator_for.items():
+                if beaten not in selected:
+                    logger.info("pruned: %s — dominated by %s", beaten, dominator)
+
+        if not selected:
+            logger.critical("NO strategies selected (all failed).")
         logger.info("")
 
     @staticmethod
     def _dominator_map(
-        results:        list[StrategySummaryRow],
+        results:        list[StrategyRow],
         resolved_names: list[str],
+        tolerance_pct:  float,
     ) -> dict[str, str]:
         """Map each pruned strategy to one dominating strategy (first in resolved order).
 
         Args:
             results:        Per-strategy test results.
             resolved_names: Strategy names in resolved order (dominator pick).
+            tolerance_pct:  The size tolerance band (percent).
 
         Returns:
             ``{pruned strategy: a strategy that dominated it}``.
@@ -1461,10 +1400,10 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         by_order = sorted(results, key=lambda r: order.get(r.strategy, len(order)))
         dominators: dict[str, str] = {}
         for beaten in by_order:
-            if beaten.total_size <= 0:
+            if beaten.size_bytes <= 0:
                 continue
             for dominator in by_order:
-                if dominator is not beaten and OptimizationPhase._dominates(dominator, beaten):
+                if dominator is not beaten and OptimizationPhase._dominates(dominator, beaten, tolerance_pct):
                     dominators[beaten.strategy] = dominator.strategy
                     break
         return dominators
@@ -1522,32 +1461,6 @@ def _wipe_encoded_dir(work_dir: Path, strategies: list[Strategy]) -> None:
             logger.debug("Wiped stale encoded dir: %s", strategy_dir)
         except OSError as exc:
             logger.warning("Could not wipe encoded dir %s: %s", strategy_dir, exc)
-
-
-def _headline_metric_keys(metric_maps: list[dict[str, float]]) -> list[str]:
-    """The fixed-mode comparison-table column set.
-
-    Exactly what the ruler judges (:data:`FIXED_COMPARISON_STATS` — the
-    table must not imply a different comparison basis than pruning used): for
-    every distinct metric, its ``p10`` and ``median`` statistics when
-    measured, ordered metric-major. Full statistics live in
-    ``optimization.yaml``.
-
-    Args:
-        metric_maps: The measured metric maps to derive the column set from.
-
-    Returns:
-        Headline keys as ``"{metric}_{statistic}"``, metric-major ordered.
-    """
-    present: set[str] = set()
-    for metrics in metric_maps:
-        present.update(_comparison_metrics(metrics))
-    return [
-        f"{metric}_{statistic}"
-        for metric in sorted({key.rsplit("_", 1)[0] for key in present})
-        for statistic in FIXED_COMPARISON_STATS
-        if f"{metric}_{statistic}" in present
-    ]
 
 
 def _select_test_chunks(

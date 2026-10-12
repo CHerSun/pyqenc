@@ -868,31 +868,6 @@ Looks more concise, with distinct steps. Single progress bar for full phase too 
 
 ---
 
-## 97. Pareto dominance with tolerance — ignore small positive deltas
-
-**Status:** landing home ruled 2026-10-09 — folds into the
-unified-quality-summaries window (TODO §111, third bullet); mechanics
-questions below carry over to that spec's tasks stage
-
-- Dominance pruning compares metric stats strictly: A dominates B iff
-  `size(A) ≤ size(B)` and A ≥ B on every compared stat. The 2026-10-03
-  real-data smoke test (§82) pruned 0 of 4 strategies — near-equal stats keep
-  every strategy mutually incomparable.
-- Idea: treat a small positive delta as equal (epsilon-dominance), reusing the
-  acceptable positive delta ALREADY defined on metrics (the same
-  "good enough" bar the encoding search fast-exits on). A stat win only
-  counts when it beats the other by more than that tolerance.
-- Needs testing on real data — could turn dominance from toothless
-  (everything survives) into an actual reducer.
-
-**Questions to think about:** tolerance source (the existing
-acceptable-delta definition — per-metric or global, and its config home);
-symmetry — should size get the same treatment (like `optimize_tolerance`'s
-band, §19)?; effect on anchor election (smallest survivor) once pruning
-actually prunes; interplay with §82's other candidate mechanisms
-(user budget, trade-off sliders).
-
----
 
 ## 98. API execution surface — small intent-based surface vs phase-mirroring wrappers
 
@@ -1047,29 +1022,6 @@ Should we move them into separate file, to be readily available for both optimiz
 
 ---
 
-## 107. Phase sidecars: uniform layout — execution-order fields
-
-**Status:** feasible, design settled by user (2026-10-09, from the real e2e
-run's sidecar review); job.yaml half LANDED 2026-10-10 (b78790f follow-up,
-`JobSidecar` flattened to top-level `{path, source}` with `source` = the
-identity fingerprint everywhere; `JobSourceRecord` deleted); field-order
-half not yet implemented
-
-The remaining uniformity gap observed across the phase sidecars on a true
-run:
-
-- **Field ordering is not uniform.** Want a stable, execution-order layout in
-  every phase YAML: (1) deps/inputs used for invalidation first — `source`
-  (the identity key) always first; (2) config params next (audio chains,
-  scene thresholds, targets/pinned map, sampling); (3) own phase results
-  (chunking scenes, test_chunks, summary-relevant facts); (4) preserved
-  summaries (`summary`) last. Mechanically free: pydantic v2 serializes in
-  field-declaration order, so this is a declaration reorder per sidecar
-  model — no custom serializers needed. Applies to all phase sidecars + the
-  per-output merged sidecar (provenance before facts there, same principle).
-
----
-
 ## 108. Run-log polish — phase banners and uniform final status lines
 
 **Status:** feasible, design settled by user (2026-10-09, from the real e2e run's log review); not yet implemented
@@ -1099,97 +1051,7 @@ Extra human input: maybe make final lines uniform, like recovery line, based on 
 
 ---
 
-## 109. Fixed-mode merge presentation judges against search targets, not the anchor
 
-**Status:** needs thinking (bug confirmed on the 2026-10-09 fixed `-q 18`
-e2e run; presentation-layer fix belongs with the unified-summaries spec)
-
-Spec: search mode = quality targets; fixed mode = anchor + deltas from it.
-In the fixed run, merge judged and displayed against the CONFIG targets:
-
-- The per-output inline metrics line marks ✘/✔ per plan.targets
-  (`_fmt_inline_metrics`, merge.py — reads `plan.targets` unconditionally).
-- The merge summary table renders config targets as the "Quality" bar and
-  the miss-detail table (`Targets: vmaf-median ≥ 96.00, ...` + `⚠ ...`
-  blocks) uses them (`_log_merge_summary(..., quality_targets=plan.targets)`
-  at both call sites).
-- `_live_verdict` already picks the right bar (synthetic targets when
-  fixed) — but its basis was EMPTY on that run because no ruler existed
-  (that half is fixed separately: fixed winner sidecars now carry the
-  p10+median comparison stats, so the ruler derives).
-
-Fix direction: fixed-mode merge presentation consumes the synthetic ruler
-(anchor-relative deltas — absolute values only where no ruler exists), the
-same basis `_live_verdict` uses. This IS the unified-summaries spec's core
-deliverable (the anchor-relative table) — land it there, with a small
-interim alignment of the inline/summary bars if that spec is far off.
-
----
-
-## 111. Unified summaries — spec exists, NOT implemented; 2026-10-09 sketch adds four details
-
-**Status:** needs thinking (state check 2026-10-09; no code changed)
-
-The `2026-10-03 unified-quality-summaries` spec sits at requirements +
-design (its tasks stage was never authored — two-stage rule, gated on
-approval). Nothing of it is implemented; TODO §109's fixed-mode
-presentation bug points at it as the landing home, and its SUBSTRATE
-(per-mode sidecars, `summary` key, fingerprints, anchor lifecycle) already
-landed via artifact-recovery-ownership.
-
-The 2026-10-09 user sketch (unified optimization + merge table) is mostly
-ALREADY in the spec — source row merge-only (Req 2.4), search targets /
-fixed anchor as the top row (Req 2.1-2.2), full table at both phases
-(Req 1.5). Four details are NEW and should fold into the spec at its
-tasks-authoring stage:
-
-- **Size-column numeric format:** ratio to source with exactly 2 decimals,
-  expected not to exceed `9.99`; on exceed — either ignore the ratio or
-  dynamically re-align ALL values in the size column; ratio + absolute
-  size right-aligned inside ONE column (source row fills its ratio cell
-  with a placeholder for alignment — the spec left the glyph, not the
-  numeric rules, to the variant review).
-- **Metric-range endpoints generalize to the presentation basis:** the
-  `min…max` range endpoints are the min/max STATISTICS of the targeted
-  stat set — true targets in search mode, the synthetic ruler's stats in
-  fixed (today's fixed table hardcodes `p10..median`; a p10/med/p90
-  target set would render `p10…p90`).
-- **Epsilon-dominance lands in this window (§97's disposition, ruled
-  2026-10-09):** Pareto dominance ignores minor positive deltas, reusing
-  the acceptable-delta already defined per metric in metric info — a stat
-  win only counts when it beats the other by more than that bar. §97's
-  open mechanics questions (per-metric vs global source, size symmetry
-  vs `optimize_tolerance`, anchor-election effect) carry over; the
-  2026-10-09 fixed run (0/4 pruned, two strategies within 0.01 MB and
-  ±0.1 stats) is now the second real-data case for it.
-- **Quality mark column uniform across modes (amends spec Req 4.2):**
-  both modes carry the mark column — search: pass/miss glyphs (miss =
-  failure against true targets, as today); fixed: Pareto-dominance /
-  recommendation glyphs (what the pipeline recommends using — dominated
-  strategies visibly cut). Req 4.2's principle stands (the anchor is a
-  baseline, never a target — no target-style verdicts in fixed rows);
-  what changes is the glyph SET per mode, not the column's presence. Note
-  the coupling: epsilon-dominance is what makes the recommendation glyph
-  meaningful — without tolerance, dominance rarely prunes (0/4 twice on
-  real data) and every row would carry the same "winner" mark.
-
----
-
-## 113. All tests must run at lowered process priority (pipeline parity)
-
-**Status:** needs thinking (user ruling 2026-10-09)
-
-The pipeline lowers its process priority in code as one of its first
-steps — encoding work must never starve the user's other work. Test
-processes MUST do the same whenever they spawn real work (e2e runs,
-integration tests driving ffmpeg/ffprobe): pytest and every child it
-starts should run at the same lowered priority as a normal pipeline
-run. (2026-10-09 session: e2e tests spun ffmpeg at normal priority and
-starved the machine while "hanging".)
-
-Related, same session: e2e tests should also run rather fast, on a
-premeditated source (per the standing speed rule) — not on whatever
-sample happens to be around.
 
 ## 114. e2e intent tests hang: ffmpeg 9.0.2 spins encoding the sample's chunk-3 region
 
@@ -1215,6 +1077,10 @@ the same command shape works elsewhere, and the real-source e2e
 scoop ffmpeg version or regenerate the sample; re-verify the intent
 e2e suite after. Also blocks any full-suite gate run that includes
 `tests/e2e/`.
+
+Related (2026-10-09 session): e2e tests should run rather fast, on a
+premeditated source (per the standing speed rule) — not on whatever
+sample happens to be around.
 
 ---
 
@@ -1251,6 +1117,12 @@ running at all until the ffmpeg version question is settled.
 ---
 
 ## 116. Metric+stat value class — retarget every stringly `"{metric}_{stat}"` / `"{metric}-{stat}"` site
+
+**Status update 2026-10-12:** the minimal identity type landed with the
+unified-quality-summaries spec (`MetricStatKey` in `pyqenc/quality.py`:
+closed sets, canonical `vmaf_median` sidecar form, `%`-form display,
+tolerant parse, pydantic dict-key alias; `QualityTarget.key()`). The
+remainder below is the full migration this item still owns.
 
 **Status:** needs thinking (user direction 2026-10-10; explicit-typing rule)
 
@@ -1354,6 +1226,13 @@ umbrella and should be re-evaluated against whatever shape lands.
 ---
 
 ## 119. Table formatting is hand-aligned everywhere — unify the mechanism (mini-research)
+
+**Status update 2026-10-12 (decision recorded):** one INTERNAL formatter
+(`format_table`, `pyqenc/utils/tables.py`) won the research — rich/
+tabulate/wcwidth rejected (the aesthetic is ours; compound cells are
+pre-formatted strings regardless). The comparison tables render through
+it. The remainder below (re-homing the winning-limiter, measure, and
+key-value tables) is still open — that is §119's leftover scope.
 
 **Status:** needs thinking (user direction 2026-10-10)
 
@@ -1483,7 +1362,8 @@ implementation sweep. No drive-by renames.
 
 ---
 
-## Last known = 122
+
+## Last known = 123
 
 Keep this updated, so we can keep continuous numbering even on last todo item deletion.
 Keep this the last entry for easy human updates.

@@ -31,7 +31,6 @@ from pyqenc.metrics import (
 )
 from pyqenc.models import (
     CleanupLevel,
-    Fingerprint,
     PhaseOutcome,
     SizedFingerprint,
     Strategy,
@@ -655,7 +654,7 @@ class TestChunkingPhaseTiming:
         write_yaml_atomic(
             work_dir / "chunking.yaml",
             _CS(
-                source=Fingerprint(token="0" * 32),
+                source=_STUB_SOURCE_FP,
                 scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)],
                 scene_threshold=27.0, min_scene_length=24,
             ).model_dump(),
@@ -725,7 +724,7 @@ class TestChunkingPhaseTiming:
         write_yaml_atomic(
             work_dir / "chunking.yaml",
             _CS(
-                source=Fingerprint(token="0" * 32),
+                source=_STUB_SOURCE_FP,
                 scenes=[SceneRecord(timestamp_seconds=0.0, frame=0)],
                 scene_threshold=27.0, min_scene_length=24,
             ).model_dump(),
@@ -977,7 +976,7 @@ class TestOptimizationPhaseTiming:
 
         # ProbePhase is a dependency; the uniform run() resolves deps first, so a
         # completed probe result must be present for the reuse path to be reached.
-        # The result is a REAL typed result (recovery builds a ProbeState from
+        # The result is a REAL typed result (recovery builds a ProbeSidecar from
         # .source/.crop — bare Mocks would fail pydantic validation).
         from pyqenc.phases.probe import ProbePhaseResult
         probe_mock = MagicMock(spec=ProbePhase)
@@ -1031,7 +1030,7 @@ class TestOptimizationPhaseTiming:
         from pyqenc.phases.chunking import ChunkingPhase
         from pyqenc.phases.job import JobPhase
         from pyqenc.phases.optimization import (
-            StrategySummaryRow,
+            StrategyRow,
             current_optimization_sidecar,
         )
         from pyqenc.phases.probe import ProbePhase
@@ -1053,9 +1052,9 @@ class TestOptimizationPhaseTiming:
             sampling    = phase._config.measurement.sampling,
             test_chunks = [a.payload.safe_name() for a in chunking.result.chunks],
             summary     = [
-                StrategySummaryRow(strategy=strategy.display_name(), total_size=1024),
-                StrategySummaryRow(
-                    strategy=_STRATEGY_H265_AQ.display_name(), total_size=512,
+                StrategyRow(strategy=strategy.display_name(), size_bytes=1024),
+                StrategyRow(
+                    strategy=_STRATEGY_H265_AQ.display_name(), size_bytes=512,
                 ),
             ],
         )

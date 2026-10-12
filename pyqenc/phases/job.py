@@ -29,8 +29,8 @@ from pyqenc.constants import TEMP_SUFFIX
 from pyqenc.metrics import MetricKey, MetricsCollector
 from pyqenc.models import (
     CleanupLevel,
-    Fingerprint,
     PhaseOutcome,
+    SizedFingerprintYaml,
     fingerprinter,
 )
 from pyqenc.phase import (
@@ -70,7 +70,7 @@ class JobSidecar(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     path:   LongPathYaml
-    source: Fingerprint
+    source: SizedFingerprintYaml
 
 
 logger = logging.getLogger(__name__)

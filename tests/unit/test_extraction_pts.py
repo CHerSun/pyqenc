@@ -593,7 +593,7 @@ class TestExtractionSidecarLifecycle:
         )
         data = yaml.safe_load((work_dir / "extraction.yaml").read_text(encoding="utf-8"))
         assert set(data) == {"source", "streams", "chapters"}
-        assert data["source"]["token"] == _STUB_FINGERPRINT.token
+        assert data["source"] == str(_STUB_FINGERPRINT)
         assert data["chapters"] is False
         assert data["streams"]["video"]["fps_fraction"] == [24000, 1001]
         assert len(data["streams"]["audio"]) == 1
@@ -629,7 +629,7 @@ class TestExtractionSidecarLifecycle:
         # Corrupt the recorded identity key (a different source's token).
         sidecar_path = work_dir / "extraction.yaml"
         data = yaml.safe_load(sidecar_path.read_text(encoding="utf-8"))
-        data["source"]["token"] = "f" * 32
+        data["source"] = str(SizedFingerprint(token="f" * 32, size=_STUB_FINGERPRINT.size))
         write_yaml_atomic(sidecar_path, data)
 
         # Without permission: fatal.

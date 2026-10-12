@@ -8,6 +8,19 @@
 
 ## Cross-Spec Notes
 
+### Superseded by a later spec
+
+- `2026-10-03 unified-quality-summaries` (implemented 2026-10-12) supersedes
+  this spec's PRESENTATION layer: the anchor-relative comparison table this
+  spec shipped (Req 8.4's seed format — ×ratios, search-mode absolutes,
+  uncompared-fixed self-extinguishing) is replaced by the converged form
+  (one StrategyRow shape + one renderer at optimization and merge, deltas
+  in every mode, %-size deltas, ` | ` sub-columns, tolerance-epsilon
+  dominance with the size tiebreak, per-population anchor election with the
+  merge-anchor audit). Fixed-mode MECHANICS this spec owns (the `-q`
+  override, pinned-quality invalidation keys, dominance-based selection)
+  are unchanged.
+
 ### What this spec supersedes
 
 | Superseded | Where | What changed |

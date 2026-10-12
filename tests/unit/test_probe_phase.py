@@ -35,7 +35,7 @@ from pyqenc.models import (
 from pyqenc.phase import Artifact, PhaseRegistry
 from pyqenc.phases.extraction import ExtractionPhase, ExtractionPhaseResult
 from pyqenc.phases.job import JobPhase, JobPhaseResult
-from pyqenc.phases.probe import ProbePhase, ProbePhaseResult, ProbeState
+from pyqenc.phases.probe import ProbePhase, ProbePhaseResult, ProbeSidecar
 from pyqenc.state import ArtifactState
 from pyqenc.stream_model import ProbedFile, VideoStream, VideoStreamInfo
 from pyqenc.utils.yaml_utils import load_model, save_model
@@ -147,7 +147,7 @@ def _make_probe_phase(
 
 def _write_probe_yaml(work_dir: Path, *, frame_count: int, crop: CropParams) -> None:
     """Persist a valid probe.yaml with the given frame count and crop."""
-    save_model(work_dir / "probe.yaml", ProbeState(source=_STUB_SOURCE_FP, frame_count=frame_count, crop=crop))
+    save_model(work_dir / "probe.yaml", ProbeSidecar(source=_STUB_SOURCE_FP, frame_count=frame_count, crop=crop))
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +290,7 @@ class TestProbePhaseCompleted:
         """
         _, work_dir = self._run_with_mocks(tmp_path)
 
-        loaded = load_model(work_dir / "probe.yaml", ProbeState)
+        loaded = load_model(work_dir / "probe.yaml", ProbeSidecar)
         assert loaded is not None
         assert loaded.frame_count == self._DETECTED_FRAME_COUNT
         assert loaded.crop is not None
@@ -304,7 +304,7 @@ class TestProbePhaseCompleted:
         a manual crop's provenance always reloaded as "detected"."""
         _, work_dir = self._run_with_mocks(tmp_path)
 
-        loaded = load_model(work_dir / "probe.yaml", ProbeState)
+        loaded = load_model(work_dir / "probe.yaml", ProbeSidecar)
         assert loaded is not None
         job = _make_job_result(work_dir, tmp_path / "source.mkv")
         assert loaded.source is not None
@@ -320,7 +320,7 @@ class TestProbePhaseCompleted:
         """
         _, work_dir = self._run_with_mocks(tmp_path)
 
-        loaded = load_model(work_dir / "probe.yaml", ProbeState)
+        loaded = load_model(work_dir / "probe.yaml", ProbeSidecar)
         assert loaded is not None
         assert loaded.resulting_resolution == "1920x800"
 

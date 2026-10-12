@@ -10,6 +10,7 @@ This document describes the current architecture, key design decisions, and main
 - [Phase Pipeline](#phase-pipeline)
 - [Artifact-Based Recovery](#artifact-based-recovery)
 - [Quality Search Algorithm](#quality-search-algorithm)
+- [Summary Tables](#summary-tables)
 - [Metrics](#metrics)
 - [Audio Processing](#audio-processing)
 - [FFmpeg Runner](#ffmpeg-runner)
@@ -291,10 +292,10 @@ sidecar); per-attempt and per-output sidecars mark pair/output completeness.
 | `probe.yaml`          | Frame count, crop, crop provenance, resulting resolution (human-facing, derived `source − crop`), source identity key |
 | `chunking.yaml`       | Scene boundaries + detection-param keys (`scene_threshold`, `min_scene_length`) + identity   |
 | `optimization.yaml`   | Per-mode union (tag `mode: fixed\|search`): mode key (pinned map / targets) + common keys    |
-|                       | (source, chunk-set, per-strategy args fingerprints, probe facet, sampling) + `summary` table |
+|                       | (source, chunk-set, per-strategy args fingerprints, probe facet, sampling) + `summary` rows |
 | `encoding.yaml`       | Replay aggregate: winning-limiter table (empty = no targets) + winners frame totals — no keys  |
 | `audio.yaml`          | Per-chain identity fingerprints + source identity key (stale outputs swept by listing)         |
-| `merge.yaml`          | Summary replay rows ONLY (per-output sidecars are the acceptance records)                     |
+| `merge.yaml`          | Summary replay rows + the outputs' `output_dir` (per-output sidecars are the acceptance records) |
 | `<chunk>.q<q>.yaml`   | Attempt facts: full measured metrics, sampling, frame count (the quality is the name)       |
 | `<chunk>.yaml`        | Winner facts: quality, targeted metrics subset, frame count, `targets_met`                   |
 | `<output>.yaml`       | Merged-output facts (frame count, FULL metrics) + provenance — no verdict                    |
@@ -374,6 +375,42 @@ flowchart TD
 ```
 
 Attempt files are named `<chunk>.q<value>.mkv` — the quality value is the search's cache key (exact-name lookup, no resolution component: the name is fully known before encoding begins). Winners are promoted to the static `<chunk>.mkv` / `<chunk>.yaml` names — pure functions of the chunk identity.
+
+---
+
+## Summary Tables
+
+The optimization and merge summaries are ONE comparison table: one persisted
+row shape, one renderer, identical mechanics (`pyqenc/summary_tables.py`).
+
+- **`StrategyRow {strategy, size_bytes, metrics}`** — THE row shape persisted
+  in both `optimization.yaml` and `merge.yaml`. Metrics are keyed by the
+  `MetricStatKey` pair type (typed keys in memory, canonical `vmaf_median`
+  strings on disk — `pyqenc/quality.py` owns the closed metric/statistic
+  sets, the display vocabulary, and tolerant parsing). Breadth is the
+  per-phase caveat: optimization rows keep the full worst-chunk statistics
+  (the ruler re-derivation substrate); merge rows keep the rendered basis
+  (the presentation bar's keys).
+- **One renderer** over the generic `format_table` util (`pyqenc/utils/tables.py`):
+  sub-column cells (` | ` dividers with per-statistic right alignment, pipes
+  preserved in the dash rules), the folded size cell (MB + %Δ), ruler cues,
+  a bare marks column, and the convention line above the table. Presentation
+  constants are named and switchable.
+- **The ruler row (◎)**: search mode = the configured targets (riding the
+  source row at merge); fixed mode = the anchor with absolute values.
+  Strategy rows show per-statistic deltas vs the ruler in BOTH modes —
+  never averaged across statistics.
+- **Anchors are elected per population**: the test anchor at optimization
+  (smallest survivor of tolerance-epsilon dominance pruning — size within
+  `optimize_tolerance`, every compared statistic within the metric's
+  `acceptance_delta`, size as the tiebreak), the merge anchor over the
+  full-movie rows at merge. The test anchor's identity flows to merge for
+  the anchor-audit line only; its values participate nowhere there.
+- **Marks**: selection-only `◀` at optimization; `◀` smallest output plus
+  live `✔`/`✘` verdicts (search only) at merge — all derived at render.
+- **Mechanics**: processing runs aggregate facts into rows and persist;
+  fast-exit runs load the rows and re-render byte-identically (no output
+  re-stat, no recomputation).
 
 ---
 
@@ -505,6 +542,7 @@ All models are Pydantic.
 | `Chapters` / `AudioOutput` / `MergedVideo` | Artifact payloads: the chapter edition, one (track, chain) audio output, one merged output — `MergedVideo` owns its output-name family incl. the per-strategy pinned-quality suffix |
 | `Strategy` | Encoding strategy (`display_name()`/`safe_name()`/`fingerprint` triple, codec config, resolved ffmpeg args) |
 | `QualityTarget` | Quality constraint (metric, statistic, threshold value) |
+| `MetricStatKey` | The metric × statistic identity: canonical `vmaf_median` sidecar form, `VMAF 50%` display form, tolerant parse — the single naming authority |
 | `CodecConfig` | Encoder configuration (quality range, granularity, max_step, label, profiles) |
 | `CropParams` | Crop geometry (top, bottom, left, right pixel offsets) |
 | `PhaseOutcome` | `COMPLETED` / `REUSED` / `PENDING` / `FAILED` |

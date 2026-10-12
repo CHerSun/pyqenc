@@ -191,9 +191,9 @@ class WinnerSidecar(BaseModel):
     """
 
     crf:         DecimalYaml        # exact string round-trip (no float drift)
-    metrics:     dict[str, float]   # the TARGETED metric subset
     frame_count: int                # frames of the winning attempt (0 = unknown)
     targets_met: bool               # False when search exhausted without a passing attempt
+    metrics:     dict[str, float]   # the TARGETED metric subset
 
 
 logger = logging.getLogger(__name__)
@@ -227,10 +227,10 @@ class LimiterSummary(BaseModel):
     rows:     list[LimiterSummaryRow]
 
 
-class EncodingSummary(BaseModel):
+class EncodingSidecar(BaseModel):
     """``encoding.yaml`` — the replay aggregate (aggregates only, no keys).
 
-    ``limiter`` is the winning-limiter table (presentational — target-gated;
+    ``summary`` is the winning-limiter table (presentational — target-gated;
     empty = not rendered: the run carried no judging targets, e.g. an
     uncompared fixed run); ``frames`` is the per-strategy Σ winner frame
     totals backing the frame-preservation re-assertion on fully-reused
@@ -244,8 +244,8 @@ class EncodingSummary(BaseModel):
     re-saves the aggregate.
     """
 
-    limiter: list[LimiterSummary]   # winning-limiter rows ([] = no table)
     frames:  dict[str, int]         # per-strategy Σ winner frame totals
+    summary: list[LimiterSummary]   # winning-limiter rows ([] = no table)
 
 
 def _encoded_dir(work_dir: Path, strategy: Strategy) -> Path:
@@ -2093,7 +2093,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
     ) -> None:
         super().__init__(config, phases, collector=collector)
 
-        self._persisted:    EncodingSummary | None   = None
+        self._persisted:    EncodingSidecar | None   = None
         """The replay aggregate loaded from ``encoding.yaml`` during recovery
         (``None`` when absent) — the fast-exit source for the summary."""
         self.quality_labels: dict[str, str]           = {}
@@ -2243,7 +2243,7 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
 
         # The replay aggregate — loaded here for the fast-exit resurface;
         # its absence costs display only, never invalidation (Req 24).
-        self._persisted = load_model(yaml_path, EncodingSummary)
+        self._persisted = load_model(yaml_path, EncodingSidecar)
 
         # Step 1: clean up .tmp files
         remove_stale_tmp_files(enc_dir)
@@ -2349,17 +2349,17 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
             The reused ``EncodingPhaseResult``.
         """
         result = super()._reused_result(wanted, message)
-        if self._persisted is not None and self._persisted.limiter:
-            self._log_limiter_summary(self._persisted.limiter)
+        if self._persisted is not None and self._persisted.summary:
+            self._log_limiter_summary(self._persisted.summary)
         else:
             logger.debug("No persisted limiter summary — table skipped on reused run")
         self._reassert_frame_preservation(self._persisted)
         return result
 
-    def _reassert_frame_preservation(self, persisted: EncodingSummary | None) -> None:
+    def _reassert_frame_preservation(self, persisted: EncodingSidecar | None) -> None:
         """Re-assert frame preservation from the persisted aggregate (fast exit).
 
-        Reads the single ``summary.frames`` map — never per-winner sidecars —
+        Reads the single ``frames`` map — never per-winner sidecars —
         and compares each strategy's total against the probe's in-memory
         frame count.  A disagreement is surfaced as a warning (the hook
         contract keeps the REUSED outcome); the merge-time frame verification
@@ -2602,8 +2602,8 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         if scan is not None:
             if scan.summaries is not None:
                 self._log_limiter_summary(scan.summaries)
-            save_model(encoding_yaml, EncodingSummary(
-                limiter = scan.summaries if scan.summaries is not None else [],
+            save_model(encoding_yaml, EncodingSidecar(
+                summary = scan.summaries if scan.summaries is not None else [],
                 frames  = scan.frame_totals() if scan.frames_known else {},
             ))
 

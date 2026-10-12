@@ -1111,6 +1111,44 @@ _STUB_SOURCE_FP = SizedFingerprint(token="0" * 32, size=64)
 """Stub source identity — phases read the job File's fingerprint."""
 
 
+def _wire_fixed_merge(merge: MergePhase, chunk: Path, anchor: str | None) -> None:
+    """Wire a fixed-mode plan + encoding/optimization results on *merge*.
+
+    The wiring half of :func:`_run_full_merge`, reusable for a FRESH phase
+    instance over an existing work dir (the second-run/replay shape —
+    ``run()`` memoizes its result, so replays need a new instance).
+    """
+    from pyqenc.phases.encoding import EncodingPhase as _EncodingPhase
+    from pyqenc.phases.optimization import OptimizationPhase as _OptPhase
+
+    config = merge._config
+    probe_result = merge._phases[ProbePhase].result
+    assert probe_result is not None
+    probe_result.plan = config.resolve_encoding(
+        strategies = ["h265-aq+slow"],
+        quality    = (Decimal("18"), Decimal("18")),
+    )
+    fixed_strategy = probe_result.plan.strategies[0]
+
+    encoding = merge._phases[_EncodingPhase]
+    winner = Artifact(
+        payload=_encoded_chunk(chunk, "chunk1", "h265-aq").model_copy(
+            deep=True, update={"strategy": fixed_strategy},
+        ),
+        state=ArtifactState.COMPLETE,
+    )
+    encoding.result = EncodingPhaseResult(
+        outcome=PhaseOutcome.COMPLETED, message="encoding complete",
+        winners=[winner],
+    )
+
+    optimization = merge._phases[_OptPhase]
+    optimization.result = OptimizationPhaseResult(
+        outcome=PhaseOutcome.COMPLETED, message="optimization complete",
+        anchor=anchor,
+    )
+
+
 def _run_full_merge(
     tmp_path: Path,
     *,
@@ -1137,37 +1175,7 @@ def _run_full_merge(
 
     merge = _make_merge_phase(work_dir, source, chunk, timestamps_path=ts_file)
     if fixed:
-        from decimal import Decimal
-
-        from pyqenc.phases.encoding import EncodingPhase as _EncodingPhase
-        from pyqenc.phases.optimization import OptimizationPhase as _OptPhase
-
-        config = merge._config
-        probe_result = merge._phases[ProbePhase].result
-        assert probe_result is not None
-        probe_result.plan = config.resolve_encoding(
-            strategies = ["h265-aq+slow"],
-            quality    = (Decimal("18"), Decimal("18")),
-        )
-        fixed_strategy = probe_result.plan.strategies[0]
-
-        encoding = merge._phases[_EncodingPhase]
-        winner = Artifact(
-            payload=_encoded_chunk(chunk, "chunk1", "h265-aq").model_copy(
-                deep=True, update={"strategy": fixed_strategy},
-            ),
-            state=ArtifactState.COMPLETE,
-        )
-        encoding.result = EncodingPhaseResult(
-            outcome=PhaseOutcome.COMPLETED, message="encoding complete",
-            winners=[winner],
-        )
-
-        optimization = merge._phases[_OptPhase]
-        optimization.result = OptimizationPhaseResult(
-            outcome=PhaseOutcome.COMPLETED, message="optimization complete",
-            anchor=anchor,
-        )
+        _wire_fixed_merge(merge, chunk, anchor)
 
     merged_dir = work_dir / MERGED_OUTPUT_DIR
 
@@ -1203,22 +1211,20 @@ def _run_full_merge(
 
 
 class TestPerOutputSidecarShape:
-    """The acceptance record: facts + provenance, no verdict (Req 27)."""
+    """The acceptance record: facts + identity, no verdict (Req 27)."""
 
     def test_fixed_record_round_trips_via_the_mode_union(self, tmp_path: Path) -> None:
         """Save → load dispatches to the FIXED variant with its quality, and
         the full measured set is retained (stats outside any target set)."""
-        from pyqenc.phases.merge import FixedMergedProvenance, MergedOutputSidecar
+        from pyqenc.phases.merge import FixedMergedOutputSidecar, load_merged_output_sidecar
 
         _merge, merged_dir = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
-        import yaml as _yaml
 
-        data = _yaml.safe_load(next(merged_dir.glob("*.yaml")).read_text(encoding="utf-8"))
-        record = MergedOutputSidecar.model_validate(data)
-        assert isinstance(record.provenance, FixedMergedProvenance)
-        assert record.provenance.quality == Decimal("18.0")
-        assert record.provenance.winners.size == 1
-        assert record.provenance.strategy.token, "strategy IS the args fingerprint (Req 61)"
+        record = load_merged_output_sidecar(next(merged_dir.glob("*.yaml")))
+        assert isinstance(record, FixedMergedOutputSidecar)
+        assert record.quality == Decimal("18.0")
+        assert record.winners.size == 1
+        assert record.strategy.token, "strategy IS the args fingerprint (Req 61)"
         # Retention: the FULL measured set (incl. stats outside any target set).
         assert record.metrics["vmaf_std"] == 1.2
         assert record.metrics["vmaf_max"] == 99.0
@@ -1226,32 +1232,32 @@ class TestPerOutputSidecarShape:
     def test_search_record_round_trips_via_the_mode_union(self, tmp_path: Path) -> None:
         """Save → load dispatches to the SEARCH variant carrying the targets
         basis (targets steer the search — a change re-searches and re-merges)."""
-        import yaml as _yaml
-
-        from pyqenc.phases.merge import MergedOutputSidecar, SearchMergedProvenance
+        from pyqenc.phases.merge import SearchMergedOutputSidecar, load_merged_output_sidecar
 
         _merge, merged_dir = _run_full_merge(tmp_path, fixed=False)
-        data = _yaml.safe_load(next(merged_dir.glob("*.yaml")).read_text(encoding="utf-8"))
-        record = MergedOutputSidecar.model_validate(data)
-        assert isinstance(record.provenance, SearchMergedProvenance)
-        assert record.provenance.targets, "search runs carry the targets basis"
+        record = load_merged_output_sidecar(next(merged_dir.glob("*.yaml")))
+        assert isinstance(record, SearchMergedOutputSidecar)
+        assert record.targets, "search runs carry the targets basis"
 
 
 class TestMergeYamlReplayAggregate:
     """merge.yaml = the summary replay rows only (Req 28/61)."""
 
     def test_summary_only_no_basis(self, tmp_path: Path) -> None:
-        """No basis marker exists: replay re-renders verdicts live against
-        the current bar, so nothing downstream needs the rendering basis
-        (dropped 2026-10-09 — zero consumers)."""
+        """No basis marker exists: replay re-renders ruler and marks live from
+        the rows, so nothing downstream needs the rendering basis. The rows
+        are the shared StrategyRow shape (sizes recorded at merge time — no
+        output paths on rows; the outputs' directory persists once)."""
 
         from pyqenc.phases.merge import MergeSidecar
 
-        merge, _ = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
+        merge, merged_dir = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
         persisted = load_model(merge._deps[JobPhase].work_dir / "merge.yaml", MergeSidecar)
         assert persisted is not None
         assert not hasattr(persisted, "basis")
-        assert [row.strategy_name for row in persisted.summary] == ["h265-aq+slow"]
+        assert [row.strategy for row in persisted.summary] == ["h265-aq+slow"]
+        assert persisted.output_dir == merged_dir
+        assert "output_path" not in persisted.summary[0].model_dump()
         # No verdict on the replay rows (marks render live).
         assert "targets_met" not in persisted.summary[0].model_dump()
 
@@ -1264,8 +1270,133 @@ class TestMergeYamlReplayAggregate:
         assert persisted.summary, "search runs persist their summary rows"
 
 
+def _summary_block(caplog_text: str) -> str:
+    """The rendered summary block: from the convention line to before the
+    ``Files named`` line (the table + the below-table audit line)."""
+    lines = caplog_text.splitlines()
+    start = next(i for i, ln in enumerate(lines) if "ruler:" in ln)
+    end = next(i for i, ln in enumerate(lines) if "Files named:" in ln)
+    return "\n".join(ln for ln in lines[start:end] if ln.strip())
+
+
+class TestUnifiedMergeSummary:
+    """The unified comparison table at merge (Req 1-4, 8.7 — §109 closure)."""
+
+    def test_fixed_table_rules_by_merge_anchor_and_holds(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """Fixed mode: the ruler is the MERGE anchor row; the audit line
+        reports the two elections agreeing; the inline completion line shows
+        the comparison values WITHOUT verdicts (no interim ruler exists)."""
+        import logging as _logging
+
+        with caplog.at_level(_logging.INFO, logger="pyqenc.phases.merge"):
+            _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
+
+        text = caplog.text
+        assert "ruler: h265-aq+slow (anchor) ◎" in text
+        assert "anchor holds at full scale: h265-aq+slow" in text
+        # The source row renders with the (src) cue; the anchor row carries
+        # the full-movie absolutes as sub-column pairs.
+        assert "test (src)" in text
+        assert "95.0 | 96.5" in text
+        # Inline completion: values only, comparison statistics only.
+        assert "vmaf-p10=95.0  vmaf-median=96.5  ssim-median=98.2  psnr-median=46.0" in text
+        # The old furniture is gone: no targets reminder under the table (the
+        # key-params line at phase start stays), no miss block.
+        assert "≥ 96.00" not in text
+        assert "missed quality targets" not in text
+        assert "Files named: test *.mkv" in text
+
+    def test_search_table_targets_ride_the_source_row(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """Search mode: the configured targets are the ruler, riding the
+        source row; strategy rows carry live verdicts (all-targets-pass —
+        the vif target is unmeasured here, so the row misses)."""
+        import logging as _logging
+
+        with caplog.at_level(_logging.INFO, logger="pyqenc.phases.merge"):
+            _run_full_merge(tmp_path, fixed=False)
+
+        text = caplog.text
+        assert "ruler: configured targets ◎" in text
+        assert "◎ test (src)" in text
+        assert "93.0 | 96.0" in text  # the vmaf p10 | median target absolutes
+        strategy_rows = [
+            ln for ln in _summary_block(text).splitlines()
+            if "h265" in ln and "(src)" not in ln
+        ]
+        assert strategy_rows and strategy_rows[0].rstrip().endswith("◀ ✘")
+
+    def test_replay_is_byte_identical_to_the_processing_table(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """Fast-exit replay renders from the persisted rows — byte-identical
+        to the producing run's block (Req 6.7). ``run()`` memoizes, so the
+        second run is a FRESH phase instance over the same work dir."""
+        import logging as _logging
+
+        with caplog.at_level(_logging.INFO, logger="pyqenc.phases.merge"):
+            _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
+        first = _summary_block(caplog.text)
+
+        work_dir = tmp_path / "work"
+        second = _make_merge_phase(
+            work_dir, tmp_path / "test.mkv", work_dir / "chunk1.mkv",
+            timestamps_path=work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME,
+        )
+        _wire_fixed_merge(second, work_dir / "chunk1.mkv", "h265-aq+slow")
+
+        caplog.clear()
+        with caplog.at_level(_logging.INFO, logger="pyqenc.phases.merge"):
+            result = second.run(dry_run=False)
+        assert result.outcome is PhaseOutcome.REUSED
+        assert _summary_block(caplog.text) == first
+
+    def test_anchor_shift_audits_with_both_names(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """When the full-movie election differs from the test-subset one, the
+        audit line escalates to WARNING naming both — driven through the
+        replay path over a persisted row population."""
+        import logging as _logging
+
+        from pyqenc.phases.merge import MergeSidecar
+        from pyqenc.summary_tables import StrategyRow
+        from pyqenc.utils.yaml_utils import save_model
+
+        merge, _merged = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
+        merge_yaml = merge._deps[JobPhase].work_dir / "merge.yaml"
+        persisted = load_model(merge_yaml, MergeSidecar)
+        assert persisted is not None
+        # A smaller full-movie row that survives pruning elects as the merge
+        # anchor — the test-subset anchor stays only as the audit reference.
+        shift_row = StrategyRow.model_validate(
+            {"strategy": "h264+ultrafast", "size_bytes": 100,
+             "metrics": {"vmaf_p10": 92.0, "vmaf_median": 93.0}},
+        )
+        save_model(merge_yaml, persisted.model_copy(
+            update={"summary": [shift_row, *persisted.summary]},
+        ))
+
+        work_dir = merge._deps[JobPhase].work_dir
+        second = _make_merge_phase(
+            work_dir, tmp_path / "test.mkv", work_dir / "chunk1.mkv",
+            timestamps_path=work_dir / EXTRACTED_DIR / TIMESTAMPS_FILENAME,
+        )
+        _wire_fixed_merge(second, work_dir / "chunk1.mkv", "h265-aq+slow")
+        with caplog.at_level(_logging.WARNING, logger="pyqenc.phases.merge"):
+            result = second.run(dry_run=False)
+        assert result.outcome is PhaseOutcome.REUSED
+        assert (
+            "anchor shifted at full scale: h265-aq+slow (test subset)"
+            " → h264+ultrafast (full movie)" in caplog.text
+        )
+
+
 class TestPerFileAcceptance:
-    """Per-file provenance compare decides COMPLETE vs re-merge (Req 49)."""
+    """Per-file record compare decides COMPLETE vs re-merge (Req 49)."""
 
     def _recover_state(self, merge, strategy_name: str):
         recovery = merge._recover()
@@ -1275,7 +1406,7 @@ class TestPerFileAcceptance:
         )
         return recovery, row
 
-    def test_matching_provenance_accepts(self, tmp_path: Path) -> None:
+    def test_matching_record_accepts(self, tmp_path: Path) -> None:
         merge, _ = _run_full_merge(tmp_path, fixed=True, anchor="h265-aq+slow")
         _recovery, row = self._recover_state(merge, "h265-aq+slow")
         assert row.state is ArtifactState.COMPLETE
@@ -1303,7 +1434,7 @@ class TestPerFileAcceptance:
 
     def test_anchor_change_does_not_remerge(self, tmp_path: Path) -> None:
         """§112 resolved (2026-10-09): the anchor is a runtime-elected
-        presentation basis, never a provenance dimension — its re-election
+        presentation basis, never a record dimension — its re-election
         must accept an output whose winner-set fingerprint (the actual
         input identity) matches. The old behavior re-merged provably
         identical outputs (~50 min each) on every anchor re-election."""
