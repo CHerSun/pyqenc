@@ -9,6 +9,16 @@ Basis: the grounding documents in this folder (`logical-vs-code.md`, `per-phase-
 
 ## Cross-Spec Notes
 
+### Superseded by a later spec
+
+- `2026-10-03 unified-quality-summaries` (implemented 2026-10-12) converges
+  the two replay-row models this spec landed (`StrategySummaryRow` in
+  `optimization.yaml`, `MergeSummaryRow` in `merge.yaml`) into ONE
+  `StrategyRow {strategy, size_bytes, metrics}` pair-keyed shape persisted
+  by both sidecars; `merge.yaml` gains `output_dir` once and drops per-row
+  output paths. The recovery/invalidation mechanics this spec owns are
+  unchanged.
+
 ### What this spec supersedes/changes in prior specs
 
 | Changed | Where | What changed |
