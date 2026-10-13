@@ -800,7 +800,6 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         current_sampling = self._config.measurement.sampling
 
         from pyqenc.phases.encoding import (
-            EncodingResult,
             _encode_chunks_parallel,
             _recover_encoding_attempts,
         )  # deferred: circular import (encoding <-> optimization)
@@ -819,7 +818,6 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         # pool; the top-level span belongs to the template). Skipped entirely
         # on a derive-only run (all pairs complete, table not covering the
         # plan) — there is nothing to encode.
-        enc_result: EncodingResult | None = None
         if strategies_to_test:
             encoder = _make_encoder(
                 work_dir         = work_dir,
@@ -844,7 +842,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
                     if r.state == ArtifactState.COMPLETE:
                         advance((chunks_by_id[r.chunk_id].end_timestamp - chunks_by_id[r.chunk_id].start_timestamp), AdvanceState.SKIPPED)
 
-                enc_result = asyncio.run(
+                asyncio.run(
                     _encode_chunks_parallel(
                         encoder           = encoder,
                         chunks            = test_chunks,
@@ -870,18 +868,18 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         if fixed:
             # Fixed mode derives every strategy fresh from the current disk
             # state — sizes from the winners, metrics worst-chunk-aggregated
-            # from the winner sidecars.
-            assert enc_result is not None or not self._strategies_to_test, \
-                "fixed compared runs always re-test (the entry wiped the winners)"
-
-            winners_by_strategy: dict[str, list[EncodedChunk]] = dict(enc_result.encoded_chunks) \
-                if enc_result is not None else {}
-            if enc_result is None:
-                for row in rows:
-                    if row.state == ArtifactState.COMPLETE and isinstance(row.payload, EncodedChunk):
-                        winners_by_strategy.setdefault(
-                            row.payload.strategy.display_name(), [],
-                        ).append(row.payload)
+            # from the winner sidecars.  Winners are always read from the live
+            # pair ledger so that strategies completed on a prior run are
+            # included alongside any newly-encoded ones.  Using enc_result
+            # alone was wrong on partial reruns: it only carries the strategies
+            # encoded this run, leaving the already-complete strategies with
+            # empty winners → size_bytes=0 and blank metrics in the sidecar.
+            winners_by_strategy: dict[str, list[EncodedChunk]] = {}
+            for row in rows:
+                if row.state == ArtifactState.COMPLETE and isinstance(row.payload, EncodedChunk):
+                    winners_by_strategy.setdefault(
+                        row.payload.strategy.display_name(), [],
+                    ).append(row.payload)
             final_results = [
                 self._build_strategy_row(work_dir, test_chunks, strategy, winners_by_strategy)
                 for strategy in plan.strategies
