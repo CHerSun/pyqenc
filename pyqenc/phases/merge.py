@@ -26,6 +26,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from pyqenc.constants import (
+    BRACKET_LEFT,
+    BRACKET_RIGHT,
     FAILURE_SYMBOL_MINOR,
     MERGED_OUTPUT_DIR,
     METRIC_KEY_QUALITY_MEASURE,
@@ -84,6 +86,7 @@ from pyqenc.summary_tables import (
     StrategyRow,
     render_comparison_table,
 )
+from pyqenc.utils.alive import AdvanceState, BarAdvance, ProgressBar
 from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
 from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
 from pyqenc.utils.log_format import fmt_metric_value
@@ -769,141 +772,172 @@ class MergePhase(Phase[MergePhaseResult]):
         final_rows: list[Artifact[MergedVideo]] = []
         failed_strategies: list[str] = []
 
-        for artifact in rows:
-            payload      = artifact.payload
-            strategy     = payload.strategy
-            strategy_name = strategy.display_name()
+        pending_count  = sum(1 for a in rows if a.state != ArtifactState.COMPLETE)
+        source_duration = source_stream.stream.info.duration_seconds or 0.0
+        total_seconds   = pending_count * source_duration
 
-            if artifact.state == ArtifactState.COMPLETE:
-                final_rows.append(artifact)
-                continue
+        pending_idx = 0
+        with ProgressBar(total_seconds, title="Merging", total_count=pending_count) as advance:
+            for artifact in rows:
+                payload       = artifact.payload
+                strategy      = payload.strategy
+                strategy_name = strategy.display_name()
 
-            # The output name derives at the entity's single owning site.
-            output_file = merged_dir / MergedVideo.output_file_name(source_stem, strategy)
-            assert output_file == payload.output_path, "recovery derived the same location"
-
-            try:
-                reason = self._pending_reasons.get(strategy_name)
-                if reason == "sampling":
-                    # Sampling-only difference (Req 49): the concat is
-                    # current — re-measure in place, never re-merge.
-                    logger.info("Re-measuring (sampling changed): %s", strategy_name)
-                elif not self._concat_and_promote(
-                    strategy        = strategy,
-                    output_file     = output_file,
-                    source_stream   = source_stream,
-                    encoded_chunks  = encoded_chunks,
-                ):
-                    # Everything else re-merges — ABSENT rows, record
-                    # mismatches (M-8: a mode-key change re-searched
-                    # winners upstream; the old concat is never current),
-                    # and the UNVERIFIABLE case (file present, sidecar
-                    # missing — Req 49/50): nothing vouches for what
-                    # produced the file, so it is re-concatenated from the
-                    # current winners in place; a crash leaves the old
-                    # output present until the promotion rename replaces it.
-                    failed_strategies.append(strategy_name)
+                if artifact.state == ArtifactState.COMPLETE:
+                    advance(0, AdvanceState.SKIPPED)
+                    final_rows.append(artifact)
                     continue
 
-                # Verify frame count
-                frame_count:       int | None       = None
-                frame_count_ok:    bool             = False
-                try:
-                    frame_count = get_frame_count(output_file)
-                    if source_frame_count > 0:
-                        if frame_count != source_frame_count:
-                            diff = frame_count - source_frame_count
-                            logger.warning(
-                                "  Frame count mismatch: expected %d, got %d (%+d)",
-                                source_frame_count, frame_count, diff,
-                            )
-                        else:
-                            frame_count_ok = True
-                except (OSError, FrameCountError) as exc:
-                    logger.warning("  Could not verify frame count: %s", exc)
+                pending_idx += 1
 
-                # Measure quality UNCONDITIONALLY (Req 52): measurement needs
-                # the file, the reference, and the sampling — no target set
-                # gates or parameterizes it. Verdicts are live (Req 51).
-                metrics_dict: dict[str, float] = {}
-                plot_path:    Path | None       = None
+                # The output name derives at the entity's single owning site.
+                output_file = merged_dir / MergedVideo.output_file_name(source_stem, strategy)
+                assert output_file == payload.output_path, "recovery derived the same location"
+
                 try:
-                    with self._collector.time(MetricKey.MERGE, METRIC_KEY_QUALITY_MEASURE):
-                        metrics_dict, plot_path = self._measure_quality(
-                            final_result  = output_file,
-                            source_stream = source_stream,
-                            ref_crop      = crop,
-                            output_dir    = merged_dir,
+                    reason = self._pending_reasons.get(strategy_name)
+                    if reason == "sampling":
+                        # Sampling-only difference (Req 49): the concat is
+                        # current — re-measure in place, never re-merge.
+                        logger.info(
+                            "Starting quality measurement %s%s%s (%d of %d)",
+                            BRACKET_LEFT, strategy_name, BRACKET_RIGHT,
+                            pending_idx, pending_count,
                         )
-                except (OSError, ValueError) as exc:
-                    logger.warning("  Could not measure quality: %s", exc)
+                    else:
+                        chunk_count = len(encoded_chunks.get(strategy_name, []))
+                        logger.info(
+                            "Starting merging %s%s%s — %d chunks (%d of %d)",
+                            BRACKET_LEFT, strategy_name, BRACKET_RIGHT,
+                            chunk_count, pending_idx, pending_count,
+                        )
+                        if not self._concat_and_promote(
+                            strategy        = strategy,
+                            output_file     = output_file,
+                            source_stream   = source_stream,
+                            encoded_chunks  = encoded_chunks,
+                        ):
+                            # Everything else re-merges — ABSENT rows, record
+                            # mismatches (M-8: a mode-key change re-searched
+                            # winners upstream; the old concat is never current),
+                            # and the UNVERIFIABLE case (file present, sidecar
+                            # missing — Req 49/50): nothing vouches for what
+                            # produced the file, so it is re-concatenated from the
+                            # current winners in place; a crash leaves the old
+                            # output present until the promotion rename replaces it.
+                            advance(0, AdvanceState.FAILED)
+                            failed_strategies.append(strategy_name)
+                            continue
+                        logger.info(
+                            "Starting quality measurement %s%s%s (%d of %d)",
+                            BRACKET_LEFT, strategy_name, BRACKET_RIGHT,
+                            pending_idx, pending_count,
+                        )
 
-                # CRF distribution plot — reads the typed winners field
-                crf_data = MergePhase._collect_crf_data(
-                    self._deps[JobPhase].work_dir,
-                    self._deps[EncodingPhase].winners,
-                    strategy_name,
-                )
-                if crf_data:
-                    crf_plot_path = merged_dir / f"{output_file.stem}.crf.png"
+                    # Verify frame count
+                    frame_count:       int | None       = None
+                    frame_count_ok:    bool             = False
                     try:
-                        qlabel = self._deps[EncodingPhase].quality_labels.get(strategy_name, "CRF")
-                        create_crf_plot(
-                            chunks        = crf_data,
-                            output_path   = crf_plot_path,
-                            title         = f"{qlabel}\n{output_file.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")}",
-                            quality_label = qlabel,
-                        )
-                        logger.debug("  CRF plot saved: %s", crf_plot_path.name)
+                        frame_count = get_frame_count(output_file)
+                        if source_frame_count > 0:
+                            if frame_count != source_frame_count:
+                                diff = frame_count - source_frame_count
+                                logger.warning(
+                                    "  Frame count mismatch: expected %d, got %d (%+d)",
+                                    source_frame_count, frame_count, diff,
+                                )
+                            else:
+                                frame_count_ok = True
+                    except (OSError, FrameCountError) as exc:
+                        logger.warning("  Could not verify frame count: %s", exc)
+
+                    # Measure quality UNCONDITIONALLY (Req 52): measurement needs
+                    # the file, the reference, and the sampling — no target set
+                    # gates or parameterizes it. Verdicts are live (Req 51).
+                    metrics_dict: dict[str, float] = {}
+                    plot_path:    Path | None       = None
+                    try:
+                        with self._collector.time(MetricKey.MERGE, METRIC_KEY_QUALITY_MEASURE):
+                            metrics_dict, plot_path = self._measure_quality(
+                                final_result  = output_file,
+                                source_stream = source_stream,
+                                ref_crop      = crop,
+                                output_dir    = merged_dir,
+                                show_progress = advance,
+                            )
                     except (OSError, ValueError) as exc:
-                        logger.warning("  Could not generate CRF plot: %s", exc)
-                else:
-                    logger.warning("No CRF data available for strategy %s — skipping CRF plot", strategy_name)
+                        logger.warning("  Could not measure quality: %s", exc)
 
-                # Write the per-output acceptance record (facts + identity,
-                # no verdict — Req 27).
-                save_model(
-                    MergePhase._sidecar_path(output_file),
-                    sidecar_builder.compose(
-                        strategy    = strategy,
-                        frame_count = frame_count or 0,
-                        all_metrics = metrics_dict,
-                    ),
-                )
+                    # CRF distribution plot — reads the typed winners field
+                    crf_data = MergePhase._collect_crf_data(
+                        self._deps[JobPhase].work_dir,
+                        self._deps[EncodingPhase].winners,
+                        strategy_name,
+                    )
+                    if crf_data:
+                        crf_plot_path = merged_dir / f"{output_file.stem}.crf.png"
+                        try:
+                            qlabel = self._deps[EncodingPhase].quality_labels.get(strategy_name, "CRF")
+                            create_crf_plot(
+                                chunks        = crf_data,
+                                output_path   = crf_plot_path,
+                                title         = f"{qlabel}\n{output_file.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")}",
+                                quality_label = qlabel,
+                            )
+                            logger.debug("  CRF plot saved: %s", crf_plot_path.name)
+                        except (OSError, ValueError) as exc:
+                            logger.warning("  Could not generate CRF plot: %s", exc)
+                    else:
+                        logger.warning("No CRF data available for strategy %s — skipping CRF plot", strategy_name)
 
-                targets_met = self._live_verdict(metrics_dict)
-                frames_sym  = SUCCESS_SYMBOL_MINOR if frame_count_ok else FAILURE_SYMBOL_MINOR
-                frames_str  = str(frame_count) if frame_count is not None else "unknown"
-                metrics_str = self._fmt_inline_metrics(metrics_dict)
-                logger.info(
-                    "%s Merged %s:  frames=%s %s%s",
-                    SUCCESS_SYMBOL_MAJOR, strategy_name, frames_str, frames_sym,
-                    f"  {metrics_str}" if metrics_str else "",
-                )
-                if metrics_dict and not targets_met:
-                    self._log_missed_targets_warning(
-                        plan.targets,
-                        fixed_quality = plan.fixed_quality,
-                        strategy_name = strategy_name,
-                        metrics_dict  = metrics_dict,
+                    # Write the per-output acceptance record (facts + identity,
+                    # no verdict — Req 27).
+                    save_model(
+                        MergePhase._sidecar_path(output_file),
+                        sidecar_builder.compose(
+                            strategy    = strategy,
+                            frame_count = frame_count or 0,
+                            all_metrics = metrics_dict,
+                        ),
                     )
 
-                final_rows.append(Artifact(
-                    payload = MergedVideo(
-                        source_stem = source_stem,
-                        strategy    = strategy,
-                        output_path = LongPath(output_file),
-                        frame_count = frame_count,
-                        metrics     = metrics_dict,
-                        targets_met = targets_met,
-                        plot_path   = LongPath(plot_path) if plot_path is not None else None,
-                    ),
-                    state   = ArtifactState.COMPLETE,
-                ))
+                    targets_met = self._live_verdict(metrics_dict)
+                    frames_sym  = SUCCESS_SYMBOL_MINOR if frame_count_ok else FAILURE_SYMBOL_MINOR
+                    frames_str  = str(frame_count) if frame_count is not None else "unknown"
+                    metrics_str = self._fmt_inline_metrics(metrics_dict)
+                    logger.info(
+                        "%s Merged %s:  frames=%s %s%s",
+                        SUCCESS_SYMBOL_MAJOR, strategy_name, frames_str, frames_sym,
+                        f"  {metrics_str}" if metrics_str else "",
+                    )
+                    if metrics_dict and not targets_met:
+                        self._log_missed_targets_warning(
+                            plan.targets,
+                            fixed_quality = plan.fixed_quality,
+                            strategy_name = strategy_name,
+                            metrics_dict  = metrics_dict,
+                        )
 
-            except Exception:  # one bad strategy must not kill the rest
-                logger.exception("Merging strategy %s error", strategy_name)
-                failed_strategies.append(strategy_name)
+                    final_rows.append(Artifact(
+                        payload = MergedVideo(
+                            source_stem = source_stem,
+                            strategy    = strategy,
+                            output_path = LongPath(output_file),
+                            frame_count = frame_count,
+                            metrics     = metrics_dict,
+                            targets_met = targets_met,
+                            plot_path   = LongPath(plot_path) if plot_path is not None else None,
+                        ),
+                        state   = ArtifactState.COMPLETE,
+                    ))
+                    advance(source_duration, AdvanceState.SUCCESS)
+
+                except Exception:  # one bad strategy must not kill the rest
+                    logger.exception("Merging strategy %s error", strategy_name)
+                    advance(0, AdvanceState.FAILED)
+                    failed_strategies.append(strategy_name)
+
+        advance(0, AdvanceState.COMPLETE)
 
         # Phase completion summary
         complete_count = sum(1 for a in final_rows if a.state == ArtifactState.COMPLETE)
@@ -972,7 +1006,6 @@ class MergePhase(Phase[MergePhaseResult]):
             ``True`` when *output_file* is ready at its final name.
         """
         strategy_name = strategy.display_name()
-        logger.info("Merging: %s", strategy_name)
 
         # Collect the strategy's winners in timeline order — the start
         # timestamp is the quantity itself (sorting on the formatted file
@@ -988,8 +1021,6 @@ class MergePhase(Phase[MergePhaseResult]):
         if not strategy_chunks:
             logger.error("No encoded chunks found for strategy %s — skipping", strategy_name)
             return False
-
-        logger.info("  Starting concatenation of %d chunks...", len(strategy_chunks))
 
         # Resolve timestamps path from ExtractionPhase result
         timestamps_path: Path | None = (
@@ -1136,6 +1167,7 @@ class MergePhase(Phase[MergePhaseResult]):
         source_stream: ExtendedVideoStream,
         ref_crop:      CropParams,
         output_dir:    Path,
+        show_progress: bool | BarAdvance = False,
     ) -> tuple[dict[str, float], Path | None]:
         """Measure the final output against the source (measurement only).
 
@@ -1144,6 +1176,12 @@ class MergePhase(Phase[MergePhaseResult]):
         applied by the caller as pure functions over the returned facts
         (Req 53). Raw metric ``.tmp`` files are written to ``output_dir``
         and deleted after parsing; the quality plot PNG is kept.
+
+        Args:
+            show_progress: ``True`` — open an inner progress bar;
+                           ``BarAdvance`` callable — feed an outer bar
+                           supplied by the caller (no inner bar created);
+                           ``False`` (default) — no progress.
 
         Returns:
             Tuple of ``(metrics_dict, plot_path)``.
@@ -1160,7 +1198,7 @@ class MergePhase(Phase[MergePhaseResult]):
             fps_value          = source_stream.stream.info.fps_fraction,
             metrics_output_dir = output_dir,
             subsample_factor   = self._config.measurement.sampling,
-            show_progress      = True,
+            show_progress      = show_progress,
             plot_path          = plot_path,
         )
 

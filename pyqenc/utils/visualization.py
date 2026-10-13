@@ -29,7 +29,7 @@ from pyqenc.quality import (
     QualityMeasurement,
     run_metrics,
 )
-from pyqenc.utils.alive import AdvanceState, ProgressBar
+from pyqenc.utils.alive import AdvanceState, BarAdvance, ProgressBar
 from pyqenc.utils.ffmpeg_runner import FFmpegInput
 
 matplotlib.use("Agg")  # non-interactive backend — safe to call from any thread
@@ -1136,7 +1136,7 @@ class QualityMeasurer:
         ref_crop:         CropParams,
         output_prefix:    str,
         metrics_sampling: int                            = 3,
-        bar_advance:      Callable[[float, AdvanceState], None] | None = None,
+        bar_advance:      BarAdvance | None = None,
         duration_seconds: float                          = 0.0,
         width:            int                            = 0,
         cwd:              Path | None                    = None,
@@ -1191,7 +1191,7 @@ class QualityMeasurer:
             delta = max(0.0, out_time_s - _last_time)
             delta = min(delta, duration_seconds - _last_time)
             if delta > 0:
-                bar_advance(delta * _weight, AdvanceState.SUCCESS)
+                bar_advance(delta * _weight, AdvanceState.PROGRESS)
                 _last_time = out_time_s
 
         _last_time: float = 0.0
@@ -1251,7 +1251,7 @@ class QualityMeasurer:
         duration_seconds:    float,
         fps_value:           Fraction | None,
         subsample_factor:    int               = 10,
-        show_progress:       bool              = False,
+        show_progress:       bool | BarAdvance = False,
         plot_path:           Path | None       = None,
         chunk_start_seconds: float             = 0.0,
         width:               int               = 0,
@@ -1282,7 +1282,7 @@ class QualityMeasurer:
             else encoded.stem.replace(TIME_SEPARATOR_MS, ".").replace(TIME_SEPARATOR_SAFE, ":")
         _total_complexity = duration_seconds or 0.0  # single ffmpeg run, linear time
 
-        if show_progress:
+        if show_progress is True:
             with ProgressBar(_total_complexity, title=f"Metrics: {resolved_title}", show_counters=False) as advance:
                 artifacts, run_frames = await self._generate_metrics(
                     encoded, reference, ref_crop,
@@ -1295,6 +1295,19 @@ class QualityMeasurer:
                     fps_value        = fps_value,
                 )
                 advance(0, AdvanceState.COMPLETE)
+        elif callable(show_progress):
+            # Outer bar supplied by caller — pass through directly; the caller
+            # owns the bar's lifecycle and must NOT receive a COMPLETE signal here.
+            artifacts, run_frames = await self._generate_metrics(
+                encoded, reference, ref_crop,
+                output_prefix    = str(cwd / f"{encoded.stem}."),
+                metrics_sampling = subsample_factor,
+                bar_advance      = show_progress,
+                duration_seconds = duration_seconds or 0.0,
+                width            = width,
+                cwd              = cwd,
+                fps_value        = fps_value,
+            )
         else:
             artifacts, run_frames = await self._generate_metrics(
                 encoded, reference, ref_crop,
@@ -1327,7 +1340,7 @@ class QualityMeasurer:
         duration_seconds:    float,
         fps_value:           Fraction | None,
         subsample_factor:    int               = 10,
-        show_progress:       bool              = False,
+        show_progress:       bool | BarAdvance = False,
         plot_path:           Path | None       = None,
         chunk_start_seconds: float             = 0.0,
         width:               int               = 0,
@@ -1351,7 +1364,10 @@ class QualityMeasurer:
             fps_value:           Average fps for plot x-axis conversion
                                  (``fps_fraction`` of the source stream).
             subsample_factor:    Frame subsampling factor for metrics.
-            show_progress:      If True, display a live progress bar.
+            show_progress:       ``True`` — open an inner progress bar;
+                                 ``BarAdvance`` callable — feed an outer bar
+                                 supplied by the caller (no inner bar created);
+                                 ``False`` (default) — no progress.
             plot_path:           Explicit path for the PNG plot.  When ``None``,
                                  written as ``<encoded.stem>.png`` inside ``output_dir``.
             chunk_start_seconds: Start timestamp of the chunk in seconds.

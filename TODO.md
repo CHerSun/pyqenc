@@ -813,36 +813,6 @@ Assessment (updated 2026-10-05 after user review of the first take):
 
 ---
 
-## 96. Merge phase: measuring step is silent — no INFO line, no progress
-
-**Status:** needs thinking (pure UX)
-
-- Merge measurement is a long step (full-file VMAF/PSNR/SSIM per output) and
-  starts with no INFO message — the log goes quiet for the whole measurement
-  stretch with no indication anything is running.
-- Wanted: a "Starting measuring..." INFO line for the step, and exactly ONE
-  progress bar for the full phase — not per file — displaying which output
-  file is currently being measured.
-- Gains weight with `2026-10-05 cli-intent-commands`: `video` terminates at
-  Merge, so the phase becomes a first-class user-facing terminal, not just
-  auto's last step.
-
-**Questions to think about:** where the current file name renders on the
-single bar (ProgressBarState extension?); whether concat/append steps share
-the same bar or only the measuring stretch reports progress.
-
-Current output looks wrong:
-2026-10-06 01:34 [INFO] Merging: h265+ultrafast
-2026-10-06 01:34 [INFO]   Starting concatenation of 107 chunks...
-
-Starting concatenation of {bracket} h265+ultrafast {bracket}...
-Starting quality measurement of {bracket} h265+ultrafast {bracket}...
-...
-
-Looks more concise, with distinct steps. Single progress bar for full phase too (N*duration)? based on measurements, as concatenation is rather fast (1:20 aproximately)
-
----
-
 
 ## 98. API execution surface — small intent-based surface vs phase-mirroring wrappers
 
