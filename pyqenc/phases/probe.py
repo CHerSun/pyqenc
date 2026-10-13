@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel
 
-from pyqenc.constants import CROP_SOURCE_DETECTED, CROP_SOURCE_MANUAL, TEMP_SUFFIX, THICK_LINE
+from pyqenc.constants import CROP_SOURCE_DETECTED, CROP_SOURCE_MANUAL, TEMP_SUFFIX
 from pyqenc.metrics import MetricKey
 from pyqenc.models import (
     CropParams,
@@ -398,7 +398,6 @@ class ProbePhase(Phase[ProbePhaseResult]):
         assert self._video_stream is not None  # recovery guarantees a video stream
         assert self._resolved is not None  # stashed by the current-currency path
         logger.info("Probe: all values cached — reusing probe.yaml")
-        logger.info(THICK_LINE)
         return self._make_result(PhaseOutcome.REUSED, [], "probe.yaml reused")
 
     def _make_result(

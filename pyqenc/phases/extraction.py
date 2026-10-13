@@ -38,7 +38,6 @@ from pyqenc.constants import (
     FFMPEG_MUXER_DATA,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
-    THICK_LINE,
     TIMESTAMPS_FILENAME,
 )
 from pyqenc.metrics import MetricKey
@@ -974,7 +973,6 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
             "%s Extraction complete: %d artifact(s) extracted",
             SUCCESS_SYMBOL_MINOR, complete_count,
         )
-        logger.info(THICK_LINE)
 
         return self._make_result(
             PhaseOutcome.COMPLETED, artifacts,

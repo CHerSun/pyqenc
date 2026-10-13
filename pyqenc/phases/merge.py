@@ -34,7 +34,6 @@ from pyqenc.constants import (
     SUCCESS_SYMBOL_MAJOR,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
-    THICK_LINE,
     TIME_SEPARATOR_MS,
     TIME_SEPARATOR_SAFE,
     WARNING_SYMBOL,
@@ -686,9 +685,6 @@ class MergePhase(Phase[MergePhaseResult]):
         merge_yaml = job_result.work_dir / MergePhase.SIDECAR_NAME
         persisted  = load_model(merge_yaml, MergeSidecar)
         if persisted is not None:
-            logger.info(THICK_LINE)
-            logger.info("MERGE SUMMARY")
-            logger.info(THICK_LINE)
             # The replay re-derives ruler and marks live from the persisted
             # rows (byte-identical to the producing run's table; a changed
             # verdict bar re-renders old rows correctly, Req 6.7).
@@ -941,9 +937,6 @@ class MergePhase(Phase[MergePhaseResult]):
 
         # Phase completion summary
         complete_count = sum(1 for a in final_rows if a.state == ArtifactState.COMPLETE)
-        logger.info(THICK_LINE)
-        logger.info("MERGE SUMMARY")
-        logger.info(THICK_LINE)
         if failed_strategies:
             logger.error("  Failed strategies: %s", ", ".join(failed_strategies))
         strategy_summaries = self._build_strategy_summaries(final_rows)

@@ -35,7 +35,6 @@ from pyqenc.constants import (
     AUDIO_OUTPUT_DIR,
     SUCCESS_SYMBOL_MINOR,
     TEMP_SUFFIX,
-    THICK_LINE,
 )
 from pyqenc.metrics import MetricKey
 from pyqenc.models import FingerprintYaml, PhaseOutcome, SizedFingerprint, SizedFingerprintYaml
@@ -515,7 +514,6 @@ class AudioPhase(Phase[AudioPhaseResult]):
             max(reused, 0),
             failed,
         )
-        logger.info(THICK_LINE)
 
         if produced == 0 and failed > 0:
             err = f"all {failed} audio chain output(s) failed"
