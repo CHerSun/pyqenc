@@ -82,6 +82,7 @@ from pyqenc.utils.log_format import (
     fmt_chunk_attempt_start,
     fmt_chunk_final,
     fmt_chunk_start,
+    fmt_key_value_table,
     fmt_metric_summary,
 )
 from pyqenc.utils.long_path import LongPath
@@ -2110,21 +2111,27 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
         return "pair"
 
     def _log_key_params(self) -> None:
-        """Log chunks, strategies, crop, and targets (key parameters)."""
+        """Log the encoding phase key input params."""
         logger.info("Scanning for existing artifacts...")
 
-        probe_result = self._deps[ProbePhase]
-        crop         = probe_result.crop
-
+        crop       = self._deps[ProbePhase].crop
         strategies = self._deps[OptimizationPhase].selected_strategies
         chunks     = self._deps[ChunkingPhase].chunks
-        logger.info("Chunks:      %d", len(chunks))
-        logger.info("Strategies:  %s", ", ".join(s.display_name() for s in strategies) if strategies else "none")
-        if crop:
-            logger.info("Crop:        %s", crop)
-        plan = self._deps[ProbePhase].plan
+        plan       = self._deps[ProbePhase].plan
 
-        logger.info("Targets:     %s", ", ".join(f"{t.metric}-{t.statistic}≥{t.value}" for t in plan.targets))
+        kv: dict[str, object] = {
+            "Crop:"      : crop,
+            "Chunks:"    : len(chunks),
+        }
+
+        if plan.fixed_quality:
+            kv["Quality:"]    = [f"{strategy.codec.quality_label}={strategy.codec.quality_range[0]} for {strategy.display_name()}" for strategy in strategies]
+        else:
+            kv["Strategies:"] = [s.display_name() for s in strategies]
+            kv["Targets:"]    = [f"{t.metric}-{t.statistic}≥{t.value}" for t in plan.targets]
+
+        fmt_key_value_table(kv)
+
 
     def _log_limiter_summary(self, summaries: list[LimiterSummary]) -> None:
         """Emit the winning-limiter distribution table at INFO.
@@ -2299,8 +2306,8 @@ class EncodingPhase(Phase[EncodingPhaseResult]):
                 continue
             if strategy_dir.name not in expected_dirs:
                 logger.info(
-                    "encoded/%s is orphaned (strategy no longer selected) — "
-                    "deleting the winner directory (attempts stay in encoding/)",
+                    "encoded/%s is orphaned (strategy is no longer selected) — "
+                    "pruning its winners.",
                     strategy_dir.name,
                 )
                 shutil.rmtree(strategy_dir, ignore_errors=True)

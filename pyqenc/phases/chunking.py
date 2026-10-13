@@ -39,6 +39,7 @@ from pyqenc.stream_model import (
     VideoStreamChunk,
 )
 from pyqenc.utils.alive import alive_bar
+from pyqenc.utils.log_format import fmt_key_value_table
 from pyqenc.utils.yaml_utils import load_model, save_model
 
 if TYPE_CHECKING:
@@ -268,9 +269,11 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
     # ------------------------------------------------------------------
 
     def _log_key_params(self) -> None:
-        """Log the scene-detection tuning (the phase's key parameters)."""
-        logger.info("Scene threshold:       %s", self._config.chunking.scene_threshold)
-        logger.info("Min scene length:      %s frames", self._config.chunking.min_scene_length)
+        """Log the chunking phase key input params."""
+        fmt_key_value_table({
+            "Scene threshold:":  self._config.chunking.scene_threshold,
+            "Min scene length:": self._config.chunking.min_scene_length,
+        })
 
     def _invalidate(self) -> None:
         """Key-triggered effects over ``chunking.yaml`` (disk effects only).
@@ -337,7 +340,6 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
                 SceneBoundary(frame=record.frame, timestamp_seconds=record.timestamp_seconds)
                 for record in sidecar.scenes
             ]
-            logger.info("Scenes:  %d (from chunking.yaml)", len(self._recovered_scenes))
             stream = self._deps[ProbePhase].stream
             assert stream is not None, "probe guaranteed complete by the dependency walk"
             # RecoveryError (unknown duration) propagates — the template

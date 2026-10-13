@@ -524,10 +524,8 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
     # ------------------------------------------------------------------
 
     def _log_key_params(self) -> None:
-        """Log the source path and the active include/exclude filter."""
-        job = self._deps[JobPhase]
-        logger.info("Source:   %s", job.file.payload.path.name)
-        extraction_cfg = job.config.extraction
+        """Log the extraction phase key input params."""
+        extraction_cfg = self._deps[JobPhase].config.extraction
         if extraction_cfg.include or extraction_cfg.exclude:
             logger.info("Filter:")
             if extraction_cfg.include:

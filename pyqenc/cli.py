@@ -538,7 +538,7 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
     needs_plan = "quality" in spec.arg_groups
 
     logger.info(f"Starting {spec.banner}")
-    logger.info(f"Source: {args.source}")
+    logger.info("")
 
     crop_params: CropParams | None = None
     if needs_crop:
@@ -572,7 +572,6 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
             "Targets:":        ", ".join(str(t) for t in plan.targets),
             "Work mode:":      "DRY-RUN (no changes will be made)" if not execute else "EXECUTE",
         })
-        logger.info("")
 
     try:
         call_kwargs: dict[str, object] = {

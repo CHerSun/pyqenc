@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, ClassVar, Self
 
 from pydantic import BaseModel, Field
 
+from pyqenc.utils.log_format import fmt_key_value_table
+
 if TYPE_CHECKING:
     from pyqenc.app_config import AppConfig
     from pyqenc.metrics import MetricsCollector
@@ -188,11 +190,14 @@ class AudioPhase(Phase[AudioPhaseResult]):
     # ------------------------------------------------------------------
 
     def _log_key_params(self) -> None:
-        """Log the configured chain / select counts (key parameters)."""
+        """Log the audio phase key input params."""
         audio_cfg = self._config.audio
-        logger.info("Chains:  %d configured", len(audio_cfg.chains))
-        if audio_cfg.select:
-            logger.info("Select:  %d entr(y/ies)", len(audio_cfg.select))
+
+        fmt_key_value_table({
+            "Processing chains:" : len(audio_cfg.chains),
+            "Selectors:"         : "0 (all extracted tracks)" if not audio_cfg.select else len(audio_cfg.select),
+            "Tracks:"            : len(self._deps[ExtractionPhase].audio_streams)
+        })
 
     # ------------------------------------------------------------------
     # Recovery + invalidation

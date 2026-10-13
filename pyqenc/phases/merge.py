@@ -88,7 +88,7 @@ from pyqenc.summary_tables import (
 from pyqenc.utils.alive import AdvanceState, BarAdvance, ProgressBar
 from pyqenc.utils.ffmpeg_runner import FrameCountError, get_frame_count
 from pyqenc.utils.fs import remove_stale_tmp_files, safe_stat_size
-from pyqenc.utils.log_format import fmt_metric_value
+from pyqenc.utils.log_format import fmt_key_value_table, fmt_metric_value
 from pyqenc.utils.long_path import LongPath
 from pyqenc.utils.visualization import QualityMeasurer, create_crf_plot
 from pyqenc.utils.yaml_utils import load_model, save_model
@@ -407,14 +407,21 @@ class MergePhase(Phase[MergePhaseResult]):
         self._pending_reasons: dict[str, str] = {}
 
     def _log_key_params(self) -> None:
-        """Log the source stem and quality targets (key parameters)."""
-        logger.info("Source stem:  %s", self._deps[JobPhase].file.payload.path.stem)
+        """Log the merge phase key input params."""
         plan = self._deps[ProbePhase].plan
+        strategies = self._deps[OptimizationPhase].selected_strategies
 
-        if plan.targets:
-            logger.info("Targets:      %s", ", ".join(
-                f"{t.metric}-{t.statistic}≥{t.value}" for t in plan.targets
-            ))
+        kv: dict[str, object] = {
+        }
+
+        if plan.fixed_quality:
+            kv["Quality:"] = [f"{strategy.codec.quality_label}={strategy.codec.quality_range[0]} for {strategy.display_name()}" for strategy in strategies]
+        else:
+            kv["Strategies:"] = [s.display_name() for s in strategies]
+            kv["Targets:"] = [f"{t.metric}-{t.statistic}≥{t.value}" for t in plan.targets]
+
+        fmt_key_value_table(kv)
+
 
     def _post_dependency_check(self) -> MergePhaseResult | None:
         """Encoding-completeness guard: refuse to merge incomplete encodes.
@@ -1340,16 +1347,15 @@ class MergePhase(Phase[MergePhaseResult]):
         if plan.fixed_quality and ruler is not None:
             test_anchor = self._deps[OptimizationPhase].anchor
             if test_anchor == ruler.anchor:
-                logger.info("anchor holds at full scale: %s", ruler.anchor)
+                logger.info("Anchor stayed the same: %s", ruler.anchor)
             elif test_anchor is not None:
                 logger.warning(
-                    "anchor shifted at full scale: %s (test subset) → %s (full movie)"
-                    " — test chunk selection may not generalize",
+                    "Anchor has shifted since optimization: %s (test) → %s (full)",
                     test_anchor, ruler.anchor,
                 )
 
-        logger.info("  Files named: %s *.mkv  (where * is the strategy)", source.stem)
-        logger.info("  Location: %s", output_dir)
+        logger.info("")
+        logger.info("Merged video files Location: %s", output_dir)
         if self._config.measurement.sampling > 1:
             logger.info(
                 "  (Subsampling 1:%d — with fewer frames measured, there's a higher"

@@ -71,6 +71,7 @@ from pyqenc.summary_tables import (
 )
 from pyqenc.utils.alive import AdvanceState, ProgressBar
 from pyqenc.utils.fs import safe_stat_size
+from pyqenc.utils.log_format import fmt_key_value_table
 from pyqenc.utils.visualization import QualityMeasurer
 from pyqenc.utils.yaml_utils import save_model
 
@@ -399,11 +400,20 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         )
 
     def _log_key_params(self) -> None:
-        """Log the strategy list and tolerance (key parameters)."""
+        """Log the optimization phase key input params."""
         plan = self._deps[ProbePhase].plan
 
-        logger.info("Strategies:  %s", ", ".join(s.display_name() for s in plan.strategies))
-        logger.info("Tolerance:   %.1f%%", self._config.encoding.optimize_tolerance)
+        kv: dict[str, object] = {
+            "Tolerance:":  self._config.encoding.optimize_tolerance,
+        }
+
+        if plan.fixed_quality:
+            kv["Quality:"]    = [f"{strategy.codec.quality_label}={strategy.codec.quality_range[0]} for {strategy.display_name()}" for strategy in plan.strategies]
+        else:
+            kv["Strategies:"] = [s.display_name() for s in plan.strategies],
+            kv["Targets:"]    = [f"{t.metric}-{t.statistic}≥{t.value}" for t in plan.targets]
+
+        fmt_key_value_table(kv)
 
     def _recovery_unit(self) -> str:
         """The recovery summary counts winning attempts (one per pair)."""

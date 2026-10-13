@@ -28,7 +28,6 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pyqenc.constants import THICK_LINE
 from pyqenc.metrics import METRICS_YAML_FILENAME, MetricsCollector
 from pyqenc.models import CleanupLevel, PhaseOutcome
 from pyqenc.phase import (
@@ -200,6 +199,7 @@ class Runner:
         # Final metrics flush on an execute run; never on dry-run.
         if not dry_run and not self._no_metrics:
             self._collector.flush()
+            logger.info("")
             logger.info("Metrics written to: %s", self._work_dir / METRICS_YAML_FILENAME)
 
         # Always unregister the collector from the interrupt-flush registry — on
@@ -315,7 +315,7 @@ class Runner:
             summary: The assembled run summary.
             dry_run: Whether this was a dry-run (changes the wording).
         """
-        logger.info(THICK_LINE)
+        logger.info("")
         if dry_run:
             logger.info("[DRY-RUN] Run preview completed")
             logger.info(
@@ -335,7 +335,7 @@ class Runner:
                 len(summary.phases_reused),
                 ", ".join(summary.phases_failed) if summary.phases_failed else "none",
             )
-        logger.info(THICK_LINE)
+        logger.info("")
 
 
 # ---------------------------------------------------------------------------
