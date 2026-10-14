@@ -139,6 +139,7 @@ def _make_strategy_by_name(name: str) -> Strategy:
         codec=CodecConfig(
             name="h265-10bit", default_quality=Decimal(20),
             default_preset="ultrafast",
+            quality_label="CRF", quality_granularity=Decimal("0.5"),
             quality_range=(Decimal(0), Decimal(51)), presets=["ultrafast"],
         ),
         profile_args=[],
@@ -1893,6 +1894,7 @@ class TestMetricKeySmoke:
             name="h265-8bit",
             default_quality=Decimal(28),
             default_preset="slow",
+            quality_label="CRF", quality_granularity=Decimal("0.5"),
             quality_range=(Decimal(0), Decimal(51)),
             encoder_args=["-i", "{input}", "-c:v", "libx265", "-crf", "{quality}", "{input}"],
             presets=["slow"],

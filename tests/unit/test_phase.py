@@ -547,6 +547,7 @@ def _merge_strategy():
         codec=CodecConfig(
             name="h265-10bit", default_quality=Decimal(20),
             default_preset="slow",
+            quality_label="CRF", quality_granularity=Decimal("0.5"),
             quality_range=(Decimal(0), Decimal(51)), presets=["slow"],
         ),
         profile_args=[],

@@ -9,7 +9,7 @@ extraction:
 
 chunking:
   scene_threshold: 27.0 # ~15-50 is meaningful range (0.0-255.0 max range). 27.0 is the default. Lower = more sensitive, but there is coalescense inbuilt - too low values can give unexpected results.
-  min_scene_length: 24  # minimum frames per chunk
+  min_scene_length: 24  # minimum frames per chunk. 20+ recommended (p10 is 2 frames then).
 
 encoding:
   targets:
@@ -17,13 +17,13 @@ encoding:
     # To increase quality (larger files): raise the most constrained passing target (• in logs).
     # To decrease quality (smaller files): lower the most constrained failing target (✘ in logs).
     - "vmaf-med:96.0"   # 95–97 = high quality. 98+ for visually lossless
-    - "psnr-med:45.0"   # 44–46 = good; 50+ = near-lossless
-    - "ssim-med:98.0"   # 98+ = good; non-linear scale, compressed near 100
-    - "vif-med:93.0"    # grain/texture retention; 92–94 = good; higher = crisper but larger
-    - "vmaf-p10:93.0"   # --- floor safeguards ---
-    - "psnr-p10:43.0"
-    - "ssim-p10:96.0"
-    - "vif-p10:90.0"
+    - "psnr-med:46.0"   # 44–46 = good; 50+ = near-lossless
+    - "ssim-med:98.5"   # 98+ = good; non-linear scale, compressed near 100
+    - "vif-med:94.0"    # grain/texture retention; 92–94 = good; higher = crisper but larger
+    - "vmaf-p10:94.0"   # --- floor safeguards ---
+    - "psnr-p10:44.0"
+    - "ssim-p10:97.0"
+    - "vif-p10:91.5"
   strategies:
     # Format: "profile[+preset]" — profile is required, preset is optional (omit = codec default).
     # Wildcards: "h265*" = all h265 profiles; "*" = all profiles; "*+*" = all profiles × all presets.
@@ -138,25 +138,11 @@ audio:
 # encoder_args templated values: {quality}, {preset}, {profile_args}, {vf}
 codecs:
   h264-8bit:
+    quality_label: CRF
+    quality_granularity: 0.5     # Codec min granularity: 0.1. Balanced: 0.5. Below balanced often bit-identical and convergence takes more steps.
+    quality_range: [6.0, 30.0]   # Codec full range: 0.0-51.0. Balanced: 6.0-30.0
     default_quality: 18.0
-    default_preset: veryslow  # affordable on modern CPUs; good quality benefit
-    quality_range: [6.0, 30.0]   # CRF; full codec range is 0–51; 6–30 is the practical working band
-    quality_granularity: 0.5     # 0.1 is accepted but produces binary-identical steps; 0.5 is the right balance
-    pre_input_args: []
-    encoder_args:
-      - "-c:v"
-      - "libx264"
-      - "-preset"
-      - "{preset}"
-      - "-x264-params"
-      - "profile=high:level=5.1:sps-id=0"  # ensures consistent codec_private_data across chunks
-      - "-crf"
-      - "{quality}"
-      - "-vf"
-      - "{vf}"
-      - "-pix_fmt"
-      - "yuv420p"
-      - "{profile_args}"
+    default_preset: veryslow     # affordable on modern CPUs, boosts quality
     presets:
       - ultrafast
       - superfast
@@ -168,13 +154,38 @@ codecs:
       - slower
       - veryslow
       - placebo
+    encoder_args:
+      - "-c:v"
+      - "libx264"
+      - "-preset"
+      - "{preset}"
+      - "-x264-params"
+      - "profile=high:level=5.1:sps-id=0"  # tries to ensure consistent codec_private_data across chunks
+      - "-crf"
+      - "{quality}"
+      - "-vf"
+      - "{vf}"
+      - "-pix_fmt"
+      - "yuv420p"
+      - "{profile_args}"
 
   h265-10bit:
+    quality_label: CRF
+    quality_granularity: 0.5     # Codec min granularity: 0.25. Balanced: 0.5. Below balanced often bit-identical and convergence takes more steps.
+    quality_range: [6.0, 30.0]   # Codec full range: 0.0-51.0. Balanced: 6.0-30.0
     default_quality: 18.0
     default_preset: slow         # slow is the practical optimum for h265; slower/very slow are only marginally better but much slower
-    quality_range: [6.0, 30.0]   # CRF; full codec range is 0–51; 6–30 is the practical working band
-    quality_granularity: 0.5
-    pre_input_args: []
+    presets:
+      - ultrafast
+      - superfast
+      - veryfast
+      - faster
+      - fast
+      - medium
+      - slow
+      - slower
+      - veryslow
+      - placebo
     encoder_args:
       - "-c:v"
       - "libx265"
@@ -187,25 +198,14 @@ codecs:
       - "-pix_fmt"
       - "yuv420p10le"
       - "{profile_args}"
-    presets:
-      - ultrafast
-      - superfast
-      - veryfast
-      - faster
-      - fast
-      - medium
-      - slow
-      - slower
-      - veryslow
-      - placebo
 
   nvenc-h265-10bit-cq:           # HEVC NVENC — CQ (Constant Quality) mode; perceptual quality control, analogous to CRF
+    quality_label: CQ
+    quality_granularity: 0.5     # NVidia Video Codec SDK 8.0+ (2017+) supports granularity of 1/256 (~0.004) under the hood. 0.5 is a balanced granularity.
+    quality_range: [6.0, 34.0]   # Codec full range: 0.0-51.0. Balanced: 6.0-34.0
     default_quality: 18.0
     default_preset: p7           # p7 = highest quality; speed difference between presets is negligible on modern GPUs
-    quality_range: [6.0, 30.0]   # CQ; full codec range is 0–51; 6–30 is the practical working band
-    quality_granularity: 0.5
-    quality_label: "CQ"
-    pre_input_args: []
+    presets: [p1, p2, p3, p4, p5, p6, p7]
     encoder_args:
       - "-vf"
       - "{vf},format=p010le,hwupload_cuda"
@@ -226,15 +226,14 @@ codecs:
       - "-qmax"
       - "{quality}"
       - "{profile_args}"
-    presets: [p1, p2, p3, p4, p5, p6, p7]
 
   nvenc-h265-10bit-qp:           # NOT RECOMMENDED — use CQ instead. QP directly controls bits without perceptual model.
-    default_quality: 18.0
+    quality_label: QP
+    quality_range: [6, 34]       # Codec full range: 0-51. Balanced: 6-34
+    quality_granularity: 1       # int
+    default_quality: 18
     default_preset: p7
-    quality_range: [6.0, 30.0]   # QP; full codec range is 0–51
-    quality_granularity: 1.0     # integer steps only
-    quality_label: "QP"
-    pre_input_args: []
+    presets: [p1, p2, p3, p4, p5, p6, p7]
     encoder_args:
       - "-vf"
       - "{vf},format=p010le,hwupload_cuda"
@@ -249,16 +248,15 @@ codecs:
       - "-qp:v"
       - "{quality}"
       - "{profile_args}"
-    presets: [p1, p2, p3, p4, p5, p6, p7]
 
   nvenc-h265-10bit-vbr:          # NOT RECOMMENDED — VBR biases toward static scenes, distorting quality search results
+    quality_label: "Mbit/s"
+    quality_granularity: 0.5     # 0.5 Mbit/s step; too fine wastes iterations, too coarse overshoots
+    quality_range: [99.5, 0.5]   # Mbit/s; reversed (higher = better); upper bound is a practical cap
+    quality_max_step: 10.0
     default_quality: 20.0
     default_preset: p7
-    quality_range: [99.5, 0.5]   # Mbit/s; reversed (higher = better); upper bound is a practical cap
-    quality_granularity: 0.5     # 0.5 Mbit/s step; too fine wastes iterations, too coarse overshoots
-    quality_max_step: 10.0
-    quality_label: "Mbit/s"
-    pre_input_args: []
+    presets: [p1, p2, p3, p4, p5, p6, p7]
     encoder_args:
       - "-vf"
       - "{vf},format=p010le,hwupload_cuda"
@@ -275,14 +273,14 @@ codecs:
       - "-b:v"
       - "{quality}M"
       - "{profile_args}"
-    presets: [p1, p2, p3, p4, p5, p6, p7]
 
   vulkan-h265-10bit-qp:          # STRONGLY NOT RECOMMENDED — Vulkan encoding is immature; results are often subpar
+    quality_label: QP
+    quality_range: [6, 40]       # Codec full range: -1-255. -1 is auto, must be excluded. Balanced: 6-40
+    quality_granularity: 1       # int
     default_quality: 20
-    default_preset: any          # hevc_vulkan has no meaningful presets
-    quality_range: [6, 34]       # QP; actual codec range is -1–255; values above ~50 produce visible artefacts
-    quality_granularity: 1       # integer steps only
-    quality_label: "QP"
+    default_preset: any          # hevc_vulkan has no presets
+    presets: ["any"]
     pre_input_args:
       - "-hwaccel"
       - "vulkan"
@@ -312,15 +310,14 @@ codecs:
       - "-tier"
       - "high"
       - "{profile_args}"
-    presets:
-      - any
 
   av1-10bit:
-    default_quality: 18
+    quality_label: CRF
+    quality_granularity: 1.0     # 0.25 is accepted but produces binary-identical steps; integer steps are reliable, until bit-identical sources are properly supported by search
+    quality_range: [4.0, 30.0]   # Codec full range: 0.0-63.0 Balanced: 4.0-30.0. AV1 is tuned for clean content — grain preservation needs lower CRF. Below 4 quality measured behaves non-linearly.
+    default_quality: 18.0
     default_preset: "3"          # preset 3 is a good speed/quality balance; use 2 or lower for grain retention
-    quality_range: [4, 30]       # CRF; full codec range is 0–63; AV1 is tuned for clean content — grain needs lower CRF
-    quality_granularity: 1       # 0.25 is accepted but produces binary-identical steps; integer steps are reliable
-    pre_input_args: []
+    presets: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"] # 0 - slowest; 2+ recommended for grain; 12 max for normal use; 13 - not recommended.
     encoder_args:
       - "-c:v"
       - "libsvtav1"
@@ -333,21 +330,6 @@ codecs:
       - "-pix_fmt"
       - "yuv420p10le"
       - "{profile_args}"
-    presets:
-      - "0"   # slowest / best quality
-      - "1"
-      - "2"
-      - "3"
-      - "4"
-      - "5"
-      - "6"
-      - "7"
-      - "8"
-      - "9"
-      - "10"
-      - "11"
-      - "12"
-      - "13"  # fastest; SVT-AV1 docs recommend stopping at 12 for normal use
 
 # ENCODING PROFILES
 # Each profile references a codec and adds optional extra ffmpeg arguments.
@@ -364,15 +346,15 @@ profiles:
     description: "H.265 10-bit, no extra tuning"
     extra_args: []
 
+  h265-crisp:
+    codec: h265-10bit
+    description: "H.265 10-bit tuned for crisp edges, reduced blocking, enhanced fine detail — suitable for cartoons or natural grain preservation."
+    extra_args: ["-x265-params", "no-sao=1:no-strong-intra-smoothing=1:aq-mode=3:psy-rd=2.0:psy-rdoq=1.0"]
+
   h265-aq:
     codec: h265-10bit
-    description: "H.265 10-bit with adaptive quantization — better quality in dark areas and fine detail"
+    description: "H.265 10-bit with adaptive quantization — better quality in dark areas and even finer detail preservation. Expensive."
     extra_args: ["-x265-params", "aq-mode=3:aq-strength=1.2"]
-
-  h265-anime:
-    codec: h265-10bit
-    description: "H.265 10-bit tuned for anime — crisp edges, reduced blocking, enhanced fine detail"
-    extra_args: ["-x265-params", "no-sao=1:no-strong-intra-smoothing=1:aq-mode=3:psy-rd=2.0:psy-rdoq=1.0"]
 
   nvenc-h265-10bit-cq:
     codec: nvenc-h265-10bit-cq
@@ -382,6 +364,7 @@ profiles:
   # nvenc-h265-10bit-qp:   # NOT RECOMMENDED
   #   codec: nvenc-h265-10bit-qp
   #   description: "HEVC NVENC 10-bit QP mode — requires NVIDIA GPU"
+  #   quality_range: [6, 30]   # int; 6-30 is the practical working band
   #   extra_args: []
 
   nvenc-h265-10bit-vbr:    # NOT RECOMMENDED — CQ mode produces better results
@@ -401,7 +384,7 @@ profiles:
 
   av1-grain:
     codec: av1-10bit
-    description: "AV1 10-bit tuned to preserve original grain — disables in-loop filters and grain synthesis"
+    description: "AV1 10-bit tuned to preserve original grain — disables in-loop filters and grain synthesis. Still bad for grain/crispness, needs more work."
     # Disables: temporal filter (enable-tf), film grain synthesis, grain denoising,
     # loop restoration, CDEF; adds slight sharpness bias. See SVT-AV1 docs for details.
     extra_args: ["-svtav1-params", "enable-tf=0:film-grain=0:film-grain-denoise=0:enable-restoration=0:enable-cdef=0:sharpness=1"]

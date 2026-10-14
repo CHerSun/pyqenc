@@ -116,6 +116,7 @@ def _encoded_chunk(path: Path, chunk_id: str, strategy_name: str):
 
     codec = CodecConfig(
         name="h265-10bit", default_quality=Decimal("20"), default_preset="slow",
+        quality_label="CRF", quality_granularity=Decimal("0.5"),
         quality_range=(Decimal("0"), Decimal("51")), presets=["slow"],
     )
     profile, _, preset = strategy_name.partition("+")
@@ -1025,6 +1026,7 @@ class TestPinnedQualitySuffix:
 
         codec = CodecConfig(
             name="h265-10bit", default_quality=Decimal("18"), default_preset="slow",
+            quality_label="CRF", quality_granularity=Decimal("0.5"),
             quality_range=(Decimal("6"), Decimal("30")), presets=["slow"],
         )
         strategy = Strategy(preset="slow", profile="h265-aq", codec=codec, profile_args=[])
@@ -1556,6 +1558,7 @@ class TestNamingCollisionLoud:
 
         codec = CodecConfig(
             name="h265-10bit", default_quality=Decimal("20"), default_preset="slow",
+            quality_label="CRF", quality_granularity=Decimal("0.5"),
             quality_range=(Decimal("0"), Decimal("51")), presets=["slow"],
         )
         same_name = Strategy(preset="slow", profile="h265", codec=codec, profile_args=[])

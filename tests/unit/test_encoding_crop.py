@@ -43,6 +43,8 @@ def _make_strategy() -> Strategy:
         name            = "h265-8bit",
         default_quality = Decimal("28"),
         default_preset  = "fast",
+        quality_label   = "CRF",
+        quality_granularity = Decimal("0.5"),
         quality_range   = (Decimal("0"), Decimal("51")),
         pre_input_args  = [],
         encoder_args    = [

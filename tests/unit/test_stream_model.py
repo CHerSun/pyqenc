@@ -183,6 +183,8 @@ class TestEncodedChunk:
             name            = "h265-10bit",
             default_quality = Decimal(28),
             default_preset  = "fast",
+            quality_label   = "CRF",
+            quality_granularity = Decimal("0.5"),
             quality_range   = (Decimal(0), Decimal(51)),
             presets         = ["fast"],
         )
@@ -216,6 +218,7 @@ class TestMergedVideoNames:
             preset="fast", profile="h265",
             codec=CodecConfig(
                 name="h265", default_quality=Decimal("18.5"), default_preset="fast",
+                quality_label="CRF", quality_granularity=Decimal("0.5"),
                 quality_range=(Decimal("18.5"), Decimal("18.5")), presets=["fast"],
             ),
             profile_args=[],
@@ -224,6 +227,7 @@ class TestMergedVideoNames:
             preset="fast", profile="h265",
             codec=CodecConfig(
                 name="h265", default_quality=Decimal("18.5"), default_preset="fast",
+                quality_label="CRF", quality_granularity=Decimal("0.5"),
                 quality_range=(Decimal(0), Decimal(51)), presets=["fast"],
             ),
             profile_args=[],
@@ -551,6 +555,7 @@ class TestStrategyTwoNames:
             codec=CodecConfig(
                 name="h265-10bit", default_quality=Decimal(20),
                 default_preset="slow",
+                quality_label="CRF", quality_granularity=Decimal("0.5"),
                 quality_range=(Decimal(0), Decimal(51)), presets=["slow"],
             ),
             profile_args=[],
@@ -569,6 +574,7 @@ def _strategy() -> Strategy:
         codec=CodecConfig(
             name="h265-10bit", default_quality=Decimal(20),
             default_preset="slow",
+            quality_label="CRF", quality_granularity=Decimal("0.5"),
             quality_range=(Decimal(0), Decimal(51)), presets=["slow"],
         ),
         profile_args=[],

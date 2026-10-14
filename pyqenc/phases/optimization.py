@@ -410,7 +410,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
         if plan.fixed_quality:
             kv["Quality:"]    = [f"{strategy.codec.quality_label}={strategy.codec.quality_range[0]} for {strategy.display_name()}" for strategy in plan.strategies]
         else:
-            kv["Strategies:"] = [s.display_name() for s in plan.strategies],
+            kv["Strategies:"] = [s.display_name() for s in plan.strategies]
             kv["Targets:"]    = [f"{t.metric}-{t.statistic}≥{t.value}" for t in plan.targets]
 
         fmt_key_value_table(kv)

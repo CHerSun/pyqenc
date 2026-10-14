@@ -53,6 +53,7 @@ def _merge_encoded_chunk(path, chunk_id: str, strategy_name: str):
 
     codec = CodecConfig(
         name="h265-10bit", default_quality=Decimal("20"), default_preset="slow",
+        quality_label="CRF", quality_granularity=Decimal("0.5"),
         quality_range=(Decimal("0"), Decimal("51")), presets=["slow"],
     )
     preset, _, profile = strategy_name.partition("+")

@@ -406,6 +406,7 @@ class Strategy(BaseModel):
         "codec.quality_range",
         "codec.quality_granularity",
         "codec.quality_max_step",
+        "codec.name",
     })
     """Model fields excluded from the identity fingerprint (dotted paths).
 
@@ -822,15 +823,15 @@ class CodecConfig(BaseModel):
     """
 
     name:                str
+    quality_label:       str
+    quality_granularity: Decimal
+    quality_range:       tuple[Decimal, Decimal]
     default_quality:     Decimal
     default_preset:      str
-    quality_range:       tuple[Decimal, Decimal]
-    quality_label:       str            = "CRF"
-    quality_granularity: Decimal        = Decimal("0.5")
     quality_max_step:    Decimal|None   = None
+    presets:             list[str]      = Field(default_factory=list)
     pre_input_args:      list[str]      = Field(default_factory=list)
     encoder_args:        list[str]      = Field(default_factory=list)
-    presets:             list[str]      = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_default_preset(self) -> Self:

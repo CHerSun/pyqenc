@@ -173,6 +173,8 @@ class TestStrategy:
             name            = "h265-10bit",
             default_quality = Decimal("20"),
             default_preset  = "slow",
+            quality_label   = "CRF",
+            quality_granularity = Decimal("0.5"),
             quality_range   = (Decimal("0"), Decimal("51")),
             pre_input_args  = [],
             encoder_args    = [
@@ -220,8 +222,9 @@ class TestStrategy:
             name            = "hevc-nvenc-10bit",
             default_quality = Decimal("28"),
             default_preset  = "p7",
-            quality_range   = (Decimal("1"), Decimal("51")),
             quality_label   = "CQ",
+            quality_granularity = Decimal("0.5"),
+            quality_range   = (Decimal("1"), Decimal("51")),
             pre_input_args  = ["-hwaccel", "cuda"],
             encoder_args    = [
                 "-c:v", "hevc_nvenc",
