@@ -722,7 +722,6 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         written) and on execute runs alike.
         """
         file_size = self._source_file.fingerprint.size if self._source_file else 0
-        assert file_size is not None, "the job's File carries the source size"
         logger.info("Materialization plan:")
         for row in rows:
             if not row.wanted:

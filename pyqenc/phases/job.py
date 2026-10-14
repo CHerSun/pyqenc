@@ -202,7 +202,6 @@ class JobPhase(Phase[JobPhaseResult]):
         # downstream phases compare against this, never re-hash).
         self._file = self._probe_file()
         live_fingerprint = self._file.fingerprint
-        assert live_fingerprint is not None, "the probed File carries its fingerprint"
 
         existing = load_model(job_yaml, JobSidecar)
         if existing is None:
@@ -256,7 +255,6 @@ class JobPhase(Phase[JobPhaseResult]):
         if self._file is None:
             self._file = self._probe_file()
         live_fingerprint = self._file.fingerprint
-        assert live_fingerprint is not None, "the probed File carries its fingerprint"
 
         existing = load_model(job_yaml, JobSidecar)
         current = (
@@ -375,7 +373,6 @@ class JobPhase(Phase[JobPhaseResult]):
         """
         assert self._file is not None, "the invalidation probe stashes the File"
         fingerprint = self._file.fingerprint
-        assert fingerprint is not None, "the probed File carries its fingerprint"
         save_model(job_yaml, JobSidecar(
             path   = self._source,
             source = fingerprint,

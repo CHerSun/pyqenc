@@ -55,7 +55,7 @@ _FINGERPRINT_BELT_SEPARATOR: Final = f"{_NBSP}·{_NBSP}"
 """The fingerprint storage-form separator (belt · token)."""
 
 class Fingerprint(BaseModel):
-    """An opaque identity token plus an optional belt magnitude.
+    """An opaque identity token (token-only — no belt).
 
     THE standard identity-comparison mechanism: one value type for everything
     whose identity is opaque (file content, resolved config objects, id sets).
@@ -64,13 +64,16 @@ class Fingerprint(BaseModel):
     a fatal at the computing site, never a carried ``None``).
     ``Fingerprint(None, None)`` is unconstructible.
 
-    ``size`` is a cheap pre-check magnitude (bytes for files, cardinality for
-    sets): it participates only when present on BOTH sides of a comparison —
-    differing sizes are a mismatch (collision enforcement) and equal sizes
-    fall through to the token — and contributes nothing when absent (owners
-    with no meaningful check). "Unknown" never occurs INSIDE the type: it
-    lives one level up, at the missing-sidecar-field layer (an absent key on
-    a sidecar is unknown, never a mismatch).
+    Plain ``Fingerprint`` carries a token only.  When the producer guarantees
+    a belt magnitude (bytes for files, cardinality for sets), use
+    :class:`SizedFingerprint` — its ``size`` field is non-nullable and
+    structurally required.  The belt participates in :meth:`matches` only
+    when present on BOTH sides — differing sizes are a mismatch (collision
+    enforcement) and equal sizes fall through to the token — and contributes
+    nothing when absent (owners with no meaningful pre-check).  "Unknown"
+    never occurs INSIDE the type: it lives one level up, at the
+    missing-sidecar-field layer (an absent key on a sidecar is unknown, never
+    a mismatch).
 
     Data is separate from means: this type knows nothing about derivations;
     each owning entity declares its own (e.g. ``Strategy.fingerprint``) and
@@ -82,14 +85,11 @@ class Fingerprint(BaseModel):
 
     Attributes:
         token: The opaque hash token (hex string) — REQUIRED, non-empty.
-        size:  Optional belt magnitude; omitted when the owner has no
-               meaningful pre-check.
     """
 
     model_config = ConfigDict(frozen=True)
 
     token: str
-    size:  int | None = None
 
     @field_validator("token")
     @classmethod
@@ -101,6 +101,16 @@ class Fingerprint(BaseModel):
                 "unreadable source is a fatal at the computing site."
             )
         return v
+
+    @property
+    def _belt(self) -> int | None:
+        """The belt magnitude for this fingerprint, or ``None`` when absent.
+
+        Returns ``None`` for a plain :class:`Fingerprint` (token-only).
+        :class:`SizedFingerprint` overrides this to return its required
+        ``size`` field.  Internal use only — callers use :meth:`matches`.
+        """
+        return None
 
     def matches(self, other: Fingerprint) -> bool:
         """Uniform identity comparison: token authoritative, size a belt.
@@ -123,11 +133,9 @@ class Fingerprint(BaseModel):
             for equal tokens (collision enforcement); an absent size on
             either side contributes nothing.
         """
-        if (
-            self.size is not None
-            and other.size is not None
-            and self.size != other.size
-        ):
+        self_belt  = self._belt
+        other_belt = other._belt
+        if self_belt is not None and other_belt is not None and self_belt != other_belt:
             return False
         return self.token == other.token
 
@@ -136,13 +144,14 @@ class Fingerprint(BaseModel):
 
         The separator (``_FINGERPRINT_BELT_SEPARATOR`` — non-breaking
         spaces around a middle dot, so yaml never quotes the scalar) is
-        ALWAYS present; the belt part is empty when ``size`` is ``None``.
-        Because the size part (digits or empty) can never contain the
-        separator, parsing is a single split on its FIRST occurrence —
-        an opaque token can never be mistaken for it.
+        ALWAYS present; the belt part is empty for a token-only
+        :class:`Fingerprint`.  Because the size part (digits or empty) can
+        never contain the separator, parsing is a single split on its FIRST
+        occurrence — an opaque token can never be mistaken for it.
         """
-        belt = "" if self.size is None else str(self.size)
-        return f"{belt}{_FINGERPRINT_BELT_SEPARATOR}{self.token}"
+        belt = self._belt
+        belt_str = "" if belt is None else str(belt)
+        return f"{belt_str}{_FINGERPRINT_BELT_SEPARATOR}{self.token}"
 
     @classmethod
     def parse(cls, value: str) -> Fingerprint:
@@ -184,17 +193,34 @@ class Fingerprint(BaseModel):
 
 
 class SizedFingerprint(Fingerprint):
-    """A fingerprint whose belt is guaranteed — the file identity.
+    """A fingerprint whose belt is guaranteed — the file/set identity.
 
     The type-level statement of a producer's guarantee: derivations whose
     belt is structural (``BlakeFingerprinter.of_file`` always stats the
-    file) return this, so consumers read ``.size`` as a plain ``int``
-    with no dead None-handling. Comparison semantics are unchanged —
-    this is-a :class:`Fingerprint`, the belt participates via
-    :meth:`Fingerprint.matches` exactly as before.
+    file, ``BlakeFingerprinter.of_ids`` always records cardinality) return
+    this, so consumers read ``.size`` as a plain ``int`` with no dead
+    None-handling.
+
+    Comparison semantics are unchanged — this is-a :class:`Fingerprint`
+    and the belt participates via :meth:`matches` exactly as for the base
+    class (belt contradiction = mismatch; absent belt on the other side =
+    token-only comparison).
+
+    Attributes:
+        size: The belt magnitude — bytes for files, cardinality for id sets.
+              Always present; required at construction.
     """
 
-    size: int  # narrowed from int | None — the belt is total for these derivations
+    size: int
+
+    @property
+    def _belt(self) -> int:
+        """The guaranteed belt magnitude for this fingerprint.
+
+        Returns:
+            The ``size`` field — always an ``int``, never ``None``.
+        """
+        return self.size
 
 
 def _fingerprint_from_yaml(value: object) -> object:

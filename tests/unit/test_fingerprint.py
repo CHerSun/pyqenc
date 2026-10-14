@@ -75,11 +75,11 @@ class TestFingerprintType:
         thing; conversely a sizeless owner must never mismatch against a
         sized one.
         """
-        base   = Fingerprint(token="aa", size=10)
-        same   = Fingerprint(token="aa", size=10)
-        other  = Fingerprint(token="bb", size=10)
-        belt   = Fingerprint(token="aa", size=11)   # token equal, size contradicts
-        bare   = Fingerprint(token="aa")            # sizeless owner
+        base   = SizedFingerprint(token="aa", size=10)
+        same   = SizedFingerprint(token="aa", size=10)
+        other  = SizedFingerprint(token="bb", size=10)
+        belt   = SizedFingerprint(token="aa", size=11)  # token equal, size contradicts
+        bare   = Fingerprint(token="aa")                # sizeless owner
 
         assert base.matches(same)
         assert not base.matches(other)
@@ -92,13 +92,13 @@ class TestFingerprintType:
         compact one-line storage form belongs to the ``FingerprintYaml``
         boundary aliases, not the value type (see ``TestYamlStorageForm``).
         """
-        sized  = Fingerprint(token="ab", size=5)
+        sized    = SizedFingerprint(token="ab", size=5)
         sizeless = Fingerprint(token="cd")
 
         assert sized.model_dump(exclude_none=True) == {"token": "ab", "size": 5}
         assert sizeless.model_dump(exclude_none=True) == {"token": "cd"}
 
-        assert Fingerprint.model_validate(sized.model_dump()) == sized
+        assert SizedFingerprint.model_validate(sized.model_dump()) == sized
         assert Fingerprint.model_validate(sizeless.model_dump()) == sizeless
 
 
