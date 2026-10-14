@@ -845,6 +845,13 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             test_chunk_ids = [c.safe_name() for c in test_chunks]
             phase_recovery = _recover_encoding_attempts(work_dir, test_chunk_ids, strategies_to_test)
 
+            pending_pairs   = sum(1 for r in phase_recovery.pairs.values() if r.state != ArtifactState.COMPLETE)
+            complete_pairs  = len(test_chunks) * len(strategies_to_test) - pending_pairs
+            logger.info(
+                "Starting optimization: %d pair(s) to encode, %d already complete",
+                pending_pairs, complete_pairs,
+            )
+
             with ProgressBar(total_seconds, title="Optimization", total_count=total_count) as advance:
                 # Pre-advance bar for already-complete pairs
                 chunks_by_id = {c.safe_name(): c for c in test_chunks}

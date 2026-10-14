@@ -1981,6 +1981,12 @@ def encode_all_chunks(
     )
 
     # Run parallel encoding — COMPLETE pairs are skipped inside _encode_chunks_parallel
+    pending_count  = sum(1 for r in phase_recovery.pairs.values() if r.state != ArtifactState.COMPLETE)
+    complete_count = len(chunks) * len(strategies) - pending_count
+    logger.info(
+        "Starting encoding: %d pair(s) to encode, %d already complete",
+        pending_count, complete_count,
+    )
     logger.debug("Starting parallel encoding with %d workers", max_parallel)
     total_seconds = sum(c.end_timestamp - c.start_timestamp for c in chunks) * len(strategies)
     with ProgressBar(total_seconds, title="Encoding", total_count=len(chunks) * len(strategies)) as advance:
