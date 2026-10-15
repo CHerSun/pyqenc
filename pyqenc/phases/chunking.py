@@ -295,7 +295,7 @@ class ChunkingPhase(Phase[ChunkingPhaseResult]):
         yaml_path  = job_result.work_dir / ChunkingPhase.SIDECAR_NAME
 
         sidecar = load_model(yaml_path, ChunkingSidecar)
-        if sidecar is not None and not sidecar.source.matches(job_result.file.payload.fingerprint):
+        if sidecar is not None and sidecar.source != job_result.file.payload.fingerprint:
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (chunking.yaml) — the "

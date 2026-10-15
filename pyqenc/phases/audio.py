@@ -231,7 +231,7 @@ class AudioPhase(Phase[AudioPhaseResult]):
         audio_dir.mkdir(parents=True, exist_ok=True)
 
         persisted_audio = load_model(sidecar_path, AudioSidecar)
-        if persisted_audio is not None and not persisted_audio.source.matches(job_result.file.payload.fingerprint):
+        if persisted_audio is not None and persisted_audio.source != job_result.file.payload.fingerprint:
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (audio.yaml) — the chain "

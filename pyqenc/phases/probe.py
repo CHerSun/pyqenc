@@ -234,7 +234,7 @@ class ProbePhase(Phase[ProbePhaseResult]):
         remove_stale_tmp_file(probe_yaml.with_name(probe_yaml.name + TEMP_SUFFIX))
 
         sidecar = load_model(probe_yaml, ProbeSidecar)
-        if sidecar is not None and not sidecar.source.matches(job_result.file.payload.fingerprint):
+        if sidecar is not None and sidecar.source != job_result.file.payload.fingerprint:
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (probe.yaml) — the committed "

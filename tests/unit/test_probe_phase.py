@@ -308,7 +308,7 @@ class TestProbePhaseCompleted:
         assert loaded is not None
         job = _make_job_result(work_dir, tmp_path / "source.mkv")
         assert loaded.source is not None
-        assert loaded.source.matches(job.file.payload.fingerprint)
+        assert loaded.source == job.file.payload.fingerprint
         assert loaded.crop_source == "detected"
 
     def test_probe_yaml_persists_resulting_resolution(self, tmp_path: Path):

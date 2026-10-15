@@ -207,7 +207,7 @@ class JobPhase(Phase[JobPhaseResult]):
         if existing is None:
             return
 
-        if not existing.source.matches(live_fingerprint):
+        if existing.source != live_fingerprint:
             if not self._force:
                 raise RecoveryError(
                     "Source content identity mismatch — this workdir belongs to a "
@@ -259,7 +259,7 @@ class JobPhase(Phase[JobPhaseResult]):
         existing = load_model(job_yaml, JobSidecar)
         current = (
             existing is not None
-            and existing.source.matches(live_fingerprint)
+            and existing.source == live_fingerprint
             and existing.path.resolve() == self._source.resolve()
         )
         self._stale = not current

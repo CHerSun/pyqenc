@@ -30,6 +30,9 @@ samples/_build/
 # Local environment Kiro steering doc
 .kiro/steering/environment.md
 
+# Local subagents workflows transfer docs
+.agents/tasks
+
 # Hypothesis testing
 .hypothesis
 

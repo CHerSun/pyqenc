@@ -552,8 +552,7 @@ class ExtractionPhase(Phase[ExtractionPhaseResult]):
         sidecar_path  = job_result.work_dir / ExtractionPhase.SIDECAR_NAME
 
         sidecar = load_model(sidecar_path, ExtractionSidecar)
-        if sidecar is not None and not sidecar.source.matches(
-                            job_result.file.payload.fingerprint):
+        if sidecar is not None and sidecar.source != job_result.file.payload.fingerprint:
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (extraction.yaml) — this "

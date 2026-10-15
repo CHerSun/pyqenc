@@ -586,9 +586,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
 
         # Step 1 — identity key: catastrophic for the shared namespace.
         persisted: OptimizationSidecar | None = load_optimization_sidecar(opt_yaml)
-        if persisted is not None and not persisted.source.matches(
-            job_result.file.payload.fingerprint,
-        ):
+        if persisted is not None and persisted.source != job_result.file.payload.fingerprint:
             if not job_result.force:
                 raise RecoveryError(
                     "Source content identity mismatch (optimization.yaml) — the "
@@ -631,7 +629,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             changed_strategies = [
                 name for name, fp in current.strategies.items()
                 if name in persisted.strategies
-                and not persisted.strategies[name].matches(fp)
+                and persisted.strategies[name] != fp
             ]
             if changed_strategies:
                 if not job_result.force:
@@ -704,7 +702,7 @@ class OptimizationPhase(Phase[OptimizationPhaseResult]):
             reasons.append(
                 f"mode changed ({persisted.mode} → {current.mode})"
             )
-        if not persisted.chunks.matches(current.chunks):
+        if persisted.chunks != current.chunks:
             reasons.append("chunk set changed (re-chunk)")
         if (
             persisted.mode == "search"

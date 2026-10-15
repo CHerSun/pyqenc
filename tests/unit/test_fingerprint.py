@@ -20,6 +20,7 @@ from pyqenc.models import (
     Fingerprint,
     SizedFingerprint,
     Strategy,
+    _fingerprint_from_str,
     fingerprinter,
 )
 
@@ -67,25 +68,25 @@ class TestFingerprintType:
             Fingerprint(token="")
 
     def test_token_is_authoritative_size_is_a_belt(self) -> None:
-        """Matching: token decides; size participates only when present on
-        both sides.
+        """Same-type equality: token decides for Fingerprint, token+size for
+        SizedFingerprint.  Cross-type comparison always returns False — the
+        types are semantically distinct (one guarantees a belt, one does not).
 
-        Bug guarded: a size-only comparison (cheap pre-check promoted to the
-        identity) would treat different content of equal length as the same
-        thing; conversely a sizeless owner must never mismatch against a
-        sized one.
+        Bug guarded: cross-type equality returning True would let a
+        SizedFingerprint "pass" as a plain Fingerprint identity check,
+        defeating the type-level size guarantee.
         """
         base   = SizedFingerprint(token="aa", size=10)
         same   = SizedFingerprint(token="aa", size=10)
         other  = SizedFingerprint(token="bb", size=10)
-        belt   = SizedFingerprint(token="aa", size=11)  # token equal, size contradicts
-        bare   = Fingerprint(token="aa")                # sizeless owner
+        belt   = SizedFingerprint(token="aa", size=11)
+        bare   = Fingerprint(token="aa")
 
-        assert base.matches(same)
-        assert not base.matches(other)
-        assert not base.matches(belt), "differing sizes on both sides = collision, not a match"
-        assert base.matches(bare)
-        assert bare.matches(base)
+        assert base == same
+        assert base != other
+        assert base != belt,  "differing sizes on same type = mismatch"
+        assert base != bare,  "cross-type is always unequal by design"
+        assert bare != base,  "symmetric: cross-type is always unequal"
 
     def test_round_trip_through_yaml_dump(self) -> None:
         """The raw model dump stays nested (the class's own shape) — the
@@ -121,10 +122,10 @@ class TestYamlStorageForm:
         assert str(bare) == f"{_SEP}cd"
         assert str(zero_belt) == f"0{_SEP}ef", "a real zero belt is not None"
 
-        parsed_sized = Fingerprint.parse(str(sized))
+        parsed_sized = _fingerprint_from_str(str(sized))
         assert isinstance(parsed_sized, SizedFingerprint) and parsed_sized == sized
-        assert Fingerprint.parse(str(bare)) == bare
-        assert Fingerprint.parse(str(zero_belt)) == zero_belt
+        assert _fingerprint_from_str(str(bare)) == bare
+        assert _fingerprint_from_str(str(zero_belt)) == zero_belt
 
     @given(st.text(min_size=1))
     def test_any_token_round_trips(self, token: str) -> None:
@@ -133,8 +134,8 @@ class TestYamlStorageForm:
         always-separator design: the size part can never contain the
         separator, so its first occurrence is always the real one).
         """
-        assert Fingerprint.parse(str(Fingerprint(token=token))) == Fingerprint(token=token)
-        assert Fingerprint.parse(str(SizedFingerprint(token=token, size=7))) == (
+        assert _fingerprint_from_str(str(Fingerprint(token=token))) == Fingerprint(token=token)
+        assert _fingerprint_from_str(str(SizedFingerprint(token=token, size=7))) == (
             SizedFingerprint(token=token, size=7)
         )
 
@@ -195,7 +196,7 @@ class TestYamlStorageForm:
             f"5{_SEP}",                  # empty token
         ):
             with pytest.raises(ValueError):
-                Fingerprint.parse(bad)
+                _fingerprint_from_str(bad)
 
 
 class TestTokenDerivation:
@@ -233,9 +234,9 @@ class TestTokenDerivation:
         Bug guarded (Req 19): a re-chunk must wipe winners via this key.
         """
         base = fingerprinter.of_ids(["a", "b"])
-        assert base.matches(fingerprinter.of_ids(["a", "b"]))
-        assert not base.matches(fingerprinter.of_ids(["a", "b", "c"]))
-        assert not base.matches(fingerprinter.of_ids(["a"]))
+        assert base == fingerprinter.of_ids(["a", "b"])
+        assert base != fingerprinter.of_ids(["a", "b", "c"])
+        assert base != fingerprinter.of_ids(["a"])
 
 
 class TestStrategyFingerprint:
@@ -257,7 +258,7 @@ class TestStrategyFingerprint:
         """
         base = _strategy(default_quality=Decimal(20))
         tuned = _strategy(default_quality=Decimal(28))
-        assert base.fingerprint.matches(tuned.fingerprint)
+        assert base.fingerprint == tuned.fingerprint
 
     def test_quality_proposal_domain_is_excluded(self) -> None:
         """The whole quality-PROPOSAL domain is excluded (Req 10a, amended
@@ -278,7 +279,7 @@ class TestStrategyFingerprint:
             quality_granularity=Decimal("1"),
             quality_max_step=Decimal("4"),
         )
-        assert base.fingerprint.matches(steered.fingerprint)
+        assert base.fingerprint == steered.fingerprint
 
     def test_q_toggle_keeps_fingerprint_via_resolve_encoding(self) -> None:
         """End-to-end over the real resolution path: resolving the same
@@ -292,7 +293,7 @@ class TestStrategyFingerprint:
         fixed = cfg.resolve_encoding(
             strategies=["h265+slow"], quality=(Decimal("18"), Decimal("18")),
         )
-        assert search.strategies[0].fingerprint.matches(fixed.strategies[0].fingerprint)
+        assert search.strategies[0].fingerprint == fixed.strategies[0].fingerprint
 
     def test_encoder_args_change_is_detected(self) -> None:
         """A deep codec-args edit changes the token (Req 39: catastrophic
@@ -303,7 +304,7 @@ class TestStrategyFingerprint:
         """
         base = _strategy()
         edited = _strategy(encoder_args=["-c:v", "libx265", "-crf", "{quality}", "-tune", "grain"])
-        assert not base.fingerprint.matches(edited.fingerprint)
+        assert base.fingerprint != edited.fingerprint
 
     def test_preset_change_is_detected(self) -> None:
         """The strategy's own preset participates in its identity."""
@@ -311,7 +312,7 @@ class TestStrategyFingerprint:
         other = Strategy(
             preset="fast", profile="h265", codec=_codec(), profile_args=[],
         )
-        assert not base.fingerprint.matches(other.fingerprint)
+        assert base.fingerprint != other.fingerprint
 
 
 class TestSourceFingerprint:
@@ -331,7 +332,7 @@ class TestSourceFingerprint:
         try:
             fp_a = fingerprinter.of_file(a)
             fp_b = fingerprinter.of_file(b)
-            assert fp_a.matches(fp_b)
+            assert fp_a == fp_b
             assert fp_a.size == fp_b.size == len(data)
         finally:
             a.unlink(missing_ok=True)
@@ -351,7 +352,7 @@ class TestSourceFingerprint:
             original = fingerprinter.of_file(p)
             p.write_bytes(b"b" * size)
             replaced = fingerprinter.of_file(p)
-            assert not original.matches(replaced)
+            assert original != replaced
         finally:
             p.unlink(missing_ok=True)
 
@@ -373,6 +374,6 @@ class TestSourceFingerprint:
             tiny = fingerprinter.of_file(p)
             assert tiny.size == 3
             assert tiny.token
-            assert not tiny.matches(empty)
+            assert tiny != empty
         finally:
             p.unlink(missing_ok=True)

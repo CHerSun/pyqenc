@@ -299,7 +299,7 @@ class _SidecarBuilder:
         mode switch between runs is itself a mismatch.
         """
         codec = strategy.codec
-        if not recorded.strategy.matches(strategy.fingerprint):
+        if recorded.strategy != strategy.fingerprint:
             return "strategy fingerprint"
         if self._plan.fixed_quality:
             if not isinstance(recorded, FixedMergedOutputSidecar):
@@ -315,7 +315,7 @@ class _SidecarBuilder:
             return "probe facet"
         # The winner-set fingerprint is compared as a whole (Req 11a):
         # count + hash over the sorted winner ids; unverifiable = mismatch.
-        if not recorded.winners.matches(self._winners):
+        if recorded.winners != self._winners:
             return "winner set"
         if recorded.sampling != self._sampling:
             return "sampling"
@@ -469,9 +469,7 @@ class MergePhase(Phase[MergePhaseResult]):
         merged_dir.mkdir(parents=True, exist_ok=True)
         for existing in sorted(merged_dir.glob("*.yaml")):
             record = MergePhase._load_merge_sidecar(existing)
-            if record is not None and not record.source.matches(
-                job_result.file.payload.fingerprint,
-            ):
+            if record is not None and record.source != job_result.file.payload.fingerprint:
                 if not job_result.force:
                     raise RecoveryError(
                         "Source content identity mismatch (a merged output's "

@@ -64,16 +64,14 @@ class Fingerprint(BaseModel):
     a fatal at the computing site, never a carried ``None``).
     ``Fingerprint(None, None)`` is unconstructible.
 
-    Plain ``Fingerprint`` carries a token only.  When the producer guarantees
-    a belt magnitude (bytes for files, cardinality for sets), use
-    :class:`SizedFingerprint` — its ``size`` field is non-nullable and
-    structurally required.  The belt participates in :meth:`matches` only
-    when present on BOTH sides — differing sizes are a mismatch (collision
-    enforcement) and equal sizes fall through to the token — and contributes
-    nothing when absent (owners with no meaningful pre-check).  "Unknown"
-    never occurs INSIDE the type: it lives one level up, at the
-    missing-sidecar-field layer (an absent key on a sidecar is unknown, never
-    a mismatch).
+    Plain ``Fingerprint`` carries a token only; a belt magnitude the
+    producer structurally guarantees (bytes for files, cardinality for sets)
+    belongs to a belt-carrying type declared at the consuming field — never
+    an optional member here.  Equality is pydantic's class-sensitive field
+    equality and never crosses that line: a guaranteed belt is a semantic
+    upgrade, not the same identity.  "Unknown" never occurs INSIDE the type:
+    it lives one level up, at the missing-sidecar-field layer (an absent key
+    on a sidecar is unknown, never a mismatch).
 
     Data is separate from means: this type knows nothing about derivations;
     each owning entity declares its own (e.g. ``Strategy.fingerprint``) and
@@ -102,45 +100,8 @@ class Fingerprint(BaseModel):
             )
         return v
 
-    @property
-    def _belt(self) -> int | None:
-        """The belt magnitude for this fingerprint, or ``None`` when absent.
-
-        Returns ``None`` for a plain :class:`Fingerprint` (token-only).
-        :class:`SizedFingerprint` overrides this to return its required
-        ``size`` field.  Internal use only — callers use :meth:`matches`.
-        """
-        return None
-
-    def matches(self, other: Fingerprint) -> bool:
-        """Uniform identity comparison: token authoritative, size a belt.
-
-        THE identity comparison callers use directly (Req 32/33): the key
-        is required on every sidecar that carries it — a sidecar missing
-        it fails validation and loads as absent, so the caller's
-        sidecar-presence guard is the only unknown state left, and a
-        present key that does not match the live identity is the phase's
-        catastrophic condition. NOT ``__eq__``: belt-tolerant equality is
-        not transitive (``{t, 64}`` matches ``{t}`` matches ``{t, 128}``,
-        but the outer two mismatch) — value equality stays pydantic's.
-
-        Args:
-            other: The fingerprint to compare against.
-
-        Returns:
-            ``True`` when the tokens are equal and no belt contradiction
-            exists — differing sizes with both present are a mismatch even
-            for equal tokens (collision enforcement); an absent size on
-            either side contributes nothing.
-        """
-        self_belt  = self._belt
-        other_belt = other._belt
-        if self_belt is not None and other_belt is not None and self_belt != other_belt:
-            return False
-        return self.token == other.token
-
     def __str__(self) -> str:
-        """The yaml storage form: belt, separator, token.
+        """The yaml storage form: empty belt part, separator, token.
 
         The separator (``_FINGERPRINT_BELT_SEPARATOR`` — non-breaking
         spaces around a middle dot, so yaml never quotes the scalar) is
@@ -148,48 +109,11 @@ class Fingerprint(BaseModel):
         :class:`Fingerprint`.  Because the size part (digits or empty) can
         never contain the separator, parsing is a single split on its FIRST
         occurrence — an opaque token can never be mistaken for it.
-        """
-        belt = self._belt
-        belt_str = "" if belt is None else str(belt)
-        return f"{belt_str}{_FINGERPRINT_BELT_SEPARATOR}{self.token}"
-
-    @classmethod
-    def parse(cls, value: str) -> Fingerprint:
-        """Parse the yaml storage string (the :meth:`__str__` inverse).
-
-        The constructed class follows belt presence: a present belt part
-        yields :class:`SizedFingerprint`, an empty one a plain
-        :class:`Fingerprint` — which then fails validation on fields
-        demanding the sized type, loudly.
-
-        Args:
-            value: ``"<size><sep><token>"`` — the separator is required;
-                   an empty size part means no belt; ``"0"`` is a real
-                   zero belt (an empty id set), never conflated with
-                   ``None``.
 
         Returns:
-            The fingerprint (sized when the belt part is present).
-
-        Raises:
-            ValueError: On a missing separator, a non-digit size part, or
-                        an empty token.
+            The compact storage string ``"<sep><token>"``.
         """
-        size_part, sep, token = value.partition(_FINGERPRINT_BELT_SEPARATOR)
-        if not sep:
-            raise ValueError(
-                f"Invalid fingerprint string {value!r}: the belt separator "
-                "is structural — use the str() storage form"
-            )
-        if not token:
-            raise ValueError(f"Invalid fingerprint string {value!r}: empty token")
-        if size_part == "":
-            return Fingerprint(token=token)
-        if not (size_part.isascii() and size_part.isdigit()):
-            raise ValueError(
-                f"Invalid fingerprint string {value!r}: bad size part {size_part!r}"
-            )
-        return SizedFingerprint(token=token, size=int(size_part))
+        return f"{_FINGERPRINT_BELT_SEPARATOR}{self.token}"
 
 
 class SizedFingerprint(Fingerprint):
@@ -201,10 +125,8 @@ class SizedFingerprint(Fingerprint):
     this, so consumers read ``.size`` as a plain ``int`` with no dead
     None-handling.
 
-    Comparison semantics are unchanged — this is-a :class:`Fingerprint`
-    and the belt participates via :meth:`matches` exactly as for the base
-    class (belt contradiction = mismatch; absent belt on the other side =
-    token-only comparison).
+    Equality requires token AND size to match — a ``SizedFingerprint`` is
+    never equal to a plain :class:`Fingerprint` by design.
 
     Attributes:
         size: The belt magnitude — bytes for files, cardinality for id sets.
@@ -213,14 +135,52 @@ class SizedFingerprint(Fingerprint):
 
     size: int
 
-    @property
-    def _belt(self) -> int:
-        """The guaranteed belt magnitude for this fingerprint.
+    def __str__(self) -> str:
+        """The yaml storage form: size, separator, token.
+
+        Overrides :class:`Fingerprint`'s ``__str__`` to include the size
+        (belt) in the storage string so round-trips reconstruct the correct
+        concrete type.
 
         Returns:
-            The ``size`` field — always an ``int``, never ``None``.
+            The compact storage string ``"<size><sep><token>"``.
         """
-        return self.size
+        return f"{self.size}{_FINGERPRINT_BELT_SEPARATOR}{self.token}"
+
+
+def _fingerprint_from_str(value: str) -> Fingerprint | SizedFingerprint:
+    """Parse the yaml storage string — the ``str()`` inverse.
+
+    The constructed type follows belt presence: a present belt part yields
+    :class:`SizedFingerprint`, an empty one a plain :class:`Fingerprint`.
+
+    Args:
+        value: ``"<size><sep><token>"`` — the separator is required; an
+               empty size part means no belt; ``"0"`` is a real zero belt
+               (an empty id set), never conflated with ``None``.
+
+    Returns:
+        The fingerprint (sized when the belt part is present).
+
+    Raises:
+        ValueError: On a missing separator, a non-digit size part, or an
+                    empty token.
+    """
+    size_part, sep, token = value.partition(_FINGERPRINT_BELT_SEPARATOR)
+    if not sep:
+        raise ValueError(
+            f"Invalid fingerprint string {value!r}: the belt separator "
+            "is structural — use the str() storage form"
+        )
+    if not token:
+        raise ValueError(f"Invalid fingerprint string {value!r}: empty token")
+    if size_part == "":
+        return Fingerprint(token=token)
+    if not (size_part.isascii() and size_part.isdigit()):
+        raise ValueError(
+            f"Invalid fingerprint string {value!r}: bad size part {size_part!r}"
+        )
+    return SizedFingerprint(token=token, size=int(size_part))
 
 
 def _fingerprint_from_yaml(value: object) -> object:
@@ -228,9 +188,18 @@ def _fingerprint_from_yaml(value: object) -> object:
 
     ``str(Fingerprint)`` is the declared storage form; a native dict (the
     legacy nested dump) passes through to normal validation unchanged.
+
+    Args:
+        value: The raw yaml value — either the compact storage string or a
+               legacy nested dict.
+
+    Returns:
+        The parsed :class:`Fingerprint` or :class:`SizedFingerprint` when
+        *value* is a string; the original *value* otherwise (passed through
+        to normal Pydantic validation).
     """
     if isinstance(value, str):
-        return Fingerprint.parse(value)
+        return _fingerprint_from_str(value)
     return value
 
 
@@ -238,7 +207,7 @@ FingerprintYaml = Annotated[
     Fingerprint, BeforeValidator(_fingerprint_from_yaml), PlainSerializer(str)
 ]
 """``Fingerprint`` as it persists: the compact one-line storage string,
-parsed back via :meth:`Fingerprint.parse` — the class stays explicitly
+parsed back via :func:`_fingerprint_from_str` — the class stays explicitly
 typed; only the yaml boundary changes form. For producers whose belt is
 structural, use :data:`SizedFingerprintYaml` instead."""
 
@@ -460,8 +429,11 @@ class Strategy(BaseModel):
         Opaque — the dump itself is never persisted, and the token is never
         re-validated into a ``Strategy`` (it omits ``default_quality``, a
         required field, by construction). Consumers persist it and compare
-        with :meth:`Fingerprint.matches` — no model-shape knowledge at any
-        comparison site. Joining the name family: display/safe/fingerprint.
+        with ``==`` — no model-shape knowledge at any comparison site.
+        Joining the name family: display/safe/fingerprint.
+
+        Returns:
+            The strategy's identity fingerprint (token-only, no belt).
         """
         return fingerprinter.of_text(
             self.model_dump_json(exclude=self._fingerprint_exclude_spec()),
